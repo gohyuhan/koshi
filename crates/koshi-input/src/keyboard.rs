@@ -24,7 +24,10 @@
 //!   1, Alt 2, Control 4, Super 8.
 
 use crate::host::{KeyCode as HostKey, KeyEvent, Modifiers};
-use koshi_core::key::{Key, KeyChord, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags, NamedKey};
+use koshi_core::key::{
+    ExtendedKeysMode, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
+    ModFlags, NamedKey, TEXT_ONLY_KEY_CODEPOINT,
+};
 
 /// The escape byte that opens every control sequence.
 const ESCAPE_BYTE: u8 = 0x1b;
@@ -44,7 +47,7 @@ const UNMODIFIED_PARAMETER: u8 = 1;
 /// as one key rather than as Tab plus a modifier.
 ///
 /// `CSI 97:65;2u` becomes key `'a'`, shifted key `'A'`, kind
-/// [`KeyEventKind::Press`](crate::host::KeyEventKind::Press), Shift held.
+/// [`KeyEventKind::Press`], Shift held.
 #[must_use]
 pub fn decode_key_event(host_key_event: KeyEvent) -> KeyInput {
     let mut modifier_flags = host_key_event.modifiers.to_key_modifier_flags();
@@ -203,30 +206,93 @@ fn encode_named_key(
             }
         }
         NamedKey::Tab => encode_c0_key(b'\t', modifier_flags),
-        NamedKey::Up => {
-            encode_cursor_key(b'A', modifier_parameter, is_application_cursor_keys_enabled)
-        }
-        NamedKey::Down => {
-            encode_cursor_key(b'B', modifier_parameter, is_application_cursor_keys_enabled)
-        }
-        NamedKey::Right => {
-            encode_cursor_key(b'C', modifier_parameter, is_application_cursor_keys_enabled)
-        }
-        NamedKey::Left => {
-            encode_cursor_key(b'D', modifier_parameter, is_application_cursor_keys_enabled)
-        }
-        NamedKey::End => {
-            encode_cursor_key(b'F', modifier_parameter, is_application_cursor_keys_enabled)
-        }
-        NamedKey::Home => {
-            encode_cursor_key(b'H', modifier_parameter, is_application_cursor_keys_enabled)
-        }
-        NamedKey::Insert => encode_tilde_key(2, modifier_parameter),
-        NamedKey::Delete => encode_tilde_key(3, modifier_parameter),
-        NamedKey::PageUp => encode_tilde_key(5, modifier_parameter),
-        NamedKey::PageDown => encode_tilde_key(6, modifier_parameter),
         NamedKey::F(function_number) => encode_function_key(function_number, modifier_flags),
+        named_key => match find_functional_key_form(named_key) {
+            Some((FunctionalKeyForm::Cursor(final_byte), _)) => encode_cursor_key(
+                final_byte,
+                modifier_parameter,
+                is_application_cursor_keys_enabled,
+            ),
+            Some((FunctionalKeyForm::Ss3(final_byte), _)) => {
+                encode_ss3_key(final_byte, modifier_parameter)
+            }
+            Some((FunctionalKeyForm::Tilde(tilde_key_code), _)) => {
+                encode_tilde_key(tilde_key_code, modifier_parameter)
+            }
+            None => unreachable!("the C0 keys and F keys are matched above"),
+        },
     }
+}
+
+/// The control-sequence shape one functional key takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FunctionalKeyForm {
+    /// A cursor or Home/End key: `ESCAPE_BYTE [ <final>` unmodified outside
+    /// application-cursor-keys mode, `ESCAPE_BYTE O <final>` inside it.
+    Cursor(u8),
+    /// An SS3 key: `ESCAPE_BYTE O <final>` unmodified, whatever the pane's
+    /// cursor-key mode is.
+    Ss3(u8),
+    /// A key of the `ESCAPE_BYTE [ <code> ~` family.
+    Tilde(u8),
+}
+
+/// The shape `named_key` takes, and the modifiers its encoding adds, or `None`
+/// for a key that carries its modifiers in one byte: Enter, Tab, Backspace,
+/// Esc and Space.
+///
+/// `NamedKey::Up` gives `Cursor(b'A')` and no modifier. `NamedKey::Delete`
+/// gives `Tilde(3)`. `NamedKey::F(13)` gives `Ss3(b'P')` with
+/// `ModFlags::SHIFT`, because F13 encodes as Shift plus F1.
+///
+/// # Panics
+///
+/// Panics when `named_key` is `NamedKey::F(function_number)` with
+/// `function_number` outside `1..=24`.
+fn find_functional_key_form(named_key: NamedKey) -> Option<(FunctionalKeyForm, ModFlags)> {
+    let functional_key_form = match named_key {
+        NamedKey::Up => FunctionalKeyForm::Cursor(b'A'),
+        NamedKey::Down => FunctionalKeyForm::Cursor(b'B'),
+        NamedKey::Right => FunctionalKeyForm::Cursor(b'C'),
+        NamedKey::Left => FunctionalKeyForm::Cursor(b'D'),
+        NamedKey::End => FunctionalKeyForm::Cursor(b'F'),
+        NamedKey::Home => FunctionalKeyForm::Cursor(b'H'),
+        NamedKey::Insert => FunctionalKeyForm::Tilde(2),
+        NamedKey::Delete => FunctionalKeyForm::Tilde(3),
+        NamedKey::PageUp => FunctionalKeyForm::Tilde(5),
+        NamedKey::PageDown => FunctionalKeyForm::Tilde(6),
+        NamedKey::F(function_number) => return Some(get_function_key_form(function_number)),
+        NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace | NamedKey::Esc | NamedKey::Space => {
+            return None
+        }
+    };
+    Some((functional_key_form, ModFlags::NONE))
+}
+
+/// The shape function key `function_number` takes, and the modifiers its
+/// encoding adds. F13 through F24 encode as Shift plus F1 through F12, so
+/// `get_function_key_form(13)` gives the F1 shape and `ModFlags::SHIFT`.
+///
+/// # Panics
+///
+/// Panics when `function_number` is `0`, or above `24`.
+fn get_function_key_form(function_number: u8) -> (FunctionalKeyForm, ModFlags) {
+    let (function_number, added_modifier_flags) = if function_number > 12 {
+        (function_number - 12, ModFlags::SHIFT)
+    } else {
+        (function_number, ModFlags::NONE)
+    };
+    let functional_key_form = match function_number {
+        // The four final bytes run in key order: `P`, `Q`, `R`, `S`.
+        1..=4 => FunctionalKeyForm::Ss3(b'P' + (function_number - 1)),
+        5 => FunctionalKeyForm::Tilde(15),
+        6..=9 => FunctionalKeyForm::Tilde(11 + function_number),
+        10 => FunctionalKeyForm::Tilde(21),
+        11 => FunctionalKeyForm::Tilde(23),
+        12 => FunctionalKeyForm::Tilde(24),
+        _ => unreachable!("decode_key and the chord parser both bound F to 1..=24"),
+    };
+    (functional_key_form, added_modifier_flags)
 }
 
 /// A C0 key's byte, with an `ESCAPE_BYTE` prefix when Alt is held. The caller folds
@@ -270,7 +336,7 @@ fn encode_ss3_key(final_byte: u8, modifier_parameter: u8) -> Vec<u8> {
     // `ESCAPE_BYTE [ 1 ;` plus the modifier parameter and the final byte.
     let mut encoded_bytes = Vec::with_capacity(7);
     encoded_bytes.extend_from_slice(&[ESCAPE_BYTE, b'[', b'1', b';']);
-    append_decimal(&mut encoded_bytes, modifier_parameter);
+    append_decimal(&mut encoded_bytes, u32::from(modifier_parameter));
     encoded_bytes.push(final_byte);
     encoded_bytes
 }
@@ -283,27 +349,32 @@ fn encode_tilde_key(tilde_key_code: u8, modifier_parameter: u8) -> Vec<u8> {
     // `ESCAPE_BYTE [` plus the key code, an optional modifier parameter, and `~`.
     let mut encoded_bytes = Vec::with_capacity(8);
     encoded_bytes.extend_from_slice(&[ESCAPE_BYTE, b'[']);
-    append_decimal(&mut encoded_bytes, tilde_key_code);
+    append_decimal(&mut encoded_bytes, u32::from(tilde_key_code));
     if modifier_parameter != UNMODIFIED_PARAMETER {
         encoded_bytes.push(b';');
-        append_decimal(&mut encoded_bytes, modifier_parameter);
+        append_decimal(&mut encoded_bytes, u32::from(modifier_parameter));
     }
     encoded_bytes.push(b'~');
     encoded_bytes
 }
 
-/// Append a control sequence number — a key code or a modifier parameter — as
-/// its decimal digits.
+/// Append a control sequence number — a key code, a modifier parameter or a
+/// codepoint — as its decimal digits.
 ///
-/// `3` appends `3`; `16` appends `1` then `6`; `100` appends `1`, `0`, `0`.
-fn append_decimal(encoded_bytes: &mut Vec<u8>, decimal_number: u8) {
-    if decimal_number >= 100 {
-        encoded_bytes.push(b'0' + decimal_number / 100);
+/// `3` appends `3`; `16` appends `1` then `6`; `1114109` appends its seven
+/// digits.
+fn append_decimal(encoded_bytes: &mut Vec<u8>, decimal_number: u32) {
+    let mut digit_divisor = 1;
+    while decimal_number / digit_divisor >= 10 {
+        digit_divisor *= 10;
     }
-    if decimal_number >= 10 {
-        encoded_bytes.push(b'0' + decimal_number / 10 % 10);
+    let mut remaining_number = decimal_number;
+    while digit_divisor > 0 {
+        let digit = remaining_number / digit_divisor;
+        encoded_bytes.push(b'0' + u8::try_from(digit).unwrap_or(0));
+        remaining_number -= digit * digit_divisor;
+        digit_divisor /= 10;
     }
-    encoded_bytes.push(b'0' + decimal_number % 10);
 }
 
 /// A function key. F1–F4 have sequences of their own (`ESCAPE_BYTE O P` … `ESCAPE_BYTE O S`,
@@ -317,22 +388,15 @@ fn append_decimal(encoded_bytes: &mut Vec<u8>, decimal_number: u8) {
 ///
 /// Panics when `function_number` is `0`, or above `24`.
 fn encode_function_key(function_number: u8, modifier_flags: ModFlags) -> Vec<u8> {
-    let (function_number, modifier_flags) = if function_number > 12 {
-        (function_number - 12, modifier_flags.union(ModFlags::SHIFT))
-    } else {
-        (function_number, modifier_flags)
-    };
-    let modifier_parameter = encode_modifier_parameter(modifier_flags);
-
-    match function_number {
-        // The four final bytes run in key order: `P`, `Q`, `R`, `S`.
-        1..=4 => encode_ss3_key(b'P' + (function_number - 1), modifier_parameter),
-        5 => encode_tilde_key(15, modifier_parameter),
-        6..=9 => encode_tilde_key(11 + function_number, modifier_parameter),
-        10 => encode_tilde_key(21, modifier_parameter),
-        11 => encode_tilde_key(23, modifier_parameter),
-        12 => encode_tilde_key(24, modifier_parameter),
-        _ => unreachable!("decode_key and the chord parser both bound F to 1..=24"),
+    let (functional_key_form, added_modifier_flags) = get_function_key_form(function_number);
+    let modifier_parameter = encode_modifier_parameter(modifier_flags.union(added_modifier_flags));
+    match functional_key_form {
+        FunctionalKeyForm::Ss3(final_byte) | FunctionalKeyForm::Cursor(final_byte) => {
+            encode_ss3_key(final_byte, modifier_parameter)
+        }
+        FunctionalKeyForm::Tilde(tilde_key_code) => {
+            encode_tilde_key(tilde_key_code, modifier_parameter)
+        }
     }
 }
 
@@ -399,6 +463,457 @@ fn encode_control_byte(character: char) -> Option<u8> {
         '8' => Some(0x7f),
         _ => None,
     }
+}
+
+// ------------------------------------- the complete event, for one pane ----
+
+/// Disambiguate escape codes: a key that produces no text takes an escape
+/// code. Enter, Tab and Backspace keep their legacy bytes.
+const DISAMBIGUATE_ESCAPE_CODES_FLAG: u8 = 1;
+/// Report event types: a repeat and a release each name their kind.
+const REPORT_EVENT_TYPES_FLAG: u8 = 2;
+/// Report alternate keys: an escape-coded event names the shifted key and the
+/// base-layout key.
+const REPORT_ALTERNATE_KEYS_FLAG: u8 = 4;
+/// Report all keys as escape codes: a text key and a modifier key each take an
+/// escape code.
+const REPORT_ALL_KEYS_FLAG: u8 = 8;
+/// Report associated text: an escape-coded text key carries the text it
+/// produced.
+const REPORT_ASSOCIATED_TEXT_FLAG: u8 = 16;
+
+/// The Kitty key number Enter reports.
+const ENTER_KEY_NUMBER: u32 = 13;
+/// The Kitty key number Tab reports.
+const TAB_KEY_NUMBER: u32 = 9;
+/// The Kitty key number Backspace reports.
+const BACKSPACE_KEY_NUMBER: u32 = 127;
+/// The Kitty key number Esc reports.
+const ESC_KEY_NUMBER: u32 = 27;
+/// The Kitty key number Space reports.
+const SPACE_KEY_NUMBER: u32 = 32;
+
+/// Encode one complete keyboard event as the bytes the receiving pane asked
+/// for.
+///
+/// `keyboard_flags` is the pane's active screen's Kitty keyboard flags:
+/// disambiguate (`1`), report event types (`2`), report alternate keys (`4`),
+/// report all keys (`8`) and report associated text (`16`).
+/// `is_application_cursor_keys_enabled` is that pane's DECCKM state.
+/// `extended_keys_mode` is `terminal.extended-keys` from `koshi.kdl`.
+///
+/// Returns no bytes for an event the pane asked not to receive: a release
+/// whose kind the report cannot name, a modifier key without flag `8`, and a
+/// key the terminal named that has neither a key form nor a codepoint.
+///
+/// A report names a kind only for a key that takes an escape code, so typing
+/// `a` writes `a` on a repeat and nothing on a release under flag `2` alone,
+/// and writes `ESCAPE_BYTE [ 9 7 ; 1 : 2 u` and `ESCAPE_BYTE [ 9 7 ; 1 : 3 u`
+/// under flags `2|8`.
+///
+/// With flags `0` and [`ExtendedKeysMode::OnRequest`], every event encodes as
+/// [`encode_key_chord`] encodes its chord, and an event carrying text writes
+/// that text: Shift+Enter writes `\r`, and Option+`a` reporting `å` writes
+/// `å`.
+///
+/// With flag `8`, Shift+Enter writes `ESCAPE_BYTE [ 1 3 ; 2 u`. With
+/// [`ExtendedKeysMode::Always`] and no flag, Shift+Enter writes the same bytes
+/// and Tab still writes `\t`.
+#[must_use]
+pub fn encode_key_input(
+    key_input: &KeyInput,
+    keyboard_flags: u8,
+    is_application_cursor_keys_enabled: bool,
+    extended_keys_mode: ExtendedKeysMode,
+) -> Vec<u8> {
+    if !is_event_written(key_input, keyboard_flags) {
+        return Vec::new();
+    }
+    match key_input.key {
+        KeyIdentity::Unnamed => Vec::new(),
+        KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT) => {
+            encode_text_only_event(key_input, keyboard_flags)
+        }
+        KeyIdentity::Codepoint(codepoint) => {
+            if keyboard_flags & REPORT_ALL_KEYS_FLAG == 0 {
+                return Vec::new();
+            }
+            encode_csi_u_event(key_input, codepoint, keyboard_flags)
+        }
+        KeyIdentity::Key(Key::Named(named_key)) => match find_functional_key_form(named_key) {
+            Some(functional_key_form) => encode_functional_key_event(
+                key_input,
+                functional_key_form,
+                keyboard_flags,
+                is_application_cursor_keys_enabled,
+            ),
+            None => encode_csi_u_or_legacy_event(
+                key_input,
+                Key::Named(named_key),
+                keyboard_flags,
+                is_application_cursor_keys_enabled,
+                extended_keys_mode,
+            ),
+        },
+        KeyIdentity::Key(key) => encode_csi_u_or_legacy_event(
+            key_input,
+            key,
+            keyboard_flags,
+            is_application_cursor_keys_enabled,
+            extended_keys_mode,
+        ),
+    }
+}
+
+/// Whether the pane receives this event at all.
+///
+/// A press and a repeat are always written. A release is written only when the
+/// report names its kind, so a pane that asked for no event kinds, and a key
+/// that takes no escape code under the flags in force, both write nothing on
+/// release.
+fn is_event_written(key_input: &KeyInput, keyboard_flags: u8) -> bool {
+    key_input.key_event_kind != KeyEventKind::Release
+        || is_event_kind_reported(key_input, keyboard_flags)
+}
+
+/// Whether the report names this event's kind.
+///
+/// The pane must have asked for event kinds with flag `2`, and the key must
+/// take an escape code, because legacy bytes have no field for a kind. Typing
+/// `a` under flag `2` alone names no kind; under flags `2|8` it names `1:2`
+/// for a repeat.
+fn is_event_kind_reported(key_input: &KeyInput, keyboard_flags: u8) -> bool {
+    keyboard_flags & REPORT_EVENT_TYPES_FLAG != 0 && is_key_escape_coded(key_input, keyboard_flags)
+}
+
+/// Whether this key takes an escape code under `keyboard_flags`.
+///
+/// Flag `8` escape-codes every key. A key that produces text, and Enter, Tab
+/// and Backspace, keep their legacy bytes without it. A cursor, editing or
+/// function key is a control sequence under every flag. Every other key takes
+/// an escape code with flag `1`.
+fn is_key_escape_coded(key_input: &KeyInput, keyboard_flags: u8) -> bool {
+    if keyboard_flags & REPORT_ALL_KEYS_FLAG != 0 {
+        return true;
+    }
+    if is_text_producing_event(key_input) || is_legacy_exception_key(key_input.key) {
+        return false;
+    }
+    if let KeyIdentity::Key(Key::Named(named_key)) = key_input.key {
+        if find_functional_key_form(named_key).is_some() {
+            return true;
+        }
+    }
+    keyboard_flags & DISAMBIGUATE_ESCAPE_CODES_FLAG != 0
+}
+
+/// Whether this event takes the `CSI u` form rather than its legacy bytes.
+///
+/// The flags decide it, and [`ExtendedKeysMode::Always`] adds the keys whose
+/// legacy bytes another key also owns.
+fn is_csi_u_written(
+    key_input: &KeyInput,
+    keyboard_flags: u8,
+    extended_keys_mode: ExtendedKeysMode,
+) -> bool {
+    is_key_escape_coded(key_input, keyboard_flags)
+        || (extended_keys_mode == ExtendedKeysMode::Always
+            && is_key_lost_by_legacy_encoding(key_input))
+}
+
+/// Whether `key` is Enter, Tab or Backspace, the three keys that keep their
+/// legacy bytes under flag `1`.
+fn is_legacy_exception_key(key: KeyIdentity) -> bool {
+    matches!(
+        key,
+        KeyIdentity::Key(Key::Named(
+            NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace
+        ))
+    )
+}
+
+/// Whether the event produces text.
+///
+/// Reported text says so on its own, which also covers an event that carries
+/// text and no key. A character key and Space produce text when no Control,
+/// Alt or Super is held: `a` and Shift+`a` produce text, and Ctrl+`a` does
+/// not.
+fn is_text_producing_event(key_input: &KeyInput) -> bool {
+    if !key_input.associated_text.is_empty() {
+        return true;
+    }
+    let is_text_key = matches!(
+        key_input.key,
+        KeyIdentity::Key(Key::Char(_) | Key::Named(NamedKey::Space))
+    );
+    if !is_text_key {
+        return false;
+    }
+    let binding_modifiers = key_input.modifier_flags.to_binding_modifiers();
+    !binding_modifiers.has_all_modifiers(ModFlags::CTRL)
+        && !binding_modifiers.has_all_modifiers(ModFlags::ALT)
+        && !binding_modifiers.has_all_modifiers(ModFlags::SUPER)
+}
+
+/// Whether the legacy bytes for this event are bytes another key also sends.
+///
+/// The legacy encoding maps several keys onto one C0 byte. Ctrl+`i` sends
+/// `0x09`, which Tab sends; Shift+Enter sends `\r`, which Enter sends. Both
+/// lose which key was pressed, so both are true here. Shift+Tab sends
+/// `ESCAPE_BYTE [ Z`, which only Shift+Tab sends, so it is false.
+fn is_key_lost_by_legacy_encoding(key_input: &KeyInput) -> bool {
+    let Some(chord) = key_input.to_binding_chord() else {
+        return false;
+    };
+    let legacy_bytes = encode_key_chord(chord, false);
+    let Some(owner_key) = find_c0_byte_owner(&legacy_bytes) else {
+        return false;
+    };
+    if owner_key != chord.key {
+        return true;
+    }
+    // The owner's own key loses a modifier when the modifier changes nothing:
+    // Shift+Enter and Enter both send `\r`.
+    let unmodified_bytes = encode_key_chord(KeyChord::from_parts(ModFlags::NONE, chord.key), false);
+    chord.modifier_flags != ModFlags::NONE && legacy_bytes == unmodified_bytes
+}
+
+/// The key that owns one C0 byte, or `None` when the bytes are not a C0 byte
+/// two keys share.
+///
+/// `0x09` belongs to Tab, `0x0d` to Enter, `0x1b` to Esc, `0x7f` to Backspace,
+/// `0x00` to Space and `0x08` to `h`.
+fn find_c0_byte_owner(legacy_bytes: &[u8]) -> Option<Key> {
+    let [single_byte] = legacy_bytes else {
+        return None;
+    };
+    let owner_key = match single_byte {
+        0x09 => Key::Named(NamedKey::Tab),
+        0x0d => Key::Named(NamedKey::Enter),
+        0x1b => Key::Named(NamedKey::Esc),
+        0x7f => Key::Named(NamedKey::Backspace),
+        0x00 => Key::Named(NamedKey::Space),
+        0x08 => Key::Char('h'),
+        _ => return None,
+    };
+    Some(owner_key)
+}
+
+/// The key number a `CSI u` report names `key` by.
+///
+/// The five C0 keys take the codepoints of the bytes they send: Enter `13`,
+/// Tab `9`, Backspace `127`, Esc `27` and Space `32`. A character key takes
+/// its own codepoint.
+fn get_csi_u_key_number(key: Key) -> u32 {
+    match key {
+        Key::Char(character) => character as u32,
+        Key::Named(NamedKey::Enter) => ENTER_KEY_NUMBER,
+        Key::Named(NamedKey::Tab) => TAB_KEY_NUMBER,
+        Key::Named(NamedKey::Backspace) => BACKSPACE_KEY_NUMBER,
+        Key::Named(NamedKey::Esc) => ESC_KEY_NUMBER,
+        Key::Named(NamedKey::Space) => SPACE_KEY_NUMBER,
+        Key::Named(_) => unreachable!("a functional key is encoded by its own form"),
+    }
+}
+
+/// The legacy bytes for one event: the text it produced, or the bytes its
+/// chord encodes to.
+///
+/// Reported text wins, so Option+`a` reporting `å` writes `å` rather than
+/// `ESCAPE_BYTE a`. An event no chord can name writes nothing.
+fn encode_legacy_event(key_input: &KeyInput, is_application_cursor_keys_enabled: bool) -> Vec<u8> {
+    if !key_input.associated_text.is_empty() {
+        return key_input.associated_text.as_bytes().to_vec();
+    }
+    match key_input.to_binding_chord() {
+        Some(chord) => encode_key_chord(chord, is_application_cursor_keys_enabled),
+        None => Vec::new(),
+    }
+}
+
+/// A key with one legacy byte: Enter, Tab, Backspace, Esc, Space, or a
+/// character key. The flags decide between its `CSI u` report and those bytes.
+///
+/// Shift+Enter gives `\r` with no flag, and `ESCAPE_BYTE [ 1 3 ; 2 u` with
+/// flag `8`.
+fn encode_csi_u_or_legacy_event(
+    key_input: &KeyInput,
+    key: Key,
+    keyboard_flags: u8,
+    is_application_cursor_keys_enabled: bool,
+    extended_keys_mode: ExtendedKeysMode,
+) -> Vec<u8> {
+    if is_csi_u_written(key_input, keyboard_flags, extended_keys_mode) {
+        return encode_csi_u_event(key_input, get_csi_u_key_number(key), keyboard_flags);
+    }
+    encode_legacy_event(key_input, is_application_cursor_keys_enabled)
+}
+
+/// A cursor, editing or function key. It keeps its canonical form under every
+/// flag; a reported event kind rides its modifier field.
+///
+/// `<Up>` gives `ESCAPE_BYTE [ A`. An Up release under flag `2` gives
+/// `ESCAPE_BYTE [ 1 ; 1 : 3 A`.
+fn encode_functional_key_event(
+    key_input: &KeyInput,
+    functional_key_form: (FunctionalKeyForm, ModFlags),
+    keyboard_flags: u8,
+    is_application_cursor_keys_enabled: bool,
+) -> Vec<u8> {
+    let Some(event_kind_number) = find_event_kind_number(key_input, keyboard_flags) else {
+        return encode_legacy_event(key_input, is_application_cursor_keys_enabled);
+    };
+    let (functional_key_form, added_modifier_flags) = functional_key_form;
+    let mut modifier_flags = key_input.modifier_flags;
+    if added_modifier_flags.has_all_modifiers(ModFlags::SHIFT) {
+        modifier_flags = modifier_flags.union(KeyModifierFlags::SHIFT);
+    }
+
+    let mut encoded_bytes = vec![ESCAPE_BYTE, b'['];
+    let key_parameter = match functional_key_form {
+        FunctionalKeyForm::Cursor(_) | FunctionalKeyForm::Ss3(_) => 1,
+        FunctionalKeyForm::Tilde(tilde_key_code) => u32::from(tilde_key_code),
+    };
+    append_decimal(&mut encoded_bytes, key_parameter);
+    encoded_bytes.push(b';');
+    append_decimal(
+        &mut encoded_bytes,
+        u32::from(modifier_flags.to_kitty_parameter()),
+    );
+    encoded_bytes.push(b':');
+    append_decimal(&mut encoded_bytes, event_kind_number);
+    match functional_key_form {
+        FunctionalKeyForm::Cursor(final_byte) | FunctionalKeyForm::Ss3(final_byte) => {
+            encoded_bytes.push(final_byte);
+        }
+        FunctionalKeyForm::Tilde(_) => encoded_bytes.push(b'~'),
+    }
+    encoded_bytes
+}
+
+/// An event that carries text and no key: `ESCAPE_BYTE [ 0 ; ; <codepoints> u`
+/// with flags `8` and `16`, and the text itself otherwise.
+fn encode_text_only_event(key_input: &KeyInput, keyboard_flags: u8) -> Vec<u8> {
+    if keyboard_flags & REPORT_ALL_KEYS_FLAG == 0
+        || keyboard_flags & REPORT_ASSOCIATED_TEXT_FLAG == 0
+    {
+        return key_input.associated_text.as_bytes().to_vec();
+    }
+    encode_csi_u_event(key_input, TEXT_ONLY_KEY_CODEPOINT, keyboard_flags)
+}
+
+/// One `CSI u` report:
+/// `ESCAPE_BYTE [ <number>[:<shifted>[:<base>]] [; <modifiers>[:<kind>]] [; <text>] u`.
+///
+/// The modifier field is left out when no modifier is held, no kind is
+/// reported and no text follows. It is left empty when text follows and no
+/// modifier is held: a text-only `å` gives `ESCAPE_BYTE [ 0 ; ; 2 2 9 u`.
+fn encode_csi_u_event(key_input: &KeyInput, key_number: u32, keyboard_flags: u8) -> Vec<u8> {
+    let mut encoded_bytes = vec![ESCAPE_BYTE, b'['];
+    append_decimal(&mut encoded_bytes, key_number);
+    if keyboard_flags & REPORT_ALTERNATE_KEYS_FLAG != 0 {
+        append_alternate_keys(&mut encoded_bytes, key_input);
+    }
+
+    let text_codepoints = get_reported_text_codepoints(key_input, keyboard_flags);
+    let event_kind_number = find_event_kind_number(key_input, keyboard_flags);
+    let modifier_parameter = get_reported_modifier_parameter(key_input);
+    let is_modifier_field_needed =
+        modifier_parameter != 1 || event_kind_number.is_some() || !text_codepoints.is_empty();
+    if is_modifier_field_needed {
+        encoded_bytes.push(b';');
+        if modifier_parameter != 1 || event_kind_number.is_some() {
+            append_decimal(&mut encoded_bytes, u32::from(modifier_parameter));
+        }
+        if let Some(event_kind_number) = event_kind_number {
+            encoded_bytes.push(b':');
+            append_decimal(&mut encoded_bytes, event_kind_number);
+        }
+    }
+    if !text_codepoints.is_empty() {
+        encoded_bytes.push(b';');
+        for (codepoint_index, text_codepoint) in text_codepoints.iter().enumerate() {
+            if codepoint_index > 0 {
+                encoded_bytes.push(b':');
+            }
+            append_decimal(&mut encoded_bytes, *text_codepoint);
+        }
+    }
+    encoded_bytes.push(b'u');
+    encoded_bytes
+}
+
+/// Append `:shifted`, `::base` or `:shifted:base` for the alternatives the
+/// event reported.
+///
+/// The shifted key is appended only with Shift held. A base-layout key equal
+/// to the key itself is left out.
+fn append_alternate_keys(encoded_bytes: &mut Vec<u8>, key_input: &KeyInput) {
+    let is_shift_held = key_input
+        .modifier_flags
+        .has_all_modifiers(KeyModifierFlags::SHIFT);
+    let shifted_key = key_input.shifted_key.filter(|_| is_shift_held);
+    let base_layout_key = key_input
+        .base_layout_key
+        .filter(|base_layout_key| KeyIdentity::Key(Key::Char(*base_layout_key)) != key_input.key);
+    if shifted_key.is_none() && base_layout_key.is_none() {
+        return;
+    }
+    encoded_bytes.push(b':');
+    if let Some(shifted_key) = shifted_key {
+        append_decimal(encoded_bytes, shifted_key as u32);
+    }
+    if let Some(base_layout_key) = base_layout_key {
+        encoded_bytes.push(b':');
+        append_decimal(encoded_bytes, base_layout_key as u32);
+    }
+}
+
+/// The event kind a report names, or `None` when the report names none.
+///
+/// A press names none. A repeat names `2` and a release names `3`, both only
+/// with flag `2`.
+fn find_event_kind_number(key_input: &KeyInput, keyboard_flags: u8) -> Option<u32> {
+    if !is_event_kind_reported(key_input, keyboard_flags) {
+        return None;
+    }
+    match key_input.key_event_kind {
+        KeyEventKind::Press => None,
+        KeyEventKind::Repeat => Some(2),
+        KeyEventKind::Release => Some(3),
+    }
+}
+
+/// The codepoints of the text a report carries, empty when it carries none.
+///
+/// Text rides a report only with flags `8` and `16` together.
+fn get_reported_text_codepoints(key_input: &KeyInput, keyboard_flags: u8) -> Vec<u32> {
+    if keyboard_flags & REPORT_ALL_KEYS_FLAG == 0
+        || keyboard_flags & REPORT_ASSOCIATED_TEXT_FLAG == 0
+    {
+        return Vec::new();
+    }
+    key_input
+        .associated_text
+        .chars()
+        .map(|text_character| text_character as u32)
+        .collect()
+}
+
+/// The modifier parameter a report names: one plus the reported bitmap.
+///
+/// Caps Lock and Num Lock are dropped from an event that produces text, so
+/// typing `a` with Caps Lock held gives `1`. Every modifier held on a key that
+/// produces no text gives `256`.
+fn get_reported_modifier_parameter(key_input: &KeyInput) -> u16 {
+    let mut modifier_flags = key_input.modifier_flags;
+    if is_text_producing_event(key_input) {
+        let lock_modifiers = KeyModifierFlags::CAPS_LOCK
+            .union(KeyModifierFlags::NUM_LOCK)
+            .bits();
+        modifier_flags = KeyModifierFlags::from_bits(modifier_flags.bits() & !lock_modifiers);
+    }
+    modifier_flags.to_kitty_parameter()
 }
 
 #[cfg(test)]

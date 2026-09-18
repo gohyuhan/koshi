@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use koshi_core::geometry::Direction;
-use koshi_core::key::KeyChord;
+use koshi_core::key::{ExtendedKeysMode, KeyChord};
 use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::key::Leader;
@@ -484,6 +484,9 @@ pub struct PartialTerminalConfig {
     /// The shell to launch. The outer `Option` is whether this layer sets the
     /// field; the inner `Option` is the value (`None` = fall back to `$SHELL`).
     pub default_shell: Option<Option<String>>,
+    /// What a pane's program receives for a key whose legacy bytes another key
+    /// also owns.
+    pub extended_keys_mode: Option<ExtendedKeysMode>,
 }
 
 impl PartialTerminalConfig {
@@ -491,6 +494,10 @@ impl PartialTerminalConfig {
         merge_override_field(&mut terminal_config.term, self.term);
         merge_override_field(&mut terminal_config.colorterm, self.colorterm);
         merge_override_field(&mut terminal_config.default_shell, self.default_shell);
+        merge_override_field(
+            &mut terminal_config.extended_keys_mode,
+            self.extended_keys_mode,
+        );
     }
 }
 

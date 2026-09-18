@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use kdl::KdlNode;
 use koshi_core::geometry::Direction;
+use koshi_core::key::ExtendedKeysMode;
 use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::{build_validation_error, validate_config_schema_version, ConfigError};
@@ -541,6 +542,16 @@ fn parse_terminal_config(
                 field_name,
                 parse_warnings,
             ),
+            // `extended-keys` decides what a pane that pushed no Kitty
+            // keyboard flag receives for a key whose legacy bytes another key
+            // also owns.
+            "extended-keys" => set_parsed_field(
+                &mut partial_terminal_config.extended_keys_mode,
+                parse_extended_keys_mode(field_node),
+                "terminal",
+                field_name,
+                parse_warnings,
+            ),
             unknown_field_name => parse_warnings.push(format!(
                 "ignored {}",
                 format_unknown_key(
@@ -549,6 +560,7 @@ fn parse_terminal_config(
                         "terminal.term",
                         "terminal.colorterm",
                         "terminal.default-shell",
+                        "terminal.extended-keys",
                     ],
                 )
             )),
@@ -637,6 +649,15 @@ fn parse_log_format(field_node: &KdlNode) -> Result<LogFormat, String> {
         "pretty" => Ok(LogFormat::Pretty),
         "json" => Ok(LogFormat::Json),
         _ => Err(r#"expected "pretty" or "json""#.to_string()),
+    }
+}
+
+/// Reads the node's single value as an [`ExtendedKeysMode`].
+fn parse_extended_keys_mode(field_node: &KdlNode) -> Result<ExtendedKeysMode, String> {
+    match parse_string_kdl_value(field_node)? {
+        "on-request" => Ok(ExtendedKeysMode::OnRequest),
+        "always" => Ok(ExtendedKeysMode::Always),
+        _ => Err(r#"expected "on-request" or "always""#.to_string()),
     }
 }
 

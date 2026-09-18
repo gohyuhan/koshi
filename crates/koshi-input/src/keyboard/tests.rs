@@ -1152,13 +1152,15 @@ fn the_control_fold_covers_its_run_and_stops_at_both_ends() {
 
 #[test]
 fn append_decimal_writes_every_digit_of_the_decimal_number() {
-    let decimal_number_cases: [(u8, &[u8]); 6] = [
+    let decimal_number_cases: [(u32, &[u8]); 8] = [
         (0, b"0"),
         (9, b"9"),
         (10, b"10"),
         (99, b"99"),
         (100, b"100"),
         (255, b"255"),
+        (256, b"256"),
+        (1_114_109, b"1114109"),
     ];
     for (decimal_number, expected_bytes) in decimal_number_cases {
         let mut decimal_digits = Vec::new();
@@ -1392,4 +1394,526 @@ fn a_text_parameter_koshi_cannot_use_never_costs_the_pane_its_key() {
     // character at all, both still write a carriage return.
     assert_eq!(encode_terminal_input_for_pane(b"\x1b[13;;13u"), b"\r");
     assert_eq!(encode_terminal_input_for_pane(b"\x1b[13;;1114112u"), b"\r");
+}
+
+// ------------------------------ encode: the complete event, for one pane ----
+
+/// A press of `key` with `modifier_flags` held, reporting no alternatives and
+/// no text.
+fn build_key_press(key: Key, modifier_flags: KeyModifierFlags) -> KeyInput {
+    KeyInput {
+        key: KeyIdentity::Key(key),
+        key_event_kind: koshi_core::key::KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags,
+    }
+}
+
+#[test]
+fn a_pane_that_pushed_no_flag_reads_the_bytes_it_reads_today() {
+    let shift_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT);
+    assert_eq!(
+        encode_key_input(&shift_enter, 0, false, ExtendedKeysMode::OnRequest),
+        b"\r".to_vec()
+    );
+
+    let control_i = build_key_press(Key::Char('i'), KeyModifierFlags::CTRL);
+    assert_eq!(
+        encode_key_input(&control_i, 0, false, ExtendedKeysMode::OnRequest),
+        vec![0x09]
+    );
+
+    let tab = build_key_press(Key::Named(NamedKey::Tab), KeyModifierFlags::NONE);
+    assert_eq!(
+        encode_key_input(&tab, 0, false, ExtendedKeysMode::OnRequest),
+        vec![0x09]
+    );
+}
+
+#[test]
+fn flag_one_keeps_enter_legacy_and_escape_codes_every_other_silent_key() {
+    let shift_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT);
+    assert_eq!(
+        encode_key_input(&shift_enter, 1, false, ExtendedKeysMode::OnRequest),
+        b"\r".to_vec()
+    );
+
+    let shift_escape = build_key_press(Key::Named(NamedKey::Esc), KeyModifierFlags::SHIFT);
+    assert_eq!(
+        encode_key_input(&shift_escape, 1, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[27;2u".to_vec()
+    );
+
+    let typed_a = build_key_press(Key::Char('a'), KeyModifierFlags::NONE);
+    assert_eq!(
+        encode_key_input(&typed_a, 1, false, ExtendedKeysMode::OnRequest),
+        b"a".to_vec()
+    );
+}
+
+#[test]
+fn flag_eight_escape_codes_every_key_and_keeps_functional_forms() {
+    let shift_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT);
+    assert_eq!(
+        encode_key_input(&shift_enter, 8, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[13;2u".to_vec()
+    );
+
+    let space = build_key_press(Key::Named(NamedKey::Space), KeyModifierFlags::NONE);
+    assert_eq!(
+        encode_key_input(&space, 8, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[32u".to_vec()
+    );
+
+    let up = build_key_press(Key::Named(NamedKey::Up), KeyModifierFlags::NONE);
+    assert_eq!(
+        encode_key_input(&up, 8, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[A".to_vec()
+    );
+
+    let every_modifier = build_key_press(Key::Char('a'), KeyModifierFlags::from_bits(0xff));
+    assert_eq!(
+        encode_key_input(&every_modifier, 8, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[97;256u".to_vec()
+    );
+}
+
+#[test]
+fn flag_two_names_the_event_kind_and_holds_releases_back_without_it() {
+    let mut repeated_a = build_key_press(Key::Char('a'), KeyModifierFlags::NONE);
+    repeated_a.key_event_kind = koshi_core::key::KeyEventKind::Repeat;
+    assert_eq!(
+        encode_key_input(&repeated_a, 10, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[97;1:2u".to_vec()
+    );
+
+    let mut released_a = build_key_press(Key::Char('a'), KeyModifierFlags::NONE);
+    released_a.key_event_kind = koshi_core::key::KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_a, 10, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[97;1:3u".to_vec()
+    );
+    assert_eq!(
+        encode_key_input(&released_a, 8, false, ExtendedKeysMode::OnRequest),
+        Vec::<u8>::new()
+    );
+
+    let mut released_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::NONE);
+    released_enter.key_event_kind = koshi_core::key::KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_enter, 2, false, ExtendedKeysMode::OnRequest),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        encode_key_input(&released_enter, 10, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[13;1:3u".to_vec()
+    );
+
+    let mut released_up = build_key_press(Key::Named(NamedKey::Up), KeyModifierFlags::NONE);
+    released_up.key_event_kind = koshi_core::key::KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_up, 2, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[1;1:3A".to_vec()
+    );
+}
+
+#[test]
+fn flag_four_names_the_alternate_keys_and_flag_sixteen_names_the_text() {
+    let mut shifted_a = build_key_press(Key::Char('a'), KeyModifierFlags::SHIFT);
+    shifted_a.shifted_key = Some('A');
+    assert_eq!(
+        encode_key_input(&shifted_a, 12, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[97:65;2u".to_vec()
+    );
+
+    shifted_a.associated_text = "A".to_string();
+    assert_eq!(
+        encode_key_input(&shifted_a, 24, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[97;2;65u".to_vec()
+    );
+    assert_eq!(
+        encode_key_input(&shifted_a, 16, false, ExtendedKeysMode::OnRequest),
+        b"A".to_vec()
+    );
+
+    let mut composed_text = build_key_press(Key::Char('e'), KeyModifierFlags::NONE);
+    composed_text.associated_text = "e\u{301}".to_string();
+    assert_eq!(
+        encode_key_input(&composed_text, 24, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[101;;101:769u".to_vec()
+    );
+}
+
+#[test]
+fn a_text_only_event_carries_its_codepoints_and_falls_back_to_the_text() {
+    let text_only = KeyInput {
+        key: KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT),
+        key_event_kind: koshi_core::key::KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: "å".to_string(),
+        modifier_flags: KeyModifierFlags::NONE,
+    };
+    assert_eq!(
+        encode_key_input(&text_only, 24, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[0;;229u".to_vec()
+    );
+    assert_eq!(
+        encode_key_input(&text_only, 0, false, ExtendedKeysMode::OnRequest),
+        "å".as_bytes().to_vec()
+    );
+}
+
+#[test]
+fn a_modifier_key_reaches_a_pane_only_with_flag_eight() {
+    let left_shift = KeyInput {
+        key: KeyIdentity::Codepoint(57441),
+        key_event_kind: koshi_core::key::KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::SHIFT,
+    };
+    assert_eq!(
+        encode_key_input(&left_shift, 8, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[57441;2u".to_vec()
+    );
+    assert_eq!(
+        encode_key_input(&left_shift, 7, false, ExtendedKeysMode::OnRequest),
+        Vec::<u8>::new()
+    );
+}
+
+#[test]
+fn always_escape_codes_only_the_keys_legacy_encoding_loses() {
+    let always = ExtendedKeysMode::Always;
+    let lost_key_cases: [(Key, KeyModifierFlags, &[u8]); 6] = [
+        (
+            Key::Named(NamedKey::Enter),
+            KeyModifierFlags::SHIFT,
+            b"\x1b[13;2u",
+        ),
+        (
+            Key::Named(NamedKey::Enter),
+            KeyModifierFlags::CTRL,
+            b"\x1b[13;5u",
+        ),
+        (Key::Char('i'), KeyModifierFlags::CTRL, b"\x1b[105;5u"),
+        (Key::Char('m'), KeyModifierFlags::CTRL, b"\x1b[109;5u"),
+        (
+            Key::Named(NamedKey::Esc),
+            KeyModifierFlags::SHIFT,
+            b"\x1b[27;2u",
+        ),
+        (
+            Key::Named(NamedKey::Backspace),
+            KeyModifierFlags::CTRL,
+            b"\x1b[127;5u",
+        ),
+    ];
+    for (key, modifier_flags, expected_bytes) in lost_key_cases {
+        let key_press = build_key_press(key, modifier_flags);
+        assert_eq!(
+            encode_key_input(&key_press, 0, false, always),
+            expected_bytes.to_vec(),
+            "{key:?} with {modifier_flags:?}"
+        );
+    }
+
+    let kept_key_cases: [(Key, KeyModifierFlags, &[u8]); 5] = [
+        (Key::Named(NamedKey::Tab), KeyModifierFlags::NONE, b"\t"),
+        (Key::Named(NamedKey::Enter), KeyModifierFlags::NONE, b"\r"),
+        (
+            Key::Named(NamedKey::Tab),
+            KeyModifierFlags::SHIFT,
+            b"\x1b[Z",
+        ),
+        (Key::Char('h'), KeyModifierFlags::CTRL, b"\x08"),
+        (
+            Key::Named(NamedKey::Right),
+            KeyModifierFlags::CTRL,
+            b"\x1b[1;5C",
+        ),
+    ];
+    for (key, modifier_flags, expected_bytes) in kept_key_cases {
+        let key_press = build_key_press(key, modifier_flags);
+        assert_eq!(
+            encode_key_input(&key_press, 0, false, always),
+            expected_bytes.to_vec(),
+            "{key:?} with {modifier_flags:?}"
+        );
+    }
+}
+
+#[test]
+fn always_writes_presses_and_repeats_and_never_a_release() {
+    let mut shift_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT);
+    shift_enter.key_event_kind = koshi_core::key::KeyEventKind::Repeat;
+    assert_eq!(
+        encode_key_input(&shift_enter, 0, false, ExtendedKeysMode::Always),
+        b"\x1b[13;2u".to_vec()
+    );
+
+    shift_enter.key_event_kind = koshi_core::key::KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&shift_enter, 0, false, ExtendedKeysMode::Always),
+        Vec::<u8>::new()
+    );
+}
+
+#[test]
+fn reported_text_reaches_a_legacy_pane_as_that_text() {
+    let mut composed_a = build_key_press(Key::Char('a'), KeyModifierFlags::ALT);
+    composed_a.associated_text = "å".to_string();
+    assert_eq!(
+        encode_key_input(&composed_a, 0, false, ExtendedKeysMode::OnRequest),
+        "å".as_bytes().to_vec()
+    );
+
+    let control_a = build_key_press(Key::Char('a'), KeyModifierFlags::CTRL);
+    assert_eq!(
+        encode_key_input(&control_a, 0, false, ExtendedKeysMode::OnRequest),
+        vec![0x01]
+    );
+}
+
+#[test]
+fn a_cursor_key_follows_the_panes_cursor_key_mode() {
+    let up = build_key_press(Key::Named(NamedKey::Up), KeyModifierFlags::NONE);
+    assert_eq!(
+        encode_key_input(&up, 8, true, ExtendedKeysMode::OnRequest),
+        b"\x1bOA".to_vec()
+    );
+    assert_eq!(
+        encode_key_input(&up, 8, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[A".to_vec()
+    );
+}
+
+#[test]
+fn every_flag_combination_leaves_plain_typing_as_the_character() {
+    for keyboard_flags in 0..32u8 {
+        let mut typed_a = build_key_press(Key::Char('a'), KeyModifierFlags::NONE);
+        typed_a.associated_text = "a".to_string();
+        let encoded_bytes =
+            encode_key_input(&typed_a, keyboard_flags, false, ExtendedKeysMode::OnRequest);
+        let is_escape_coded = keyboard_flags & 8 != 0;
+        if is_escape_coded {
+            let expected_bytes = if keyboard_flags & 16 != 0 {
+                b"\x1b[97;;97u".to_vec()
+            } else {
+                b"\x1b[97u".to_vec()
+            };
+            assert_eq!(encoded_bytes, expected_bytes, "flags {keyboard_flags}");
+        } else {
+            assert_eq!(encoded_bytes, b"a".to_vec(), "flags {keyboard_flags}");
+        }
+    }
+}
+
+#[test]
+fn a_text_key_reports_no_event_kind_without_the_all_keys_flag() {
+    // Flag 2 alone names kinds only for keys that take an escape code. A text
+    // key takes one with flag 8, so under flag 2 alone a repeat writes the
+    // character again and a release writes nothing.
+    let mut repeated_a = build_key_press(Key::Char('a'), KeyModifierFlags::NONE);
+    repeated_a.key_event_kind = KeyEventKind::Repeat;
+    assert_eq!(
+        encode_key_input(&repeated_a, 2, false, ExtendedKeysMode::OnRequest),
+        b"a".to_vec()
+    );
+
+    let mut released_a = build_key_press(Key::Char('a'), KeyModifierFlags::NONE);
+    released_a.key_event_kind = KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_a, 2, false, ExtendedKeysMode::OnRequest),
+        Vec::<u8>::new()
+    );
+}
+
+#[test]
+fn a_silent_key_reports_no_event_kind_without_an_escape_coded_form() {
+    // Esc takes an escape code with flag 1. Under flag 2 alone it has none, so
+    // a repeat writes the legacy byte and a release writes nothing.
+    let mut repeated_escape = build_key_press(Key::Named(NamedKey::Esc), KeyModifierFlags::NONE);
+    repeated_escape.key_event_kind = KeyEventKind::Repeat;
+    assert_eq!(
+        encode_key_input(&repeated_escape, 2, false, ExtendedKeysMode::OnRequest),
+        vec![0x1b]
+    );
+
+    let mut released_escape = build_key_press(Key::Named(NamedKey::Esc), KeyModifierFlags::NONE);
+    released_escape.key_event_kind = KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_escape, 2, false, ExtendedKeysMode::OnRequest),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        encode_key_input(&released_escape, 3, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[27;1:3u".to_vec()
+    );
+}
+
+#[test]
+fn a_text_only_event_writes_nothing_on_release() {
+    let mut released_text = KeyInput {
+        key: KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT),
+        key_event_kind: KeyEventKind::Release,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: "å".to_string(),
+        modifier_flags: KeyModifierFlags::NONE,
+    };
+    assert_eq!(
+        encode_key_input(&released_text, 2, false, ExtendedKeysMode::OnRequest),
+        Vec::<u8>::new()
+    );
+
+    released_text.key_event_kind = KeyEventKind::Press;
+    assert_eq!(
+        encode_key_input(&released_text, 2, false, ExtendedKeysMode::OnRequest),
+        "å".as_bytes().to_vec()
+    );
+}
+
+#[test]
+fn a_functional_key_reports_its_kind_on_flag_two_alone() {
+    let mut released_delete = build_key_press(Key::Named(NamedKey::Delete), KeyModifierFlags::NONE);
+    released_delete.key_event_kind = KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_delete, 2, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[3;1:3~".to_vec()
+    );
+
+    let mut released_f13 = build_key_press(Key::Named(NamedKey::F(13)), KeyModifierFlags::NONE);
+    released_f13.key_event_kind = KeyEventKind::Release;
+    assert_eq!(
+        encode_key_input(&released_f13, 2, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[1;2:3P".to_vec()
+    );
+}
+
+#[test]
+fn always_adds_to_the_flags_rather_than_replacing_them() {
+    // Flag 1 keeps Enter legacy. `Always` names Shift+Enter as a key legacy
+    // encoding loses, so the two together give the report.
+    let shift_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT);
+    assert_eq!(
+        encode_key_input(&shift_enter, 1, false, ExtendedKeysMode::Always),
+        b"\x1b[13;2u".to_vec()
+    );
+
+    // A key flag 1 already escape-codes is unchanged by `Always`.
+    let shift_escape = build_key_press(Key::Named(NamedKey::Esc), KeyModifierFlags::SHIFT);
+    assert_eq!(
+        encode_key_input(&shift_escape, 1, false, ExtendedKeysMode::Always),
+        encode_key_input(&shift_escape, 1, false, ExtendedKeysMode::OnRequest)
+    );
+}
+
+#[test]
+fn a_key_outside_the_basic_plane_reports_its_whole_codepoint() {
+    let mut emoji_key = build_key_press(Key::Char('😀'), KeyModifierFlags::NONE);
+    emoji_key.associated_text = "😀".to_string();
+    assert_eq!(
+        encode_key_input(&emoji_key, 24, false, ExtendedKeysMode::OnRequest),
+        b"\x1b[128512;;128512u".to_vec()
+    );
+    assert_eq!(
+        encode_key_input(&emoji_key, 0, false, ExtendedKeysMode::OnRequest),
+        "😀".as_bytes().to_vec()
+    );
+}
+
+#[test]
+fn always_converts_exactly_the_chords_legacy_encoding_cannot_tell_apart() {
+    // The list is built from the encoder, not by hand: every printable
+    // character and every C0 key, under each modifier set, encoded twice. A
+    // chord belongs here when its legacy bytes are bytes another key also
+    // sends. A new legacy encoding that adds a collision fails this test.
+    let modifier_sets: [(&str, KeyModifierFlags); 4] = [
+        ("", KeyModifierFlags::NONE),
+        ("Shift+", KeyModifierFlags::SHIFT),
+        ("Ctrl+", KeyModifierFlags::CTRL),
+        (
+            "Ctrl+Shift+",
+            KeyModifierFlags::CTRL.union(KeyModifierFlags::SHIFT),
+        ),
+    ];
+    let named_keys: [(&str, NamedKey); 5] = [
+        ("Enter", NamedKey::Enter),
+        ("Tab", NamedKey::Tab),
+        ("Backspace", NamedKey::Backspace),
+        ("Escape", NamedKey::Esc),
+        ("Space", NamedKey::Space),
+    ];
+
+    let mut converted_chords: Vec<String> = Vec::new();
+    for (modifier_label, modifier_flags) in modifier_sets {
+        for character in ' '..='~' {
+            let key_press = build_key_press(Key::Char(character), modifier_flags);
+            if is_csi_u_report(&encode_key_input(
+                &key_press,
+                0,
+                false,
+                ExtendedKeysMode::Always,
+            )) {
+                converted_chords.push(format!("{modifier_label}{character}"));
+            }
+        }
+        for (key_label, named_key) in named_keys {
+            let key_press = build_key_press(Key::Named(named_key), modifier_flags);
+            if is_csi_u_report(&encode_key_input(
+                &key_press,
+                0,
+                false,
+                ExtendedKeysMode::Always,
+            )) {
+                converted_chords.push(format!("{modifier_label}{key_label}"));
+            }
+        }
+    }
+
+    assert_eq!(
+        converted_chords,
+        vec![
+            "Shift+Enter",
+            "Shift+Backspace",
+            "Shift+Escape",
+            "Ctrl+2",
+            "Ctrl+3",
+            "Ctrl+8",
+            "Ctrl+?",
+            "Ctrl+@",
+            "Ctrl+I",
+            "Ctrl+M",
+            "Ctrl+[",
+            "Ctrl+i",
+            "Ctrl+m",
+            "Ctrl+Enter",
+            "Ctrl+Tab",
+            "Ctrl+Backspace",
+            "Ctrl+Escape",
+            "Ctrl+Shift+2",
+            "Ctrl+Shift+3",
+            "Ctrl+Shift+8",
+            "Ctrl+Shift+?",
+            "Ctrl+Shift+@",
+            "Ctrl+Shift+I",
+            "Ctrl+Shift+M",
+            "Ctrl+Shift+[",
+            "Ctrl+Shift+i",
+            "Ctrl+Shift+m",
+            "Ctrl+Shift+Enter",
+            "Ctrl+Shift+Backspace",
+            "Ctrl+Shift+Escape",
+        ]
+    );
+}
+
+/// Whether `encoded_bytes` is a `CSI u` report rather than legacy bytes.
+fn is_csi_u_report(encoded_bytes: &[u8]) -> bool {
+    encoded_bytes.starts_with(b"\x1b[") && encoded_bytes.ends_with(b"u")
 }

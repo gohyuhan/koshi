@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use kdl::KdlDocument;
 use koshi_core::geometry::Direction;
+use koshi_core::key::ExtendedKeysMode;
 use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::ConfigError;
@@ -670,6 +671,34 @@ fn terminal_section_parses_including_default_shell() {
     assert_eq!(terminal.term, Some("xterm".to_string()));
     assert_eq!(terminal.colorterm, Some("truecolor".to_string()));
     assert_eq!(terminal.default_shell, Some(Some("/bin/zsh".to_string())));
+}
+
+#[test]
+fn extended_keys_parses_both_modes_and_warns_on_any_other_value() {
+    let on_request = parse_config("terminal {\n    extended-keys \"on-request\"\n}")
+        .terminal
+        .expect("terminal section present");
+    assert_eq!(
+        on_request.extended_keys_mode,
+        Some(ExtendedKeysMode::OnRequest)
+    );
+
+    let always = parse_config("terminal {\n    extended-keys \"always\"\n}")
+        .terminal
+        .expect("terminal section present");
+    assert_eq!(always.extended_keys_mode, Some(ExtendedKeysMode::Always));
+
+    let (layer, warnings) = parse_with_warnings("terminal {\n    extended-keys \"sometimes\"\n}");
+    assert_eq!(
+        layer
+            .terminal
+            .and_then(|terminal| terminal.extended_keys_mode),
+        None
+    );
+    assert_eq!(
+        warnings,
+        vec!["ignored `terminal.extended-keys`: expected \"on-request\" or \"always\"".to_string()]
+    );
 }
 
 #[test]
