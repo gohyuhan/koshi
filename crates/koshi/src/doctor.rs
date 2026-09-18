@@ -127,6 +127,10 @@ const DOCTOR_CHECKS: &[DoctorCheck] = &[
         run_check: check_log_directory,
     },
     DoctorCheck {
+        check_name: "session log file",
+        run_check: check_session_log_file,
+    },
+    DoctorCheck {
         check_name: "plugins directory",
         run_check: check_plugins_directory,
     },
@@ -478,42 +482,44 @@ fn check_log_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
         );
     };
     let displayed_path = log_directory.display();
-    let log_file_text = match &doctor_context.session_log_file {
-        Ok(Some(session_log_file)) => {
-            format!("this session writes {}", session_log_file.display())
-        }
-        Ok(None) => {
-            "each session writes koshi-log-<session-id>.log there; koshi list-sessions names the id"
-                .to_string()
-        }
-        Err(in_session_error) => {
-            return DoctorOutcome::build_warning_outcome(
-                format!("KOSHI is set but the in-session identity is unreadable, so the session's log file cannot be named: {in_session_error}"),
-                "run koshi doctor from a shell koshi started, or unset KOSHI",
-            );
-        }
-    };
     if !log_directory.exists() {
-        return build_absent_directory_outcome(
-            log_directory,
-            &format!("when logging is on; {log_file_text}"),
-        );
+        return build_absent_directory_outcome(log_directory, "when logging is on");
     }
     match tempfile::NamedTempFile::new_in(log_directory) {
         Ok(writable_file_probe) => {
             drop(writable_file_probe);
-            let logging_state = if doctor_context.is_logging_enabled {
-                "on"
-            } else {
-                "off"
-            };
             DoctorOutcome::build_success_outcome(format!(
-                "{displayed_path} is writable and logging is {logging_state}; {log_file_text}"
+                "{displayed_path} is writable and logging is {}",
+                if doctor_context.is_logging_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
             ))
         }
         Err(log_directory_error) => DoctorOutcome::build_failure_outcome(
             format!("{displayed_path} cannot be written: {log_directory_error}"),
             &format!("make sure you own {displayed_path}"),
+        ),
+    }
+}
+
+/// Name the log file this session writes. Inside a pane the exact path;
+/// outside one the `koshi-log-<session-id>.log` shape; a `Warn` when `KOSHI`
+/// is set and the rest of the in-session identity is missing or malformed.
+fn check_session_log_file(doctor_context: &DoctorContext) -> DoctorOutcome {
+    match &doctor_context.session_log_file {
+        Ok(Some(session_log_file)) => DoctorOutcome::build_success_outcome(format!(
+            "this session writes {}",
+            session_log_file.display()
+        )),
+        Ok(None) => DoctorOutcome::build_success_outcome(
+            "not inside a koshi pane; each session writes koshi-log-<session-id>.log in the log directory, and koshi list-sessions names the id"
+                .to_string(),
+        ),
+        Err(in_session_error) => DoctorOutcome::build_warning_outcome(
+            format!("the session's log file cannot be named: {in_session_error}"),
+            "run koshi doctor from a shell koshi started, or unset KOSHI",
         ),
     }
 }

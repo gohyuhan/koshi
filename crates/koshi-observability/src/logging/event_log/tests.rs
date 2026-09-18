@@ -542,6 +542,7 @@ fn a_pane_exit_is_info_only_when_the_program_exited_zero() {
         (Some(-1), None, "WARN"),
         (None, Some(9), "WARN"),
         (None, Some(0), "WARN"),
+        (Some(0), Some(9), "WARN"),
     ];
 
     for (exit_code, signal, expected_log_level) in exit_level_cases {

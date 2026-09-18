@@ -338,9 +338,10 @@ fn a_pane_exit_without_a_signal_field_decodes_with_no_signal() {
     );
 }
 
-// `is_failure` is `false` for exit code `0` alone.
+// `is_failure` is `false` for exit code `0` with no signal, and `true` for
+// every other pair, including the contradictory `Some(0)` beside a signal.
 #[test]
-fn a_pane_exit_is_a_failure_unless_its_code_is_zero() {
+fn a_pane_exit_is_a_failure_unless_its_code_is_zero_and_no_signal_is_present() {
     let pane_id = PaneId::new();
     let failure_cases = [
         (Some(0), None, false),
@@ -348,6 +349,8 @@ fn a_pane_exit_is_a_failure_unless_its_code_is_zero() {
         (Some(-1), None, true),
         (None, Some(9), true),
         (None, Some(0), true),
+        (Some(0), Some(9), true),
+        (None, None, true),
     ];
 
     for (exit_code, signal, expected_is_failure) in failure_cases {

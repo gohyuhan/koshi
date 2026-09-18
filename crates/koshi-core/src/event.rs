@@ -235,11 +235,13 @@ pub struct PaneProcessExited {
 }
 
 impl PaneProcessExited {
-    /// `true` unless the process exited with code `0`: a non-zero code, a
-    /// signal, and an unobserved exit (`exit_code: Some(-1)`) are all failures.
+    /// `true` unless the process exited with code `0` and no signal: a non-zero
+    /// code, any present `signal`, and an unobserved exit (`exit_code:
+    /// Some(-1)`) are all failures. A value carrying both `exit_code: Some(0)`
+    /// and a `signal` is a failure.
     #[must_use]
     pub fn is_failure(&self) -> bool {
-        self.exit_code != Some(0)
+        self.signal.is_some() || self.exit_code != Some(0)
     }
 }
 
