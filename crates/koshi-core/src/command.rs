@@ -252,6 +252,20 @@ pub struct FocusPaneArgs {
     pub client_id: Option<ClientId>,
 }
 
+/// The visible span a pane is inserted beside. A placement command names one
+/// of these; the layout engine resolves it to a tree position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanePlacementAnchor {
+    /// One pane's rectangle.
+    Pane(PaneId),
+    /// One visible group's rectangle, named by the complete set of pane ids
+    /// the group holds. The set must equal the leaf set of exactly one split
+    /// node in the tab's layout tree.
+    Group(Vec<PaneId>),
+    /// The whole tab rectangle.
+    Tab,
+}
+
 /// Arguments for [`Command::NewTab`]. The tab's name is not supplied by the
 /// caller — the runtime assigns a freshly generated one.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

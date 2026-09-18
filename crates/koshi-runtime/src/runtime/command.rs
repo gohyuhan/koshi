@@ -49,6 +49,7 @@ use koshi_layout::{
     edit::{add_pane_to_stack, split_leaf},
     focus::activate_stack_member,
     mode::LayoutMode,
+    neighbor::select_directional_neighbor,
     resize::{resize_layout_with_sizing, ResizeError},
     solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
     tree::LayoutNode,
@@ -76,7 +77,7 @@ use koshi_session::session::{
 ///
 /// A pane the solve gives no content rect falls back to the whole `viewport`
 /// rect.
-pub(crate) fn size_root_pane(
+pub(crate) fn compute_root_pane_pty_size(
     pane_id: PaneId,
     viewport_size: Size,
     pane_sizing: PaneSizing,
@@ -101,7 +102,7 @@ pub(crate) fn size_root_pane(
 /// order. A multi-pane tab's panes each spawn at their tiled slice this way,
 /// not the whole tab. A pane the solve suppressed for lack of space has no
 /// content rect and falls back to the full tab rect — the same floor
-/// [`size_root_pane`] uses.
+/// [`compute_root_pane_pty_size`] uses.
 pub(crate) fn compute_pane_spawn_sizes(
     layout_tree: &LayoutNode,
     viewport_size: Size,
@@ -121,22 +122,6 @@ pub(crate) fn compute_pane_spawn_sizes(
         )
     })
     .collect()
-}
-
-/// The overlap length of the spans `[a_start, a_start + a_len)` and
-/// `[b_start, b_start + b_len)`, `0` when they are disjoint. Used by the
-/// directional focus lookup to require that a neighbor actually shares rows
-/// (or columns) with the pane focus moves from.
-fn compute_span_overlap(
-    first_span_start: u16,
-    first_span_length: u16,
-    second_span_start: u16,
-    second_span_length: u16,
-) -> u16 {
-    let overlap_start = first_span_start.max(second_span_start);
-    let overlap_end =
-        (first_span_start + first_span_length).min(second_span_start + second_span_length);
-    overlap_end.saturating_sub(overlap_start)
 }
 
 /// The tab named by the first [`Event::TabFocused`] in `emitted_events`, or
@@ -180,7 +165,7 @@ impl Rejection {
 
     /// A resize refused at a pane minimum, carrying the `spare_cell_count` cells the
     /// donating pane can still give in both the hint and the field.
-    fn min_size(spare_cell_count: u16) -> Self {
+    fn from_min_size(spare_cell_count: u16) -> Self {
         Rejection {
             reason: RejectReason::MinSize,
             help: Some(format!(
@@ -604,7 +589,7 @@ impl Server {
         command_source: &CommandSource,
         command_args: &DetachArgs,
     ) -> Result<CommandResult, Rejection> {
-        let session = Self::require_session(self.acting_session(command_source)?)?;
+        let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         let client_id =
             Self::resolve_target_client(command_args.client_id, command_source, session)?;
 
@@ -642,7 +627,7 @@ impl Server {
                 "plugin lacks the session_switch capability",
             ));
         }
-        let session = Self::require_session(self.acting_session(command_source)?)?;
+        let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         if command_args.session_id == session.session_id {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -678,7 +663,7 @@ impl Server {
         command_id: CommandId,
         command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let session = Self::require_session(self.acting_session(command_source)?)?;
+        let session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         let clients: Vec<ClientId> = session
             .clients
             .list_attached_clients()
@@ -705,10 +690,10 @@ impl Server {
     /// ([`RejectReason::SourceClientStale`]).
     ///
     /// On a session with two clients,
-    /// `sole_attached_client(s, "to view the new pane's tab", "the new pane")`
+    /// `resolve_sole_attached_client(s, "to view the new pane's tab", "the new pane")`
     /// returns
     /// `Err(TargetAmbiguous, "multiple clients; name a target client for the new pane")`.
-    fn sole_attached_client<'a>(
+    fn resolve_sole_attached_client<'a>(
         session: &'a Session,
         none_tail: &str,
         ambiguous_noun: &str,

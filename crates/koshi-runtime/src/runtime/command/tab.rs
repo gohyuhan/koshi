@@ -21,10 +21,10 @@ impl Server {
         requested_tab_id: Option<TabId>,
         command_source: &CommandSource,
     ) -> Result<(TabId, &mut Session), Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let resolve_acting_session = self.resolve_acting_session(command_source)?;
         let tab_id =
-            self.resolve_tab_or_active(requested_tab_id, command_source, acting_session)?;
-        let session_id = acting_session
+            self.resolve_tab_or_active(requested_tab_id, command_source, resolve_acting_session)?;
+        let session_id = resolve_acting_session
             .map(|session| session.session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let session = self
@@ -61,9 +61,9 @@ impl Server {
         command_args: &NewTabArgs,
         issued_at: SystemTime,
     ) -> Result<CommandResult, Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let resolve_acting_session = self.resolve_acting_session(command_source)?;
         let tab_target =
-            Self::resolve_new_tab_target(command_args, command_source, acting_session)?;
+            Self::resolve_new_tab_target(command_args, command_source, resolve_acting_session)?;
         // An owned handle on the shared backend. The spawn below uses it while
         // the session is borrowed mutably.
         let pty_backend = Arc::clone(self.get_pty_backend());
@@ -105,7 +105,8 @@ impl Server {
         if !is_layout_within_rect(&LayoutNode::Pane(new_pane_id), tab_rect, pane_sizing) {
             return Err(reject_when_no_room());
         }
-        let new_tab_pty_size = size_root_pane(new_pane_id, designated_pane_area, pane_sizing);
+        let new_tab_pty_size =
+            compute_root_pane_pty_size(new_pane_id, designated_pane_area, pane_sizing);
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.
@@ -291,9 +292,9 @@ impl Server {
         command_source: &CommandSource,
         command_args: &FocusTabArgs,
     ) -> Result<CommandResult, Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let resolve_acting_session = self.resolve_acting_session(command_source)?;
         let tab_target =
-            Self::resolve_focus_tab_target(command_args, command_source, acting_session)?;
+            Self::resolve_focus_tab_target(command_args, command_source, resolve_acting_session)?;
 
         let pty_backend = Arc::clone(self.get_pty_backend());
 

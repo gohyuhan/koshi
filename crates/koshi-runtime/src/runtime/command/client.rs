@@ -830,10 +830,11 @@ impl Server {
         command_source: &CommandSource,
         explicit_client_id: Option<ClientId>,
     ) -> Result<(ClientId, &mut Client), Rejection> {
-        let acting_session = Self::require_session(self.acting_session(command_source)?)?;
-        let session_id = acting_session.session_id;
+        let resolve_acting_session =
+            Self::require_session(self.resolve_acting_session(command_source)?)?;
+        let session_id = resolve_acting_session.session_id;
         let client_id =
-            Self::resolve_view_client(explicit_client_id, command_source, acting_session)?;
+            Self::resolve_view_client(explicit_client_id, command_source, resolve_acting_session)?;
         let session = self
             .session_by_id
             .get_mut(&session_id)

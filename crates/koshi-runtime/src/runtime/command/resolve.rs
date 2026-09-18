@@ -31,7 +31,7 @@ impl Server {
 
         // 2. The session this command acts in (and, for a keybinding or mouse
         //    command source, the client's liveness — the session is located by it).
-        let session = self.acting_session(&envelope.command_source)?;
+        let session = self.resolve_acting_session(&envelope.command_source)?;
 
         // 3. Session admission: a winding-down session takes no mutations.
         if let Some(session) = session {
@@ -208,7 +208,7 @@ impl Server {
     /// CLI naming a session must match one. A missing
     /// session is [`RejectReason::TargetNotFound`]. Sources with no session
     /// context (`Plugin`, `Internal`, external with no session) resolve to `None`.
-    pub(super) fn acting_session(
+    pub(super) fn resolve_acting_session(
         &self,
         command_source: &CommandSource,
     ) -> Result<Option<&Session>, Rejection> {
@@ -597,19 +597,18 @@ impl Server {
     }
 
     /// Resolve the [`Command::FocusPane`] target: the client whose focus moves
-    /// and the pane, which must live in that client's active tab. Shared by
-    /// validation and [`Self::handle_focus_pane`] so both apply one contract.
+    /// and the pane, which must live in that client's active tab. Validation
+    /// and [`Self::handle_focus_pane`] both call this.
     ///
     /// The target client is the explicit `client` argument when set — it wins
     /// even over an in-session issuer, and one not attached to the acting
     /// session is [`RejectReason::TargetNotFound`], never a fallback to the
     /// issuer. With no explicit target the acting client decides
-    /// ([`Self::resolve_acting_client`]). Focus is tab-local, so the pane
-    /// resolves through [`Self::require_pane_in_active_tab`]. A
-    /// [`FocusTarget::Direction`] target resolves geometrically from the
-    /// target client's focused pane over the solved layout
-    /// ([`Self::directional_neighbor`]); no pane in that direction is
-    /// [`RejectReason::TargetNotFound`].
+    /// ([`Self::resolve_acting_client`]). The pane resolves through
+    /// [`Self::require_pane_in_active_tab`]. A [`FocusTarget::Direction`]
+    /// target resolves geometrically from the target client's focused pane
+    /// over the solved layout ([`Self::find_directional_neighbor`]); no pane
+    /// in that direction is [`RejectReason::TargetNotFound`].
     pub(super) fn resolve_focus_target(
         command_args: &FocusPaneArgs,
         command_source: &CommandSource,
@@ -622,7 +621,7 @@ impl Server {
             FocusTarget::Pane(pane_id) => pane_id,
             FocusTarget::Direction(direction) => {
                 let source_pane_id = Self::resolve_focused_pane(session, client_id)?;
-                Self::directional_neighbor(
+                Self::find_directional_neighbor(
                     session,
                     client_id,
                     source_pane_id,
@@ -641,17 +640,17 @@ impl Server {
         })
     }
 
-    /// The nearest pane in `direction` from `from`, over the client's active
-    /// tab solved at its current pane region.
+    /// The nearest pane in `direction` from `source_pane_id`, over the
+    /// client's active tab solved at its current pane region.
     ///
-    /// A candidate qualifies when its whole box lies on the far side of
-    /// `from`'s edge in that direction and the two boxes overlap on the
-    /// perpendicular axis — a pane diagonally offset with no shared span is
-    /// not a neighbor. The nearest qualifying edge wins; among equals the
-    /// larger perpendicular overlap does. Suppressed and zero-area panes
-    /// never qualify. No qualifying pane is
-    /// [`RejectReason::TargetNotFound`].
-    pub(super) fn directional_neighbor(
+    /// The tab is solved in the client's own layout mode; a zoomed client's
+    /// solve holds one pane and yields no neighbour. Suppressed and zero-area
+    /// panes are left out of the candidates; a collapsed stack member is a
+    /// candidate at its header strip. Ranking is
+    /// [`select_directional_neighbor`]: nearest facing edge, then largest
+    /// perpendicular overlap, then screen position, then pane id. No
+    /// qualifying pane is [`RejectReason::TargetNotFound`].
+    pub(super) fn find_directional_neighbor(
         session: &Session,
         client_id: ClientId,
         source_pane_id: PaneId,
@@ -667,9 +666,6 @@ impl Server {
         let tab_viewport_size = session
             .get_tab_viewport(tab_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::InvalidState))?;
-        // Directional focus moves within what THIS client sees, so the tab is
-        // solved in this client's own mode: a zoomed client draws one pane and
-        // has no neighbour to move to.
         let solved_layout = crate::runtime::snapshot::solve_tab_layout(
             tab_record,
             client_record.get_layout_mode(tab_id),
@@ -682,80 +678,22 @@ impl Server {
             .find(|(pane_id, _)| *pane_id == source_pane_id)
             .map(|(_, pane_rect)| *pane_rect)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-
-        let mut best_neighbor: Option<(PaneId, u16, u16)> = None;
-        for &(pane_id, pane_rect) in &solved_layout.pane_rects {
-            if pane_id == source_pane_id
-                || solved_layout.suppressed_pane_ids.contains(&pane_id)
-                || pane_rect.is_empty()
-            {
-                continue;
-            }
-            // Distance between the facing edges; `None` when the candidate is
-            // not on the far side.
-            let edge_distance = match direction {
-                Direction::Left => (pane_rect.origin.column + pane_rect.cell_size.column_count
-                    <= source_pane_rect.origin.column)
-                    .then(|| {
-                        source_pane_rect.origin.column
-                            - (pane_rect.origin.column + pane_rect.cell_size.column_count)
-                    }),
-                Direction::Right => (pane_rect.origin.column
-                    >= source_pane_rect.origin.column + source_pane_rect.cell_size.column_count)
-                    .then(|| {
-                        pane_rect.origin.column
-                            - (source_pane_rect.origin.column
-                                + source_pane_rect.cell_size.column_count)
-                    }),
-                Direction::Up => (pane_rect.origin.row + pane_rect.cell_size.row_count
-                    <= source_pane_rect.origin.row)
-                    .then(|| {
-                        source_pane_rect.origin.row
-                            - (pane_rect.origin.row + pane_rect.cell_size.row_count)
-                    }),
-                Direction::Down => (pane_rect.origin.row
-                    >= source_pane_rect.origin.row + source_pane_rect.cell_size.row_count)
-                    .then(|| {
-                        pane_rect.origin.row
-                            - (source_pane_rect.origin.row + source_pane_rect.cell_size.row_count)
-                    }),
-            };
-            let Some(edge_distance) = edge_distance else {
-                continue;
-            };
-            let perpendicular_overlap = match direction {
-                Direction::Left | Direction::Right => compute_span_overlap(
-                    source_pane_rect.origin.row,
-                    source_pane_rect.cell_size.row_count,
-                    pane_rect.origin.row,
-                    pane_rect.cell_size.row_count,
-                ),
-                Direction::Up | Direction::Down => compute_span_overlap(
-                    source_pane_rect.origin.column,
-                    source_pane_rect.cell_size.column_count,
-                    pane_rect.origin.column,
-                    pane_rect.cell_size.column_count,
-                ),
-            };
-            if perpendicular_overlap == 0 {
-                continue;
-            }
-            let is_better_neighbor =
-                best_neighbor.is_none_or(|(_, best_edge_distance, best_perpendicular_overlap)| {
-                    edge_distance < best_edge_distance
-                        || (edge_distance == best_edge_distance
-                            && perpendicular_overlap > best_perpendicular_overlap)
-                });
-            if is_better_neighbor {
-                best_neighbor = Some((pane_id, edge_distance, perpendicular_overlap));
-            }
-        }
-        best_neighbor.map(|(pane_id, _, _)| pane_id).ok_or_else(|| {
-            Rejection::from_reason_and_help(
-                RejectReason::TargetNotFound,
-                "no pane in that direction",
-            )
-        })
+        let candidate_pane_rects: Vec<(PaneId, Rect)> = solved_layout
+            .pane_rects
+            .iter()
+            .copied()
+            .filter(|&(pane_id, _)| {
+                pane_id != source_pane_id && !solved_layout.suppressed_pane_ids.contains(&pane_id)
+            })
+            .collect();
+        select_directional_neighbor(source_pane_rect, &candidate_pane_rects, direction).ok_or_else(
+            || {
+                Rejection::from_reason_and_help(
+                    RejectReason::TargetNotFound,
+                    "no pane in that direction",
+                )
+            },
+        )
     }
 
     /// Resolve the client's focused pane. A client with no focused pane is

@@ -3042,6 +3042,86 @@ fn focus_from_a_sessionless_source_has_no_session_context() {
 }
 
 #[test]
+fn directional_focus_follows_the_screen_up_then_left_across_the_four_pane_fixture() {
+    // `A | B B` above `A | C D` at 80 by 24 cells. Up from D lands on the
+    // wide pane B; Left from B lands on A.
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let (pane_a, pane_b, pane_c, pane_d) =
+        (PaneId::new(), PaneId::new(), PaneId::new(), PaneId::new());
+    let mut session = build_bare_session(SessionId::new());
+    for pane_id in [pane_a, pane_b, pane_c, pane_d] {
+        register_pane_record(&mut session, pane_id);
+    }
+    register_session_tab(&mut session, tab_id, pane_a);
+    session
+        .tabs
+        .get_mut(&tab_id)
+        .expect("tab")
+        .update_layout(LayoutNode::Split(SplitNode {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                LayoutNode::Pane(pane_a),
+                LayoutNode::Split(SplitNode::with_equal_weights(
+                    SplitDirection::Vertical,
+                    vec![
+                        LayoutNode::Pane(pane_b),
+                        LayoutNode::Split(SplitNode::with_equal_weights(
+                            SplitDirection::Horizontal,
+                            vec![LayoutNode::Pane(pane_c), LayoutNode::Pane(pane_d)],
+                        )),
+                    ],
+                )),
+            ],
+            weights: vec![
+                koshi_layout::size::SizeWeight::from_primary_constraint(
+                    koshi_layout::size::SizeConstraint::Flex(1),
+                ),
+                koshi_layout::size::SizeWeight::from_primary_constraint(
+                    koshi_layout::size::SizeConstraint::Flex(2),
+                ),
+            ],
+            active_child_index: 0,
+        }));
+    attach_client(&mut session, client_id, tab_id, Some(pane_d));
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+
+    for (direction, expected_focused_pane_id) in
+        [(Direction::Up, pane_b), (Direction::Left, pane_a)]
+    {
+        let command_envelope = build_command_envelope(
+            CommandSource::from_key_binding(client_id),
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Direction(direction),
+                client_id: None,
+            }),
+        );
+        let command_id = command_envelope.command_id;
+        match runtime.dispatch(command_envelope) {
+            CommandResult::Ok {
+                command_id: ok_id,
+                emitted_events,
+            } => {
+                assert_eq!(ok_id, command_id);
+                assert_eq!(list_event_names(&emitted_events), ["PaneFocused"]);
+            }
+            other => panic!("expected Ok for {direction:?}, got {other:?}"),
+        }
+        assert_eq!(
+            runtime.session_by_id[&session_id]
+                .clients
+                .get_client_by_id(client_id)
+                .expect("client")
+                .get_focused_pane(tab_id),
+            Some(expected_focused_pane_id),
+            "{direction:?}"
+        );
+    }
+}
+
+#[test]
 fn focus_pane_moves_focus_records_mru_and_emits_one_event() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
@@ -11875,7 +11955,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
         false,
     );
 
-    let expected_pty_size = size_root_pane(
+    let expected_pty_size = compute_root_pane_pty_size(
         pane_id,
         pane_viewport(small_viewport_size),
         PaneSizing::default(),
@@ -12007,7 +12087,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
     let (_session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
     let events = runtime.handle_client_resize(client, resized_viewport, None);
-    let expected_pty_size = size_root_pane(
+    let expected_pty_size = compute_root_pane_pty_size(
         pane_id,
         pane_viewport(resized_viewport),
         PaneSizing::default(),
@@ -12249,7 +12329,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
     // back and the pane's PTY reflows up.
     let events = runtime.handle_client_detach(small_client_id);
 
-    let expected_pty_size = size_root_pane(
+    let expected_pty_size = compute_root_pane_pty_size(
         pane_id,
         pane_viewport(large_viewport_size),
         PaneSizing::default(),
@@ -12813,7 +12893,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
             .unwrap()
             .last()
             .unwrap(),
-        size_root_pane(
+        compute_root_pane_pty_size(
             pane_id_1,
             pane_viewport(small_viewport_size),
             PaneSizing::default(),
@@ -12834,7 +12914,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         false,
     );
 
-    let expected_pty_size = size_root_pane(
+    let expected_pty_size = compute_root_pane_pty_size(
         pane_id_1,
         pane_viewport(large_viewport_size),
         PaneSizing::default(),
@@ -13186,7 +13266,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
 
     // Session 2's pane shrinks to the new minimum; session 1's pane keeps its
     // size (its tab lost its only viewer).
-    let expected_pty_size = size_root_pane(
+    let expected_pty_size = compute_root_pane_pty_size(
         pane_id_2,
         pane_viewport(small_viewport_size),
         PaneSizing::default(),
@@ -13389,7 +13469,7 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
     // A single pane over the same viewport keeps the full inner width, so the
     // two-pane tiles really are narrower.
     assert_eq!(
-        size_root_pane(left_pane_id, viewport, PaneSizing::default()),
+        compute_root_pane_pty_size(left_pane_id, viewport, PaneSizing::default()),
         PtySize {
             column_count: 78,
             row_count: 22
@@ -13403,7 +13483,7 @@ fn size_root_pane_falls_back_to_the_whole_viewport_for_a_suppressed_pane() {
     // so the solve gives the pane no content rect and the size is taken from
     // the whole viewport rect instead.
     assert_eq!(
-        size_root_pane(
+        compute_root_pane_pty_size(
             PaneId::new(),
             Size {
                 column_count: 3,
@@ -13457,24 +13537,6 @@ fn pane_spawn_sizes_falls_back_to_the_tab_rect_for_a_suppressed_pane() {
             ),
         ]
     );
-}
-
-#[test]
-fn span_overlap_measures_only_the_length_two_spans_share() {
-    // `[0, 10)` and `[4, 10)` share `[4, 10)`: six cells.
-    assert_eq!(compute_span_overlap(0, 10, 4, 6), 6);
-    // Full containment answers the inner span's whole length, either way round.
-    assert_eq!(compute_span_overlap(0, 10, 2, 3), 3);
-    assert_eq!(compute_span_overlap(2, 3, 0, 10), 3);
-    // Identical spans overlap along their whole length.
-    assert_eq!(compute_span_overlap(5, 4, 5, 4), 4);
-    // `[0, 5)` and `[5, 10)` touch end to end and share no cell.
-    assert_eq!(compute_span_overlap(0, 5, 5, 5), 0);
-    // Disjoint spans share nothing, in either order.
-    assert_eq!(compute_span_overlap(0, 2, 7, 3), 0);
-    assert_eq!(compute_span_overlap(7, 3, 0, 2), 0);
-    // A zero-length span shares nothing, even inside the other span.
-    assert_eq!(compute_span_overlap(0, 10, 5, 0), 0);
 }
 
 #[test]
@@ -16594,7 +16656,7 @@ fn a_re_attach_reporting_no_pane_area_replaces_the_earlier_report() {
             .expect("resizes")
             .last()
             .unwrap(),
-        size_root_pane(pane_id, pane_viewport(viewport), PaneSizing::default())
+        compute_root_pane_pty_size(pane_id, pane_viewport(viewport), PaneSizing::default())
     );
 }
 
