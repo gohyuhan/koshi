@@ -48,6 +48,7 @@ use crate::runtime::event::RuntimeEvent;
 use koshi_renderer::snapshot::Delivery;
 
 use super::*;
+use koshi_core::event::QuitCause;
 
 /// A `new-pane` request with nothing chosen: the focused pane of the issuer's
 /// tab splits rightward, running the default shell.
@@ -11760,8 +11761,11 @@ fn child_exit_of_an_unknown_pane_is_dropped() {
     assert!(events.is_empty());
 }
 
+// The root pane exits with a code, then the last pane is killed by a signal:
+// each exit carries exactly one of `exit_code` and `signal`, and the quit the
+// last exit causes names the tab and carries that exit.
 #[test]
-fn child_exit_by_signal_reports_no_exit_code() {
+fn child_exit_by_signal_reports_the_signal_and_the_quit_it_causes_carries_it() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let client_id = ClientId::new();
     let tab_id = TabId::new();
@@ -11783,13 +11787,40 @@ fn child_exit_by_signal_reports_no_exit_code() {
     ));
     let new_pane_id = find_other_pane_id(&runtime, session_id, root_pane_id);
 
-    let events = runtime.handle_child_exit(new_pane_id, ExitStatus::Signaled(9));
+    let coded_exit_events = runtime.handle_child_exit(root_pane_id, ExitStatus::ExitCode(3));
+    assert_eq!(
+        coded_exit_events.first(),
+        Some(&Event::PaneProcessExited(PaneProcessExited {
+            pane_id: root_pane_id,
+            exit_code: Some(3),
+            signal: None,
+        }))
+    );
+    assert!(
+        !coded_exit_events
+            .iter()
+            .any(|event| matches!(event, Event::Quit(_))),
+        "one pane survives, so the session does not quit: {coded_exit_events:?}"
+    );
 
-    // A signal has no numeric code.
-    match events.first() {
-        Some(Event::PaneProcessExited(exited)) => assert_eq!(exited.exit_code, None),
-        other => panic!("expected PaneProcessExited first, got {other:?}"),
-    }
+    let signaled_exit = PaneProcessExited {
+        pane_id: new_pane_id,
+        exit_code: None,
+        signal: Some(9),
+    };
+    let signaled_exit_events = runtime.handle_child_exit(new_pane_id, ExitStatus::Signaled(9));
+
+    assert_eq!(
+        signaled_exit_events.first(),
+        Some(&Event::PaneProcessExited(signaled_exit))
+    );
+    assert_eq!(
+        signaled_exit_events.last(),
+        Some(&Event::Quit(QuitCause::LastTabClosed {
+            tab_id,
+            pane_exit: Some(signaled_exit),
+        }))
+    );
 }
 
 /// The `(session, tab, pane)` of a runtime `bootstrap_local` built: exactly one
@@ -13465,7 +13496,7 @@ fn tab_focused_in_reports_the_first_focused_tab() {
     );
     // A batch that holds no switch, and an empty batch, name none.
     assert_eq!(
-        find_first_focused_tab_id(&[Event::Quit, Event::Restarting]),
+        find_first_focused_tab_id(&[Event::Quit(QuitCause::Requested), Event::Restarting]),
         None
     );
     assert_eq!(find_first_focused_tab_id(&[]), None);

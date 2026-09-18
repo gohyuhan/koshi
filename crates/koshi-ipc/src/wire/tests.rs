@@ -848,6 +848,7 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::PaneProcessExited {
             pane_id: PaneId::new(),
             exit_code: None,
+            signal: None,
         },
         SessionEvent::PaneClosing {
             pane_id: PaneId::new(),

@@ -26,7 +26,9 @@ use serde::Serialize;
 use crate::cli::OutputFormat;
 use crate::output;
 use koshi_link::error::CliError;
+use koshi_link::in_session::InSessionContext;
 use koshi_link::router_client::{query_running_router_remote_connections, RemoteConnections};
+use koshi_observability::logging::session_log_path;
 use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
@@ -125,6 +127,10 @@ const DOCTOR_CHECKS: &[DoctorCheck] = &[
         run_check: check_log_directory,
     },
     DoctorCheck {
+        check_name: "session log file",
+        run_check: check_session_log_file,
+    },
+    DoctorCheck {
         check_name: "plugins directory",
         run_check: check_plugins_directory,
     },
@@ -183,6 +189,11 @@ pub struct DoctorContext {
     /// The directory koshi writes its log files in, or `None` when this
     /// machine reports no home directory.
     pub log_directory: Option<PathBuf>,
+    /// The log file of the session this command runs inside, read from
+    /// `KOSHI_SESSION_ID`; `Ok(None)` when the command runs outside a pane;
+    /// the message naming what is wrong when `KOSHI` is set and the rest of
+    /// the in-session identity is missing or malformed.
+    pub session_log_file: Result<Option<PathBuf>, String>,
     /// `plugins` under the config directory, or `None` when this machine
     /// reports no home directory.
     pub plugins_directory: Option<PathBuf>,
@@ -253,6 +264,12 @@ impl DoctorContext {
             runtime_directory_rule,
             runtime_directory_mode,
             log_directory: koshi_observability::logging::resolve_log_directory(),
+            session_log_file: InSessionContext::from_env()
+                .map(|in_session_context| {
+                    in_session_context
+                        .map(|in_session_context| session_log_path(in_session_context.session_id))
+                })
+                .map_err(|in_session_error| in_session_error.to_string()),
             plugins_directory,
             shared_directory,
             shell: match &server_config.terminal.default_shell {
@@ -483,6 +500,26 @@ fn check_log_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
         Err(log_directory_error) => DoctorOutcome::build_failure_outcome(
             format!("{displayed_path} cannot be written: {log_directory_error}"),
             &format!("make sure you own {displayed_path}"),
+        ),
+    }
+}
+
+/// Name the log file this session writes. Inside a pane the exact path;
+/// outside one the `koshi-log-<session-id>.log` shape; a `Warn` when `KOSHI`
+/// is set and the rest of the in-session identity is missing or malformed.
+fn check_session_log_file(doctor_context: &DoctorContext) -> DoctorOutcome {
+    match &doctor_context.session_log_file {
+        Ok(Some(session_log_file)) => DoctorOutcome::build_success_outcome(format!(
+            "this session writes {}",
+            session_log_file.display()
+        )),
+        Ok(None) => DoctorOutcome::build_success_outcome(
+            "not inside a koshi pane; each session writes koshi-log-<session-id>.log in the log directory, and koshi list-sessions names the id"
+                .to_string(),
+        ),
+        Err(in_session_error) => DoctorOutcome::build_warning_outcome(
+            format!("the session's log file cannot be named: {in_session_error}"),
+            "run koshi doctor from a shell koshi started, or unset KOSHI",
         ),
     }
 }

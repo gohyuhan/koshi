@@ -257,7 +257,7 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             plugin_id: Some(get_plugin_id(plugin_event)),
             ..empty_recent_event
         },
-        Event::Quit | Event::Restarting => empty_recent_event,
+        Event::Quit(_) | Event::Restarting => empty_recent_event,
     }
 }
 

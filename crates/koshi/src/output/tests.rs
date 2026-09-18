@@ -2090,7 +2090,10 @@ session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  Quit         -
     let rendered_text = render_recent_events(
         &[build_session_events(vec![
             build_pane_created_event(),
-            recent_event::record_event(&Event::Quit, build_fixed_test_time()),
+            recent_event::record_event(
+                &Event::Quit(koshi_core::event::QuitCause::Requested),
+                build_fixed_test_time(),
+            ),
         ])],
         OutputFormat::Table,
     );
@@ -2389,7 +2392,7 @@ fn debug_events_table_pads_a_non_ascii_session_name_by_characters() {
         session_id: SessionId::from_uuid(build_test_uuid_with_suffix(9)),
         session_name: "S-ふるい-みず".to_string(),
         recent_events: vec![recent_event::record_event(
-            &Event::Quit,
+            &Event::Quit(koshi_core::event::QuitCause::Requested),
             build_fixed_test_time(),
         )],
     };

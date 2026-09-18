@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use koshi_core::command::CliExitCode;
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
-use koshi_core::event::{Event, RejectReason};
+use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
     ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
@@ -158,7 +158,7 @@ fn serve_kill_session(
             kill_command_request.request_id,
             IpcResult::CommandResult(CommandResult::Ok {
                 command_id: command_envelope.command_id,
-                emitted_events: vec![Event::Quit],
+                emitted_events: vec![Event::Quit(QuitCause::Requested)],
             }),
         );
     })
@@ -211,7 +211,7 @@ fn serve_kill_session_without_discovery(
             kill_command_request.request_id,
             IpcResult::CommandResult(CommandResult::Ok {
                 command_id: command_envelope.command_id,
-                emitted_events: vec![Event::Quit],
+                emitted_events: vec![Event::Quit(QuitCause::Requested)],
             }),
         );
     })
@@ -607,7 +607,7 @@ fn kill_by_name_submits_quit_to_that_session() {
         CommandResult::Ok {
             emitted_events,
             ..
-        } if emitted_events == vec![Event::Quit]
+        } if emitted_events == vec![Event::Quit(QuitCause::Requested)]
     ));
     kill_server_thread.join().expect("stand-in session exits");
     let _ = std::fs::remove_dir_all(&runtime_directory);
@@ -627,7 +627,7 @@ fn kill_without_a_name_submits_quit_to_the_only_session() {
         CommandResult::Ok {
             emitted_events,
             ..
-        } if emitted_events == vec![Event::Quit]
+        } if emitted_events == vec![Event::Quit(QuitCause::Requested)]
     ));
     kill_server_thread.join().expect("stand-in session exits");
     let _ = std::fs::remove_dir_all(&runtime_directory);
@@ -650,7 +650,7 @@ fn kill_by_session_id_submits_quit_without_discovery() {
         CommandResult::Ok {
             emitted_events,
             ..
-        } if emitted_events == vec![Event::Quit]
+        } if emitted_events == vec![Event::Quit(QuitCause::Requested)]
     ));
     kill_server_thread
         .join()

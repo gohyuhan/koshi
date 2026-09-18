@@ -188,7 +188,7 @@ impl EventBus {
         // in: the client reading it leaves this socket. The notice carries it
         // to a client whose queue has no room left for it.
         let session_ending = match event {
-            Event::Quit => Some(SessionEnding::Quit),
+            Event::Quit(_) => Some(SessionEnding::Quit),
             Event::Restarting => Some(SessionEnding::Restarting),
             _ => None,
         };
@@ -538,6 +538,7 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::PaneProcessExited(payload) => Some(SessionEvent::PaneProcessExited {
                 pane_id: payload.pane_id,
                 exit_code: payload.exit_code,
+                signal: payload.signal,
             }),
             Event::PaneClosing(payload) => Some(SessionEvent::PaneClosing {
                 pane_id: payload.pane_id,
@@ -571,7 +572,7 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 previous_tab_index: payload.previous_tab_index,
                 new_tab_index: payload.new_tab_index,
             }),
-            Event::Quit => Some(SessionEvent::Quit),
+            Event::Quit(_) => Some(SessionEvent::Quit),
             Event::Restarting => Some(SessionEvent::Restarting),
 
             // PTY size and content damage: the client redraws from the next

@@ -143,6 +143,7 @@ fn list_test_events() -> Vec<SessionEvent> {
         SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: Some(130),
+            signal: None,
         },
         SessionEvent::PaneClosing { pane_id },
         SessionEvent::PaneRemoved { pane_id, tab_id },
@@ -428,6 +429,7 @@ fn an_absent_optional_field_round_trips_as_absent() {
         SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: None,
+            signal: None,
         },
         SessionEvent::PaneFocused {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
@@ -468,7 +470,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
         vec![
             json!("ImageCacheReset"),
             json!({ "PaneCreated": { "pane_id": wire_identifier, "tab_id": wire_identifier } }),
-            json!({ "PaneProcessExited": { "pane_id": wire_identifier, "exit_code": 130 } }),
+            json!({ "PaneProcessExited": { "pane_id": wire_identifier, "exit_code": 130, "signal": null } }),
             json!({ "PaneClosing": { "pane_id": wire_identifier } }),
             json!({ "PaneRemoved": { "pane_id": wire_identifier, "tab_id": wire_identifier } }),
             json!({ "PaneFocused": {
@@ -725,10 +727,12 @@ fn numeric_fields_round_trip_at_their_extremes() {
         SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: Some(i32::MIN),
+            signal: None,
         },
         SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: Some(i32::MAX),
+            signal: None,
         },
         SessionEvent::TabMoved {
             tab_id: TabId::from_uuid(build_fixed_test_uuid()),
@@ -788,6 +792,38 @@ fn an_event_whose_id_is_not_a_uuid_is_refused() {
             .expect_err("a pane id that is not a UUID decoded instead of failing")
             .to_string(),
         "UUID parsing failed: invalid character: found `n` at 0 at line 1 column 38"
+    );
+}
+
+/// `Quit` carries no payload on the wire: it serializes as the bare name.
+#[test]
+fn quit_serializes_as_the_bare_name() {
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::Quit).expect("serialize"),
+        r#""Quit""#
+    );
+}
+
+/// A peer that predates the `signal` field sends a `PaneProcessExited`
+/// without it; the field reads as `None`.
+#[test]
+fn a_pane_exit_frame_without_a_signal_field_decodes_with_no_signal() {
+    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
+    let exit_event_json = format!(
+        r#"{{"PaneProcessExited":{{"pane_id":"{}","exit_code":null}}}}"#,
+        pane_id.get_uuid()
+    );
+
+    let decoded_event: SessionEvent =
+        serde_json::from_str(&exit_event_json).expect("decodes without signal");
+
+    assert_eq!(
+        decoded_event,
+        SessionEvent::PaneProcessExited {
+            pane_id,
+            exit_code: None,
+            signal: None,
+        }
     );
 }
 

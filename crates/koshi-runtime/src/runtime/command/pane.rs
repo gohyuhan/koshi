@@ -301,6 +301,7 @@ impl Server {
             tab_rect,
             pane_sizing,
             EmptyTabPolicy::default(),
+            None,
         );
 
         // The pane is gone from state; drop its runtime bookkeeping and reflow
@@ -427,11 +428,18 @@ impl Server {
     /// frees the master fd; the `exited` flag the watcher set makes it send no
     /// signal to the dead child, so the purge is a bounded, inline call.
     pub fn handle_child_exit(&mut self, pane_id: PaneId, exit_status: ExitStatus) -> Vec<Event> {
-        // A signal-terminated child carries no numeric code; the session models
-        // that as `None`.
-        let exit_code = match exit_status {
-            ExitStatus::ExitCode(code) => Some(code),
-            ExitStatus::Signaled(_) => None,
+        // Exactly one of `exit_code` and `signal` is `Some`.
+        let pane_exit = match exit_status {
+            ExitStatus::ExitCode(exit_code) => PaneProcessExited {
+                pane_id,
+                exit_code: Some(exit_code),
+                signal: None,
+            },
+            ExitStatus::Signaled(signal) => PaneProcessExited {
+                pane_id,
+                exit_code: None,
+                signal: Some(signal),
+            },
         };
 
         // Find the session that owns the pane. An exit for a pane already gone
@@ -467,8 +475,7 @@ impl Server {
         let mut emitted_events = on_child_exit(
             session,
             tab_id,
-            pane_id,
-            exit_code,
+            pane_exit,
             tab_rect,
             pane_sizing,
             EmptyTabPolicy::default(),

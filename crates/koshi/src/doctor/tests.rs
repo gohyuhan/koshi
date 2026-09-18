@@ -4,6 +4,7 @@
 use std::fs;
 use std::time::Duration;
 
+use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::{TokenRecord, TokenScope};
 use tempfile::TempDir;
 
@@ -22,6 +23,7 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         runtime_directory_rule: Some(RuntimeDirectoryRule::EnvironmentVariable),
         runtime_directory_mode: Some(0o700),
         log_directory: Some(root_directory.join("log")),
+        session_log_file: Ok(None),
         plugins_directory: Some(root_directory.join("config").join("plugins")),
         shared_directory: Some(root_directory.join("shared")),
         shell: root_directory.join("shell"),
@@ -782,8 +784,98 @@ fn log_directory_reports_logging_on_when_it_is_writable() {
     );
 }
 
-/// The reason ends in ` at path "<name>"`, where `<name>` is the random file
-/// name `tempfile` tried. The assertion covers everything before it.
+// ------------------------------------------------------- session log file
+
+// Inside a pane, the row names the one file this session writes, whether or
+// not the log directory exists yet.
+#[test]
+fn session_log_file_is_named_when_run_inside_a_pane() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let session_id = SessionId::new();
+    let session_log_file = koshi_observability::logging::session_log_path(session_id);
+    doctor_context.session_log_file = Ok(Some(session_log_file.clone()));
+
+    assert_eq!(
+        check_session_log_file(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: format!("this session writes {}", session_log_file.display()),
+            help: None,
+            detail: None,
+        }
+    );
+    assert_eq!(
+        session_log_file.file_name().unwrap().to_str().unwrap(),
+        format!("koshi-log-{}.log", session_id.get_uuid())
+    );
+}
+
+#[test]
+fn session_log_file_reports_the_name_shape_when_run_outside_a_pane() {
+    let test_directory = TempDir::new().unwrap();
+    let doctor_context = build_doctor_context(test_directory.path());
+
+    assert_eq!(
+        check_session_log_file(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: "not inside a koshi pane; each session writes koshi-log-<session-id>.log in \
+                     the log directory, and koshi list-sessions names the id"
+                .to_string(),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+// `KOSHI` set with a broken identity is reported, not read as "outside a pane".
+#[test]
+fn session_log_file_warns_when_the_in_session_identity_is_unreadable() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    doctor_context.session_log_file = Err("KOSHI_SESSION_ID is not a uuid".to_string());
+
+    assert_eq!(
+        check_session_log_file(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: "the session's log file cannot be named: KOSHI_SESSION_ID is not a uuid"
+                .to_string(),
+            help: Some("run koshi doctor from a shell koshi started, or unset KOSHI".to_string()),
+            detail: None,
+        }
+    );
+}
+
+// A broken in-session identity never hides a log directory that cannot be
+// written: the two rows report independently.
+#[test]
+fn an_unreadable_identity_does_not_hide_a_failing_log_directory() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    doctor_context.session_log_file = Err("KOSHI_SESSION_ID is not a uuid".to_string());
+    fs::write(doctor_context.log_directory.as_deref().unwrap(), "").unwrap();
+
+    let verdict_by_row: Vec<(&str, Verdict)> = build_doctor_check_rows(&doctor_context)
+        .into_iter()
+        .filter(|check_row| {
+            check_row.check_name == "log directory" || check_row.check_name == "session log file"
+        })
+        .map(|check_row| (check_row.check_name, check_row.outcome.verdict))
+        .collect();
+
+    assert_eq!(
+        verdict_by_row,
+        vec![
+            ("log directory", Verdict::Fail),
+            ("session log file", Verdict::Warn)
+        ]
+    );
+}
+
+// --------------------------------------------------------- log directory (continued)
+
 #[test]
 fn log_directory_fails_when_it_cannot_be_written() {
     let test_directory = TempDir::new().unwrap();
@@ -1397,6 +1489,7 @@ fn build_doctor_check_rows_runs_every_check_in_print_order() {
             "terminal",
             "runtime directory",
             "log directory",
+            "session log file",
             "plugins directory",
             "router",
             "session directory",

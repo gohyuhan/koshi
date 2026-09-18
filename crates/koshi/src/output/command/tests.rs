@@ -1,6 +1,6 @@
 //! Tests for created-id command output.
 
-use koshi_core::event::{Event, PaneCreated, TabCreated};
+use koshi_core::event::{Event, PaneCreated, QuitCause, TabCreated};
 use koshi_core::ids::{PaneId, TabId};
 use uuid::Uuid;
 
@@ -41,7 +41,10 @@ fn a_new_tab_prints_tab_then_root_pane() {
 
 #[test]
 fn unrelated_events_print_nothing() {
-    assert_eq!(render_created_events(&[Event::Quit]), "");
+    assert_eq!(
+        render_created_events(&[Event::Quit(QuitCause::Requested)]),
+        ""
+    );
 }
 
 #[test]
@@ -55,7 +58,7 @@ fn created_ids_keep_their_event_order() {
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let events = [
         Event::PaneCreated(PaneCreated { pane_id, tab_id }),
-        Event::Quit,
+        Event::Quit(QuitCause::Requested),
         Event::TabCreated(TabCreated { tab_id }),
     ];
 

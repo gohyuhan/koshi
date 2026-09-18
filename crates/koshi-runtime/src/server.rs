@@ -22,7 +22,7 @@ use std::{
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
-use koshi_core::event::Event;
+use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, SubscriberId};
 use koshi_core::process::PtySize;
@@ -813,7 +813,7 @@ impl Server {
             .get_session_ending()
             .is_none()
         {
-            self.publish_events(&[Event::Quit]);
+            self.publish_events(&[Event::Quit(QuitCause::Requested)]);
         }
         self.wait_for_clients_told();
     }

@@ -38,6 +38,7 @@ fn lifecycle_events_roundtrip() {
     assert_json_roundtrip(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: PaneId::new(),
         exit_code: Some(0),
+        signal: None,
     }));
     assert_json_roundtrip(&Event::PaneRemoved(PaneRemoved {
         pane_id: PaneId::new(),
@@ -299,8 +300,67 @@ fn remaining_event_variants_survive_a_json_round_trip() {
     assert_json_roundtrip(&Event::PaneMouseForwarded(PaneMouseForwarded {
         pane_id: PaneId::new(),
     }));
-    assert_json_roundtrip(&Event::Quit);
+    assert_json_roundtrip(&Event::Quit(QuitCause::Requested));
+    assert_json_roundtrip(&Event::Quit(QuitCause::LastTabClosed {
+        tab_id: TabId::new(),
+        pane_exit: None,
+    }));
+    assert_json_roundtrip(&Event::Quit(QuitCause::LastTabClosed {
+        tab_id: TabId::new(),
+        pane_exit: Some(PaneProcessExited {
+            pane_id: PaneId::new(),
+            exit_code: None,
+            signal: Some(9),
+        }),
+    }));
     assert_json_roundtrip(&Event::Restarting);
+}
+
+// A serialized exit from before the field existed carries no `signal`.
+#[test]
+fn a_pane_exit_without_a_signal_field_decodes_with_no_signal() {
+    let pane_id = PaneId::new();
+    let exit_event_json = format!(
+        r#"{{"PaneProcessExited":{{"pane_id":"{}","exit_code":127}}}}"#,
+        pane_id.get_uuid()
+    );
+
+    let decoded_event: Event =
+        serde_json::from_str(&exit_event_json).expect("decodes without signal");
+
+    assert_eq!(
+        decoded_event,
+        Event::PaneProcessExited(PaneProcessExited {
+            pane_id,
+            exit_code: Some(127),
+            signal: None,
+        })
+    );
+}
+
+// `is_failure` is `false` for exit code `0` with no signal, and `true` for
+// every other pair, including the contradictory `Some(0)` beside a signal.
+#[test]
+fn a_pane_exit_is_a_failure_unless_its_code_is_zero_and_no_signal_is_present() {
+    let pane_id = PaneId::new();
+    let failure_cases = [
+        (Some(0), None, false),
+        (Some(1), None, true),
+        (Some(-1), None, true),
+        (None, Some(9), true),
+        (None, Some(0), true),
+        (Some(0), Some(9), true),
+        (None, None, true),
+    ];
+
+    for (exit_code, signal, expected_is_failure) in failure_cases {
+        let pane_exit = PaneProcessExited {
+            pane_id,
+            exit_code,
+            signal,
+        };
+        assert_eq!(pane_exit.is_failure(), expected_is_failure, "{pane_exit:?}");
+    }
 }
 
 /// The tier of an input event is its payload variant; there is no separate
@@ -372,7 +432,7 @@ fn payload_tier_accessors_map_to_privacy_tier() {
 
 /// The variant name in a value's `Debug` output: the text before the first
 /// `(`, or the whole string for a unit variant.
-/// `PaneCreated(PaneCreated { .. })` → `"PaneCreated"`; `Quit` → `"Quit"`.
+/// `PaneCreated(PaneCreated { .. })` → `"PaneCreated"`; `Quit(_)` → `"Quit"`.
 fn get_variant_name<DebugValue: std::fmt::Debug>(debug_value: &DebugValue) -> String {
     let debug_text = format!("{debug_value:?}");
     debug_text
@@ -398,6 +458,7 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 38] {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: PaneId::new(),
                 exit_code: None,
+                signal: None,
             }),
             "PaneProcessExited",
             EventClass::Critical,
@@ -700,7 +761,11 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 38] {
             "Plugin",
             EventClass::Critical,
         ),
-        (Event::Quit, "Quit", EventClass::Critical),
+        (
+            Event::Quit(QuitCause::Requested),
+            "Quit",
+            EventClass::Critical,
+        ),
         (Event::Restarting, "Restarting", EventClass::Critical),
     ]
 }
@@ -874,8 +939,8 @@ fn privacy_tiers_and_input_payloads_roundtrip() {
 #[test]
 fn events_encode_externally_tagged() {
     assert_eq!(
-        serde_json::to_string(&Event::Quit).expect("serialize"),
-        r#""Quit""#
+        serde_json::to_string(&Event::Quit(QuitCause::Requested)).expect("serialize"),
+        r#"{"Quit":"Requested"}"#
     );
     assert_eq!(
         serde_json::to_string(&Event::Restarting).expect("serialize"),

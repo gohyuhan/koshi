@@ -62,7 +62,7 @@ fn booted_server() -> (Server, ClientId) {
 /// it, so exactly one event was dropped for each.
 fn pause_subscribers(server: &mut Server) {
     while !server.event_bus.has_desynced_subscribers() {
-        server.event_bus.publish(&Event::Quit);
+        server.event_bus.publish(&Event::Quit(QuitCause::Requested));
     }
 }
 
@@ -379,13 +379,13 @@ fn a_subscriber_receives_the_events_a_command_emits() {
 fn publish_events_delivers_out_of_command_events_to_subscribers() {
     let (mut server, client_id) = booted_server();
     let event_receiver = server.subscribe(client_id, EventFilter::All);
-    let published_events = vec![Event::Quit];
+    let published_events = vec![Event::Quit(QuitCause::Requested)];
 
     server.publish_events(&published_events);
 
     assert_eq!(
         event_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit)]
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
 }
 
@@ -426,7 +426,7 @@ fn a_subscriber_whose_receiver_is_gone_loses_its_recorded_client_too() {
     let (subscriber_id, _) = server.subscriptions[0];
     drop(event_receiver);
 
-    server.publish_events(&[Event::Quit]);
+    server.publish_events(&[Event::Quit(QuitCause::Requested)]);
 
     assert!(!server.event_bus.has_subscriber(subscriber_id));
     assert_eq!(server.subscriptions, Vec::new());
@@ -619,14 +619,14 @@ fn a_gone_receiver_costs_only_its_own_recorded_client() {
     let (gone_id, _) = server.subscriptions[1];
     drop(gone);
 
-    server.publish_events(&[Event::Quit]);
+    server.publish_events(&[Event::Quit(QuitCause::Requested)]);
 
     assert!(!server.event_bus.has_subscriber(gone_id));
     assert!(server.event_bus.has_subscriber(keep_id));
     assert_eq!(server.subscriptions, vec![(keep_id, client_id)]);
     assert_eq!(
         keep.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit)]
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
 }
 
@@ -2282,7 +2282,7 @@ fn the_quit_announcement_tells_the_clients_the_session_ended() {
 
     assert_eq!(
         queue.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit)]
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
     assert_eq!(
         server.ending_notice().get_session_ending(),
@@ -2297,13 +2297,13 @@ fn the_quit_announcement_leaves_a_published_quit_as_the_only_one() {
     // The stream's last frame goes out once.
     let (mut server, _client_id) = booted_server();
     let (_, queue) = server.event_bus.subscribe(EventFilter::All);
-    server.publish_events(&[Event::Quit]);
+    server.publish_events(&[Event::Quit(QuitCause::Requested)]);
 
     server.announce_quit();
 
     assert_eq!(
         queue.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit)]
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
 }
 

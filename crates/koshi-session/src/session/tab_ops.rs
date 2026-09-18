@@ -17,8 +17,8 @@
 use std::time::SystemTime;
 
 use koshi_core::event::{
-    Event, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, TabClosed, TabCreated, TabFocused,
-    TabMoved,
+    Event, PaneClosing, PaneCreated, PaneFocused, PaneProcessExited, PaneRemoved, QuitCause,
+    TabClosed, TabCreated, TabFocused, TabMoved,
 };
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_layout::tree::LayoutNode;
@@ -248,7 +248,7 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
         events.push(Event::PaneRemoved(PaneRemoved { pane_id, tab_id }));
     }
 
-    events.extend(close_and_refocus_tab(session, tab_id));
+    events.extend(close_and_refocus_tab(session, tab_id, None));
 
     events
 }
@@ -444,12 +444,18 @@ pub fn move_tab(session: &mut Session, target_tab_id: TabId, new_tab_index: usiz
 /// viewing it to the nearest surviving tab with [`Event::TabFocused`] and, for
 /// a client holding no pane focus there, [`Event::PaneFocused`] on that tab's
 /// landing pane — renumbers the survivors densely, and emits [`Event::Quit`]
-/// when no tabs remain. With no surviving tab to move to, a viewer's
-/// `active_tab` keeps naming the removed tab. Shared by [`close_tab`] and the
-/// close/quit cascade's empty-tab path. The caller removes the tab's panes
-/// first (if any); this handles the tab and above.
+/// with [`QuitCause::LastTabClosed`] naming `tab_id` and `pane_exit` when no
+/// tabs remain. `pane_exit` is the child exit that emptied the tab, and `None`
+/// when a command closed the pane or the tab. With no surviving tab to move
+/// to, a viewer's `active_tab` keeps naming the removed tab. Shared by
+/// [`close_tab`] and the close/quit cascade's empty-tab path. The caller
+/// removes the tab's panes first (if any); this handles the tab and above.
 #[must_use]
-pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
+pub(crate) fn close_and_refocus_tab(
+    session: &mut Session,
+    tab_id: TabId,
+    pane_exit: Option<PaneProcessExited>,
+) -> Vec<Event> {
     let mut events = vec![];
 
     let closed_index = session.tabs.remove(&tab_id).map(|tab| tab.get_tab_index());
@@ -488,7 +494,7 @@ pub(crate) fn close_and_refocus_tab(session: &mut Session, tab_id: TabId) -> Vec
         // An already `Stopping` or `Stopped` session keeps the state it has;
         // `Quit` is emitted either way.
         let _ = session.update_lifecycle(SessionLifecycleEvent::StopRequested);
-        events.push(Event::Quit);
+        events.push(Event::Quit(QuitCause::LastTabClosed { tab_id, pane_exit }));
     }
 
     events

@@ -9,7 +9,7 @@
 
 use super::*;
 
-use koshi_core::event::{PaneCreated, PaneTyped, TypedPayload};
+use koshi_core::event::{PaneCreated, PaneTyped, QuitCause, TypedPayload};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 
 /// Held for the length of one test; two tests never hold the ring at once.
@@ -52,7 +52,7 @@ fn records_come_back_in_the_order_they_were_made() {
     let _serialization_guard = lock_recent_events_for_test();
 
     record_event(&build_pane_created_event());
-    record_event(&Event::Quit);
+    record_event(&Event::Quit(QuitCause::Requested));
     record_event(&Event::Restarting);
 
     assert_eq!(
@@ -165,7 +165,7 @@ fn a_record_is_stamped_with_the_wall_clock_at_the_moment_it_was_made() {
     let _serialization_guard = lock_recent_events_for_test();
 
     let before_record_time = SystemTime::now();
-    record_event(&Event::Quit);
+    record_event(&Event::Quit(QuitCause::Requested));
     let after_record_time = SystemTime::now();
 
     let recent_events = list_recent_events();
@@ -182,7 +182,7 @@ fn a_record_is_stamped_with_the_wall_clock_at_the_moment_it_was_made() {
 fn clearing_the_ring_drops_every_record_and_recording_starts_over() {
     let _serialization_guard = lock_recent_events_for_test();
     record_event(&build_pane_created_event());
-    record_event(&Event::Quit);
+    record_event(&Event::Quit(QuitCause::Requested));
 
     clear_recent_events();
     assert_eq!(list_recent_events(), Vec::new());
@@ -196,7 +196,7 @@ fn clearing_the_ring_drops_every_record_and_recording_starts_over() {
 #[test]
 fn the_ring_answers_after_a_thread_died_holding_it() {
     let _serialization_guard = lock_recent_events_for_test();
-    record_event(&Event::Quit);
+    record_event(&Event::Quit(QuitCause::Requested));
 
     // `resume_unwind` skips the panic hook; the guard dropped while unwinding
     // poisons the lock.
@@ -227,7 +227,7 @@ fn the_ring_answers_after_a_thread_died_holding_it() {
 fn reading_the_ring_twice_gives_the_same_records_both_times() {
     let _serialization_guard = lock_recent_events_for_test();
     record_event(&build_pane_created_event());
-    record_event(&Event::Quit);
+    record_event(&Event::Quit(QuitCause::Requested));
 
     assert_eq!(list_recent_events(), list_recent_events());
     assert_eq!(list_recent_events().len(), 2);
@@ -238,7 +238,7 @@ fn two_threads_recording_at_once_both_land_and_neither_record_is_torn() {
     let _serialization_guard = lock_recent_events_for_test();
     let quit_thread = std::thread::spawn(|| {
         for _ in 0..100 {
-            record_event(&Event::Quit);
+            record_event(&Event::Quit(QuitCause::Requested));
         }
     });
     let restart_thread = std::thread::spawn(|| {
