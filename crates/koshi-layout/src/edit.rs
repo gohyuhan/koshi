@@ -173,7 +173,7 @@ pub struct PaneRemovalOutcome {
 /// split.
 ///
 /// `tab_rect` is the rect the layout tree solves into; the returned
-/// [`PaneRemovalOutcome`] geometry is measured in it. `sizing` is the caller's own
+/// [`PaneRemovalOutcome`] geometry is measured in it. `pane_sizing` is the caller's own
 /// [`PaneSizing`]; the before and after solves use it, so they agree with
 /// the caller's solve on which panes are suppressed and where each rect
 /// sits.
@@ -189,10 +189,10 @@ pub fn remove_pane(
     layout_tree: &LayoutNode,
     tab_rect: Rect,
     pane_id: PaneId,
-    sizing: PaneSizing,
+    pane_sizing: PaneSizing,
 ) -> Result<(LayoutNode, PaneRemovalOutcome), RemoveError> {
     // The solve before the edit gives the rect the pane frees.
-    let before_layout = solve_layout_with_sizing(layout_tree, tab_rect, sizing);
+    let before_layout = solve_layout_with_sizing(layout_tree, tab_rect, pane_sizing);
     let Some(&(_, removed_pane_rect)) = before_layout
         .pane_rects
         .iter()
@@ -215,7 +215,7 @@ pub fn remove_pane(
 
     // Solve again after the edit and collect every surviving, visible pane
     // that either grew into the freed space or simply changed size.
-    let after_layout = solve_layout_with_sizing(&edited_tree, tab_rect, sizing);
+    let after_layout = solve_layout_with_sizing(&edited_tree, tab_rect, pane_sizing);
     let mut affected_pane_area_pairs: Vec<(PaneId, u64)> = after_layout
         .pane_rects
         .iter()
@@ -255,7 +255,7 @@ pub fn remove_pane(
 }
 
 /// What happened below while looking for the leaf to remove.
-enum PaneRemovalStatus {
+pub(crate) enum PaneRemovalStatus {
     /// The pane is not in this subtree.
     PaneNotFound,
     /// Removed; the subtree is still alive.
@@ -267,7 +267,7 @@ enum PaneRemovalStatus {
 /// Walks `layout_node` depth-first for the leaf holding `pane_id` and drops it, along
 /// with every split the drop empties below `layout_node`. Returns
 /// [`PaneRemovalStatus::SubtreeEmpty`] when `layout_node` itself is left with no child.
-fn remove_leaf(layout_node: &mut LayoutNode, pane_id: PaneId) -> PaneRemovalStatus {
+pub(crate) fn remove_leaf(layout_node: &mut LayoutNode, pane_id: PaneId) -> PaneRemovalStatus {
     let LayoutNode::Split(split_node) = layout_node else {
         return if *layout_node == LayoutNode::Pane(pane_id) {
             PaneRemovalStatus::SubtreeEmpty

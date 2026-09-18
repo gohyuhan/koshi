@@ -31,7 +31,7 @@ impl Server {
         command_args: &NewPaneArgs,
         issued_at: SystemTime,
     ) -> Result<CommandResult, Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let new_pane_target =
             self.resolve_new_pane_source(command_args, command_source, acting_session)?;
 
@@ -250,7 +250,7 @@ impl Server {
         command_source: &CommandSource,
         command_args: &ClosePaneArgs,
     ) -> Result<CommandResult, Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
             self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
 
@@ -533,7 +533,7 @@ impl Server {
                 "resize size must be non-zero",
             ));
         }
-        let acting_session = self.acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
             self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
 
@@ -623,7 +623,7 @@ impl Server {
             ),
             ResizeError::MinimumSizeExceeded {
                 spare_cell_count, ..
-            } => Rejection::min_size(*spare_cell_count),
+            } => Rejection::from_min_size(*spare_cell_count),
         }
     }
 
@@ -650,7 +650,7 @@ impl Server {
         command_source: &CommandSource,
         command_args: &FocusPaneArgs,
     ) -> Result<CommandResult, Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_sizing = self.get_pane_sizing();
         let pane_target =
             Self::resolve_focus_target(command_args, command_source, acting_session, pane_sizing)?;
@@ -798,7 +798,7 @@ impl Server {
         command_id: CommandId,
         command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let acting_session = self.acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_sizing = self.get_pane_sizing();
         let pane_target = self.resolve_fullscreen_target(command_source, acting_session)?;
         let client_id = pane_target.client_id;
@@ -926,7 +926,7 @@ impl Server {
                 "plugin lacks the pane_write capability",
             ));
         }
-        let acting_session = self.acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
             self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
         let session = self
@@ -1068,8 +1068,11 @@ impl Server {
 
         // Unviewed and no designated client: default to the session's sole
         // client; reject when there are several (name one) or none.
-        let sole_client =
-            Self::sole_attached_client(session, "to view the new pane's tab", "the new pane")?;
+        let sole_client = Self::resolve_sole_attached_client(
+            session,
+            "to view the new pane's tab",
+            "the new pane",
+        )?;
         let viewport = sole_client
             .get_pane_area()
             .ok_or_else(reject_when_no_room)?;

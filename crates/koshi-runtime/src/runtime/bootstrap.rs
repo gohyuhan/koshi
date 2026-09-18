@@ -28,7 +28,7 @@ use koshi_session::session::pane_ops::NewPaneSpec;
 use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
 
-use crate::runtime::command::{compute_pane_spawn_sizes, size_root_pane};
+use crate::runtime::command::{compute_pane_spawn_sizes, compute_root_pane_pty_size};
 use crate::runtime::spawn_env::build_koshi_environment;
 use crate::server::Server;
 
@@ -95,7 +95,8 @@ impl Server {
         let pane_id = PaneId::new();
 
         // Chrome owns one row above and below the pane region.
-        let spawn_size = size_root_pane(pane_id, pane_viewport(viewport), self.get_pane_sizing());
+        let spawn_size =
+            compute_root_pane_pty_size(pane_id, pane_viewport(viewport), self.get_pane_sizing());
 
         // Launch the shell first: on failure nothing is registered. The spec
         // carries the pane's in-session identity vars in its env overlay.

@@ -824,13 +824,13 @@ impl Server {
     /// client alone (the lock and mouse-select commands). The client is the
     /// one [`Self::resolve_view_client`] picks — the explicit target when
     /// given, else the acting client — so the record mutated here is the same
-    /// one [`Self::validate`] admitted the command against.
+    /// one [`Self::validate_command`] admitted the command against.
     fn acting_client_mut(
         &mut self,
         command_source: &CommandSource,
         explicit_client_id: Option<ClientId>,
     ) -> Result<(ClientId, &mut Client), Rejection> {
-        let acting_session = Self::require_session(self.acting_session(command_source)?)?;
+        let acting_session = Self::require_session(self.resolve_acting_session(command_source)?)?;
         let session_id = acting_session.session_id;
         let client_id =
             Self::resolve_view_client(explicit_client_id, command_source, acting_session)?;
