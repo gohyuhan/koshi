@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use koshi_core::event::{
-    Event, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, TabClosed, TabCreated, TabFocused,
-    TabMoved,
+    Event, PaneClosing, PaneCreated, PaneFocused, PaneRemoved, QuitCause, TabClosed, TabCreated,
+    TabFocused, TabMoved,
 };
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -782,7 +782,10 @@ fn closing_the_last_tab_quits() {
             Event::PaneClosing(PaneClosing { pane_id }),
             Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            }),
         ]
     );
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Stopping);
@@ -1964,7 +1967,10 @@ fn closing_the_last_tab_leaves_a_viewing_clients_active_tab_pointing_at_it() {
             Event::PaneClosing(PaneClosing { pane_id }),
             Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            }),
         ]
     );
     assert_eq!(

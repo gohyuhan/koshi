@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use koshi_core::event::{
-    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, TabClosed,
-    TerminalTooSmallCause, TerminalTooSmallEntered,
+    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, QuitCause,
+    TabClosed, TerminalTooSmallCause, TerminalTooSmallEntered,
 };
 use koshi_core::geometry::{Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -179,16 +179,23 @@ fn process_child_exit(
 ) -> Vec<Event> {
     match pane_handle.try_receive_exit_status() {
         Some(exit_status) => {
-            // A signal-killed child has no exit code, so it maps to `None`.
-            let exit_code = match exit_status {
-                ExitStatus::ExitCode(code) => Some(code),
-                ExitStatus::Signaled(_) => None,
+            let pane_id = pane_handle.get_pane_id();
+            let pane_exit = match exit_status {
+                ExitStatus::ExitCode(exit_code) => PaneProcessExited {
+                    pane_id,
+                    exit_code: Some(exit_code),
+                    signal: None,
+                },
+                ExitStatus::Signaled(signal) => PaneProcessExited {
+                    pane_id,
+                    exit_code: None,
+                    signal: Some(signal),
+                },
             };
             on_child_exit(
                 session,
                 tab_id,
-                pane_handle.get_pane_id(),
-                exit_code,
+                pane_exit,
                 tab_rect,
                 PaneSizing {
                     minimum_size: MIN_PANE_SIZE,
@@ -287,6 +294,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: exited_pane_id,
@@ -307,7 +315,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
 }
 
 #[test]
-fn a_signal_killed_child_reports_no_exit_code() {
+fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
     let pty = FakePtyBackend::new();
     let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
     let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
@@ -320,7 +328,7 @@ fn a_signal_killed_child_reports_no_exit_code() {
         ],
     );
 
-    // A signal-killed child carries no exit code, so the reported code is `None`.
+    // A signal-killed child carries the signal number and no exit code.
     pty.trigger_child_exit(exited_pane_id, ExitStatus::Signaled(9))
         .expect("the exited pane is known to the backend");
     let events = process_child_exit(
@@ -341,6 +349,7 @@ fn a_signal_killed_child_reports_no_exit_code() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
                 exit_code: None,
+                signal: Some(9),
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: exited_pane_id,
@@ -395,6 +404,7 @@ fn a_second_exit_for_an_already_removed_pane_only_reports_the_exit() {
         &[Event::PaneProcessExited(PaneProcessExited {
             pane_id: exited_pane_id,
             exit_code: Some(0),
+            signal: None,
         })],
     );
     assert_eq!(
@@ -450,6 +460,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: exited_pane_id,
@@ -569,6 +580,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: exited_pane_id,
@@ -625,6 +637,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: only_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: only_pane_id,
@@ -634,7 +647,14 @@ fn last_pane_exit_closes_the_tab_and_quits() {
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: Some(PaneProcessExited {
+                    pane_id: only_pane_id,
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+            }),
         ],
     );
 }
@@ -691,6 +711,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: closing_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: closing_pane_id,
@@ -739,6 +760,7 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: failed_pane_id,
                 exit_code: Some(1),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: failed_pane_id,
@@ -748,7 +770,14 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: Some(PaneProcessExited {
+                    pane_id: failed_pane_id,
+                    exit_code: Some(1),
+                    signal: None,
+                }),
+            }),
         ],
     );
 }
@@ -782,6 +811,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // The closed pane is gone, the layout collapsed onto the survivor, and the
@@ -971,6 +1001,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: exited_pane_id,
@@ -1030,6 +1061,7 @@ fn output_for_a_removed_pane_is_dropped() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: removed_pane_id,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing {
                 pane_id: removed_pane_id,

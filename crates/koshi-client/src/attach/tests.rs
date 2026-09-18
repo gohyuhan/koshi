@@ -423,6 +423,7 @@ fn every_other_frame_keeps_the_stream_reading() {
         SessionEvent::PaneProcessExited {
             pane_id: PaneId::new(),
             exit_code: Some(0),
+            signal: None,
         },
         SessionEvent::PaneClosing {
             pane_id: PaneId::new(),

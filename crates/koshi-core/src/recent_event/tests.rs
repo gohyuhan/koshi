@@ -13,7 +13,8 @@ use crate::event::{
     MousePressed, MouseReleased, MouseScrolled, PaneCommandFinished, PaneCreated, PaneEnterPressed,
     PaneFocused, PaneTyped, PluginBroken, PluginDisabled, PluginDoctorCompleted, PluginEnabled,
     PluginInstalled, PluginLoadFailed, PluginReloaded, PluginUninstalled, PluginUnloaded,
-    PluginUpdated, RejectReason, SubmittedLinePayload, SubscriberLagged, TabFocused, TypedPayload,
+    PluginUpdated, QuitCause, RejectReason, SubmittedLinePayload, SubscriberLagged, TabFocused,
+    TypedPayload,
 };
 use crate::geometry::Point;
 use crate::mouse::{MouseButton, ScrollDirection};
@@ -503,7 +504,7 @@ fn a_copy_records_the_client_and_pane_but_no_byte_count() {
 
 #[test]
 fn a_quit_records_a_name_and_no_id_at_all() {
-    let recorded_event = record_event(&Event::Quit, occurred_at());
+    let recorded_event = record_event(&Event::Quit(QuitCause::Requested), occurred_at());
 
     assert_eq!(
         recorded_event,
@@ -708,7 +709,7 @@ fn a_record_whose_name_is_not_an_event_this_build_has_still_reads() {
 
 #[test]
 fn a_record_serializes_with_its_field_names_in_order() {
-    let recorded_event = record_event(&Event::Quit, occurred_at());
+    let recorded_event = record_event(&Event::Quit(QuitCause::Requested), occurred_at());
 
     assert_eq!(
         serde_json::to_string(&recorded_event).unwrap(),

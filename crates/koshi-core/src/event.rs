@@ -28,7 +28,8 @@ use std::time::SystemTime;
 ///
 /// Variants are grouped to match the sections further down the file: pane/tab
 /// lifecycle, input modes, input privacy, mouse, delivery, selection/copy, and
-/// plugins. Each variant wraps a like-named payload struct.
+/// plugins. Each variant wraps a like-named payload struct. `Quit` wraps its
+/// [`QuitCause`]; `Restarting` carries nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     // Pane and tab lifecycle.
@@ -125,9 +126,10 @@ pub enum Event {
     Plugin(PluginEvent),
 
     // Session lifecycle.
-    /// The session is over: its last tab closed, a quit command was applied,
-    /// or its last pane's child exited. A terminal event — nothing follows it.
-    Quit,
+    /// The session is over. The payload names what ended it: a quit request,
+    /// or the last tab closing, with the child exit that emptied it when one
+    /// did. A terminal event — nothing follows it.
+    Quit(QuitCause),
     /// The session server is replacing its own process image with the binary
     /// now on disk. The session, its panes and their child processes stay as
     /// they are; only the process running them changes. A terminal event —
@@ -177,10 +179,31 @@ impl Event {
             Event::SelectionChanged(_) => "SelectionChanged",
             Event::Copied(_) => "Copied",
             Event::Plugin(_) => "Plugin",
-            Event::Quit => "Quit",
+            Event::Quit(_) => "Quit",
             Event::Restarting => "Restarting",
         }
     }
+}
+
+// ============================================================================
+// Session lifecycle
+// ============================================================================
+
+/// Payload for [`Event::Quit`]: what ended the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuitCause {
+    /// A quit was asked for: `core:quit` from a source naming no client,
+    /// `kill-session`, the last client leaving under `auto-close-session`, or
+    /// the session process being told to stop.
+    Requested,
+    /// The session's last tab closed.
+    LastTabClosed {
+        /// The tab that closed.
+        tab_id: TabId,
+        /// The child exit that emptied the tab, when a process exit started
+        /// the close. `None` when a command closed the pane or the tab.
+        pane_exit: Option<PaneProcessExited>,
+    },
 }
 
 // ============================================================================
@@ -201,8 +224,23 @@ pub struct PaneCreated {
 pub struct PaneProcessExited {
     /// The pane whose process exited.
     pub pane_id: PaneId,
-    /// The process exit code; `None` when terminated by a signal or unknown.
+    /// The process exit code; `None` when a signal terminated the process.
     pub exit_code: Option<i32>,
+    /// The signal number that terminated the process; `None` when the process
+    /// exited with a code. Exactly one of `exit_code` and `signal` is `Some`.
+    /// Always `None` on Windows. `Some(0)` is a signal whose number the
+    /// platform did not report. Absent from serialized input decodes as `None`.
+    #[serde(default)]
+    pub signal: Option<i32>,
+}
+
+impl PaneProcessExited {
+    /// `true` unless the process exited with code `0`: a non-zero code, a
+    /// signal, and an unobserved exit (`exit_code: Some(-1)`) are all failures.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        self.exit_code != Some(0)
+    }
 }
 
 /// Payload for [`Event::PaneClosing`].
@@ -711,7 +749,7 @@ pub fn classify_event(event: &Event) -> EventClass {
         | Event::SelectionChanged(_)
         | Event::Copied(_)
         | Event::Plugin(_)
-        | Event::Quit
+        | Event::Quit(_)
         | Event::Restarting => EventClass::Critical,
     }
 }

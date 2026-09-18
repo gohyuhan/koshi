@@ -29,7 +29,7 @@
 //!   and [`koshi_core::event::Event::PaneCommandFinished`] report what the
 //!   shell inside a pane is doing.
 
-use koshi_core::event::{Event, PluginEvent};
+use koshi_core::event::{Event, PluginEvent, QuitCause};
 
 /// Write one log line for `runtime_event`, at the level its outcome deserves, or write
 /// nothing when the event is one of the high-frequency kinds the [logging
@@ -45,19 +45,21 @@ pub fn log_event(runtime_event: &Event) {
             tracing::info!(pane_id = %event_payload.pane_id, tab_id = %event_payload.tab_id, "pane created");
         }
         Event::PaneProcessExited(event_payload) => {
-            // `exit_code` is `None` for a signal-terminated child; the line
-            // then carries no `exit_code` field. An exit code of `0` logs at
-            // info; every other code, and a signal, logs at warn.
-            if event_payload.exit_code == Some(0) {
-                tracing::info!(
-                    pane_id = %event_payload.pane_id,
-                    exit_code = event_payload.exit_code,
-                    "pane process exited"
-                );
-            } else {
+            // Exactly one of `exit_code` and `signal` is `Some`; a `None`
+            // writes no field. Exit code `0` logs at info; every other code,
+            // and a signal, logs at warn.
+            if event_payload.is_failure() {
                 tracing::warn!(
                     pane_id = %event_payload.pane_id,
                     exit_code = event_payload.exit_code,
+                    signal = event_payload.signal,
+                    "pane process exited"
+                );
+            } else {
+                tracing::info!(
+                    pane_id = %event_payload.pane_id,
+                    exit_code = event_payload.exit_code,
+                    signal = event_payload.signal,
                     "pane process exited"
                 );
             }
@@ -158,8 +160,42 @@ pub fn log_event(runtime_event: &Event) {
                 "subscriber queue overflowed; events dropped"
             );
         }
-        // --- session end.
-        Event::Quit => tracing::info!("session quitting"),
+        // --- session end: `cause` is `requested` or `last-tab-closed`. A
+        // last-tab close names its tab, and the pane exit that emptied it when
+        // one did. Only a close that followed a failed exit logs at warn.
+        Event::Quit(QuitCause::Requested) => {
+            tracing::info!(cause = "requested", "session quitting");
+        }
+        Event::Quit(QuitCause::LastTabClosed {
+            tab_id,
+            pane_exit: None,
+        }) => {
+            tracing::info!(cause = "last-tab-closed", tab_id = %tab_id, "session quitting");
+        }
+        Event::Quit(QuitCause::LastTabClosed {
+            tab_id,
+            pane_exit: Some(pane_exit),
+        }) => {
+            if pane_exit.is_failure() {
+                tracing::warn!(
+                    cause = "last-tab-closed",
+                    tab_id = %tab_id,
+                    pane_id = %pane_exit.pane_id,
+                    exit_code = pane_exit.exit_code,
+                    signal = pane_exit.signal,
+                    "session quitting"
+                );
+            } else {
+                tracing::info!(
+                    cause = "last-tab-closed",
+                    tab_id = %tab_id,
+                    pane_id = %pane_exit.pane_id,
+                    exit_code = pane_exit.exit_code,
+                    signal = pane_exit.signal,
+                    "session quitting"
+                );
+            }
+        }
 
         // --- image swap: the session keeps running under a new process image.
         Event::Restarting => tracing::info!("session restarting into the binary on disk"),

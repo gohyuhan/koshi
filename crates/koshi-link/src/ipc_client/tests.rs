@@ -580,7 +580,7 @@ fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
             SystemTime::UNIX_EPOCH,
         ),
         koshi_core::recent_event::record_event(
-            &koshi_core::event::Event::Quit,
+            &koshi_core::event::Event::Quit(koshi_core::event::QuitCause::Requested),
             SystemTime::UNIX_EPOCH,
         ),
     ];

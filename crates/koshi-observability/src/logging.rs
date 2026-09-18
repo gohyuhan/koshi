@@ -97,7 +97,8 @@ pub fn resolve_log_directory() -> Option<PathBuf> {
 ///
 /// Example: session `…446655440000` resolves on Linux to
 /// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
-fn session_log_path(session_id: SessionId) -> PathBuf {
+#[must_use]
+pub fn session_log_path(session_id: SessionId) -> PathBuf {
     let log_file_name = format!("koshi-log-{}.log", session_id.get_uuid());
     match resolve_log_directory() {
         Some(log_directory) => log_directory.join(log_file_name),

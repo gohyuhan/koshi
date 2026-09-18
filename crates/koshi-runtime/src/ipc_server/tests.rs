@@ -384,7 +384,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_ended() {
     // other event, so a client whose queue is full never takes it. That client
     // would read end of stream when the session ends and report it dead,
     // instead of saying the session ended.
-    use koshi_core::event::{Event, TabCreated};
+    use koshi_core::event::{Event, QuitCause, TabCreated};
 
     use crate::runtime::bus::{EventBus, EventFilter, SUBSCRIBER_QUEUE_CAPACITY};
 
@@ -401,7 +401,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_ended() {
     // The announcement: publishing the quit raises the notice and puts the
     // event on a queue with no room left for it.
     let notice = Arc::clone(bus.ending_notice());
-    bus.publish(&Event::Quit);
+    bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Quit));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
@@ -438,7 +438,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     // detaches, so the notice is raised while that client's writing thread
     // still holds frames to write. That client asked to leave, so the detach is
     // what it reads.
-    use koshi_core::event::{Event, TabCreated};
+    use koshi_core::event::{Event, QuitCause, TabCreated};
 
     use crate::runtime::bus::{EventBus, EventFilter};
 
@@ -455,7 +455,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     // session ends right after.
     bus.unsubscribe(subscriber);
     let notice = Arc::clone(bus.ending_notice());
-    bus.publish(&Event::Quit);
+    bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Quit));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();
@@ -491,7 +491,7 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     // first turn. The raised notice is what that thread writes, whatever the
     // queue still holds: the pane's exit is queued ahead of the quit here, and
     // the client reads the quit alone.
-    use koshi_core::event::{Event, PaneProcessExited};
+    use koshi_core::event::{Event, PaneProcessExited, QuitCause};
 
     use crate::runtime::bus::{EventBus, EventFilter};
 
@@ -505,11 +505,12 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     bus.publish(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: pane,
         exit_code: Some(0),
+        signal: None,
     }));
     // The announcement: the queue has room, so the quit is queued behind the
     // exit and the notice is raised as well.
     let notice = Arc::clone(bus.ending_notice());
-    bus.publish(&Event::Quit);
+    bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Quit));
 
     let (inbox_tx, inbox_rx) = mpsc::channel();

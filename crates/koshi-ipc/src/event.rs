@@ -78,9 +78,13 @@ pub enum SessionEvent {
     PaneProcessExited {
         /// The pane whose process exited.
         pane_id: PaneId,
-        /// The process exit code; `None` when terminated by a signal or
-        /// unknown.
+        /// The process exit code; `None` when a signal terminated the process.
         exit_code: Option<i32>,
+        /// The signal number that terminated the process; `None` when the
+        /// process exited with a code. A Windows session server sends `None`.
+        /// A peer that sends no `signal` field is read as `None`.
+        #[serde(default)]
+        signal: Option<i32>,
     },
     /// A pane's close transaction started.
     PaneClosing {

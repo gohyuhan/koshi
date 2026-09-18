@@ -35,8 +35,8 @@ use koshi_core::{
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
-        Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused, PtyResized,
-        RejectReason, SelectionChanged,
+        Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused, PaneProcessExited,
+        PtyResized, RejectReason, SelectionChanged,
     },
     geometry::{Direction, PaneArea, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},

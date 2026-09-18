@@ -23,8 +23,8 @@ use koshi_core::event::{
     PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
     PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
     PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginEvent, PluginInstalled,
-    PluginMouseInput, PtyResized, RejectReason, SelectionChanged, SubmittedLinePayload, TabClosed,
-    TabCreated, TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
+    PluginMouseInput, PtyResized, QuitCause, RejectReason, SelectionChanged, SubmittedLinePayload,
+    TabClosed, TabCreated, TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
     TerminalTooSmallExited, TypedPayload,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
@@ -406,7 +406,7 @@ fn publishing_the_quit_raises_the_ending_notice_and_delivers_it() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe(EventFilter::All);
 
-    let removed_subscriber_ids = bus.publish(&Event::Quit);
+    let removed_subscriber_ids = bus.publish(&Event::Quit(QuitCause::Requested));
 
     assert_eq!(removed_subscriber_ids, Vec::new());
     assert_eq!(
@@ -415,7 +415,7 @@ fn publishing_the_quit_raises_the_ending_notice_and_delivers_it() {
     );
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit)]
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
     assert_eq!(bus.list_desynced_subscriber_ids(), Vec::new());
     assert!(bus.has_subscriber(subscriber_id));
@@ -427,7 +427,7 @@ fn the_ending_notice_keeps_the_first_ending_it_was_raised_with() {
     let (_subscriber_id, subscriber_receiver) = bus.subscribe(EventFilter::All);
 
     bus.publish(&Event::Restarting);
-    bus.publish(&Event::Quit);
+    bus.publish(&Event::Quit(QuitCause::Requested));
 
     assert_eq!(
         bus.ending_notice().get_session_ending(),
@@ -438,7 +438,7 @@ fn the_ending_notice_keeps_the_first_ending_it_was_raised_with() {
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
         vec![
             Delivery::Event(Event::Restarting),
-            Delivery::Event(Event::Quit),
+            Delivery::Event(Event::Quit(QuitCause::Requested)),
         ]
     );
 }
@@ -479,11 +479,11 @@ fn a_desynced_subscriber_is_told_the_session_quit() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
 
-    bus.publish(&Event::Quit);
+    bus.publish(&Event::Quit(QuitCause::Requested));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
-        vec![Delivery::Event(Event::Quit)]
+        vec![Delivery::Event(Event::Quit(QuitCause::Requested))]
     );
 }
 
@@ -1222,11 +1222,13 @@ fn every_structure_event_converts_to_its_wire_frame() {
             PaneProcessExited {
                 pane_id,
                 exit_code: Some(130),
+                signal: None,
             }
         ))),
         Some(SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: Some(130),
+            signal: None,
         })
     );
     assert_eq!(
@@ -1295,7 +1297,7 @@ fn every_structure_event_converts_to_its_wire_frame() {
         })
     );
     assert_eq!(
-        wire_event(&Delivery::Event(Event::Quit)),
+        wire_event(&Delivery::Event(Event::Quit(QuitCause::Requested))),
         Some(SessionEvent::Quit)
     );
     assert_eq!(
@@ -1315,11 +1317,13 @@ fn an_absent_optional_field_stays_absent_on_the_wire() {
             PaneProcessExited {
                 pane_id,
                 exit_code: None,
+                signal: Some(9),
             }
         ))),
         Some(SessionEvent::PaneProcessExited {
             pane_id,
             exit_code: None,
+            signal: Some(9),
         })
     );
     assert_eq!(

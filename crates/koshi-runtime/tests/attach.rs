@@ -640,7 +640,7 @@ fn close_tab(connection: &mut Connection, session_id: SessionId, tab: TabId, req
     assert!(
         emitted_events
             .iter()
-            .any(|event| matches!(event, Event::Quit)),
+            .any(|event| matches!(event, Event::Quit(_))),
         "closing the last tab quits the session",
     );
 }
@@ -741,6 +741,7 @@ fn the_stream_carries_a_pane_exit_while_the_session_keeps_serving() {
                 Some(&SessionEvent::PaneProcessExited {
                     pane_id: new_pane_id,
                     exit_code: Some(0),
+                    signal: None,
                 }),
             );
             (vec![viewer, caller], (session_id, new_pane_id))

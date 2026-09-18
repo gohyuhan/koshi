@@ -4,7 +4,7 @@
 //! batch to the bus's subscribers.
 
 use koshi_core::command::CommandResult;
-use koshi_core::event::{Event, LayoutChanged, TabCreated, TabFocused};
+use koshi_core::event::{Event, LayoutChanged, QuitCause, TabCreated, TabFocused};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_renderer::snapshot::Delivery;
 
@@ -29,7 +29,7 @@ fn emit_appends_in_call_order() {
         tab_id,
         previous_tab_id,
     }));
-    scope.emit(Event::Quit);
+    scope.emit(Event::Quit(QuitCause::Requested));
 
     assert_eq!(
         scope.emitted_events(),
@@ -40,7 +40,7 @@ fn emit_appends_in_call_order() {
                 tab_id,
                 previous_tab_id,
             }),
-            Event::Quit,
+            Event::Quit(QuitCause::Requested),
         ]
     );
 }

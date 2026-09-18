@@ -8,7 +8,7 @@
 use std::time::SystemTime;
 
 use koshi_core::constant::MAX_TAB_FOCUS_MRU_ENTRY_COUNT;
-use koshi_core::event::{Event, PaneClosing, PaneRemoved, TabClosed};
+use koshi_core::event::{Event, PaneClosing, PaneRemoved, QuitCause, TabClosed};
 use koshi_core::geometry::{Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::tree::{LayoutNode, SplitNode};
@@ -569,7 +569,10 @@ fn closing_the_last_tab_requests_a_stop() {
                 tab_id: tab,
             }),
             Event::TabClosed(TabClosed { tab_id: tab }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id: tab,
+                pane_exit: None,
+            }),
         ]
     );
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Stopping);

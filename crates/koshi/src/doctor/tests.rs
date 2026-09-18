@@ -4,6 +4,7 @@
 use std::fs;
 use std::time::Duration;
 
+use koshi_core::ids::SessionId;
 use koshi_ipc::remote_tokens::{TokenRecord, TokenScope};
 use tempfile::TempDir;
 
@@ -22,6 +23,7 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         runtime_directory_rule: Some(RuntimeDirectoryRule::EnvironmentVariable),
         runtime_directory_mode: Some(0o700),
         log_directory: Some(root_directory.join("log")),
+        session_log_file: Ok(None),
         plugins_directory: Some(root_directory.join("config").join("plugins")),
         shared_directory: Some(root_directory.join("shared")),
         shell: root_directory.join("shell"),
@@ -729,7 +731,8 @@ fn log_directory_is_ok_when_it_does_not_exist_yet() {
         DoctorOutcome {
             verdict: Verdict::Ok,
             reason: format!(
-                "{} does not exist yet; koshi creates it under {} when logging is on",
+                "{} does not exist yet; koshi creates it under {} when logging is on; each \
+                 session writes koshi-log-<session-id>.log there; koshi list-sessions names the id",
                 doctor_context.log_directory.as_deref().unwrap().display(),
                 test_directory.path().display()
             ),
@@ -751,7 +754,8 @@ fn log_directory_reports_logging_off_when_it_is_writable() {
         DoctorOutcome {
             verdict: Verdict::Ok,
             reason: format!(
-                "{} is writable and logging is off",
+                "{} is writable and logging is off; each session writes \
+                 koshi-log-<session-id>.log there; koshi list-sessions names the id",
                 log_directory_path.display()
             ),
             help: None,
@@ -773,10 +777,89 @@ fn log_directory_reports_logging_on_when_it_is_writable() {
         DoctorOutcome {
             verdict: Verdict::Ok,
             reason: format!(
-                "{} is writable and logging is on",
+                "{} is writable and logging is on; each session writes \
+                 koshi-log-<session-id>.log there; koshi list-sessions names the id",
                 log_directory_path.display()
             ),
             help: None,
+            detail: None,
+        }
+    );
+}
+
+// Run inside a pane, the check names the one file this session writes, so a
+// person whose shell just died can open it without guessing the id.
+#[test]
+fn log_directory_names_this_sessions_log_file_when_run_inside_a_pane() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let log_directory_path = doctor_context.log_directory.clone().unwrap();
+    fs::create_dir_all(&log_directory_path).unwrap();
+    doctor_context.is_logging_enabled = true;
+    let session_id = SessionId::new();
+    let session_log_file = koshi_observability::logging::session_log_path(session_id);
+    doctor_context.session_log_file = Ok(Some(session_log_file.clone()));
+
+    assert_eq!(
+        check_log_directory(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: format!(
+                "{} is writable and logging is on; this session writes {}",
+                log_directory_path.display(),
+                session_log_file.display()
+            ),
+            help: None,
+            detail: None,
+        }
+    );
+    assert_eq!(
+        session_log_file.file_name().unwrap().to_str().unwrap(),
+        format!("koshi-log-{}.log", session_id.get_uuid())
+    );
+}
+
+// The file is named before the directory exists: the path is where the first
+// line lands once logging is on.
+#[test]
+fn log_directory_names_this_sessions_log_file_before_the_directory_exists() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    let session_log_file = test_directory.path().join("log").join("koshi-log-x.log");
+    doctor_context.session_log_file = Ok(Some(session_log_file.clone()));
+
+    assert_eq!(
+        check_log_directory(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Ok,
+            reason: format!(
+                "{} does not exist yet; koshi creates it under {} when logging is on; this session writes {}",
+                doctor_context.log_directory.as_deref().unwrap().display(),
+                test_directory.path().display(),
+                session_log_file.display()
+            ),
+            help: None,
+            detail: None,
+        }
+    );
+}
+
+// `KOSHI` set with a broken identity is reported, not read as "outside a pane".
+#[test]
+fn log_directory_warns_when_the_in_session_identity_is_unreadable() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    fs::create_dir_all(doctor_context.log_directory.as_deref().unwrap()).unwrap();
+    doctor_context.session_log_file = Err("KOSHI_SESSION_ID is not a uuid".to_string());
+
+    assert_eq!(
+        check_log_directory(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Warn,
+            reason: "KOSHI is set but the in-session identity is unreadable, so the session's log \
+                     file cannot be named: KOSHI_SESSION_ID is not a uuid"
+                .to_string(),
+            help: Some("run koshi doctor from a shell koshi started, or unset KOSHI".to_string()),
             detail: None,
         }
     );

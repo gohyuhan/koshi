@@ -49,13 +49,14 @@ use crate::session::tab_ops::close_and_refocus_tab;
 ///    [`repair_focus`] and apply the verdict;
 /// 5. if the tab is now empty, apply `empty_tab_policy` —
 ///    [`EmptyTabPolicy::CloseTab`] closes the tab, and closing the last tab
-///    quits the session.
+///    quits the session with [`QuitCause::LastTabClosed`](koshi_core::event::QuitCause::LastTabClosed) carrying `pane_exit`.
 ///
 /// `tab_rect` is the viewport the tab is solved against, needed to rank focus
 /// candidates geometrically. `sizing` carries the per-pane content minimum and
-/// the gap between split children. Returns the events for the caller to emit.
-/// An unknown pane, and a tab id the session does not hold, each change nothing
-/// and emit no events.
+/// the gap between split children. `pane_exit` is the child exit that removes
+/// the pane, and `None` when a command removes it. Returns the events for the
+/// caller to emit. An unknown pane, and a tab id the session does not hold,
+/// each change nothing and emit no events.
 #[must_use]
 pub fn remove_pane_cascade(
     session: &mut Session,
@@ -64,6 +65,7 @@ pub fn remove_pane_cascade(
     tab_rect: Rect,
     sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
+    pane_exit: Option<PaneProcessExited>,
 ) -> Vec<Event> {
     // Both checks run before anything is removed, so an unknown pane and an
     // unknown tab each leave the session as it was.
@@ -183,7 +185,7 @@ pub fn remove_pane_cascade(
         // The tab is empty: its policy decides its fate.
         None => match empty_tab_policy {
             EmptyTabPolicy::CloseTab => {
-                events.extend(close_and_refocus_tab(session, tab_id));
+                events.extend(close_and_refocus_tab(session, tab_id, pane_exit));
             }
         },
     }
@@ -265,24 +267,20 @@ fn terminal_too_small_cause(
 /// exactly like an explicit close.
 ///
 /// `sizing` carries the per-pane content minimum and the gap between split
-/// children. An unknown `pane_id` emits only the exit event.
-// Carries a child-exit's full context to the shared cascade: the exit fact
-// (`exit_code`), the reflow geometry (`tab_rect`, `sizing`), and the empty-tab
-// policy.
+/// children. `pane_exit` is the exit fact for `pane_id`; a quit the removal
+/// reaches carries it as [`QuitCause::LastTabClosed`](koshi_core::event::QuitCause::LastTabClosed)'s `pane_exit`. An
+/// unknown `pane_id` emits only the exit event.
 #[must_use]
 pub fn on_child_exit(
     session: &mut Session,
     tab_id: TabId,
-    pane_id: PaneId,
-    exit_code: Option<i32>,
+    pane_exit: PaneProcessExited,
     tab_rect: Rect,
     sizing: PaneSizing,
     empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
-    let mut events = vec![Event::PaneProcessExited(PaneProcessExited {
-        pane_id,
-        exit_code,
-    })];
+    let pane_id = pane_exit.pane_id;
+    let mut events = vec![Event::PaneProcessExited(pane_exit)];
 
     let Some(policy) = session
         .panes
@@ -302,6 +300,7 @@ pub fn on_child_exit(
                 tab_rect,
                 sizing,
                 empty_tab_policy,
+                Some(pane_exit),
             ));
         }
     }

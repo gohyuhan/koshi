@@ -24,7 +24,9 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, ScrollDirection};
 use koshi_core::process::PtySize;
 
-use crate::logging::with_test_writer;
+use koshi_core::log::LogLevel;
+
+use crate::logging::{capture_logs_at_level, resolve_maximum_tracing_level, with_test_writer};
 
 /// Log `runtime_events` through a thread-local JSON subscriber and return everything
 /// written. Empty output means every event was left out of the file.
@@ -350,7 +352,7 @@ fn no_event_is_ever_logged_as_an_error() {
             plugin_id: PluginId::new(),
             failure_reason: "unreadable".to_string(),
         })),
-        Event::Quit,
+        Event::Quit(QuitCause::Requested),
         Event::Restarting,
     ]);
 
@@ -453,8 +455,9 @@ fn a_closed_pane_is_recorded_once_by_the_removal_not_the_announcement() {
     );
 }
 
-// `exit_code: None` leaves the field off the line; it is not written as
-// `null`.
+// A `None` leaves its field off the line; it is not written as `null`. A
+// signaled exit carries `signal` and no `exit_code`; a coded exit carries
+// `exit_code` and no `signal`.
 #[test]
 fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
     let pane_id = PaneId::new();
@@ -462,6 +465,7 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
     let successful_exit_log = capture_event_logs(&[Event::PaneProcessExited(PaneProcessExited {
         pane_id,
         exit_code: Some(0),
+        signal: None,
     })]);
     assert_eq!(
         successful_exit_log.lines().count(),
@@ -484,10 +488,15 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
         successful_exit_log.contains(r#""exit_code":0"#),
         "{successful_exit_log}"
     );
+    assert!(
+        !successful_exit_log.contains("signal"),
+        "{successful_exit_log}"
+    );
 
     let negative_exit_log = capture_event_logs(&[Event::PaneProcessExited(PaneProcessExited {
         pane_id,
         exit_code: Some(-1),
+        signal: None,
     })]);
     assert!(
         negative_exit_log.contains(r#""exit_code":-1"#),
@@ -497,6 +506,7 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
     let signaled_exit_log = capture_event_logs(&[Event::PaneProcessExited(PaneProcessExited {
         pane_id,
         exit_code: None,
+        signal: Some(9),
     })]);
     assert_eq!(
         signaled_exit_log.lines().count(),
@@ -515,6 +525,10 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
         !signaled_exit_log.contains("exit_code"),
         "{signaled_exit_log}"
     );
+    assert!(
+        signaled_exit_log.contains(r#""signal":9"#),
+        "{signaled_exit_log}"
+    );
 }
 
 // `Some(0)` is the only code that logs at info. Every other code, and
@@ -522,12 +536,19 @@ fn a_pane_exit_writes_its_code_as_a_number_and_omits_an_absent_one() {
 #[test]
 fn a_pane_exit_is_info_only_when_the_program_exited_zero() {
     let pane_id = PaneId::new();
-    let exit_level_cases = [(Some(0), "INFO"), (Some(127), "WARN"), (None, "WARN")];
+    let exit_level_cases = [
+        (Some(0), None, "INFO"),
+        (Some(127), None, "WARN"),
+        (Some(-1), None, "WARN"),
+        (None, Some(9), "WARN"),
+        (None, Some(0), "WARN"),
+    ];
 
-    for (exit_code, expected_log_level) in exit_level_cases {
+    for (exit_code, signal, expected_log_level) in exit_level_cases {
         let log_output = capture_event_logs(&[Event::PaneProcessExited(PaneProcessExited {
             pane_id,
             exit_code,
+            signal,
         })]);
 
         assert_eq!(log_output.lines().count(), 1, "{exit_code:?}: {log_output}");
@@ -758,20 +779,200 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     );
 }
 
+// A quit writes one line whatever its cause. Only a last-tab close that a
+// failed exit started logs at warn; a requested quit, a close a command made,
+// and a close a clean exit made log at info.
 #[test]
-fn quitting_writes_one_info_line_saying_the_session_is_ending() {
-    let log_output = capture_event_logs(&[Event::Quit]);
+fn quitting_writes_one_line_at_warn_only_when_a_failed_exit_ended_the_session() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let quit_cases = [
+        (QuitCause::Requested, "INFO", "requested"),
+        (
+            QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            },
+            "INFO",
+            "last-tab-closed",
+        ),
+        (
+            QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: Some(PaneProcessExited {
+                    pane_id,
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+            },
+            "INFO",
+            "last-tab-closed",
+        ),
+        (
+            QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: Some(PaneProcessExited {
+                    pane_id,
+                    exit_code: Some(127),
+                    signal: None,
+                }),
+            },
+            "WARN",
+            "last-tab-closed",
+        ),
+        (
+            QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: Some(PaneProcessExited {
+                    pane_id,
+                    exit_code: None,
+                    signal: Some(9),
+                }),
+            },
+            "WARN",
+            "last-tab-closed",
+        ),
+    ];
 
-    assert_eq!(
-        log_output.lines().count(),
-        1,
-        "expected exactly one line: {log_output}"
-    );
-    assert!(log_output.contains(r#""level":"INFO""#), "{log_output}");
+    for (quit_cause, expected_log_level, expected_cause) in quit_cases {
+        let log_output = capture_event_logs(&[Event::Quit(quit_cause)]);
+
+        assert_eq!(
+            log_output.lines().count(),
+            1,
+            "{quit_cause:?}: expected exactly one line: {log_output}"
+        );
+        assert!(
+            log_output.contains(&format!(r#""level":"{expected_log_level}""#)),
+            "{quit_cause:?} must log at {expected_log_level}: {log_output}"
+        );
+        assert!(
+            log_output.contains(r#""message":"session quitting""#),
+            "{quit_cause:?}: {log_output}"
+        );
+        assert!(
+            log_output.contains(&format!(r#""cause":"{expected_cause}""#)),
+            "{quit_cause:?}: {log_output}"
+        );
+    }
+}
+
+// A requested quit names no tab and no pane. A last-tab close names its tab,
+// and the pane exit that emptied it when one did, with the exit's own fields.
+#[test]
+fn a_quit_line_names_the_tab_and_the_pane_exit_that_ended_the_session() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+
+    let requested_log = capture_event_logs(&[Event::Quit(QuitCause::Requested)]);
+    assert!(!requested_log.contains("tab_id"), "{requested_log}");
+    assert!(!requested_log.contains("pane_id"), "{requested_log}");
+
+    let closed_by_command_log = capture_event_logs(&[Event::Quit(QuitCause::LastTabClosed {
+        tab_id,
+        pane_exit: None,
+    })]);
     assert!(
-        log_output.contains(r#""message":"session quitting""#),
-        "{log_output}"
+        closed_by_command_log.contains(&format!(r#""tab_id":"{tab_id}""#)),
+        "{closed_by_command_log}"
     );
+    assert!(
+        !closed_by_command_log.contains("pane_id"),
+        "{closed_by_command_log}"
+    );
+
+    let closed_by_exit_log = capture_event_logs(&[Event::Quit(QuitCause::LastTabClosed {
+        tab_id,
+        pane_exit: Some(PaneProcessExited {
+            pane_id,
+            exit_code: Some(127),
+            signal: None,
+        }),
+    })]);
+    assert!(
+        closed_by_exit_log.contains(&format!(r#""tab_id":"{tab_id}""#)),
+        "{closed_by_exit_log}"
+    );
+    assert!(
+        closed_by_exit_log.contains(&format!(r#""pane_id":"{pane_id}""#)),
+        "{closed_by_exit_log}"
+    );
+    assert!(
+        closed_by_exit_log.contains(r#""exit_code":127"#),
+        "{closed_by_exit_log}"
+    );
+    assert!(
+        !closed_by_exit_log.contains("signal"),
+        "{closed_by_exit_log}"
+    );
+
+    let closed_by_signal_log = capture_event_logs(&[Event::Quit(QuitCause::LastTabClosed {
+        tab_id,
+        pane_exit: Some(PaneProcessExited {
+            pane_id,
+            exit_code: None,
+            signal: Some(9),
+        }),
+    })]);
+    assert!(
+        closed_by_signal_log.contains(r#""signal":9"#),
+        "{closed_by_signal_log}"
+    );
+    assert!(
+        !closed_by_signal_log.contains("exit_code"),
+        "{closed_by_signal_log}"
+    );
+}
+
+// At the shipped default cutoff, `warning`, a failed exit and the quit it
+// caused are written, and a clean exit and its quit are not.
+#[test]
+fn at_the_warning_cutoff_only_a_failed_exit_and_the_quit_it_caused_are_written() {
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let failed_exit = PaneProcessExited {
+        pane_id,
+        exit_code: Some(127),
+        signal: None,
+    };
+    let clean_exit = PaneProcessExited {
+        pane_id,
+        exit_code: Some(0),
+        signal: None,
+    };
+
+    let failing_exit_log = {
+        let (_subscriber_guard, captured_logs) =
+            capture_logs_at_level(resolve_maximum_tracing_level(LogLevel::Warning));
+        log_event(&Event::PaneProcessExited(failed_exit));
+        log_event(&Event::Quit(QuitCause::LastTabClosed {
+            tab_id,
+            pane_exit: Some(failed_exit),
+        }));
+        captured_logs.contents()
+    };
+    assert_eq!(failing_exit_log.lines().count(), 2, "{failing_exit_log}");
+    assert!(
+        failing_exit_log.contains(r#""message":"pane process exited""#),
+        "{failing_exit_log}"
+    );
+    assert!(
+        failing_exit_log.contains(r#""message":"session quitting""#),
+        "{failing_exit_log}"
+    );
+
+    let clean_exit_log = {
+        let (_subscriber_guard, captured_logs) =
+            capture_logs_at_level(resolve_maximum_tracing_level(LogLevel::Warning));
+        log_event(&Event::PaneProcessExited(clean_exit));
+        log_event(&Event::Quit(QuitCause::LastTabClosed {
+            tab_id,
+            pane_exit: Some(clean_exit),
+        }));
+        log_event(&Event::Quit(QuitCause::Requested));
+        captured_logs.contents()
+    };
+    assert_eq!(clean_exit_log, "", "{clean_exit_log}");
 }
 
 // Each plugin event writes its own message. `LoadFailed` and `Broken` are

@@ -11,8 +11,8 @@
 use std::time::SystemTime;
 
 use koshi_core::event::{
-    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, TabClosed,
-    TerminalTooSmallCause,
+    Event, LayoutChanged, PaneClosing, PaneFocused, PaneProcessExited, PaneRemoved, QuitCause,
+    TabClosed, TerminalTooSmallCause,
 };
 use koshi_core::geometry::{PaneArea, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -225,6 +225,7 @@ fn removing_a_focused_pane_focuses_a_survivor() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // The survivor inherits focus, on the client and in the event stream.
@@ -306,6 +307,7 @@ fn removing_a_pane_missing_from_the_layout_still_repairs_focus_and_zoom() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
@@ -373,6 +375,7 @@ fn removing_a_nonfocused_pane_leaves_focus_untouched() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -429,6 +432,7 @@ fn collapsing_a_multi_pane_tab_emits_layout_changed() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // The survivor's geometry changed when the leaf collapsed, so the cascade
@@ -484,6 +488,7 @@ fn focus_repair_runs_for_every_client_on_the_removed_pane() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -550,6 +555,7 @@ fn focus_repair_reaches_a_client_viewing_another_tab() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -626,6 +632,7 @@ fn removing_a_focused_pane_with_no_room_to_refocus_clears_focus() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // The overlay is reported with the viewport and the two-row fallback area,
@@ -700,6 +707,7 @@ fn a_too_small_event_carries_a_starving_area_and_region_cause() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
     let entered = events
         .iter()
@@ -926,6 +934,7 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // Only the survivor is left, and it kept its place in the history.
@@ -955,6 +964,7 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -972,7 +982,10 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            }),
         ]
     );
 }
@@ -1006,6 +1019,7 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -1017,7 +1031,10 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            }),
         ]
     );
     assert_eq!(
@@ -1075,6 +1092,7 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -1114,8 +1132,11 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
     let events = on_child_exit(
         &mut session,
         tab_id,
-        unknown,
-        Some(1),
+        PaneProcessExited {
+            pane_id: unknown,
+            exit_code: Some(1),
+            signal: None,
+        },
         rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -1129,6 +1150,7 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
         vec![Event::PaneProcessExited(PaneProcessExited {
             pane_id: unknown,
             exit_code: Some(1),
+            signal: None,
         })]
     );
     // The real pane in the tab is completely untouched.
@@ -1168,6 +1190,7 @@ fn removing_an_unknown_pane_emits_nothing() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(events, Vec::new());
@@ -1209,6 +1232,7 @@ fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(events, Vec::new());
@@ -1242,8 +1266,11 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
     let events = on_child_exit(
         &mut session,
         tab_id,
-        pane,
-        Some(0),
+        PaneProcessExited {
+            pane_id: pane,
+            exit_code: Some(0),
+            signal: None,
+        },
         rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -1270,6 +1297,7 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: pane,
                 exit_code: Some(0),
+                signal: None,
             }),
             Event::PaneClosing(PaneClosing { pane_id: pane }),
             Event::PaneRemoved(PaneRemoved {
@@ -1277,7 +1305,14 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: Some(PaneProcessExited {
+                    pane_id: pane,
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+            }),
         ]
     );
 }
@@ -1326,6 +1361,7 @@ fn closing_a_clients_active_tab_moves_it_to_the_previous_tab() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
@@ -1373,6 +1409,7 @@ fn closing_the_first_tab_moves_the_client_to_the_next_tab() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // No previous tab, so the next one inherits the client.
@@ -1423,6 +1460,7 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     let client = session.clients.get_client_by_id(client_id).unwrap();
@@ -1458,6 +1496,7 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // No surviving tab to move the client to, so no `TabFocused` is emitted.
@@ -1470,7 +1509,10 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
-            Event::Quit,
+            Event::Quit(QuitCause::LastTabClosed {
+                tab_id,
+                pane_exit: None,
+            }),
         ]
     );
     // The focus entry for the closed tab is pruned even as the session quits.
@@ -1522,6 +1564,7 @@ fn removing_a_hidden_pane_leaves_a_zoomed_client_zoomed() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     assert_eq!(
@@ -1589,6 +1632,7 @@ fn removing_the_zoomed_pane_drops_that_clients_zoom() {
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     let client = session.clients.get_client_by_id(client_id).expect("client");
@@ -1633,6 +1677,7 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
             gap_cell_count: 0,
         },
         EmptyTabPolicy::CloseTab,
+        None,
     );
 
     // Exactly the two removal facts: no `LayoutChanged`, no `TabClosed`, no
@@ -1701,8 +1746,11 @@ fn a_repeated_exit_still_removes_the_pane() {
     let events = on_child_exit(
         &mut session,
         tab_id,
-        pane,
-        Some(2),
+        PaneProcessExited {
+            pane_id: pane,
+            exit_code: Some(2),
+            signal: None,
+        },
         rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -1716,6 +1764,7 @@ fn a_repeated_exit_still_removes_the_pane() {
         Some(&Event::PaneProcessExited(PaneProcessExited {
             pane_id: pane,
             exit_code: Some(2),
+            signal: None,
         }))
     );
     assert_eq!(session.panes.get_pane_record_by_id(pane), None);
