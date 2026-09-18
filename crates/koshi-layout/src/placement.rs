@@ -119,7 +119,7 @@ pub struct CrossTabPlacement {
     pub destination_tree: LayoutNode,
 }
 
-/// Place `source_pane_id` at `target` inside its own tab.
+/// Place `source_pane_id` at `placement_target` inside its own tab.
 ///
 /// `layout_tree` is the tab's tree, `tab_rect` the rectangle it solves into
 /// and `pane_sizing` the caller's own [`PaneSizing`].
@@ -137,7 +137,7 @@ pub struct CrossTabPlacement {
 pub fn place_pane_within_tab(
     layout_tree: &LayoutNode,
     source_pane_id: PaneId,
-    target: &PlacementTarget,
+    placement_target: &PlacementTarget,
     tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, PlacementError> {
@@ -147,7 +147,7 @@ pub fn place_pane_within_tab(
             .ok_or(PlacementError::SourcePaneNotFound {
                 pane_id: source_pane_id,
             })?;
-    match target {
+    match placement_target {
         PlacementTarget::Swap { target_pane_id } => {
             if *target_pane_id == source_pane_id {
                 return Ok(layout_tree.clone());
@@ -177,7 +177,7 @@ pub fn place_pane_within_tab(
     }
 }
 
-/// Place `source_pane_id`, a leaf of `source_tree`, at `target` in
+/// Place `source_pane_id`, a leaf of `source_tree`, at `placement_target` in
 /// `destination_tree`, a different tab's tree.
 ///
 /// `destination_tab_rect` is the rectangle the destination tree solves into
@@ -199,7 +199,7 @@ pub fn place_pane_across_tabs(
     source_tree: &LayoutNode,
     source_pane_id: PaneId,
     destination_tree: &LayoutNode,
-    target: &PlacementTarget,
+    placement_target: &PlacementTarget,
     destination_tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<CrossTabPlacement, PlacementError> {
@@ -214,7 +214,7 @@ pub fn place_pane_across_tabs(
             .ok_or(PlacementError::SourcePaneNotFound {
                 pane_id: source_pane_id,
             })?;
-    match target {
+    match placement_target {
         PlacementTarget::Swap { target_pane_id } => {
             if source_tree.contains_pane(*target_pane_id) {
                 return Err(PlacementError::PaneInBothTrees {

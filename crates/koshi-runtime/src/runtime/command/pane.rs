@@ -31,9 +31,9 @@ impl Server {
         command_args: &NewPaneArgs,
         issued_at: SystemTime,
     ) -> Result<CommandResult, Rejection> {
-        let resolve_acting_session = self.resolve_acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let new_pane_target =
-            self.resolve_new_pane_source(command_args, command_source, resolve_acting_session)?;
+            self.resolve_new_pane_source(command_args, command_source, acting_session)?;
 
         // Clone the shared backend before borrowing a session: spawn and resize
         // then need no `&self` borrow, so they coexist with `&mut Session`.
@@ -250,9 +250,9 @@ impl Server {
         command_source: &CommandSource,
         command_args: &ClosePaneArgs,
     ) -> Result<CommandResult, Rejection> {
-        let resolve_acting_session = self.resolve_acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, resolve_acting_session)?;
+            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
 
         // Clone the shared backend before borrowing a session: the kill thread
         // takes its own handle, so no `&self` borrow crosses the commit.
@@ -533,9 +533,9 @@ impl Server {
                 "resize size must be non-zero",
             ));
         }
-        let resolve_acting_session = self.resolve_acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, resolve_acting_session)?;
+            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
 
         let pty_backend = Arc::clone(self.get_pty_backend());
 
@@ -650,14 +650,10 @@ impl Server {
         command_source: &CommandSource,
         command_args: &FocusPaneArgs,
     ) -> Result<CommandResult, Rejection> {
-        let resolve_acting_session = self.resolve_acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_sizing = self.get_pane_sizing();
-        let pane_target = Self::resolve_focus_target(
-            command_args,
-            command_source,
-            resolve_acting_session,
-            pane_sizing,
-        )?;
+        let pane_target =
+            Self::resolve_focus_target(command_args, command_source, acting_session, pane_sizing)?;
 
         let pty_backend = Arc::clone(self.get_pty_backend());
 
@@ -802,9 +798,9 @@ impl Server {
         command_id: CommandId,
         command_source: &CommandSource,
     ) -> Result<CommandResult, Rejection> {
-        let resolve_acting_session = self.resolve_acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_sizing = self.get_pane_sizing();
-        let pane_target = self.resolve_fullscreen_target(command_source, resolve_acting_session)?;
+        let pane_target = self.resolve_fullscreen_target(command_source, acting_session)?;
         let client_id = pane_target.client_id;
 
         let pty_backend = Arc::clone(self.get_pty_backend());
@@ -930,9 +926,9 @@ impl Server {
                 "plugin lacks the pane_write capability",
             ));
         }
-        let resolve_acting_session = self.resolve_acting_session(command_source)?;
+        let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
-            self.resolve_pane_target(command_args.pane_id, command_source, resolve_acting_session)?;
+            self.resolve_pane_target(command_args.pane_id, command_source, acting_session)?;
         let session = self
             .session_by_id
             .get(&pane_target.session_id)

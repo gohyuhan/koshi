@@ -8,7 +8,7 @@ impl Server {
     ///
     /// Every variant acts on the issuing client's own highlights: a highlight
     /// belongs to one client, and a gone issuer takes its highlights with it
-    /// ([`Self::resolve_issuing_client_id`]). [`Self::validate`] has already confirmed the
+    /// ([`Self::resolve_issuing_client_id`]). [`Self::validate_command`] has already confirmed the
     /// command source names a client.
     pub(super) fn handle_visual(
         &mut self,

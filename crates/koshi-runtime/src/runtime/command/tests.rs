@@ -13478,7 +13478,7 @@ fn pane_spawn_sizes_gives_each_pane_of_a_two_pane_tab_its_own_tile() {
 }
 
 #[test]
-fn size_root_pane_falls_back_to_the_whole_viewport_for_a_suppressed_pane() {
+fn compute_root_pane_pty_size_falls_back_to_the_whole_viewport_for_a_suppressed_pane() {
     // A 3x3 viewport is below the pane's border-inclusive floor of 4 columns,
     // so the solve gives the pane no content rect and the size is taken from
     // the whole viewport rect instead.

@@ -883,8 +883,8 @@ impl Server {
     }
 
     /// The session that owns `client_id`, or `None` if no attached client has
-    /// that id. Shared with command dispatch's `resolve_acting_session`, which resolves
-    /// the same key-binding/mouse client to its session.
+    /// that id. Command dispatch's `resolve_acting_session` resolves the same
+    /// key-binding/mouse client to its session.
     pub(crate) fn get_session_for_client(&self, client_id: ClientId) -> Option<&Session> {
         self.list_sessions()
             .values()

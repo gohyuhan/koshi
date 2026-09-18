@@ -403,9 +403,9 @@ impl Server {
 
     /// Seal `events` as one committed transaction keyed to `command_id`: emit
     /// each event into a fresh [`TransactionScope`] in order, then commit,
-    /// delivering the batch to every subscriber on `bus`.
+    /// delivering the batch to every subscriber on `event_bus`.
     fn commit_events(
-        bus: &mut EventBus,
+        event_bus: &mut EventBus,
         command_id: CommandId,
         events: Vec<Event>,
     ) -> CommandResult {
@@ -413,7 +413,7 @@ impl Server {
         for event in events {
             scope.emit(event);
         }
-        scope.commit(command_id, bus)
+        scope.commit(command_id, event_bus)
     }
 
     /// Launch a pane's child process, mapping a backend failure onto the shared
