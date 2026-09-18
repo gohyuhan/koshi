@@ -1461,7 +1461,7 @@ impl TerminalState {
 
     /// The Kitty keyboard flags in effect on the active screen: the top entry
     /// of that screen's stack, or `0` when the stack is empty.
-    pub(crate) fn get_keyboard_flags(&self) -> u8 {
+    pub fn get_keyboard_flags(&self) -> u8 {
         match self.active_screen {
             Screen::Primary => self.primary_keyboard_stack.get_current_keyboard_flags(),
             Screen::Alternate => self.alternate_keyboard_stack.get_current_keyboard_flags(),

@@ -92,6 +92,170 @@ that decides what they are told.
 | `term` | string — the `TERM` value child programs see | `"xterm-256color"` | ≥ 0.1.0 |
 | `colorterm` | string — the `COLORTERM` value child programs see | `"truecolor"` | ≥ 0.1.0 |
 | `default-shell` | string — the shell to launch | your `$SHELL` (`%COMSPEC%` on Windows) | ≥ 0.1.0 |
+| `extended-keys` | `"on-request"` or `"always"` — whether keys like Shift+Enter reach programs that never ask for them | `"on-request"` | ≥ 0.5.0 |
+
+### `extended-keys`
+
+**Short version:** if Shift+Enter does nothing useful in a program you run inside
+koshi, set this to `"always"`.
+
+```kdl
+terminal {
+    extended-keys "always"
+}
+```
+
+#### The problem
+
+Press Shift+Enter in a terminal and the program you are running receives the byte
+`0x0d`. Press plain Enter and it receives `0x0d`. The same byte. The program has
+no way to know you held Shift.
+
+This is not a koshi bug. Terminals have worked this way since the 1970s. Six
+bytes carry more than one key, and these are the combinations people actually
+press:
+
+| What you press | What the program receives | The key that already owns those bytes |
+|---|---|---|
+| Shift+Enter | `0x0d` | Enter |
+| Ctrl+Enter | `0x0d` | Enter |
+| Ctrl+m | `0x0d` | Enter |
+| Ctrl+i | `0x09` | Tab |
+| Ctrl+[ | `0x1b` | Escape |
+| Shift+Escape | `0x1b` | Escape |
+| Ctrl+Backspace | `0x08` | Ctrl+h |
+| Shift+Backspace | `0x7f` | Backspace |
+
+The right-hand column is the key that keeps those bytes. Enter stays `0x0d`, Tab
+stays `0x09`, Escape stays `0x1b`, Ctrl+h stays `0x08` and Backspace stays
+`0x7f`. Only the key in the left-hand column is the one with no way to announce
+itself.
+
+A few rarer combinations collide too, for the same reason: Ctrl+Tab and
+Ctrl+Escape (the modifier changes nothing), Ctrl+@ and Ctrl+2 (both `0x00`),
+Ctrl+3 (`0x1b`), and Ctrl+8 and Ctrl+? (both `0x7f`).
+
+So a chat-style program cannot use Shift+Enter for "new line" and Enter for
+"send", because both keys arrive identically.
+
+#### The fix, and why it is not automatic
+
+There is a newer way to send keys that names the key and the modifiers instead
+of squeezing them into one byte. Shift+Enter becomes `ESC [ 13 ; 2 u` — "key 13,
+modifier 2", which reads as Enter plus Shift.
+
+Koshi does not send that form to every program, because a program that does not
+understand it would see garbage. So the rule is: a program gets the new form
+after it asks for it.
+
+**How a program asks.** A program does not only receive keys from its terminal.
+It also writes back to it. That is how it switches to a full-screen view, turns
+on mouse reporting, or asks for the new key form:
+
+| The program writes | It is telling koshi |
+|---|---|
+| `ESC [ ? 1049 h` | switch to the full-screen view |
+| `ESC [ ? 1003 h` | start sending me mouse events |
+| `ESC [ ? 2004 h` | mark the text I paste |
+| `ESC [ > 1 u` | send me keys in the new form |
+
+The last line is the request. Koshi reads it off the program's own output, the
+same output it paints on your screen. Koshi itself does exactly this to the
+terminal it runs inside.
+
+Neovim, Helix and Kakoune ask. Bash, Zsh and most command-line tools do not.
+
+**A program asks for as much or as little as it wants.** The number in the
+request is a sum, and each part switches on one kind of detail:
+
+| Number | What the program is asking for |
+|---|---|
+| 1 | tell keys apart that otherwise share bytes — **except Enter, Tab and Backspace** |
+| 2 | tell me when a key repeats and when it is released |
+| 4 | tell me the shifted and base-layout letters as well |
+| 8 | send every key in the new form, Enter, Tab and Backspace included |
+| 16 | include the text the key produced |
+
+A program adds up the parts it wants: `ESC [ > 1 u` asks for the first only,
+`ESC [ > 11 u` asks for 1, 2 and 8 together.
+
+**This is why asking is not always enough.** Number 1 deliberately leaves Enter,
+Tab and Backspace alone, so that a shell still works if a crashed program left
+the mode switched on. A program that asks with `1` alone still receives `0x0d`
+for Shift+Enter — the exact problem it was trying to solve. Only number 8 covers
+those three keys.
+
+#### Why the setting exists
+
+Some programs read the new form but never ask for it. Claude Code is one: it
+understands `ESC [ 13 ; 2 u` perfectly, and it sends no request. Koshi cannot
+tell such a program apart from `bash`, because the request is the only signal
+there is — a program has no way to say "I understand it" other than asking.
+
+That is what you are deciding with this setting.
+
+| Value | What a program that asks gets | What a program that never asks gets |
+|---|---|---|
+| `"on-request"` (default) | exactly the detail it asked for | the old bytes — Shift+Enter arrives as Enter |
+| `"always"` | the detail it asked for, plus the colliding keys above | the old bytes, except the colliding keys above |
+
+`"always"` adds to a request, it never replaces one. A program that asked with
+`1` alone keeps everything that answer gave it, and gains Shift+Enter and the
+other seven.
+
+#### What `"always"` changes, exactly
+
+It changes the colliding keys, and nothing else. The rule is exact: a key changes
+only when its old bytes are bytes another key also sends. Every other key is
+byte-for-byte identical in both settings:
+
+```
+Tab           -> 0x09          unchanged
+Enter         -> 0x0d          unchanged
+typing "a"    -> a             unchanged
+Up arrow      -> ESC [ A       unchanged
+Shift+Tab     -> ESC [ Z       unchanged
+Ctrl+Right    -> ESC [ 1;5 C   unchanged
+
+Shift+Enter   -> ESC [ 13;2 u  was 0x0d
+Ctrl+i        -> ESC [ 105;5 u was 0x09
+```
+
+#### The cost of `"always"`
+
+A program that does not understand the new form stops understanding the colliding
+keys:
+
+- In `bash`, Shift+Enter today runs the command. With `"always"` it does
+  nothing.
+- In an editor that has not asked for the new form, Ctrl+[ stops acting as
+  Escape and Ctrl+i stops acting as Tab.
+
+That is the whole trade. Nothing else is affected.
+
+#### Your own terminal has to support it too
+
+Koshi can only pass on a key that your terminal reports in the first place. Ask
+your terminal for the new form at startup, and if it does not support it, it
+reports Shift+Enter as plain Enter and koshi never learns you held Shift. No
+setting can recover that.
+
+Terminals that support it include kitty, Ghostty, WezTerm, foot and Alacritty.
+Apple Terminal does not.
+
+To check yours, run this in the terminal itself — not inside koshi — press
+Shift+Enter, then press Ctrl+C:
+
+```sh
+stty -icanon -echo min 1 time 0; printf '\033[>1u'; cat -v
+```
+
+`^[[13;2u` means your terminal supports it. `^M` means it does not. Then restore
+your terminal:
+
+```sh
+printf '\033[<u'; stty sane
+```
 
 ## `logging`
 
@@ -363,6 +527,7 @@ copy {
 terminal {
     term "xterm-256color"
     colorterm "truecolor"
+    extended-keys "on-request"
     // default-shell "/bin/zsh"  // optional override
 }
 

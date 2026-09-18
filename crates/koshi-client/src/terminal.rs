@@ -66,17 +66,20 @@ const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 
 /// Enter the alternate screen and enable keyboard, mouse, and paste reports.
 ///
-/// The keyboard push asks for flags `1|2|4`: disambiguate escape codes, report
-/// event types, and report alternate keys. Every one of those reaches a pane
-/// through the chord Koshi already sends.
+/// The keyboard push asks for flags `1|2|4|8|16`: disambiguate escape codes,
+/// report event types, report alternate keys, report all keys as escape codes,
+/// and report associated text. Every one of those reaches a pane through the
+/// event Koshi sends, encoded for that pane's own flags.
 ///
-/// It does not ask for flag `8`, report all keys as escape codes. Flag `8`
-/// moves ordinary typing off the plain-byte path and into `CSI u` reports
-/// whose text rides a parameter that no pane encoding reads yet, so typing
-/// `å` would reach a pane as `ESC a` or as nothing. Flag `16`, report
-/// associated text, is defined only alongside flag `8`, so neither is
-/// requested here.
-const APPLICATION_MODE_SETUP_BYTES: &[u8] = b"\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
+/// Flags `8` and `16` together move ordinary typing into `CSI u` reports that
+/// carry the text the key produced, so typing `å` reaches a pane as `å`. Flag
+/// `8` alone would drop that text, and the specification defines `16` only
+/// beside `8`.
+///
+/// A terminal that ignores the push keeps reporting legacy bytes, and every
+/// key reaches a pane as it does today.
+const APPLICATION_MODE_SETUP_BYTES: &[u8] =
+    b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
 
 /// Ask which Kitty keyboard enhancements the terminal applied. The answer is
 /// `ESC [ ? flags u`.

@@ -344,6 +344,7 @@ fn copy_and_terminal_scalar_overrides() {
             term: Some("screen-256color".to_string()),
             colorterm: None,
             default_shell: None,
+            extended_keys_mode: None,
         }),
         ..Default::default()
     };
@@ -363,6 +364,7 @@ fn terminal_default_shell_sets_inner_value() {
             term: None,
             colorterm: None,
             default_shell: Some(Some("/bin/zsh".to_string())),
+            extended_keys_mode: None,
         }),
         ..Default::default()
     };
@@ -562,6 +564,7 @@ fn each_side_folds_only_its_own_sections() {
             term: None,
             colorterm: None,
             default_shell: Some(Some("/bin/fish".to_string())),
+            extended_keys_mode: None,
         }),
         theme: Some(PartialThemeConfig {
             theme_name: Some("midnight".to_string()),
@@ -863,6 +866,7 @@ fn a_higher_precedence_layer_can_clear_the_default_shell() {
             term: None,
             colorterm: None,
             default_shell: Some(Some("/bin/zsh".to_string())),
+            extended_keys_mode: None,
         }),
         ..Default::default()
     };
@@ -871,6 +875,7 @@ fn a_higher_precedence_layer_can_clear_the_default_shell() {
             term: None,
             colorterm: None,
             default_shell: Some(None),
+            extended_keys_mode: None,
         }),
         ..Default::default()
     };

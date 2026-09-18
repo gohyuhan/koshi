@@ -2202,7 +2202,7 @@ fn terminal_modes_are_enabled_after_entering_the_alternate_screen() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
+        b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
     );
 }
 
@@ -2219,7 +2219,7 @@ fn sixel_modes_are_saved_before_application_modes() {
 
     assert_eq!(
         terminal_mode_bytes,
-        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>7u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
+        b"\x1b[?80s\x1b[?8452s\x1b[?1070s\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h\x1b[?u"
     );
 }
 
@@ -2642,11 +2642,11 @@ fn the_mode_setup_pushes_the_keyboard_flags_and_asks_what_landed() {
     enable_terminal_modes(&mut terminal_mode_bytes, GraphicsSupport::Unsupported)
         .expect("terminal modes write");
 
-    // The push asks for flags 1|2|4, and the query follows it in the same
+    // The push asks for flags 1|2|4|8|16, and the query follows it in the same
     // batch so the answer describes the push.
     let mode_setup_text = String::from_utf8(terminal_mode_bytes).expect("mode bytes are text");
     let push_position = mode_setup_text
-        .find("\x1b[>7u")
+        .find("\x1b[>31u")
         .expect("the keyboard push is written");
     let query_position = mode_setup_text
         .find("\x1b[?u")

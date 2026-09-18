@@ -196,6 +196,7 @@ fn app_config_reload_lands_the_session_owned_sections_on_the_server() {
             term: Some("screen-256color".to_owned()),
             colorterm: None,
             default_shell: Some(Some("/bin/fish".to_owned())),
+            extended_keys_mode: None,
         }),
         ..PartialKoshiConfig::default()
     });

@@ -22,7 +22,7 @@ use std::str::FromStr;
 
 use koshi_core::action::ActionReference;
 use koshi_core::geometry::Direction;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{ExtendedKeysMode, Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::resolve::ActionArgs;
 
@@ -653,6 +653,9 @@ pub struct TerminalConfig {
     pub colorterm: String,
     /// The shell to launch; `None` falls back to the user's `$SHELL`.
     pub default_shell: Option<String>,
+    /// What a pane's program receives for a key whose legacy bytes another key
+    /// also owns, such as Shift+Enter.
+    pub extended_keys_mode: ExtendedKeysMode,
 }
 
 impl Default for TerminalConfig {
@@ -661,6 +664,7 @@ impl Default for TerminalConfig {
             term: "xterm-256color".to_string(),
             colorterm: "truecolor".to_string(),
             default_shell: None,
+            extended_keys_mode: ExtendedKeysMode::default(),
         }
     }
 }

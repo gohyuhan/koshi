@@ -19,6 +19,7 @@ use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::build_key_input_for_chord;
 
 const TEST_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
@@ -177,7 +178,9 @@ fn typed_keys_write_to_the_focused_pane() {
     for key in [Key::Char('l'), Key::Char('s'), Key::Named(NamedKey::Enter)] {
         let chord = KeyChord::from_parts(ModFlags::NONE, key);
         match viewer.resolve_key(chord, Instant::now()) {
-            KeyOutcome::PassThrough(chord) => server.handle_key_press(client_id, chord),
+            KeyOutcome::PassThrough(chord) => {
+                server.handle_key_input(client_id, &build_key_input_for_chord(chord));
+            }
             unexpected_key_outcome => panic!(
                 "`{chord}` binds nothing, so it passes through; got {unexpected_key_outcome:?}"
             ),

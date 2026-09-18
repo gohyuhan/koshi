@@ -14,7 +14,10 @@ use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{PluginId, SessionId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{
+    ExtendedKeysMode, Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags, KeySequence,
+    ModFlags, NamedKey,
+};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
 use koshi_layout::edit::split_leaf;
@@ -22,6 +25,7 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::{Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::build_key_input_for_chord;
 use std::time::{Duration, Instant};
 
 use koshi_client::input::KeyOutcome;
@@ -78,7 +82,9 @@ fn apply_key_press(
             let new_pane_direction = viewer.get_client_config().layout.new_pane_direction;
             runtime.handle_bound_action(client_id, bound_action, new_pane_direction);
         }
-        KeyOutcome::PassThrough(chord) => runtime.handle_key_press(client_id, chord),
+        KeyOutcome::PassThrough(chord) => {
+            runtime.handle_key_input(client_id, &build_key_input_for_chord(chord));
+        }
         KeyOutcome::Pending | KeyOutcome::Discard => {}
     }
     viewer.apply_events();
@@ -1379,7 +1385,10 @@ fn a_key_from_an_unknown_client_writes_nothing() {
 
     // A press arriving for a client the session does not know resolves to no
     // pane, so nothing is written rather than landing on someone else's.
-    runtime.handle_key_press(ClientId::new(), build_key_chord(ModFlags::NONE, 'x'));
+    runtime.handle_key_input(
+        ClientId::new(),
+        &build_key_input_for_chord(build_key_chord(ModFlags::NONE, 'x')),
+    );
 
     assert_eq!(
         fake_pty_backend
@@ -2568,5 +2577,117 @@ fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
             .list_pane_write_bytes(pane_id)
             .expect("writes"),
         Vec::<Vec<u8>>::new()
+    );
+}
+
+// ------------------------ the pane's own keyboard flags decide the bytes ----
+
+/// The bytes the fake backend saw written to `pane_id`, joined in order.
+fn get_pane_write_bytes(
+    fake_pty_backend: &FakePtyBackend,
+    pane_id: koshi_core::ids::PaneId,
+) -> Vec<u8> {
+    fake_pty_backend
+        .list_pane_write_bytes(pane_id)
+        .expect("writes")
+        .concat()
+}
+
+/// A Shift+Enter press, as a terminal that speaks the Kitty keyboard protocol
+/// reports it.
+fn build_shift_enter_press() -> KeyInput {
+    KeyInput {
+        key: KeyIdentity::Key(Key::Named(NamedKey::Enter)),
+        key_event_kind: KeyEventKind::Press,
+        shifted_key: None,
+        base_layout_key: None,
+        associated_text: String::new(),
+        modifier_flags: KeyModifierFlags::SHIFT,
+    }
+}
+
+#[test]
+fn a_pane_that_pushed_no_flag_reads_shift_enter_as_a_carriage_return() {
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+
+    runtime.handle_key_input(client_id, &build_shift_enter_press());
+
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        b"\r".to_vec()
+    );
+}
+
+#[test]
+fn a_pane_that_pushed_flag_eight_reads_shift_enter_as_a_csi_u_report() {
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+
+    // The program in the pane asks for every key as an escape code.
+    runtime.handle_pty_output(pane_id, b"\x1b[>8u");
+    runtime.handle_key_input(client_id, &build_shift_enter_press());
+
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        b"\x1b[13;2u".to_vec()
+    );
+}
+
+#[test]
+fn a_pane_reads_the_flags_of_the_screen_it_is_on_at_the_write() {
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+
+    // The program pushes flag 8 on the primary screen, then enters the
+    // alternate screen, whose own stack is empty.
+    runtime.handle_pty_output(pane_id, b"\x1b[>8u\x1b[?1049h");
+    runtime.handle_key_input(client_id, &build_shift_enter_press());
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        b"\r".to_vec()
+    );
+
+    // Back on the primary screen its own stack still holds flag 8.
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049l");
+    runtime.handle_key_input(client_id, &build_shift_enter_press());
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        b"\r\x1b[13;2u".to_vec()
+    );
+}
+
+#[test]
+fn always_gives_shift_enter_to_a_pane_that_pushed_no_flag() {
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    runtime.config.terminal.extended_keys_mode = ExtendedKeysMode::Always;
+
+    runtime.handle_key_input(client_id, &build_shift_enter_press());
+
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        b"\x1b[13;2u".to_vec()
+    );
+}
+
+#[test]
+fn a_release_reaches_a_pane_only_when_that_pane_asked_for_event_kinds() {
+    let (mut runtime, fake_pty_backend, client_id, _viewer) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let mut released_a = build_key_input_for_chord(build_key_chord(ModFlags::NONE, 'a'));
+    released_a.key_event_kind = KeyEventKind::Release;
+
+    runtime.handle_key_input(client_id, &released_a);
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        Vec::<u8>::new()
+    );
+
+    runtime.handle_pty_output(pane_id, b"\x1b[>10u");
+    runtime.handle_key_input(client_id, &released_a);
+    assert_eq!(
+        get_pane_write_bytes(&fake_pty_backend, pane_id),
+        b"\x1b[97;1:3u".to_vec()
     );
 }

@@ -438,6 +438,15 @@ impl KeyModifierFlags {
         Self(self.0 | other_modifier_flags.0)
     }
 
+    /// The Kitty keyboard modifier parameter: one plus the eight-bit bitmap.
+    ///
+    /// No modifier gives `1`. Shift gives `2`. Every modifier held gives
+    /// `256`.
+    #[must_use]
+    pub const fn to_kitty_parameter(self) -> u16 {
+        self.0 as u16 + 1
+    }
+
     /// The four modifiers a keybinding matches on.
     ///
     /// Control, Alt and Shift carry across unchanged. Meta counts as Super,
@@ -462,6 +471,23 @@ impl KeyModifierFlags {
         }
         ModFlags(binding_bits)
     }
+}
+
+/// What a pane's program receives for a key that legacy encoding cannot tell
+/// apart from another key.
+///
+/// The pane's own Kitty keyboard flags decide every byte in both modes. This
+/// setting only adds bytes for a pane that pushed no flag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExtendedKeysMode {
+    /// The pane's flags decide alone. A pane that pushed no flag reads the
+    /// legacy bytes: Shift+Enter reads `\r`, and Ctrl+i reads `0x09`.
+    #[default]
+    OnRequest,
+    /// A pane that pushed no flag reads the `CSI u` form for every key whose
+    /// legacy bytes another key also owns: Shift+Enter reads `CSI 13 ; 2 u`,
+    /// and Ctrl+i reads `CSI 105 ; 5 u`. Tab still reads `0x09`.
+    Always,
 }
 
 impl std::ops::BitOr for KeyModifierFlags {

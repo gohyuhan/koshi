@@ -32,9 +32,9 @@ use koshi_config::types::BoundAction;
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
-use koshi_core::key::KeyChord;
+use koshi_core::key::KeyInput;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
-use koshi_input::keyboard::encode_key_chord;
+use koshi_input::keyboard::encode_key_input;
 use koshi_layout::content::list_content_rects;
 use koshi_pane::pane::state::PaneKind;
 
@@ -209,25 +209,38 @@ impl Server {
     }
 
     /// Write one key the viewer did not bind to the pane it is typing into,
-    /// encoded for that pane's cursor-key mode at this instant.
+    /// encoded for that pane's keyboard flags and cursor-key mode at this
+    /// instant.
     ///
-    /// Nothing is written when `Server::find_typed_pane` names no pane. A pane with
-    /// no terminal engine encodes with application cursor keys off. A write
-    /// clears the client's highlight in that pane and returns the client's view
-    /// to live output.
-    pub fn handle_key_press(&mut self, client_id: ClientId, chord: KeyChord) {
+    /// Nothing is written when `Server::find_typed_pane` names no pane, and
+    /// nothing is written when the pane asked not to receive this event, such
+    /// as a key release into a pane that pushed no flag. A pane with no
+    /// terminal engine encodes with no keyboard flags and application cursor
+    /// keys off. A write clears the client's highlight in that pane and
+    /// returns the client's view to live output.
+    pub fn handle_key_input(&mut self, client_id: ClientId, key_input: &KeyInput) {
         let Some(pane_id) = self.find_typed_pane(client_id) else {
             return;
         };
-        let is_application_cursor_keys_enabled = self
+        let (keyboard_flags, is_application_cursor_keys_enabled) = self
             .terminal_engine_by_pane_id
             .get(&pane_id)
-            .is_some_and(|terminal_engine| {
-                terminal_engine
-                    .get_terminal_state()
-                    .are_application_cursor_keys_enabled()
+            .map_or((0, false), |terminal_engine| {
+                let terminal_state = terminal_engine.get_terminal_state();
+                (
+                    terminal_state.get_keyboard_flags(),
+                    terminal_state.are_application_cursor_keys_enabled(),
+                )
             });
-        let key_bytes = encode_key_chord(chord, is_application_cursor_keys_enabled);
+        let key_bytes = encode_key_input(
+            key_input,
+            keyboard_flags,
+            is_application_cursor_keys_enabled,
+            self.config.terminal.extended_keys_mode,
+        );
+        if key_bytes.is_empty() {
+            return;
+        }
         let _ = self.get_pty_backend().write_pane_input(pane_id, &key_bytes);
         self.on_input_reached_pane(client_id, pane_id);
     }

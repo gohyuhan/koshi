@@ -23,6 +23,7 @@ use koshi_core::mouse::{MouseButton, MouseInput, MouseKind};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{MouseFrame, ViewerChrome};
 use koshi_test_support::fake_pty::FakePtyBackend;
+use koshi_test_support::fixtures::build_key_input_for_chord;
 
 use crate::runtime::bus::EventFilter;
 
@@ -2679,9 +2680,9 @@ fn ctrl_c_clears_the_highlight_like_any_key_reaching_the_pane() {
 
     // `<C-c>` binds nothing, so the viewer passes it through and the session
     // writes it to the pane.
-    runtime_server.handle_key_press(
+    runtime_server.handle_key_input(
         client_id,
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')),
+        &build_key_input_for_chord(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c'))),
     );
     assert_eq!(
         get_selection(&mut runtime_server, client_id, pane_id),
@@ -2736,9 +2737,9 @@ fn typing_into_the_pane_clears_the_typists_highlight_there() {
         }
     );
 
-    runtime_server.handle_key_press(
+    runtime_server.handle_key_input(
         client_id,
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('x')),
+        &build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))),
     );
     assert_eq!(
         get_selection(&mut runtime_server, client_id, pane_id),
@@ -2787,9 +2788,9 @@ fn typing_during_a_drag_cancels_the_highlight_and_the_gesture() {
     // The key reaches the pane's program, so the viewer drops the gesture and
     // the session drops the highlight — the way the binary's loop pairs them.
     viewer.end_mouse_selection();
-    runtime_server.handle_key_press(
+    runtime_server.handle_key_input(
         client_id,
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('x')),
+        &build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))),
     );
     assert_eq!(get_selection(&mut runtime_server, client_id, pane_id), None);
 
@@ -2824,9 +2825,9 @@ fn typing_after_a_press_cancels_the_empty_gesture() {
     assert_eq!(get_selection(&mut runtime_server, client_id, pane_id), None);
 
     viewer.end_mouse_selection();
-    runtime_server.handle_key_press(
+    runtime_server.handle_key_input(
         client_id,
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('x')),
+        &build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))),
     );
 
     // The armed gesture is gone: a drag from here highlights nothing.
@@ -2868,9 +2869,9 @@ fn typing_leaves_another_panes_highlight_alone() {
     // The split focuses the new pane, so the key types into it.
     let other_pane_id = split_pane_rightward(&mut runtime_server, client_id);
     assert_ne!(other_pane_id, pane_id);
-    runtime_server.handle_key_press(
+    runtime_server.handle_key_input(
         client_id,
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('x')),
+        &build_key_input_for_chord(KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))),
     );
     assert_eq!(
         get_selection(&mut runtime_server, client_id, pane_id),

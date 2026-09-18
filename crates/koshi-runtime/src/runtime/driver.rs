@@ -45,15 +45,13 @@ impl Server {
             }
             // An attached client's viewer already read this event: its keymap
             // bound nothing to it, or no chord could name it. The pane write
-            // takes a chord, so a release and a key no chord can name write
-            // nothing.
+            // reads the whole event, so the receiving pane's keyboard flags
+            // decide which of its fields reach that pane.
             RuntimeEvent::ClientKeyboard {
                 client_id,
                 key_input,
             } => {
-                if let Some(chord) = key_input.to_binding_chord() {
-                    self.handle_key_press(client_id, chord);
-                }
+                self.handle_key_input(client_id, &key_input);
             }
             // An attached client's viewer already read this mouse event against
             // the frame it painted, so the round names every pane it touches.
