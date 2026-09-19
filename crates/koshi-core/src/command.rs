@@ -62,6 +62,12 @@ pub enum Command {
     TogglePaneFullscreen,
     /// Move a tab to a new index.
     MoveTab(MoveTabArgs),
+    /// Move a tiled pane into the slot of its visible neighbor.
+    MovePane(MovePaneArgs),
+    /// Exchange two tiled pane occupants within one tab.
+    SwapPanes(SwapPanesArgs),
+    /// Move one client's view of a pane through its scrollback.
+    ScrollPane(ScrollPaneArgs),
     /// Prompt the issuing client to quit the client or session.
     Quit,
     /// Detach one client from the session. The session keeps running and its
@@ -115,6 +121,12 @@ pub enum CommandKind {
     TogglePaneFullscreen,
     /// Discriminant of [`Command::MoveTab`].
     MoveTab,
+    /// Discriminant of [`Command::MovePane`].
+    MovePane,
+    /// Discriminant of [`Command::SwapPanes`].
+    SwapPanes,
+    /// Discriminant of [`Command::ScrollPane`].
+    ScrollPane,
     /// Discriminant of [`Command::Quit`].
     Quit,
     /// Discriminant of [`Command::Detach`].
@@ -146,6 +158,9 @@ impl Command {
             Command::Plugin(_) => CommandKind::Plugin,
             Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
             Command::MoveTab(_) => CommandKind::MoveTab,
+            Command::MovePane(_) => CommandKind::MovePane,
+            Command::SwapPanes(_) => CommandKind::SwapPanes,
+            Command::ScrollPane(_) => CommandKind::ScrollPane,
             Command::Quit => CommandKind::Quit,
             Command::Detach(_) => CommandKind::Detach,
             Command::DetachAll => CommandKind::DetachAll,
@@ -396,6 +411,38 @@ pub struct MoveTabArgs {
     /// Destination zero-based index.
     #[serde(rename = "index")]
     pub target_tab_index: usize,
+}
+
+/// Arguments for [`Command::MovePane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovePaneArgs {
+    /// Tiled pane to move; `None` moves the focused pane.
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
+    /// Direction in which to choose the visible neighbor.
+    pub direction: Direction,
+}
+
+/// Arguments for [`Command::SwapPanes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwapPanesArgs {
+    /// Pane whose occupant moves; `None` uses the focused pane.
+    #[serde(rename = "a")]
+    pub source_pane_id: Option<PaneId>,
+    /// Pane whose slot receives the source occupant.
+    #[serde(rename = "b")]
+    pub target_pane_id: PaneId,
+}
+
+/// Arguments for [`Command::ScrollPane`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrollPaneArgs {
+    /// Pane whose view scrolls; `None` uses the target client's focused pane.
+    #[serde(rename = "pane")]
+    pub pane_id: Option<PaneId>,
+    /// Signed scroll line count: positive moves toward history, negative moves toward live output.
+    #[serde(rename = "lines")]
+    pub scroll_line_count: i32,
 }
 
 /// Arguments for [`Command::Detach`].

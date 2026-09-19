@@ -706,6 +706,42 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
+            "core:move-pane",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-left",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-down",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-up",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-right",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:swap-panes",
+            CommandKind::SwapPanes,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
             "core:focus-pane",
             CommandKind::FocusPane,
             Client,
@@ -732,6 +768,24 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
         (
             "core:focus-pane-right",
             CommandKind::FocusPane,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:scroll-pane",
+            CommandKind::ScrollPane,
+            Client,
+            vec![ClientTarget, Pane],
+        ),
+        (
+            "core:scroll-pane-up",
+            CommandKind::ScrollPane,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:scroll-pane-down",
+            CommandKind::ScrollPane,
             Client,
             vec![ClientTarget],
         ),
@@ -864,8 +918,8 @@ fn core_action_seeds_have_valid_namespaces_and_serde_forms() {
     }
 }
 
-/// Pins the client-scoped seeds: lock mode and focus are per-client state, so
-/// their actions carry the `Client` scope and accept a client target.
+/// Pins the client-scoped seeds: lock mode, focus, and scroll are per-client
+/// state, so their actions carry the `Client` scope and accept a client target.
 #[test]
 fn lock_and_focus_seeds_use_client_scope_and_targets() {
     let seeds = build_core_action_seeds();
@@ -888,6 +942,9 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
         ("lock", vec![TargetKind::Client]),
         ("unlock", vec![TargetKind::Client]),
         ("toggle-lock", vec![TargetKind::Client]),
+        ("scroll-pane", vec![TargetKind::Client, TargetKind::Pane]),
+        ("scroll-pane-up", vec![TargetKind::Client]),
+        ("scroll-pane-down", vec![TargetKind::Client]),
     ];
     for (action_name, target_kinds) in client_scoped_action_cases {
         let action_metadata = get_action_metadata(action_name);
@@ -935,8 +992,8 @@ fn coming_soon_action_seeds_are_stable() {
     assert_eq!(coming_soon, expected_coming_soon_action_names);
 }
 
-/// Pins which seeds are continuous: exactly the resize-pane and focus-pane
-/// families. A new member of either family added without the `continuous`
+/// Pins which seeds are continuous: the resize-pane, focus-pane, and scroll
+/// action families. A new member of a family added without the `continuous`
 /// flag — or the flag appearing on any other action — changes this list and
 /// fails the assert.
 #[test]
@@ -959,6 +1016,8 @@ fn continuous_action_seeds_are_stable() {
         "core:focus-pane-down",
         "core:focus-pane-up",
         "core:focus-pane-right",
+        "core:scroll-pane-down",
+        "core:scroll-pane-up",
     ]
     .map(String::from)
     .to_vec();
@@ -990,6 +1049,11 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:focus-tab",
         "core:lock",
         "core:mouse-select",
+        "core:move-pane",
+        "core:move-pane-down",
+        "core:move-pane-left",
+        "core:move-pane-right",
+        "core:move-pane-up",
         "core:move-tab",
         "core:new-pane",
         "core:new-pane-down",
@@ -1013,6 +1077,10 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:resize-pane-right",
         "core:resize-pane-up",
         "core:run",
+        "core:scroll-pane",
+        "core:scroll-pane-down",
+        "core:scroll-pane-up",
+        "core:swap-panes",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
         "core:unlock",

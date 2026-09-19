@@ -8,7 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koshi_core::client::ClientOrigin;
 
-use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
+use koshi_core::command::{
+    Command, CommandSource, MovePaneArgs, NewPaneArgs, ScrollPaneArgs, SwapPanesArgs,
+    ToggleLockModeArgs,
+};
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
 };
@@ -1617,6 +1620,40 @@ fn a_mouse_action_carrying_an_unknown_field_ignores_it() {
             }]),
         }
     );
+}
+
+#[test]
+fn pane_command_requests_round_trip_without_a_protocol_change() {
+    let commands = [
+        Command::MovePane(MovePaneArgs {
+            pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+            direction: Direction::Left,
+        }),
+        Command::SwapPanes(SwapPanesArgs {
+            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+            target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        }),
+        Command::ScrollPane(ScrollPaneArgs {
+            pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+            scroll_line_count: -7,
+        }),
+    ];
+
+    for (request_id, command) in commands.into_iter().enumerate() {
+        let request = IpcRequest {
+            request_id: request_id as u64,
+            request_kind: IpcRequestKind::SubmitCommand(Box::new(CommandEnvelope::from_parts(
+                CommandId::from_uuid(build_fixed_test_uuid()),
+                CommandSource::ExternalCli {
+                    session_id: None,
+                    target_client_id: None,
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                command,
+            ))),
+        };
+        assert_eq!(round_trip_wire_message(&request), request);
+    }
 }
 
 #[test]

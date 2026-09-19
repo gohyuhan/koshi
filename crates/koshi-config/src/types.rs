@@ -24,7 +24,7 @@ use koshi_core::action::ActionReference;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{ExtendedKeysMode, Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
-use koshi_core::resolve::ActionArgs;
+use koshi_core::resolve::{ActionArgs, DEFAULT_SCROLL_LINE_COUNT};
 
 use crate::error::ColorParseError;
 use crate::key::Leader;
@@ -597,7 +597,7 @@ impl Default for MouseConfig {
     fn default() -> Self {
         Self {
             can_resize_pane_border: true,
-            scroll_line_count: 3,
+            scroll_line_count: DEFAULT_SCROLL_LINE_COUNT,
             wheel: WheelScroll::default(),
         }
     }

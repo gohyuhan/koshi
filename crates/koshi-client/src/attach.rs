@@ -118,7 +118,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
 use koshi_core::registry::ActionRegistry;
-use koshi_core::resolve::{resolve_action, DispatchPlan};
+use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
@@ -767,11 +767,12 @@ impl Uplink {
     /// host owns, send nothing.
     fn submit_bound_action(&mut self, client: &Client, bound_action: BoundAction) {
         let new_pane_direction = client.get_client_config().layout.new_pane_direction;
-        let Ok(dispatch_plan) = resolve_action(
+        let Ok(dispatch_plan) = resolve_action_with_scroll_line_count(
             &bound_action.action_reference,
             &bound_action.action_arguments,
             &self.registry,
             new_pane_direction,
+            client.get_client_config().mouse.scroll_line_count,
         ) else {
             return;
         };

@@ -38,7 +38,8 @@ use std::path::PathBuf;
 use crate::action::{ActionHandlerReference, ActionReference, ActionStatus};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, TabTarget, ToggleLockModeArgs,
+    MovePaneArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
+    TabTarget, ToggleLockModeArgs,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
@@ -55,6 +56,9 @@ use serde::{Deserialize, Serialize};
 /// macros, exhausts the budget.
 pub const MAX_SEQUENCE_DEPTH: usize = 8;
 
+/// The number of lines a scroll action uses when its binding gives no value.
+pub const DEFAULT_SCROLL_LINE_COUNT: u16 = 3;
+
 /// The arguments bound to an action at its call site — a keymap entry, or a step
 /// of a macro.
 ///
@@ -65,12 +69,15 @@ pub const MAX_SEQUENCE_DEPTH: usize = 8;
 ///
 /// [`ActionArgs::Run`] names a program and its arguments, not a whole
 /// [`SpawnSpec`]: the command it builds carries no working directory and an
-/// empty environment.
+/// empty environment. [`ActionArgs::Scroll`] supplies an optional signed line
+/// count to the scroll actions.
 ///
-/// Every `core:` action except `core:run` accepts only [`ActionArgs::None`];
-/// `core:run` accepts only [`ActionArgs::Run`]. A plugin action forwards any
-/// value uninterpreted. A macro accepts only [`ActionArgs::None`], and every
-/// step of it resolves with [`ActionArgs::None`].
+/// Every binding-invocable `core:` action except `core:run` and the scroll
+/// actions accepts only [`ActionArgs::None`]; `core:run` accepts only
+/// [`ActionArgs::Run`]. CLI-only actions are built directly by the CLI. A
+/// plugin action forwards any value uninterpreted. A macro accepts only
+/// [`ActionArgs::None`], and every step of it resolves with
+/// [`ActionArgs::None`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionArgs {
     /// No arguments supplied.
@@ -89,6 +96,13 @@ pub enum ActionArgs {
         /// Stack onto the source pane instead of splitting space.
         #[serde(rename = "stacked")]
         should_stack: bool,
+    },
+    /// Optional signed scroll line count for `core:scroll-pane-up` and
+    /// `core:scroll-pane-down`; `None` uses the viewer's configured default.
+    Scroll {
+        /// Signed scroll line count to place in the typed scroll command.
+        #[serde(rename = "lines")]
+        scroll_line_count: Option<i32>,
     },
 }
 
@@ -188,21 +202,44 @@ pub fn resolve_action(
     registry: &ActionRegistry,
     new_pane_direction: Direction,
 ) -> Result<DispatchPlan, ResolveError> {
+    resolve_action_with_scroll_line_count(
+        action_reference,
+        action_arguments,
+        registry,
+        new_pane_direction,
+        DEFAULT_SCROLL_LINE_COUNT,
+    )
+}
+
+/// Turn an action into a plan with the caller's configured default scroll count.
+///
+/// The regular [`resolve_action`] entry point uses [`DEFAULT_SCROLL_LINE_COUNT`].
+/// A client uses this entry point when its mouse configuration supplies another
+/// count for a scroll action that has no explicit scroll line count.
+pub fn resolve_action_with_scroll_line_count(
+    action_reference: &ActionReference,
+    action_arguments: &ActionArgs,
+    registry: &ActionRegistry,
+    new_pane_direction: Direction,
+    scroll_line_count: u16,
+) -> Result<DispatchPlan, ResolveError> {
     resolve_action_at_depth(
         action_reference,
         action_arguments,
         registry,
         new_pane_direction,
+        scroll_line_count,
         0,
     )
 }
 
-/// [`resolve_action`] carrying the count of sequences entered to reach `action`.
+/// [`resolve_action_with_scroll_line_count`] carrying the count of sequences entered to reach `action`.
 fn resolve_action_at_depth(
     action_reference: &ActionReference,
     action_arguments: &ActionArgs,
     registry: &ActionRegistry,
     new_pane_direction: Direction,
+    scroll_line_count: u16,
     sequence_depth: usize,
 ) -> Result<DispatchPlan, ResolveError> {
     let action_metadata = registry
@@ -218,10 +255,13 @@ fn resolve_action_at_depth(
     }
 
     match &action_metadata.handler {
-        ActionHandlerReference::CoreCommand(_) => {
-            resolve_core_action(action_reference, action_arguments, new_pane_direction)
-                .map(DispatchPlan::Command)
-        }
+        ActionHandlerReference::CoreCommand(_) => resolve_core_action(
+            action_reference,
+            action_arguments,
+            new_pane_direction,
+            scroll_line_count,
+        )
+        .map(DispatchPlan::Command),
         ActionHandlerReference::PluginHostCall(plugin_id) => Ok(DispatchPlan::PluginHostCall {
             plugin_id: *plugin_id,
             action_reference: action_reference.clone(),
@@ -248,6 +288,7 @@ fn resolve_action_at_depth(
                     &ActionArgs::None,
                     registry,
                     new_pane_direction,
+                    scroll_line_count,
                     sequence_depth + 1,
                 )?);
             }
@@ -266,6 +307,7 @@ fn resolve_core_action(
     action_reference: &ActionReference,
     action_arguments: &ActionArgs,
     new_pane_direction: Direction,
+    scroll_line_count: u16,
 ) -> Result<Command, ResolveError> {
     Ok(
         match (action_reference.action_name.get_name(), action_arguments) {
@@ -298,6 +340,10 @@ fn resolve_core_action(
             ("focus-pane-down", ActionArgs::None) => build_focus_pane_command(Direction::Down),
             ("focus-pane-up", ActionArgs::None) => build_focus_pane_command(Direction::Up),
             ("focus-pane-right", ActionArgs::None) => build_focus_pane_command(Direction::Right),
+            ("move-pane-left", ActionArgs::None) => build_move_pane_command(Direction::Left),
+            ("move-pane-down", ActionArgs::None) => build_move_pane_command(Direction::Down),
+            ("move-pane-up", ActionArgs::None) => build_move_pane_command(Direction::Up),
+            ("move-pane-right", ActionArgs::None) => build_move_pane_command(Direction::Right),
             ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,
 
             // --- Tabs ---
@@ -330,6 +376,26 @@ fn resolve_core_action(
 
             // --- Mouse select ---
             ("mouse-select", ActionArgs::None) => Command::ToggleMouseSelect,
+
+            // --- Scroll ---
+            ("scroll-pane-up", ActionArgs::None) => {
+                build_scroll_pane_command(None, scroll_line_count, true)
+            }
+            (
+                "scroll-pane-up",
+                ActionArgs::Scroll {
+                    scroll_line_count: requested_scroll_line_count,
+                },
+            ) => build_scroll_pane_command(*requested_scroll_line_count, scroll_line_count, true),
+            ("scroll-pane-down", ActionArgs::None) => {
+                build_scroll_pane_command(None, scroll_line_count, false)
+            }
+            (
+                "scroll-pane-down",
+                ActionArgs::Scroll {
+                    scroll_line_count: requested_scroll_line_count,
+                },
+            ) => build_scroll_pane_command(*requested_scroll_line_count, scroll_line_count, false),
 
             // --- Run ---
             // The spawn spec carries no working directory and an empty
@@ -397,6 +463,33 @@ fn build_focus_pane_command(direction: Direction) -> Command {
     Command::FocusPane(FocusPaneArgs {
         focus_target: FocusTarget::Direction(direction),
         client_id: None,
+    })
+}
+
+/// The command a `move-pane-<direction>` action builds.
+fn build_move_pane_command(direction: Direction) -> Command {
+    Command::MovePane(MovePaneArgs {
+        pane_id: None,
+        direction,
+    })
+}
+
+/// The command a scroll action builds from its optional line count.
+fn build_scroll_pane_command(
+    requested_scroll_line_count: Option<i32>,
+    default_scroll_line_count: u16,
+    should_scroll_up: bool,
+) -> Command {
+    let default_scroll_line_count = i32::from(default_scroll_line_count);
+    let scroll_line_count = requested_scroll_line_count.unwrap_or(default_scroll_line_count);
+    let signed_scroll_line_count = if should_scroll_up {
+        scroll_line_count
+    } else {
+        scroll_line_count.saturating_neg()
+    };
+    Command::ScrollPane(ScrollPaneArgs {
+        pane_id: None,
+        scroll_line_count: signed_scroll_line_count,
     })
 }
 
