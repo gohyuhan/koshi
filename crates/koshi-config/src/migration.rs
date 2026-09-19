@@ -109,11 +109,18 @@ struct ConfigSchema {
     migrate_to_next_schema: Option<MigrateConfigFunction>,
 }
 
-const CONFIG_SCHEMAS: &[ConfigSchema] = &[ConfigSchema {
-    schema_version: 1,
-    validate_config_file: validate_v1,
-    migrate_to_next_schema: None,
-}];
+const CONFIG_SCHEMAS: &[ConfigSchema] = &[
+    ConfigSchema {
+        schema_version: 1,
+        validate_config_file: validate_schema,
+        migrate_to_next_schema: Some(reject_schema_one_migration),
+    },
+    ConfigSchema {
+        schema_version: 2,
+        validate_config_file: validate_schema,
+        migrate_to_next_schema: None,
+    },
+];
 
 /// Validates one config file against the schema version it declares.
 ///
@@ -127,6 +134,9 @@ pub fn validate_config(
 ) -> Result<ValidatedConfig, MigrationError> {
     validate_schema_registry(CONFIG_SCHEMAS)?;
     let schema_version = read_schema_version(config_path, config_source_text)?;
+    if schema_version < SCHEMA_VERSION {
+        return Err(build_old_schema_version_error(config_path, schema_version));
+    }
     if schema_version > SCHEMA_VERSION {
         return Err(MigrationError::Version {
             config_path: config_path.display().to_string(),
@@ -153,6 +163,13 @@ pub fn migrate_config(
     config_path: &Path,
     config_source_text: &str,
 ) -> Result<MigratedConfig, MigrationError> {
+    let source_schema_version = read_schema_version(config_path, config_source_text)?;
+    if source_schema_version < SCHEMA_VERSION {
+        return Err(build_old_schema_version_error(
+            config_path,
+            source_schema_version,
+        ));
+    }
     migrate_with_registry(
         config_file_kind,
         config_path,
@@ -258,7 +275,7 @@ fn parse_schema_version_from_document(
     Ok(schema_version)
 }
 
-fn validate_v1(
+fn validate_schema(
     config_file_kind: ConfigFileKind,
     config_path: &Path,
     config_source_text: &str,
@@ -358,6 +375,25 @@ fn build_version_error(
         config_path: config_path.display().to_string(),
         version_error_detail: version_error_detail.into(),
     }
+}
+
+fn build_old_schema_version_error(
+    config_path: &Path,
+    declared_schema_version: u32,
+) -> MigrationError {
+    build_version_error(
+        config_path,
+        format!(
+            "schema version {declared_schema_version} is older than this koshi supports ({SCHEMA_VERSION})"
+        ),
+    )
+}
+
+fn reject_schema_one_migration(
+    config_path: &Path,
+    _config_source_text: &str,
+) -> Result<String, MigrationError> {
+    Err(build_old_schema_version_error(config_path, 1))
 }
 
 fn find_schema_by_version(

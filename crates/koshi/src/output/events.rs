@@ -55,13 +55,10 @@ pub fn filter_recent_events(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionEvents {
     /// The session that remembered them.
-    #[serde(rename = "session")]
     pub session_id: SessionId,
     /// That session's name.
-    #[serde(rename = "name")]
     pub session_name: String,
     /// The events, oldest first.
-    #[serde(rename = "events")]
     pub recent_events: Vec<RecentEvent>,
 }
 

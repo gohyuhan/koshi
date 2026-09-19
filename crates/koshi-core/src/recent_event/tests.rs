@@ -598,15 +598,15 @@ fn a_record_survives_the_wire_with_an_owned_name() {
 #[test]
 fn a_record_from_a_newer_koshi_reads_with_the_field_it_adds_ignored() {
     let serialized_recent_event_json = r#"{
-        "at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
-        "name": "PaneOpenedSideways",
-        "session": null,
-        "client": null,
-        "tab": null,
-        "pane": null,
-        "plugin": null,
-        "command": null,
-        "subscriber": null,
+        "occurred_at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
+        "event_name": "PaneOpenedSideways",
+        "session_id": null,
+        "client_id": null,
+        "tab_id": null,
+        "pane_id": null,
+        "plugin_id": null,
+        "command_id": null,
+        "subscriber_id": null,
         "workspace": "w-1"
     }"#;
 
@@ -623,15 +623,15 @@ fn a_record_from_a_newer_koshi_reads_with_the_field_it_adds_ignored() {
 #[test]
 fn a_record_whose_time_cannot_be_represented_is_refused_and_does_not_panic() {
     let serialized_recent_event_json = r#"{
-        "at": {"secs_since_epoch": 18446744073709551615, "nanos_since_epoch": 999999999},
-        "name": "PaneCreated",
-        "session": null,
-        "client": null,
-        "tab": null,
-        "pane": null,
-        "plugin": null,
-        "command": null,
-        "subscriber": null
+        "occurred_at": {"secs_since_epoch": 18446744073709551615, "nanos_since_epoch": 999999999},
+        "event_name": "PaneCreated",
+        "session_id": null,
+        "client_id": null,
+        "tab_id": null,
+        "pane_id": null,
+        "plugin_id": null,
+        "command_id": null,
+        "subscriber_id": null
     }"#;
 
     let recent_event_parse_error =
@@ -647,14 +647,14 @@ fn a_record_whose_time_cannot_be_represented_is_refused_and_does_not_panic() {
 #[test]
 fn a_record_missing_an_id_field_reads_it_as_absent() {
     let serialized_recent_event_json = r#"{
-        "at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
-        "name": "PaneCreated",
-        "session": null,
-        "client": null,
-        "tab": null,
-        "pane": null,
-        "plugin": null,
-        "command": null
+        "occurred_at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
+        "event_name": "PaneCreated",
+        "session_id": null,
+        "client_id": null,
+        "tab_id": null,
+        "pane_id": null,
+        "plugin_id": null,
+        "command_id": null
     }"#;
 
     let decoded_recent_event: RecentEvent = serde_json::from_str(serialized_recent_event_json)
@@ -666,23 +666,23 @@ fn a_record_missing_an_id_field_reads_it_as_absent() {
 
 #[test]
 fn a_record_missing_the_time_or_the_name_is_refused() {
-    let missing_time_json = r#"{"name": "Quit", "session": null, "client": null, "tab": null,
-        "pane": null, "plugin": null, "command": null, "subscriber": null}"#;
-    let missing_name_json = r#"{"at": {"secs_since_epoch": 1, "nanos_since_epoch": 0}, "session": null,
-        "client": null, "tab": null, "pane": null, "plugin": null, "command": null,
-        "subscriber": null}"#;
+    let missing_time_json = r#"{"event_name": "Quit", "session_id": null, "client_id": null, "tab_id": null,
+        "pane_id": null, "plugin_id": null, "command_id": null, "subscriber_id": null}"#;
+    let missing_name_json = r#"{"occurred_at": {"secs_since_epoch": 1, "nanos_since_epoch": 0}, "session_id": null,
+        "client_id": null, "tab_id": null, "pane_id": null, "plugin_id": null, "command_id": null,
+        "subscriber_id": null}"#;
 
     let missing_time_parse_error =
         serde_json::from_str::<RecentEvent>(missing_time_json).expect_err("a record needs a time");
     assert!(
-        missing_time_parse_error.to_string().contains("at"),
+        missing_time_parse_error.to_string().contains("occurred_at"),
         "{missing_time_parse_error}"
     );
 
     let missing_name_parse_error =
         serde_json::from_str::<RecentEvent>(missing_name_json).expect_err("a record needs a name");
     assert!(
-        missing_name_parse_error.to_string().contains("name"),
+        missing_name_parse_error.to_string().contains("event_name"),
         "{missing_name_parse_error}"
     );
 }
@@ -690,15 +690,15 @@ fn a_record_missing_the_time_or_the_name_is_refused() {
 #[test]
 fn a_record_whose_name_is_not_an_event_this_build_has_still_reads() {
     let serialized_recent_event_json = r#"{
-        "at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
-        "name": "PaneOpenedSideways",
-        "session": null,
-        "client": null,
-        "tab": null,
-        "pane": null,
-        "plugin": null,
-        "command": null,
-        "subscriber": null
+        "occurred_at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
+        "event_name": "PaneOpenedSideways",
+        "session_id": null,
+        "client_id": null,
+        "tab_id": null,
+        "pane_id": null,
+        "plugin_id": null,
+        "command_id": null,
+        "subscriber_id": null
     }"#;
 
     let decoded_recent_event: RecentEvent =
@@ -713,22 +713,22 @@ fn a_record_serializes_with_its_field_names_in_order() {
 
     assert_eq!(
         serde_json::to_string(&recorded_event).unwrap(),
-        r#"{"at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"name":"Quit","session":null,"client":null,"tab":null,"pane":null,"plugin":null,"command":null,"subscriber":null}"#
+        r#"{"occurred_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"event_name":"Quit","session_id":null,"client_id":null,"tab_id":null,"pane_id":null,"plugin_id":null,"command_id":null,"subscriber_id":null}"#
     );
 }
 
 #[test]
 fn a_record_whose_name_is_null_is_refused() {
     let serialized_recent_event_json = r#"{
-        "at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
-        "name": null,
-        "session": null,
-        "client": null,
-        "tab": null,
-        "pane": null,
-        "plugin": null,
-        "command": null,
-        "subscriber": null
+        "occurred_at": {"secs_since_epoch": 1700000000, "nanos_since_epoch": 0},
+        "event_name": null,
+        "session_id": null,
+        "client_id": null,
+        "tab_id": null,
+        "pane_id": null,
+        "plugin_id": null,
+        "command_id": null,
+        "subscriber_id": null
     }"#;
 
     let null_name_parse_error = serde_json::from_str::<RecentEvent>(serialized_recent_event_json)

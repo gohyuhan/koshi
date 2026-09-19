@@ -84,19 +84,15 @@ fn render_settled_server_line(status_verb: &str, saved_server: &SavedServer) -> 
 struct RemoteServerRow {
     /// The name the user chose for this server, or `None` when they chose
     /// none.
-    #[serde(rename = "name")]
     server_name: Option<String>,
     /// Where the server listens, as `host:port`.
-    #[serde(rename = "address")]
     server_address: String,
     /// The sha256 of the certificate this server presented on the first
     /// connection, as 64 lowercase hex characters, or `None` while no
     /// connection to it has opened.
-    #[serde(rename = "fingerprint")]
     certificate_fingerprint: Option<String>,
     /// When a connection to this server last opened, or `None` when none has
     /// since it was saved.
-    #[serde(rename = "last_used")]
     last_used_at: Option<SystemTime>,
 }
 

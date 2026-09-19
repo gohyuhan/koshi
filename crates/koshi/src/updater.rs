@@ -368,8 +368,7 @@ fn restart_advertised_sessions(
 #[derive(Debug, Deserialize)]
 struct Release {
     /// The git tag the release was cut from, e.g. `v0.2.0`.
-    #[serde(rename = "tag_name")]
-    release_tag: String,
+    tag_name: String,
 }
 
 /// Returns the newer release tag when one is available, or `None` when this
@@ -392,7 +391,7 @@ fn fetch_latest_release(should_allow_prerelease_updates: bool) -> Result<String,
         let latest_release_url =
             format!("https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/latest");
         let release: Release = fetch_json(&latest_release_url)?;
-        Ok(release.release_tag)
+        Ok(release.tag_name)
     }
 }
 
@@ -406,9 +405,9 @@ fn find_highest_release_version(releases: Vec<Release>) -> Result<String, String
     releases
         .into_iter()
         .filter_map(|release| {
-            Version::parse(strip_version_prefix(&release.release_tag))
+            Version::parse(strip_version_prefix(&release.tag_name))
                 .ok()
-                .map(|parsed_version| (parsed_version, release.release_tag))
+                .map(|parsed_version| (parsed_version, release.tag_name))
         })
         .max_by(|left_release, right_release| left_release.0.cmp(&right_release.0))
         .map(|(_, release_tag)| release_tag)

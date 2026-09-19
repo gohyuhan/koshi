@@ -40,14 +40,11 @@ pub const SERVER_STORE_FORMAT: u32 = koshi_core::compat::SAVED_SERVER_FORMAT.max
 pub struct SavedServer {
     /// The name the user chose for this server, or `None` when they chose
     /// none. The user types it in place of the address.
-    #[serde(rename = "name")]
     pub server_name: Option<String>,
     /// Where the server listens, as `host:port`.
-    #[serde(rename = "address")]
     pub server_address: String,
     /// The secret the operator handed out with a grant. `ConnectionToken`'s
     /// `Debug` and `Display` write it redacted.
-    #[serde(rename = "secret")]
     pub connection_token: ConnectionToken,
     /// The sha256 of the certificate this server presented on the first
     /// connection, as 64 lowercase hex characters, or `None` while no
@@ -55,11 +52,7 @@ pub struct SavedServer {
     /// different certificate is refused; the first connection of a record
     /// holding `None` pins whatever certificate it meets. `None` leaves the
     /// file without this field.
-    #[serde(
-        rename = "fingerprint",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub certificate_fingerprint: Option<String>,
     /// When this server was first saved.
     pub added_at: SystemTime,
@@ -76,11 +69,9 @@ pub struct SavedServer {
 #[serde(deny_unknown_fields)]
 pub struct ServerStore {
     /// The format number of the file these records came from or go to.
-    #[serde(rename = "format")]
     pub store_format: u32,
     /// One record per server, in the order they were saved. Saving an address
     /// again moves its record to the end.
-    #[serde(rename = "records")]
     pub saved_servers: Vec<SavedServer>,
 }
 

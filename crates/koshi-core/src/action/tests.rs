@@ -468,24 +468,24 @@ fn action_namespace_serialization_uses_stable_wire_forms() {
 }
 
 #[test]
-fn action_status_serialization_uses_kebab_case() {
+fn action_status_serialization_uses_declared_variant_names() {
     assert_eq!(
         serde_json::to_string(&ActionStatus::Available).expect("serialize"),
-        "\"available\""
+        "\"Available\""
     );
     assert_eq!(
         serde_json::to_string(&ActionStatus::ComingSoon).expect("serialize"),
-        "\"coming-soon\""
+        "\"ComingSoon\""
     );
     let decoded_action_status: ActionStatus =
-        serde_json::from_str("\"coming-soon\"").expect("deserialize");
+        serde_json::from_str("\"ComingSoon\"").expect("deserialize");
     assert_eq!(decoded_action_status, ActionStatus::ComingSoon);
-    let rejected: Result<ActionStatus, _> = serde_json::from_str("\"ComingSoon\"");
+    let rejected: Result<ActionStatus, _> = serde_json::from_str("\"coming-soon\"");
     assert_eq!(
         rejected
-            .expect_err("PascalCase is not the wire form")
+            .expect_err("kebab-case is not the wire form")
             .to_string(),
-        "unknown variant `ComingSoon`, expected `available` or `coming-soon` at line 1 column 12"
+        "unknown variant `coming-soon`, expected `Available` or `ComingSoon` at line 1 column 13"
     );
 }
 
@@ -551,11 +551,14 @@ fn action_metadata_defaults_is_continuous_when_wire_field_is_absent() {
         is_continuous: true,
     };
     let mut metadata_json = serde_json::to_value(&metadata).expect("serialize");
-    assert_eq!(metadata_json["continuous"], serde_json::Value::Bool(true));
+    assert_eq!(
+        metadata_json["is_continuous"],
+        serde_json::Value::Bool(true)
+    );
     let removed_continuous_wire_field = metadata_json
         .as_object_mut()
         .expect("metadata is an object")
-        .remove("continuous");
+        .remove("is_continuous");
     assert_eq!(
         removed_continuous_wire_field,
         Some(serde_json::Value::Bool(true))

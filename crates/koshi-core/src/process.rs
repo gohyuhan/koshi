@@ -22,7 +22,7 @@ pub enum KillPolicy {
     /// Request a clean shutdown, allowing up to `timeout_duration` to comply.
     Graceful {
         /// How long to wait for the process to exit on its own.
-        #[serde(rename = "timeout", with = "duration_seconds")]
+        #[serde(with = "duration_seconds")]
         timeout_duration: Duration,
     },
     /// Kill the process immediately.
@@ -34,7 +34,7 @@ pub enum KillPolicy {
     GracefulTree {
         /// How long to wait for the process to exit on its own before the
         /// group-kill.
-        #[serde(rename = "timeout", with = "duration_seconds")]
+        #[serde(with = "duration_seconds")]
         timeout_duration: Duration,
     },
 }
@@ -106,13 +106,10 @@ pub struct SpawnSpec {
     /// The program to execute.
     pub program: PathBuf,
     /// Arguments passed to the program (excluding `argv[0]`).
-    #[serde(rename = "args")]
     pub arguments: Vec<String>,
     /// Working directory; `None` inherits the parent's.
-    #[serde(rename = "cwd")]
     pub working_directory: Option<PathBuf>,
     /// Environment overrides, sorted for deterministic serialization.
-    #[serde(rename = "env")]
     pub environment_variables: BTreeMap<String, String>,
     /// Which shell this spawn targets.
     pub shell_kind: ShellKind,
@@ -180,10 +177,8 @@ fn resolve_shell_program(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PtySize {
     /// Width in cells (columns).
-    #[serde(rename = "cols")]
     pub column_count: u16,
     /// Height in cells (rows).
-    #[serde(rename = "rows")]
     pub row_count: u16,
 }
 

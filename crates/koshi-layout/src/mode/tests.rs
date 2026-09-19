@@ -139,7 +139,7 @@ fn layout_mode_serializes_as_an_externally_tagged_enum() {
     );
     assert_eq!(
         serde_json::to_value(LayoutMode::Fullscreen { focused_pane_id }).unwrap(),
-        serde_json::json!({ "Fullscreen": { "focused": focused_pane_id_json } })
+        serde_json::json!({ "Fullscreen": { "focused_pane_id": focused_pane_id_json } })
     );
 }
 

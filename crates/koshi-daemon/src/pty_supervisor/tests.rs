@@ -481,7 +481,7 @@ fn a_request_kind_the_supervisor_does_not_have_is_refused_by_name_and_the_link_k
     let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(TEST_IDLE_EXIT_DURATION);
     let mut link = TestLink::connect_with_connection_token(&supervisor.supervisor_address);
 
-    link.send_raw_frame(r#"{"request_id":99,"kind":{"Rehome":{"pane_id":1}}}"#);
+    link.send_raw_frame(r#"{"request_id":99,"request_kind":{"Rehome":{"pane_id":1}}}"#);
     let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
@@ -514,7 +514,7 @@ fn bytes_that_are_not_a_readable_request_are_refused_and_the_link_keeps_serving(
     let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(TEST_IDLE_EXIT_DURATION);
     let mut link = TestLink::connect_with_connection_token(&supervisor.supervisor_address);
 
-    link.send_raw_frame(r#"{"request_id":"not a number","kind":"ListPanes"}"#);
+    link.send_raw_frame(r#"{"request_id":"not a number","request_kind":"ListPanes"}"#);
     let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
@@ -551,7 +551,7 @@ fn a_request_kind_the_supervisor_does_not_have_is_refused_for_the_missing_hello_
     let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(TEST_IDLE_EXIT_DURATION);
     let mut link = TestLink::connect_without_hello(&supervisor.supervisor_address);
 
-    link.send_raw_frame(r#"{"request_id":99,"kind":{"Rehome":{"pane_id":1}}}"#);
+    link.send_raw_frame(r#"{"request_id":99,"request_kind":{"Rehome":{"pane_id":1}}}"#);
     let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };
@@ -588,7 +588,7 @@ fn bytes_that_are_not_a_readable_request_before_a_hello_are_refused_and_the_link
     let mut supervisor = RunningSupervisor::start_with_idle_exit_duration(TEST_IDLE_EXIT_DURATION);
     let mut link = TestLink::connect_without_hello(&supervisor.supervisor_address);
 
-    link.send_raw_frame(r#"{"request_id":"not a number","kind":"ListPanes"}"#);
+    link.send_raw_frame(r#"{"request_id":"not a number","request_kind":"ListPanes"}"#);
     let SupervisorMessage::Response(response) = link.receive_supervisor_message() else {
         panic!("the refusal is a response, not an event");
     };

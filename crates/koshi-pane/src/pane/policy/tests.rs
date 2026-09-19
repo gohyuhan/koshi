@@ -84,7 +84,7 @@ fn a_graceful_timeout_serializes_as_whole_seconds_matching_kill_policy() {
 
     // `duration_seconds` writes the timeout as a whole number of seconds, the same
     // form `KillPolicy` uses.
-    assert_eq!(close, r#"{"Graceful":{"timeout":3}}"#);
+    assert_eq!(close, r#"{"Graceful":{"timeout_duration":3}}"#);
     assert_eq!(close, kill);
 }
 
@@ -98,7 +98,7 @@ fn a_sub_second_graceful_timeout_loses_its_fraction_in_serde() {
     let deserialized_policy: PaneClosePolicy =
         serde_json::from_str(&policy_json).expect("deserialize");
 
-    assert_eq!(policy_json, r#"{"Graceful":{"timeout":1}}"#);
+    assert_eq!(policy_json, r#"{"Graceful":{"timeout_duration":1}}"#);
     assert_eq!(
         deserialized_policy,
         PaneClosePolicy::Graceful {
@@ -119,7 +119,7 @@ fn the_largest_graceful_timeout_serializes_as_u64_max_seconds() {
 
     assert_eq!(
         policy_json,
-        r#"{"Graceful":{"timeout":18446744073709551615}}"#
+        r#"{"Graceful":{"timeout_duration":18446744073709551615}}"#
     );
     assert_eq!(
         deserialized_policy,
@@ -132,24 +132,24 @@ fn the_largest_graceful_timeout_serializes_as_u64_max_seconds() {
 #[test]
 fn a_negative_graceful_timeout_fails_to_deserialize() {
     let deserialization_error =
-        serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":-1}}"#)
+        serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout_duration":-1}}"#)
             .expect_err("negative seconds");
 
     assert_eq!(
         deserialization_error.to_string(),
-        "invalid value: integer `-1`, expected u64 at line 1 column 25"
+        "invalid value: integer `-1`, expected u64 at line 1 column 34"
     );
 }
 
 #[test]
 fn a_fractional_graceful_timeout_fails_to_deserialize() {
     let deserialization_error =
-        serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout":1.5}}"#)
+        serde_json::from_str::<PaneClosePolicy>(r#"{"Graceful":{"timeout_duration":1.5}}"#)
             .expect_err("fractional seconds");
 
     assert_eq!(
         deserialization_error.to_string(),
-        "invalid type: floating point `1.5`, expected u64 at line 1 column 26"
+        "invalid type: floating point `1.5`, expected u64 at line 1 column 35"
     );
 }
 

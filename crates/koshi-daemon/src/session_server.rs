@@ -172,10 +172,8 @@ type PtyOwner = SupervisorPtyBackend;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeSupport {
     /// The oldest resume-file format this build reads.
-    #[serde(rename = "min")]
     pub minimum_resume_format: u32,
     /// The newest resume-file format this build reads.
-    #[serde(rename = "max")]
     pub maximum_resume_format: u32,
 }
 

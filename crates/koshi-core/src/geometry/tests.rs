@@ -95,16 +95,16 @@ fn pixel_cell_dimensions_are_nonzero_and_round_trip_exactly() {
     let pixel_cell_size_json = serde_json::to_value(pixel_cell_size).expect("serialize");
     assert_eq!(
         pixel_cell_size_json,
-        serde_json::json!({"width": 10, "height": 20})
+        serde_json::json!({"pixel_width": 10, "pixel_height": 20})
     );
     assert_eq!(
         serde_json::from_value::<PixelCellSize>(pixel_cell_size_json).expect("restore"),
         pixel_cell_size
     );
-    assert!(
-        serde_json::from_value::<PixelCellSize>(serde_json::json!({"width": 0, "height": 20}))
-            .is_err()
-    );
+    assert!(serde_json::from_value::<PixelCellSize>(
+        serde_json::json!({"pixel_width": 0, "pixel_height": 20})
+    )
+    .is_err());
 }
 
 #[test]
@@ -347,7 +347,10 @@ fn pane_area_reported_encodes_as_a_tagged_size() {
     }))
     .expect("serialize");
 
-    assert_eq!(pane_area_json, r#"{"Reported":{"cols":80,"rows":22}}"#);
+    assert_eq!(
+        pane_area_json,
+        r#"{"Reported":{"column_count":80,"row_count":22}}"#
+    );
 }
 
 #[test]
@@ -430,7 +433,7 @@ fn rect_encodes_origin_then_size() {
 
     assert_eq!(
         rect_json,
-        r#"{"origin":{"x":1,"y":2},"size":{"cols":3,"rows":4}}"#
+        r#"{"origin":{"column":1,"row":2},"cell_size":{"column_count":3,"row_count":4}}"#
     );
 }
 
@@ -449,23 +452,24 @@ fn layout_enums_encode_as_bare_variant_names() {
 #[test]
 fn point_rejects_a_coordinate_outside_u16() {
     let negative_coordinate_error =
-        serde_json::from_str::<Point>(r#"{"x":-1,"y":0}"#).expect_err("negative");
+        serde_json::from_str::<Point>(r#"{"column":-1,"row":0}"#).expect_err("negative");
     assert_eq!(
         negative_coordinate_error.to_string(),
-        "invalid value: integer `-1`, expected u16 at line 1 column 7"
+        "invalid value: integer `-1`, expected u16 at line 1 column 12"
     );
 
     let oversized_coordinate_error =
-        serde_json::from_str::<Point>(r#"{"x":65536,"y":0}"#).expect_err("too big");
+        serde_json::from_str::<Point>(r#"{"column":65536,"row":0}"#).expect_err("too big");
     assert_eq!(
         oversized_coordinate_error.to_string(),
-        "invalid value: integer `65536`, expected u16 at line 1 column 10"
+        "invalid value: integer `65536`, expected u16 at line 1 column 15"
     );
 }
 
 #[test]
 fn point_ignores_an_unknown_field() {
-    let point: Point = serde_json::from_str(r#"{"x":1,"y":2,"z":3}"#).expect("deserialize");
+    let point: Point =
+        serde_json::from_str(r#"{"column":1,"row":2,"extra":3}"#).expect("deserialize");
 
     assert_eq!(point, Point { column: 1, row: 2 });
 }

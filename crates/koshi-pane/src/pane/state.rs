@@ -51,16 +51,12 @@ impl PaneKind {
 pub struct PaneRecord {
     /// The stable pane id, which matches the layout leaf that references this
     /// pane. The pane id never changes.
-    #[serde(rename = "id")]
     pane_id: PaneId,
     /// What backs the pane. The pane kind is set at creation and never changes.
-    #[serde(rename = "kind")]
     pane_kind: PaneKind,
     /// The process spawn specification, when the pane has one.
-    #[serde(rename = "command")]
     pub spawn_spec: Option<SpawnSpec>,
     /// The working directory that the pane starts in, when it is known.
-    #[serde(rename = "cwd")]
     pub working_directory: Option<PathBuf>,
     /// How the pane carries out a requested close.
     pub close_policy: PaneClosePolicy,

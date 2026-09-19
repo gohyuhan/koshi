@@ -202,8 +202,11 @@ fn reading_junk_bytes_is_token_store_unreadable() {
 fn a_file_with_an_unknown_field_is_unreadable() {
     let test_directory = TempDir::new().expect("create test directory");
     let token_store_path = test_directory.path().join("tokens");
-    std::fs::write(&token_store_path, r#"{"format":1,"records":[],"extra":1}"#)
-        .expect("write file");
+    std::fs::write(
+        &token_store_path,
+        r#"{"store_format":2,"token_records":[],"extra":1}"#,
+    )
+    .expect("write file");
 
     match TokenStore::load_token_store_from_path(&token_store_path) {
         Err(IpcError::RemoteFileUnreadable {
@@ -214,7 +217,7 @@ fn a_file_with_an_unknown_field_is_unreadable() {
             assert_eq!(reported_file_path, token_store_path.display().to_string());
             assert_eq!(
                 error_detail,
-                "unknown field `extra`, expected `format` or `records` at line 1 column 32"
+                "unknown field `extra`, expected `store_format` or `token_records` at line 1 column 44"
             );
         }
         unexpected_error => {
@@ -227,7 +230,11 @@ fn a_file_with_an_unknown_field_is_unreadable() {
 fn a_file_whose_format_number_is_two_is_unreadable() {
     let test_directory = TempDir::new().expect("create test directory");
     let token_store_path = test_directory.path().join("tokens");
-    std::fs::write(&token_store_path, r#"{"format":2,"records":[]}"#).expect("write file");
+    std::fs::write(
+        &token_store_path,
+        r#"{"store_format":3,"token_records":[]}"#,
+    )
+    .expect("write file");
 
     match TokenStore::load_token_store_from_path(&token_store_path) {
         Err(IpcError::RemoteFileUnreadable {
@@ -236,7 +243,7 @@ fn a_file_whose_format_number_is_two_is_unreadable() {
             error_detail,
         }) => {
             assert_eq!(reported_file_path, token_store_path.display().to_string());
-            assert_eq!(error_detail, "format 2 is not the 1 this build reads");
+            assert_eq!(error_detail, "format 3 is not the 2 this build reads");
         }
         unexpected_error => {
             panic!("expected a token store RemoteFileUnreadable, got {unexpected_error:?}")
@@ -1029,7 +1036,7 @@ fn a_store_whose_bytes_stop_part_way_is_refused_and_admits_nothing() {
     let token_store_path = test_directory.path().join("tokens");
     std::fs::write(
         &token_store_path,
-        br#"{"format":1,"records":[{"identity":"ad"#,
+        br#"{"store_format":2,"token_records":[{"identity":"ad"#,
     )
     .expect("write the truncated store");
 
@@ -1047,7 +1054,7 @@ fn a_store_whose_bytes_stop_part_way_is_refused_and_admits_nothing() {
     assert_eq!(reported_file_path, token_store_path.display().to_string());
     assert_eq!(
         error_detail,
-        "EOF while parsing a string at line 1 column 38"
+        "EOF while parsing a string at line 1 column 50"
     );
 }
 
@@ -1077,8 +1084,11 @@ fn a_directory_where_the_store_belongs_is_refused_rather_than_read_as_empty() {
 fn a_store_holding_no_records_reads_back_as_a_store_holding_no_records() {
     let test_directory = TempDir::new().expect("create test directory");
     let token_store_path = test_directory.path().join("tokens");
-    std::fs::write(&token_store_path, br#"{"format":1,"records":[]}"#)
-        .expect("write the empty store");
+    std::fs::write(
+        &token_store_path,
+        br#"{"store_format":2,"token_records":[]}"#,
+    )
+    .expect("write the empty store");
 
     let token_store = TokenStore::load_token_store_from_path(&token_store_path)
         .expect("an empty record list reads");
@@ -1140,10 +1150,10 @@ fn a_revoked_secret_and_an_expired_one_are_admitted_by_nothing() {
 }
 
 #[test]
-fn this_build_writes_token_store_format_one() {
-    // A store written by this build carries format 1. A build that reads only
+fn this_build_writes_token_store_format_two() {
+    // A store written by this build carries format 2. A build that reads only
     // another number refuses this machine's grants.
-    assert_eq!(TOKEN_STORE_FORMAT, 1);
+    assert_eq!(TOKEN_STORE_FORMAT, 2);
 }
 
 // --- Whether a listed grant still stands ---
@@ -1362,7 +1372,7 @@ fn a_store_holding_one_record_with_every_field_set_is_written_as_these_exact_byt
 
     assert_eq!(
         std::fs::read_to_string(&token_store_path).expect("read file bytes"),
-        r#"{"format":1,"records":[{"identity":"ada","hash":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":{"secs_since_epoch":900,"nanos_since_epoch":0},"last_used_at":{"secs_since_epoch":200,"nanos_since_epoch":0},"revoked_at":{"secs_since_epoch":300,"nanos_since_epoch":0}}]}"#
+        r#"{"store_format":2,"token_records":[{"identity":"ada","token_hash":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":{"secs_since_epoch":900,"nanos_since_epoch":0},"last_used_at":{"secs_since_epoch":200,"nanos_since_epoch":0},"revoked_at":{"secs_since_epoch":300,"nanos_since_epoch":0}}]}"#
     );
     assert_eq!(
         TokenStore::load_token_store_from_path(&token_store_path).expect("read token store"),
@@ -1405,7 +1415,7 @@ fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
     let token_store_path = test_directory.path().join("tokens");
     std::fs::write(
         &token_store_path,
-        r#"{"format":1,"records":[{"identity":"ada","hash":"h","scope":"HostWide","issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null,"extra":1}]}"#,
+        r#"{"store_format":2,"token_records":[{"identity":"ada","token_hash":"h","scope":"HostWide","issued_at":{"secs_since_epoch":100,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null,"extra":1}]}"#,
     )
     .expect("write file");
 
@@ -1423,8 +1433,7 @@ fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
     assert_eq!(reported_file_path, token_store_path.display().to_string());
     assert_eq!(
         error_detail,
-        "unknown field `extra`, expected one of `identity`, `hash`, `scope`, `issued_at`, \
-         `expires_at`, `last_used_at`, `revoked_at` at line 1 column 193"
+        "unknown field `extra`, expected one of `identity`, `token_hash`, `scope`, `issued_at`, `expires_at`, `last_used_at`, `revoked_at` at line 1 column 211"
     );
 }
 
@@ -1452,7 +1461,7 @@ fn a_listed_grant_carrying_a_field_this_build_does_not_know_still_reads() {
 fn a_file_missing_its_record_list_is_unreadable() {
     let test_directory = TempDir::new().expect("create test directory");
     let token_store_path = test_directory.path().join("tokens");
-    std::fs::write(&token_store_path, r#"{"format":1}"#).expect("write file");
+    std::fs::write(&token_store_path, r#"{"store_format":2}"#).expect("write file");
 
     let missing_records_field_error = TokenStore::load_token_store_from_path(&token_store_path)
         .expect_err("a store without records is refused");
@@ -1466,14 +1475,21 @@ fn a_file_missing_its_record_list_is_unreadable() {
         panic!("expected a token store RemoteFileUnreadable, got {missing_records_field_error:?}");
     };
     assert_eq!(reported_file_path, token_store_path.display().to_string());
-    assert_eq!(error_detail, "missing field `records` at line 1 column 12");
+    assert_eq!(
+        error_detail,
+        "missing field `token_records` at line 1 column 18"
+    );
 }
 
 #[test]
 fn a_file_whose_format_number_is_zero_is_unreadable() {
     let test_directory = TempDir::new().expect("create test directory");
     let token_store_path = test_directory.path().join("tokens");
-    std::fs::write(&token_store_path, r#"{"format":0,"records":[]}"#).expect("write file");
+    std::fs::write(
+        &token_store_path,
+        r#"{"store_format":0,"token_records":[]}"#,
+    )
+    .expect("write file");
 
     let unsupported_format_error =
         TokenStore::load_token_store_from_path(&token_store_path).expect_err("format 0 is refused");
@@ -1487,7 +1503,7 @@ fn a_file_whose_format_number_is_zero_is_unreadable() {
         panic!("expected a token store RemoteFileUnreadable, got {unsupported_format_error:?}");
     };
     assert_eq!(reported_file_path, token_store_path.display().to_string());
-    assert_eq!(error_detail, "format 0 is not the 1 this build reads");
+    assert_eq!(error_detail, "format 0 is not the 2 this build reads");
 }
 
 #[test]

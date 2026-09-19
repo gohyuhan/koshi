@@ -17,7 +17,7 @@ pub enum PaneClosePolicy {
     /// Close gracefully. `timeout_duration` is how long the process has to clean up.
     /// `timeout_duration` serializes as whole seconds; the sub-second part is dropped.
     Graceful {
-        #[serde(rename = "timeout", with = "koshi_core::process::duration_seconds")]
+        #[serde(with = "koshi_core::process::duration_seconds")]
         timeout_duration: Duration,
     },
     /// Force-kill the process immediately.

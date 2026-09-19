@@ -481,7 +481,7 @@ fn legacy_scrollback_rows_deserialize_as_unmarked() {
         .as_object_mut()
         .expect("scrollback is an object");
     let serialized_line_rows = serialized_scrollback_object
-        .get_mut("lines")
+        .get_mut("retained_lines")
         .and_then(serde_json::Value::as_array_mut)
         .expect("scrollback lines are an array");
     for serialized_line_row in serialized_line_rows {
@@ -490,7 +490,7 @@ fn legacy_scrollback_rows_deserialize_as_unmarked() {
             .expect("serialized row is an array")
             .pop()
             .expect("serialized row has metadata");
-        let row_end_value = serialized_row_metadata["end"].clone();
+        let row_end_value = serialized_row_metadata["row_end"].clone();
         serialized_line_row
             .as_array_mut()
             .expect("serialized row is an array")
@@ -771,7 +771,7 @@ fn a_stored_retained_byte_count_that_does_not_match_the_rows_is_recomputed() {
     scrollback.push_row(&build_line_cells("abc"), RowMetadata::default());
     let mut serialized_scrollback =
         serde_json::to_value(&scrollback).expect("scrollback serializes");
-    serialized_scrollback["byte_total"] = serde_json::json!(0);
+    serialized_scrollback["retained_byte_count"] = serde_json::json!(0);
 
     let mut restored_scrollback: Scrollback =
         serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");
@@ -794,7 +794,7 @@ fn stored_rows_over_the_line_cap_are_dropped_on_the_way_in() {
     }
     let mut serialized_scrollback =
         serde_json::to_value(&scrollback).expect("scrollback serializes");
-    serialized_scrollback["max_lines"] = serde_json::json!(2);
+    serialized_scrollback["maximum_line_count"] = serde_json::json!(2);
 
     let restored_scrollback: Scrollback =
         serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");
@@ -818,7 +818,7 @@ fn stored_rows_over_the_byte_cap_are_dropped_on_the_way_in() {
     }
     let mut serialized_scrollback =
         serde_json::to_value(&scrollback).expect("scrollback serializes");
-    serialized_scrollback["max_bytes"] = serde_json::json!(6);
+    serialized_scrollback["maximum_byte_count"] = serde_json::json!(6);
 
     let restored_scrollback: Scrollback =
         serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");

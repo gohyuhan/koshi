@@ -404,9 +404,9 @@ fn render_single_session_listing(session_id: SessionId) -> String {
 #[cfg(unix)]
 fn render_single_server_version_answer(session_id: SessionId, build_version: &str) -> String {
     format!(
-        "[\n  {{\n    \"kind\": \"router\",\n    \"session\": null,\n    \
-         \"state\": \"not_running\"\n  }},\n  {{\n    \"kind\": \"session\",\n    \
-         \"session\": \"{}\",\n    \"state\": \"running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n",
+        "[\n  {{\n    \"server_kind\": \"Router\",\n    \"session_id\": null,\n    \
+         \"state\": \"NotRunning\"\n  }},\n  {{\n    \"server_kind\": \"Session\",\n    \
+         \"session_id\": \"{}\",\n    \"state\": \"Running\",\n    \"version\": \"{build_version}\"\n  }}\n]\n",
         session_id.get_uuid()
     )
 }

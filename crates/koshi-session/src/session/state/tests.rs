@@ -992,12 +992,12 @@ fn a_stored_session_carrying_a_config_snapshot_key_still_reads() {
     // names it reads back with the key ignored and every other field taken.
     let session_id = SessionId::new();
     let stored = serde_json::json!({
-        "id": session_id,
-        "name": "carried",
+        "session_id": session_id,
+        "session_name": "carried",
         "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
         "tabs": {},
-        "panes": { "records": {} },
-        "clients": { "records": {} },
+        "panes": { "pane_record_by_id": {} },
+        "clients": { "client_by_id": {} },
         "config_snapshot": null,
         "lifecycle": "Starting",
     });

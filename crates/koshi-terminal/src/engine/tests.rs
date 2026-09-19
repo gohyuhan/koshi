@@ -1222,7 +1222,8 @@ fn synchronized_output_transport_rejects_impossible_scanner_state() {
     )
     .expect("the transport serializes");
 
-    serialized_transport["terminal_input"]["utf8_continuations"] = serde_json::json!(4);
+    serialized_transport["terminal_input"]["remaining_utf8_continuation_count"] =
+        serde_json::json!(4);
     assert_eq!(
         serde_json::from_value::<SynchronizedOutputTransport>(serialized_transport.clone())
             .unwrap_err()
@@ -1230,9 +1231,10 @@ fn synchronized_output_transport_rejects_impossible_scanner_state() {
         "terminal-input UTF-8 continuation count is invalid"
     );
 
-    serialized_transport["terminal_input"]["utf8_continuations"] = serde_json::json!(0);
-    serialized_transport["terminal_input"]["tail_len"] = serde_json::json!(0);
-    serialized_transport["terminal_input"]["tail_next"] = serde_json::json!(7);
+    serialized_transport["terminal_input"]["remaining_utf8_continuation_count"] =
+        serde_json::json!(0);
+    serialized_transport["terminal_input"]["trailing_byte_count"] = serde_json::json!(0);
+    serialized_transport["terminal_input"]["trailing_start_index"] = serde_json::json!(7);
     assert_eq!(
         serde_json::from_value::<SynchronizedOutputTransport>(serialized_transport.clone())
             .unwrap_err()
@@ -1240,8 +1242,8 @@ fn synchronized_output_transport_rejects_impossible_scanner_state() {
         "terminal-input scanner tail is invalid"
     );
 
-    serialized_transport["terminal_input"]["tail_next"] = serde_json::json!(0);
-    serialized_transport["bytes"] = serde_json::json!([]);
+    serialized_transport["terminal_input"]["trailing_start_index"] = serde_json::json!(0);
+    serialized_transport["normalized_bytes"] = serde_json::json!([]);
     assert_eq!(
         serde_json::from_value::<SynchronizedOutputTransport>(serialized_transport)
             .unwrap_err()

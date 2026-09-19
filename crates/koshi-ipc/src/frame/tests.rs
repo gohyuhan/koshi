@@ -253,10 +253,10 @@ fn a_frame_survives_a_round_trip_field_for_field() {
 #[test]
 fn an_image_placement_without_availability_expects_its_record() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
-    encoded_json["panes"][0]["image_placements"][0]
+    encoded_json["pane_snapshots"][0]["image_placement_snapshots"][0]
         .as_object_mut()
         .expect("the image placement is an object")
-        .remove("available");
+        .remove("is_available");
 
     let received: PaintedFrame =
         serde_json::from_str(&encoded_json.to_string()).expect("the frame decodes");
@@ -276,18 +276,18 @@ fn image_chunk_bytes_use_base64_on_wire_and_read_old_number_lists() {
     assert_eq!(
         serde_json::to_value(&chunk).expect("the image chunk encodes"),
         json!({
-            "transfer_id": 1,
-            "offset": 0,
-            "last": true,
-            "bytes": "AAEC/wQFBgc="
+            "image_transfer_id": 1,
+            "byte_offset": 0,
+            "is_last": true,
+            "chunk_bytes": "AAEC/wQFBgc="
         })
     );
 
     let from_list: FrameImageChunk = serde_json::from_value(json!({
-        "transfer_id": 1,
-        "offset": 0,
-        "last": true,
-        "bytes": [0, 1, 2, 255, 4, 5, 6, 7]
+        "image_transfer_id": 1,
+        "byte_offset": 0,
+        "is_last": true,
+        "chunk_bytes": [0, 1, 2, 255, 4, 5, 6, 7]
     }))
     .expect("the number-list image chunk decodes");
 
@@ -295,10 +295,10 @@ fn image_chunk_bytes_use_base64_on_wire_and_read_old_number_lists() {
     assert_eq!(
         serde_json::to_value(from_list).expect("the decoded image chunk re-encodes"),
         json!({
-            "transfer_id": 1,
-            "offset": 0,
-            "last": true,
-            "bytes": "AAEC/wQFBgc="
+            "image_transfer_id": 1,
+            "byte_offset": 0,
+            "is_last": true,
+            "chunk_bytes": "AAEC/wQFBgc="
         })
     );
 }
@@ -307,14 +307,14 @@ fn image_chunk_bytes_use_base64_on_wire_and_read_old_number_lists() {
 fn an_image_value_this_build_does_not_know_falls_back_without_dropping_the_frame() {
     let frame_image_record_header: FrameImageRecordHeader = serde_json::from_value(json!({
         "protocol": "Vector",
-        "width": 1,
-        "height": 1,
-        "action": "Replace",
+        "pixel_width": 1,
+        "pixel_height": 1,
+        "image_action": "Replace",
         "display": {
-            "width": "AutoSize",
+            "requested_width": "AutoSize",
             "sixel_background": "Opaque"
         },
-        "anchor": [0, 0]
+        "anchor_cell": [0, 0]
     }))
     .expect("unknown image values use presentation defaults");
 
@@ -335,11 +335,11 @@ fn an_image_value_this_build_does_not_know_falls_back_without_dropping_the_frame
 #[test]
 fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
     let image_row_range_error = serde_json::from_value::<FrameImagePlacement>(json!({
-        "id": 1,
-        "content_id": 2,
-        "anchor": [65535, 0],
-        "columns": 1,
-        "rows": 2
+        "placement_id": 1,
+        "image_content_id": 2,
+        "anchor_cell": [65535, 0],
+        "column_count": 1,
+        "row_count": 2
     }))
     .expect_err("two rows cannot start at the last u16 row");
     assert_eq!(
@@ -348,11 +348,11 @@ fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
     );
 
     let image_column_range_error = serde_json::from_value::<FrameImagePlacement>(json!({
-        "id": 1,
-        "content_id": 2,
-        "anchor": [0, 65535],
-        "columns": 2,
-        "rows": 1
+        "placement_id": 1,
+        "image_content_id": 2,
+        "anchor_cell": [0, 65535],
+        "column_count": 2,
+        "row_count": 1
     }))
     .expect_err("two columns cannot start at the last u16 column");
     assert_eq!(
@@ -361,11 +361,11 @@ fn an_image_placement_cannot_cross_the_cell_coordinate_limit() {
     );
 
     let edge: FrameImagePlacement = serde_json::from_value(json!({
-        "id": 1,
-        "content_id": 2,
-        "anchor": [65535, 65535],
-        "columns": 1,
-        "rows": 1
+        "placement_id": 1,
+        "image_content_id": 2,
+        "anchor_cell": [65535, 65535],
+        "column_count": 1,
+        "row_count": 1
     }))
     .expect("one cell may occupy the last row and column");
     assert_eq!(edge.anchor_cell, (u16::MAX, u16::MAX));
@@ -387,7 +387,7 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
         image_byte_count: 8,
     };
     let mut wrong_length = serde_json::to_value(&transfer).expect("the transfer encodes");
-    wrong_length["byte_len"] = json!(4);
+    wrong_length["image_byte_count"] = json!(4);
     let error = serde_json::from_value::<FrameImageTransfer>(wrong_length)
         .expect_err("a transfer with a wrong byte count is refused");
     assert_eq!(
@@ -396,10 +396,10 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
     );
 
     let empty_chunk = serde_json::json!({
-        "transfer_id": 1,
-        "offset": 0,
-        "last": true,
-        "bytes": ""
+        "image_transfer_id": 1,
+        "byte_offset": 0,
+        "is_last": true,
+        "chunk_bytes": ""
     });
     let error = serde_json::from_value::<FrameImageChunk>(empty_chunk)
         .expect_err("an empty image chunk is refused");
@@ -409,32 +409,32 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
 #[test]
 fn image_transfer_dimensions_accept_the_limits_and_refuse_the_next_value() {
     let at_pixel_limit: FrameImageTransfer = serde_json::from_value(json!({
-        "id": 1,
-        "record": {
+        "image_content_id": 1,
+        "image_record": {
             "protocol": "Kitty",
-            "width": 16_384,
-            "height": 1_024,
-            "action": "Display",
+            "pixel_width": 16_384,
+            "pixel_height": 1_024,
+            "image_action": "Display",
             "display": FrameImageDisplay::default(),
-            "anchor": [0, 0]
+            "anchor_cell": [0, 0]
         },
-        "byte_len": 67_108_864
+        "image_byte_count": 67_108_864
     }))
     .expect("the exact graphics limits are accepted");
     assert_eq!(at_pixel_limit.image_byte_count, 67_108_864);
 
     for (width, height, byte_len) in [(0, 1, 0), (16_385, 1, 65_540), (16_384, 1_025, 67_174_400)] {
         let error = serde_json::from_value::<FrameImageTransfer>(json!({
-            "id": 1,
-            "record": {
+            "image_content_id": 1,
+            "image_record": {
                 "protocol": "Kitty",
-                "width": width,
-                "height": height,
-                "action": "Display",
+                "pixel_width": width,
+                "pixel_height": height,
+                "image_action": "Display",
                 "display": FrameImageDisplay::default(),
-                "anchor": [0, 0]
+                "anchor_cell": [0, 0]
             },
-            "byte_len": byte_len
+            "image_byte_count": byte_len
         }))
         .expect_err("dimensions beyond the graphics limits are refused");
         assert_eq!(error.to_string(), "image dimensions exceed graphics limits");
@@ -450,98 +450,98 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
     // A default cell carries no `combining`, no `underline_color` and no set
     // attribute, so those names are absent from the encoding below.
     let plain_cell = json!({
-        "ch": "h",
-        "width": 1,
+        "character": "h",
+        "cell_width": 1,
         "style": {
-            "fg": "Default",
-            "bg": "Default",
-            "attrs": { "underline": "None" }
+            "foreground_color": "Default",
+            "background_color": "Default",
+            "text_attributes": { "underline_style": "None" }
         }
     });
     let mut second_cell = plain_cell.clone();
-    second_cell["ch"] = json!("i");
+    second_cell["character"] = json!("i");
 
     assert_eq!(
         serde_json::to_value(build_painted_frame()).expect("frame encodes"),
         json!({
-            "session": {
-                "id": "00000000-0000-0000-0000-000000000001",
-                "name": "quiet-lake",
-                "active_tab": {
-                    "id": "00000000-0000-0000-0000-000000000002",
-                    "name": "edit",
-                    "slots": [{
+            "session_snapshot": {
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "session_name": "quiet-lake",
+                "active_tab_snapshot": {
+                    "tab_id": "00000000-0000-0000-0000-000000000002",
+                    "tab_name": "edit",
+                    "pane_slots": [{
                         "pane_id": "00000000-0000-0000-0000-000000000004",
-                        "rect": {
-                            "origin": { "x": 0, "y": 0 },
-                            "size": { "cols": 4, "rows": 3 }
+                        "outer_rect": {
+                            "origin": { "column": 0, "row": 0 },
+                            "cell_size": { "column_count": 4, "row_count": 3 }
                         },
-                        "inner_rect": {
-                            "origin": { "x": 1, "y": 1 },
-                            "size": { "cols": 2, "rows": 1 }
+                        "content_rect": {
+                            "origin": { "column": 1, "row": 1 },
+                            "cell_size": { "column_count": 2, "row_count": 1 }
                         },
-                        "kind": "Terminal",
-                        "visible": true,
-                        "suppressed": false,
-                        "dead": false
+                        "pane_kind": "Terminal",
+                        "is_visible": true,
+                        "is_suppressed": false,
+                        "is_dead": false
                     }],
-                    "effective_size": { "cols": 4, "rows": 3 },
+                    "effective_cell_size": { "column_count": 4, "row_count": 3 },
                     "stack_headers": [],
                     "layout_mode": "Tiled",
-                    "all_suppressed": false,
-                    "gap": 0
+                    "is_every_pane_suppressed": false,
+                    "gap_cell_count": 0
                 },
-                "tabs": [{
-                    "id": "00000000-0000-0000-0000-000000000002",
-                    "name": "edit",
-                    "index": 0,
-                    "active": true
+                "tab_snapshots": [{
+                    "tab_id": "00000000-0000-0000-0000-000000000002",
+                    "tab_name": "edit",
+                    "tab_index": 0,
+                    "is_active": true
                 }]
             },
-            "panes": [{
-                "id": "00000000-0000-0000-0000-000000000004",
-                "title": "vim",
-                "cursor": {
-                    "row": 0,
-                    "col": 1,
-                    "visible": true,
-                    "blink": false,
+            "pane_snapshots": [{
+                "pane_id": "00000000-0000-0000-0000-000000000004",
+                "pane_title": "vim",
+                "cursor_snapshot": {
+                    "row_index": 0,
+                    "column_index": 1,
+                    "is_visible": true,
+                    "is_blinking": false,
                     "shape": "Bar"
                 },
-                "window": {
-                    "cols": 2,
-                    "rows": [{
-                        "runs": [
-                            { "count": 1, "cell": plain_cell },
-                            { "count": 1, "cell": second_cell }
+                "terminal_window": {
+                    "column_count": 2,
+                    "row_snapshots": [{
+                        "cell_runs": [
+                            { "repeat_count": 1, "cell": plain_cell },
+                            { "repeat_count": 1, "cell": second_cell }
                         ]
                     }],
-                    "view_offset": 0
+                    "view_row_offset": 0
                 },
-                "image_placements": [{
-                    "id": 7,
-                    "content_id": 11,
-                    "available": true,
-                    "anchor": [0, 1],
-                    "columns": 1,
-                    "rows": 1
+                "image_placement_snapshots": [{
+                    "placement_id": 7,
+                    "image_content_id": 11,
+                    "is_available": true,
+                    "anchor_cell": [0, 1],
+                    "column_count": 1,
+                    "row_count": 1
                 }],
-                "reverse_video": false,
+                "is_reverse_video": false,
                 "mouse_tracking": "ButtonMotion",
-                "alt_scroll": false,
-                "on_alt_screen": false,
-                "view_top_row": 7,
-                "selection": { "rows": [[0, 0, 1]] },
+                "is_alt_scroll_enabled": false,
+                "is_on_alt_screen": false,
+                "view_top_row_index": 7,
+                "selection_spans": { "row_spans": [[0, 0, 1]] },
                 "has_selection": true,
-                "scrollback": { "truncated": false, "retained_lines": 12 }
+                "scrollback_meta": { "is_truncated": false, "retained_line_count": 12 }
             }],
-            "client": {
-                "id": "00000000-0000-0000-0000-000000000003",
-                "viewport": { "cols": 4, "rows": 3 },
-                "active_tab": "00000000-0000-0000-0000-000000000002",
-                "focused_pane": "00000000-0000-0000-0000-000000000004",
+            "client_snapshot": {
+                "client_id": "00000000-0000-0000-0000-000000000003",
+                "viewport_size": { "column_count": 4, "row_count": 3 },
+                "active_tab_id": "00000000-0000-0000-0000-000000000002",
+                "focused_pane_id": "00000000-0000-0000-0000-000000000004",
                 "lock_mode": "Normal",
-                "mouse_select": false
+                "is_mouse_selection_enabled": false
             }
         })
     );
@@ -550,7 +550,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
 #[test]
 fn a_frame_carrying_an_unknown_field_ignores_it() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    encoded_json["panes"][0]
+    encoded_json["pane_snapshots"][0]
         .as_object_mut()
         .expect("a pane encodes as an object")
         .insert("zoomed".to_string(), serde_json::Value::Bool(true));
@@ -572,10 +572,10 @@ fn a_frame_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_frame_without_a_gap_reads_as_zero() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    encoded_json["session"]["active_tab"]
+    encoded_json["session_snapshot"]["active_tab_snapshot"]
         .as_object_mut()
         .expect("a tab encodes as an object")
-        .remove("gap")
+        .remove("gap_cell_count")
         .expect("the tab encodes a gap");
 
     // Decoded from text, the way the transport does it.
@@ -602,14 +602,15 @@ fn a_frame_without_a_gap_reads_as_zero() {
 #[test]
 fn a_cell_value_this_build_has_no_name_for_falls_back() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    let style = encoded_json["panes"][0]["window"]["rows"][0]["runs"][0]["cell"]["style"]
+    let style = encoded_json["pane_snapshots"][0]["terminal_window"]["row_snapshots"][0]
+        ["cell_runs"][0]["cell"]["style"]
         .as_object_mut()
         .expect("a style encodes as an object");
-    style.insert("fg".to_string(), serde_json::json!("Neon"));
-    style["attrs"]
+    style.insert("foreground_color".to_string(), serde_json::json!("Neon"));
+    style["text_attributes"]
         .as_object_mut()
         .expect("attributes encode as an object")
-        .insert("underline".to_string(), serde_json::json!("Dotted2"));
+        .insert("underline_style".to_string(), serde_json::json!("Dotted2"));
 
     // Decoded from text, the way the transport does it.
     let decoded: PaintedFrame = serde_json::from_str(&encoded_json.to_string())
@@ -645,12 +646,12 @@ fn a_wrapped_row_carries_its_ending_and_an_ended_row_leaves_it_off() {
             .expect("a frame row encodes")
     };
 
-    assert_eq!(encoded_json(FrameRowEnd::Soft)["end"], json!("Soft"));
+    assert_eq!(encoded_json(FrameRowEnd::Soft)["row_end"], json!("Soft"));
     assert_eq!(
-        encoded_json(FrameRowEnd::SoftWide)["end"],
+        encoded_json(FrameRowEnd::SoftWide)["row_end"],
         json!("SoftWide")
     );
-    assert_eq!(encoded_json(FrameRowEnd::Hard).get("end"), None);
+    assert_eq!(encoded_json(FrameRowEnd::Hard).get("row_end"), None);
 }
 
 #[test]
@@ -673,7 +674,7 @@ fn a_row_reads_back_with_the_ending_it_was_written_with() {
 
 #[test]
 fn a_row_ending_this_build_has_no_name_for_reads_as_hard() {
-    let read: FrameRow = serde_json::from_str(r#"{"runs":[],"end":"SoftDouble"}"#)
+    let read: FrameRow = serde_json::from_str(r#"{"cell_runs":[],"row_end":"SoftDouble"}"#)
         .expect("an ending with no name here falls back, it does not fail");
 
     assert_eq!(read.row_end, FrameRowEnd::Hard);
@@ -685,9 +686,9 @@ fn a_row_ending_this_build_has_no_name_for_reads_as_hard() {
 #[test]
 fn a_cursor_shape_and_an_underline_colour_with_no_name_here_read_as_none() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    encoded_json["panes"][0]["cursor"]["shape"] = json!("Beam");
-    encoded_json["panes"][0]["window"]["rows"][0]["runs"][0]["cell"]["style"]["underline_color"] =
-        json!("Neon");
+    encoded_json["pane_snapshots"][0]["cursor_snapshot"]["shape"] = json!("Beam");
+    encoded_json["pane_snapshots"][0]["terminal_window"]["row_snapshots"][0]["cell_runs"][0]
+        ["cell"]["style"]["underline_color"] = json!("Neon");
 
     // Decoded from text, the way the transport does it.
     let decoded: PaintedFrame = serde_json::from_str(&encoded_json.to_string())
@@ -719,7 +720,7 @@ fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {
         serde_json::json!(70_000),
     ] {
         let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-        encoded_json["session"]["active_tab"]["gap"] = hostile;
+        encoded_json["session_snapshot"]["active_tab_snapshot"]["gap_cell_count"] = hostile;
         let decoded: PaintedFrame = serde_json::from_str(&encoded_json.to_string())
             .expect("a frame with a bad gap decodes");
         assert_eq!(decoded, build_painted_frame());
@@ -809,9 +810,9 @@ fn hard_is_the_only_ending_that_is_hard() {
 #[test]
 fn a_run_whose_count_is_zero_expands_to_no_cells() {
     let encoded_json = json!({
-        "runs": [
-            { "count": 0, "cell": build_frame_cell('x', FrameColor::Default) },
-            { "count": 2, "cell": build_blank_frame_cell() }
+        "cell_runs": [
+            { "repeat_count": 0, "cell": build_frame_cell('x', FrameColor::Default) },
+            { "repeat_count": 2, "cell": build_blank_frame_cell() }
         ]
     });
 
@@ -858,18 +859,18 @@ fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
     assert_eq!(
         encoded_json,
         json!({
-            "ch": "e",
-            "combining": ["\u{301}"],
-            "width": 2,
+            "character": "e",
+            "combining_characters": ["\u{301}"],
+            "cell_width": 2,
             "style": {
-                "fg": { "Indexed": 1 },
-                "bg": { "Rgb": [0, 0, 255] },
+                "foreground_color": { "Indexed": 1 },
+                "background_color": { "Rgb": [0, 0, 255] },
                 "underline_color": { "Indexed": 3 },
-                "attrs": {
-                    "bold": true,
-                    "reverse": true,
-                    "strike": true,
-                    "underline": "Curly"
+                "text_attributes": {
+                    "is_bold": true,
+                    "is_reverse": true,
+                    "is_struck_through": true,
+                    "underline_style": "Curly"
                 }
             }
         })
@@ -895,21 +896,27 @@ fn absent_optional_values_encode_as_null() {
     let encoded_json = serde_json::to_value(&bare).expect("frame encodes");
 
     assert_eq!(
-        encoded_json["session"]["active_tab"]["slots"][0]["inner_rect"],
-        serde_json::Value::Null
-    );
-    assert_eq!(encoded_json["panes"][0]["title"], serde_json::Value::Null);
-    assert_eq!(
-        encoded_json["panes"][0]["cursor"]["shape"],
-        serde_json::Value::Null
-    );
-    assert_eq!(encoded_json["panes"][0]["window"], serde_json::Value::Null);
-    assert_eq!(
-        encoded_json["panes"][0]["selection"],
+        encoded_json["session_snapshot"]["active_tab_snapshot"]["pane_slots"][0]["content_rect"],
         serde_json::Value::Null
     );
     assert_eq!(
-        encoded_json["client"]["focused_pane"],
+        encoded_json["pane_snapshots"][0]["pane_title"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        encoded_json["pane_snapshots"][0]["cursor_snapshot"]["shape"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        encoded_json["pane_snapshots"][0]["terminal_window"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        encoded_json["pane_snapshots"][0]["selection_spans"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        encoded_json["client_snapshot"]["focused_pane_id"],
         serde_json::Value::Null
     );
     let decoded: PaintedFrame =
@@ -922,7 +929,7 @@ fn absent_optional_values_encode_as_null() {
 #[test]
 fn a_cursor_without_a_shape_key_reads_as_no_shape() {
     let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    encoded_json["panes"][0]["cursor"]
+    encoded_json["pane_snapshots"][0]["cursor_snapshot"]
         .as_object_mut()
         .expect("a cursor encodes as an object")
         .remove("shape")

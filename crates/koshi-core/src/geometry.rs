@@ -17,10 +17,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Point {
     /// Horizontal position (column).
-    #[serde(rename = "x")]
     pub column: u16,
     /// Vertical position (row).
-    #[serde(rename = "y")]
     pub row: u16,
 }
 
@@ -28,10 +26,8 @@ pub struct Point {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Size {
     /// Width in cells (columns).
-    #[serde(rename = "cols")]
     pub column_count: u16,
     /// Height in cells (rows).
-    #[serde(rename = "rows")]
     pub row_count: u16,
 }
 
@@ -41,7 +37,6 @@ pub struct ImageCellGeometry {
     /// The image's cell dimensions before clipping.
     pub full_size: Size,
     /// The clipped columns and rows measured from the complete image's origin.
-    #[serde(rename = "offset")]
     pub cell_offset: Point,
 }
 
@@ -61,9 +56,7 @@ impl ImageCellGeometry {
 /// The measured width and height of one terminal cell in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PixelCellSize {
-    #[serde(rename = "width")]
     pixel_width: std::num::NonZeroU16,
-    #[serde(rename = "height")]
     pixel_height: std::num::NonZeroU16,
 }
 
@@ -131,7 +124,6 @@ pub struct Rect {
     /// Top-left cell position.
     pub origin: Point,
     /// Width and height in cells.
-    #[serde(rename = "size")]
     pub cell_size: Size,
 }
 

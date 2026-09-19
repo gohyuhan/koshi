@@ -84,12 +84,12 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
         serialize_test_wire_message(&SupervisorRequest {
             request_id: 1,
             request_kind: SupervisorRequestKind::Hello {
-                min_protocol_version: 1,
-                max_protocol_version: 1,
+                min_protocol_version: 2,
+                max_protocol_version: 2,
                 connection_token: build_test_connection_token(),
             },
         }),
-        r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":1,"max_protocol_version":1,"token":"k7QxSecret"}}}"#
+        r#"{"request_id":1,"request_kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"connection_token":"k7QxSecret"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
@@ -100,7 +100,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 pty_size: build_test_pty_size(),
             },
         }),
-        r#"{"request_id":2,"kind":{"Spawn":{"pane_id":"00000000-0000-0000-0000-000000000001","spec":{"program":"/bin/sh","args":["-c","echo hi"],"cwd":null,"env":{},"shell_kind":{"Other":"sh"}},"size":{"cols":80,"rows":24}}}}"#
+        r#"{"request_id":2,"request_kind":{"Spawn":{"pane_id":"00000000-0000-0000-0000-000000000001","spawn_spec":{"program":"/bin/sh","arguments":["-c","echo hi"],"working_directory":null,"environment_variables":{},"shell_kind":{"Other":"sh"}},"pty_size":{"column_count":80,"row_count":24}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
@@ -110,7 +110,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 pty_size: build_test_pty_size(),
             },
         }),
-        r#"{"request_id":3,"kind":{"Resize":{"pane_id":"00000000-0000-0000-0000-000000000001","size":{"cols":80,"rows":24}}}}"#
+        r#"{"request_id":3,"request_kind":{"Resize":{"pane_id":"00000000-0000-0000-0000-000000000001","pty_size":{"column_count":80,"row_count":24}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
@@ -120,7 +120,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 input_bytes: vec![104, 105],
             },
         }),
-        r#"{"request_id":4,"kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":"aGk="}}}"#
+        r#"{"request_id":4,"request_kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","input_bytes":"aGk="}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
@@ -130,7 +130,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 kill_policy: KillPolicy::Tree,
             },
         }),
-        r#"{"request_id":5,"kind":{"Kill":{"pane_id":"00000000-0000-0000-0000-000000000001","kill_policy":"Tree"}}}"#
+        r#"{"request_id":5,"request_kind":{"Kill":{"pane_id":"00000000-0000-0000-0000-000000000001","kill_policy":"Tree"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
@@ -139,21 +139,21 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 pane_id: build_test_pane_id()
             },
         }),
-        r#"{"request_id":6,"kind":{"LiveCwd":{"pane_id":"00000000-0000-0000-0000-000000000001"}}}"#
+        r#"{"request_id":6,"request_kind":{"LiveCwd":{"pane_id":"00000000-0000-0000-0000-000000000001"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
             request_id: 7,
             request_kind: SupervisorRequestKind::ListPanes,
         }),
-        r#"{"request_id":7,"kind":"ListPanes"}"#
+        r#"{"request_id":7,"request_kind":"ListPanes"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
             request_id: 8,
             request_kind: SupervisorRequestKind::Shutdown,
         }),
-        r#"{"request_id":8,"kind":"Shutdown"}"#
+        r#"{"request_id":8,"request_kind":"Shutdown"}"#
     );
 
     assert_eq!(
@@ -165,7 +165,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 },
             }
         )),
-        r#"{"Response":{"request_id":1,"result":{"Hello":{"protocol_version":1}}}}"#
+        r#"{"Response":{"request_id":1,"answer_result":{"Hello":{"protocol_version":2}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -174,7 +174,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 answer_result: SupervisorResult::Spawned { process_id: 4242 },
             }
         )),
-        r#"{"Response":{"request_id":2,"result":{"Spawned":{"pid":4242}}}}"#
+        r#"{"Response":{"request_id":2,"answer_result":{"Spawned":{"process_id":4242}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -187,7 +187,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 }]),
             }
         )),
-        r#"{"Response":{"request_id":7,"result":{"Panes":[{"pane_id":"00000000-0000-0000-0000-000000000001","pid":4242,"size":{"cols":80,"rows":24}}]}}}"#
+        r#"{"Response":{"request_id":7,"answer_result":{"Panes":[{"pane_id":"00000000-0000-0000-0000-000000000001","process_id":4242,"pty_size":{"column_count":80,"row_count":24}}]}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -196,7 +196,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 answer_result: SupervisorResult::Cwd(Some(PathBuf::from("/home/dev/api"))),
             }
         )),
-        r#"{"Response":{"request_id":6,"result":{"Cwd":"/home/dev/api"}}}"#
+        r#"{"Response":{"request_id":6,"answer_result":{"Cwd":"/home/dev/api"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -205,7 +205,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 answer_result: SupervisorResult::Done,
             }
         )),
-        r#"{"Response":{"request_id":3,"result":"Done"}}"#
+        r#"{"Response":{"request_id":3,"answer_result":"Done"}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<_, SupervisorEvent>::Response(
@@ -217,7 +217,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 }),
             }
         )),
-        r#"{"Response":{"request_id":null,"result":{"Error":{"code":"malformed_request","message":"the request could not be read"}}}}"#
+        r#"{"Response":{"request_id":null,"answer_result":{"Error":{"code":"MalformedRequest","message":"the request could not be read"}}}}"#
     );
 
     assert_eq!(
@@ -227,7 +227,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 output_bytes: vec![104, 105],
             }
         )),
-        r#"{"Event":{"Output":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":"aGk="}}}"#
+        r#"{"Event":{"Output":{"pane_id":"00000000-0000-0000-0000-000000000001","output_bytes":"aGk="}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorMessage::<SupervisorResult, _>::Event(
@@ -236,7 +236,7 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
                 exit_status: ExitStatus::ExitCode(0),
             }
         )),
-        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","status":{"ExitCode":0}}}}"#
+        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","exit_status":{"ExitCode":0}}}}"#
     );
 }
 
@@ -247,14 +247,14 @@ fn the_output_hold_requests_travel_as_bare_names() {
             request_id: 9,
             request_kind: SupervisorRequestKind::PauseOutput,
         }),
-        r#"{"request_id":9,"kind":"PauseOutput"}"#
+        r#"{"request_id":9,"request_kind":"PauseOutput"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
             request_id: 10,
             request_kind: SupervisorRequestKind::ResumeOutput,
         }),
-        r#"{"request_id":10,"kind":"ResumeOutput"}"#
+        r#"{"request_id":10,"request_kind":"ResumeOutput"}"#
     );
 }
 
@@ -267,7 +267,7 @@ fn a_cwd_the_operating_system_cannot_answer_travels_as_null() {
                 answer_result: SupervisorResult::Cwd(None),
             }
         )),
-        r#"{"Response":{"request_id":6,"result":{"Cwd":null}}}"#
+        r#"{"Response":{"request_id":6,"answer_result":{"Cwd":null}}}"#
     );
 }
 
@@ -284,7 +284,7 @@ fn an_empty_write_travels_as_an_empty_string_and_reads_back_empty() {
 
     assert_eq!(
         serialized_request_json,
-        r#"{"request_id":4,"kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":""}}}"#
+        r#"{"request_id":4,"request_kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","input_bytes":""}}}"#
     );
     let decoded: SupervisorRequest =
         serde_json::from_str(&serialized_request_json).expect("an empty write reads back");
@@ -294,15 +294,15 @@ fn an_empty_write_travels_as_an_empty_string_and_reads_back_empty() {
 #[test]
 fn answers_and_events_read_back_from_their_wire_text() {
     let hello: IncomingSupervisorMessage = serde_json::from_str(
-        r#"{"Response":{"request_id":1,"result":{"Hello":{"protocol_version":1}}}}"#,
+        r#"{"Response":{"request_id":1,"answer_result":{"Hello":{"protocol_version":2}}}}"#,
     )
     .expect("a Hello answer is this version's shape");
     let incoming_message: IncomingSupervisorMessage = serde_json::from_str(
-        r#"{"Event":{"Output":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":"aGk="}}}"#,
+        r#"{"Event":{"Output":{"pane_id":"00000000-0000-0000-0000-000000000001","output_bytes":"aGk="}}}"#,
     )
     .expect("an Output event is this version's shape");
     let exited: IncomingSupervisorMessage = serde_json::from_str(
-        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","status":{"Signaled":9}}}}"#,
+        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","exit_status":{"Signaled":9}}}}"#,
     )
     .expect("an Exited event is this version's shape");
 
@@ -311,7 +311,7 @@ fn answers_and_events_read_back_from_their_wire_text() {
         SupervisorMessage::Response(SupervisorResponse {
             request_id: Some(1),
             answer_result: MaybeKnown::Known(SupervisorResult::Hello {
-                protocol_version: 1
+                protocol_version: 2
             }),
         })
     );
@@ -336,17 +336,17 @@ fn a_hello_built_here_names_this_builds_range() {
     assert_eq!(
         SupervisorRequestKind::build_hello_request(build_test_connection_token()),
         SupervisorRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            min_protocol_version: 2,
+            max_protocol_version: 2,
             connection_token: build_test_connection_token(),
         }
     );
 }
 
 #[test]
-fn this_build_speaks_supervisor_link_version_one_only() {
-    assert_eq!(SUPERVISOR_PROTOCOL_VERSION, 1);
-    assert_eq!(MIN_SUPERVISOR_PROTOCOL_VERSION, 1);
+fn this_build_speaks_supervisor_link_version_two_only() {
+    assert_eq!(SUPERVISOR_PROTOCOL_VERSION, 2);
+    assert_eq!(MIN_SUPERVISOR_PROTOCOL_VERSION, 2);
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn every_request_kind_and_event_travels_under_the_name_it_reports() {
 #[test]
 fn a_kind_this_build_does_not_have_reads_as_its_name_alone() {
     let request: IncomingSupervisorRequest =
-        serde_json::from_str(r#"{"request_id":9,"kind":{"Rehome":{"pane_id":1}}}"#)
+        serde_json::from_str(r#"{"request_id":9,"request_kind":{"Rehome":{"pane_id":1}}}"#)
             .expect("a kind this build lacks still reads");
 
     assert_eq!(
@@ -570,9 +570,10 @@ fn a_kind_this_build_does_not_have_reads_as_its_name_alone() {
 
 #[test]
 fn an_answer_this_build_does_not_have_reads_as_its_name_alone() {
-    let message: IncomingSupervisorMessage =
-        serde_json::from_str(r#"{"Response":{"request_id":9,"result":{"Rehomed":{"pid":7}}}}"#)
-            .expect("an answer this build lacks still reads");
+    let message: IncomingSupervisorMessage = serde_json::from_str(
+        r#"{"Response":{"request_id":9,"answer_result":{"Rehomed":{"process_id":7}}}}"#,
+    )
+    .expect("an answer this build lacks still reads");
 
     assert_eq!(
         message,
@@ -602,32 +603,33 @@ fn an_event_this_build_does_not_have_reads_as_its_name_alone() {
 #[test]
 fn a_request_carrying_an_unknown_field_is_refused() {
     let decoded: Result<SupervisorRequest, _> =
-        serde_json::from_str(r#"{"request_id":7,"kind":"ListPanes","junk":5}"#);
+        serde_json::from_str(r#"{"request_id":7,"request_kind":"ListPanes","junk":5}"#);
 
     assert_eq!(
         decoded
             .expect_err("an unknown field is not this version's shape")
             .to_string(),
-        "unknown field `junk`, expected `request_id` or `kind` at line 1 column 41"
+        "unknown field `junk`, expected `request_id` or `request_kind` at line 1 column 49"
     );
 }
 
 #[test]
 fn a_request_missing_its_id_is_refused() {
-    let decoded: Result<SupervisorRequest, _> = serde_json::from_str(r#"{"kind":"ListPanes"}"#);
+    let decoded: Result<SupervisorRequest, _> =
+        serde_json::from_str(r#"{"request_kind":"ListPanes"}"#);
 
     assert_eq!(
         decoded
             .expect_err("a request without an id is not this version's shape")
             .to_string(),
-        "missing field `request_id` at line 1 column 20"
+        "missing field `request_id` at line 1 column 28"
     );
 }
 
 #[test]
 fn an_unknown_kind_sent_as_a_bare_name_reads_as_its_name_alone() {
     let request: IncomingSupervisorRequest =
-        serde_json::from_str(r#"{"request_id":9,"kind":"Rehome"}"#)
+        serde_json::from_str(r#"{"request_id":9,"request_kind":"Rehome"}"#)
             .expect("a kind this build lacks still reads");
 
     assert_eq!(
@@ -644,34 +646,34 @@ fn an_unknown_kind_sent_as_a_bare_name_reads_as_its_name_alone() {
 #[test]
 fn a_hello_sent_as_a_bare_name_keeps_the_decoding_error() {
     let decoded: Result<IncomingSupervisorRequest, _> =
-        serde_json::from_str(r#"{"request_id":1,"kind":"Hello"}"#);
+        serde_json::from_str(r#"{"request_id":1,"request_kind":"Hello"}"#);
 
     assert_eq!(
         decoded
             .expect_err("a Hello with no payload is not this version's shape")
             .to_string(),
-        "invalid type: unit variant, expected struct variant at line 1 column 31"
+        "invalid type: unit variant, expected struct variant at line 1 column 39"
     );
 }
 
 #[test]
 fn a_write_whose_bytes_are_not_base64_keeps_the_decoding_error() {
     let decoded: Result<IncomingSupervisorRequest, _> = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","bytes":"a"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Write":{"pane_id":"00000000-0000-0000-0000-000000000001","input_bytes":"a"}}}"#,
     );
 
     assert_eq!(
         decoded
             .expect_err("bytes that are not base64 are not this version's shape")
             .to_string(),
-        "the base64 text length is not a multiple of four at line 1 column 70"
+        "the base64 text length is not a multiple of four at line 1 column 76"
     );
 }
 
 #[test]
 fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
     let decoded: SupervisorRequest = serde_json::from_str(
-        r#"{"request_id":3,"kind":{"Resize":{"pane_id":"00000000-0000-0000-0000-000000000001","size":{"cols":80,"rows":24},"priority":3}}}"#,
+        r#"{"request_id":3,"request_kind":{"Resize":{"pane_id":"00000000-0000-0000-0000-000000000001","pty_size":{"column_count":80,"row_count":24},"priority":3}}}"#,
     )
     .expect("a field this build lacks is passed over");
 
@@ -690,7 +692,7 @@ fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
 #[test]
 fn an_answer_carrying_a_field_this_build_does_not_know_still_reads() {
     let decoded: SupervisorResponse = serde_json::from_str(
-        r#"{"request_id":7,"result":{"Panes":[{"pane_id":"00000000-0000-0000-0000-000000000001","pid":4242,"size":{"cols":80,"rows":24},"tty":"/dev/pts/3"}]}}"#,
+        r#"{"request_id":7,"answer_result":{"Panes":[{"pane_id":"00000000-0000-0000-0000-000000000001","process_id":4242,"pty_size":{"column_count":80,"row_count":24},"tty":"/dev/pts/3"}]}}"#,
     )
     .expect("a field this build lacks is passed over");
 
@@ -710,7 +712,7 @@ fn an_answer_carrying_a_field_this_build_does_not_know_still_reads() {
 #[test]
 fn an_event_carrying_a_field_this_build_does_not_know_still_reads() {
     let decoded: SupervisorMessage = serde_json::from_str(
-        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","status":{"ExitCode":2},"seq":1}}}"#,
+        r#"{"Event":{"Exited":{"pane_id":"00000000-0000-0000-0000-000000000001","exit_status":{"ExitCode":2},"seq":1}}}"#,
     )
     .expect("a field this build lacks is passed over");
 

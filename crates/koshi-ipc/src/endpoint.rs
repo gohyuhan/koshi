@@ -161,13 +161,10 @@ pub struct EndpointFile {
     /// The control-socket address: a socket-file path on Unix, a bare pipe
     /// name on Windows — the string
     /// [`Connection::connect`](crate::transport::Connection::connect) takes.
-    #[serde(rename = "socket")]
     pub socket_address: String,
     /// The secret a connection presents at Hello.
-    #[serde(rename = "token")]
     pub connection_token: ConnectionToken,
     /// The process id of the process advertising this socket.
-    #[serde(rename = "pid")]
     pub process_id: u32,
 }
 

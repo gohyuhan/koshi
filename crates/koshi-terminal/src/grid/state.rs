@@ -11,11 +11,8 @@ use crate::style::{Color, Style};
 /// A cell-sized portion of one retained native image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ImageCellFragment {
-    #[serde(rename = "source")]
     pub(crate) image_source_id: u64,
-    #[serde(rename = "row")]
     pub(crate) source_row_index: u16,
-    #[serde(rename = "column")]
     pub(crate) source_column_index: u16,
 }
 
@@ -162,10 +159,8 @@ pub(crate) struct ImagePlaceholder {
     /// The optional placement id encoded by the underline color.
     pub(crate) placement_id: Option<u32>,
     /// The source row encoded by the first placeholder diacritic.
-    #[serde(rename = "row")]
     pub(crate) source_row: Option<u16>,
     /// The source column encoded by the second placeholder diacritic.
-    #[serde(rename = "column")]
     pub(crate) source_column: Option<u16>,
     /// The most significant image-id byte encoded by the third diacritic.
     pub(crate) image_id_msb: Option<u8>,
@@ -205,21 +200,20 @@ fn get_color_value(color: Color) -> Option<u32> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     /// The base character occupying the cell.
-    #[serde(rename = "ch")]
     character: char,
     /// The rest of the grapheme cluster layered over the base character
     /// — a grapheme cluster is the run of code points a person perceives as
     /// one visual character — in arrival order: combining accents, variation
     /// selectors, and the joined parts of a multi-codepoint emoji (ZWJ-joined
     /// glyphs, skin-tone modifiers, the second half of a flag). `None` for a
-    /// plain cell; the renderer draws `ch` followed by these as one glyph.
+    /// plain cell; the renderer draws `character` followed by these as one
+    /// glyph.
     ///
     /// [`push_combining`](Cell::push_combining) is the normal writer; a
     /// placeholder can allocate the same storage without continuation marks.
     combining: Option<Box<CellExtra>>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
-    #[serde(rename = "width")]
     display_width: u8,
     /// The cell's visual style (color, bold, italic, etc.).
     style: Style,
@@ -490,10 +484,8 @@ pub enum RowEnd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RowMetadata {
     /// How the row ends relative to the row below it.
-    #[serde(rename = "end")]
     pub row_end: RowEnd,
     /// Whether a shell reported a prompt on this row with OSC 133;A.
-    #[serde(rename = "prompt")]
     pub has_prompt_mark: bool,
 }
 
@@ -520,7 +512,6 @@ pub struct Grid {
     rows: Vec<Vec<Cell>>,
     /// Per-row metadata, parallel to `rows`. Every operation that adds,
     /// removes, or reorders rows maintains it.
-    #[serde(rename = "row_meta")]
     row_metadata: Vec<RowMetadata>,
 }
 
@@ -973,7 +964,7 @@ impl Grid {
 #[derive(Deserialize)]
 struct GridFields {
     rows: Vec<Vec<Cell>>,
-    #[serde(rename = "row_meta", default)]
+    #[serde(default)]
     row_metadata: Option<Vec<RowMetadata>>,
     #[serde(default)]
     row_ends: Option<Vec<RowEnd>>,

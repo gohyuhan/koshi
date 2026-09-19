@@ -568,13 +568,13 @@ fn a_router_settling_outside_the_control_plane_range_stops_the_exchange() {
     let router = spawn_fake_router_for_hello(
         runtime_directory.path(),
         RouterResult::Hello {
-            protocol_version: 3,
+            protocol_version: 4,
             build_version: "9.9.9".to_string(),
         },
     );
 
     let router_version_error =
-        get_running_router_version(runtime_directory.path()).expect_err("3 is outside the 1 to 2");
+        get_running_router_version(runtime_directory.path()).expect_err("4 is outside the 3 to 3");
 
     let CliError::IpcUnavailable {
         detail: error_detail,
@@ -584,7 +584,7 @@ fn a_router_settling_outside_the_control_plane_range_stops_the_exchange() {
     };
     assert_eq!(
         error_detail,
-        "the router settled on control-plane protocol version 3, which is outside the 1 to 2 \
+        "the router settled on control-plane protocol version 4, which is outside the 3 to 3 \
          this koshi asked for"
     );
     router.join().expect("the stand-in router exits");

@@ -37,7 +37,6 @@ pub const fn pane_viewport(viewport: Size) -> Size {
 /// tab — keep independent focus, lock mode, viewport and reported pane area.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Client {
-    #[serde(rename = "id")]
     client_id: ClientId,
     session_id: SessionId,
     attached_at: SystemTime,
@@ -63,7 +62,6 @@ pub struct Client {
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
-    #[serde(rename = "mouse_select")]
     is_mouse_selection_enabled: bool,
     /// This client's scrollback view position per pane: lines scrolled up from
     /// the live bottom. A pane absent from the map (the default) sits at the live
@@ -434,7 +432,6 @@ impl Client {
 /// so iteration walks clients in id order.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ClientRegistry {
-    #[serde(rename = "records")]
     client_by_id: BTreeMap<ClientId, Client>,
 }
 

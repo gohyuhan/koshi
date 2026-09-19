@@ -89,7 +89,10 @@ fn non_utf8_working_directory_serializes_as_its_lossy_string() {
 
     let serialized_discovery = serde_json::to_value(&pane_discovery).expect("serializes");
 
-    assert_eq!(serialized_discovery["cwd"], json!("/tmp/f\u{FFFD}oo"));
+    assert_eq!(
+        serialized_discovery["working_directory"],
+        json!("/tmp/f\u{FFFD}oo")
+    );
 }
 
 #[test]
@@ -98,7 +101,10 @@ fn absent_working_directory_serializes_as_null() {
 
     let serialized_discovery = serde_json::to_value(&pane_discovery).expect("serializes");
 
-    assert_eq!(serialized_discovery["cwd"], serde_json::Value::Null);
+    assert_eq!(
+        serialized_discovery["working_directory"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
@@ -107,30 +113,33 @@ fn valid_utf8_working_directory_serializes_as_its_plain_string() {
 
     let serialized_discovery = serde_json::to_value(&pane_discovery).expect("serializes");
 
-    assert_eq!(serialized_discovery["cwd"], json!("/home/user/project"));
+    assert_eq!(
+        serialized_discovery["working_directory"],
+        json!("/home/user/project")
+    );
 }
 
 #[test]
-fn pane_lifecycle_serializes_with_snake_case_names() {
+fn pane_lifecycle_serializes_with_declared_variant_names() {
     assert_eq!(
         serde_json::to_value(PaneLifecycle::Spawning).expect("serializes"),
-        json!("spawning")
+        json!("Spawning")
     );
     assert_eq!(
         serde_json::to_value(PaneLifecycle::Running).expect("serializes"),
-        json!("running")
+        json!("Running")
     );
     assert_eq!(
         serde_json::to_value(PaneLifecycle::Closing).expect("serializes"),
-        json!("closing")
+        json!("Closing")
     );
     assert_eq!(
         serde_json::to_value(PaneLifecycle::Exited { exit_code: Some(1) }).expect("serializes"),
-        json!({"exited": {"code": 1}})
+        json!({"Exited": {"exit_code": 1}})
     );
     assert_eq!(
         serde_json::to_value(PaneLifecycle::Exited { exit_code: None }).expect("serializes"),
-        json!({"exited": {"code": null}})
+        json!({"Exited": {"exit_code": null}})
     );
 }
 
@@ -350,14 +359,14 @@ fn an_unknown_pane_state_name_is_rejected() {
 
     assert_eq!(
         lifecycle_parse_error.to_string(),
-        "unknown variant `sleeping`, expected one of `spawning`, `running`, `exited`, `closing`"
+        "unknown variant `sleeping`, expected one of `Spawning`, `Running`, `Exited`, `Closing`"
     );
 }
 
 #[test]
 fn an_exited_state_without_its_code_field_decodes_with_no_code() {
     let decoded_lifecycle: PaneLifecycle =
-        serde_json::from_value(json!({"exited": {}})).expect("deserializes");
+        serde_json::from_value(json!({"Exited": {}})).expect("deserializes");
 
     assert_eq!(decoded_lifecycle, PaneLifecycle::Exited { exit_code: None });
 }
@@ -368,11 +377,11 @@ fn a_client_row_missing_its_id_is_rejected() {
     client_json
         .as_object_mut()
         .expect("a client row is a JSON object")
-        .remove("id")
-        .expect("the row carries an `id` field to remove");
+        .remove("client_id")
+        .expect("the row carries a `client_id` field to remove");
 
     let client_parse_error =
         serde_json::from_value::<ClientDiscovery>(client_json).expect_err("rejects");
 
-    assert_eq!(client_parse_error.to_string(), "missing field `id`");
+    assert_eq!(client_parse_error.to_string(), "missing field `client_id`");
 }

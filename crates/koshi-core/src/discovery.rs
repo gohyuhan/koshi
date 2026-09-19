@@ -28,15 +28,12 @@ use crate::lock::LockMode;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDiscovery {
     /// Stable session id.
-    #[serde(rename = "id")]
     pub session_id: SessionId,
     /// The session's generated display name.
-    #[serde(rename = "name")]
     pub session_name: String,
     /// When the session was created.
     pub created_at: SystemTime,
     /// Ids of the clients currently attached.
-    #[serde(rename = "attached_clients")]
     pub attached_client_ids: Vec<ClientId>,
     /// Number of panes across all of the session's tabs.
     pub pane_count: usize,
@@ -47,18 +44,14 @@ pub struct SessionDiscovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabDiscovery {
     /// Stable tab id.
-    #[serde(rename = "id")]
     pub tab_id: TabId,
     /// The session holding the tab.
     pub session_id: SessionId,
     /// The tab's generated display name.
-    #[serde(rename = "name")]
     pub tab_name: String,
     /// The tab's position in the tab bar, zero-based.
-    #[serde(rename = "index")]
     pub tab_index: usize,
     /// The tab's most-recently-focused pane, once one has been focused.
-    #[serde(rename = "active_pane")]
     pub active_pane_id: Option<PaneId>,
     /// Number of panes in the tab.
     pub pane_count: usize,
@@ -66,7 +59,6 @@ pub struct TabDiscovery {
 
 /// Where a pane sits in its life, as reported by discovery queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum PaneLifecycle {
     /// The pane is being created; its child has not started yet.
     Spawning,
@@ -76,7 +68,6 @@ pub enum PaneLifecycle {
     /// or its status was unavailable.
     Exited {
         /// The child's exit code, when one was observed.
-        #[serde(rename = "code")]
         exit_code: Option<i32>,
     },
     /// The pane is shutting down.
@@ -88,29 +79,23 @@ pub enum PaneLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneDiscovery {
     /// Stable pane id.
-    #[serde(rename = "id")]
     pub pane_id: PaneId,
     /// The tab holding the pane.
     pub tab_id: TabId,
     /// The session holding the pane.
     pub session_id: SessionId,
     /// The pane's display title, once the child has set one.
-    #[serde(rename = "title")]
     pub pane_title: Option<String>,
     /// Working directory the pane started in, when known. Serializes as
     /// the path's lossy UTF-8 string.
     #[serde(serialize_with = "serialize_path_lossy")]
-    #[serde(rename = "cwd")]
     pub working_directory: Option<PathBuf>,
     /// The argv the pane was spawned to run — program first, then its
     /// arguments — for a command pane; `None` for a shell pane.
-    #[serde(rename = "command")]
     pub command_argv: Option<Vec<String>>,
     /// Where the pane sits in its life.
-    #[serde(rename = "state")]
     pub lifecycle: PaneLifecycle,
     /// Ids of the clients whose focus is on this pane.
-    #[serde(rename = "focused_by_clients")]
     pub focused_by_client_ids: Vec<ClientId>,
 }
 
@@ -119,7 +104,6 @@ pub struct PaneDiscovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientDiscovery {
     /// Stable client id.
-    #[serde(rename = "id")]
     pub client_id: ClientId,
     /// The session the client is attached to.
     pub session_id: SessionId,
@@ -128,14 +112,11 @@ pub struct ClientDiscovery {
     /// The client's terminal viewport size.
     pub viewport_size: Size,
     /// The tab the client is viewing.
-    #[serde(rename = "active_tab")]
     pub active_tab_id: TabId,
     /// The client's focused pane in the tab it is viewing, once it has
     /// focused one.
-    #[serde(rename = "focused_pane")]
     pub focused_pane_id: Option<PaneId>,
     /// The client's modal input state.
-    #[serde(rename = "lock_state")]
     pub lock_mode: LockMode,
     /// Where the client connected from. `None` when the row carries no
     /// `origin` field; `None` is not [`ClientOrigin::Local`].
