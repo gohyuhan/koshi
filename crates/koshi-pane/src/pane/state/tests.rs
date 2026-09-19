@@ -13,7 +13,7 @@ use crate::pane::policy::{PaneClosePolicy, PaneExitPolicy};
 
 /// The JSON form of a fresh terminal pane record with the nil uuid as its id and
 /// `UNIX_EPOCH` as its creation time.
-const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"id":"00000000-0000-0000-0000-000000000000","kind":"Terminal","command":null,"cwd":null,"close_policy":{"Graceful":{"timeout":3}},"exit_policy":"CloseOnExit","lifecycle":"Spawning","created_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#;
+const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"pane_id":"00000000-0000-0000-0000-000000000000","pane_kind":"Terminal","spawn_spec":null,"working_directory":null,"close_policy":{"Graceful":{"timeout_duration":3}},"exit_policy":"CloseOnExit","lifecycle":"Spawning","created_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#;
 
 /// The `PaneId` whose uuid is all zeros.
 fn nil_pane_id() -> PaneId {
@@ -214,6 +214,6 @@ fn a_record_without_a_lifecycle_fails_to_deserialize() {
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `lifecycle` at line 1 column 217"
+        "missing field `lifecycle` at line 1 column 253"
     );
 }

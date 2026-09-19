@@ -181,7 +181,6 @@ struct TerminalStateSerializeFields<'a> {
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: &'a Arc<Grid>,
     alternate: &'a Arc<Grid>,
-    #[serde(rename = "active")]
     active_screen: Screen,
     primary_cursor: &'a Cursor,
     alternate_cursor: &'a Cursor,
@@ -198,22 +197,18 @@ struct TerminalStateSerializeFields<'a> {
     sixel_palette: &'a SixelPalette,
     tab_stops: &'a Vec<bool>,
     title: &'a Option<String>,
-    #[serde(rename = "reported_cwd")]
     reported_working_directory: &'a Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
     shell_integration_facts: &'a Vec<ShellIntegrationFact>,
     scrollback: &'a Scrollback,
     primary_scroll_region: &'a Option<(u16, u16)>,
     alternate_scroll_region: &'a Option<(u16, u16)>,
-    #[serde(rename = "primary_horizontal_margins")]
     primary_horizontal_margins: &'a Option<(u16, u16)>,
-    #[serde(rename = "alternate_horizontal_margins")]
     alternate_horizontal_margins: &'a Option<(u16, u16)>,
     primary_keyboard_stack: &'a KeyboardStack,
     alternate_keyboard_stack: &'a KeyboardStack,
     cluster: &'a String,
     cluster_base: &'a Option<(u16, u16)>,
-    #[serde(rename = "replies")]
     device_query_replies: &'a Vec<u8>,
 }
 
@@ -431,8 +426,6 @@ fn normalize_restored_horizontal_margins(
     Ok(Some((left_column_index, right_column_index)))
 }
 
-#[derive(Deserialize)]
-#[serde(field_identifier, rename_all = "snake_case")]
 enum RawTerminalStateField {
     NativeImageCoverage,
     CellSize,
@@ -454,25 +447,83 @@ enum RawTerminalStateField {
     SixelPalette,
     TabStops,
     Title,
-    #[serde(rename = "reported_cwd")]
     ReportedWorkingDirectory,
     ShellIntegrationState,
     ShellIntegrationFacts,
     Scrollback,
     PrimaryScrollRegion,
     AlternateScrollRegion,
-    #[serde(rename = "primary_horizontal_margins")]
     PrimaryHorizontalMargins,
-    #[serde(rename = "alternate_horizontal_margins")]
     AlternateHorizontalMargins,
     PrimaryKeyboardStack,
     AlternateKeyboardStack,
     Cluster,
     ClusterBase,
-    #[serde(rename = "replies")]
     DeviceQueryReplies,
-    #[serde(other)]
     Other,
+}
+
+impl<'de> Deserialize<'de> for RawTerminalStateField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RawTerminalStateFieldVisitor;
+
+        impl Visitor<'_> for RawTerminalStateFieldVisitor {
+            type Value = RawTerminalStateField;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a terminal state field name")
+            }
+
+            fn visit_str<E>(self, field_name: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(match field_name {
+                    "native_image_coverage" => RawTerminalStateField::NativeImageCoverage,
+                    "cell_size" => RawTerminalStateField::CellSize,
+                    "primary" => RawTerminalStateField::Primary,
+                    "alternate" => RawTerminalStateField::Alternate,
+                    "active_screen" => RawTerminalStateField::Active,
+                    "primary_cursor" => RawTerminalStateField::PrimaryCursor,
+                    "alternate_cursor" => RawTerminalStateField::AlternateCursor,
+                    "primary_render" => RawTerminalStateField::PrimaryRender,
+                    "alternate_render" => RawTerminalStateField::AlternateRender,
+                    "primary_image_placements" => RawTerminalStateField::PrimaryImagePlacements,
+                    "primary_image_history" => RawTerminalStateField::PrimaryImageHistory,
+                    "alternate_image_placements" => RawTerminalStateField::AlternateImagePlacements,
+                    "kitty_images" => RawTerminalStateField::KittyImages,
+                    "image_contents" => RawTerminalStateField::ImageContents,
+                    "next_image_content_id" => RawTerminalStateField::NextImageContentId,
+                    "next_image_placement_id" => RawTerminalStateField::NextImagePlacementId,
+                    "modes" => RawTerminalStateField::Modes,
+                    "sixel_palette" => RawTerminalStateField::SixelPalette,
+                    "tab_stops" => RawTerminalStateField::TabStops,
+                    "title" => RawTerminalStateField::Title,
+                    "reported_working_directory" => RawTerminalStateField::ReportedWorkingDirectory,
+                    "shell_integration_state" => RawTerminalStateField::ShellIntegrationState,
+                    "shell_integration_facts" => RawTerminalStateField::ShellIntegrationFacts,
+                    "scrollback" => RawTerminalStateField::Scrollback,
+                    "primary_scroll_region" => RawTerminalStateField::PrimaryScrollRegion,
+                    "alternate_scroll_region" => RawTerminalStateField::AlternateScrollRegion,
+                    "primary_horizontal_margins" => RawTerminalStateField::PrimaryHorizontalMargins,
+                    "alternate_horizontal_margins" => {
+                        RawTerminalStateField::AlternateHorizontalMargins
+                    }
+                    "primary_keyboard_stack" => RawTerminalStateField::PrimaryKeyboardStack,
+                    "alternate_keyboard_stack" => RawTerminalStateField::AlternateKeyboardStack,
+                    "cluster" => RawTerminalStateField::Cluster,
+                    "cluster_base" => RawTerminalStateField::ClusterBase,
+                    "device_query_replies" => RawTerminalStateField::DeviceQueryReplies,
+                    _ => RawTerminalStateField::Other,
+                })
+            }
+        }
+
+        deserializer.deserialize_identifier(RawTerminalStateFieldVisitor)
+    }
 }
 
 struct RawTerminalStateVisitor<'a> {
@@ -552,7 +603,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 }
                 RawTerminalStateField::Active => {
                     if active_screen.is_some() {
-                        return Err(serde::de::Error::duplicate_field("active"));
+                        return Err(serde::de::Error::duplicate_field("active_screen"));
                     }
                     active_screen = Some(map.next_value()?);
                 }
@@ -666,7 +717,9 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 }
                 RawTerminalStateField::ReportedWorkingDirectory => {
                     if reported_working_directory.is_some() {
-                        return Err(serde::de::Error::duplicate_field("reported_cwd"));
+                        return Err(serde::de::Error::duplicate_field(
+                            "reported_working_directory",
+                        ));
                     }
                     reported_working_directory = Some(map.next_value()?);
                 }
@@ -744,7 +797,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 }
                 RawTerminalStateField::DeviceQueryReplies => {
                     if device_query_replies.is_some() {
-                        return Err(serde::de::Error::duplicate_field("replies"));
+                        return Err(serde::de::Error::duplicate_field("device_query_replies"));
                     }
                     device_query_replies = Some(map.next_value()?);
                 }
@@ -761,7 +814,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
             alternate: alternate_grid
                 .ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
             active_screen: active_screen
-                .ok_or_else(|| serde::de::Error::missing_field("active"))?,
+                .ok_or_else(|| serde::de::Error::missing_field("active_screen"))?,
             primary_cursor: primary_cursor
                 .ok_or_else(|| serde::de::Error::missing_field("primary_cursor"))?,
             alternate_cursor: alternate_cursor
@@ -783,7 +836,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
             tab_stops: tab_stops.ok_or_else(|| serde::de::Error::missing_field("tab_stops"))?,
             title: title.ok_or_else(|| serde::de::Error::missing_field("title"))?,
             reported_working_directory: reported_working_directory
-                .ok_or_else(|| serde::de::Error::missing_field("reported_cwd"))?,
+                .ok_or_else(|| serde::de::Error::missing_field("reported_working_directory"))?,
             shell_integration_state: shell_integration_state.unwrap_or_default(),
             shell_integration_facts: shell_integration_facts.unwrap_or_default(),
             scrollback: scrollback.ok_or_else(|| serde::de::Error::missing_field("scrollback"))?,
@@ -799,7 +852,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
             cluster_base: cluster_base
                 .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
             device_query_replies: device_query_replies
-                .ok_or_else(|| serde::de::Error::missing_field("replies"))?,
+                .ok_or_else(|| serde::de::Error::missing_field("device_query_replies"))?,
         })
     }
 }

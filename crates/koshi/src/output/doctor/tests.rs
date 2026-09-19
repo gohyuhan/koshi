@@ -56,15 +56,15 @@ fn the_json_form_is_one_object_per_row() {
         rendered,
         "[\n  \
            {\n    \
-             \"name\": \"config\",\n    \
-             \"verdict\": \"ok\",\n    \
+             \"check_name\": \"config\",\n    \
+             \"verdict\": \"Ok\",\n    \
              \"reason\": \"1 config file validated\",\n    \
              \"help\": null,\n    \
              \"detail\": null\n  \
            },\n  \
            {\n    \
-             \"name\": \"terminal\",\n    \
-             \"verdict\": \"warn\",\n    \
+             \"check_name\": \"terminal\",\n    \
+             \"verdict\": \"Warn\",\n    \
              \"reason\": \"TERM is not set\",\n    \
              \"help\": \"set TERM before running koshi\",\n    \
              \"detail\": null\n  \
@@ -115,8 +115,8 @@ fn the_json_form_carries_the_full_text() {
         rendered,
         "[\n  \
            {\n    \
-             \"name\": \"router\",\n    \
-             \"verdict\": \"fail\",\n    \
+             \"check_name\": \"router\",\n    \
+             \"verdict\": \"Fail\",\n    \
              \"reason\": \"a router is listening and did not answer\",\n    \
              \"help\": \"end every koshi process on this machine and start one again\",\n    \
              \"detail\": \"this router has no request kind named RemoteStatus, and the running router is an older koshi that does not report its build\"\n  \

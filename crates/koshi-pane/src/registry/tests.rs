@@ -334,7 +334,7 @@ fn a_plugin_pane_kind_survives_a_serde_round_trip() {
 fn an_empty_registry_serializes_as_an_empty_records_map() {
     assert_eq!(
         serde_json::to_string(&PaneRegistry::new()).expect("serialize"),
-        r#"{"records":{}}"#
+        r#"{"pane_record_by_id":{}}"#
     );
 }
 

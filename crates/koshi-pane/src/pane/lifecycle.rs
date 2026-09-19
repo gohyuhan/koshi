@@ -42,16 +42,11 @@ pub enum PaneLifecycle {
     /// The child process ended at `exited_at`. `exit_code` is `None` when a signal killed
     /// the child or when no exit status was available.
     Exited {
-        #[serde(rename = "code")]
         exit_code: Option<i32>,
-        #[serde(rename = "at")]
         exited_at: SystemTime,
     },
     /// The pane is shutting down. `close_requested_at` is the time of the close request.
-    Closing {
-        #[serde(rename = "since")]
-        close_requested_at: SystemTime,
-    },
+    Closing { close_requested_at: SystemTime },
     /// The pane is removed from the registry. This state is terminal.
     Removed,
 }
@@ -106,17 +101,12 @@ pub enum PaneLifecycleEvent {
     /// The child process ended at `exited_at`. `exit_code` is `None` when a signal killed
     /// the child or when no exit status was available.
     ProcessExited {
-        #[serde(rename = "code")]
         exit_code: Option<i32>,
-        #[serde(rename = "at")]
         exited_at: SystemTime,
     },
     /// A user or a policy asked the pane to close. `close_requested_at` is the
     /// time of the request.
-    CloseRequested {
-        #[serde(rename = "since")]
-        close_requested_at: SystemTime,
-    },
+    CloseRequested { close_requested_at: SystemTime },
     /// The close finished its cleanup.
     Cleaned,
 }

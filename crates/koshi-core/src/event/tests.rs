@@ -123,15 +123,15 @@ fn too_small_causes_roundtrip() {
 }
 
 #[test]
-fn an_old_too_small_event_defaults_new_fields() {
+fn a_too_small_event_defaults_missing_fields() {
     let client_id = ClientId::new();
-    let old_event_json = serde_json::json!({
+    let partial_event_json = serde_json::json!({
         "client_id": client_id,
-        "size": { "cols": 80, "rows": 24 }
+        "viewport_size": { "column_count": 80, "row_count": 24 }
     });
 
     let entered_event: TerminalTooSmallEntered =
-        serde_json::from_value(old_event_json).expect("the old event shape remains readable");
+        serde_json::from_value(partial_event_json).expect("missing optional fields use defaults");
     assert_eq!(entered_event.client_id, client_id);
     assert_eq!(
         entered_event.viewport_size,
@@ -988,7 +988,7 @@ fn a_too_small_event_reads_an_explicit_null_pane_area_as_none() {
     let client_id = ClientId::new();
     let too_small_event_json = serde_json::json!({
         "client_id": client_id,
-        "size": { "cols": 80, "rows": 24 },
+        "viewport_size": { "column_count": 80, "row_count": 24 },
         "pane_area": null,
         "cause": "Regions"
     });

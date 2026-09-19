@@ -158,11 +158,8 @@ impl<'de> Deserialize<'de> for LoopPolicy {
 /// One shared complete RGBA canvas and its display delay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AnimationFrame {
-    #[serde(rename = "image")]
     decoded_image: Arc<DecodedImage>,
-    #[serde(rename = "delay")]
     frame_delay: FrameDelay,
-    #[serde(rename = "gapless")]
     is_gapless: bool,
 }
 
@@ -232,12 +229,9 @@ impl<'de> Deserialize<'de> for AnimationFrame {
     {
         #[derive(Deserialize)]
         struct AnimationFrameFields {
-            #[serde(rename = "image")]
             decoded_image: Arc<DecodedImage>,
-            #[serde(rename = "delay")]
             frame_delay: FrameDelay,
             #[serde(default)]
-            #[serde(rename = "gapless")]
             is_gapless: bool,
         }
 
@@ -353,14 +347,13 @@ impl<'de> Deserialize<'de> for DecodedAnimation {
     {
         #[derive(Deserialize)]
         struct DecodedAnimationFields {
-            #[serde(rename = "frames")]
-            animation_frames: BoundedAnimationFrames,
+            frames: BoundedAnimationFrames,
             loop_policy: LoopPolicy,
         }
 
         let decoded_animation_fields = DecodedAnimationFields::deserialize(deserializer)?;
         Self::from_frames_and_loop_policy(
-            decoded_animation_fields.animation_frames.animation_frames,
+            decoded_animation_fields.frames.animation_frames,
             decoded_animation_fields.loop_policy,
         )
         .map_err(de::Error::custom)
@@ -479,7 +472,7 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
             match field_name {
                 AnimationFrameField::Image => {
                     if decoded_image.is_some() {
-                        return Err(de::Error::duplicate_field("image"));
+                        return Err(de::Error::duplicate_field("decoded_image"));
                     }
                     decoded_image = Some(map_access.next_value_seed(BoundedDecodedImageSeed {
                         maximum_byte_count: self.remaining_byte_count,
@@ -487,7 +480,7 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
                 }
                 AnimationFrameField::Delay => {
                     if frame_delay.is_some() {
-                        return Err(de::Error::duplicate_field("delay"));
+                        return Err(de::Error::duplicate_field("frame_delay"));
                     }
                     frame_delay = Some(map_access.next_value::<FrameDelay>()?);
                 }
@@ -499,8 +492,9 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
                 }
             }
         }
-        let decoded_image = decoded_image.ok_or_else(|| de::Error::missing_field("image"))?;
-        let frame_delay = frame_delay.ok_or_else(|| de::Error::missing_field("delay"))?;
+        let decoded_image =
+            decoded_image.ok_or_else(|| de::Error::missing_field("decoded_image"))?;
+        let frame_delay = frame_delay.ok_or_else(|| de::Error::missing_field("frame_delay"))?;
         let mut animation_frame = AnimationFrame::from_image_and_delay(decoded_image, frame_delay)
             .map_err(de::Error::custom)?;
         animation_frame.is_gapless = is_gapless;
@@ -508,14 +502,42 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(field_identifier, rename_all = "snake_case")]
 enum AnimationFrameField {
     Image,
     Delay,
     Gapless,
-    #[serde(other)]
     Other,
+}
+
+impl<'de> Deserialize<'de> for AnimationFrameField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct AnimationFrameFieldVisitor;
+
+        impl Visitor<'_> for AnimationFrameFieldVisitor {
+            type Value = AnimationFrameField;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an animation frame field name")
+            }
+
+            fn visit_str<E>(self, field_name: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(match field_name {
+                    "decoded_image" => AnimationFrameField::Image,
+                    "frame_delay" => AnimationFrameField::Delay,
+                    "is_gapless" => AnimationFrameField::Gapless,
+                    _ => AnimationFrameField::Other,
+                })
+            }
+        }
+
+        deserializer.deserialize_identifier(AnimationFrameFieldVisitor)
+    }
 }
 
 struct BoundedDecodedImageSeed {
@@ -557,19 +579,19 @@ impl<'de> Visitor<'de> for BoundedDecodedImageVisitor {
             match field_name {
                 DecodedImageField::Width => {
                     if pixel_width.is_some() {
-                        return Err(de::Error::duplicate_field("width"));
+                        return Err(de::Error::duplicate_field("pixel_width"));
                     }
                     pixel_width = Some(map_access.next_value::<u32>()?);
                 }
                 DecodedImageField::Height => {
                     if pixel_height.is_some() {
-                        return Err(de::Error::duplicate_field("height"));
+                        return Err(de::Error::duplicate_field("pixel_height"));
                     }
                     pixel_height = Some(map_access.next_value::<u32>()?);
                 }
                 DecodedImageField::Rgba => {
                     if rgba_bytes.is_some() {
-                        return Err(de::Error::duplicate_field("rgba"));
+                        return Err(de::Error::duplicate_field("rgba_bytes"));
                     }
                     let rgba_byte_limit = match (pixel_width, pixel_height) {
                         (Some(pixel_width), Some(pixel_height)) => {
@@ -597,9 +619,9 @@ impl<'de> Visitor<'de> for BoundedDecodedImageVisitor {
                 }
             }
         }
-        let pixel_width = pixel_width.ok_or_else(|| de::Error::missing_field("width"))?;
-        let pixel_height = pixel_height.ok_or_else(|| de::Error::missing_field("height"))?;
-        let rgba_bytes = rgba_bytes.ok_or_else(|| de::Error::missing_field("rgba"))?;
+        let pixel_width = pixel_width.ok_or_else(|| de::Error::missing_field("pixel_width"))?;
+        let pixel_height = pixel_height.ok_or_else(|| de::Error::missing_field("pixel_height"))?;
+        let rgba_bytes = rgba_bytes.ok_or_else(|| de::Error::missing_field("rgba_bytes"))?;
         let decoded_image = Arc::new(DecodedImage {
             pixel_width,
             pixel_height,
@@ -610,14 +632,42 @@ impl<'de> Visitor<'de> for BoundedDecodedImageVisitor {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(field_identifier, rename_all = "snake_case")]
 enum DecodedImageField {
     Width,
     Height,
     Rgba,
-    #[serde(other)]
     Other,
+}
+
+impl<'de> Deserialize<'de> for DecodedImageField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DecodedImageFieldVisitor;
+
+        impl Visitor<'_> for DecodedImageFieldVisitor {
+            type Value = DecodedImageField;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a decoded image field name")
+            }
+
+            fn visit_str<E>(self, field_name: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(match field_name {
+                    "pixel_width" => DecodedImageField::Width,
+                    "pixel_height" => DecodedImageField::Height,
+                    "rgba_bytes" => DecodedImageField::Rgba,
+                    _ => DecodedImageField::Other,
+                })
+            }
+        }
+
+        deserializer.deserialize_identifier(DecodedImageFieldVisitor)
+    }
 }
 
 fn compute_expected_animation_byte_count(

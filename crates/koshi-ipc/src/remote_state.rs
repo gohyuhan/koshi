@@ -50,7 +50,6 @@ pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORM
 #[serde(deny_unknown_fields)]
 pub struct CertFile {
     /// The format number of the file these bytes came from or go to.
-    #[serde(rename = "format")]
     pub file_format: u32,
     /// The certificate, in DER form: the bytes a client fingerprints.
     pub cert_der: Vec<u8>,
@@ -104,7 +103,6 @@ impl CertFile {
 #[serde(deny_unknown_fields)]
 pub struct EnabledFile {
     /// The format number of the file this record came from or goes to.
-    #[serde(rename = "format")]
     pub file_format: u32,
     /// When the operator answered yes.
     pub enabled_at: SystemTime,

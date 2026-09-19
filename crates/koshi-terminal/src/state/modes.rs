@@ -68,7 +68,6 @@ pub(crate) struct TerminalModes {
     pub(in crate::state) mouse_encoding: MouseEncoding,
     /// `?1007` — alternate scroll: on the alternate screen, the mouse layer
     /// sends cursor arrow keys for wheel motion.
-    #[serde(rename = "alt_scroll")]
     pub(in crate::state) alternate_scroll: bool,
     /// `?7` (DECAWM) — autowrap. On (the default), a glyph printed into the
     /// effective right bound parks the cursor there and the next glyph wraps to
@@ -76,7 +75,6 @@ pub(crate) struct TerminalModes {
     pub(in crate::state) autowrap: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
     /// for the arrow keys; off, it sends `ESC [ A`.
-    #[serde(rename = "app_cursor_keys")]
     pub(in crate::state) application_cursor_keys: bool,
     /// `?69` (DECLRMM) — enables DECSLRM left/right margin setting and use.
     #[serde(default)]

@@ -63,10 +63,8 @@ pub enum SelectionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GridPosition {
     /// Absolute line number — see the type docs. Never renumbered.
-    #[serde(rename = "row")]
     pub row_index: u64,
     /// Column in cells, 0-indexed from the left.
-    #[serde(rename = "col")]
     pub column_index: u16,
 }
 
@@ -91,7 +89,6 @@ pub struct GridPosition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     /// Selection shape.
-    #[serde(rename = "kind")]
     pub selection_kind: SelectionKind,
     /// The end that stays put — where the drag started.
     pub anchor: GridPosition,

@@ -124,7 +124,7 @@ fn config_counts_one_validated_file_in_the_singular() {
     let test_directory = TempDir::new().unwrap();
     let doctor_context = build_doctor_context(test_directory.path());
     let config_directory = build_config_directory(&doctor_context);
-    fs::write(config_directory.join("koshi.kdl"), "version 1\n").unwrap();
+    fs::write(config_directory.join("koshi.kdl"), "version 2\n").unwrap();
 
     assert_eq!(
         check_config(&doctor_context),
@@ -142,10 +142,10 @@ fn config_counts_two_validated_files_in_the_plural() {
     let test_directory = TempDir::new().unwrap();
     let doctor_context = build_doctor_context(test_directory.path());
     let config_directory = build_config_directory(&doctor_context);
-    fs::write(config_directory.join("koshi.kdl"), "version 1\n").unwrap();
+    fs::write(config_directory.join("koshi.kdl"), "version 2\n").unwrap();
     fs::write(
         config_directory.join("keybinding.kdl"),
-        "version 1\nmode \"normal\" {}\n",
+        "version 2\nmode \"normal\" {}\n",
     )
     .unwrap();
 

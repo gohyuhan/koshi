@@ -231,13 +231,10 @@ pub(super) struct RasterPlan {
     /// The complete cell rectangle and the currently clipped source offset.
     geometry: ImageCellGeometry,
     /// The source rectangle in canonical image pixels.
-    #[serde(rename = "source")]
     source_rect: (u32, u32, u32, u32),
     /// The fitted source size in output pixels.
-    #[serde(rename = "target")]
     target_size: (u32, u32),
     /// The complete output canvas size in pixels.
-    #[serde(rename = "canvas")]
     canvas_size: (u32, u32),
     /// The target's top-left pixel offset in the complete canvas.
     pixel_offset: (u32, u32),
@@ -281,7 +278,6 @@ enum ImageCursorMovement {
 pub(super) struct SerializedImageRecord {
     protocol: GraphicsProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "image")]
     decoded_image: Option<Arc<crate::graphics::DecodedImage>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     animation: Option<Arc<DecodedAnimation>>,
@@ -292,17 +288,12 @@ pub(super) struct SerializedImageRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SerializedImagePlacement {
-    #[serde(rename = "id")]
     image_placement_id: ImagePlacementId,
-    #[serde(rename = "record")]
     image_record: SerializedImageRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "content_id")]
     image_content_id: Option<ImageContentId>,
     anchor: (u64, u16),
-    #[serde(rename = "columns")]
     column_count: u16,
-    #[serde(rename = "rows")]
     row_count: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     plan: Option<RasterPlan>,
@@ -317,7 +308,6 @@ pub(super) struct SerializedKittyImage {
     #[serde(flatten)]
     image_record: SerializedImageRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "content_id")]
     image_content_id: Option<ImageContentId>,
     #[serde(default, skip_serializing_if = "is_false_boolean_flag")]
     is_virtual_placement: bool,
@@ -327,25 +317,19 @@ pub(super) struct SerializedKittyImage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SerializedImageContent {
-    #[serde(rename = "id")]
     image_content_id: ImageContentId,
-    #[serde(rename = "image")]
     decoded_image: Arc<crate::graphics::DecodedImage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     animation: Option<Arc<DecodedAnimation>>,
     #[serde(default, skip_serializing_if = "is_zero_numeric_field")]
-    #[serde(rename = "animation_frame")]
     animation_frame_index: u32,
     #[serde(default, skip_serializing_if = "is_zero_numeric_field")]
-    #[serde(rename = "animation_loops")]
     animation_loop_count: u32,
     #[serde(default, skip_serializing_if = "is_zero_numeric_field")]
     animation_elapsed_nanos: u64,
     #[serde(default, skip_serializing_if = "is_false_boolean_flag")]
-    #[serde(rename = "animation_running")]
     is_animation_running: bool,
     #[serde(default, skip_serializing_if = "is_false_boolean_flag")]
-    #[serde(rename = "animation_loading")]
     is_animation_loading: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sixel: Option<SixelImageSource>,
@@ -595,21 +579,21 @@ impl<'de> Visitor<'de> for BudgetedDecodedImageVisitor<'_> {
         let mut rgba_bytes = None;
         while let Some(field_name) = map_access.next_key::<String>()? {
             match field_name.as_str() {
-                "width" => {
+                "pixel_width" => {
                     if pixel_width.is_some() {
-                        return Err(de::Error::duplicate_field("width"));
+                        return Err(de::Error::duplicate_field("pixel_width"));
                     }
                     pixel_width = Some(map_access.next_value::<u32>()?);
                 }
-                "height" => {
+                "pixel_height" => {
                     if pixel_height.is_some() {
-                        return Err(de::Error::duplicate_field("height"));
+                        return Err(de::Error::duplicate_field("pixel_height"));
                     }
                     pixel_height = Some(map_access.next_value::<u32>()?);
                 }
-                "rgba" => {
+                "rgba_bytes" => {
                     if rgba_bytes.is_some() {
-                        return Err(de::Error::duplicate_field("rgba"));
+                        return Err(de::Error::duplicate_field("rgba_bytes"));
                     }
                     let decoded_rgba_bytes =
                         map_access.next_value_seed(BudgetedImageBytesSeed {
@@ -625,9 +609,9 @@ impl<'de> Visitor<'de> for BudgetedDecodedImageVisitor<'_> {
                 }
             }
         }
-        let pixel_width = pixel_width.ok_or_else(|| de::Error::missing_field("width"))?;
-        let pixel_height = pixel_height.ok_or_else(|| de::Error::missing_field("height"))?;
-        let rgba_bytes = rgba_bytes.ok_or_else(|| de::Error::missing_field("rgba"))?;
+        let pixel_width = pixel_width.ok_or_else(|| de::Error::missing_field("pixel_width"))?;
+        let pixel_height = pixel_height.ok_or_else(|| de::Error::missing_field("pixel_height"))?;
+        let rgba_bytes = rgba_bytes.ok_or_else(|| de::Error::missing_field("rgba_bytes"))?;
         let decoded_image = Arc::new(crate::graphics::DecodedImage {
             pixel_width,
             pixel_height,
@@ -939,9 +923,9 @@ impl<'de> Visitor<'de> for SerializedImageRecordVisitor<'_> {
                     }
                     graphics_protocol = Some(map.next_value::<GraphicsProtocol>()?);
                 }
-                "image" => {
+                "decoded_image" => {
                     if decoded_image.is_some() {
-                        return Err(de::Error::duplicate_field("image"));
+                        return Err(de::Error::duplicate_field("decoded_image"));
                     }
                     decoded_image = Some(map.next_value_seed(OptionalImageSeed {
                         budget: self.budget,
@@ -1044,24 +1028,24 @@ impl<'de> Visitor<'de> for SerializedImagePlacementVisitor<'_> {
         let mut raster_image = None;
         while let Some(field_name) = map.next_key::<String>()? {
             match field_name.as_str() {
-                "id" => {
+                "image_placement_id" => {
                     if image_placement_id.is_some() {
-                        return Err(de::Error::duplicate_field("id"));
+                        return Err(de::Error::duplicate_field("image_placement_id"));
                     }
                     image_placement_id = Some(map.next_value::<ImagePlacementId>()?);
                 }
-                "record" => {
+                "image_record" => {
                     if serialized_image_record.is_some() {
-                        return Err(de::Error::duplicate_field("record"));
+                        return Err(de::Error::duplicate_field("image_record"));
                     }
                     serialized_image_record =
                         Some(map.next_value_seed(SerializedImageRecordSeed {
                             budget: self.budget,
                         })?);
                 }
-                "content_id" => {
+                "image_content_id" => {
                     if image_content_id.is_some() {
-                        return Err(de::Error::duplicate_field("content_id"));
+                        return Err(de::Error::duplicate_field("image_content_id"));
                     }
                     image_content_id = Some(map.next_value::<Option<ImageContentId>>()?);
                 }
@@ -1071,15 +1055,15 @@ impl<'de> Visitor<'de> for SerializedImagePlacementVisitor<'_> {
                     }
                     image_anchor = Some(map.next_value::<(u64, u16)>()?);
                 }
-                "columns" => {
+                "column_count" => {
                     if column_count.is_some() {
-                        return Err(de::Error::duplicate_field("columns"));
+                        return Err(de::Error::duplicate_field("column_count"));
                     }
                     column_count = Some(map.next_value::<u16>()?);
                 }
-                "rows" => {
+                "row_count" => {
                     if row_count.is_some() {
-                        return Err(de::Error::duplicate_field("rows"));
+                        return Err(de::Error::duplicate_field("row_count"));
                     }
                     row_count = Some(map.next_value::<u16>()?);
                 }
@@ -1109,13 +1093,14 @@ impl<'de> Visitor<'de> for SerializedImagePlacementVisitor<'_> {
             }
         }
         Ok(SerializedImagePlacement {
-            image_placement_id: image_placement_id.ok_or_else(|| de::Error::missing_field("id"))?,
+            image_placement_id: image_placement_id
+                .ok_or_else(|| de::Error::missing_field("image_placement_id"))?,
             image_record: serialized_image_record
-                .ok_or_else(|| de::Error::missing_field("record"))?,
+                .ok_or_else(|| de::Error::missing_field("image_record"))?,
             image_content_id: image_content_id.unwrap_or_default(),
             anchor: image_anchor.ok_or_else(|| de::Error::missing_field("anchor"))?,
-            column_count: column_count.ok_or_else(|| de::Error::missing_field("columns"))?,
-            row_count: row_count.ok_or_else(|| de::Error::missing_field("rows"))?,
+            column_count: column_count.ok_or_else(|| de::Error::missing_field("column_count"))?,
+            row_count: row_count.ok_or_else(|| de::Error::missing_field("row_count"))?,
             plan: raster_plan.unwrap_or_default(),
             geometry: image_geometry.unwrap_or_default(),
             raster: raster_image.unwrap_or_default(),
@@ -1175,9 +1160,9 @@ impl<'de> Visitor<'de> for SerializedKittyImageVisitor<'_> {
                     }
                     graphics_protocol = Some(map.next_value::<GraphicsProtocol>()?);
                 }
-                "image" => {
+                "decoded_image" => {
                     if decoded_image.is_some() {
-                        return Err(de::Error::duplicate_field("image"));
+                        return Err(de::Error::duplicate_field("decoded_image"));
                     }
                     decoded_image = Some(map.next_value_seed(OptionalImageSeed {
                         budget: self.budget,
@@ -1207,15 +1192,15 @@ impl<'de> Visitor<'de> for SerializedKittyImageVisitor<'_> {
                     }
                     image_anchor = Some(map.next_value::<(u16, u16)>()?);
                 }
-                "content_id" => {
+                "image_content_id" => {
                     if image_content_id.is_some() {
-                        return Err(de::Error::duplicate_field("content_id"));
+                        return Err(de::Error::duplicate_field("image_content_id"));
                     }
                     image_content_id = Some(map.next_value::<Option<ImageContentId>>()?);
                 }
-                "virtual_placement" => {
+                "is_virtual_placement" => {
                     if is_virtual_placement.is_some() {
-                        return Err(de::Error::duplicate_field("virtual_placement"));
+                        return Err(de::Error::duplicate_field("is_virtual_placement"));
                     }
                     is_virtual_placement = Some(map.next_value::<bool>()?);
                 }
@@ -1303,15 +1288,15 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
         let mut sixel = None;
         while let Some(field_name) = map.next_key::<String>()? {
             match field_name.as_str() {
-                "id" => {
+                "image_content_id" => {
                     if image_content_id.is_some() {
-                        return Err(de::Error::duplicate_field("id"));
+                        return Err(de::Error::duplicate_field("image_content_id"));
                     }
                     image_content_id = Some(map.next_value::<ImageContentId>()?);
                 }
-                "image" => {
+                "decoded_image" => {
                     if decoded_image.is_some() {
-                        return Err(de::Error::duplicate_field("image"));
+                        return Err(de::Error::duplicate_field("decoded_image"));
                     }
                     decoded_image = Some(map.next_value_seed(BudgetedDecodedImageSeed {
                         budget: self.budget,
@@ -1323,15 +1308,15 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
                     }
                     decoded_animation = Some(map.next_value::<Option<Arc<DecodedAnimation>>>()?);
                 }
-                "animation_frame" => {
+                "animation_frame_index" => {
                     if animation_frame_index.is_some() {
-                        return Err(de::Error::duplicate_field("animation_frame"));
+                        return Err(de::Error::duplicate_field("animation_frame_index"));
                     }
                     animation_frame_index = Some(map.next_value::<u32>()?);
                 }
-                "animation_loops" => {
+                "animation_loop_count" => {
                     if animation_loop_count.is_some() {
-                        return Err(de::Error::duplicate_field("animation_loops"));
+                        return Err(de::Error::duplicate_field("animation_loop_count"));
                     }
                     animation_loop_count = Some(map.next_value::<u32>()?);
                 }
@@ -1341,15 +1326,15 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
                     }
                     animation_elapsed_nanos = Some(map.next_value::<u64>()?);
                 }
-                "animation_running" => {
+                "is_animation_running" => {
                     if is_animation_running.is_some() {
-                        return Err(de::Error::duplicate_field("animation_running"));
+                        return Err(de::Error::duplicate_field("is_animation_running"));
                     }
                     is_animation_running = Some(map.next_value::<bool>()?);
                 }
-                "animation_loading" => {
+                "is_animation_loading" => {
                     if is_animation_loading.is_some() {
-                        return Err(de::Error::duplicate_field("animation_loading"));
+                        return Err(de::Error::duplicate_field("is_animation_loading"));
                     }
                     is_animation_loading = Some(map.next_value::<bool>()?);
                 }
@@ -1372,7 +1357,7 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
         let is_animation_running = is_animation_running.unwrap_or(false);
         let is_animation_loading = is_animation_loading.unwrap_or(false);
         let mut decoded_image =
-            Some(decoded_image.ok_or_else(|| de::Error::missing_field("image"))?);
+            Some(decoded_image.ok_or_else(|| de::Error::missing_field("decoded_image"))?);
         validate_animation_content_state(
             decoded_image.as_ref().expect("the image is present"),
             decoded_animation.as_ref(),
@@ -1401,7 +1386,8 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
                 .map_err(de::Error::custom)?;
         }
         Ok(SerializedImageContent {
-            image_content_id: image_content_id.ok_or_else(|| de::Error::missing_field("id"))?,
+            image_content_id: image_content_id
+                .ok_or_else(|| de::Error::missing_field("image_content_id"))?,
             decoded_image: decoded_image.expect("the image is present"),
             animation: decoded_animation,
             animation_frame_index,
@@ -2428,10 +2414,8 @@ pub(super) fn restore_serialized_image_state(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ImagePlacement {
     /// The terminal-local identity for this placement.
-    #[serde(rename = "id")]
     image_placement_id: ImagePlacementId,
     /// The complete image record retained with the placement and terminal state.
-    #[serde(rename = "record")]
     image_record: Arc<ImageRecord>,
     /// The canonical image source shared by this placement's copies.
     #[serde(skip)]
@@ -2439,10 +2423,8 @@ pub struct ImagePlacement {
     /// The zero-based row and column of the upper-left covered cell.
     anchor: (u16, u16),
     /// The number of covered columns.
-    #[serde(rename = "columns")]
     column_count: u16,
     /// The number of covered rows.
-    #[serde(rename = "rows")]
     row_count: u16,
     /// The transform and complete cell geometry used to rebuild the raster.
     plan: RasterPlan,
@@ -2455,10 +2437,8 @@ pub struct ImagePlacement {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct PrimaryHistoryImagePlacement {
     /// The terminal-local identity for this placement.
-    #[serde(rename = "id")]
     image_placement_id: ImagePlacementId,
     /// The complete image record retained with the placement and terminal state.
-    #[serde(rename = "record")]
     image_record: Arc<ImageRecord>,
     /// The canonical image source shared by this placement's copies.
     #[serde(skip)]
@@ -2466,10 +2446,8 @@ pub(crate) struct PrimaryHistoryImagePlacement {
     /// The absolute primary row and column of the upper-left covered cell.
     anchor: (u64, u16),
     /// The number of covered columns.
-    #[serde(rename = "columns")]
     column_count: u16,
     /// The number of covered rows.
-    #[serde(rename = "rows")]
     row_count: u16,
     /// The transform and complete cell geometry used to rebuild the raster.
     plan: RasterPlan,
@@ -2732,14 +2710,10 @@ impl<'de> serde::Deserialize<'de> for ImagePlacement {
     {
         #[derive(serde::Deserialize)]
         struct ImagePlacementFields {
-            #[serde(rename = "id")]
             image_placement_id: ImagePlacementId,
-            #[serde(rename = "record")]
             image_record: Arc<ImageRecord>,
             anchor: (u16, u16),
-            #[serde(rename = "columns")]
             column_count: u16,
-            #[serde(rename = "rows")]
             row_count: u16,
             #[serde(default)]
             geometry: Option<ImageCellGeometry>,
@@ -2827,14 +2801,10 @@ impl<'de> serde::Deserialize<'de> for PrimaryHistoryImagePlacement {
     {
         #[derive(serde::Deserialize)]
         struct PrimaryHistoryImagePlacementFields {
-            #[serde(rename = "id")]
             image_placement_id: ImagePlacementId,
-            #[serde(rename = "record")]
             image_record: Arc<ImageRecord>,
             anchor: (u64, u16),
-            #[serde(rename = "columns")]
             column_count: u16,
-            #[serde(rename = "rows")]
             row_count: u16,
             #[serde(default)]
             geometry: Option<ImageCellGeometry>,

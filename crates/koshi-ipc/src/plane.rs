@@ -121,8 +121,8 @@ pub enum RequestDisposition<RequestKind> {
 ///
 /// When the gate accepts a Hello and [`Gate::get_agreed_protocol_version`] still returns `None`.
 ///
-/// Example — a caller that sends `{"request_id":4,"kind":"Discovery"}` on an
-/// open connection gets `RequestDisposition::Dispatch { request_id: 4, kind: Discovery }`,
+/// Example — a caller that sends `{"request_id":4,"request_kind":"Discovery"}` on an
+/// open connection gets `RequestDisposition::Dispatch { request_id: 4, request_kind: Discovery }`,
 /// and the same bytes before any Hello are answered here with
 /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired) and read as
 /// `RequestDisposition::Answered`.

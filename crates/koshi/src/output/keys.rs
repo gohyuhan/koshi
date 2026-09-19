@@ -29,18 +29,14 @@ const KEYS_RECOMMENDED_HEADERS: &[&str] = &["key", "action", "plugin"];
 #[derive(Serialize)]
 struct KeyBindingSummary {
     /// The input mode the binding fires in.
-    #[serde(rename = "mode")]
     input_mode: String,
     /// The key sequence, in the angle grammar.
-    #[serde(rename = "key")]
     key_sequence: String,
     /// The action reference the key fires.
-    #[serde(rename = "action")]
     action_reference: String,
     /// The layer that authored the winning entry: `defaults`, `user`,
     /// `session`, or `layout` — or `defaults (unbound)` for a shipped
     /// binding a user surface displaced.
-    #[serde(rename = "source")]
     binding_source: String,
 }
 
@@ -49,10 +45,8 @@ struct KeyBindingSummary {
 struct KeysList {
     /// True when a user keybinding file exists but was not admitted, so the
     /// listing shows the built-in defaults.
-    #[serde(rename = "reverted")]
     is_reverted: bool,
     /// Every effective binding, then every displaced default.
-    #[serde(rename = "bindings")]
     key_bindings: Vec<KeyBindingSummary>,
 }
 
@@ -60,13 +54,10 @@ struct KeysList {
 #[derive(Serialize)]
 struct KeyBindingDetail {
     /// The key sequence, in the angle grammar.
-    #[serde(rename = "key")]
     key_sequence: String,
     /// The input mode this entry fires in.
-    #[serde(rename = "mode")]
     input_mode: String,
     /// The action reference the key fires.
-    #[serde(rename = "action")]
     action_reference: String,
     /// The action's human-facing name.
     display_name: String,
@@ -75,14 +66,11 @@ struct KeyBindingDetail {
     /// How broad the action's effect is.
     scope: String,
     /// The preset arguments bound with the action, `null` when none.
-    #[serde(rename = "args")]
     action_arguments: serde_json::Value,
     /// The layer that authored the winning entry.
-    #[serde(rename = "source")]
     binding_source: String,
     /// Whether the action re-arms its prefix when fired from a multi-chord
     /// binding.
-    #[serde(rename = "continuous")]
     is_continuous: bool,
 }
 
@@ -106,7 +94,6 @@ struct KeysConflicts {
     /// describe the built-in defaults, not the file.
     file_error: Option<String>,
     /// Every finding, warnings included.
-    #[serde(rename = "findings")]
     conflict_findings: Vec<ConflictFinding>,
 }
 
@@ -114,16 +101,12 @@ struct KeysConflicts {
 #[derive(Serialize)]
 struct KeysValidation {
     /// True when the file parsed as valid keybinding KDL.
-    #[serde(rename = "valid")]
     is_valid: bool,
     /// True when a reload would apply the file.
-    #[serde(rename = "applies")]
     is_applicable: bool,
     /// Parse problems, one per line, when the file did not parse.
-    #[serde(rename = "errors")]
     parse_errors: Vec<String>,
     /// Conflict-detection findings, when the file parsed.
-    #[serde(rename = "findings")]
     conflict_findings: Vec<ConflictFinding>,
 }
 

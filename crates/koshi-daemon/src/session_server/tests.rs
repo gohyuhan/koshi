@@ -1198,7 +1198,8 @@ fn the_line_a_build_prints_names_the_formats_it_reads() {
     // The one line is the whole answer, so a build that printed something else
     // must be refused rather than read as a range that happens to parse.
     assert_eq!(
-        parse_resume_support("{\"min\":1,\"max\":3}").expect("the line reads"),
+        parse_resume_support("{\"minimum_resume_format\":1,\"maximum_resume_format\":3}")
+            .expect("the line reads"),
         ResumeSupport {
             minimum_resume_format: 1,
             maximum_resume_format: 3
@@ -1206,7 +1207,7 @@ fn the_line_a_build_prints_names_the_formats_it_reads() {
     );
     assert_eq!(
         serde_json::to_string(&ResumeSupport::from_current_build()).expect("the range encodes"),
-        format!("{{\"min\":{RESUME_FORMAT_MIN},\"max\":{RESUME_FORMAT}}}")
+        format!("{{\"minimum_resume_format\":{RESUME_FORMAT_MIN},\"maximum_resume_format\":{RESUME_FORMAT}}}")
     );
     assert_eq!(
         parse_resume_support("koshi 0.2.0").expect_err("a version line is not a range"),
@@ -1249,7 +1250,7 @@ fn a_binary_reading_no_format_this_one_writes_is_refused_naming_both_ranges() {
     );
 
     // The real case behind the refusal: a koshi that reads formats 1 through
-    // 2 is an older build, and this one writes a body with format 3.
+    // 2 is an older build, and this one writes a body with format 4.
     assert_eq!(
         reads_the_format_this_build_writes(
             ResumeSupport {
@@ -1311,7 +1312,7 @@ fn a_binary_answering_a_range_this_one_writes_into_passes_the_whole_check() {
     write_probe_binary(
         &executable_path,
         &format!(
-            "{{\"min\":{RESUME_FORMAT_MIN},\"max\":{}}}",
+            "{{\"minimum_resume_format\":{RESUME_FORMAT_MIN},\"maximum_resume_format\":{}}}",
             RESUME_FORMAT + 5
         ),
     );
@@ -1370,7 +1371,7 @@ fn a_binary_answering_a_range_that_misses_this_ones_is_refused_naming_both() {
     write_probe_binary(
         &executable_path,
         &format!(
-            "{{\"min\":{unsupported_minimum_resume_format},\"max\":{}}}",
+            "{{\"minimum_resume_format\":{unsupported_minimum_resume_format},\"maximum_resume_format\":{}}}",
             unsupported_minimum_resume_format + 2
         ),
     );
@@ -2508,7 +2509,7 @@ fn a_binary_printing_its_answer_with_no_newline_after_it_is_still_read() {
     let executable_path = runtime_directory_fixture.path().join("koshi");
     std::fs::write(
         &executable_path,
-        format!("#!/bin/sh\nprintf '{{\"min\":{RESUME_FORMAT_MIN},\"max\":{RESUME_FORMAT}}}'\n"),
+        format!("#!/bin/sh\nprintf '{{\"minimum_resume_format\":{RESUME_FORMAT_MIN},\"maximum_resume_format\":{RESUME_FORMAT}}}'\n"),
     )
     .expect("the stand-in binary is written");
     std::fs::set_permissions(&executable_path, std::fs::Permissions::from_mode(0o755))
@@ -2784,7 +2785,7 @@ fn a_resume_file_whose_header_does_not_read_is_refused_and_taken_off_the_disk() 
     let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
     let resume_file_path =
         resolve_resume_file_path(runtime_directory_fixture.path(), session_start.session_id);
-    std::fs::write(&resume_file_path, b"{\"header\":{\"format\":1}")
+    std::fs::write(&resume_file_path, b"{\"header\":{\"resume_format\":1}")
         .expect("the half-written resume file is placed");
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
 
@@ -2804,7 +2805,7 @@ fn a_resume_file_whose_header_does_not_read_is_refused_and_taken_off_the_disk() 
         resume_error.to_string(),
         format!(
             "corrupt stored state: resume state at {} is unreadable: \
-             missing field `session_id` at line 1 column 22",
+             missing field `session_id` at line 1 column 29",
             resume_file_path.display()
         )
     );

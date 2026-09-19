@@ -35,33 +35,24 @@ use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId,
 pub struct RecentEvent {
     /// Wall-clock time supplied by the caller. `recent_events::record` in
     /// `koshi-observability` supplies the clock reading when it runs.
-    #[serde(rename = "at")]
     pub occurred_at: SystemTime,
     /// The event variant's name, e.g. `"PaneCreated"` — the string
     /// [`Event::get_event_name`] returns. Borrowed while the record stays in the process
     /// that made it, owned once it is decoded from the wire.
-    #[serde(rename = "name")]
     pub event_name: Cow<'static, str>,
     /// The session the event named.
-    #[serde(rename = "session")]
     pub session_id: Option<SessionId>,
     /// The client the event named.
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
     /// The tab the event named.
-    #[serde(rename = "tab")]
     pub tab_id: Option<TabId>,
     /// The pane the event named.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// The plugin the event named.
-    #[serde(rename = "plugin")]
     pub plugin_id: Option<PluginId>,
     /// The command the event named.
-    #[serde(rename = "command")]
     pub command_id: Option<CommandId>,
     /// The subscriber the event named.
-    #[serde(rename = "subscriber")]
     pub subscriber_id: Option<SubscriberId>,
 }
 

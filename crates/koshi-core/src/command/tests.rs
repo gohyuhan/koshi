@@ -84,8 +84,8 @@ fn pane_commands_roundtrip() {
         .expect("serialize scroll command"),
         json!({
             "ScrollPane": {
-                "pane": null,
-                "lines": -7,
+                "pane_id": null,
+                "scroll_line_count": -7,
             }
         })
     );
@@ -816,7 +816,7 @@ fn toggle_pane_fullscreen_is_a_bare_wire_string() {
 
 #[test]
 fn an_external_cli_source_without_a_client_still_decodes() {
-    // JSON carrying no `target_client` field decodes with it `None`.
+    // JSON carrying no `target_client_id` field decodes with it `None`.
     assert_eq!(
         serde_json::from_str::<CommandSource>(r#"{"ExternalCli":{"session_id":null}}"#).unwrap(),
         CommandSource::ExternalCli {
@@ -1284,9 +1284,9 @@ fn extreme_numeric_fields_roundtrip() {
 #[test]
 fn a_resize_size_past_i16_is_rejected() {
     let parse_error = serde_json::from_value::<ResizePaneArgs>(json!({
-        "pane": null,
+        "pane_id": null,
         "direction": "Left",
-        "size": 32768
+        "resize_amount_cells": 32768
     }))
     .expect_err("rejects");
 
@@ -1309,10 +1309,10 @@ fn write_to_pane_carries_every_byte_value() {
         input_bytes,
     })
     .expect("serialize");
-    assert_eq!(write_to_pane_json["data"][0], json!(0));
-    assert_eq!(write_to_pane_json["data"][255], json!(255));
+    assert_eq!(write_to_pane_json["input_bytes"][0], json!(0));
+    assert_eq!(write_to_pane_json["input_bytes"][255], json!(255));
     assert_eq!(
-        write_to_pane_json["data"].as_array().map(Vec::len),
+        write_to_pane_json["input_bytes"].as_array().map(Vec::len),
         Some(256)
     );
 }
@@ -1325,8 +1325,10 @@ fn args_written_without_their_defaulted_fields_still_decode() {
     let session_json = serde_json::to_value(session_id).expect("serialize");
 
     assert_eq!(
-        serde_json::from_value::<ClosePaneArgs>(json!({"pane": null, "force": true}))
-            .expect("deserialize"),
+        serde_json::from_value::<ClosePaneArgs>(
+            json!({"pane_id": null, "should_force_close": true})
+        )
+        .expect("deserialize"),
         ClosePaneArgs {
             pane_id: None,
             should_force_close: true,
@@ -1334,8 +1336,10 @@ fn args_written_without_their_defaulted_fields_still_decode() {
         }
     );
     assert_eq!(
-        serde_json::from_value::<CloseTabArgs>(json!({"tab": null, "force": false}))
-            .expect("deserialize"),
+        serde_json::from_value::<CloseTabArgs>(
+            json!({"tab_id": null, "should_force_close": false})
+        )
+        .expect("deserialize"),
         CloseTabArgs {
             tab_id: None,
             should_force_close: false,
@@ -1344,18 +1348,19 @@ fn args_written_without_their_defaulted_fields_still_decode() {
     );
     assert_eq!(
         serde_json::from_value::<NewPaneArgs>(json!({
-            "source": null,
+            "source_pane_id": null,
+            "tab_id": null,
             "direction": "Right",
-            "stacked": false,
-            "cwd": null,
-            "command": null,
-            "client": null
+            "should_stack": false,
+            "working_directory": null,
+            "spawn_spec": null,
+            "client_id": null
         }))
         .expect("deserialize"),
         build_new_pane_args()
     );
     assert_eq!(
-        serde_json::from_value::<LockModeArgs>(json!({"locked": true})).expect("deserialize"),
+        serde_json::from_value::<LockModeArgs>(json!({"is_locked": true})).expect("deserialize"),
         LockModeArgs {
             is_locked: true,
             client_id: None,
@@ -1370,7 +1375,7 @@ fn args_written_without_their_defaulted_fields_still_decode() {
         DetachArgs { client_id: None }
     );
     assert_eq!(
-        serde_json::from_value::<SwitchSessionArgs>(json!({"session": session_json}))
+        serde_json::from_value::<SwitchSessionArgs>(json!({"session_id": session_json}))
             .expect("deserialize"),
         SwitchSessionArgs {
             client_id: None,
@@ -1378,8 +1383,10 @@ fn args_written_without_their_defaulted_fields_still_decode() {
         }
     );
     assert_eq!(
-        serde_json::from_value::<LockModeArgs>(json!({"locked": false, "client": client_json}))
-            .expect("deserialize"),
+        serde_json::from_value::<LockModeArgs>(
+            json!({"is_locked": false, "client_id": client_json})
+        )
+        .expect("deserialize"),
         LockModeArgs {
             is_locked: false,
             client_id: Some(client_id),
@@ -1394,11 +1401,11 @@ fn run_command_pane_args_written_without_tab_and_client_still_decode() {
         .as_object_mut()
         .expect("args are a JSON object");
     command_fields
-        .remove("tab")
-        .expect("the args carry a `tab` field to remove");
+        .remove("tab_id")
+        .expect("the args carry a `tab_id` field to remove");
     command_fields
-        .remove("client")
-        .expect("the args carry a `client` field to remove");
+        .remove("client_id")
+        .expect("the args carry a `client_id` field to remove");
 
     let decoded_run_command_args: RunCommandPaneArgs =
         serde_json::from_value(command_args_json).expect("deserialize");

@@ -1134,8 +1134,8 @@ impl Server {
     /// client — the one that will view the tab and focus the new pane, `None`
     /// when the tab is already viewed and no client was named.
     ///
-    /// A designated client is an explicit `target_client` (the command's named
-    /// `--client`, which wins even over an in-session issuer) or, when none is
+    /// A designated client is an explicit `target_client_id` (the command's
+    /// named `--client`, which wins even over an in-session issuer) or, when none is
     /// named, the issuing client (`focus_client_id`). When one is designated, the
     /// split is sized to the smallest of the tab's current viewers *and* that
     /// client, so it fits everyone who will see it; the caller switches the client
@@ -1155,7 +1155,7 @@ impl Server {
     /// `candidate_layout_tree` is the post-split tree fit is judged against. Fails
     /// [`RejectReason::MinSize`] when the split cannot fit the chosen viewport,
     /// [`RejectReason::TargetNotFound`] when the designated client (a named
-    /// `target_client`, or the issuer) is not attached here — a wrong explicit
+    /// `target_client_id`, or the issuer) is not attached here — a wrong explicit
     /// target is rejected outright, never falling back — and
     /// [`RejectReason::InvalidState`] when the tab has no viewer and the session
     /// has no attached client at all. A bystander client is never switched to
@@ -1165,7 +1165,7 @@ impl Server {
         tab_id: TabId,
         candidate_layout_tree: &LayoutNode,
         issuing_client_id: Option<ClientId>,
-        target_client: Option<ClientId>,
+        target_client_id: Option<ClientId>,
         pane_sizing: PaneSizing,
     ) -> Result<(Size, Option<ClientId>), Rejection> {
         let reject_when_no_room = || {
@@ -1193,16 +1193,17 @@ impl Server {
         // that names a client is honored even in-session — and must be valid: a
         // wrong target is rejected outright, never falling back to the issuer. With
         // no explicit target, the in-session issuer is used.
-        if let Some(client_id) = target_client.or(issuing_client_id) {
-            let target_client = session.clients.get_client_by_id(client_id).ok_or_else(|| {
-                Rejection::from_reason_and_help(
-                    RejectReason::TargetNotFound,
-                    "target client not attached to the session",
-                )
-            })?;
+        if let Some(client_id) = target_client_id.or(issuing_client_id) {
+            let designated_client =
+                session.clients.get_client_by_id(client_id).ok_or_else(|| {
+                    Rejection::from_reason_and_help(
+                        RejectReason::TargetNotFound,
+                        "target client not attached to the session",
+                    )
+                })?;
             // The smaller of the tab's current viewport and the designated
             // client's pane area; a starving designated client adds no size.
-            let viewport = match (existing_viewport, target_client.get_pane_area()) {
+            let viewport = match (existing_viewport, designated_client.get_pane_area()) {
                 (Some(existing_viewport), Some(designated_client_area)) => {
                     existing_viewport.compute_minimum_axes(designated_client_area)
                 }

@@ -85,23 +85,19 @@ pub enum ActionArgs {
     /// Arguments for `core:run`.
     Run {
         /// The program to execute.
-        #[serde(rename = "program")]
         program: PathBuf,
         /// Arguments passed to the program, excluding `argv[0]`.
-        #[serde(rename = "args")]
         arguments: Vec<String>,
         /// Split direction for the new pane; `None` uses the direction the
         /// resolving client passes in.
         direction: Option<Direction>,
         /// Stack onto the source pane instead of splitting space.
-        #[serde(rename = "stacked")]
         should_stack: bool,
     },
     /// Optional signed scroll line count for `core:scroll-pane-up` and
     /// `core:scroll-pane-down`; `None` uses the viewer's configured default.
     Scroll {
         /// Signed scroll line count to place in the typed scroll command.
-        #[serde(rename = "lines")]
         scroll_line_count: Option<i32>,
     },
 }

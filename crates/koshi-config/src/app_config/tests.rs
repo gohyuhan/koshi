@@ -503,7 +503,7 @@ fn a_duplicate_update_section_is_a_validation_error() {
 
 #[test]
 fn a_current_schema_version_is_accepted() {
-    let layer = parse_config("version 1\nupdate {\n    auto-check #false\n}");
+    let layer = parse_config("version 2\nupdate {\n    auto-check #false\n}");
     assert_eq!(
         layer
             .update
@@ -520,7 +520,7 @@ fn a_newer_schema_version_is_a_validation_error() {
     assert_validation(
         validation_error,
         "version",
-        "config schema version 999 is newer than this koshi supports (1)",
+        "config schema version 999 is newer than this koshi supports (2)",
     );
 }
 
@@ -1107,14 +1107,14 @@ fn the_largest_u32_interval_is_accepted_and_one_past_it_is_a_validation_error() 
 
 #[test]
 fn the_first_unsupported_schema_version_is_rejected_at_the_boundary() {
-    // The build supports schema version 1; version 2, one past the boundary,
+    // The build supports schema version 2; version 3, one past the boundary,
     // is the smallest rejected version, named in the exact detail.
-    let validation_error = parse_app_config(Path::new("koshi.kdl"), "version 2")
-        .expect_err("version 2 is newer than this build");
+    let validation_error = parse_app_config(Path::new("koshi.kdl"), "version 3")
+        .expect_err("version 3 is newer than this build");
     assert_validation(
         validation_error,
         "version",
-        "config schema version 2 is newer than this koshi supports (1)",
+        "config schema version 3 is newer than this koshi supports (2)",
     );
 }
 

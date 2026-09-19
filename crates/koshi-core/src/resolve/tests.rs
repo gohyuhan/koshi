@@ -1399,10 +1399,11 @@ fn action_args_serialize_to_their_wire_form() {
     };
     assert_eq!(
         serde_json::to_string(&scroll_action_arguments).expect("serializes"),
-        r#"{"Scroll":{"lines":-4}}"#
+        r#"{"Scroll":{"scroll_line_count":-4}}"#
     );
     assert_eq!(
-        serde_json::from_str::<ActionArgs>(r#"{"Scroll":{"lines":null}}"#).expect("deserializes"),
+        serde_json::from_str::<ActionArgs>(r#"{"Scroll":{"scroll_line_count":null}}"#)
+            .expect("deserializes"),
         ActionArgs::Scroll {
             scroll_line_count: None,
         }
@@ -1414,7 +1415,7 @@ fn action_args_serialize_to_their_wire_form() {
         direction: Some(Direction::Down),
         should_stack: false,
     };
-    let action_args_json = r#"{"Run":{"program":"/usr/bin/lazygit","args":["--all"],"direction":"Down","stacked":false}}"#;
+    let action_args_json = r#"{"Run":{"program":"/usr/bin/lazygit","arguments":["--all"],"direction":"Down","should_stack":false}}"#;
     assert_eq!(
         serde_json::to_string(&run_action_arguments).expect("serializes"),
         action_args_json
@@ -1428,7 +1429,7 @@ fn action_args_serialize_to_their_wire_form() {
 #[test]
 fn action_args_run_deserializes_a_null_direction() {
     let null_direction_action_args_json =
-        r#"{"Run":{"program":"/bin/zsh","args":[],"direction":null,"stacked":true}}"#;
+        r#"{"Run":{"program":"/bin/zsh","arguments":[],"direction":null,"should_stack":true}}"#;
 
     assert_eq!(
         serde_json::from_str::<ActionArgs>(null_direction_action_args_json).expect("deserializes"),

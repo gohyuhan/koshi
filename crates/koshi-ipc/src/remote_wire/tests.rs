@@ -330,14 +330,14 @@ fn a_server_frame_reads_back_as_the_frame_that_was_written() {
 fn a_doorway_version_refusal_names_the_callers_range_then_this_builds() {
     assert_eq!(
         format_version_refusal(2, 3),
-        "the caller speaks remote doorway 2 to 3, this koshi speaks 1 to 1"
+        "the caller speaks remote doorway 2 to 3, this koshi speaks 2 to 2"
     );
 }
 
 #[test]
-fn this_build_speaks_remote_doorway_one_to_one() {
-    assert_eq!(MIN_REMOTE_PROTOCOL_VERSION, 1);
-    assert_eq!(REMOTE_PROTOCOL_VERSION, 1);
+fn this_build_speaks_remote_doorway_two_to_two() {
+    assert_eq!(MIN_REMOTE_PROTOCOL_VERSION, 2);
+    assert_eq!(REMOTE_PROTOCOL_VERSION, 2);
 }
 
 /// Every client frame, pinned byte for byte. The version numbers are written
@@ -347,20 +347,20 @@ fn every_client_frame_travels_as_these_exact_bytes() {
     for (frame, expected_frame_json) in [
         (
             RemoteClientFrame::Hello {
-                min_remote_version: 1,
-                max_remote_version: 1,
-                min_protocol_version: 2,
-                max_protocol_version: 3,
+                min_remote_version: 2,
+                max_remote_version: 2,
+                min_protocol_version: 4,
+                max_protocol_version: 4,
                 connection_token: ConnectionToken::from_secret("k7QxSecret"),
             },
-            r#"{"Hello":{"min_remote_version":1,"max_remote_version":1,"min_protocol_version":2,"max_protocol_version":3,"token":"k7QxSecret"}}"#,
+            r#"{"Hello":{"min_remote_version":2,"max_remote_version":2,"min_protocol_version":4,"max_protocol_version":4,"connection_token":"k7QxSecret"}}"#,
         ),
         (RemoteClientFrame::List, r#""List""#),
         (
             RemoteClientFrame::Attach {
                 session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
             },
-            r#"{"Attach":{"session":{"Name":"quiet-lake"}}}"#,
+            r#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"}}}"#,
         ),
         (
             RemoteClientFrame::Attach {
@@ -368,7 +368,7 @@ fn every_client_frame_travels_as_these_exact_bytes() {
                     build_fixed_test_uuid(),
                 )),
             },
-            r#"{"Attach":{"session":{"Id":"00000000-0000-0000-0000-000000000001"}}}"#,
+            r#"{"Attach":{"session_selector":{"SessionId":"00000000-0000-0000-0000-000000000001"}}}"#,
         ),
     ] {
         assert_eq!(
@@ -389,9 +389,9 @@ fn every_server_frame_travels_as_these_exact_bytes() {
     for (frame, expected_frame_json) in [
         (
             RemoteServerFrame::Welcome {
-                remote_protocol_version: 1,
+                remote_protocol_version: 2,
             },
-            r#"{"Welcome":{"remote_version":1}}"#,
+            r#"{"Welcome":{"remote_protocol_version":2}}"#,
         ),
         (
             RemoteServerFrame::Refused {
@@ -406,13 +406,13 @@ fn every_server_frame_travels_as_these_exact_bytes() {
                     session_name: "quiet-lake".to_string(),
                 }],
             },
-            r#"{"Sessions":{"rows":[{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake"}]}}"#,
+            r#"{"Sessions":{"session_rows":[{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake"}]}}"#,
         ),
         (
             RemoteServerFrame::Sessions {
                 session_rows: Vec::new(),
             },
-            r#"{"Sessions":{"rows":[]}}"#,
+            r#"{"Sessions":{"session_rows":[]}}"#,
         ),
     ] {
         assert_eq!(
@@ -429,7 +429,8 @@ fn every_server_frame_travels_as_these_exact_bytes() {
 
 #[test]
 fn a_field_a_struct_variant_does_not_know_is_ignored() {
-    let frame_payload_bytes = br#"{"Attach":{"session":{"Name":"quiet-lake"},"extra":1}}"#;
+    let frame_payload_bytes =
+        br#"{"Attach":{"session_selector":{"SessionName":"quiet-lake"},"extra":1}}"#;
 
     let (frame_read_result, consumed_byte_count) =
         read_one_remote_client_frame(build_length_prefixed_payload(frame_payload_bytes));
@@ -445,57 +446,58 @@ fn a_field_a_struct_variant_does_not_know_is_ignored() {
 
 #[test]
 fn a_misspelled_field_name_is_the_missing_field_it_displaced() {
-    let frame_payload_bytes = br#"{"Attach":{"sesion":{"Name":"quiet-lake"}}}"#;
+    let frame_payload_bytes = br#"{"Attach":{"sesion":{"SessionName":"quiet-lake"}}}"#;
 
     let (frame_read_result, consumed_byte_count) =
         read_one_remote_client_frame(build_length_prefixed_payload(frame_payload_bytes));
 
     assert_eq!(
         malformed_detail(frame_read_result),
-        "missing field `session` at line 1 column 42"
+        "missing field `session_selector` at line 1 column 49"
     );
     assert_eq!(consumed_byte_count, frame_payload_bytes.len() as u64 + 4);
 }
 
 #[test]
 fn a_hello_missing_its_secret_is_a_malformed_frame() {
-    let frame_payload_bytes = br#"{"Hello":{"min_remote_version":1,"max_remote_version":1,"min_protocol_version":2,"max_protocol_version":3}}"#;
+    let frame_payload_bytes = br#"{"Hello":{"min_remote_version":2,"max_remote_version":2,"min_protocol_version":4,"max_protocol_version":4}}"#;
 
     let (frame_read_result, consumed_byte_count) =
         read_one_remote_client_frame(build_length_prefixed_payload(frame_payload_bytes));
 
     assert_eq!(
         malformed_detail(frame_read_result),
-        "missing field `token` at line 1 column 106"
+        "missing field `connection_token` at line 1 column 106"
     );
     assert_eq!(consumed_byte_count, frame_payload_bytes.len() as u64 + 4);
 }
 
 #[test]
 fn a_server_frame_or_row_carrying_an_unknown_field_still_decodes() {
-    let welcome =
-        serde_json::from_str::<RemoteServerFrame>(r#"{"Welcome":{"remote_version":1,"extra":1}}"#)
-            .expect("an unknown field on a server frame is ignored");
+    let welcome = serde_json::from_str::<RemoteServerFrame>(
+        r#"{"Welcome":{"remote_protocol_version":2,"extra":1}}"#,
+    )
+    .expect("an unknown field on a server frame is ignored");
     assert_eq!(
         welcome,
         RemoteServerFrame::Welcome {
-            remote_protocol_version: 1
+            remote_protocol_version: 2
         }
     );
 
     let remote_session_row = serde_json::from_str::<RemoteSessionRow>(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","extra":1}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","extra":1}"#,
     )
     .expect("an unknown field on a remote_session_row is ignored");
     assert_eq!(remote_session_row.session_name, "quiet-lake");
 
     let missing_field_error = serde_json::from_str::<RemoteSessionRow>(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","nme":"quiet-lake"}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","nme":"quiet-lake"}"#,
     )
     .expect_err("a misspelled name leaves the field it displaced missing");
     assert_eq!(
         missing_field_error.to_string(),
-        "missing field `name` at line 1 column 64"
+        "missing field `session_name` at line 1 column 72"
     );
 }
 
@@ -590,7 +592,7 @@ fn the_largest_hello_a_generated_secret_makes_fits_the_pre_admission_cap() {
     let frame_payload_bytes =
         build_framed_remote_client_frame(&largest_hello_frame).len() as u32 - 4;
 
-    assert_eq!(frame_payload_bytes, 218);
+    assert_eq!(frame_payload_bytes, 229);
     assert!(
         frame_payload_bytes < REMOTE_HELLO_MAX_BYTE_COUNT,
         "the largest hello of {frame_payload_bytes} bytes fits the {REMOTE_HELLO_MAX_BYTE_COUNT}-byte cap"

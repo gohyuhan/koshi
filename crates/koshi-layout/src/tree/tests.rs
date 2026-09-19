@@ -560,9 +560,9 @@ fn a_stack_serializes_field_by_field() {
         1,
     ));
     let default_size_weight_json = json!({
-        "primary": { "Flex": 1 },
-        "min": null,
-        "preferred": null,
+        "primary_constraint": { "Flex": 1 },
+        "minimum_cell_count": null,
+        "preferred_cell_count": null,
         "resize_delta": 0
     });
     assert_eq!(
@@ -575,7 +575,7 @@ fn a_stack_serializes_field_by_field() {
                     { "Pane": "00000000-0000-0000-0000-000000000002" }
                 ],
                 "weights": [default_size_weight_json.clone(), default_size_weight_json],
-                "active": 1
+                "active_child_index": 1
             }
         })
     );
@@ -584,9 +584,9 @@ fn a_stack_serializes_field_by_field() {
 #[test]
 fn a_deserialized_active_index_past_the_last_child_is_kept_and_clamped_on_read() {
     let default_size_weight_json = json!({
-        "primary": { "Flex": 1 },
-        "min": null,
-        "preferred": null,
+        "primary_constraint": { "Flex": 1 },
+        "minimum_cell_count": null,
+        "preferred_cell_count": null,
         "resize_delta": 0
     });
     let split_node: SplitNode = serde_json::from_value(json!({
@@ -596,7 +596,7 @@ fn a_deserialized_active_index_past_the_last_child_is_kept_and_clamped_on_read()
             { "Pane": "00000000-0000-0000-0000-000000000002" }
         ],
         "weights": [default_size_weight_json.clone(), default_size_weight_json],
-        "active": 9
+        "active_child_index": 9
     }))
     .expect("deserialize");
     assert_eq!(split_node.active_child_index, 9);
@@ -606,9 +606,9 @@ fn a_deserialized_active_index_past_the_last_child_is_kept_and_clamped_on_read()
 #[test]
 fn a_stored_child_wrapped_in_a_node_record_reads_as_the_node_itself() {
     let default_size_weight_json = json!({
-        "primary": { "Flex": 1 },
-        "min": null,
-        "preferred": null,
+        "primary_constraint": { "Flex": 1 },
+        "minimum_cell_count": null,
+        "preferred_cell_count": null,
         "resize_delta": 0
     });
     let wrapped_split: SplitNode = serde_json::from_value(json!({
@@ -619,11 +619,11 @@ fn a_stored_child_wrapped_in_a_node_record_reads_as_the_node_itself() {
                 "direction": "Vertical",
                 "children": [{ "node": { "Pane": "00000000-0000-0000-0000-000000000002" } }],
                 "weights": [default_size_weight_json.clone()],
-                "active": 0
+                "active_child_index": 0
             } } }
         ],
         "weights": [default_size_weight_json.clone(), default_size_weight_json.clone()],
-        "active": 0
+        "active_child_index": 0
     }))
     .expect("deserialize");
     let bare_split: SplitNode = serde_json::from_value(json!({
@@ -634,11 +634,11 @@ fn a_stored_child_wrapped_in_a_node_record_reads_as_the_node_itself() {
                 "direction": "Vertical",
                 "children": [{ "Pane": "00000000-0000-0000-0000-000000000002" }],
                 "weights": [default_size_weight_json.clone()],
-                "active": 0
+                "active_child_index": 0
             } }
         ],
         "weights": [default_size_weight_json.clone(), default_size_weight_json],
-        "active": 0
+        "active_child_index": 0
     }))
     .expect("deserialize");
     assert_eq!(wrapped_split, bare_split);
@@ -659,16 +659,16 @@ fn a_stored_child_wrapped_in_a_node_record_reads_as_the_node_itself() {
 #[test]
 fn a_stored_child_that_is_neither_a_node_nor_a_node_record_is_refused() {
     let default_size_weight_json = json!({
-        "primary": { "Flex": 1 },
-        "min": null,
-        "preferred": null,
+        "primary_constraint": { "Flex": 1 },
+        "minimum_cell_count": null,
+        "preferred_cell_count": null,
         "resize_delta": 0
     });
     let deserialization_result = serde_json::from_value::<SplitNode>(json!({
         "direction": "Horizontal",
         "children": [{ "slot": { "Pane": "00000000-0000-0000-0000-000000000001" } }],
         "weights": [default_size_weight_json],
-        "active": 0
+        "active_child_index": 0
     }));
     assert!(deserialization_result.is_err());
 }
@@ -676,9 +676,9 @@ fn a_stored_child_that_is_neither_a_node_nor_a_node_record_is_refused() {
 #[test]
 fn a_stored_child_carrying_a_collapsed_flag_still_reads_and_drops_it() {
     let default_size_weight_json = json!({
-        "primary": { "Flex": 1 },
-        "min": null,
-        "preferred": null,
+        "primary_constraint": { "Flex": 1 },
+        "minimum_cell_count": null,
+        "preferred_cell_count": null,
         "resize_delta": 0
     });
     let split_node: SplitNode = serde_json::from_value(json!({
@@ -694,10 +694,10 @@ fn a_stored_child_carrying_a_collapsed_flag_still_reads_and_drops_it() {
             }
         ],
         "weights": [default_size_weight_json.clone(), default_size_weight_json],
-        "active": 0
+        "active_child_index": 0
     }))
     .expect("deserialize");
-    // `active` alone decides the collapse, so the stored flags are ignored:
+    // `active_child_index` alone decides the collapse, so the stored flags are ignored:
     // the stored file says child 0 is expanded and child 1 collapsed, and
     // `active` 0 says the same.
     assert!(!split_node.is_child_collapsed(0));

@@ -22,7 +22,6 @@ pub enum LayoutMode {
     /// membership and active children.
     Fullscreen {
         /// The promoted pane.
-        #[serde(rename = "focused")]
         focused_pane_id: PaneId,
     },
 }

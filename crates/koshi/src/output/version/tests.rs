@@ -85,21 +85,21 @@ fn a_server_json_answer_keeps_every_state_apart() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&rendered).expect("the answer is JSON"),
         serde_json::json!([
-            { "kind": "router", "session": null, "state": "running", "version": "0.2.0" },
+            { "server_kind": "Router", "session_id": null, "state": "Running", "version": "0.2.0" },
             {
-                "kind": "session",
-                "session": "00000000-0000-0000-0000-000000000001",
-                "state": "unnamed"
+                "server_kind": "Session",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "state": "Unnamed"
             },
             {
-                "kind": "session",
-                "session": "00000000-0000-0000-0000-000000000002",
-                "state": "not_running"
+                "server_kind": "Session",
+                "session_id": "00000000-0000-0000-0000-000000000002",
+                "state": "NotRunning"
             },
             {
-                "kind": "session",
-                "session": "00000000-0000-0000-0000-000000000003",
-                "state": "unreachable",
+                "server_kind": "Session",
+                "session_id": "00000000-0000-0000-0000-000000000003",
+                "state": "Unreachable",
                 "detail": "the socket closed mid-answer"
             },
         ])

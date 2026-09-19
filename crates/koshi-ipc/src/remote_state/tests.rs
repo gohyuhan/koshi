@@ -242,29 +242,29 @@ fn junk_bytes_are_an_unreadable_certificate() {
 
 #[test]
 fn a_certificate_file_carrying_an_unknown_field_is_unreadable() {
-    let certificate_json =
-        format!(r#"{{"issuer":"ada","format":{CERT_FILE_FORMAT},"cert_der":[],"key_der":[]}}"#);
+    let certificate_json = format!(
+        r#"{{"issuer":"ada","file_format":{CERT_FILE_FORMAT},"cert_der":[],"key_der":[]}}"#
+    );
 
     let unknown_field_error =
         serde_json::from_str::<CertFile>(&certificate_json).expect_err("refused");
     assert_eq!(
         unknown_field_error.to_string(),
-        "unknown field `issuer`, expected one of `format`, `cert_der`, `key_der` at line 1 \
-         column 9"
+        "unknown field `issuer`, expected one of `file_format`, `cert_der`, `key_der` at line 1 column 9"
     );
 }
 
 #[test]
 fn an_enabled_file_carrying_an_unknown_field_is_unreadable() {
     let enabled_file_json = format!(
-        r#"{{"by":"ada","format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
+        r#"{{"by":"ada","file_format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
     );
 
     let unknown_field_error =
         serde_json::from_str::<EnabledFile>(&enabled_file_json).expect_err("refused");
     assert_eq!(
         unknown_field_error.to_string(),
-        "unknown field `by`, expected `format` or `enabled_at` at line 1 column 5"
+        "unknown field `by`, expected `file_format` or `enabled_at` at line 1 column 5"
     );
 }
 
@@ -382,7 +382,7 @@ fn the_two_files_are_written_as_these_exact_bytes() {
             test_directory.path()
         ))
         .expect("read the certificate file"),
-        format!(r#"{{"format":{CERT_FILE_FORMAT},"cert_der":[1,2,3,4],"key_der":[5,6,7,8]}}"#)
+        format!(r#"{{"file_format":{CERT_FILE_FORMAT},"cert_der":[1,2,3,4],"key_der":[5,6,7,8]}}"#)
     );
     assert_eq!(
         std::fs::read_to_string(EnabledFile::resolve_enabled_file_path(
@@ -390,7 +390,7 @@ fn the_two_files_are_written_as_these_exact_bytes() {
         ))
         .expect("read the enabled file"),
         format!(
-            r#"{{"format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
+            r#"{{"file_format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
         )
     );
 }
