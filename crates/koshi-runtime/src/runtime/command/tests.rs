@@ -19,9 +19,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, CommandKind, CommandSource, CopyArgs, CopyTarget,
-    EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPosition, LockModeArgs, MoveTabArgs,
-    NewPaneArgs, NewTabArgs, PluginCommand, ResizePaneArgs, RunCommandPaneArgs, Selection,
-    SelectionKind, TabTarget, VisualCommand, WriteToPaneArgs,
+    EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPosition, LockModeArgs, MovePaneArgs,
+    MoveTabArgs, NewPaneArgs, NewTabArgs, PluginCommand, ResizePaneArgs, RunCommandPaneArgs,
+    ScrollPaneArgs, Selection, SelectionKind, SwapPanesArgs, TabTarget, VisualCommand,
+    WriteToPaneArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, PixelCellSize, Size, SplitDirection};
@@ -397,7 +398,7 @@ fn build_command_matrix_server(
 
 /// Every command kind this build has, one entry each. [`build_command_for_kind`] matches
 /// over the enum, so a new variant stops the build there.
-const ALL_COMMAND_KINDS: [CommandKind; 20] = [
+const ALL_COMMAND_KINDS: [CommandKind; 23] = [
     CommandKind::NewPane,
     CommandKind::ClosePane,
     CommandKind::ResizePane,
@@ -414,6 +415,9 @@ const ALL_COMMAND_KINDS: [CommandKind; 20] = [
     CommandKind::Plugin,
     CommandKind::TogglePaneFullscreen,
     CommandKind::MoveTab,
+    CommandKind::MovePane,
+    CommandKind::SwapPanes,
+    CommandKind::ScrollPane,
     CommandKind::Quit,
     CommandKind::Detach,
     CommandKind::DetachAll,
@@ -479,6 +483,18 @@ fn build_command_for_kind(command_kind: CommandKind, tab_id: TabId, pane_id: Pan
         CommandKind::MoveTab => Command::MoveTab(MoveTabArgs {
             tab_id: Some(tab_id),
             target_tab_index: 1,
+        }),
+        CommandKind::MovePane => Command::MovePane(MovePaneArgs {
+            pane_id: Some(pane_id),
+            direction: Direction::Right,
+        }),
+        CommandKind::SwapPanes => Command::SwapPanes(SwapPanesArgs {
+            source_pane_id: Some(pane_id),
+            target_pane_id: pane_id,
+        }),
+        CommandKind::ScrollPane => Command::ScrollPane(ScrollPaneArgs {
+            pane_id: Some(pane_id),
+            lines: 3,
         }),
         CommandKind::Quit => Command::Quit,
         CommandKind::Detach => Command::Detach(DetachArgs { client_id: None }),
@@ -840,11 +856,12 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
     }
 
     // The kinds that reach their handler on this fixture, so the comparison
-    // above is not two matching refusals every time. The four missing ones are
+    // above is not two matching refusals every time. The five missing ones are
     // refused by what the fixture holds, identically on both sides: a resize
-    // has no border to move in a single-pane tab, a write has no running child
-    // to take the bytes, a plugin command has no handler yet, and the switch
-    // has no connected viewer to send the move over.
+    // has no border to move in a single-pane tab, a move has no neighbor, a
+    // write has no running child to take the bytes, a plugin command has no
+    // handler yet, and the switch has no connected viewer to send the move
+    // over.
     assert_eq!(
         applied_command_kinds,
         vec![
@@ -861,6 +878,8 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             CommandKind::Visual,
             CommandKind::TogglePaneFullscreen,
             CommandKind::MoveTab,
+            CommandKind::SwapPanes,
+            CommandKind::ScrollPane,
             CommandKind::Quit,
             CommandKind::Detach,
             CommandKind::DetachAll,
@@ -8013,6 +8032,338 @@ fn build_resize_fixture() -> (
 }
 
 #[test]
+fn move_pane_swaps_the_focused_pane_with_its_directional_neighbor() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        session_id,
+        client_id,
+        root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::MovePane(MovePaneArgs {
+            pane_id: None,
+            direction: Direction::Left,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    match runtime.dispatch(command_envelope) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(list_event_names(&emitted_events), ["LayoutChanged"]);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &runtime.session_by_id[&session_id];
+    let tab_id = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab();
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
+        vec![pane_id_a, root_pane_id]
+    );
+}
+
+#[test]
+fn move_pane_without_a_neighbor_is_rejected_without_changing_the_layout() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        session_id,
+        client_id,
+        root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+    let state_before = serialize_session_records(&runtime);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::MovePane(MovePaneArgs {
+            pane_id: None,
+            direction: Direction::Right,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::TargetNotFound,
+            help: Some("no pane in that direction".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), state_before);
+    let session = &runtime.session_by_id[&session_id];
+    let tab_id = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab();
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
+        vec![root_pane_id, pane_id_a]
+    );
+}
+
+#[test]
+fn swap_panes_exchanges_explicit_pane_occupants() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        session_id,
+        client_id,
+        root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::SwapPanes(SwapPanesArgs {
+            source_pane_id: Some(root_pane_id),
+            target_pane_id: pane_id_a,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    match runtime.dispatch(command_envelope) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert_eq!(list_event_names(&emitted_events), ["LayoutChanged"]);
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+
+    let session = &runtime.session_by_id[&session_id];
+    let tab_id = session
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab();
+    assert_eq!(
+        session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
+        vec![pane_id_a, root_pane_id]
+    );
+}
+
+#[test]
+fn swapping_a_pane_with_itself_is_a_no_op() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        _session_id,
+        client_id,
+        _root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+    let state_before = serialize_session_records(&runtime);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::SwapPanes(SwapPanesArgs {
+            source_pane_id: Some(pane_id_a),
+            target_pane_id: pane_id_a,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    match runtime.dispatch(command_envelope) {
+        CommandResult::Ok {
+            command_id: ok_id,
+            emitted_events,
+        } => {
+            assert_eq!(ok_id, command_id);
+            assert!(emitted_events.is_empty());
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(serialize_session_records(&runtime), state_before);
+}
+
+#[test]
+fn swapping_panes_in_different_tabs_is_rejected_without_mutation() {
+    let (mut runtime, _runtime_event_sender, client_id, first_tab_id, first_pane_id) =
+        build_command_matrix_server(ClientOrigin::Local);
+    let second_pane_id = runtime
+        .session_by_id
+        .values()
+        .next()
+        .expect("session")
+        .tabs
+        .values()
+        .find(|tab| tab.get_tab_id() != first_tab_id)
+        .expect("second tab")
+        .get_layout_tree()
+        .list_leaf_pane_ids()[0];
+    let session_id = runtime
+        .session_by_id
+        .values()
+        .next()
+        .expect("session")
+        .session_id;
+    let state_before = serialize_session_records(&runtime);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::SwapPanes(SwapPanesArgs {
+            source_pane_id: Some(first_pane_id),
+            target_pane_id: second_pane_id,
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("panes must be in the same tab".to_string()),
+        }
+    );
+    assert_eq!(serialize_session_records(&runtime), state_before);
+    assert_eq!(
+        runtime.session_by_id[&session_id].tabs[&first_tab_id]
+            .get_layout_tree()
+            .list_leaf_pane_ids(),
+        vec![first_pane_id]
+    );
+}
+
+#[test]
+fn scroll_pane_uses_the_named_clients_view_and_signed_lines() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        session_id,
+        client_id,
+        _root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+    let second_client_id = ClientId::new();
+    let tab_id = runtime.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab();
+    attach_client(
+        runtime.session_by_id.get_mut(&session_id).expect("session"),
+        second_client_id,
+        tab_id,
+        Some(pane_id_a),
+    );
+    runtime.handle_pty_output(pane_id_a, &b"\n".repeat(200));
+
+    let scroll_up = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(second_client_id)),
+        Command::ScrollPane(ScrollPaneArgs {
+            pane_id: Some(pane_id_a),
+            lines: 3,
+        }),
+    );
+    match runtime.dispatch(scroll_up) {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id_a), 0);
+    assert_eq!(
+        get_client_scroll_offset(&runtime, second_client_id, pane_id_a),
+        3
+    );
+
+    let scroll_down = build_command_envelope(
+        CommandSource::from_external_cli(Some(session_id), Some(second_client_id)),
+        Command::ScrollPane(ScrollPaneArgs {
+            pane_id: Some(pane_id_a),
+            lines: -2,
+        }),
+    );
+    match runtime.dispatch(scroll_down) {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(
+        get_client_scroll_offset(&runtime, second_client_id, pane_id_a),
+        1
+    );
+}
+
+#[test]
+fn scroll_pane_with_zero_lines_keeps_the_view_unchanged() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        _session_id,
+        client_id,
+        _root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+    runtime.handle_pty_output(pane_id_a, &b"\n".repeat(200));
+    runtime.scroll_up(client_id, pane_id_a, 4);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::ScrollPane(ScrollPaneArgs {
+            pane_id: Some(pane_id_a),
+            lines: 0,
+        }),
+    );
+    match runtime.dispatch(command_envelope) {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id_a), 4);
+}
+
+#[test]
+fn scroll_pane_accepts_the_minimum_negative_line_count() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        _session_id,
+        client_id,
+        _root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+    runtime.handle_pty_output(pane_id_a, &b"\n".repeat(200));
+    runtime.scroll_up(client_id, pane_id_a, 4);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::ScrollPane(ScrollPaneArgs {
+            pane_id: Some(pane_id_a),
+            lines: i32::MIN,
+        }),
+    );
+    match runtime.dispatch(command_envelope) {
+        CommandResult::Ok { emitted_events, .. } => assert!(emitted_events.is_empty()),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+    assert_eq!(get_client_scroll_offset(&runtime, client_id, pane_id_a), 0);
+}
+
+#[test]
 fn resize_pane_grows_the_focused_pane_and_reflows_its_pty() {
     let (
         mut runtime,
@@ -14176,10 +14527,10 @@ fn fullscreen_from_a_clientless_pane_zooms_the_sole_client() {
     );
 }
 
-/// `is_client_scoped` answers `true` for exactly one command. Every other
-/// variant carries a target of its own, resolved by its own resolver. The
-/// count assert fails when a variant is added to [`ALL_COMMAND_KINDS`], so a
-/// new command has to be classified here.
+/// `is_client_scoped` answers `true` for the command whose target is only the
+/// issuing client's view. Every other variant carries a target of its own,
+/// resolved by its own resolver. The count assert fails when a variant is
+/// added to [`ALL_COMMAND_KINDS`], so a new command has to be classified here.
 #[test]
 fn client_scoped_is_exactly_toggle_mouse_select() {
     let tab_id = TabId::new();
@@ -14189,7 +14540,7 @@ fn client_scoped_is_exactly_toggle_mouse_select() {
         .map(|command_kind| build_command_for_kind(*command_kind, tab_id, pane_id))
         .collect();
 
-    assert_eq!(cases.len(), 20);
+    assert_eq!(cases.len(), 23);
     for command in &cases {
         assert_eq!(
             Server::is_client_scoped(command),

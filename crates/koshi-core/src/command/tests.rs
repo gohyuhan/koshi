@@ -64,6 +64,18 @@ fn pane_commands_roundtrip() {
         direction: Direction::Left,
         resize_amount_cells: -3,
     }));
+    assert_json_roundtrip(&Command::MovePane(MovePaneArgs {
+        pane_id: None,
+        direction: Direction::Right,
+    }));
+    assert_json_roundtrip(&Command::SwapPanes(SwapPanesArgs {
+        source_pane_id: Some(PaneId::new()),
+        target_pane_id: PaneId::new(),
+    }));
+    assert_json_roundtrip(&Command::ScrollPane(ScrollPaneArgs {
+        pane_id: Some(PaneId::new()),
+        lines: -7,
+    }));
     assert_json_roundtrip(&Command::RunCommandPane(RunCommandPaneArgs {
         spawn_spec: SpawnSpec {
             program: std::path::PathBuf::from("htop"),
@@ -250,6 +262,27 @@ fn command_variant_names_are_canonical() {
             }),
             "MoveTab",
         ),
+        (
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Left,
+            }),
+            "MovePane",
+        ),
+        (
+            Command::SwapPanes(SwapPanesArgs {
+                source_pane_id: None,
+                target_pane_id: PaneId::new(),
+            }),
+            "SwapPanes",
+        ),
+        (
+            Command::ScrollPane(ScrollPaneArgs {
+                pane_id: None,
+                lines: 1,
+            }),
+            "ScrollPane",
+        ),
         (Command::Quit, "Quit"),
         (Command::ToggleMouseSelect, "ToggleMouseSelect"),
         (Command::Detach(DetachArgs::default()), "Detach"),
@@ -262,7 +295,7 @@ fn command_variant_names_are_canonical() {
             "SwitchSession",
         ),
     ];
-    assert_eq!(command_cases.len(), 20);
+    assert_eq!(command_cases.len(), 23);
     for (command, command_name) in &command_cases {
         assert_eq!(&get_variant_name(command), command_name);
     }
@@ -406,6 +439,27 @@ fn command_kind_mirrors_command() {
             }),
             CommandKind::MoveTab,
         ),
+        (
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Left,
+            }),
+            CommandKind::MovePane,
+        ),
+        (
+            Command::SwapPanes(SwapPanesArgs {
+                source_pane_id: None,
+                target_pane_id: PaneId::new(),
+            }),
+            CommandKind::SwapPanes,
+        ),
+        (
+            Command::ScrollPane(ScrollPaneArgs {
+                pane_id: None,
+                lines: 1,
+            }),
+            CommandKind::ScrollPane,
+        ),
         (Command::Quit, CommandKind::Quit),
         (Command::Detach(DetachArgs::default()), CommandKind::Detach),
         (Command::DetachAll, CommandKind::DetachAll),
@@ -417,7 +471,7 @@ fn command_kind_mirrors_command() {
             CommandKind::SwitchSession,
         ),
     ];
-    assert_eq!(command_kind_cases.len(), 20);
+    assert_eq!(command_kind_cases.len(), 23);
     for (command, command_kind) in &command_kind_cases {
         assert_eq!(command.get_command_kind(), *command_kind);
         assert_json_roundtrip(command_kind);
@@ -1118,12 +1172,15 @@ fn command_kind_serializes_as_its_variant_name() {
         CommandKind::Plugin,
         CommandKind::TogglePaneFullscreen,
         CommandKind::MoveTab,
+        CommandKind::MovePane,
+        CommandKind::SwapPanes,
+        CommandKind::ScrollPane,
         CommandKind::Quit,
         CommandKind::Detach,
         CommandKind::DetachAll,
         CommandKind::SwitchSession,
     ];
-    assert_eq!(command_kinds.len(), 20);
+    assert_eq!(command_kinds.len(), 23);
     for command_kind in command_kinds {
         assert_eq!(
             serde_json::to_value(command_kind).expect("serialize"),
@@ -1342,7 +1399,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `Plugin`, `TogglePaneFullscreen`, `MoveTab`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `Plugin`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `SwapPanes`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

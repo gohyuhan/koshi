@@ -44,15 +44,18 @@ fn build_run_spawn_spec() -> SpawnSpec {
 
 /// The `Available` core actions that no binding can invoke: each has a
 /// required value with an open range (a resize amount, a pane id, a tab
-/// index, the text to type), so it is reachable only through a CLI command,
-/// which builds its [`Command`] directly. `resolve_action` refuses every one
-/// of them whatever the arguments. Pinned against the seed table by
-/// [`available_action_table_matches_seeds`].
-const CLI_ONLY: [&str; 5] = [
+/// index, the text to type, or a swap target), so it is reachable only
+/// through a CLI command, which builds its [`Command`] directly.
+/// `resolve_action` refuses every one of them whatever the arguments.
+/// Pinned against the seed table by [`available_action_table_matches_seeds`].
+const CLI_ONLY: [&str; 8] = [
     "resize-pane",
     "focus-pane",
     "focus-tab",
     "move-tab",
+    "move-pane",
+    "swap-panes",
+    "scroll-pane",
     "write-to-pane",
 ];
 
@@ -232,6 +235,54 @@ fn build_available_action_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::FocusPane(FocusPaneArgs {
                 focus_target: FocusTarget::Direction(Direction::Right),
                 client_id: None,
+            }),
+        ),
+        (
+            "move-pane-left",
+            ActionArgs::None,
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Left,
+            }),
+        ),
+        (
+            "move-pane-down",
+            ActionArgs::None,
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Down,
+            }),
+        ),
+        (
+            "move-pane-up",
+            ActionArgs::None,
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Up,
+            }),
+        ),
+        (
+            "move-pane-right",
+            ActionArgs::None,
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Right,
+            }),
+        ),
+        (
+            "scroll-pane-up",
+            ActionArgs::None,
+            Command::ScrollPane(ScrollPaneArgs {
+                pane_id: None,
+                lines: 3,
+            }),
+        ),
+        (
+            "scroll-pane-down",
+            ActionArgs::None,
+            Command::ScrollPane(ScrollPaneArgs {
+                pane_id: None,
+                lines: -3,
             }),
         ),
         (
@@ -421,6 +472,53 @@ fn every_available_action_resolves_to_its_exact_command() {
             "core:{action_name}"
         );
     }
+}
+
+#[test]
+fn scroll_action_arguments_override_the_viewer_default() {
+    let registry = ActionRegistry::new();
+    let scroll_up = build_core_action_reference("scroll-pane-up");
+    let scroll_down = build_core_action_reference("scroll-pane-down");
+
+    assert_eq!(
+        resolve_action_with_scroll_line_count(
+            &scroll_up,
+            &ActionArgs::Scroll { lines: Some(7) },
+            &registry,
+            CLIENT_SPLIT,
+            11,
+        ),
+        Ok(DispatchPlan::Command(Command::ScrollPane(ScrollPaneArgs {
+            pane_id: None,
+            lines: 7,
+        })))
+    );
+    assert_eq!(
+        resolve_action_with_scroll_line_count(
+            &scroll_down,
+            &ActionArgs::Scroll { lines: Some(7) },
+            &registry,
+            CLIENT_SPLIT,
+            11,
+        ),
+        Ok(DispatchPlan::Command(Command::ScrollPane(ScrollPaneArgs {
+            pane_id: None,
+            lines: -7,
+        })))
+    );
+    assert_eq!(
+        resolve_action_with_scroll_line_count(
+            &scroll_down,
+            &ActionArgs::Scroll { lines: None },
+            &registry,
+            CLIENT_SPLIT,
+            11,
+        ),
+        Ok(DispatchPlan::Command(Command::ScrollPane(ScrollPaneArgs {
+            pane_id: None,
+            lines: -11,
+        })))
+    );
 }
 
 #[test]
@@ -1289,6 +1387,15 @@ fn action_args_serialize_to_their_wire_form() {
     assert_eq!(
         serde_json::from_str::<ActionArgs>(r#""None""#).expect("deserializes"),
         ActionArgs::None
+    );
+    let scroll_action_arguments = ActionArgs::Scroll { lines: Some(-4) };
+    assert_eq!(
+        serde_json::to_string(&scroll_action_arguments).expect("serializes"),
+        r#"{"Scroll":{"lines":-4}}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<ActionArgs>(r#"{"Scroll":{"lines":null}}"#).expect("deserializes"),
+        ActionArgs::Scroll { lines: None }
     );
 
     let run_action_arguments = ActionArgs::Run {

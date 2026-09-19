@@ -25,8 +25,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, TabTarget,
-    ToggleLockModeArgs, WriteToPaneArgs,
+    MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
+    ScrollPaneArgs, SwapPanesArgs, TabTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::parse_prefixed_uuid;
@@ -385,6 +385,36 @@ pub enum CliCommand {
         /// Pane to resize; defaults to the focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
+    },
+    /// Move a pane into the slot of its visible neighbor.
+    MovePane {
+        /// Direction in which to choose the visible neighbor.
+        #[arg(long, value_enum, value_name = "DIRECTION")]
+        direction: DirectionArgument,
+        /// Pane to move; defaults to the focused pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+    },
+    /// Exchange two pane occupants.
+    SwapPanes {
+        /// Pane whose occupant receives the source pane's slot.
+        #[arg(long = "with", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        target_pane_id: PaneId,
+        /// Pane whose occupant moves; defaults to the focused pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+    },
+    /// Scroll one client's view of a pane.
+    ScrollPane {
+        /// Signed number of lines; positive moves toward history.
+        #[arg(long, value_name = "LINES", allow_negative_numbers = true)]
+        lines: i32,
+        /// Pane whose view scrolls; defaults to the target client's focused pane.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: Option<PaneId>,
+        /// Client whose view scrolls; defaults to the issuing client.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Toggle fullscreen on the focused pane.
     TogglePaneFullscreen {
@@ -1135,6 +1165,34 @@ impl CliCommand {
                     resize_amount_cells: *resize_amount_cells,
                 }),
             ),
+            CliCommand::MovePane { direction, pane_id } => (
+                "move-pane",
+                Command::MovePane(MovePaneArgs {
+                    pane_id: *pane_id,
+                    direction: Direction::from(*direction),
+                }),
+            ),
+            CliCommand::SwapPanes {
+                target_pane_id,
+                pane_id,
+            } => (
+                "swap-panes",
+                Command::SwapPanes(SwapPanesArgs {
+                    source_pane_id: *pane_id,
+                    target_pane_id: *target_pane_id,
+                }),
+            ),
+            CliCommand::ScrollPane {
+                lines,
+                pane_id,
+                client_id: _,
+            } => (
+                "scroll-pane",
+                Command::ScrollPane(ScrollPaneArgs {
+                    pane_id: *pane_id,
+                    lines: *lines,
+                }),
+            ),
             CliCommand::TogglePaneFullscreen { client_id: _ } => {
                 ("toggle-pane-fullscreen", Command::TogglePaneFullscreen)
             }
@@ -1358,7 +1416,13 @@ impl CliCommand {
             | CliCommand::Run { pane_id, .. }
             | CliCommand::ClosePane { pane_id, .. }
             | CliCommand::ResizePane { pane_id, .. }
+            | CliCommand::ScrollPane { pane_id, .. }
             | CliCommand::Input { pane_id, .. } => *pane_id,
+            CliCommand::MovePane { pane_id, .. } => *pane_id,
+            CliCommand::SwapPanes {
+                pane_id,
+                target_pane_id,
+            } => (*pane_id).or(Some(*target_pane_id)),
             CliCommand::FocusPane { pane_id, .. } => Some(*pane_id),
             _ => None,
         }
@@ -1380,7 +1444,8 @@ impl CliCommand {
             | CliCommand::Lock { client_id }
             | CliCommand::Unlock { client_id }
             | CliCommand::ToggleLock { client_id }
-            | CliCommand::TogglePaneFullscreen { client_id } => *client_id,
+            | CliCommand::TogglePaneFullscreen { client_id }
+            | CliCommand::ScrollPane { client_id, .. } => *client_id,
             _ => None,
         }
     }
@@ -1388,8 +1453,8 @@ impl CliCommand {
     /// The client this invocation names that no [`Command`] carries; it rides
     /// on the command's source instead
     /// ([`CommandSource::ExternalCli`](koshi_core::command::CommandSource::ExternalCli)).
-    /// Only `toggle-pane-fullscreen` answers `Some`: every other client-taking
-    /// verb puts its client in the command's own arguments, which travel on
+    /// `toggle-pane-fullscreen` and `scroll-pane` answer `Some`: every other
+    /// client-taking verb puts its client in the command's own arguments, which travel on
     /// both routes.
     /// [`CommandSource::InSessionCli`](koshi_core::command::CommandSource::InSessionCli)
     /// carries no client, and a command with one here never takes the
@@ -1397,7 +1462,8 @@ impl CliCommand {
     #[must_use]
     pub fn get_source_client_id(&self) -> Option<ClientId> {
         match self {
-            CliCommand::TogglePaneFullscreen { client_id } => *client_id,
+            CliCommand::TogglePaneFullscreen { client_id }
+            | CliCommand::ScrollPane { client_id, .. } => *client_id,
             _ => None,
         }
     }

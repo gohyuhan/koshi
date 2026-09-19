@@ -606,6 +606,158 @@ impl Server {
         ))
     }
 
+    /// Handle [`Command::MovePane`]: exchange the selected pane with the visible
+    /// neighbor in the requested direction. The neighbor is selected from the
+    /// issuing client's solved layout, the edit preserves the tree's slots,
+    /// and the changed tab reflows its live PTYs.
+    pub(super) fn handle_move_pane(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+        command_args: &MovePaneArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let pane_sizing = self.get_pane_sizing();
+        let pane_target =
+            self.resolve_move_pane_target(command_args, command_source, acting_session)?;
+        let target_pane_id = Self::find_directional_neighbor(
+            self.session_by_id
+                .get(&pane_target.session_id)
+                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?,
+            pane_target.client_id,
+            pane_target.pane_id,
+            command_args.direction,
+            pane_sizing,
+        )?;
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let (session, viewport) =
+            self.resolve_session_and_viewport(pane_target.session_id, pane_target.tab_id)?;
+        let tab_rect = Rect::from_size_at_origin(viewport);
+        let tab_state = session
+            .tabs
+            .get_mut(&pane_target.tab_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let moved_layout_tree = place_pane_within_tab(
+            tab_state.get_layout_tree(),
+            pane_target.pane_id,
+            &PlacementTarget::Swap { target_pane_id },
+            tab_rect,
+            pane_sizing,
+        )
+        .map_err(|placement_error| Self::placement_rejection(&placement_error))?;
+        tab_state.update_layout(moved_layout_tree);
+        if let Some(client) = session.clients.get_client_mut_by_id(pane_target.client_id) {
+            client.clear_zoom(pane_target.tab_id);
+        }
+        let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged {
+            tab_id: pane_target.tab_id,
+        })];
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            pane_target.session_id,
+            pane_target.tab_id,
+            &mut emitted_events,
+        );
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
+    }
+
+    /// Handle [`Command::SwapPanes`]: exchange two pane occupants in one tab
+    /// without changing its split structure. A self-swap commits no events and
+    /// does not solve or resize the tab.
+    pub(super) fn handle_swap_panes(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+        command_args: &SwapPanesArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let (source_target, target_target) =
+            self.resolve_swap_panes_target(command_args, command_source, acting_session)?;
+        if source_target.pane_id == target_target.pane_id {
+            return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
+        }
+        let pane_sizing = self.get_pane_sizing();
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let (session, viewport) =
+            self.resolve_session_and_viewport(source_target.session_id, source_target.tab_id)?;
+        let tab_rect = Rect::from_size_at_origin(viewport);
+        let tab_state = session
+            .tabs
+            .get_mut(&source_target.tab_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let swapped_layout_tree = place_pane_within_tab(
+            tab_state.get_layout_tree(),
+            source_target.pane_id,
+            &PlacementTarget::Swap {
+                target_pane_id: target_target.pane_id,
+            },
+            tab_rect,
+            pane_sizing,
+        )
+        .map_err(|placement_error| Self::placement_rejection(&placement_error))?;
+        tab_state.update_layout(swapped_layout_tree);
+        let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged {
+            tab_id: source_target.tab_id,
+        })];
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            source_target.session_id,
+            source_target.tab_id,
+            &mut emitted_events,
+        );
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
+    }
+
+    /// Handle [`Command::ScrollPane`]: move one client's view of one pane
+    /// through scrollback without changing layout or PTY sizes.
+    pub(super) fn handle_scroll_pane(
+        &mut self,
+        command_id: CommandId,
+        command_source: &CommandSource,
+        command_args: &ScrollPaneArgs,
+    ) -> Result<CommandResult, Rejection> {
+        let acting_session = self.resolve_acting_session(command_source)?;
+        let pane_target =
+            self.resolve_scroll_pane_target(command_args, command_source, acting_session)?;
+        let line_count = command_args.lines.unsigned_abs() as usize;
+        if command_args.lines > 0 {
+            self.scroll_up(pane_target.client_id, pane_target.pane_id, line_count);
+        } else if command_args.lines < 0 {
+            self.scroll_down(pane_target.client_id, pane_target.pane_id, line_count);
+        }
+        Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
+    }
+
+    /// Map a placement failure to a command rejection without exposing layout
+    /// implementation details through the runtime command vocabulary.
+    fn placement_rejection(placement_error: &PlacementError) -> Rejection {
+        match placement_error {
+            PlacementError::SourcePaneNotFound { .. }
+            | PlacementError::TargetPaneNotFound { .. } => {
+                Rejection::from_reason(RejectReason::TargetNotFound)
+            }
+            PlacementError::DestinationTooSmall { .. } => Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                "pane placement does not fit the tab",
+            ),
+            PlacementError::AnchorIsSource { .. }
+            | PlacementError::GroupPaneDuplicated { .. }
+            | PlacementError::GroupIsNotOneSubtree { .. }
+            | PlacementError::AnchorInsideStack { .. }
+            | PlacementError::PaneInBothTrees { .. } => {
+                Rejection::from_reason(RejectReason::InvalidState)
+            }
+        }
+    }
+
     /// Map a layout [`ResizeError`] onto the command vocabulary's rejection:
     /// a missing pane is [`RejectReason::TargetNotFound`], a pane with no
     /// neighbor on the requested side is [`RejectReason::InvalidState`], and

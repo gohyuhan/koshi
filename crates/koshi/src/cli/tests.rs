@@ -969,6 +969,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "list-sessions",
         "list-tabs",
         "lock",
+        "move-pane",
         "move-tab",
         "new-pane",
         "new-tab",
@@ -979,11 +980,13 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "resize-pane",
         "resume-support",
         "run",
+        "scroll-pane",
         "serve-pty-supervisor",
         "serve-router",
         "serve-session",
         "server-version",
         "share",
+        "swap-panes",
         "toggle-lock",
         "toggle-pane-fullscreen",
         "unlock",
@@ -1617,7 +1620,7 @@ fn toggle_pane_fullscreen_takes_a_client_flag() {
 }
 
 #[test]
-fn only_toggle_pane_fullscreen_puts_its_client_on_the_source() {
+fn fullscreen_and_scroll_put_their_client_on_the_source() {
     let client = ClientId::from_uuid(build_fixed_test_uuid());
     assert_eq!(
         CliCommand::TogglePaneFullscreen {
@@ -1716,6 +1719,15 @@ fn only_toggle_pane_fullscreen_puts_its_client_on_the_source() {
         }
         .get_source_client_id(),
         None
+    );
+    assert_eq!(
+        CliCommand::ScrollPane {
+            lines: 3,
+            pane_id: None,
+            client_id: Some(client),
+        }
+        .get_source_client_id(),
+        Some(client)
     );
 }
 
@@ -2447,6 +2459,67 @@ fn action_subcommands_map_to_their_exact_commands() {
             }),
         ),
         (
+            vec!["koshi", "move-pane", "--direction", "up"],
+            "move-pane",
+            Command::MovePane(MovePaneArgs {
+                pane_id: None,
+                direction: Direction::Up,
+            }),
+        ),
+        (
+            vec![
+                "koshi",
+                "move-pane",
+                "--direction",
+                "up",
+                "--pane",
+                &pane_flag,
+            ],
+            "move-pane",
+            Command::MovePane(MovePaneArgs {
+                pane_id: Some(pane),
+                direction: Direction::Up,
+            }),
+        ),
+        (
+            vec!["koshi", "swap-panes", "--with", &pane_flag],
+            "swap-panes",
+            Command::SwapPanes(SwapPanesArgs {
+                source_pane_id: None,
+                target_pane_id: pane,
+            }),
+        ),
+        (
+            vec![
+                "koshi",
+                "swap-panes",
+                "--with",
+                &pane_flag,
+                "--pane",
+                &pane_flag,
+            ],
+            "swap-panes",
+            Command::SwapPanes(SwapPanesArgs {
+                source_pane_id: Some(pane),
+                target_pane_id: pane,
+            }),
+        ),
+        (
+            vec![
+                "koshi",
+                "scroll-pane",
+                "--lines",
+                "-5",
+                "--pane",
+                &pane_flag,
+            ],
+            "scroll-pane",
+            Command::ScrollPane(ScrollPaneArgs {
+                pane_id: Some(pane),
+                lines: -5,
+            }),
+        ),
+        (
             vec!["koshi", "toggle-pane-fullscreen"],
             "toggle-pane-fullscreen",
             Command::TogglePaneFullscreen,
@@ -2579,6 +2652,14 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
         &["koshi", "new-pane"],
         &["koshi", "close-pane"],
         &["koshi", "resize-pane", "--direction", "left"],
+        &["koshi", "move-pane", "--direction", "right"],
+        &[
+            "koshi",
+            "swap-panes",
+            "--with",
+            "0192f0c1-2345-7000-8000-000000000001",
+        ],
+        &["koshi", "scroll-pane", "--lines", "3"],
         &["koshi", "toggle-pane-fullscreen"],
         &["koshi", "new-tab"],
         &["koshi", "close-tab"],
@@ -2742,6 +2823,24 @@ fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
             "--pane",
             &pane_flag,
         ],
+        vec![
+            "koshi",
+            "move-pane",
+            "--direction",
+            "left",
+            "--pane",
+            &pane_flag,
+        ],
+        vec!["koshi", "swap-panes", "--with", &pane_flag],
+        vec![
+            "koshi",
+            "swap-panes",
+            "--with",
+            &pane_flag,
+            "--pane",
+            &pane_flag,
+        ],
+        vec!["koshi", "scroll-pane", "--lines", "3", "--pane", &pane_flag],
         vec!["koshi", "input", "--pane", &pane_flag, "ls"],
         vec!["koshi", "focus-pane", "--pane", &pane_flag],
     ];
@@ -2757,6 +2856,7 @@ fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
         vec!["koshi", "new-pane"],
         vec!["koshi", "close-pane"],
         vec!["koshi", "input", "ls"],
+        vec!["koshi", "move-pane", "--direction", "left"],
         vec!["koshi", "new-tab"],
         vec!["koshi", "lock"],
         vec!["koshi", "list-panes"],
@@ -2801,6 +2901,14 @@ fn target_client_names_the_client_of_every_verb_that_takes_one() {
         vec!["koshi", "unlock", "--client", &client_flag],
         vec!["koshi", "toggle-lock", "--client", &client_flag],
         vec!["koshi", "toggle-pane-fullscreen", "--client", &client_flag],
+        vec![
+            "koshi",
+            "scroll-pane",
+            "--lines",
+            "3",
+            "--client",
+            &client_flag,
+        ],
     ];
     for argv in &argvs {
         assert_eq!(
@@ -3477,7 +3585,7 @@ fn a_discovery_query_names_its_session_scope() {
 }
 
 /// Every action name `build_action_command` builds is a registered core action, and the
-/// sixteen action verbs name sixteen different actions.
+/// nineteen action verbs name nineteen different actions.
 #[test]
 fn every_to_action_name_is_a_registered_core_action() {
     use std::collections::BTreeSet;
@@ -3493,6 +3601,9 @@ fn every_to_action_name_is_a_registered_core_action() {
         vec!["koshi", "new-pane"],
         vec!["koshi", "close-pane"],
         vec!["koshi", "resize-pane", "--direction", "left"],
+        vec!["koshi", "move-pane", "--direction", "left"],
+        vec!["koshi", "swap-panes", "--with", &pane],
+        vec!["koshi", "scroll-pane", "--lines", "3"],
         vec!["koshi", "toggle-pane-fullscreen"],
         vec!["koshi", "input", "echo hi"],
         vec!["koshi", "new-tab"],
@@ -3525,6 +3636,7 @@ fn every_to_action_name_is_a_registered_core_action() {
         "core:focus-pane",
         "core:focus-tab",
         "core:lock",
+        "core:move-pane",
         "core:move-tab",
         "core:new-pane",
         "core:new-tab",
@@ -3532,6 +3644,8 @@ fn every_to_action_name_is_a_registered_core_action() {
         "core:previous-tab",
         "core:resize-pane",
         "core:run",
+        "core:scroll-pane",
+        "core:swap-panes",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
         "core:unlock",

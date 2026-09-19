@@ -117,6 +117,9 @@ impl Server {
             Command::NewPane(_)
                 | Command::ClosePane(_)
                 | Command::ResizePane(_)
+                | Command::MovePane(_)
+                | Command::SwapPanes(_)
+                | Command::ScrollPane(_)
                 | Command::TogglePaneFullscreen
                 | Command::WriteToPane(_)
                 | Command::RunCommandPane(_)
@@ -143,9 +146,9 @@ impl Server {
         }
     }
 
-    /// Whether `command` acts on one client's own view state (mouse-select)
-    /// and carries no other target, so
-    /// [`Self::resolve_acting_client`] alone decides which client it lands on.
+    /// Whether `command` changes one client's own view state without carrying
+    /// another target, so [`Self::resolve_acting_client`] alone decides which
+    /// client it reaches.
     ///
     /// [`Command::FocusPane`], [`Command::FocusTab`], [`Command::NewTab`],
     /// [`Command::SetLockMode`], [`Command::ToggleLockMode`], and
@@ -154,12 +157,14 @@ impl Server {
     /// the same helper for the rest.
     /// [`Command::TogglePaneFullscreen`] is absent for the same reason: it
     /// accepts an explicit target client on its command source
-    /// ([`CommandSource::target_client`]) that outranks the issuer, and
+    /// ([`CommandSource::get_target_client_id`]) that outranks the issuer, and
     /// [`Self::resolve_fullscreen_target`] applies the same ladder the lock
     /// commands use.
-    /// [`Command::Visual`] is absent too: a highlight
-    /// belongs to the client that made it, so a gone issuer means the target
-    /// is gone, never another client's screen ([`Self::resolve_issuing_client_id`]).
+    /// [`Command::Visual`] is absent too: a highlight belongs to the client
+    /// that made it, so a gone issuer means the target is gone, never another
+    /// client's screen ([`Self::resolve_issuing_client_id`]).
+    /// [`Command::ScrollPane`] is absent because its source can carry an
+    /// explicit target client, which [`Self::resolve_scroll_pane_target`] reads.
     /// [`Command::ToggleMouseSelect`] has no CLI verb, so
     /// [`Self::is_command_allowed_from_source`] refuses it from a CLI before this runs.
     pub(super) fn is_client_scoped(command: &Command) -> bool {
@@ -264,6 +269,15 @@ impl Server {
             Command::ResizePane(command_args) => self
                 .resolve_pane_target(command_args.pane_id, command_source, session)
                 .map(drop),
+            Command::MovePane(command_args) => self
+                .resolve_move_pane_target(command_args, command_source, session)
+                .map(drop),
+            Command::SwapPanes(command_args) => self
+                .resolve_swap_panes_target(command_args, command_source, session)
+                .map(drop),
+            Command::ScrollPane(command_args) => self
+                .resolve_scroll_pane_target(command_args, command_source, session)
+                .map(drop),
             Command::WriteToPane(command_args) => self
                 .resolve_pane_target(command_args.pane_id, command_source, session)
                 .map(drop),
@@ -344,6 +358,75 @@ impl Server {
             .map(drop),
             Command::Plugin(_) | Command::DetachAll | Command::Quit => Ok(()),
         }
+    }
+
+    /// Resolve a move target and the client view used to choose its neighbor.
+    pub(super) fn resolve_move_pane_target(
+        &self,
+        command_args: &MovePaneArgs,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<ClientPaneTarget, Rejection> {
+        let session = Self::require_session(session)?;
+        let client_id = Self::resolve_view_client(None, command_source, session)?;
+        let pane_target =
+            self.resolve_pane_target(command_args.pane_id, command_source, Some(session))?;
+        Self::require_pane_in_active_tab(session, client_id, pane_target.pane_id)?;
+        Ok(ClientPaneTarget {
+            session_id: pane_target.session_id,
+            client_id,
+            tab_id: pane_target.tab_id,
+            pane_id: pane_target.pane_id,
+        })
+    }
+
+    /// Resolve both panes of a same-tab swap.
+    pub(super) fn resolve_swap_panes_target(
+        &self,
+        command_args: &SwapPanesArgs,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<(PaneTarget, PaneTarget), Rejection> {
+        let source_target =
+            self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
+        let target_target =
+            self.resolve_pane_target(Some(command_args.target_pane_id), command_source, session)?;
+        if source_target.session_id != target_target.session_id
+            || source_target.tab_id != target_target.tab_id
+        {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                "panes must be in the same tab",
+            ));
+        }
+        Ok((source_target, target_target))
+    }
+
+    /// Resolve the client and active-tab pane a scroll command changes.
+    pub(super) fn resolve_scroll_pane_target(
+        &self,
+        command_args: &ScrollPaneArgs,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<ClientPaneTarget, Rejection> {
+        let session = Self::require_session(session)?;
+        let client_id = Self::resolve_view_client(
+            command_source.get_target_client_id(),
+            command_source,
+            session,
+        )?;
+        let pane_target =
+            self.resolve_pane_target(command_args.pane_id, command_source, Some(session))?;
+        if pane_target.session_id != session.session_id {
+            return Err(Rejection::from_reason(RejectReason::TargetNotFound));
+        }
+        Self::require_pane_in_active_tab(session, client_id, pane_target.pane_id)?;
+        Ok(ClientPaneTarget {
+            session_id: pane_target.session_id,
+            client_id,
+            tab_id: pane_target.tab_id,
+            pane_id: pane_target.pane_id,
+        })
     }
 
     /// The client a command names in its own `client` argument, resolved by
