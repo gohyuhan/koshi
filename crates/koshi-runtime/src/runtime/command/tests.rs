@@ -494,7 +494,7 @@ fn build_command_for_kind(command_kind: CommandKind, tab_id: TabId, pane_id: Pan
         }),
         CommandKind::ScrollPane => Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(pane_id),
-            lines: 3,
+            scroll_line_count: 3,
         }),
         CommandKind::Quit => Command::Quit,
         CommandKind::Detach => Command::Detach(DetachArgs { client_id: None }),
@@ -8275,7 +8275,7 @@ fn scroll_pane_uses_the_named_clients_view_and_signed_lines() {
         CommandSource::from_external_cli(Some(session_id), Some(second_client_id)),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(pane_id_a),
-            lines: 3,
+            scroll_line_count: 3,
         }),
     );
     match runtime.dispatch(scroll_up) {
@@ -8292,7 +8292,7 @@ fn scroll_pane_uses_the_named_clients_view_and_signed_lines() {
         CommandSource::from_external_cli(Some(session_id), Some(second_client_id)),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(pane_id_a),
-            lines: -2,
+            scroll_line_count: -2,
         }),
     );
     match runtime.dispatch(scroll_down) {
@@ -8324,7 +8324,7 @@ fn scroll_pane_with_zero_lines_keeps_the_view_unchanged() {
         CommandSource::from_key_binding(client_id),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(pane_id_a),
-            lines: 0,
+            scroll_line_count: 0,
         }),
     );
     match runtime.dispatch(command_envelope) {
@@ -8353,7 +8353,7 @@ fn scroll_pane_accepts_the_minimum_negative_line_count() {
         CommandSource::from_key_binding(client_id),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(pane_id_a),
-            lines: i32::MIN,
+            scroll_line_count: i32::MIN,
         }),
     );
     match runtime.dispatch(command_envelope) {

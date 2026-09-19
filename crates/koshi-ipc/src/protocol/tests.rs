@@ -1635,7 +1635,7 @@ fn pane_command_requests_round_trip_without_a_protocol_change() {
         }),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            lines: -7,
+            scroll_line_count: -7,
         }),
     ];
 

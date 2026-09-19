@@ -274,7 +274,7 @@ fn build_available_action_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
-                lines: 3,
+                scroll_line_count: 3,
             }),
         ),
         (
@@ -282,7 +282,7 @@ fn build_available_action_table() -> Vec<(&'static str, ActionArgs, Command)> {
             ActionArgs::None,
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
-                lines: -3,
+                scroll_line_count: -3,
             }),
         ),
         (
@@ -483,40 +483,46 @@ fn scroll_action_arguments_override_the_viewer_default() {
     assert_eq!(
         resolve_action_with_scroll_line_count(
             &scroll_up,
-            &ActionArgs::Scroll { lines: Some(7) },
+            &ActionArgs::Scroll {
+                scroll_line_count: Some(7),
+            },
             &registry,
             CLIENT_SPLIT,
             11,
         ),
         Ok(DispatchPlan::Command(Command::ScrollPane(ScrollPaneArgs {
             pane_id: None,
-            lines: 7,
+            scroll_line_count: 7,
         })))
     );
     assert_eq!(
         resolve_action_with_scroll_line_count(
             &scroll_down,
-            &ActionArgs::Scroll { lines: Some(7) },
+            &ActionArgs::Scroll {
+                scroll_line_count: Some(7),
+            },
             &registry,
             CLIENT_SPLIT,
             11,
         ),
         Ok(DispatchPlan::Command(Command::ScrollPane(ScrollPaneArgs {
             pane_id: None,
-            lines: -7,
+            scroll_line_count: -7,
         })))
     );
     assert_eq!(
         resolve_action_with_scroll_line_count(
             &scroll_down,
-            &ActionArgs::Scroll { lines: None },
+            &ActionArgs::Scroll {
+                scroll_line_count: None,
+            },
             &registry,
             CLIENT_SPLIT,
             11,
         ),
         Ok(DispatchPlan::Command(Command::ScrollPane(ScrollPaneArgs {
             pane_id: None,
-            lines: -11,
+            scroll_line_count: -11,
         })))
     );
 }
@@ -1388,14 +1394,18 @@ fn action_args_serialize_to_their_wire_form() {
         serde_json::from_str::<ActionArgs>(r#""None""#).expect("deserializes"),
         ActionArgs::None
     );
-    let scroll_action_arguments = ActionArgs::Scroll { lines: Some(-4) };
+    let scroll_action_arguments = ActionArgs::Scroll {
+        scroll_line_count: Some(-4),
+    };
     assert_eq!(
         serde_json::to_string(&scroll_action_arguments).expect("serializes"),
         r#"{"Scroll":{"lines":-4}}"#
     );
     assert_eq!(
         serde_json::from_str::<ActionArgs>(r#"{"Scroll":{"lines":null}}"#).expect("deserializes"),
-        ActionArgs::Scroll { lines: None }
+        ActionArgs::Scroll {
+            scroll_line_count: None,
+        }
     );
 
     let run_action_arguments = ActionArgs::Run {

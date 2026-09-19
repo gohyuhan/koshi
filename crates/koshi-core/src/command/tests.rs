@@ -74,8 +74,21 @@ fn pane_commands_roundtrip() {
     }));
     assert_json_roundtrip(&Command::ScrollPane(ScrollPaneArgs {
         pane_id: Some(PaneId::new()),
-        lines: -7,
+        scroll_line_count: -7,
     }));
+    assert_eq!(
+        serde_json::to_value(Command::ScrollPane(ScrollPaneArgs {
+            pane_id: None,
+            scroll_line_count: -7,
+        }))
+        .expect("serialize scroll command"),
+        json!({
+            "ScrollPane": {
+                "pane": null,
+                "lines": -7,
+            }
+        })
+    );
     assert_json_roundtrip(&Command::RunCommandPane(RunCommandPaneArgs {
         spawn_spec: SpawnSpec {
             program: std::path::PathBuf::from("htop"),
@@ -279,7 +292,7 @@ fn command_variant_names_are_canonical() {
         (
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
-                lines: 1,
+                scroll_line_count: 1,
             }),
             "ScrollPane",
         ),
@@ -456,7 +469,7 @@ fn command_kind_mirrors_command() {
         (
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
-                lines: 1,
+                scroll_line_count: 1,
             }),
             CommandKind::ScrollPane,
         ),

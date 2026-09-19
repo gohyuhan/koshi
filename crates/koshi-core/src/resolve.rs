@@ -97,11 +97,12 @@ pub enum ActionArgs {
         #[serde(rename = "stacked")]
         should_stack: bool,
     },
-    /// Optional signed line count for `core:scroll-pane-up` and
+    /// Optional signed scroll line count for `core:scroll-pane-up` and
     /// `core:scroll-pane-down`; `None` uses the viewer's configured default.
     Scroll {
-        /// Signed line count to place in the typed scroll command.
-        lines: Option<i32>,
+        /// Signed scroll line count to place in the typed scroll command.
+        #[serde(rename = "lines")]
+        scroll_line_count: Option<i32>,
     },
 }
 
@@ -214,7 +215,7 @@ pub fn resolve_action(
 ///
 /// The regular [`resolve_action`] entry point uses [`DEFAULT_SCROLL_LINE_COUNT`].
 /// A client uses this entry point when its mouse configuration supplies another
-/// count for a scroll action that has no explicit `lines` argument.
+/// count for a scroll action that has no explicit scroll line count.
 pub fn resolve_action_with_scroll_line_count(
     action_reference: &ActionReference,
     action_arguments: &ActionArgs,
@@ -380,15 +381,21 @@ fn resolve_core_action(
             ("scroll-pane-up", ActionArgs::None) => {
                 build_scroll_pane_command(None, scroll_line_count, true)
             }
-            ("scroll-pane-up", ActionArgs::Scroll { lines }) => {
-                build_scroll_pane_command(*lines, scroll_line_count, true)
-            }
+            (
+                "scroll-pane-up",
+                ActionArgs::Scroll {
+                    scroll_line_count: requested_scroll_line_count,
+                },
+            ) => build_scroll_pane_command(*requested_scroll_line_count, scroll_line_count, true),
             ("scroll-pane-down", ActionArgs::None) => {
                 build_scroll_pane_command(None, scroll_line_count, false)
             }
-            ("scroll-pane-down", ActionArgs::Scroll { lines }) => {
-                build_scroll_pane_command(*lines, scroll_line_count, false)
-            }
+            (
+                "scroll-pane-down",
+                ActionArgs::Scroll {
+                    scroll_line_count: requested_scroll_line_count,
+                },
+            ) => build_scroll_pane_command(*requested_scroll_line_count, scroll_line_count, false),
 
             // --- Run ---
             // The spawn spec carries no working directory and an empty
@@ -469,20 +476,20 @@ fn build_move_pane_command(direction: Direction) -> Command {
 
 /// The command a scroll action builds from its optional line count.
 fn build_scroll_pane_command(
-    lines: Option<i32>,
-    scroll_line_count: u16,
+    requested_scroll_line_count: Option<i32>,
+    default_scroll_line_count: u16,
     should_scroll_up: bool,
 ) -> Command {
-    let scroll_line_count = i32::from(scroll_line_count);
-    let lines = lines.unwrap_or(scroll_line_count);
-    let lines = if should_scroll_up {
-        lines
+    let default_scroll_line_count = i32::from(default_scroll_line_count);
+    let scroll_line_count = requested_scroll_line_count.unwrap_or(default_scroll_line_count);
+    let signed_scroll_line_count = if should_scroll_up {
+        scroll_line_count
     } else {
-        lines.saturating_neg()
+        scroll_line_count.saturating_neg()
     };
     Command::ScrollPane(ScrollPaneArgs {
         pane_id: None,
-        lines,
+        scroll_line_count: signed_scroll_line_count,
     })
 }
 

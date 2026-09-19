@@ -406,9 +406,9 @@ pub enum CliCommand {
     },
     /// Scroll one client's view of a pane.
     ScrollPane {
-        /// Signed number of lines; positive moves toward history.
-        #[arg(long, value_name = "LINES", allow_negative_numbers = true)]
-        lines: i32,
+        /// Signed scroll line count; positive moves toward history.
+        #[arg(long = "lines", value_name = "LINES", allow_negative_numbers = true)]
+        scroll_line_count: i32,
         /// Pane whose view scrolls; defaults to the target client's focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
@@ -1183,14 +1183,14 @@ impl CliCommand {
                 }),
             ),
             CliCommand::ScrollPane {
-                lines,
+                scroll_line_count,
                 pane_id,
                 client_id: _,
             } => (
                 "scroll-pane",
                 Command::ScrollPane(ScrollPaneArgs {
                     pane_id: *pane_id,
-                    lines: *lines,
+                    scroll_line_count: *scroll_line_count,
                 }),
             ),
             CliCommand::TogglePaneFullscreen { client_id: _ } => {

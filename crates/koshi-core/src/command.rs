@@ -440,8 +440,9 @@ pub struct ScrollPaneArgs {
     /// Pane whose view scrolls; `None` uses the target client's focused pane.
     #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
-    /// Signed line count: positive moves toward history, negative moves toward live output.
-    pub lines: i32,
+    /// Signed scroll line count: positive moves toward history, negative moves toward live output.
+    #[serde(rename = "lines")]
+    pub scroll_line_count: i32,
 }
 
 /// Arguments for [`Command::Detach`].

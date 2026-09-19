@@ -727,10 +727,10 @@ impl Server {
         let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
             self.resolve_scroll_pane_target(command_args, command_source, acting_session)?;
-        let line_count = command_args.lines.unsigned_abs() as usize;
-        if command_args.lines > 0 {
+        let line_count = command_args.scroll_line_count.unsigned_abs() as usize;
+        if command_args.scroll_line_count > 0 {
             self.scroll_up(pane_target.client_id, pane_target.pane_id, line_count);
-        } else if command_args.lines < 0 {
+        } else if command_args.scroll_line_count < 0 {
             self.scroll_down(pane_target.client_id, pane_target.pane_id, line_count);
         }
         Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))

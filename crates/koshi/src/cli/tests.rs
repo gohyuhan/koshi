@@ -1722,7 +1722,7 @@ fn fullscreen_and_scroll_put_their_client_on_the_source() {
     );
     assert_eq!(
         CliCommand::ScrollPane {
-            lines: 3,
+            scroll_line_count: 3,
             pane_id: None,
             client_id: Some(client),
         }
@@ -2516,7 +2516,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             "scroll-pane",
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: Some(pane),
-                lines: -5,
+                scroll_line_count: -5,
             }),
         ),
         (
