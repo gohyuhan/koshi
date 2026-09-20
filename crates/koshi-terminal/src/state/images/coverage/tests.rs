@@ -600,7 +600,7 @@ fn dangling_native_source_reference_is_rejected_on_restore() {
     );
     let mut serialized_terminal_state = serde_json::to_value(&terminal_state).unwrap();
     serialized_terminal_state["primary"]["rows"][0][0]["combining"]["image_fragments"][0]
-        ["source"] = serde_json::json!(u64::MAX);
+        ["image_source_id"] = serde_json::json!(u64::MAX);
     assert_eq!(
         serde_json::from_value::<TerminalState>(serialized_terminal_state)
             .unwrap_err()

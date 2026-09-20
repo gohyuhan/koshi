@@ -30,9 +30,10 @@ use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-        LockModeArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
-        Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
-        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
+        LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs,
+        RunCommandPaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
+        SwapPanesArgs, SwitchSessionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
+        WriteToPaneArgs,
     },
     event::{
         Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused, PaneProcessExited,
@@ -50,6 +51,7 @@ use koshi_layout::{
     focus::activate_stack_member,
     mode::LayoutMode,
     neighbor::select_directional_neighbor,
+    placement::{place_pane_within_tab, PlacementError, PlacementTarget},
     resize::{resize_layout_with_sizing, ResizeError},
     solver::{is_layout_within_rect, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing},
     tree::LayoutNode,
@@ -268,6 +270,15 @@ impl Server {
             }
             Command::ResizePane(command_args) => {
                 self.handle_resize_pane(command_id, &envelope.command_source, &command_args)
+            }
+            Command::MovePane(command_args) => {
+                self.handle_move_pane(command_id, &envelope.command_source, &command_args)
+            }
+            Command::SwapPanes(command_args) => {
+                self.handle_swap_panes(command_id, &envelope.command_source, &command_args)
+            }
+            Command::ScrollPane(command_args) => {
+                self.handle_scroll_pane(command_id, &envelope.command_source, &command_args)
             }
             Command::FocusPane(command_args) => {
                 self.handle_focus_pane(command_id, &envelope.command_source, &command_args)

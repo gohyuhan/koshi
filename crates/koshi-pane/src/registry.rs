@@ -15,7 +15,6 @@ use crate::{error::PaneRegistryError, pane::state::PaneRecord};
 /// private; [`Self::list_pane_records`] yields records in id order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaneRegistry {
-    #[serde(rename = "records")]
     pane_record_by_id: BTreeMap<PaneId, PaneRecord>,
 }
 

@@ -696,7 +696,7 @@ impl ImagePlacementSnapshot {
         )
     }
 
-    /// Build a placement with a complete image record and `content_id`.
+    /// Build a placement with a complete image record and `image_content_id`.
     ///
     /// Returns `None` when an identity or dimension is zero, the placement
     /// has an anchor plus a row or column count greater than `u16::MAX + 1`,

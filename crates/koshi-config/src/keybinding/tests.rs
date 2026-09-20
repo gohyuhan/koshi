@@ -697,7 +697,7 @@ fn a_duplicate_version_node_is_reported_once_and_the_second_is_not_checked() {
 
 #[test]
 fn current_version_is_accepted() {
-    parse_keybinding_text("version 1").expect("current version parses");
+    parse_keybinding_text("version 2").expect("current version parses");
 }
 
 #[test]

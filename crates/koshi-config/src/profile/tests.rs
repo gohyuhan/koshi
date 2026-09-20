@@ -453,7 +453,7 @@ fn missing_version_is_reported() {
 fn newer_version_is_reported() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 999\ntab {pane}"),
-        ["config schema version 999 is newer than this koshi supports (1)"]
+        ["config schema version 999 is newer than this koshi supports (2)"]
     );
 }
 
@@ -1340,7 +1340,7 @@ tab { stack {pane} }
     assert_eq!(
         diagnostic_messages,
         [
-            "config schema version 999 is newer than this koshi supports (1)",
+            "config schema version 999 is newer than this koshi supports (2)",
             "`tab` holds one root node; wrap multiple panes in `horizontal`, `vertical`, or \
              `stack`",
             "`stack` needs at least two members",

@@ -109,11 +109,18 @@ struct ConfigSchema {
     migrate_to_next_schema: Option<MigrateConfigFunction>,
 }
 
-const CONFIG_SCHEMAS: &[ConfigSchema] = &[ConfigSchema {
-    schema_version: 1,
-    validate_config_file: validate_v1,
-    migrate_to_next_schema: None,
-}];
+const CONFIG_SCHEMAS: &[ConfigSchema] = &[
+    ConfigSchema {
+        schema_version: 1,
+        validate_config_file: validate_schema,
+        migrate_to_next_schema: Some(migrate_schema_one_to_two),
+    },
+    ConfigSchema {
+        schema_version: 2,
+        validate_config_file: validate_schema,
+        migrate_to_next_schema: None,
+    },
+];
 
 /// Validates one config file against the schema version it declares.
 ///
@@ -258,7 +265,7 @@ fn parse_schema_version_from_document(
     Ok(schema_version)
 }
 
-fn validate_v1(
+fn validate_schema(
     config_file_kind: ConfigFileKind,
     config_path: &Path,
     config_source_text: &str,
@@ -358,6 +365,29 @@ fn build_version_error(
         config_path: config_path.display().to_string(),
         version_error_detail: version_error_detail.into(),
     }
+}
+
+fn migrate_schema_one_to_two(
+    config_path: &Path,
+    config_source_text: &str,
+) -> Result<String, MigrationError> {
+    let config_document = parse_kdl(config_path, config_source_text).map_err(build_parse_error)?;
+    let version_node = config_document
+        .nodes()
+        .iter()
+        .find(|node| node.name().value() == "version")
+        .ok_or_else(|| build_version_error(config_path, "file must declare `version`"))?;
+    let version_entry = version_node.entries().first().ok_or_else(|| {
+        build_version_error(config_path, "`version` takes exactly one integer argument")
+    })?;
+    let version_span = version_entry.span();
+    let version_start = version_span.offset();
+    let version_end = version_start + version_span.len();
+    let mut migrated_source = String::with_capacity(config_source_text.len() + 1);
+    migrated_source.push_str(&config_source_text[..version_start]);
+    migrated_source.push('2');
+    migrated_source.push_str(&config_source_text[version_end..]);
+    Ok(migrated_source)
 }
 
 fn find_schema_by_version(

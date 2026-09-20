@@ -468,24 +468,24 @@ fn action_namespace_serialization_uses_stable_wire_forms() {
 }
 
 #[test]
-fn action_status_serialization_uses_kebab_case() {
+fn action_status_serialization_uses_declared_variant_names() {
     assert_eq!(
         serde_json::to_string(&ActionStatus::Available).expect("serialize"),
-        "\"available\""
+        "\"Available\""
     );
     assert_eq!(
         serde_json::to_string(&ActionStatus::ComingSoon).expect("serialize"),
-        "\"coming-soon\""
+        "\"ComingSoon\""
     );
     let decoded_action_status: ActionStatus =
-        serde_json::from_str("\"coming-soon\"").expect("deserialize");
+        serde_json::from_str("\"ComingSoon\"").expect("deserialize");
     assert_eq!(decoded_action_status, ActionStatus::ComingSoon);
-    let rejected: Result<ActionStatus, _> = serde_json::from_str("\"ComingSoon\"");
+    let rejected: Result<ActionStatus, _> = serde_json::from_str("\"coming-soon\"");
     assert_eq!(
         rejected
-            .expect_err("PascalCase is not the wire form")
+            .expect_err("kebab-case is not the wire form")
             .to_string(),
-        "unknown variant `ComingSoon`, expected `available` or `coming-soon` at line 1 column 12"
+        "unknown variant `coming-soon`, expected `Available` or `ComingSoon` at line 1 column 13"
     );
 }
 
@@ -551,11 +551,14 @@ fn action_metadata_defaults_is_continuous_when_wire_field_is_absent() {
         is_continuous: true,
     };
     let mut metadata_json = serde_json::to_value(&metadata).expect("serialize");
-    assert_eq!(metadata_json["continuous"], serde_json::Value::Bool(true));
+    assert_eq!(
+        metadata_json["is_continuous"],
+        serde_json::Value::Bool(true)
+    );
     let removed_continuous_wire_field = metadata_json
         .as_object_mut()
         .expect("metadata is an object")
-        .remove("continuous");
+        .remove("is_continuous");
     assert_eq!(
         removed_continuous_wire_field,
         Some(serde_json::Value::Bool(true))
@@ -706,6 +709,42 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
+            "core:move-pane",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-left",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-down",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-up",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:move-pane-right",
+            CommandKind::MovePane,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
+            "core:swap-panes",
+            CommandKind::SwapPanes,
+            PaneSession,
+            vec![Pane],
+        ),
+        (
             "core:focus-pane",
             CommandKind::FocusPane,
             Client,
@@ -732,6 +771,24 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
         (
             "core:focus-pane-right",
             CommandKind::FocusPane,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:scroll-pane",
+            CommandKind::ScrollPane,
+            Client,
+            vec![ClientTarget, Pane],
+        ),
+        (
+            "core:scroll-pane-up",
+            CommandKind::ScrollPane,
+            Client,
+            vec![ClientTarget],
+        ),
+        (
+            "core:scroll-pane-down",
+            CommandKind::ScrollPane,
             Client,
             vec![ClientTarget],
         ),
@@ -864,8 +921,8 @@ fn core_action_seeds_have_valid_namespaces_and_serde_forms() {
     }
 }
 
-/// Pins the client-scoped seeds: lock mode and focus are per-client state, so
-/// their actions carry the `Client` scope and accept a client target.
+/// Pins the client-scoped seeds: lock mode, focus, and scroll are per-client
+/// state, so their actions carry the `Client` scope and accept a client target.
 #[test]
 fn lock_and_focus_seeds_use_client_scope_and_targets() {
     let seeds = build_core_action_seeds();
@@ -888,6 +945,9 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
         ("lock", vec![TargetKind::Client]),
         ("unlock", vec![TargetKind::Client]),
         ("toggle-lock", vec![TargetKind::Client]),
+        ("scroll-pane", vec![TargetKind::Client, TargetKind::Pane]),
+        ("scroll-pane-up", vec![TargetKind::Client]),
+        ("scroll-pane-down", vec![TargetKind::Client]),
     ];
     for (action_name, target_kinds) in client_scoped_action_cases {
         let action_metadata = get_action_metadata(action_name);
@@ -935,8 +995,8 @@ fn coming_soon_action_seeds_are_stable() {
     assert_eq!(coming_soon, expected_coming_soon_action_names);
 }
 
-/// Pins which seeds are continuous: exactly the resize-pane and focus-pane
-/// families. A new member of either family added without the `continuous`
+/// Pins which seeds are continuous: the resize-pane, focus-pane, and scroll
+/// action families. A new member of a family added without the `continuous`
 /// flag — or the flag appearing on any other action — changes this list and
 /// fails the assert.
 #[test]
@@ -959,6 +1019,8 @@ fn continuous_action_seeds_are_stable() {
         "core:focus-pane-down",
         "core:focus-pane-up",
         "core:focus-pane-right",
+        "core:scroll-pane-down",
+        "core:scroll-pane-up",
     ]
     .map(String::from)
     .to_vec();
@@ -990,6 +1052,11 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:focus-tab",
         "core:lock",
         "core:mouse-select",
+        "core:move-pane",
+        "core:move-pane-down",
+        "core:move-pane-left",
+        "core:move-pane-right",
+        "core:move-pane-up",
         "core:move-tab",
         "core:new-pane",
         "core:new-pane-down",
@@ -1013,6 +1080,10 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:resize-pane-right",
         "core:resize-pane-up",
         "core:run",
+        "core:scroll-pane",
+        "core:scroll-pane-down",
+        "core:scroll-pane-up",
+        "core:swap-panes",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
         "core:unlock",

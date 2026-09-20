@@ -152,9 +152,7 @@ impl<'de> Deserialize<'de> for SixelPaletteChanges {
 /// One Sixel palette register edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SixelPaletteChange {
-    #[serde(rename = "register")]
     register_number: u8,
-    #[serde(rename = "color")]
     rgb_color: [u8; 3],
 }
 
@@ -278,15 +276,10 @@ impl<'de> Deserialize<'de> for SixelPalette {
 /// A bounded row-major image of Sixel register indices before palette resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IndexedImage {
-    #[serde(rename = "width")]
     width_pixels: u32,
-    #[serde(rename = "height")]
     height_pixels: u32,
-    #[serde(rename = "indices")]
     pixel_register_indices: Vec<u16>,
-    #[serde(rename = "aspect_vertical")]
     pixel_aspect_vertical: u32,
-    #[serde(rename = "aspect_horizontal")]
     pixel_aspect_horizontal: u32,
 }
 
@@ -447,15 +440,10 @@ impl<'de> Deserialize<'de> for IndexedImage {
     {
         #[derive(Deserialize)]
         struct IndexedImageFields {
-            #[serde(rename = "width")]
             width_pixels: u32,
-            #[serde(rename = "height")]
             height_pixels: u32,
-            #[serde(rename = "indices")]
             pixel_register_indices: BoundedIndices,
-            #[serde(rename = "aspect_vertical")]
             pixel_aspect_vertical: u32,
-            #[serde(rename = "aspect_horizontal")]
             pixel_aspect_horizontal: u32,
         }
 

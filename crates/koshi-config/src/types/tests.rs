@@ -1032,9 +1032,9 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
 }
 
 #[test]
-fn this_build_writes_config_schema_version_one() {
+fn this_build_writes_config_schema_version_two() {
     // `SCHEMA_VERSION` reads `koshi_core::compat::CONFIG_SCHEMA.maximum_version`, one
     // crate away. This pins the version number every config file this build
     // writes carries.
-    assert_eq!(SCHEMA_VERSION, 1);
+    assert_eq!(SCHEMA_VERSION, 2);
 }

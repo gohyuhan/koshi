@@ -10,7 +10,6 @@ pub(crate) struct SavedCursor {
     /// Saved zero-based row within the grid.
     pub(in crate::state) row: u16,
     /// Saved zero-based column within the grid.
-    #[serde(rename = "col")]
     pub(in crate::state) column: u16,
     /// The deferred-wrap latch at save time, restored with the position: a
     /// glyph parked at the effective horizontal right bound still wraps after
@@ -33,7 +32,6 @@ pub(crate) struct Cursor {
     /// the stored value is one less.
     pub(in crate::state) row: u16,
     /// Zero-based column within the active grid.
-    #[serde(rename = "col")]
     pub(in crate::state) column: u16,
     /// Whether the cursor is currently shown (toggled by DEC mode `?25`).
     pub(in crate::state) is_visible: bool,

@@ -136,13 +136,13 @@ fn build_test_client_discovery() -> ClientDiscovery {
 #[test]
 fn session_json_schema_is_stable() {
     let expected_text = r#"{
-  "id": "00000000-0000-0000-0000-000000000001",
-  "name": "quiet-lake",
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "session_name": "quiet-lake",
   "created_at": {
     "secs_since_epoch": 1234,
     "nanos_since_epoch": 0
   },
-  "attached_clients": [
+  "attached_client_ids": [
     "00000000-0000-0000-0000-000000000001"
   ],
   "pane_count": 3
@@ -158,9 +158,9 @@ fn session_json_schema_is_stable() {
 fn session_list_json_is_an_array_of_id_name_and_server() {
     let expected_text = r#"[
   {
-    "id": "00000000-0000-0000-0000-000000000001",
-    "name": "quiet-lake",
-    "server": null
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake",
+    "server_name_or_address": null
   }
 ]
 "#;
@@ -176,9 +176,9 @@ fn session_list_json_names_the_server_of_a_remote_row() {
     remote_session_row.server_name_or_address = Some("desk".to_string());
     let expected_text = r#"[
   {
-    "id": "00000000-0000-0000-0000-000000000001",
-    "name": "quiet-lake",
-    "server": "desk"
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake",
+    "server_name_or_address": "desk"
   }
 ]
 "#;
@@ -192,9 +192,9 @@ fn session_list_json_names_the_server_of_a_remote_row() {
 fn tab_list_json_carries_the_owning_session() {
     let expected_text = r#"[
   {
-    "id": "00000000-0000-0000-0000-000000000001",
-    "name": "amber-fox",
-    "session": "00000000-0000-0000-0000-000000000001",
+    "tab_id": "00000000-0000-0000-0000-000000000001",
+    "tab_name": "amber-fox",
+    "session_id": "00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -209,11 +209,11 @@ fn tab_list_json_carries_the_owning_session() {
 fn pane_list_json_carries_the_whole_id_chain() {
     let expected_text = r#"[
   {
-    "id": "00000000-0000-0000-0000-000000000001",
-    "name": "htop",
-    "tab": "00000000-0000-0000-0000-000000000001",
+    "pane_id": "00000000-0000-0000-0000-000000000001",
+    "pane_name": "htop",
+    "tab_id": "00000000-0000-0000-0000-000000000001",
     "tab_name": "amber-fox",
-    "session": "00000000-0000-0000-0000-000000000001",
+    "session_id": "00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -232,7 +232,7 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
     };
     let rendered_text = render_panes(&[pane], OutputFormat::Json);
     assert!(
-        rendered_text.contains("\"name\": null,"),
+        rendered_text.contains("\"pane_name\": null,"),
         "unexpected name form: {rendered_text}"
     );
 }
@@ -241,8 +241,8 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
 fn client_list_json_carries_the_owning_session() {
     let expected_text = r#"[
   {
-    "id": "00000000-0000-0000-0000-000000000001",
-    "session": "00000000-0000-0000-0000-000000000001",
+    "client_id": "00000000-0000-0000-0000-000000000001",
+    "session_id": "00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake"
   }
 ]
@@ -256,11 +256,11 @@ fn client_list_json_carries_the_owning_session() {
 #[test]
 fn tab_json_schema_is_stable() {
     let expected_text = r#"{
-  "id": "00000000-0000-0000-0000-000000000001",
+  "tab_id": "00000000-0000-0000-0000-000000000001",
   "session_id": "00000000-0000-0000-0000-000000000001",
-  "name": "amber-fox",
-  "index": 1,
-  "active_pane": "00000000-0000-0000-0000-000000000001",
+  "tab_name": "amber-fox",
+  "tab_index": 1,
+  "active_pane_id": "00000000-0000-0000-0000-000000000001",
   "pane_count": 2
 }
 "#;
@@ -273,17 +273,17 @@ fn tab_json_schema_is_stable() {
 #[test]
 fn pane_json_schema_is_stable() {
     let expected_text = r#"{
-  "id": "00000000-0000-0000-0000-000000000001",
+  "pane_id": "00000000-0000-0000-0000-000000000001",
   "tab_id": "00000000-0000-0000-0000-000000000001",
   "session_id": "00000000-0000-0000-0000-000000000001",
-  "title": "htop",
-  "cwd": "/home/user",
-  "command": [
+  "pane_title": "htop",
+  "working_directory": "/home/user",
+  "command_argv": [
     "htop",
     "--tree"
   ],
-  "state": "running",
-  "focused_by_clients": [
+  "lifecycle": "Running",
+  "focused_by_client_ids": [
     "00000000-0000-0000-0000-000000000001"
   ]
 }
@@ -299,17 +299,17 @@ fn non_utf8_cwd_renders_lossily_in_json() {
     let mut pane = build_test_pane_discovery();
     pane.working_directory = Some(build_non_utf8_path());
     let expected_text = r#"{
-  "id": "00000000-0000-0000-0000-000000000001",
+  "pane_id": "00000000-0000-0000-0000-000000000001",
   "tab_id": "00000000-0000-0000-0000-000000000001",
   "session_id": "00000000-0000-0000-0000-000000000001",
-  "title": "htop",
-  "cwd": "/tmp/f�oo",
-  "command": [
+  "pane_title": "htop",
+  "working_directory": "/tmp/f�oo",
+  "command_argv": [
     "htop",
     "--tree"
   ],
-  "state": "running",
-  "focused_by_clients": [
+  "lifecycle": "Running",
+  "focused_by_client_ids": [
     "00000000-0000-0000-0000-000000000001"
   ]
 }
@@ -341,7 +341,8 @@ fn exited_pane_state_json_carries_the_code() {
     pane.lifecycle = PaneLifecycle::Exited { exit_code: Some(0) };
     let rendered_text = render_pane(&pane, OutputFormat::Json);
     assert!(
-        rendered_text.contains("\"state\": {\n    \"exited\": {\n      \"code\": 0\n    }\n  }"),
+        rendered_text
+            .contains("\"lifecycle\": {\n    \"Exited\": {\n      \"exit_code\": 0\n    }\n  }"),
         "unexpected state form: {rendered_text}"
     );
 }
@@ -349,19 +350,19 @@ fn exited_pane_state_json_carries_the_code() {
 #[test]
 fn client_json_schema_is_stable() {
     let expected_text = r#"{
-  "id": "00000000-0000-0000-0000-000000000001",
+  "client_id": "00000000-0000-0000-0000-000000000001",
   "session_id": "00000000-0000-0000-0000-000000000001",
   "attached_at": {
     "secs_since_epoch": 1234,
     "nanos_since_epoch": 0
   },
   "viewport_size": {
-    "cols": 120,
-    "rows": 40
+    "column_count": 120,
+    "row_count": 40
   },
-  "active_tab": "00000000-0000-0000-0000-000000000001",
-  "focused_pane": null,
-  "lock_state": "Normal",
+  "active_tab_id": "00000000-0000-0000-0000-000000000001",
+  "focused_pane_id": null,
+  "lock_mode": "Normal",
   "origin": "Local",
   "pane_area": null
 }
@@ -386,7 +387,7 @@ fn a_reported_pane_area_json_is_a_tagged_size() {
 
     assert!(
         rendered_text.contains(
-            "\"pane_area\": {\n    \"Reported\": {\n      \"cols\": 100,\n      \"rows\": 30\n    }\n  }"
+            "\"pane_area\": {\n    \"Reported\": {\n      \"column_count\": 100,\n      \"row_count\": 30\n    }\n  }"
         ),
         "unexpected pane_area form: {rendered_text}"
     );
@@ -876,22 +877,22 @@ fn keys_list_shows_a_steal_and_its_unbound_default() {
     let rendered_text = render_keys_list(&keymap_view, Some("normal"), None, OutputFormat::Json);
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    let binding_records = json_document["bindings"].as_array().expect("array");
+    let binding_records = json_document["key_bindings"].as_array().expect("array");
     assert!(
         binding_records.contains(&serde_json::json!({
-            "mode": "normal",
-            "key": "<A-f>",
-            "action": "core:close-pane",
-            "source": "user",
+            "input_mode": "normal",
+            "key_sequence": "<A-f>",
+            "action_reference": "core:close-pane",
+            "binding_source": "user",
         })),
         "got: {rendered_text}"
     );
     assert!(
         binding_records.contains(&serde_json::json!({
-            "mode": "normal",
-            "key": "<A-f>",
-            "action": "core:toggle-pane-fullscreen",
-            "source": "defaults (unbound)",
+            "input_mode": "normal",
+            "key_sequence": "<A-f>",
+            "action_reference": "core:toggle-pane-fullscreen",
+            "binding_source": "defaults (unbound)",
         })),
         "got: {rendered_text}"
     );
@@ -921,12 +922,12 @@ fn keys_list_mode_filter_keeps_only_the_named_mode() {
     let rendered_text = render_keys_list(&keymap_view, Some("locked"), None, OutputFormat::Json);
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    assert_eq!(json_document["reverted"], serde_json::json!(false));
-    let binding_records = json_document["bindings"].as_array().expect("array");
+    assert_eq!(json_document["is_reverted"], serde_json::json!(false));
+    let binding_records = json_document["key_bindings"].as_array().expect("array");
     assert!(!binding_records.is_empty());
     assert!(binding_records
         .iter()
-        .all(|binding| binding["mode"] == serde_json::json!("locked")));
+        .all(|binding| binding["input_mode"] == serde_json::json!("locked")));
 }
 
 #[test]
@@ -988,15 +989,18 @@ fn keys_describe_renders_system_authored_args_as_json() {
         .expect("bound in normal mode");
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    assert_eq!(json_document[0]["action"], serde_json::json!("core:run"));
     assert_eq!(
-        json_document[0]["args"],
+        json_document[0]["action_reference"],
+        serde_json::json!("core:run")
+    );
+    assert_eq!(
+        json_document[0]["action_arguments"],
         serde_json::json!({
             "Run": {
                 "program": "/usr/bin/htop",
-                "args": ["--tree"],
+                "arguments": ["--tree"],
                 "direction": null,
-                "stacked": false,
+                "should_stack": false,
             }
         })
     );
@@ -1010,9 +1014,12 @@ fn keys_describe_renders_missing_args_as_null() {
         .expect("bound in normal mode");
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    assert_eq!(json_document[0]["args"], serde_json::Value::Null);
     assert_eq!(
-        json_document[0]["action"],
+        json_document[0]["action_arguments"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        json_document[0]["action_reference"],
         serde_json::json!("core:toggle-pane-fullscreen")
     );
 }
@@ -1045,10 +1052,13 @@ fn keys_describe_reports_the_user_entry_alone_when_it_displaced_a_default() {
 
     assert_eq!(action_details.len(), 1);
     assert_eq!(
-        action_details[0]["action"],
+        action_details[0]["action_reference"],
         serde_json::json!("core:close-pane")
     );
-    assert_eq!(action_details[0]["source"], serde_json::json!("user"));
+    assert_eq!(
+        action_details[0]["binding_source"],
+        serde_json::json!("user")
+    );
 }
 
 #[test]
@@ -1061,7 +1071,9 @@ fn keys_conflicts_renders_the_verdict_and_findings() {
         serde_json::from_str(&rendered_text).expect("valid JSON");
     assert_eq!(json_document["verdict"], serde_json::json!("apply"));
     assert_eq!(json_document["file_error"], serde_json::Value::Null);
-    let findings = json_document["findings"].as_array().expect("array");
+    let findings = json_document["conflict_findings"]
+        .as_array()
+        .expect("array");
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["severity"], serde_json::json!("warning"));
 }
@@ -1094,10 +1106,10 @@ fn keys_validate_renders_both_outcome_shapes() {
     assert_eq!(
         failed_json,
         serde_json::json!({
-            "valid": false,
-            "applies": false,
-            "errors": ["bad node"],
-            "findings": [],
+            "is_valid": false,
+            "is_applicable": false,
+            "parse_errors": ["bad node"],
+            "conflict_findings": [],
         })
     );
 
@@ -1137,7 +1149,9 @@ fn keys_conflicts_reports_a_reject_verdict_and_a_fatal_finding() {
         serde_json::from_str(&rendered_text).expect("valid JSON");
     assert_eq!(json_document["verdict"], serde_json::json!("reject"));
     assert_eq!(json_document["file_error"], serde_json::Value::Null);
-    let findings = json_document["findings"].as_array().expect("array");
+    let findings = json_document["conflict_findings"]
+        .as_array()
+        .expect("array");
     assert!(
         findings
             .iter()
@@ -1154,8 +1168,8 @@ fn keys_list_marks_a_rejected_user_file_as_reverted() {
     let rendered_text = render_keys_list(&keymap_view, None, None, OutputFormat::Json);
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    assert_eq!(json_document["reverted"], serde_json::json!(true));
-    let binding_records = json_document["bindings"].as_array().expect("array");
+    assert_eq!(json_document["is_reverted"], serde_json::json!(true));
+    let binding_records = json_document["key_bindings"].as_array().expect("array");
     assert!(
         !binding_records.is_empty(),
         "defaults still list: {rendered_text}"
@@ -1163,7 +1177,7 @@ fn keys_list_marks_a_rejected_user_file_as_reverted() {
     assert!(
         binding_records
             .iter()
-            .all(|binding| binding["source"] != serde_json::json!("user")),
+            .all(|binding| binding["binding_source"] != serde_json::json!("user")),
         "a rejected file must contribute no user bindings: {rendered_text}"
     );
 }
@@ -1228,7 +1242,7 @@ fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
     );
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    let binding_records = json_document["bindings"].as_array().expect("array");
+    let binding_records = json_document["key_bindings"].as_array().expect("array");
     assert!(
         !binding_records.is_empty(),
         "defaults exist: {rendered_text}"
@@ -1236,7 +1250,7 @@ fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
     assert!(
         binding_records
             .iter()
-            .all(|binding| binding["source"] == serde_json::json!("defaults")),
+            .all(|binding| binding["binding_source"] == serde_json::json!("defaults")),
         "the defaults filter keeps only defaults: {rendered_text}"
     );
 }
@@ -1280,10 +1294,12 @@ fn keys_validate_checked_carries_the_conflict_findings() {
     let json_document: serde_json::Value =
         serde_json::from_str(&render_keys_validate(&checked, OutputFormat::Json))
             .expect("valid JSON");
-    assert_eq!(json_document["valid"], serde_json::json!(true));
-    assert_eq!(json_document["applies"], serde_json::json!(true));
-    assert_eq!(json_document["errors"], serde_json::json!([]));
-    let findings = json_document["findings"].as_array().expect("array");
+    assert_eq!(json_document["is_valid"], serde_json::json!(true));
+    assert_eq!(json_document["is_applicable"], serde_json::json!(true));
+    assert_eq!(json_document["parse_errors"], serde_json::json!([]));
+    let findings = json_document["conflict_findings"]
+        .as_array()
+        .expect("array");
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0]["severity"], serde_json::json!("warning"));
 
@@ -1601,38 +1617,38 @@ fn dump_state_json_is_an_array_of_whole_overviews() {
         parsed_json,
         serde_json::json!([{
             "session": {
-                "id": "00000000-0000-0000-0000-000000000001",
-                "name": "quiet-lake",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "session_name": "quiet-lake",
                 "created_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
-                "attached_clients": ["00000000-0000-0000-0000-000000000001"],
+                "attached_client_ids": ["00000000-0000-0000-0000-000000000001"],
                 "pane_count": 3
             },
             "tabs": [{
-                "id": "00000000-0000-0000-0000-000000000001",
+                "tab_id": "00000000-0000-0000-0000-000000000001",
                 "session_id": "00000000-0000-0000-0000-000000000001",
-                "name": "amber-fox",
-                "index": 1,
-                "active_pane": "00000000-0000-0000-0000-000000000001",
+                "tab_name": "amber-fox",
+                "tab_index": 1,
+                "active_pane_id": "00000000-0000-0000-0000-000000000001",
                 "pane_count": 2
             }],
             "panes": [{
-                "id": "00000000-0000-0000-0000-000000000001",
+                "pane_id": "00000000-0000-0000-0000-000000000001",
                 "tab_id": "00000000-0000-0000-0000-000000000001",
                 "session_id": "00000000-0000-0000-0000-000000000001",
-                "title": "htop",
-                "cwd": "/home/user",
-                "command": ["htop", "--tree"],
-                "state": "running",
-                "focused_by_clients": ["00000000-0000-0000-0000-000000000001"]
+                "pane_title": "htop",
+                "working_directory": "/home/user",
+                "command_argv": ["htop", "--tree"],
+                "lifecycle": "Running",
+                "focused_by_client_ids": ["00000000-0000-0000-0000-000000000001"]
             }],
             "clients": [{
-                "id": "00000000-0000-0000-0000-000000000001",
+                "client_id": "00000000-0000-0000-0000-000000000001",
                 "session_id": "00000000-0000-0000-0000-000000000001",
                 "attached_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
-                "viewport_size": { "cols": 120, "rows": 40 },
-                "active_tab": "00000000-0000-0000-0000-000000000001",
-                "focused_pane": null,
-                "lock_state": "Normal",
+                "viewport_size": { "column_count": 120, "row_count": 40 },
+                "active_tab_id": "00000000-0000-0000-0000-000000000001",
+                "focused_pane_id": null,
+                "lock_mode": "Normal",
                 "origin": "Local",
                 "pane_area": null
             }]
@@ -2021,33 +2037,33 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
     assert_eq!(
         parsed_json,
         serde_json::json!([{
-            "id": "00000000-0000-0000-0000-000000000001",
-            "name": "quiet-lake",
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "session_name": "quiet-lake",
             "tabs": [{
-                "id": "00000000-0000-0000-0000-000000000002",
-                "name": "editor",
-                "index": 0,
-                "tree": { "Pane": "00000000-0000-0000-0000-000000000004" },
-                "solved": [{
-                    "client": "00000000-0000-0000-0000-000000000003",
-                    "viewport": { "cols": 80, "rows": 22 },
-                    "mode": "Tiled",
-                    "panes": [{
-                        "id": "00000000-0000-0000-0000-000000000004",
-                        "rect": {
-                            "origin": { "x": 0, "y": 0 },
-                            "size": { "cols": 80, "rows": 22 }
+                "tab_id": "00000000-0000-0000-0000-000000000002",
+                "tab_name": "editor",
+                "tab_index": 0,
+                "layout_tree": { "Pane": "00000000-0000-0000-0000-000000000004" },
+                "solved_tabs": [{
+                    "client_id": "00000000-0000-0000-0000-000000000003",
+                    "viewport_size": { "column_count": 80, "row_count": 22 },
+                    "layout_mode": "Tiled",
+                    "pane_rects": [{
+                        "pane_id": "00000000-0000-0000-0000-000000000004",
+                        "outer_rect": {
+                            "origin": { "column": 0, "row": 0 },
+                            "cell_size": { "column_count": 80, "row_count": 22 }
                         }
                     }],
-                    "suppressed": [],
-                    "all_suppressed": false,
+                    "suppressed_pane_ids": [],
+                    "is_every_pane_suppressed": false,
                     "stack_headers": []
                 }]
             }],
             "clients": [{
-                "id": "00000000-0000-0000-0000-000000000003",
-                "active_tab": "00000000-0000-0000-0000-000000000002",
-                "focused_pane": "00000000-0000-0000-0000-000000000004"
+                "client_id": "00000000-0000-0000-0000-000000000003",
+                "active_tab_id": "00000000-0000-0000-0000-000000000002",
+                "focused_pane_id": "00000000-0000-0000-0000-000000000004"
             }]
         }])
     );
@@ -2150,18 +2166,18 @@ fn debug_events_json_carries_the_name_the_ids_and_the_time() {
     assert_eq!(
         parsed_json,
         serde_json::json!([{
-            "session": "00000000-0000-0000-0000-000000000001",
-            "name": "quiet-lake",
-            "events": [{
-                "at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
-                "name": "PaneCreated",
-                "session": null,
-                "client": null,
-                "tab": "00000000-0000-0000-0000-000000000002",
-                "pane": "00000000-0000-0000-0000-000000000004",
-                "plugin": null,
-                "command": null,
-                "subscriber": null
+            "session_id": "00000000-0000-0000-0000-000000000001",
+            "session_name": "quiet-lake",
+            "recent_events": [{
+                "occurred_at": { "secs_since_epoch": 1234, "nanos_since_epoch": 0 },
+                "event_name": "PaneCreated",
+                "session_id": null,
+                "client_id": null,
+                "tab_id": "00000000-0000-0000-0000-000000000002",
+                "pane_id": "00000000-0000-0000-0000-000000000004",
+                "plugin_id": null,
+                "command_id": null,
+                "subscriber_id": null
             }]
         }])
     );

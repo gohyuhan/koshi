@@ -121,7 +121,7 @@ fn explain_answers_for_the_profile_version() {
 
     assert_eq!(
         explanation,
-        "profile.version\nfile: profile/<name>.kdl\ndefault: 1\n\
+        "profile.version\nfile: profile/<name>.kdl\ndefault: 2\n\
          Config schema version.\n"
     );
 }
@@ -141,20 +141,20 @@ fn check_validates_every_known_file_in_sorted_path_order() {
     let config_directory = TempDir::new().unwrap();
     fs::create_dir(config_directory.path().join("themes")).unwrap();
     fs::create_dir(config_directory.path().join("profile")).unwrap();
-    fs::write(config_directory.path().join("koshi.kdl"), "version 1\n").unwrap();
+    fs::write(config_directory.path().join("koshi.kdl"), "version 2\n").unwrap();
     fs::write(
         config_directory.path().join("keybinding.kdl"),
-        "version 1\nmode \"normal\" {}\n",
+        "version 2\nmode \"normal\" {}\n",
     )
     .unwrap();
     fs::write(
         config_directory.path().join("themes").join("z.kdl"),
-        "version 1\ncolors {}\n",
+        "version 2\ncolors {}\n",
     )
     .unwrap();
     fs::write(
         config_directory.path().join("profile").join("a.kdl"),
-        "version 1\ntab { pane }\n",
+        "version 2\ntab { pane }\n",
     )
     .unwrap();
     fs::write(
@@ -168,7 +168,7 @@ fn check_validates_every_known_file_in_sorted_path_order() {
     assert_eq!(
         report_text,
         format!(
-            "{}: valid (version 1)\n{}: valid (version 1)\n{}: valid (version 1)\n{}: valid (version 1)\n",
+            "{}: valid (version 2)\n{}: valid (version 2)\n{}: valid (version 2)\n{}: valid (version 2)\n",
             config_directory.path().join("keybinding.kdl").display(),
             config_directory.path().join("koshi.kdl").display(),
             config_directory.path().join("profile").join("a.kdl").display(),
@@ -184,7 +184,7 @@ fn check_collects_errors_from_all_files() {
     fs::write(config_directory.path().join("koshi.kdl"), "pane {}\n").unwrap();
     fs::write(
         config_directory.path().join("themes").join("bad.kdl"),
-        "version 1\ncolors { accent \"bad\" }\n",
+        "version 2\ncolors { accent \"bad\" }\n",
     )
     .unwrap();
 
@@ -255,6 +255,22 @@ fn check_reports_read_and_validation_errors_together() {
             theme_config_path.display()
         )
     );
+}
+
+#[test]
+fn migrate_command_updates_a_schema_one_file_to_schema_two() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+
+    let migration_report =
+        run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
+
+    assert_eq!(
+        migration_report,
+        format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(fs::read_to_string(app_config_path).unwrap(), "version 2\n");
 }
 
 fn migrate_config_for_test(
@@ -519,33 +535,33 @@ fn run_config_command_in_directory_routes_explain_to_the_field_table() {
 fn run_config_command_in_directory_routes_check_to_the_directory_scan() {
     let config_directory = TempDir::new().unwrap();
     let app_config_path = config_directory.path().join("koshi.kdl");
-    fs::write(&app_config_path, "version 1\n").unwrap();
+    fs::write(&app_config_path, "version 2\n").unwrap();
 
     let command_output =
         run_config_command_in_directory(&ConfigCommand::Check, config_directory.path()).unwrap();
 
     assert_eq!(
         command_output,
-        format!("{}: valid (version 1)\n", app_config_path.display())
+        format!("{}: valid (version 2)\n", app_config_path.display())
     );
 }
 
-/// `migrate` through the real migration table: version 1 is this build's
+/// `migrate` through the real migration table: version 2 is this build's
 /// schema, so the file is reported as current and left byte for byte as it is.
 #[test]
 fn run_config_command_in_directory_migrate_leaves_a_file_already_on_this_schema_untouched() {
     let config_directory = TempDir::new().unwrap();
     let app_config_path = config_directory.path().join("koshi.kdl");
-    fs::write(&app_config_path, "version 1\n").unwrap();
+    fs::write(&app_config_path, "version 2\n").unwrap();
 
     let command_output =
         run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
 
     assert_eq!(
         command_output,
-        format!("{}: current (version 1)\n", app_config_path.display())
+        format!("{}: current (version 2)\n", app_config_path.display())
     );
-    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 1\n");
+    assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 2\n");
 }
 
 #[test]
@@ -553,15 +569,15 @@ fn check_sorts_two_theme_files_by_path() {
     let config_directory = TempDir::new().unwrap();
     let themes_directory = config_directory.path().join("themes");
     fs::create_dir(&themes_directory).unwrap();
-    fs::write(themes_directory.join("z.kdl"), "version 1\ncolors {}\n").unwrap();
-    fs::write(themes_directory.join("a.kdl"), "version 1\ncolors {}\n").unwrap();
+    fs::write(themes_directory.join("z.kdl"), "version 2\ncolors {}\n").unwrap();
+    fs::write(themes_directory.join("a.kdl"), "version 2\ncolors {}\n").unwrap();
 
     let report_text = check_config_directory(config_directory.path()).unwrap();
 
     assert_eq!(
         report_text,
         format!(
-            "{}: valid (version 1)\n{}: valid (version 1)\n",
+            "{}: valid (version 2)\n{}: valid (version 2)\n",
             themes_directory.join("a.kdl").display(),
             themes_directory.join("z.kdl").display(),
         )
@@ -591,14 +607,14 @@ fn check_validates_a_config_symlink_through_its_target() {
     let config_directory = TempDir::new().unwrap();
     let stored_config_path = config_directory.path().join("stored-koshi.kdl");
     let app_config_path = config_directory.path().join("koshi.kdl");
-    fs::write(&stored_config_path, "version 1\n").unwrap();
+    fs::write(&stored_config_path, "version 2\n").unwrap();
     symlink(&stored_config_path, &app_config_path).unwrap();
 
     let report_text = check_config_directory(config_directory.path()).unwrap();
 
     assert_eq!(
         report_text,
-        format!("{}: valid (version 1)\n", app_config_path.display())
+        format!("{}: valid (version 2)\n", app_config_path.display())
     );
 }
 

@@ -57,13 +57,11 @@ pub enum SessionEvent {
     /// Metadata for one image record whose pixels follow in chunks.
     ImageContentStart {
         /// The image record and its exact RGBA byte count.
-        #[serde(rename = "image")]
         image_transfer: FrameImageTransfer,
     },
     /// One bounded piece of an image record.
     ImageContentChunk {
         /// The image bytes and their position in the transfer.
-        #[serde(rename = "chunk")]
         image_chunk: FrameImageChunk,
     },
     /// A pane was created and registered.
@@ -107,7 +105,6 @@ pub enum SessionEvent {
         /// The newly focused pane.
         pane_id: PaneId,
         /// The pane that held this client's focus in the tab before, if any.
-        #[serde(rename = "prior_pane")]
         previous_pane_id: Option<PaneId>,
     },
     /// A tab's layout tree changed.
@@ -133,7 +130,6 @@ pub enum SessionEvent {
         tab_id: TabId,
         /// The tab the client was viewing before the switch. When the switch
         /// was forced by a tab close, this is the closed tab.
-        #[serde(rename = "prior_tab")]
         previous_tab_id: TabId,
     },
     /// A tab moved to a new index.
@@ -141,10 +137,8 @@ pub enum SessionEvent {
         /// The moved tab.
         tab_id: TabId,
         /// The tab's previous zero-based index.
-        #[serde(rename = "old_index")]
         previous_tab_index: usize,
         /// The tab's new zero-based index.
-        #[serde(rename = "new_index")]
         new_tab_index: usize,
     },
     /// The session is over: its last tab closed, a quit command was applied,
@@ -163,7 +157,6 @@ pub enum SessionEvent {
     /// skip.
     Resync {
         /// How many events the client missed.
-        #[serde(rename = "dropped_count")]
         dropped_event_count: u64,
     },
     /// What one round of mouse actions did. Sent once per
@@ -175,7 +168,6 @@ pub enum SessionEvent {
         /// One entry per action in the round that had something to report, in
         /// the order those actions ran. An empty list is the normal case: the
         /// session ran the round and had nothing to say.
-        #[serde(rename = "answers")]
         mouse_answers: Vec<koshi_core::mouse::MouseAnswer>,
     },
     /// Bytes for the terminal this client runs in, written to it verbatim.
@@ -185,7 +177,6 @@ pub enum SessionEvent {
         /// from that string or from a list of numbers, the shape a session
         /// server speaking session protocol 2 writes.
         #[serde(with = "crate::bytes::base64_or_list")]
-        #[serde(rename = "bytes")]
         host_output_bytes: Vec<u8>,
     },
     /// The client drops this session and attaches to the named one.

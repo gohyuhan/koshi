@@ -129,13 +129,13 @@ fn build_populated_session_layout() -> SessionLayout {
 /// The exact encoding of [`build_populated_session_layout`].
 fn build_populated_layout_json() -> serde_json::Value {
     json!({
-        "id": "00000000-0000-0000-0000-000000000001",
-        "name": "quiet-lake",
+        "session_id": "00000000-0000-0000-0000-000000000001",
+        "session_name": "quiet-lake",
         "tabs": [{
-            "id": "00000000-0000-0000-0000-000000000002",
-            "name": "editor",
-            "index": 1,
-            "tree": {
+            "tab_id": "00000000-0000-0000-0000-000000000002",
+            "tab_name": "editor",
+            "tab_index": 1,
+            "layout_tree": {
                 "Split": {
                     "direction": "Stacked",
                     "children": [
@@ -144,60 +144,60 @@ fn build_populated_layout_json() -> serde_json::Value {
                     ],
                     "weights": [
                         {
-                            "primary": { "Flex": 1 },
-                            "min": null,
-                            "preferred": null,
+                            "primary_constraint": { "Flex": 1 },
+                            "minimum_cell_count": null,
+                            "preferred_cell_count": null,
                             "resize_delta": 0
                         },
                         {
-                            "primary": { "Flex": 1 },
-                            "min": null,
-                            "preferred": null,
+                            "primary_constraint": { "Flex": 1 },
+                            "minimum_cell_count": null,
+                            "preferred_cell_count": null,
                             "resize_delta": 0
                         }
                     ],
-                    "active": 0
+                    "active_child_index": 0
                 }
             },
-            "solved": [{
-                "client": "00000000-0000-0000-0000-000000000003",
-                "viewport": { "cols": 80, "rows": 22 },
-                "mode": {
-                    "Fullscreen": { "focused": "00000000-0000-0000-0000-000000000004" }
+            "solved_tabs": [{
+                "client_id": "00000000-0000-0000-0000-000000000003",
+                "viewport_size": { "column_count": 80, "row_count": 22 },
+                "layout_mode": {
+                    "Fullscreen": { "focused_pane_id": "00000000-0000-0000-0000-000000000004" }
                 },
-                "panes": [
+                "pane_rects": [
                     {
-                        "id": "00000000-0000-0000-0000-000000000004",
-                        "rect": {
-                            "origin": { "x": 0, "y": 0 },
-                            "size": { "cols": 80, "rows": 21 }
+                        "pane_id": "00000000-0000-0000-0000-000000000004",
+                        "outer_rect": {
+                            "origin": { "column": 0, "row": 0 },
+                            "cell_size": { "column_count": 80, "row_count": 21 }
                         }
                     },
                     {
-                        "id": "00000000-0000-0000-0000-000000000005",
-                        "rect": {
-                            "origin": { "x": 0, "y": 21 },
-                            "size": { "cols": 80, "rows": 1 }
+                        "pane_id": "00000000-0000-0000-0000-000000000005",
+                        "outer_rect": {
+                            "origin": { "column": 0, "row": 21 },
+                            "cell_size": { "column_count": 80, "row_count": 1 }
                         }
                     }
                 ],
-                "suppressed": ["00000000-0000-0000-0000-000000000005"],
-                "all_suppressed": true,
+                "suppressed_pane_ids": ["00000000-0000-0000-0000-000000000005"],
+                "is_every_pane_suppressed": true,
                 "stack_headers": [{
-                    "pane": "00000000-0000-0000-0000-000000000005",
-                    "rect": {
-                        "origin": { "x": 0, "y": 21 },
-                        "size": { "cols": 80, "rows": 1 }
+                    "pane_id": "00000000-0000-0000-0000-000000000005",
+                    "header_rect": {
+                        "origin": { "column": 0, "row": 21 },
+                        "cell_size": { "column_count": 80, "row_count": 1 }
                     },
-                    "position": 1,
-                    "total": 2
+                    "member_index": 1,
+                    "member_count": 2
                 }]
             }]
         }],
         "clients": [{
-            "id": "00000000-0000-0000-0000-000000000003",
-            "active_tab": "00000000-0000-0000-0000-000000000002",
-            "focused_pane": "00000000-0000-0000-0000-000000000004"
+            "client_id": "00000000-0000-0000-0000-000000000003",
+            "active_tab_id": "00000000-0000-0000-0000-000000000002",
+            "focused_pane_id": "00000000-0000-0000-0000-000000000004"
         }]
     })
 }
@@ -312,7 +312,7 @@ fn the_pinned_wire_shape_decodes_back_into_the_same_layout() {
 #[test]
 fn a_layout_carrying_an_unknown_field_ignores_it() {
     let decoded_session_layout: SessionLayout = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[],"clients":[],"junk":5}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"clients":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -330,7 +330,7 @@ fn a_layout_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_tab_carrying_an_unknown_field_ignores_it() {
     let decoded_tab_layout: TabLayout = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000002","name":"editor","index":0,"tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved":[],"junk":5}"#,
+        r#"{"tab_id":"00000000-0000-0000-0000-000000000002","tab_name":"editor","tab_index":0,"layout_tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved_tabs":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -349,7 +349,7 @@ fn a_tab_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
     let decoded_solved_tab: SolvedTab = serde_json::from_str(
-        r#"{"client":"00000000-0000-0000-0000-000000000003","viewport":{"cols":80,"rows":22},"mode":"Tiled","panes":[],"suppressed":[],"all_suppressed":false,"stack_headers":[],"junk":5}"#,
+        r#"{"client_id":"00000000-0000-0000-0000-000000000003","viewport_size":{"column_count":80,"row_count":22},"layout_mode":"Tiled","pane_rects":[],"suppressed_pane_ids":[],"is_every_pane_suppressed":false,"stack_headers":[],"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -373,7 +373,7 @@ fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_solved_pane_carrying_an_unknown_field_ignores_it() {
     let decoded_solved_pane: SolvedPane = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000004","rect":{"origin":{"x":0,"y":0},"size":{"cols":80,"rows":22}},"junk":5}"#,
+        r#"{"pane_id":"00000000-0000-0000-0000-000000000004","outer_rect":{"origin":{"column":0,"row":0},"cell_size":{"column_count":80,"row_count":22}},"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -392,7 +392,7 @@ fn a_solved_pane_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_client_focus_carrying_an_unknown_field_ignores_it() {
     let decoded_client_focus: ClientFocus = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000003","active_tab":"00000000-0000-0000-0000-000000000002","focused_pane":null,"junk":5}"#,
+        r#"{"client_id":"00000000-0000-0000-0000-000000000003","active_tab_id":"00000000-0000-0000-0000-000000000002","focused_pane_id":null,"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -409,7 +409,7 @@ fn a_client_focus_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_client_focus_with_no_focused_pane_key_reads_as_focusing_nothing() {
     let decoded_client_focus: ClientFocus = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000003","active_tab":"00000000-0000-0000-0000-000000000002"}"#,
+        r#"{"client_id":"00000000-0000-0000-0000-000000000003","active_tab_id":"00000000-0000-0000-0000-000000000002"}"#,
     )
     .expect("a missing `focused_pane` reads as `None`");
 
@@ -426,55 +426,55 @@ fn a_client_focus_with_no_focused_pane_key_reads_as_focusing_nothing() {
 #[test]
 fn a_layout_with_a_misspelled_field_name_is_refused() {
     let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","nmae":"quiet-lake","tabs":[],"clients":[]}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","nmae":"quiet-lake","tabs":[],"clients":[]}"#,
     );
 
     assert_eq!(
         decoded_layout_result
             .expect_err("a misspelled field is refused")
             .to_string(),
-        "missing field `name` at line 1 column 88"
+        "missing field `session_name` at line 1 column 96"
     );
 }
 
 #[test]
 fn a_tab_whose_index_is_below_zero_is_refused() {
     let decoded_tab_result: Result<TabLayout, _> = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000002","name":"editor","index":-1,"tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved":[]}"#,
+        r#"{"tab_id":"00000000-0000-0000-0000-000000000002","tab_name":"editor","tab_index":-1,"layout_tree":{"Pane":"00000000-0000-0000-0000-000000000004"},"solved_tabs":[]}"#,
     );
 
     assert_eq!(
         decoded_tab_result
             .expect_err("a negative index is refused")
             .to_string(),
-        "invalid value: integer `-1`, expected usize at line 1 column 71"
+        "invalid value: integer `-1`, expected usize at line 1 column 83"
     );
 }
 
 #[test]
 fn a_solve_whose_mode_this_build_does_not_have_is_refused() {
     let decoded_solved_tab_result: Result<SolvedTab, _> = serde_json::from_str(
-        r#"{"client":"00000000-0000-0000-0000-000000000003","viewport":{"cols":80,"rows":22},"mode":"Floating","panes":[],"suppressed":[],"all_suppressed":false,"stack_headers":[]}"#,
+        r#"{"client_id":"00000000-0000-0000-0000-000000000003","viewport_size":{"column_count":80,"row_count":22},"layout_mode":"Floating","pane_rects":[],"suppressed_pane_ids":[],"is_every_pane_suppressed":false,"stack_headers":[]}"#,
     );
 
     assert_eq!(
         decoded_solved_tab_result
             .expect_err("a mode this build does not have is refused")
             .to_string(),
-        "unknown variant `Floating`, expected `Tiled` or `Fullscreen` at line 1 column 99"
+        "unknown variant `Floating`, expected `Tiled` or `Fullscreen` at line 1 column 127"
     );
 }
 
 #[test]
 fn a_layout_missing_its_clients_is_refused() {
     let decoded_layout_result: Result<SessionLayout, _> = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[]}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[]}"#,
     );
 
     assert_eq!(
         decoded_layout_result
             .expect_err("a missing field is refused")
             .to_string(),
-        "missing field `clients` at line 1 column 75"
+        "missing field `clients` at line 1 column 91"
     );
 }

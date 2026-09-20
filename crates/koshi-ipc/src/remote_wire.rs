@@ -105,7 +105,6 @@ pub enum RemoteClientFrame {
         /// The highest session protocol version the client speaks.
         max_protocol_version: u32,
         /// The secret the operator handed out with a grant.
-        #[serde(rename = "token")]
         connection_token: ConnectionToken,
     },
     /// List the sessions this secret reaches.
@@ -113,7 +112,6 @@ pub enum RemoteClientFrame {
     /// Attach to one session.
     Attach {
         /// Which session to attach to.
-        #[serde(rename = "session")]
         session_selector: SessionSelector,
     },
 }
@@ -129,7 +127,6 @@ pub enum RemoteServerFrame {
     Welcome {
         /// The doorway version both ends settled on: the highest they both
         /// speak.
-        #[serde(rename = "remote_version")]
         remote_protocol_version: u32,
     },
     /// The stream is not open, or the frame is not served.
@@ -142,7 +139,6 @@ pub enum RemoteServerFrame {
     /// reaches.
     Sessions {
         /// The sessions, in the order the server holds them.
-        #[serde(rename = "rows")]
         session_rows: Vec<RemoteSessionRow>,
     },
 }
@@ -211,10 +207,8 @@ pub fn open_remote_connection(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteSessionRow {
     /// The session's stable id.
-    #[serde(rename = "id")]
     pub session_id: SessionId,
     /// The session's generated display name.
-    #[serde(rename = "name")]
     pub session_name: String,
 }
 

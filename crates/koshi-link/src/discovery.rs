@@ -32,14 +32,11 @@ use crate::ipc_client;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionRow {
     /// Stable session id.
-    #[serde(rename = "id")]
     pub session_id: SessionId,
     /// The session's display name.
-    #[serde(rename = "name")]
     pub session_name: String,
     /// The saved server this session runs on, by the name it was saved under
     /// or its `host:port` address. `None` for a session on this machine.
-    #[serde(rename = "server")]
     pub server_name_or_address: Option<String>,
 }
 
@@ -68,16 +65,12 @@ impl SessionRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TabRow {
     /// Stable tab id.
-    #[serde(rename = "id")]
     pub tab_id: TabId,
     /// The tab's display name.
-    #[serde(rename = "name")]
     pub tab_name: String,
     /// The session holding the tab.
-    #[serde(rename = "session")]
     pub session_id: SessionId,
     /// That session's display name.
-    #[serde(rename = "session_name")]
     pub session_name: String,
 }
 
@@ -85,22 +78,16 @@ pub struct TabRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PaneRow {
     /// Stable pane id.
-    #[serde(rename = "id")]
     pub pane_id: PaneId,
     /// The pane's title, once the child has set one.
-    #[serde(rename = "name")]
     pub pane_name: Option<String>,
     /// The tab holding the pane.
-    #[serde(rename = "tab")]
     pub tab_id: TabId,
     /// That tab's display name.
-    #[serde(rename = "tab_name")]
     pub tab_name: String,
     /// The session holding the pane.
-    #[serde(rename = "session")]
     pub session_id: SessionId,
     /// That session's display name.
-    #[serde(rename = "session_name")]
     pub session_name: String,
 }
 
@@ -108,13 +95,10 @@ pub struct PaneRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClientRow {
     /// Stable client id.
-    #[serde(rename = "id")]
     pub client_id: ClientId,
     /// The session the client is attached to.
-    #[serde(rename = "session")]
     pub session_id: SessionId,
     /// That session's display name.
-    #[serde(rename = "session_name")]
     pub session_name: String,
 }
 

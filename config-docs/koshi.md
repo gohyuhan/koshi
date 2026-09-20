@@ -487,7 +487,7 @@ Linux and macOS, `%ProgramData%\koshi` on Windows.
 
 ```kdl
 // koshi.kdl — the complete default configuration.
-version 1
+version 2
 
 theme "default"
 allow-beta-features #false

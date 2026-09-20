@@ -33,7 +33,6 @@ use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// The check found what it looks for.
     Ok,
@@ -305,10 +304,9 @@ impl DoctorContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DoctorCheckRow {
     /// The check's name.
-    #[serde(rename = "name")]
     pub check_name: &'static str,
     /// What the check concluded. `--format json` prints its fields beside
-    /// `check_name`, serialized as `name`, in the same object.
+    /// `check_name` in the same object.
     #[serde(flatten)]
     pub outcome: DoctorOutcome,
 }

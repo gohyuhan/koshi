@@ -28,7 +28,7 @@ fn migrate_to_schema_three(
 
 #[test]
 fn current_valid_file_stays_byte_for_byte_unchanged() {
-    let config_source_text = "version 1\ncolors { accent \"#ffffff\" }\n";
+    let config_source_text = "version 2\ncolors { accent \"#ffffff\" }\n";
 
     let migrated_config = migrate_config(
         ConfigFileKind::Theme,
@@ -37,8 +37,8 @@ fn current_valid_file_stays_byte_for_byte_unchanged() {
     )
     .unwrap();
 
-    assert_eq!(migrated_config.source_schema_version, 1);
-    assert_eq!(migrated_config.target_schema_version, 1);
+    assert_eq!(migrated_config.source_schema_version, 2);
+    assert_eq!(migrated_config.target_schema_version, 2);
     assert!(!migrated_config.is_changed);
     assert_eq!(migrated_config.migrated_source, config_source_text);
 }
@@ -46,6 +46,78 @@ fn current_valid_file_stays_byte_for_byte_unchanged() {
 #[test]
 fn production_registry_covers_every_supported_version() {
     validate_schema_registry(CONFIG_SCHEMAS).unwrap();
+}
+
+#[test]
+fn production_migration_updates_each_config_file_kind() {
+    let config_files = [
+        (
+            ConfigFileKind::App,
+            Path::new("koshi.kdl"),
+            "version 1\n",
+            "version 2\n",
+        ),
+        (
+            ConfigFileKind::Keybinding,
+            Path::new("keybinding.kdl"),
+            "version 1\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
+            "version 2\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
+        ),
+        (
+            ConfigFileKind::Theme,
+            Path::new("themes/plain.kdl"),
+            "version 1\ncolors { accent \"#ffffff\" }\n",
+            "version 2\ncolors { accent \"#ffffff\" }\n",
+        ),
+        (
+            ConfigFileKind::Profile,
+            Path::new("profile/dev.kdl"),
+            "version 1\ntab { pane }\n",
+            "version 2\ntab { pane }\n",
+        ),
+    ];
+
+    for (config_file_kind, config_path, config_source_text, expected_source_text) in config_files {
+        let migrated_config =
+            migrate_config(config_file_kind, config_path, config_source_text).unwrap();
+
+        assert_eq!(migrated_config.source_schema_version, 1);
+        assert_eq!(migrated_config.target_schema_version, 2);
+        assert!(migrated_config.is_changed);
+        assert_eq!(migrated_config.migrated_source, expected_source_text);
+    }
+}
+
+#[test]
+fn an_older_valid_file_reports_that_it_needs_migration() {
+    let validated_config =
+        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 1\n").unwrap();
+
+    assert_eq!(
+        validated_config,
+        ValidatedConfig {
+            schema_version: 1,
+            is_current: false,
+        }
+    );
+}
+
+#[test]
+fn schema_one_migration_changes_only_the_version_value() {
+    let config_source_text =
+        "// keep café\nversion 1 // keep this comment\ncolors { accent \"#ffffff\" }\n";
+
+    let migrated_config = migrate_config(
+        ConfigFileKind::Theme,
+        Path::new("themes/plain.kdl"),
+        config_source_text,
+    )
+    .unwrap();
+
+    assert_eq!(
+        migrated_config.migrated_source,
+        "// keep café\nversion 2 // keep this comment\ncolors { accent \"#ffffff\" }\n"
+    );
 }
 
 #[test]
@@ -184,7 +256,7 @@ fn field_partial_warning_is_a_validation_error_for_migration() {
     let migration_error = validate_config(
         ConfigFileKind::App,
         Path::new("koshi.kdl"),
-        "version 1\npane { min-col 2 }\n",
+        "version 2\npane { min-col 2 }\n",
     )
     .unwrap_err();
 
@@ -421,13 +493,13 @@ fn a_step_landing_on_the_wrong_version_stops_the_chain() {
 #[test]
 fn newer_version_is_rejected() {
     let migration_error =
-        migrate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 2\n").unwrap_err();
+        migrate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 3\n").unwrap_err();
 
     assert_eq!(
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "schema version 2 is newer than this koshi supports (1)"
+            version_error_detail: "schema version 3 is newer than this koshi supports (2)"
                 .to_string(),
         }
     );
@@ -441,12 +513,12 @@ fn an_empty_file_declares_no_version() {
 #[test]
 fn a_valid_app_file_reports_the_version_it_declares() {
     let validated_config =
-        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 1\n").unwrap();
+        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 2\n").unwrap();
 
     assert_eq!(
         validated_config,
         ValidatedConfig {
-            schema_version: 1,
+            schema_version: 2,
             is_current: true,
         }
     );
@@ -457,14 +529,14 @@ fn a_valid_keybinding_file_reports_the_version_it_declares() {
     let validated_config = validate_config(
         ConfigFileKind::Keybinding,
         Path::new("keybinding.kdl"),
-        "version 1\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
+        "version 2\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
     )
     .unwrap();
 
     assert_eq!(
         validated_config,
         ValidatedConfig {
-            schema_version: 1,
+            schema_version: 2,
             is_current: true,
         }
     );
@@ -475,7 +547,7 @@ fn every_keybinding_schema_problem_lands_in_one_invalid_error() {
     let migration_error = validate_config(
         ConfigFileKind::Keybinding,
         Path::new("keybinding.kdl"),
-        "version 1\nkeybindings { }\nmode \"normal\" { unbind \"<Tab>\" }\n",
+        "version 2\nkeybindings { }\nmode \"normal\" { unbind \"<Tab>\" }\n",
     )
     .unwrap_err();
 
@@ -495,14 +567,14 @@ fn a_valid_profile_file_reports_the_version_it_declares() {
     let validated_config = validate_config(
         ConfigFileKind::Profile,
         Path::new("profile/dev.kdl"),
-        "version 1\ntab { pane }\n",
+        "version 2\ntab { pane }\n",
     )
     .unwrap();
 
     assert_eq!(
         validated_config,
         ValidatedConfig {
-            schema_version: 1,
+            schema_version: 2,
             is_current: true,
         }
     );
@@ -513,7 +585,7 @@ fn a_profile_schema_problem_becomes_an_invalid_error() {
     let migration_error = validate_config(
         ConfigFileKind::Profile,
         Path::new("profile/dev.kdl"),
-        "version 1\n",
+        "version 2\n",
     )
     .unwrap_err();
 
@@ -531,7 +603,7 @@ fn a_theme_warning_is_a_validation_error_for_migration() {
     let migration_error = validate_config(
         ConfigFileKind::Theme,
         Path::new("themes/plain.kdl"),
-        "version 1\ncolors { accent \"#ffffff\" }\ncolors { }\n",
+        "version 2\ncolors { accent \"#ffffff\" }\ncolors { }\n",
     )
     .unwrap_err();
 
@@ -547,13 +619,13 @@ fn a_theme_warning_is_a_validation_error_for_migration() {
 #[test]
 fn validation_names_a_newer_schema_version_against_the_running_schema() {
     let migration_error =
-        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 2\n").unwrap_err();
+        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 3\n").unwrap_err();
 
     assert_eq!(
         migration_error,
         MigrationError::Version {
             config_path: "koshi.kdl".to_string(),
-            version_error_detail: "schema version 2 is newer than this koshi supports (1)"
+            version_error_detail: "schema version 3 is newer than this koshi supports (2)"
                 .to_string(),
         }
     );

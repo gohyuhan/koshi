@@ -405,14 +405,14 @@ fn a_tab_survives_a_serde_round_trip() {
 
 #[test]
 fn a_tabs_name_is_stored_as_a_plain_json_string() {
-    // Pins the stored shape: the member is named `name` and holds a JSON
+    // Pins the stored shape: the member is named `tab_name` and holds a JSON
     // string, not a nested object.
     let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, PaneId::new());
 
     let serialized_tab = serde_json::to_value(&tab).expect("serialize");
 
     assert_eq!(
-        serialized_tab["name"],
+        serialized_tab["tab_name"],
         serde_json::Value::String("code".to_owned())
     );
 }

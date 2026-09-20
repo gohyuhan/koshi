@@ -56,7 +56,6 @@ pub struct Envelope<RequestKind> {
     /// the messages in flight on one connection.
     pub request_id: u64,
     /// What is being asked.
-    #[serde(rename = "kind")]
     pub request_kind: RequestKind,
 }
 
@@ -76,7 +75,6 @@ pub struct Answer<Response> {
     /// its own.
     pub request_id: Option<u64>,
     /// The answer itself.
-    #[serde(rename = "result")]
     pub answer_result: Response,
 }
 

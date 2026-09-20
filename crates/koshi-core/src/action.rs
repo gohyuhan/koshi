@@ -347,13 +347,12 @@ pub enum TargetKind {
     Client,
 }
 
-/// Whether the runtime implements an action. Serializes in kebab-case:
-/// `available`, `coming-soon`.
+/// Whether the runtime implements an action. It serializes with the variant
+/// names `Available` and `ComingSoon`.
 ///
 /// Introspection (`koshi actions list`/`explain`) hides `ComingSoon` actions,
 /// and resolving one is rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum ActionStatus {
     /// The runtime implements this action; binding and invoking it work.
     Available,
@@ -388,21 +387,18 @@ pub struct ActionMetadata {
     /// One-line description for `describe`/which-key output.
     pub description: String,
     /// How broad the action's effect is.
-    #[serde(rename = "scope_class")]
     pub scope: ActionScope,
     /// Entity kinds the action can target.
-    #[serde(rename = "target_compat")]
     pub target_kinds: Vec<TargetKind>,
     /// How the action is dispatched.
     pub handler: ActionHandlerReference,
     /// Whether the runtime implements the action.
-    #[serde(rename = "status")]
     pub action_status: ActionStatus,
     /// Whether the action repeats from a held prefix: fired from a
     /// multi-chord binding, the binding's prefix stays armed and the next
     /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
     /// per action here, never in a binding. Absent on the wire means `false`.
-    #[serde(default, rename = "continuous")]
+    #[serde(default)]
     pub is_continuous: bool,
 }
 
@@ -455,8 +451,8 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// all build `FocusTab`.
 ///
 /// The `copy-selection` and `plugin-*` actions are seeded `ComingSoon`; every
-/// other action is `Available`. The `resize-pane*` and `focus-pane*` actions
-/// are `continuous`; every other action is not.
+/// other action is `Available`. The `resize-pane*`, `focus-pane*`, and
+/// `scroll-pane*` actions are `continuous`; every other action is not.
 #[must_use]
 pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
     use ActionHandlerReference::CoreCommand;
@@ -584,6 +580,60 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Available,
         ),
         build_core_action_seed(
+            "move-pane",
+            "Move Pane",
+            "Move the focused pane into the slot of a neighboring pane",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::MovePane),
+            Available,
+        ),
+        build_core_action_seed(
+            "move-pane-left",
+            "Move Pane Left",
+            "Move the focused pane into the slot of its left neighbor",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::MovePane),
+            Available,
+        ),
+        build_core_action_seed(
+            "move-pane-down",
+            "Move Pane Down",
+            "Move the focused pane into the slot of its lower neighbor",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::MovePane),
+            Available,
+        ),
+        build_core_action_seed(
+            "move-pane-up",
+            "Move Pane Up",
+            "Move the focused pane into the slot of its upper neighbor",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::MovePane),
+            Available,
+        ),
+        build_core_action_seed(
+            "move-pane-right",
+            "Move Pane Right",
+            "Move the focused pane into the slot of its right neighbor",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::MovePane),
+            Available,
+        ),
+        build_core_action_seed(
+            "swap-panes",
+            "Swap Panes",
+            "Exchange two pane occupants within one tab",
+            PaneSession,
+            vec![Pane],
+            CoreCommand(CommandKind::SwapPanes),
+            Available,
+        ),
+        build_core_action_seed(
             "focus-pane",
             "Focus Pane",
             "Move the issuing client's focus to a pane",
@@ -626,6 +676,33 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
+            Available,
+        ),
+        build_core_action_seed(
+            "scroll-pane",
+            "Scroll Pane",
+            "Scroll a pane's view by a chosen number of lines",
+            Client,
+            vec![ClientTarget, Pane],
+            CoreCommand(CommandKind::ScrollPane),
+            Available,
+        ),
+        build_core_action_seed(
+            "scroll-pane-up",
+            "Scroll Pane Up",
+            "Scroll the focused pane's view toward its history",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::ScrollPane),
+            Available,
+        ),
+        build_core_action_seed(
+            "scroll-pane-down",
+            "Scroll Pane Down",
+            "Scroll the focused pane's view toward live output",
+            Client,
+            vec![ClientTarget],
+            CoreCommand(CommandKind::ScrollPane),
             Available,
         ),
         build_core_action_seed(
@@ -838,6 +915,8 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
                 | "focus-pane-down"
                 | "focus-pane-up"
                 | "focus-pane-right"
+                | "scroll-pane-up"
+                | "scroll-pane-down"
         ) {
             action_metadata.is_continuous = true;
         }

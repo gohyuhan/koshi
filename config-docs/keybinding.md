@@ -56,7 +56,7 @@ Complete built-in keymap. `<leader>` bindings follow the configured leader.
 
 ```kdl
 // keybinding.kdl — the complete default keymap.
-version 1
+version 2
 
 chord-timeout-ms 500
 which-key-delay-ms 300

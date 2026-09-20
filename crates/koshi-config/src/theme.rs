@@ -15,7 +15,7 @@
 //! Top-level nodes, no wrapping `theme` block (the file *is* the theme), the
 //! same shape the keybinding file uses:
 //! ```kdl
-//! version 1
+//! version 2
 //! colors {
 //!     ramp-start "#d0a5ff"
 //!     accent "#f5c2ff"

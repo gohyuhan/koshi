@@ -78,7 +78,6 @@ pub struct TokenRecord {
     pub identity: String,
     /// The sha256 of the granted secret, as 64 lowercase hex characters. No
     /// field of this record holds the secret itself.
-    #[serde(rename = "hash")]
     pub token_hash: String,
     /// How far this grant reaches.
     pub scope: TokenScope,
@@ -179,10 +178,8 @@ pub enum Resolution {
 #[serde(deny_unknown_fields)]
 pub struct TokenStore {
     /// The format number of the file these records came from or go to.
-    #[serde(rename = "format")]
     pub store_format: u32,
     /// One record per grant, in the order the grants were made.
-    #[serde(rename = "records")]
     pub token_records: Vec<TokenRecord>,
 }
 

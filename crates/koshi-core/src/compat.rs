@@ -63,8 +63,8 @@ pub struct Surface {
 ///
 /// Four shapes differ between 2 and 3:
 ///
-/// - A command naming a target client carries `target_client`. A peer speaking
-///   2 has no field for it.
+/// - A command naming a target client carries `target_client_id`. A peer
+///   speaking 2 has no field for it.
 /// - A `HostWrite` event carries its bytes as one base64 string. 2 wrote a
 ///   list of numbers.
 /// - Each entry of a layout split's `children` is the child node itself. 2
@@ -74,10 +74,10 @@ pub struct Surface {
 ///   RGBA records travel in bounded image-content events and remain cached
 ///   across unchanged frames. Version 2 had no terminal-image wire shape.
 ///
-/// The readers still accept the two legacy encodings that can occur in stored
-/// data: a `HostWrite` holding a list of numbers and a split child wrapped in a
-/// `{"node": …}` record both decode. The resume reader accepts format 1, and a
-/// resume file written by an earlier build can carry the wrapped split shape.
+/// The session reader still accepts two shape-level encodings in stored data:
+/// a `HostWrite` holding a list of numbers and a split child wrapped in a
+/// `{"node": …}` record. Resume format 4 is the only resume format this build
+/// reads.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
     minimum_version: 4,
@@ -88,111 +88,106 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 /// The control plane: what a caller and the router speak over the router's
 /// socket.
 ///
-/// `v0.2.0` speaks 1. `v0.3.0` and this build speak 2. The floor is 1.
+/// `v0.4.0` speaks 2. `v0.5.0` speaks 3. The floor is 3.
 pub const CONTROL_PROTOCOL: Surface = Surface {
     surface_name: "control plane",
-    minimum_version: 1,
-    maximum_version: 2,
+    minimum_version: 3,
+    maximum_version: 3,
     released_version: Some(2),
 };
 
 /// The supervisor link: what a session server and the process holding its panes
 /// speak.
 ///
-/// `v0.3.0` and this build both speak 1. The supervisor end can be older than
-/// the session server that reconnects to it.
+/// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2.
 pub const SUPERVISOR_PROTOCOL: Surface = Surface {
     surface_name: "supervisor link",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The remote access token store: the file this machine keeps its grants in.
 ///
-/// `v0.3.0` and this build both write 1.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2.
 pub const TOKEN_STORE_FORMAT: Surface = Surface {
     surface_name: "token store format",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The remote doorway: what a client on another machine and this machine's TLS
 /// listener speak before any session is reached.
 ///
-/// `v0.3.0` and this build both speak 1. Its two ends are different machines.
-/// The session protocol the two ends settle after the door opens is a separate
-/// surface, [`SESSION_PROTOCOL`].
+/// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2. Its two ends are
+/// different machines. The session protocol the two ends settle after the door
+/// opens is a separate surface, [`SESSION_PROTOCOL`].
 pub const REMOTE_PROTOCOL: Surface = Surface {
     surface_name: "remote doorway",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The saved server file: the servers a dialling machine has connected to,
 /// with the secret and the pinned certificate fingerprint for each.
 ///
-/// `v0.3.0` and this build both write 1. The file sits on the dialling
-/// machine. This build reads what an older koshi saved.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. The file sits on
+/// the dialling machine.
 pub const SAVED_SERVER_FORMAT: Surface = Surface {
     surface_name: "saved server file format",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The remote certificate file: the certificate and private key this machine
 /// generated for its remote listener.
 ///
-/// `v0.3.0` and this build both write 1. This build reads a certificate an
-/// older build generated.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. A file with
+/// format 1 is not read.
 pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
     surface_name: "remote certificate file format",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The remote access record: the file saying the operator switched remote
 /// access on for this machine.
 ///
-/// `v0.3.0` and this build both write 1. This build reads a record an older
-/// build wrote, and keeps the port open.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. A file with format 1
+/// is not read.
 pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
     surface_name: "remote access record format",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The resume file: the state a session server writes before it replaces its
 /// own process image, and the next image reads back.
 ///
-/// `v0.3.0` writes 2, and `v0.4.0` and this build write 3. Format 3 adds
-/// prompt metadata to every terminal row, and writes each entry of a layout
-/// split's `children` as the child node itself. 1 and 2 wrapped it in a
-/// `{"node": …}` record. This build reads either shape, so a session server
-/// upgraded from `v0.3.0` keeps its layout trees across the swap.
+/// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. Format 4
+/// uses the declared field names in the saved records. The floor is 4.
 ///
-/// The build being installed states which formats it reads. The running server
+/// The build being installed states which format it writes. The running server
 /// reads that answer before it commits to the swap.
 pub const RESUME_FORMAT: Surface = Surface {
     surface_name: "resume file format",
-    minimum_version: 1,
-    maximum_version: 3,
+    minimum_version: 4,
+    maximum_version: 4,
     released_version: Some(3),
 };
 
 /// The config schema: the shape of the files under the config directory.
 ///
-/// `v0.1.0`, `v0.2.0` and `v0.3.0` all write 1. A file naming an older version
-/// is migrated forward before it is read.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2.
 pub const CONFIG_SCHEMA: Surface = Surface {
     surface_name: "config schema",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 

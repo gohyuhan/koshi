@@ -271,7 +271,6 @@ pub struct PaneFocused {
     /// The newly focused pane.
     pub pane_id: PaneId,
     /// The pane that held this client's focus in the tab before, if any.
-    #[serde(rename = "prior_pane")]
     pub previous_pane_id: Option<PaneId>,
 }
 
@@ -281,7 +280,6 @@ pub struct PtyResized {
     /// The pane whose PTY was resized.
     pub pane_id: PaneId,
     /// The new PTY dimensions in cells.
-    #[serde(rename = "size")]
     pub pty_size: PtySize,
 }
 
@@ -325,7 +323,6 @@ pub struct TabFocused {
     pub tab_id: TabId,
     /// The tab the client was viewing before the switch. When the switch was
     /// forced by a tab close, this is the closed tab.
-    #[serde(rename = "prior_tab")]
     pub previous_tab_id: TabId,
 }
 
@@ -335,10 +332,8 @@ pub struct TabMoved {
     /// The moved tab.
     pub tab_id: TabId,
     /// The tab's previous zero-based index.
-    #[serde(rename = "old_index")]
     pub previous_tab_index: usize,
     /// The tab's new zero-based index.
-    #[serde(rename = "new_index")]
     pub new_tab_index: usize,
 }
 
@@ -378,7 +373,6 @@ pub struct TerminalTooSmallEntered {
     /// The affected client viewport.
     pub client_id: ClientId,
     /// The viewport size that could not fit any pane.
-    #[serde(rename = "size")]
     pub viewport_size: Size,
     /// The pane area the client reported, or `None` when it reported no area.
     #[serde(default)]
@@ -394,7 +388,6 @@ pub struct TerminalTooSmallExited {
     /// The affected client viewport.
     pub client_id: ClientId,
     /// The viewport size after recovery.
-    #[serde(rename = "size")]
     pub viewport_size: Size,
 }
 
@@ -421,7 +414,6 @@ pub struct InputModeChanged {
     /// key is interpreted. A key bound to a koshi shortcut still fires it; a key
     /// that reaches the pane's program clears that pane's highlight on the way.
     /// The highlight itself is reported by [`Event::SelectionChanged`].
-    #[serde(rename = "mode")]
     pub lock_mode: LockMode,
 }
 
@@ -432,7 +424,6 @@ pub struct MouseSelectChanged {
     /// client-scoped: clients sharing a session hold independent modes.
     pub client_id: ClientId,
     /// Whether the client now grabs the mouse for text selection.
-    #[serde(rename = "on")]
     pub is_enabled: bool,
 }
 
@@ -523,10 +514,8 @@ pub struct PaneTyped {
     /// The client that produced the input.
     pub client_id: ClientId,
     /// The classified, privacy-tiered character payload.
-    #[serde(rename = "payload")]
     pub typed_payload: TypedPayload,
     /// When the input was accepted.
-    #[serde(rename = "timestamp")]
     pub accepted_at: SystemTime,
 }
 
@@ -576,10 +565,8 @@ pub struct PaneEnterPressed {
     /// The client that produced the input.
     pub client_id: ClientId,
     /// The classified, privacy-tiered submitted-line payload.
-    #[serde(rename = "line")]
     pub submitted_line: SubmittedLinePayload,
     /// When Enter was accepted.
-    #[serde(rename = "timestamp")]
     pub accepted_at: SystemTime,
 }
 
@@ -597,7 +584,6 @@ pub struct MousePressed {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
@@ -611,7 +597,6 @@ pub struct MouseReleased {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
@@ -625,7 +610,6 @@ pub struct MouseDragged {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
@@ -639,7 +623,6 @@ pub struct MouseScrolled {
     /// The client that produced the event.
     pub client_id: ClientId,
     /// The hit-tested pane, if any.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// The client-local cell position.
     pub position: Point,
@@ -806,10 +789,8 @@ impl std::fmt::Display for RejectReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRejected {
     /// The command that was rejected.
-    #[serde(rename = "id")]
     pub command_id: CommandId,
     /// Why it was rejected.
-    #[serde(rename = "reason")]
     pub rejection_reason: RejectReason,
 }
 
@@ -840,10 +821,8 @@ pub struct Copied {
     /// The pane the text was copied from.
     pub pane_id: PaneId,
     /// Where the text was copied to.
-    #[serde(rename = "target")]
     pub clipboard_target: CopyTarget,
     /// The byte length of the copied text.
-    #[serde(rename = "byte_len")]
     pub byte_count: usize,
 }
 
@@ -925,7 +904,6 @@ pub struct PluginLoadFailed {
     /// The plugin that failed to load.
     pub plugin_id: PluginId,
     /// A human-readable failure reason.
-    #[serde(rename = "reason")]
     pub failure_reason: String,
 }
 
@@ -942,7 +920,6 @@ pub struct PluginBroken {
     /// The plugin marked broken.
     pub plugin_id: PluginId,
     /// A human-readable reason it was disabled.
-    #[serde(rename = "reason")]
     pub failure_reason: String,
 }
 

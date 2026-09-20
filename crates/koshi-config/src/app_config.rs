@@ -22,7 +22,7 @@
 //! # Example
 //! A `koshi.kdl` of
 //! ```kdl
-//! version 1
+//! version 2
 //! theme "midnight"
 //! scrollback {
 //!     max-lines 50000

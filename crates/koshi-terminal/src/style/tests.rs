@@ -454,9 +454,9 @@ fn style_round_trips_through_serde() {
     assert_eq!(
         serialized_style,
         serde_json::json!({
-            "fg": { "Rgb": [10, 20, 30] },
-            "bg": { "Indexed": 200 },
-            "attrs": (1 << 3) | (2 << 8),
+            "foreground_color": { "Rgb": [10, 20, 30] },
+            "background_color": { "Indexed": 200 },
+            "attributes": (1 << 3) | (2 << 8),
             "underline_color": { "Indexed": 9 },
         })
     );

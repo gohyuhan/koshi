@@ -614,7 +614,7 @@ fn bounded_index_deserialization_grows_only_when_full() {
 #[test]
 fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
     let duplicate_change_error = serde_json::from_str::<SixelPaletteChanges>(
-        "[{\"register\":1,\"color\":[1,2,3]},{\"register\":1,\"color\":[4,5,6]}]",
+        "[{\"register_number\":1,\"rgb_color\":[1,2,3]},{\"register_number\":1,\"rgb_color\":[4,5,6]}]",
     )
     .expect_err("duplicate palette edits are invalid");
     assert!(duplicate_change_error
@@ -633,10 +633,10 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
             too_many_changes.push(',');
         }
         too_many_changes.push_str(&format!(
-            "{{\"register\":{register_number},\"color\":[0,0,0]}}"
+            "{{\"register_number\":{register_number},\"rgb_color\":[0,0,0]}}"
         ));
     }
-    too_many_changes.push_str(",{\"register\":0,\"color\":[0,0,0]}]");
+    too_many_changes.push_str(",{\"register_number\":0,\"rgb_color\":[0,0,0]}]");
     let too_many_change_error = serde_json::from_str::<SixelPaletteChanges>(&too_many_changes)
         .expect_err("palette changes must stay within the register bound");
     assert!(too_many_change_error
@@ -644,7 +644,7 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
         .contains("exceed 256 registers"));
 
     let invalid_register_index_error = serde_json::from_str::<IndexedImage>(
-        "{\"width\":1,\"height\":1,\"indices\":[258],\"aspect_vertical\":1,\"aspect_horizontal\":1}",
+        "{\"width_pixels\":1,\"height_pixels\":1,\"pixel_register_indices\":[258],\"pixel_aspect_vertical\":1,\"pixel_aspect_horizontal\":1}",
     )
     .expect_err("index above the sentinel range is invalid");
     assert!(invalid_register_index_error
@@ -652,7 +652,7 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
         .contains("invalid register or sentinel"));
 
     let wrong_index_length_error = serde_json::from_str::<IndexedImage>(
-        "{\"width\":2,\"height\":1,\"indices\":[0],\"aspect_vertical\":1,\"aspect_horizontal\":1}",
+        "{\"width_pixels\":2,\"height_pixels\":1,\"pixel_register_indices\":[0],\"pixel_aspect_vertical\":1,\"pixel_aspect_horizontal\":1}",
     )
     .expect_err("index length must match dimensions");
     assert!(wrong_index_length_error
@@ -665,7 +665,7 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
     assert!(too_few_color_error.to_string().contains("fewer than 256"));
 
     let unnormalized_aspect_error = serde_json::from_str::<IndexedImage>(
-        "{\"width\":1,\"height\":1,\"indices\":[0],\"aspect_vertical\":2,\"aspect_horizontal\":2}",
+        "{\"width_pixels\":1,\"height_pixels\":1,\"pixel_register_indices\":[0],\"pixel_aspect_vertical\":2,\"pixel_aspect_horizontal\":2}",
     )
     .expect_err("aspect ratio must be normalized");
     assert!(unnormalized_aspect_error
@@ -673,7 +673,7 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
         .contains("dimensions are invalid"));
 
     let oversized_aspect_error = serde_json::from_str::<IndexedImage>(
-        "{\"width\":1,\"height\":1,\"indices\":[0],\"aspect_vertical\":16385,\"aspect_horizontal\":1}",
+        "{\"width_pixels\":1,\"height_pixels\":1,\"pixel_register_indices\":[0],\"pixel_aspect_vertical\":16385,\"pixel_aspect_horizontal\":1}",
     )
     .expect_err("expanded aspect must stay within image limits");
     assert!(oversized_aspect_error

@@ -281,17 +281,18 @@ fn a_chord_survives_a_serde_round_trip() {
 fn decoding_refuses_a_modifier_bit_that_names_no_modifier() {
     // Bit 4 is the lowest one past Super, the highest modifier.
     let modifier_parse_error =
-        serde_json::from_str::<KeyChord>(r#"{"mods":16,"key":{"Char":"q"}}"#)
+        serde_json::from_str::<KeyChord>(r#"{"modifier_flags":16,"key":{"Char":"q"}}"#)
             .expect_err("bit 4 names no modifier");
     assert_eq!(
         modifier_parse_error.to_string(),
         "modifier bits 0b00010000 name no modifier; the modifiers are 0b00001111 \
-         at line 1 column 10"
+         at line 1 column 20"
     );
 
     // Every bit the four modifiers do occupy still decodes.
-    let all_modifier_chord = serde_json::from_str::<KeyChord>(r#"{"mods":15,"key":{"Char":"q"}}"#)
-        .expect("the four modifier bits together");
+    let all_modifier_chord =
+        serde_json::from_str::<KeyChord>(r#"{"modifier_flags":15,"key":{"Char":"q"}}"#)
+            .expect("the four modifier bits together");
     assert_eq!(
         all_modifier_chord,
         KeyChord::from_parts(
@@ -304,8 +305,9 @@ fn decoding_refuses_a_modifier_bit_that_names_no_modifier() {
 #[test]
 fn decoding_refuses_a_function_key_number_no_terminal_names() {
     // The column is where the number ends, so it grows with the number's digits.
-    for (function_key_number, error_column_index) in [(0_u8, 32), (25, 33), (255, 34)] {
-        let chord_json = format!(r#"{{"mods":0,"key":{{"Named":{{"F":{function_key_number}}}}}}}"#);
+    for (function_key_number, error_column_index) in [(0_u8, 42), (25, 43), (255, 44)] {
+        let chord_json =
+            format!(r#"{{"modifier_flags":0,"key":{{"Named":{{"F":{function_key_number}}}}}}}"#);
         let function_key_parse_error = serde_json::from_str::<KeyChord>(&chord_json)
             .expect_err("a function key outside F1 through F24");
         assert_eq!(
@@ -319,7 +321,7 @@ fn decoding_refuses_a_function_key_number_no_terminal_names() {
 
     // The two ends of the range still decode.
     for number in [1_u8, 24] {
-        let chord_json = format!(r#"{{"mods":0,"key":{{"Named":{{"F":{number}}}}}}}"#);
+        let chord_json = format!(r#"{{"modifier_flags":0,"key":{{"Named":{{"F":{number}}}}}}}"#);
         let decoded_chord: KeyChord =
             serde_json::from_str(&chord_json).expect("a real function key");
         assert_eq!(
@@ -334,7 +336,7 @@ fn the_chord_wire_form_is_the_field_names_the_modifier_bits_and_the_variant_name
     assert_eq!(
         serde_json::to_string(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('q')))
             .expect("serialize"),
-        r#"{"mods":1,"key":{"Char":"q"}}"#
+        r#"{"modifier_flags":1,"key":{"Char":"q"}}"#
     );
 }
 
@@ -405,7 +407,7 @@ fn the_named_key_wire_form_is_the_variant_name_with_the_function_key_number() {
             Key::Named(NamedKey::Space)
         ))
         .expect("serialize"),
-        r#"{"mods":0,"key":{"Named":"Space"}}"#
+        r#"{"modifier_flags":0,"key":{"Named":"Space"}}"#
     );
     assert_eq!(
         serde_json::to_string(&KeyChord::from_parts(
@@ -413,7 +415,7 @@ fn the_named_key_wire_form_is_the_variant_name_with_the_function_key_number() {
             Key::Named(NamedKey::F(12))
         ))
         .expect("serialize"),
-        r#"{"mods":4,"key":{"Named":{"F":12}}}"#
+        r#"{"modifier_flags":4,"key":{"Named":{"F":12}}}"#
     );
 }
 

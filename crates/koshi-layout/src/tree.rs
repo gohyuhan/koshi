@@ -188,7 +188,6 @@ pub struct SplitNode {
     /// where it names the one expanded member; every other member is
     /// collapsed to its one-row header. Directional splits carry `0` and
     /// collapse no child.
-    #[serde(rename = "active")]
     pub active_child_index: usize,
 }
 

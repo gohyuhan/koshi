@@ -79,7 +79,7 @@ Terminals that attach later start unlocked: the node names the state the first
 terminal opens in, not a setting the session keeps.
 
 ```kdl
-version 1
+version 2
 lock
 
 tab {
@@ -102,7 +102,7 @@ sizing key.
 
 ```kdl
 // profile/dev.kdl — every layout form, pane setting, and sizing key.
-version 1
+version 2
 
 tab {
     // a horizontal split: editor on the left (60%), a tools column (40%) right

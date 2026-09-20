@@ -80,14 +80,11 @@ where
 pub struct PaintedFrame {
     /// The session being viewed: its identity, its solved active tab, and its
     /// tab list.
-    #[serde(rename = "session")]
     pub session_snapshot: FrameSession,
     /// Per-pane content, one entry per live pane in the active tab, matched to
     /// a [`FrameSlot`] by [`PaneId`].
-    #[serde(rename = "panes")]
     pub pane_snapshots: Vec<FramePane>,
     /// The viewing client's own state (viewport, focus, lock mode).
-    #[serde(rename = "client")]
     pub client_snapshot: FrameClient,
 }
 
@@ -96,16 +93,12 @@ pub struct PaintedFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameSession {
     /// The session's stable id.
-    #[serde(rename = "id")]
     pub session_id: SessionId,
     /// The session's display name.
-    #[serde(rename = "name")]
     pub session_name: String,
     /// The tab this client is shown, solved and ready to draw.
-    #[serde(rename = "active_tab")]
     pub active_tab_snapshot: FrameTab,
     /// One entry per tab in the session, in display order.
-    #[serde(rename = "tabs")]
     pub tab_snapshots: Vec<FrameTabMeta>,
 }
 
@@ -113,21 +106,17 @@ pub struct FrameSession {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameTab {
     /// The tab's stable id.
-    #[serde(rename = "id")]
     pub tab_id: TabId,
     /// The tab's display name.
-    #[serde(rename = "name")]
     pub tab_name: String,
     /// The solved layout: one [`FrameSlot`] per pane, giving outer and content
     /// rects and coarse status.
-    #[serde(rename = "slots")]
     pub pane_slots: Vec<FrameSlot>,
     /// The viewport size the layout was solved for: the element-wise minimum
     /// viewport across the clients viewing this tab. The
     /// [`pane_slots`](Self::pane_slots) rects live in this space with origin `(0, 0)`. A
     /// client whose own [`viewport_size`](FrameClient::viewport_size) is larger draws
     /// this layout centered and letterboxes the surrounding margin.
-    #[serde(rename = "effective_size")]
     pub effective_cell_size: Size,
     /// Header strips for stacked panes: the one-row title bar each collapsed
     /// stack member shows in place of its content.
@@ -138,14 +127,12 @@ pub struct FrameTab {
     pub layout_mode: LayoutMode,
     /// True when the tab has no room to draw and every pane is suppressed;
     /// the client fills the whole frame with the "terminal too small" overlay.
-    #[serde(rename = "all_suppressed")]
     pub is_every_pane_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
     /// vertical split, in the [`pane_slots`](Self::pane_slots) space. A frame from a
     /// server without this field reads as `0`, and so does a value that is
     /// not a cell count.
     #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    #[serde(rename = "gap")]
     pub gap_cell_count: u16,
 }
 
@@ -154,16 +141,12 @@ pub struct FrameTab {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameTabMeta {
     /// The tab's stable id.
-    #[serde(rename = "id")]
     pub tab_id: TabId,
     /// The tab's display name.
-    #[serde(rename = "name")]
     pub tab_name: String,
     /// The tab's position in the bar, starting at 0.
-    #[serde(rename = "index")]
     pub tab_index: usize,
     /// Whether this is the client's active tab, drawn with the active marker.
-    #[serde(rename = "active")]
     pub is_active: bool,
 }
 
@@ -183,59 +166,45 @@ pub struct FrameSlot {
     /// The pane this slot places.
     pub pane_id: PaneId,
     /// The outer pane box, including the 1-cell border gutter.
-    #[serde(rename = "rect")]
     pub outer_rect: Rect,
     /// The content area inside the border — the rect the PTY was sized from.
     /// `None` when the pane shows no content (suppressed, hidden, or a
     /// collapsed stack member). Cells and the cursor are drawn here.
-    #[serde(rename = "inner_rect")]
     pub content_rect: Option<Rect>,
     /// Whether a terminal or a plugin backs this pane.
-    #[serde(rename = "kind")]
     pub pane_kind: PaneKind,
     /// Whether the pane is currently shown.
-    #[serde(rename = "visible")]
     pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
-    #[serde(rename = "suppressed")]
     pub is_suppressed: bool,
     /// Whether the pane's process has exited.
-    #[serde(rename = "dead")]
     pub is_dead: bool,
 }
 
 /// One image placement carried with a pane's visible cells.
 ///
-/// `content_id` names an image record uploaded on this connection. A client
-/// without that record still has the complete cell rectangle needed to draw
-/// the unavailable-image marker.
+/// `image_content_id` names an image record uploaded on this connection. A
+/// client without that record still has the complete cell rectangle needed to
+/// draw the unavailable-image marker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImagePlacement {
     /// The complete cell size and the clipped top and left cells.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "geometry")]
     pub cell_geometry: Option<koshi_core::geometry::ImageCellGeometry>,
     /// Record metadata for this placement of the shared pixel content.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "record")]
     pub image_record: Option<FrameImageRecordHeader>,
     /// The terminal-local placement identity.
-    #[serde(rename = "id")]
     pub placement_id: u64,
     /// The connection-local image-record identity.
-    #[serde(rename = "content_id")]
     pub image_content_id: u64,
     /// Whether the source snapshot has the named image record.
-    #[serde(rename = "available")]
     pub is_available: bool,
     /// The zero-based row and column of the upper-left covered cell.
-    #[serde(rename = "anchor")]
     pub anchor_cell: (u16, u16),
     /// The number of covered columns.
-    #[serde(rename = "columns")]
     pub column_count: u16,
     /// The number of covered rows.
-    #[serde(rename = "rows")]
     pub row_count: u16,
 }
 
@@ -246,24 +215,16 @@ impl<'de> Deserialize<'de> for FrameImagePlacement {
     {
         #[derive(Deserialize)]
         struct FrameImagePlacementFields {
-            #[serde(rename = "id")]
             placement_id: u64,
-            #[serde(rename = "content_id")]
             image_content_id: u64,
             #[serde(default)]
-            #[serde(rename = "geometry")]
             cell_geometry: Option<koshi_core::geometry::ImageCellGeometry>,
             #[serde(default)]
-            #[serde(rename = "record")]
             image_record: Option<FrameImageRecordHeader>,
             #[serde(default = "is_image_available_by_default")]
-            #[serde(rename = "available")]
             is_available: bool,
-            #[serde(rename = "anchor")]
             anchor_cell: (u16, u16),
-            #[serde(rename = "columns")]
             column_count: u16,
-            #[serde(rename = "rows")]
             row_count: u16,
         }
 
@@ -325,20 +286,16 @@ pub struct FrameImageRecordHeader {
     #[serde(default, deserialize_with = "deserialize_image_or_default")]
     pub protocol: FrameGraphicsProtocol,
     /// Image width in pixels.
-    #[serde(rename = "width")]
     pub pixel_width: u32,
     /// Image height in pixels.
-    #[serde(rename = "height")]
     pub pixel_height: u32,
     /// The state operation represented by the transfer. An unknown action reads
     /// as `Display`.
     #[serde(default, deserialize_with = "deserialize_image_or_default")]
-    #[serde(rename = "action")]
     pub image_action: FrameImageAction,
     /// Display hints supplied by the protocol.
     pub display: FrameImageDisplay,
     /// Cursor position when the image sequence ended, as row and column.
-    #[serde(rename = "anchor")]
     pub anchor_cell: (u16, u16),
 }
 
@@ -346,13 +303,10 @@ pub struct FrameImageRecordHeader {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageTransfer {
     /// The image-record identity on this connection.
-    #[serde(rename = "id")]
     pub image_content_id: u64,
     /// The image record metadata and its pixel dimensions.
-    #[serde(rename = "record")]
     pub image_record: FrameImageRecordHeader,
     /// The exact number of RGBA bytes the chunks carry.
-    #[serde(rename = "byte_len")]
     pub image_byte_count: u64,
 }
 
@@ -363,11 +317,8 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
     {
         #[derive(Deserialize)]
         struct FrameImageTransferFields {
-            #[serde(rename = "id")]
             image_content_id: u64,
-            #[serde(rename = "record")]
             image_record: FrameImageRecordHeader,
-            #[serde(rename = "byte_len")]
             image_byte_count: u64,
         }
 
@@ -402,17 +353,13 @@ impl<'de> Deserialize<'de> for FrameImageTransfer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FrameImageChunk {
     /// The image-record identity named by the transfer start.
-    #[serde(rename = "transfer_id")]
     pub image_transfer_id: u64,
-    /// The raw-byte offset of `bytes` in that image.
-    #[serde(rename = "offset")]
+    /// The raw-byte offset of `chunk_bytes` in that image.
     pub byte_offset: u64,
     /// Whether this chunk ends the transfer.
-    #[serde(rename = "last")]
     pub is_last: bool,
     /// Raw RGBA bytes, encoded as base64 on the wire.
     #[serde(with = "crate::bytes::base64_or_list")]
-    #[serde(rename = "bytes")]
     pub chunk_bytes: Vec<u8>,
 }
 
@@ -423,14 +370,10 @@ impl<'de> Deserialize<'de> for FrameImageChunk {
     {
         #[derive(Deserialize)]
         struct FrameImageChunkFields {
-            #[serde(rename = "transfer_id")]
             image_transfer_id: u64,
-            #[serde(rename = "offset")]
             byte_offset: u64,
-            #[serde(rename = "last")]
             is_last: bool,
             #[serde(with = "crate::bytes::base64_or_list")]
-            #[serde(rename = "bytes")]
             chunk_bytes: Vec<u8>,
         }
 
@@ -494,23 +437,17 @@ pub enum FrameSixelBackground {
 #[serde(default)]
 pub struct FrameImageDisplay {
     /// The source command's response suppression level.
-    #[serde(
-        rename = "quiet",
-        skip_serializing_if = "is_zero_response_suppression_level"
-    )]
+    #[serde(skip_serializing_if = "is_zero_response_suppression_level")]
     pub response_suppression_level: u8,
     /// The requested width, if the sender supplied one. An unknown dimension is
     /// read as absent.
     #[serde(deserialize_with = "deserialize_image_or_default")]
-    #[serde(rename = "width")]
     pub requested_width: Option<FrameImageDimension>,
     /// The requested height, if the sender supplied one. An unknown dimension is
     /// read as absent.
     #[serde(deserialize_with = "deserialize_image_or_default")]
-    #[serde(rename = "height")]
     pub requested_height: Option<FrameImageDimension>,
     /// Whether the sender requests aspect-ratio preservation.
-    #[serde(rename = "preserve_aspect_ratio")]
     pub is_aspect_ratio_preserved: bool,
     /// The Sixel background rule, when the record came from Sixel. An unknown
     /// rule is read as absent.
@@ -525,7 +462,6 @@ pub struct FrameImageDisplay {
     /// Usage flags supplied by Kitty.
     pub usage_hints: u32,
     /// Whether Kitty asks for a Unicode-placeholder placement.
-    #[serde(rename = "unicode_placeholder")]
     pub is_unicode_placeholder: bool,
     /// The Kitty image z-index.
     pub z_index: i32,
@@ -537,32 +473,23 @@ pub struct FrameImageDisplay {
     pub relative_placement_id: Option<u32>,
     /// The horizontal cell offset from a relative parent placement.
     #[serde(default)]
-    #[serde(rename = "relative_offset_x")]
     pub relative_column_offset: i32,
     /// The vertical cell offset from a relative parent placement.
     #[serde(default)]
-    #[serde(rename = "relative_offset_y")]
     pub relative_row_offset: i32,
     /// The number of terminal columns requested by Kitty.
-    #[serde(rename = "cell_columns")]
     pub requested_column_count: Option<u32>,
     /// The number of terminal rows requested by Kitty.
-    #[serde(rename = "cell_rows")]
     pub requested_row_count: Option<u32>,
     /// The source image x offset requested by Kitty, in pixels.
-    #[serde(rename = "source_offset_x")]
     pub source_pixel_offset_x: Option<u32>,
     /// The source image y offset requested by Kitty, in pixels.
-    #[serde(rename = "source_offset_y")]
     pub source_pixel_offset_y: Option<u32>,
     /// The x offset inside the first terminal cell requested by Kitty.
-    #[serde(rename = "cell_offset_x")]
     pub cell_pixel_offset_x: Option<u32>,
     /// The y offset inside the first terminal cell requested by Kitty.
-    #[serde(rename = "cell_offset_y")]
     pub cell_pixel_offset_y: Option<u32>,
     /// Whether Kitty asks the placement to move the cursor after display.
-    #[serde(rename = "move_cursor")]
     pub should_move_cursor: bool,
 }
 
@@ -638,25 +565,20 @@ fn compute_frame_image_byte_count(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameClient {
     /// The client's stable id.
-    #[serde(rename = "id")]
     pub client_id: ClientId,
     /// The client's terminal size in cells.
-    #[serde(rename = "viewport")]
     pub viewport_size: Size,
     /// The tab the client is viewing.
-    #[serde(rename = "active_tab")]
     pub active_tab_id: TabId,
     /// The client's focused pane in the active tab, or `None` when the tab has
     /// no focusable pane. The client highlights the pane whose
     /// [`FrameSlot::pane_id`] matches, and places the cursor there.
-    #[serde(rename = "focused_pane")]
     pub focused_pane_id: Option<PaneId>,
     /// The client's input mode, as the session has it.
     pub lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection. Adds the
     /// `SELECT` tag to the mode indicator, and decides whether a press in a
     /// mouse-aware pane begins a highlight.
-    #[serde(rename = "mouse_select")]
     pub is_mouse_selection_enabled: bool,
 }
 
@@ -665,29 +587,23 @@ pub struct FrameClient {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FramePane {
     /// The pane this content belongs to, matched to a [`FrameSlot`] by id.
-    #[serde(rename = "id")]
     pub pane_id: PaneId,
     /// The pane's resolved display title: on the alternate screen the running
     /// app's OSC 0/1/2 title; on the primary screen the shell's OSC 7 working
     /// directory (`~`-shortened), falling back to the OSC title. `None` when
     /// the pane has reported neither.
-    #[serde(rename = "title")]
     pub pane_title: Option<String>,
     /// The cursor's position and look within the content area.
-    #[serde(rename = "cursor")]
     pub cursor_snapshot: FrameCursor,
     /// The visible terminal cells. `None` for a pane with no terminal content —
     /// a plugin pane, or a slot showing nothing this frame.
-    #[serde(rename = "window")]
     pub terminal_window: Option<FrameWindow>,
     /// The complete image placements whose rectangles fit inside this pane's
     /// visible window. Empty when the pane has no image to draw.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[serde(rename = "image_placements")]
     pub image_placement_snapshots: Vec<FrameImagePlacement>,
     /// Whether the whole screen is in reverse video (DECSCNM): the client swaps
     /// the default foreground and background for every cell.
-    #[serde(rename = "reverse_video")]
     pub is_reverse_video: bool,
     /// Which mouse events the pane's program asked to be told about
     /// (`?9`/`?1000`/`?1002`/`?1003`). Present in every frame: a pane that
@@ -695,28 +611,23 @@ pub struct FramePane {
     pub mouse_tracking: MouseTracking,
     /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
     /// wheel tick becomes cursor arrow keys.
-    #[serde(rename = "alt_scroll")]
     pub is_alt_scroll_enabled: bool,
     /// Whether the pane is showing the alternate screen. The alternate screen
     /// keeps no scrollback and has no view to scroll.
-    #[serde(rename = "on_alt_screen")]
     pub is_on_alt_screen: bool,
     /// The absolute line number of the top row this frame shows for the pane,
     /// counting every line the pane has ever pushed into scrollback. A press on
     /// the pane's `n`-th visible row names line `view_top_row_index + n`.
-    #[serde(rename = "view_top_row")]
     pub view_top_row_index: u64,
     /// The viewing client's highlighted text in this pane, cut down to the rows
     /// this frame shows. `None` when the client has nothing highlighted here,
     /// or when the highlight is entirely outside the visible rows.
-    #[serde(rename = "selection")]
     pub selection_spans: Option<FrameSelection>,
     /// Whether the viewing client has a highlight in this pane at all,
     /// including one scrolled entirely out of the visible rows, where
     /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
-    #[serde(rename = "scrollback")]
     pub scrollback_meta: FrameScrollback,
 }
 
@@ -724,16 +635,12 @@ pub struct FramePane {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameCursor {
     /// The cursor's row within the content area, starting at 0.
-    #[serde(rename = "row")]
     pub row_index: u16,
     /// The cursor's column within the content area, starting at 0.
-    #[serde(rename = "col")]
     pub column_index: u16,
     /// Whether the cursor is visible.
-    #[serde(rename = "visible")]
     pub is_visible: bool,
     /// Whether the cursor blinks.
-    #[serde(rename = "blink")]
     pub is_blinking: bool,
     /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane
     /// has asked for no shape at all, which leaves the user's own configured
@@ -764,7 +671,6 @@ pub enum FrameCursorShape {
 pub struct FrameSelection {
     /// One entry per highlighted row: the row, then the first and last
     /// highlighted column on it. Both columns are inclusive.
-    #[serde(rename = "rows")]
     pub row_spans: Vec<(u16, u16, u16)>,
 }
 
@@ -772,10 +678,8 @@ pub struct FrameSelection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameScrollback {
     /// Whether the buffer reached its cap and dropped its oldest lines.
-    #[serde(rename = "truncated")]
     pub is_truncated: bool,
     /// How many scrollback lines are currently retained.
-    #[serde(rename = "retained_lines")]
     pub retained_line_count: usize,
 }
 
@@ -783,14 +687,11 @@ pub struct FrameScrollback {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameWindow {
     /// The width every row expands back to.
-    #[serde(rename = "cols")]
     pub column_count: u16,
     /// The visible rows, top row first.
-    #[serde(rename = "rows")]
     pub row_snapshots: Vec<FrameRow>,
     /// Rows scrolled up from the live tail; `0` shows the live bottom of the
     /// buffer.
-    #[serde(rename = "view_offset")]
     pub view_row_offset: usize,
 }
 
@@ -798,7 +699,6 @@ pub struct FrameWindow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRow {
     /// The runs, left to right. Their counts sum to the row's width.
-    #[serde(rename = "runs")]
     pub cell_runs: Vec<FrameRun>,
     /// Whether the row ends its logical line or continues onto the next. An
     /// ending this build has no name for reads as
@@ -808,7 +708,6 @@ pub struct FrameRow {
         deserialize_with = "crate::wire::deserialize_or_default",
         skip_serializing_if = "FrameRowEnd::is_hard"
     )]
-    #[serde(rename = "end")]
     pub row_end: FrameRowEnd,
 }
 
@@ -842,10 +741,10 @@ impl FrameRowEnd {
 impl FrameRow {
     /// Fold `frame_cells` into runs: each stretch of equal neighbouring cells becomes
     /// one [`FrameRun`]. A count stops at [`u16::MAX`] and the next equal cell
-    /// opens a new run. `end` is how the row ends its logical line.
+    /// opens a new run. `row_end` is how the row ends its logical line.
     ///
-    /// 80 blank cells give one run with `count == 80`. 70 000 blank cells give
-    /// two runs, `65_535` then `4_465`.
+    /// 80 blank cells give one run with `repeat_count == 80`. 70 000 blank
+    /// cells give two runs, `65_535` then `4_465`.
     #[must_use]
     pub fn from_cells(
         frame_cells: impl IntoIterator<Item = FrameCell>,
@@ -868,7 +767,8 @@ impl FrameRow {
         Self { cell_runs, row_end }
     }
 
-    /// Expand the runs back into cells, each run's cell repeated `count` times.
+    /// Expand the runs back into cells, each run's cell repeated
+    /// `repeat_count` times.
     /// The inverse of [`from_cells`](Self::from_cells). The returned vector is
     /// allocated once, at the runs' total count.
     #[must_use]
@@ -891,7 +791,6 @@ impl FrameRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameRun {
     /// How many cells this run stands for. Never 0.
-    #[serde(rename = "count")]
     pub repeat_count: u16,
     /// The cell every position in the run holds.
     pub cell: FrameCell,
@@ -902,18 +801,15 @@ pub struct FrameRun {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameCell {
     /// The base character occupying the cell.
-    #[serde(rename = "ch")]
     pub character: char,
     /// The rest of the grapheme cluster layered over [`character`](Self::character), in
     /// arrival order: combining accents, variation selectors, and the joined
     /// parts of a multi-codepoint emoji. Empty for a plain cell; the client
     /// draws `character` followed by these as one glyph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[serde(rename = "combining")]
     pub combining_characters: Vec<char>,
     /// Display width in cells: 0 (continuation half of a wide glyph), 1
     /// (narrow), or 2 (wide, e.g. CJK).
-    #[serde(rename = "width")]
     pub cell_width: u8,
     /// The cell's colors and text attributes.
     pub style: FrameStyle,
@@ -925,12 +821,10 @@ pub struct FrameStyle {
     /// The foreground color. A color this build has no name for reads as
     /// [`Default`](FrameColor::Default).
     #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    #[serde(rename = "fg")]
     pub foreground_color: FrameColor,
     /// The background color. A color this build has no name for reads as
     /// [`Default`](FrameColor::Default).
     #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    #[serde(rename = "bg")]
     pub background_color: FrameColor,
     /// The underline color (SGR 58); `None` follows the foreground color. A
     /// color this build has no name for reads as `None`.
@@ -941,7 +835,6 @@ pub struct FrameStyle {
     )]
     pub underline_color: Option<FrameColor>,
     /// The boolean text attributes and the underline style.
-    #[serde(rename = "attrs")]
     pub text_attributes: FrameAttrs,
 }
 
@@ -950,40 +843,31 @@ pub struct FrameStyle {
 pub struct FrameAttrs {
     /// Bold / increased intensity (SGR 1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "bold")]
     pub is_bold: bool,
     /// Italic (SGR 3).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "italic")]
     pub is_italic: bool,
     /// Reverse video — swap foreground and background (SGR 7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "reverse")]
     pub is_reverse: bool,
     /// Faint / decreased intensity (SGR 2).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "faint")]
     pub is_faint: bool,
     /// Blink (SGR 5 slow or 6 rapid, collapsed to one flag).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "blink")]
     pub is_blinking: bool,
     /// Conceal — hidden text (SGR 8).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "conceal")]
     pub is_concealed: bool,
     /// Crossed-out / strikethrough (SGR 9).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "strike")]
     pub is_struck_through: bool,
     /// Overline (SGR 53).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[serde(rename = "overline")]
     pub is_overlined: bool,
     /// The underline style (SGR 4 / 21 / 24 and the `4:n` forms). A style this
     /// build has no name for reads as [`None`](FrameUnderline::None).
     #[serde(default, deserialize_with = "crate::wire::deserialize_or_default")]
-    #[serde(rename = "underline")]
     pub underline_style: FrameUnderline,
 }
 

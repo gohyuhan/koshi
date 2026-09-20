@@ -41,28 +41,23 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::CONTROL_PROTOCOL`].
 ///
-/// On version 2 a session the router does not have is refused with
-/// [`NotFound`](crate::protocol::IpcErrorCode::NotFound); on version 1 the
-/// same case is
-/// [`MalformedRequest`](crate::protocol::IpcErrorCode::MalformedRequest).
+/// On version 3 a session the router does not have is refused with
+/// [`NotFound`](crate::protocol::IpcErrorCode::NotFound).
 pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.maximum_version;
 
 /// The lowest control-plane protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
 /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion).
 ///
-/// The floor is 1, the version 0.2.0 speaks. Raising it drops support for
-/// every build below it.
+/// The floor is 3. Raising it drops support for every build below it.
 pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.minimum_version;
 
 /// Which session a request means: the id, or the generated display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionSelector {
     /// The session's stable id.
-    #[serde(rename = "Id")]
     SessionId(SessionId),
     /// The session's generated display name, e.g. `"quiet-lake"`.
-    #[serde(rename = "Name")]
     SessionName(String),
 }
 
@@ -99,7 +94,6 @@ pub enum RouterRequestKind {
         /// The highest control-plane protocol version the caller speaks.
         max_protocol_version: u32,
         /// The secret read from the router's endpoint file.
-        #[serde(rename = "token")]
         connection_token: ConnectionToken,
     },
     /// Start a new session. The router picks the id and the name, spawns the
@@ -110,19 +104,16 @@ pub enum RouterRequestKind {
         /// The directory the caller ran in. The session's first shell opens
         /// here; `None` leaves the session server in the directory it
         /// inherited.
-        #[serde(rename = "cwd")]
         working_directory: Option<PathBuf>,
         /// `Some(true)` lets the other users of this machine reach the new
         /// session, whatever that session's `koshi.kdl` says. Any other value
         /// leaves the answer to the file.
-        #[serde(rename = "allow_other_users")]
         is_other_user_access_allowed: Option<bool>,
     },
     /// Look up a running session's control-socket address, so the caller can
     /// connect to that session directly.
     AttachLookup {
         /// Which session to look up.
-        #[serde(rename = "selector")]
         session_selector: SessionSelector,
     },
     /// List the running sessions.
@@ -226,18 +217,14 @@ pub type IncomingRouterResponse = RouterResponse<MaybeKnown<RouterResult>>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionAddress {
     /// The session's stable id.
-    #[serde(rename = "id")]
     pub session_id: SessionId,
     /// The session's generated display name.
-    #[serde(rename = "name")]
     pub session_name: String,
     /// The session's control-socket address: a socket-file path on Unix, a
     /// bare pipe name on Windows — the string
     /// [`Connection::connect`](crate::transport::Connection::connect) takes.
-    #[serde(rename = "socket")]
     pub socket_address: String,
     /// The process id of the session server serving that socket.
-    #[serde(rename = "pid")]
     pub process_id: u32,
 }
 
@@ -255,7 +242,6 @@ pub enum RouterResult {
         /// The build version of the answering router, e.g. `0.3.0`. Empty
         /// when the router predates this field.
         #[serde(default)]
-        #[serde(rename = "version")]
         build_version: String,
     },
     /// Answers [`RouterRequestKind::CreateSession`]: where the new session
@@ -274,11 +260,9 @@ pub enum RouterResult {
     Granted {
         /// The secret the caller shows the operator once. `ConnectionToken`'s
         /// `Debug` and `Display` write it redacted.
-        #[serde(rename = "token")]
         connection_token: ConnectionToken,
         /// Whether a grant the identity already held on this scope stopped
         /// working.
-        #[serde(rename = "replaced")]
         did_replace_active_grant: bool,
     },
     /// Answers [`RouterRequestKind::RevokeToken`]: the scope of every grant
@@ -292,37 +276,30 @@ pub enum RouterResult {
     RemoteStatus {
         /// Where remote clients would be served, as `host:port`, or `None`
         /// when `koshi.kdl` names no listen address.
-        #[serde(rename = "address")]
         remote_listen_address: Option<String>,
         /// Whether the operator has switched remote access on. This is the
         /// answer they gave, which outlives any one run.
-        #[serde(rename = "enabled")]
         is_remote_access_enabled: bool,
         /// Whether this router is holding the port right now. `enabled` with
         /// this `false` means the answer was given and the port could not be
         /// taken this start — something else is on the address.
-        #[serde(rename = "listening")]
         is_listening: bool,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters, or `None` when no certificate has been generated.
-        #[serde(rename = "fingerprint")]
         certificate_fingerprint: Option<String>,
         /// How many connections from another machine this router holds
         /// admitted right now, whether they have attached to a session or
         /// not. `Some(0)` is a router holding none; `None` is a router whose
         /// build reports no count at all.
         #[serde(default)]
-        #[serde(rename = "remote_connections")]
         remote_connection_count: Option<usize>,
     },
     /// Answers [`RouterRequestKind::EnableRemote`]: remote access is on.
     RemoteEnabled {
         /// Where remote clients are served, as `host:port`.
-        #[serde(rename = "address")]
         remote_listen_address: String,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters. The dialling side pins it.
-        #[serde(rename = "fingerprint")]
         certificate_fingerprint: String,
     },
     /// The request was refused.
@@ -339,7 +316,6 @@ pub struct SessionServerReady {
     pub protocol_version: u32,
     /// The control-socket address the session server bound: a socket-file
     /// path on Unix, a bare pipe name on Windows.
-    #[serde(rename = "socket")]
     pub socket_address: String,
 }
 
