@@ -741,9 +741,9 @@ impl Server {
         ))
     }
 
-    /// Handle [`Command::SwapPanes`]: exchange two pane occupants in one tab
-    /// without changing its split structure. A self-swap commits no events and
-    /// does not solve or resize the tab.
+    /// Handle [`Command::SwapPanes`]: exchange two pane occupants in one
+    /// session. Cross-tab swaps use the checked placement path. A self-swap
+    /// commits no events and does not solve or resize either tab.
     pub(super) fn handle_swap_panes(
         &mut self,
         command_id: CommandId,

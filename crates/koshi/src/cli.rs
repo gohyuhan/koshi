@@ -1114,6 +1114,56 @@ pub enum ActionsCommand {
 }
 
 impl CliCommand {
+    /// Whether this subcommand travels through the session control socket.
+    #[must_use]
+    pub fn is_action_verb(&self) -> bool {
+        match self {
+            CliCommand::NewPane { .. }
+            | CliCommand::ClosePane { .. }
+            | CliCommand::ResizePane { .. }
+            | CliCommand::MovePane { .. }
+            | CliCommand::SwapPanes { .. }
+            | CliCommand::PlacePane { .. }
+            | CliCommand::ScrollPane { .. }
+            | CliCommand::TogglePaneFullscreen { .. }
+            | CliCommand::Input { .. }
+            | CliCommand::NewTab { .. }
+            | CliCommand::CloseTab { .. }
+            | CliCommand::NextTab { .. }
+            | CliCommand::PreviousTab { .. }
+            | CliCommand::MoveTab { .. }
+            | CliCommand::FocusTab { .. }
+            | CliCommand::FocusPane { .. }
+            | CliCommand::Lock { .. }
+            | CliCommand::Unlock { .. }
+            | CliCommand::ToggleLock { .. }
+            | CliCommand::Run { .. } => true,
+            CliCommand::ListSessions { .. }
+            | CliCommand::KillSession { .. }
+            | CliCommand::Attach { .. }
+            | CliCommand::Detach { .. }
+            | CliCommand::Doctor { .. }
+            | CliCommand::Config { .. }
+            | CliCommand::Share { .. }
+            | CliCommand::Remote { .. }
+            | CliCommand::Debug { .. }
+            | CliCommand::Plugin
+            | CliCommand::Update
+            | CliCommand::Version { .. }
+            | CliCommand::ServerVersion { .. }
+            | CliCommand::Actions { .. }
+            | CliCommand::Inspect { .. }
+            | CliCommand::ListTabs { .. }
+            | CliCommand::ListPanes { .. }
+            | CliCommand::ListClients { .. }
+            | CliCommand::Keys { .. }
+            | CliCommand::ServeRouter { .. }
+            | CliCommand::ServeSession { .. }
+            | CliCommand::ServePtySupervisor { .. }
+            | CliCommand::ResumeSupport => false,
+        }
+    }
+
     /// The typed action this subcommand requests: its `core:` action
     /// reference paired with the fully-built core [`Command`].
     ///

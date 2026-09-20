@@ -627,7 +627,7 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "swap-panes",
             "Swap Panes",
-            "Exchange two pane occupants within one tab",
+            "Exchange two pane occupants within one session, including across tabs",
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::SwapPanes),

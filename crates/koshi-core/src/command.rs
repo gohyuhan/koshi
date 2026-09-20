@@ -64,7 +64,7 @@ pub enum Command {
     MoveTab(MoveTabArgs),
     /// Move a tiled pane into the slot of its visible neighbor.
     MovePane(MovePaneArgs),
-    /// Exchange two tiled pane occupants within one tab.
+    /// Exchange two tiled pane occupants within one session, including across tabs.
     SwapPanes(SwapPanesArgs),
     /// Commit a checked tiled pane placement across tabs.
     PlacePane(PlacePaneArgs),

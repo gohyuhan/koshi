@@ -53,13 +53,15 @@ pub struct Surface {
 /// build speaks 4. The floor is 4: a peer that speaks 3 is refused at the
 /// handshake.
 ///
-/// One shape differs between 3 and 4. This build writes version 4 on every
-/// session connection:
+/// The following shapes differ between 3 and 4. This build writes version 4 on
+/// every session connection:
 ///
 /// - The keyboard request carries the whole event the client's terminal
 ///   reported: the key, whether it went down, repeated or came up, the shifted
 ///   and base-layout keys, the text, and all eight modifiers. 3 carried one
 ///   chord, which holds no event kind, no text, and neither lock modifier.
+/// - Version 4 includes direct pane movement, pane swaps across tabs,
+///   per-client scrolling, and checked pane placement across tabs.
 ///
 /// Four shapes differ between 2 and 3:
 ///

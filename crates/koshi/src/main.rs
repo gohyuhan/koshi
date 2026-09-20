@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use koshi::cli::{
     parse_session_reference, ActionsCommand, Cli, CliCommand, DebugCommand, InspectTarget,
-    KeysCommand, OutputFormat, ResolvedTargets, TabReference,
+    KeysCommand, OutputFormat, TabReference,
 };
 use koshi::config_command;
 use koshi::doctor;
@@ -31,9 +31,11 @@ use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
 use koshi_link::remote_client::{self, Reach, REACH_TIMEOUT_DURATION};
 
+const CLI_PARSER_STACK_SIZE_BYTES: usize = 2 * 1024 * 1024;
+
 fn main() -> ExitCode {
     // Usage errors print through clap and exit 2; --help/--version exit 0.
-    let cli = Cli::parse();
+    let cli = parse_cli_arguments();
 
     // A failure prints `koshi: <error>` on standard error before the process
     // exits with that error's code.
@@ -47,6 +49,30 @@ fn main() -> ExitCode {
 
     // Exit codes are 0..=4, always in u8 range.
     ExitCode::from(cli_exit_code.get_exit_code() as u8)
+}
+
+/// Parse command-line arguments on a dedicated stack and return the typed CLI.
+/// Exit with code 1 when the parser thread cannot start or complete.
+fn parse_cli_arguments() -> Cli {
+    let parser_thread = match std::thread::Builder::new()
+        .name("koshi-cli-parser".to_string())
+        .stack_size(CLI_PARSER_STACK_SIZE_BYTES)
+        .spawn(Cli::parse)
+    {
+        Ok(parser_thread) => parser_thread,
+        Err(spawn_error) => {
+            eprintln!("koshi: failed to start CLI parser: {spawn_error}");
+            std::process::exit(CliExitCode::RuntimeAction.get_exit_code());
+        }
+    };
+
+    match parser_thread.join() {
+        Ok(cli) => cli,
+        Err(_) => {
+            eprintln!("koshi: CLI parser thread failed");
+            std::process::exit(CliExitCode::RuntimeAction.get_exit_code());
+        }
+    }
 }
 
 /// Run one parsed invocation, reporting failures as a [`CliError`]. The
@@ -74,14 +100,9 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // holds no direction of its own.
     let new_pane_direction = config::resolve_new_pane_direction(app_config_layer);
 
-    // `build_action_command` with default targets answers only whether this is an action
-    // verb. The command that travels the socket is built after routing
-    // resolves the targets.
-    let is_action = cli.command.as_ref().is_some_and(|cli_command| {
-        cli_command
-            .build_action_command(&ResolvedTargets::default(), new_pane_direction)
-            .is_some()
-    });
+    // The action verb is classified before routing. The command that travels
+    // the socket is built after routing resolves the targets.
+    let is_action = cli.command.as_ref().is_some_and(CliCommand::is_action_verb);
 
     // `--remote` runs with `attach`, with `list-sessions`, and with an action
     // verb. Every other verb, `--headless`, and a bare `koshi --remote

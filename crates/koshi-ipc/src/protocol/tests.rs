@@ -8,9 +8,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koshi_core::client::ClientOrigin;
 
+use crate::attach::{PaneStructure, TabStructure};
+use crate::layout::{ClientFocus, SolvedPane, SolvedTab, TabLayout};
+use crate::plane::Plane;
+use crate::router::RouterRequestKind;
+use crate::wire::{MaybeKnown, WireName, WireVariants};
 use koshi_core::command::{
-    Command, CommandSource, MovePaneArgs, NewPaneArgs, ScrollPaneArgs, SwapPanesArgs,
-    ToggleLockModeArgs,
+    Command, CommandSource, MovePaneArgs, NewPaneArgs, PanePlacementAnchor, PanePlacementTarget,
+    PlacePaneArgs, ScrollPaneArgs, SwapPanesArgs, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
@@ -29,12 +34,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-
-use crate::attach::{PaneStructure, TabStructure};
-use crate::layout::{ClientFocus, SolvedPane, SolvedTab, TabLayout};
-use crate::plane::Plane;
-use crate::router::RouterRequestKind;
-use crate::wire::{MaybeKnown, WireName, WireVariants};
 
 use super::*;
 
@@ -59,6 +58,43 @@ fn build_test_command_envelope() -> CommandEnvelope {
 /// An envelope carrying a `NewPane` with every optional field filled, at fixed
 /// ids and times. Encodes to the same bytes on every call.
 fn build_populated_test_command_envelope() -> CommandEnvelope {
+    build_command_envelope_with_fixed_in_session_source(Command::NewPane(NewPaneArgs {
+        source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
+        tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
+        direction: Direction::Down,
+        should_stack: true,
+        working_directory: Some(PathBuf::from("/home/user")),
+        spawn_spec: Some(SpawnSpec {
+            program: PathBuf::from("/bin/zsh"),
+            arguments: vec!["-l".to_string()],
+            working_directory: Some(PathBuf::from("/home/user")),
+            environment_variables: BTreeMap::from([(
+                "KOSHI_PANE_ID".to_string(),
+                "pane-1".to_string(),
+            )]),
+            shell_kind: ShellKind::Zsh,
+        }),
+        client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
+    }))
+}
+
+/// An envelope carrying a `PlacePane` split at fixed ids and times. Encodes to
+/// the same bytes on every call.
+fn build_populated_place_pane_command_envelope() -> CommandEnvelope {
+    build_command_envelope_with_fixed_in_session_source(Command::PlacePane(PlacePaneArgs {
+        source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        placement_target: PanePlacementTarget::Split {
+            destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+            anchor: PanePlacementAnchor::Tab,
+            direction: Direction::Down,
+        },
+        expected_placement_revision: None,
+    }))
+}
+
+/// Build a command envelope with the fixed in-session source used by the wire
+/// shape tests.
+fn build_command_envelope_with_fixed_in_session_source(command: Command) -> CommandEnvelope {
     CommandEnvelope::from_parts(
         CommandId::from_uuid(build_fixed_test_uuid()),
         CommandSource::InSessionCli {
@@ -68,24 +104,7 @@ fn build_populated_test_command_envelope() -> CommandEnvelope {
             socket_path: PathBuf::from("/run/koshi.sock"),
         },
         UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-        Command::NewPane(NewPaneArgs {
-            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            tab_id: Some(TabId::from_uuid(build_fixed_test_uuid())),
-            direction: Direction::Down,
-            should_stack: true,
-            working_directory: Some(PathBuf::from("/home/user")),
-            spawn_spec: Some(SpawnSpec {
-                program: PathBuf::from("/bin/zsh"),
-                arguments: vec!["-l".to_string()],
-                working_directory: Some(PathBuf::from("/home/user")),
-                environment_variables: BTreeMap::from([(
-                    "KOSHI_PANE_ID".to_string(),
-                    "pane-1".to_string(),
-                )]),
-                shell_kind: ShellKind::Zsh,
-            }),
-            client_id: Some(ClientId::from_uuid(build_fixed_test_uuid())),
-        }),
+        command,
     )
 }
 
@@ -539,9 +558,8 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
     // Every field of a command a CLI sends, as this build writes it: the
     // envelope, the source it names, and the whole argument struct of the
     // command inside it. Any field of `Command` or of an `*Args` struct that
-    // is added, removed, renamed or retyped changes these bytes. A change an
-    // older peer cannot decode, a rename or a retype among them, also moves
-    // `PROTOCOL_VERSION` in the same commit, the cadence rule in
+    // is added, removed, renamed or retyped changes these bytes. This fixture
+    // pins the command vocabulary under the protocol version named by
     // `koshi_core::compat`.
     let request = IpcRequest {
         request_id: 2,
@@ -588,6 +606,34 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
                         }
                     }
                 }
+            }
+        })
+    );
+}
+
+#[test]
+fn the_place_pane_command_wire_shape_belongs_to_this_protocol_version() {
+    let request = IpcRequest {
+        request_id: 5,
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(
+            build_populated_place_pane_command_envelope(),
+        )),
+    };
+    let encoded_request = serde_json::to_value(&request).expect("request encodes");
+
+    assert_eq!(
+        encoded_request["request_kind"]["SubmitCommand"]["command"],
+        json!({
+            "PlacePane": {
+                "source_pane_id": "00000000-0000-0000-0000-000000000001",
+                "placement_target": {
+                    "Split": {
+                        "destination_tab_id": "00000000-0000-0000-0000-000000000001",
+                        "anchor": "Tab",
+                        "direction": "Down"
+                    }
+                },
+                "expected_placement_revision": null
             }
         })
     );
@@ -1663,6 +1709,15 @@ fn pane_command_requests_round_trip_without_a_protocol_change() {
         Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        }),
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            placement_target: PanePlacementTarget::Split {
+                destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+                anchor: PanePlacementAnchor::Tab,
+                direction: Direction::Down,
+            },
+            expected_placement_revision: None,
         }),
         Command::ScrollPane(ScrollPaneArgs {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
