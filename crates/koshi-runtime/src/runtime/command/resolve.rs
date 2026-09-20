@@ -9,6 +9,8 @@
 
 use super::*;
 
+use std::collections::HashSet;
+
 impl Server {
     /// Check a command against live state before it reaches a handler. Runs the
     /// universal checks in fixed precedence: CLI command admission, session
@@ -119,6 +121,7 @@ impl Server {
                 | Command::ResizePane(_)
                 | Command::MovePane(_)
                 | Command::SwapPanes(_)
+                | Command::PlacePane(_)
                 | Command::ScrollPane(_)
                 | Command::TogglePaneFullscreen
                 | Command::WriteToPane(_)
@@ -275,6 +278,9 @@ impl Server {
             Command::SwapPanes(command_args) => self
                 .resolve_swap_panes_target(command_args, command_source, session)
                 .map(drop),
+            Command::PlacePane(command_args) => self
+                .resolve_place_pane_target(command_args, command_source, session)
+                .map(drop),
             Command::ScrollPane(command_args) => self
                 .resolve_scroll_pane_target(command_args, command_source, session)
                 .map(drop),
@@ -387,19 +393,85 @@ impl Server {
         command_source: &CommandSource,
         session: Option<&Session>,
     ) -> Result<(PaneTarget, PaneTarget), Rejection> {
-        let source_target =
+        let source_pane_target =
             self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
-        let target_target =
+        let target_pane_target =
             self.resolve_pane_target(Some(command_args.target_pane_id), command_source, session)?;
-        if source_target.session_id != target_target.session_id
-            || source_target.tab_id != target_target.tab_id
-        {
+        if source_pane_target.session_id != target_pane_target.session_id {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
-                "panes must be in the same tab",
+                "panes must be in the same session",
             ));
         }
-        Ok((source_target, target_target))
+        Ok((source_pane_target, target_pane_target))
+    }
+
+    /// Resolve the source pane, destination tab, and acting client of a checked
+    /// cross-tab placement. The destination target must stay inside the source
+    /// pane's session, and the selected client must be attached there.
+    pub(super) fn resolve_place_pane_target(
+        &self,
+        command_args: &PlacePaneArgs,
+        command_source: &CommandSource,
+        session: Option<&Session>,
+    ) -> Result<PlacePaneTarget, Rejection> {
+        let source_pane_target =
+            self.resolve_pane_target(Some(command_args.source_pane_id), command_source, session)?;
+        let owner_session = self
+            .session_by_id
+            .get(&source_pane_target.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+        let destination_tab_id = match &command_args.placement_target {
+            PanePlacementTarget::Swap { target_pane_id } => {
+                let destination_pane_target = self.resolve_pane_target(
+                    Some(*target_pane_id),
+                    command_source,
+                    Some(owner_session),
+                )?;
+                if destination_pane_target.session_id != source_pane_target.session_id {
+                    return Err(Rejection::from_reason(RejectReason::InvalidState));
+                }
+                destination_pane_target.tab_id
+            }
+            PanePlacementTarget::Split {
+                destination_tab_id,
+                anchor,
+                ..
+            } => {
+                Self::require_tab(owner_session, *destination_tab_id)?;
+                validate_placement_anchor(owner_session, *destination_tab_id, anchor)?;
+                *destination_tab_id
+            }
+        };
+        if destination_tab_id == source_pane_target.tab_id {
+            return Err(Rejection::from_reason_and_help(
+                RejectReason::InvalidState,
+                "placement destination must be another tab",
+            ));
+        }
+        let client_id = Self::resolve_view_client(
+            command_source.get_target_client_id(),
+            command_source,
+            owner_session,
+        )?;
+        if let Some(expected_placement_revision) = command_args.expected_placement_revision {
+            let client = Self::require_client(owner_session, client_id)?;
+            if expected_placement_revision.session_revision
+                != owner_session.get_placement_revision()
+                || expected_placement_revision.client_revision != client.get_placement_revision()
+            {
+                return Err(Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    "placement preview is stale; refresh and confirm again",
+                ));
+            }
+        }
+        Ok(PlacePaneTarget {
+            session_id: source_pane_target.session_id,
+            source_tab_id: source_pane_target.tab_id,
+            destination_tab_id,
+            client_id,
+        })
     }
 
     /// Resolve the client and active-tab pane a scroll command changes.
@@ -981,5 +1053,41 @@ impl Server {
             session.get_lifecycle(),
             SessionLifecycle::Stopping | SessionLifecycle::Stopped
         )
+    }
+}
+
+/// Confirm that every pane named by a placement anchor belongs to the selected
+/// destination tab. The layout planner performs the complete group-shape check
+/// before installation.
+fn validate_placement_anchor(
+    session: &Session,
+    tab_id: TabId,
+    anchor: &PanePlacementAnchor,
+) -> Result<(), Rejection> {
+    let tab = session
+        .tabs
+        .get(&tab_id)
+        .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+    let layout_tree = tab.get_layout_tree();
+    match anchor {
+        PanePlacementAnchor::Pane(pane_id) => {
+            if layout_tree.contains_pane(*pane_id) {
+                Ok(())
+            } else {
+                Err(Rejection::from_reason(RejectReason::TargetNotFound))
+            }
+        }
+        PanePlacementAnchor::Group(pane_ids) => {
+            let mut unique_pane_ids = HashSet::with_capacity(pane_ids.len());
+            if pane_ids.is_empty()
+                || pane_ids.iter().any(|pane_id| {
+                    !unique_pane_ids.insert(*pane_id) || !layout_tree.contains_pane(*pane_id)
+                })
+            {
+                return Err(Rejection::from_reason(RejectReason::TargetNotFound));
+            }
+            Ok(())
+        }
+        PanePlacementAnchor::Tab => Ok(()),
     }
 }

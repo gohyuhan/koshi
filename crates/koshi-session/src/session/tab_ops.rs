@@ -500,6 +500,21 @@ pub(crate) fn close_and_refocus_tab(
     events
 }
 
+/// Remove an empty source tab after a pane transfer has installed its
+/// destination. The pane registry is unchanged because the transferred pane
+/// already belongs to the destination tree.
+#[must_use]
+pub(crate) fn close_empty_tab_after_transfer(session: &mut Session, tab_id: TabId) -> Vec<Event> {
+    close_and_refocus_tab(session, tab_id, None)
+}
+
+/// Find the tab that receives viewers when `closed_tab_id` is removed.
+#[must_use]
+pub fn find_nearest_surviving_tab(session: &Session, closed_tab_id: TabId) -> Option<TabId> {
+    let closed_tab_index = session.tabs.get(&closed_tab_id)?.get_tab_index();
+    nearest_surviving_tab(session, closed_tab_index)
+}
+
 /// Renumber every tab to a dense `0..len` index in current display order,
 /// closing any gap a removal left. Reordering only — emits no events.
 fn reindex_tab_index(session: &mut Session) {

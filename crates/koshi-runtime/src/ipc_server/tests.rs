@@ -124,6 +124,7 @@ fn image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> Render
     RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id,
+            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -171,6 +172,7 @@ fn image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> Render
         }],
         client_snapshot: ClientSnapshot {
             client_id,
+            client_revision: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),

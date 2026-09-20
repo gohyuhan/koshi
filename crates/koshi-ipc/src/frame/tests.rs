@@ -55,6 +55,7 @@ fn build_painted_frame() -> PaintedFrame {
     PaintedFrame {
         session_snapshot: FrameSession {
             session_id: SessionId::from_uuid(Uuid::from_u128(1)),
+            session_revision: 17,
             session_name: "quiet-lake".to_string(),
             active_tab_snapshot: FrameTab {
                 tab_id: tab,
@@ -143,6 +144,7 @@ fn build_painted_frame() -> PaintedFrame {
         }],
         client_snapshot: FrameClient {
             client_id: ClientId::from_uuid(Uuid::from_u128(3)),
+            client_revision: 19,
             viewport_size: Size {
                 column_count: 4,
                 row_count: 3,
@@ -248,6 +250,27 @@ fn a_frame_survives_a_round_trip_field_for_field() {
         received.pane_snapshots[0].mouse_tracking,
         MouseTracking::ButtonMotion
     );
+}
+
+#[test]
+fn an_old_frame_without_placement_revisions_reads_zero_generations() {
+    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+    encoded_json["session_snapshot"]
+        .as_object_mut()
+        .expect("the session snapshot is an object")
+        .remove("session_revision")
+        .expect("the session revision is present");
+    encoded_json["client_snapshot"]
+        .as_object_mut()
+        .expect("the client snapshot is an object")
+        .remove("client_revision")
+        .expect("the client revision is present");
+
+    let received: PaintedFrame =
+        serde_json::from_str(&encoded_json.to_string()).expect("an old frame decodes");
+
+    assert_eq!(received.session_snapshot.session_revision, 0);
+    assert_eq!(received.client_snapshot.client_revision, 0);
 }
 
 #[test]
@@ -466,6 +489,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
         json!({
             "session_snapshot": {
                 "session_id": "00000000-0000-0000-0000-000000000001",
+                "session_revision": 17,
                 "session_name": "quiet-lake",
                 "active_tab_snapshot": {
                     "tab_id": "00000000-0000-0000-0000-000000000002",
@@ -537,6 +561,7 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
             }],
             "client_snapshot": {
                 "client_id": "00000000-0000-0000-0000-000000000003",
+                "client_revision": 19,
                 "viewport_size": { "column_count": 4, "row_count": 3 },
                 "active_tab_id": "00000000-0000-0000-0000-000000000002",
                 "focused_pane_id": "00000000-0000-0000-0000-000000000004",

@@ -58,6 +58,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
 
     let session_snapshot = SessionSnapshot {
         session_id: SessionId::new(),
+        session_revision: 0,
         session_name: "sess".to_string(),
         active_tab_snapshot: active_tab,
         tabs_metadata: vec![TabMeta {
@@ -98,6 +99,7 @@ fn fixture(grid: Arc<Grid>) -> RenderSnapshot {
 
     let client = ClientSnapshot {
         client_id: ClientId::new(),
+        client_revision: 0,
         viewport_size: Size {
             column_count: 80,
             row_count: 24,

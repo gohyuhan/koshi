@@ -67,6 +67,7 @@ pub(crate) fn wire_frame_with_content_ids(
     PaintedFrame {
         session_snapshot: FrameSession {
             session_id: session_snapshot.session_id,
+            session_revision: session_snapshot.session_revision,
             session_name: session_snapshot.session_name.clone(),
             active_tab_snapshot: FrameTab {
                 tab_id: active_tab_snapshot.tab_id,
@@ -95,6 +96,7 @@ pub(crate) fn wire_frame_with_content_ids(
             .collect(),
         client_snapshot: FrameClient {
             client_id: client_snapshot.client_id,
+            client_revision: client_snapshot.client_revision,
             viewport_size: client_snapshot.viewport_size,
             active_tab_id: client_snapshot.active_tab_id,
             focused_pane_id: client_snapshot.focused_pane_id,

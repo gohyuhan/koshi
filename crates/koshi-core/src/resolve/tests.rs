@@ -48,13 +48,14 @@ fn build_run_spawn_spec() -> SpawnSpec {
 /// through a CLI command, which builds its [`Command`] directly.
 /// `resolve_action` refuses every one of them whatever the arguments.
 /// Pinned against the seed table by [`available_action_table_matches_seeds`].
-const CLI_ONLY: [&str; 8] = [
+const CLI_ONLY: [&str; 9] = [
     "resize-pane",
     "focus-pane",
     "focus-tab",
     "move-tab",
     "move-pane",
     "swap-panes",
+    "place-pane",
     "scroll-pane",
     "write-to-pane",
 ];

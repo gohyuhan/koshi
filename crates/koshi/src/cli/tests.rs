@@ -974,6 +974,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "new-pane",
         "new-tab",
         "next-tab",
+        "place-pane",
         "plugin",
         "previous-tab",
         "remote",
@@ -1834,6 +1835,42 @@ fn resize_pane_requires_a_direction() {
 }
 
 #[test]
+fn place_pane_requires_a_pane_tab_and_direction() {
+    let pane_flag = format!("pane-{}", build_fixed_test_uuid());
+    for argv in [
+        vec![
+            "koshi",
+            "place-pane",
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+        ],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            pane_flag.as_str(),
+            "--direction",
+            "left",
+        ],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            pane_flag.as_str(),
+            "--tab",
+            "logs",
+        ],
+    ] {
+        assert_eq!(
+            parse_cli_error(&argv).kind(),
+            ErrorKind::MissingRequiredArgument
+        );
+    }
+}
+
+#[test]
 fn input_parses_its_text_target_and_enter_flag() {
     assert_eq!(
         parse_cli_command(&["koshi", "input", "ls"]),
@@ -2507,6 +2544,28 @@ fn action_subcommands_map_to_their_exact_commands() {
         (
             vec![
                 "koshi",
+                "place-pane",
+                "--pane",
+                &pane_flag,
+                "--tab",
+                &tab_flag,
+                "--direction",
+                "left",
+            ],
+            "place-pane",
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: pane,
+                placement_target: PanePlacementTarget::Split {
+                    destination_tab_id: tab,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Left,
+                },
+                expected_placement_revision: None,
+            }),
+        ),
+        (
+            vec![
+                "koshi",
                 "scroll-pane",
                 "--lines",
                 "-5",
@@ -2715,9 +2774,13 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "keys", "list"],
     ];
     for argv in argvs {
+        let parsed_command = parse_cli_command(argv);
+        assert!(
+            !parsed_command.is_action_verb(),
+            "{argv:?} must not be an action"
+        );
         assert_eq!(
-            parse_cli_command(argv)
-                .build_action_command(&ResolvedTargets::default(), Direction::Right),
+            parsed_command.build_action_command(&ResolvedTargets::default(), Direction::Right),
             None,
             "for {argv:?}"
         );
@@ -2737,9 +2800,13 @@ fn the_self_run_and_store_verbs_map_to_no_action() {
         vec!["koshi", "remote", "list"],
     ];
     for argv in &argvs {
+        let parsed_command = parse_cli_command(argv);
+        assert!(
+            !parsed_command.is_action_verb(),
+            "{argv:?} must not be an action"
+        );
         assert_eq!(
-            parse_cli_command(argv)
-                .build_action_command(&ResolvedTargets::default(), Direction::Right),
+            parsed_command.build_action_command(&ResolvedTargets::default(), Direction::Right),
             None,
             "for {argv:?}"
         );
@@ -2787,6 +2854,16 @@ fn target_tab_names_the_tab_of_every_verb_that_takes_one() {
         vec!["koshi", "close-tab", "--tab", "logs"],
         vec!["koshi", "move-tab", "--index", "0", "--tab", "logs"],
         vec!["koshi", "focus-tab", "--tab", "logs"],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            "pane-0192f0c1-2345-7000-8000-000000000001",
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+        ],
     ];
     for argv in &argvs {
         assert_eq!(
@@ -2832,6 +2909,16 @@ fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
             &pane_flag,
         ],
         vec!["koshi", "swap-panes", "--with", &pane_flag],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane_flag,
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+        ],
         vec![
             "koshi",
             "swap-panes",
@@ -2901,6 +2988,18 @@ fn target_client_names_the_client_of_every_verb_that_takes_one() {
         vec!["koshi", "unlock", "--client", &client_flag],
         vec!["koshi", "toggle-lock", "--client", &client_flag],
         vec!["koshi", "toggle-pane-fullscreen", "--client", &client_flag],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane_flag,
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+            "--client",
+            &client_flag,
+        ],
         vec![
             "koshi",
             "scroll-pane",
@@ -3459,6 +3558,47 @@ fn move_tab_and_focus_tab_carry_their_tab_id_into_the_command() {
 }
 
 #[test]
+fn place_pane_with_a_named_tab_is_classified_before_routing_resolves_the_tab() {
+    let pane = PaneId::from_uuid(build_fixed_test_uuid());
+    let pane_flag = format!("pane-{}", build_fixed_test_uuid());
+    let destination_tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let parsed_command = parse_cli_command(&[
+        "koshi",
+        "place-pane",
+        "--pane",
+        &pane_flag,
+        "--tab",
+        "monitoring",
+        "--direction",
+        "left",
+    ]);
+
+    assert!(parsed_command.is_action_verb());
+
+    let (_, mapped_command) = parsed_command
+        .build_action_command(
+            &ResolvedTargets {
+                session_id: None,
+                tab_id: Some(destination_tab_id),
+            },
+            Direction::Right,
+        )
+        .expect("a routed place-pane command maps to a core command");
+    assert_eq!(
+        mapped_command,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: pane,
+            placement_target: PanePlacementTarget::Split {
+                destination_tab_id,
+                anchor: PanePlacementAnchor::Tab,
+                direction: Direction::Left,
+            },
+            expected_placement_revision: None,
+        })
+    );
+}
+
+#[test]
 fn the_version_verbs_parse() {
     assert_eq!(
         parse_cli_arguments(&["koshi", "version"]).command,
@@ -3585,7 +3725,7 @@ fn a_discovery_query_names_its_session_scope() {
 }
 
 /// Every action name `build_action_command` builds is a registered core action, and the
-/// nineteen action verbs name nineteen different actions.
+/// Twenty action verbs name twenty different actions.
 #[test]
 fn every_to_action_name_is_a_registered_core_action() {
     use std::collections::BTreeSet;
@@ -3603,6 +3743,16 @@ fn every_to_action_name_is_a_registered_core_action() {
         vec!["koshi", "resize-pane", "--direction", "left"],
         vec!["koshi", "move-pane", "--direction", "left"],
         vec!["koshi", "swap-panes", "--with", &pane],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane,
+            "--tab",
+            "tab-0192f0c1-2345-7000-8000-000000000001",
+            "--direction",
+            "left",
+        ],
         vec!["koshi", "scroll-pane", "--lines", "3"],
         vec!["koshi", "toggle-pane-fullscreen"],
         vec!["koshi", "input", "echo hi"],
@@ -3621,7 +3771,12 @@ fn every_to_action_name_is_a_registered_core_action() {
 
     let mut named = BTreeSet::new();
     for argv in &action_verbs {
-        let (action, _) = parse_cli_command(argv)
+        let parsed_command = parse_cli_command(argv);
+        assert!(
+            parsed_command.is_action_verb(),
+            "{argv:?} must be an action"
+        );
+        let (action, _) = parsed_command
             .build_action_command(&ResolvedTargets::default(), Direction::Right)
             .unwrap_or_else(|| panic!("{argv:?} maps to an action"));
         assert!(
@@ -3641,6 +3796,7 @@ fn every_to_action_name_is_a_registered_core_action() {
         "core:new-pane",
         "core:new-tab",
         "core:next-tab",
+        "core:place-pane",
         "core:previous-tab",
         "core:resize-pane",
         "core:run",

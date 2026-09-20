@@ -179,12 +179,14 @@ impl Server {
         Some(OwnedFrameLayout {
             session_snapshot: SessionSnapshot {
                 session_id: session.session_id,
+                session_revision: session.get_placement_revision(),
                 session_name: session.session_name.clone(),
                 active_tab_snapshot,
                 tabs_metadata,
             },
             client_snapshot: ClientSnapshot {
                 client_id: client.get_client_id(),
+                client_revision: client.get_placement_revision(),
                 viewport_size: client.get_viewport_size(),
                 active_tab_id,
                 focused_pane_id: client.get_focused_pane(active_tab_id),

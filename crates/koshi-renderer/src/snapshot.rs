@@ -411,6 +411,8 @@ impl From<&PaneSnapshot> for MousePane {
 pub struct SessionSnapshot {
     /// The session's stable id.
     pub session_id: SessionId,
+    /// The session's committed layout, membership, and shared-sizing revision.
+    pub session_revision: u64,
     /// The session's display name.
     pub session_name: String,
     /// The tab currently shown, solved and ready to draw.
@@ -919,6 +921,8 @@ pub struct ScrollbackMeta {
 pub struct ClientSnapshot {
     /// The client's stable identifier.
     pub client_id: ClientId,
+    /// The client's committed geometry and view revision.
+    pub client_revision: u64,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is currently viewing.

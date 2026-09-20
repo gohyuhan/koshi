@@ -94,6 +94,9 @@ pub struct Client {
     /// as it is. A zoom changes how this client solves the tab's tree; the tree
     /// itself stays unchanged.
     zoom_by_tab: HashMap<TabId, PaneId>,
+    /// Generation of this client's committed geometry and view.
+    #[serde(default)]
+    placement_revision: u64,
 }
 
 impl Client {
@@ -134,6 +137,7 @@ impl Client {
             scroll_by_pane: HashMap::new(),
             selection_by_pane: HashMap::new(),
             zoom_by_tab: HashMap::new(),
+            placement_revision: 0,
         }
     }
 
@@ -141,6 +145,27 @@ impl Client {
     #[must_use]
     pub fn get_client_id(&self) -> ClientId {
         self.client_id
+    }
+
+    /// The generation of this client's committed placement view.
+    #[must_use]
+    pub fn get_placement_revision(&self) -> u64 {
+        self.placement_revision
+    }
+
+    /// Whether this client revision can advance without wrapping.
+    #[must_use]
+    pub fn can_advance_placement_revision(&self) -> bool {
+        self.placement_revision < u64::MAX
+    }
+
+    /// Advance this client's revision once. Returns `false` at the maximum value.
+    pub fn advance_placement_revision(&mut self) -> bool {
+        let Some(next_revision) = self.placement_revision.checked_add(1) else {
+            return false;
+        };
+        self.placement_revision = next_revision;
+        true
     }
 
     /// The session this client is attached to.

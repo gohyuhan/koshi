@@ -107,6 +107,20 @@ impl Server {
         }
         let new_tab_pty_size =
             compute_root_pane_pty_size(new_pane_id, designated_pane_area, pane_sizing);
+        let previous_tab_id = session
+            .clients
+            .get_client_by_id(tab_target.client_id)
+            .map(|client| client.get_active_tab());
+        let mut affected_tab_ids = vec![new_tab_id];
+        if let Some(previous_tab_id) = previous_tab_id {
+            if previous_tab_id != new_tab_id {
+                affected_tab_ids.push(previous_tab_id);
+            }
+        }
+        let affected_client_ids =
+            list_clients_affected_by_tabs(session, &affected_tab_ids, Some(tab_target.client_id));
+        ensure_session_placement_revision_capacity(session)?;
+        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.
@@ -153,6 +167,8 @@ impl Server {
             new_pane_spec,
             issued_at,
         );
+        advance_session_placement_revision(session);
+        advance_client_placement_revisions(session, &affected_client_ids);
 
         // Park the handle: a forwarder relays its output and exit, the spawn
         // size lands in the size cache later reflows compare against, and the
@@ -237,10 +253,24 @@ impl Server {
             )?;
             pane_kill_policies.push((pane_id, kill_policy));
         }
+        let landing_tab_id = tab_ops::find_nearest_surviving_tab(session, tab_id);
+        let mut affected_tab_ids = vec![tab_id];
+        if let Some(landing_tab_id) = landing_tab_id {
+            affected_tab_ids.push(landing_tab_id);
+        }
+        let affected_client_ids = list_clients_affected_by_tabs(
+            session,
+            &affected_tab_ids,
+            command_source.get_client_id(),
+        );
+        ensure_session_placement_revision_capacity(session)?;
+        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         // Commit the state removal: pane records drop, the tab goes, viewers
         // move to the nearest surviving tab, last-tab close quits the session.
         let mut emitted_events = tab_ops::close_tab(session, tab_id);
+        advance_session_placement_revision(session);
+        advance_client_placement_revisions(session, &affected_client_ids);
 
         // The panes are gone from state; drop their runtime bookkeeping — PTY
         // handle, size cache, terminal engine, scroll offsets, and highlights. Keyed
@@ -313,12 +343,21 @@ impl Server {
         if prior_tab_id == tab_target.tab_id {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
+        let affected_client_ids = list_clients_affected_by_tabs(
+            session,
+            &[tab_target.tab_id, prior_tab_id],
+            Some(tab_target.client_id),
+        );
+        ensure_session_placement_revision_capacity(session)?;
+        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
 
         let mut emitted_events = tab_ops::focus_tab(
             session,
             tab_target.client_id,
             tab_ops::TabTarget::Id(tab_target.tab_id),
         );
+        advance_session_placement_revision(session);
+        advance_client_placement_revisions(session, &affected_client_ids);
 
         // Both tabs' viewer sets changed: the target tab gained the arriving
         // viewer, the left tab lost it. Reflow each that still has a viewer;

@@ -2567,6 +2567,18 @@ fn carrying_out_names_the_session_the_body_carries() {
     let (mut server, client_id) = booted_server();
     let (session_id, _tab_id, _pane_id) = booted_parts(&server, client_id);
     let session_name = server.session_by_id[&session_id].session_name.clone();
+    {
+        let session = server
+            .session_by_id
+            .get_mut(&session_id)
+            .expect("session exists");
+        assert!(session.advance_placement_revision());
+        assert!(session
+            .clients
+            .get_client_mut_by_id(client_id)
+            .expect("client exists")
+            .advance_placement_revision());
+    }
 
     let (header, body) = server.carry_out(&[]).expect("a session to carry");
 
@@ -2574,6 +2586,15 @@ fn carrying_out_names_the_session_the_body_carries() {
     assert_eq!(header.session_name, session_name);
     assert_eq!(body.session_by_id[&session_id].session_id, session_id);
     assert_eq!(body.session_by_id[&session_id].session_name, session_name);
+    assert_eq!(body.session_by_id[&session_id].get_placement_revision(), 1);
+    assert_eq!(
+        body.session_by_id[&session_id]
+            .clients
+            .get_client_by_id(client_id)
+            .expect("carried client exists")
+            .get_placement_revision(),
+        1
+    );
 }
 
 #[test]

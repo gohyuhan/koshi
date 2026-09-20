@@ -129,6 +129,7 @@ fn build_mouse_frame(
     MouseFrame {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: "fixture".to_owned(),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -153,6 +154,7 @@ fn build_mouse_frame(
         mouse_panes: panes.to_vec(),
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            client_revision: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id,

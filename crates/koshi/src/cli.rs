@@ -25,8 +25,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs,
-    ScrollPaneArgs, SwapPanesArgs, TabTarget, ToggleLockModeArgs, WriteToPaneArgs,
+    MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
+    PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs, SwapPanesArgs, TabTarget,
+    ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::parse_prefixed_uuid;
@@ -403,6 +404,26 @@ pub enum CliCommand {
         /// Pane whose occupant moves; defaults to the focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
+    },
+    /// Insert a pane into another tab's tiled layout.
+    PlacePane {
+        /// Pane to place.
+        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
+        pane_id: PaneId,
+        /// Destination tab, by id or name.
+        #[arg(
+            long = "tab",
+            value_parser = parse_tab_reference,
+            value_name = "TAB",
+            required = true
+        )]
+        tab_reference: TabReference,
+        /// Side of the destination tab where the pane lands.
+        #[arg(long, value_enum, value_name = "DIRECTION")]
+        direction: DirectionArgument,
+        /// Client whose committed view supplies the destination sizing.
+        #[arg(long = "client", value_parser = parse_client_id, value_name = "CLIENT_ID")]
+        client_id: Option<ClientId>,
     },
     /// Scroll one client's view of a pane.
     ScrollPane {
@@ -1093,6 +1114,56 @@ pub enum ActionsCommand {
 }
 
 impl CliCommand {
+    /// Whether this subcommand travels through the session control socket.
+    #[must_use]
+    pub fn is_action_verb(&self) -> bool {
+        match self {
+            CliCommand::NewPane { .. }
+            | CliCommand::ClosePane { .. }
+            | CliCommand::ResizePane { .. }
+            | CliCommand::MovePane { .. }
+            | CliCommand::SwapPanes { .. }
+            | CliCommand::PlacePane { .. }
+            | CliCommand::ScrollPane { .. }
+            | CliCommand::TogglePaneFullscreen { .. }
+            | CliCommand::Input { .. }
+            | CliCommand::NewTab { .. }
+            | CliCommand::CloseTab { .. }
+            | CliCommand::NextTab { .. }
+            | CliCommand::PreviousTab { .. }
+            | CliCommand::MoveTab { .. }
+            | CliCommand::FocusTab { .. }
+            | CliCommand::FocusPane { .. }
+            | CliCommand::Lock { .. }
+            | CliCommand::Unlock { .. }
+            | CliCommand::ToggleLock { .. }
+            | CliCommand::Run { .. } => true,
+            CliCommand::ListSessions { .. }
+            | CliCommand::KillSession { .. }
+            | CliCommand::Attach { .. }
+            | CliCommand::Detach { .. }
+            | CliCommand::Doctor { .. }
+            | CliCommand::Config { .. }
+            | CliCommand::Share { .. }
+            | CliCommand::Remote { .. }
+            | CliCommand::Debug { .. }
+            | CliCommand::Plugin
+            | CliCommand::Update
+            | CliCommand::Version { .. }
+            | CliCommand::ServerVersion { .. }
+            | CliCommand::Actions { .. }
+            | CliCommand::Inspect { .. }
+            | CliCommand::ListTabs { .. }
+            | CliCommand::ListPanes { .. }
+            | CliCommand::ListClients { .. }
+            | CliCommand::Keys { .. }
+            | CliCommand::ServeRouter { .. }
+            | CliCommand::ServeSession { .. }
+            | CliCommand::ServePtySupervisor { .. }
+            | CliCommand::ResumeSupport => false,
+        }
+    }
+
     /// The typed action this subcommand requests: its `core:` action
     /// reference paired with the fully-built core [`Command`].
     ///
@@ -1180,6 +1251,26 @@ impl CliCommand {
                 Command::SwapPanes(SwapPanesArgs {
                     source_pane_id: *pane_id,
                     target_pane_id: *target_pane_id,
+                }),
+            ),
+            CliCommand::PlacePane {
+                pane_id,
+                tab_reference,
+                direction,
+                client_id: _,
+            } => (
+                "place-pane",
+                Command::PlacePane(PlacePaneArgs {
+                    source_pane_id: *pane_id,
+                    placement_target: PanePlacementTarget::Split {
+                        destination_tab_id: resolved_targets
+                            .tab_id
+                            .or(resolve_tab_reference_id(&Some(tab_reference.clone())))
+                            .expect("clap and target routing require --tab"),
+                        anchor: PanePlacementAnchor::Tab,
+                        direction: Direction::from(*direction),
+                    },
+                    expected_placement_revision: None,
                 }),
             ),
             CliCommand::ScrollPane {
@@ -1403,6 +1494,7 @@ impl CliCommand {
             | CliCommand::CloseTab { tab_reference, .. }
             | CliCommand::MoveTab { tab_reference, .. }
             | CliCommand::FocusTab { tab_reference, .. } => tab_reference.as_ref(),
+            CliCommand::PlacePane { tab_reference, .. } => Some(tab_reference),
             _ => None,
         }
     }
@@ -1419,6 +1511,7 @@ impl CliCommand {
             | CliCommand::ScrollPane { pane_id, .. }
             | CliCommand::Input { pane_id, .. } => *pane_id,
             CliCommand::MovePane { pane_id, .. } => *pane_id,
+            CliCommand::PlacePane { pane_id, .. } => Some(*pane_id),
             CliCommand::SwapPanes {
                 pane_id,
                 target_pane_id,
@@ -1445,7 +1538,8 @@ impl CliCommand {
             | CliCommand::Unlock { client_id }
             | CliCommand::ToggleLock { client_id }
             | CliCommand::TogglePaneFullscreen { client_id }
-            | CliCommand::ScrollPane { client_id, .. } => *client_id,
+            | CliCommand::ScrollPane { client_id, .. }
+            | CliCommand::PlacePane { client_id, .. } => *client_id,
             _ => None,
         }
     }
@@ -1463,7 +1557,8 @@ impl CliCommand {
     pub fn get_source_client_id(&self) -> Option<ClientId> {
         match self {
             CliCommand::TogglePaneFullscreen { client_id }
-            | CliCommand::ScrollPane { client_id, .. } => *client_id,
+            | CliCommand::ScrollPane { client_id, .. }
+            | CliCommand::PlacePane { client_id, .. } => *client_id,
             _ => None,
         }
     }

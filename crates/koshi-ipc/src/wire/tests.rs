@@ -999,6 +999,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
     crate::frame::PaintedFrame {
         session_snapshot: crate::frame::FrameSession {
             session_id: SessionId::new(),
+            session_revision: 17,
             session_name: String::new(),
             active_tab_snapshot: crate::frame::FrameTab {
                 tab_id: TabId::new(),
@@ -1018,6 +1019,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
         pane_snapshots: Vec::new(),
         client_snapshot: crate::frame::FrameClient {
             client_id: ClientId::new(),
+            client_revision: 19,
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,

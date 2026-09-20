@@ -162,6 +162,10 @@ pub struct Session {
     #[serde(default)]
     pub start_locked: bool,
 
+    /// Generation of committed layout, membership, and shared sizing inputs.
+    #[serde(default)]
+    placement_revision: u64,
+
     lifecycle: SessionLifecycle,
 }
 
@@ -185,6 +189,7 @@ impl Session {
             panes: PaneRegistry::new(),
             clients: client_registry,
             start_locked: false,
+            placement_revision: 0,
             lifecycle: SessionLifecycle::Starting,
         }
     }
@@ -202,6 +207,27 @@ impl Session {
     /// The session's current lifecycle state.
     pub fn get_lifecycle(&self) -> &SessionLifecycle {
         &self.lifecycle
+    }
+
+    /// The generation of this session's committed placement inputs.
+    #[must_use]
+    pub fn get_placement_revision(&self) -> u64 {
+        self.placement_revision
+    }
+
+    /// Whether the session revision can advance without wrapping.
+    #[must_use]
+    pub fn can_advance_placement_revision(&self) -> bool {
+        self.placement_revision < u64::MAX
+    }
+
+    /// Advance the session revision once. Returns `false` at the maximum value.
+    pub fn advance_placement_revision(&mut self) -> bool {
+        let Some(next_revision) = self.placement_revision.checked_add(1) else {
+            return false;
+        };
+        self.placement_revision = next_revision;
+        true
     }
 
     /// Apply a lifecycle `event`, advancing the session's state, or return

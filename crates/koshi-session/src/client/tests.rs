@@ -138,6 +138,35 @@ fn a_new_client_starts_unlocked_with_no_focus() {
 }
 
 #[test]
+fn a_client_placement_revision_advances_once_and_refuses_wraparound() {
+    let mut client = build_test_client(TabId::new());
+
+    assert_eq!(client.get_placement_revision(), 0);
+    assert!(client.can_advance_placement_revision());
+    assert!(client.advance_placement_revision());
+    assert_eq!(client.get_placement_revision(), 1);
+
+    client.placement_revision = u64::MAX;
+    assert!(!client.can_advance_placement_revision());
+    assert!(!client.advance_placement_revision());
+    assert_eq!(client.get_placement_revision(), u64::MAX);
+}
+
+#[test]
+fn an_old_client_record_reads_a_zero_placement_revision() {
+    let client = build_test_client(TabId::new());
+    let mut serialized_client = serde_json::to_value(&client).expect("client serializes");
+    serialized_client
+        .as_object_mut()
+        .expect("client is an object")
+        .remove("placement_revision");
+
+    let restored_client: Client =
+        serde_json::from_value(serialized_client).expect("old client decodes");
+    assert_eq!(restored_client.get_placement_revision(), 0);
+}
+
+#[test]
 fn two_clients_focus_different_panes_in_the_same_tab() {
     let tab = TabId::new();
     let (pane_a, pane_b) = (PaneId::new(), PaneId::new());
@@ -1340,6 +1369,7 @@ fn a_clients_whole_view_state_survives_a_serde_round_trip() {
     client.zoom_pane(other_tab_id, other_pane_id);
     client.set_scroll_offset(pane_id, 9);
     client.set_selection(pane_id, build_test_selection());
+    assert!(client.advance_placement_revision());
 
     let serialized_client_json = serde_json::to_string(&client).expect("the client encodes");
     let decoded_client: Client =
@@ -1352,6 +1382,7 @@ fn a_clients_whole_view_state_survives_a_serde_round_trip() {
         decoded_client.get_zoomed_pane(other_tab_id),
         Some(other_pane_id)
     );
+    assert_eq!(decoded_client.get_placement_revision(), 1);
     assert_eq!(
         decoded_client.get_layout_mode(other_tab_id),
         LayoutMode::Fullscreen {
