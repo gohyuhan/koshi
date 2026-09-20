@@ -569,10 +569,10 @@ fn a_body_written_without_the_held_bytes_reads_back_with_none() {
     let mut on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
             .expect("valid json");
-    on_disk["body"]
+    on_disk["raw_body"]
         .as_object_mut()
         .expect("the body is a map")
-        .remove("undecoded");
+        .remove("undecoded_bytes_by_pane_id");
     std::fs::write(
         &resume_file_path,
         serde_json::to_vec(&on_disk).expect("encode"),
@@ -664,7 +664,7 @@ fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
     let mut on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
             .expect("valid json");
-    on_disk["body"] = serde_json::json!({ "sessions": "not-a-map" });
+    on_disk["raw_body"] = serde_json::json!({ "session_by_id": "not-a-map" });
     std::fs::write(
         &resume_file_path,
         serde_json::to_vec(&on_disk).expect("encode"),
@@ -686,7 +686,7 @@ fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
-                "resume body is unreadable: invalid type: string \"not-a-map\", expected a map at line 1 column 23"
+                "resume body is unreadable: invalid type: string \"not-a-map\", expected a map at line 1 column 28"
             );
         }
         other => panic!("expected a corrupt body, got {other:?}"),
@@ -713,14 +713,14 @@ fn a_body_format_this_build_does_not_know_is_refused_by_both_numbers() {
 #[test]
 fn a_resume_body_rejects_graphics_transport_that_exceeds_wrapper_depth() {
     let pane = PaneId::new();
-    let mut nested = serde_json::json!({ "carry": [] });
+    let mut nested = serde_json::json!({ "carry_bytes": [] });
     for _ in 0..9 {
-        nested = serde_json::json!({ "screen_inner": nested });
+        nested = serde_json::json!({ "screen_inner_transport": nested });
     }
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_transport": { pane.get_uuid().to_string(): nested },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_transport_by_pane_id": { pane.get_uuid().to_string(): nested },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -740,9 +740,11 @@ fn a_resume_body_rejects_graphics_transport_with_too_many_carry_bytes() {
     let pane = PaneId::new();
     let oversized = vec![0u8; 64 * 1024 + 1];
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_transport": { pane.get_uuid().to_string(): { "carry": oversized } },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_transport_by_pane_id": {
+            pane.get_uuid().to_string(): { "carry_bytes": oversized }
+        },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -762,9 +764,9 @@ fn a_resume_body_rejects_legacy_graphics_carry_that_exceeds_the_limit() {
     let pane = PaneId::new();
     let oversized = vec![0u8; koshi_terminal::graphics::MAX_GRAPHICS_CARRY_BYTE_COUNT + 1];
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_undecoded": { pane.get_uuid().to_string(): oversized },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_undecoded_bytes_by_pane_id": { pane.get_uuid().to_string(): oversized },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -796,11 +798,11 @@ fn a_resume_body_rejects_queued_image_bytes_that_do_not_match_dimensions() {
         anchor: (0, 0),
     });
     let mut event = serde_json::to_value(event).expect("the image event is json");
-    event["Ok"]["image"]["rgba"] = serde_json::json!([255, 0, 0]);
+    event["Ok"]["image"]["rgba_bytes"] = serde_json::json!([255, 0, 0]);
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_events": { pane.get_uuid().to_string(): [event] },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_events_by_pane_id": { pane.get_uuid().to_string(): [event] },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -827,9 +829,9 @@ fn a_resume_body_rejects_graphics_error_text_over_the_control_limit() {
         "x".repeat(koshi_terminal::graphics::MAX_GRAPHICS_CONTROL_BYTE_COUNT + 1),
     );
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_events": { pane.get_uuid().to_string(): [event] },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_events_by_pane_id": { pane.get_uuid().to_string(): [event] },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -863,9 +865,9 @@ fn a_resume_body_rejects_a_graphics_event_list_over_the_engine_limit() {
     let event = serde_json::to_value(event).expect("the image event is json");
     let events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENT_COUNT + 1];
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_events": { pane.get_uuid().to_string(): events },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_events_by_pane_id": { pane.get_uuid().to_string(): events },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -900,13 +902,13 @@ fn a_resume_body_accepts_the_queue_full_report_after_queued_events() {
     let mut events = vec![event; koshi_terminal::engine::MAX_GRAPHICS_EVENT_COUNT];
     events.push(serde_json::json!({
         "Err": {
-            "QueueFull": { "dropped": 2 }
+            "QueueFull": { "dropped_event_count": 2 }
         }
     }));
     let serialized_resume_body = serde_json::json!({
-        "sessions": {},
-        "engines": {},
-        "graphics_events": { pane.get_uuid().to_string(): events },
+        "session_by_id": {},
+        "terminal_state_by_pane_id": {},
+        "graphics_events_by_pane_id": { pane.get_uuid().to_string(): events },
     });
     let raw_resume_body =
         serde_json::value::RawValue::from_string(serialized_resume_body.to_string())
@@ -972,18 +974,21 @@ fn a_header_written_without_a_terminal_name_reads_back_with_none() {
     let pane_id = PaneId::new();
     let written = serde_json::json!({
         "header": {
-            "format": RESUME_FORMAT,
+            "resume_format": RESUME_FORMAT,
             "session_id": session_id,
             "session_name": "from-a-build-without-the-name",
-            "panes": [{
+            "carried_panes": [{
                 "pane_id": pane_id,
-                "pid": 4242,
-                "rows": 20,
-                "cols": 78,
+                "process_id": 4242,
+                "row_count": 20,
+                "column_count": 78,
                 "terminal_fd": 9,
             }],
         },
-        "body": { "sessions": {}, "engines": {} },
+        "raw_body": {
+            "session_by_id": {},
+            "terminal_state_by_pane_id": {}
+        },
     });
     std::fs::write(
         &resume_file_path,
@@ -1150,10 +1155,10 @@ fn a_body_missing_one_of_its_two_halves_is_corrupt_while_the_header_still_reads(
     let mut on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
             .expect("valid json");
-    on_disk["body"]
+    on_disk["raw_body"]
         .as_object_mut()
         .expect("a body object")
-        .remove("engines");
+        .remove("terminal_state_by_pane_id");
     std::fs::write(
         &resume_file_path,
         serde_json::to_vec(&on_disk).expect("encode"),
@@ -1169,7 +1174,7 @@ fn a_body_missing_one_of_its_two_halves_is_corrupt_while_the_header_still_reads(
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
-                "resume body is unreadable: missing field `engines` at line 1 column \
+                "resume body is unreadable: missing field `terminal_state_by_pane_id` at line 1 column \
                  "
                 .to_string()
                     + &raw_body.get().len().to_string(),
@@ -1398,8 +1403,8 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
         serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
             .expect("valid json");
     let swapped = serde_json::json!({
-        "header": on_disk["body"].take(),
-        "body": on_disk["header"].take(),
+        "header": on_disk["raw_body"].take(),
+        "raw_body": on_disk["header"].take(),
     });
     std::fs::write(
         &resume_file_path,
@@ -1414,7 +1419,7 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
             detail.split(" at line ").next(),
             Some(
                 format!(
-                    "resume state at {} is unreadable: missing field `format`",
+                    "resume state at {} is unreadable: missing field `resume_format`",
                     resume_file_path.display()
                 )
                 .as_str()
@@ -1480,12 +1485,12 @@ fn a_carried_session_with_its_client_comes_back_whole() {
         let (read_back, raw_body) =
             read_resume_header(&resume_file_path).expect("read the header back");
 
-        // Format 3 writes the origin and no authority key. The header's format
+        // Format 4 writes the origin and no authority key. The header's format
         // number and the client carried pane's shape move together.
         let encoded_json: serde_json::Value =
             serde_json::from_str(raw_body.get()).expect("the body is json");
-        let client_record_json = &encoded_json["sessions"][session_id.get_uuid().to_string()]
-            ["clients"]["records"][client_id.get_uuid().to_string()];
+        let client_record_json = &encoded_json["session_by_id"][session_id.get_uuid().to_string()]
+            ["clients"]["client_by_id"][client_id.get_uuid().to_string()];
         assert_eq!(
             client_record_json["origin"],
             serde_json::Value::String(written_origin.to_string())
@@ -1500,7 +1505,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
 
         assert_eq!(read_back.resume_format, RESUME_FORMAT);
-        assert_eq!(RESUME_FORMAT, 3);
+        assert_eq!(RESUME_FORMAT, 4);
         let resumed_session = &read_body.session_by_id[&session_id];
         assert_eq!(resumed_session.session_id, session_id);
         let client = resumed_session
@@ -1516,73 +1521,18 @@ fn a_carried_session_with_its_client_comes_back_whole() {
 }
 
 #[test]
-fn a_carried_file_written_before_this_change_still_reads() {
-    // A format 1 body carries a `tier` key on every client. This build reads
-    // that body and takes the client back with the identity it names.
-    let session_id = SessionId::new();
-    let client_id = ClientId::new();
-    let tab_id = TabId::new();
-    let mut clients = serde_json::Map::new();
-    clients.insert(
-        client_id.get_uuid().to_string(),
-        serde_json::json!({
-            "id": client_id,
-            "session_id": session_id,
-            "attached_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
-            "viewport": { "cols": 80, "rows": 24 },
-            "active_tab": tab_id,
-            "origin": "Local",
-            "label": "C-swift-otter",
-            "colour": 3,
-            "tier": "Admin",
-            "focus_by_tab": {},
-            "lock_mode": "Normal",
-            "mouse_select": false,
-            "scroll_by_pane": {},
-            "selection_by_pane": {},
-            "zoom_by_tab": {},
-        }),
-    );
-    let mut sessions = serde_json::Map::new();
-    sessions.insert(
-        session_id.get_uuid().to_string(),
-        serde_json::json!({
-            "id": session_id,
-            "name": "carried",
-            "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
-            "tabs": {},
-            "panes": { "records": {} },
-            "clients": { "records": clients },
-            "config_snapshot": null,
-            "lifecycle": "Starting",
-        }),
-    );
-    let written = serde_json::json!({ "sessions": sessions, "engines": {} });
-    let raw_resume_body = serde_json::value::RawValue::from_string(written.to_string())
-        .expect("the body is one json value");
+fn a_resume_format_before_current_baseline_is_rejected() {
+    let retired_resume_format = RESUME_FORMAT - 1;
 
-    assert_eq!(RESUME_FORMAT_MIN, 1);
-    let parsed_resume_body = read_resume_body(1, &raw_resume_body)
-        .expect("a body written before this change reads back");
-
-    let resumed_session = &parsed_resume_body.session_by_id[&session_id];
-    assert_eq!(resumed_session.session_id, session_id);
-    let client = resumed_session
-        .clients
-        .get_client_by_id(client_id)
-        .expect("the carried client");
-    assert_eq!(client.get_client_id(), client_id);
-    assert_eq!(client.get_origin(), ClientOrigin::Local);
-    assert_eq!(client.get_label(), "C-swift-otter");
-    assert_eq!(client.get_color(), 3);
-    assert_eq!(client.get_active_tab(), tab_id);
-    assert_eq!(
-        client.get_viewport_size(),
-        Size {
-            column_count: 80,
-            row_count: 24
-        }
-    );
+    match read_resume_body(retired_resume_format, serde_json::value::RawValue::NULL) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail,
+            format!(
+                "resume body format {retired_resume_format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
+            )
+        ),
+        other => panic!("expected a retired format to be refused, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1641,10 +1591,10 @@ fn a_body_written_without_a_quit_reads_back_with_none() {
     let mut on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
             .expect("valid json");
-    on_disk["body"]
+    on_disk["raw_body"]
         .as_object_mut()
         .expect("the body is a map")
-        .remove("quit");
+        .remove("carried_quit");
     std::fs::write(
         &resume_file_path,
         serde_json::to_vec(&on_disk).expect("encode"),

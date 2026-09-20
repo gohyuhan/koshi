@@ -47,13 +47,10 @@ pub enum SixelBackground {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageDisplay {
     /// The requested width, if the sender supplied one.
-    #[serde(rename = "width")]
     pub requested_width: Option<ImageDimension>,
     /// The requested height, if the sender supplied one.
-    #[serde(rename = "height")]
     pub requested_height: Option<ImageDimension>,
     /// Whether the sender requests aspect-ratio preservation.
-    #[serde(rename = "preserve_aspect_ratio")]
     pub is_aspect_ratio_preserved: bool,
     /// The Sixel background rule, when the record came from Sixel.
     pub sixel_background: Option<SixelBackground>,
@@ -66,7 +63,6 @@ pub struct ImageDisplay {
     /// Usage flags supplied by kitty.
     pub usage_hints: u32,
     /// Whether kitty asks for a Unicode-placeholder placement.
-    #[serde(rename = "unicode_placeholder")]
     pub is_unicode_placeholder: bool,
     /// The kitty image z-index.
     pub z_index: i32,
@@ -78,36 +74,26 @@ pub struct ImageDisplay {
     pub relative_placement_id: Option<u32>,
     /// The horizontal cell offset from a relative parent placement.
     #[serde(default)]
-    #[serde(rename = "relative_offset_x")]
     pub relative_column_offset: i32,
     /// The vertical cell offset from a relative parent placement.
     #[serde(default)]
-    #[serde(rename = "relative_offset_y")]
     pub relative_row_offset: i32,
     /// The number of terminal columns requested by kitty.
-    #[serde(rename = "cell_columns")]
     pub requested_column_count: Option<u32>,
     /// The number of terminal rows requested by kitty.
-    #[serde(rename = "cell_rows")]
     pub requested_row_count: Option<u32>,
     /// The source image x offset requested by kitty, in pixels.
-    #[serde(rename = "source_offset_x")]
     pub source_pixel_offset_x: Option<u32>,
     /// The source image y offset requested by kitty, in pixels.
-    #[serde(rename = "source_offset_y")]
     pub source_pixel_offset_y: Option<u32>,
     /// The x offset inside the first terminal cell requested by kitty.
-    #[serde(rename = "cell_offset_x")]
     pub cell_pixel_offset_x: Option<u32>,
     /// The y offset inside the first terminal cell requested by kitty.
-    #[serde(rename = "cell_offset_y")]
     pub cell_pixel_offset_y: Option<u32>,
     /// Whether kitty asks the placement to move the cursor after display.
-    #[serde(rename = "move_cursor")]
     pub should_move_cursor: bool,
     /// Kitty response suppression: 0 sends all replies, 1 sends errors, 2 sends none.
     #[serde(default)]
-    #[serde(rename = "quiet")]
     pub response_suppression_level: u8,
 }
 
@@ -144,13 +130,10 @@ impl Default for ImageDisplay {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecodedImage {
     /// Image width in pixels.
-    #[serde(rename = "width")]
     pub pixel_width: u32,
     /// Image height in pixels.
-    #[serde(rename = "height")]
     pub pixel_height: u32,
     /// Four bytes per pixel in red, green, blue, alpha order.
-    #[serde(rename = "rgba")]
     pub rgba_bytes: Vec<u8>,
 }
 
@@ -161,12 +144,9 @@ impl<'de> Deserialize<'de> for DecodedImage {
     {
         #[derive(Deserialize)]
         struct DecodedImageFields {
-            #[serde(rename = "width")]
             pixel_width: u32,
-            #[serde(rename = "height")]
             pixel_height: u32,
             #[serde(deserialize_with = "deserialize_rgba_bytes")]
-            #[serde(rename = "rgba")]
             rgba_bytes: Vec<u8>,
         }
 

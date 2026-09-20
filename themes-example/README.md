@@ -85,7 +85,7 @@ Two rules shape every mapping, both from the guidance in
 
 ## Adding one
 
-Send a pull request. A theme file needs `version 1` and a `colors` block setting
-all thirteen roles, and every value must come from the upstream project's
-published palette. The test suite parses every file in this folder, so a typo or
+Send a pull request. A new theme file needs `version 2` and a `colors` block
+setting all thirteen roles. A valid `version 1` file migrates to version 2.
+Every value must come from the upstream project's published palette. The test suite parses every file in this folder, so a typo or
 an unknown color role fails CI.

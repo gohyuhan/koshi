@@ -584,13 +584,13 @@ fn legacy_row_end_grid_state_deserializes_with_unmarked_rows() {
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
     let serialized_row_metadata = serialized_grid_object
-        .remove("row_meta")
+        .remove("row_metadata")
         .expect("current metadata exists");
     let serialized_row_end_values = serialized_row_metadata
         .as_array()
         .expect("row metadata is an array")
         .iter()
-        .map(|row_metadata| row_metadata["end"].clone())
+        .map(|row_metadata| row_metadata["row_end"].clone())
         .collect();
     serialized_grid_object.insert(
         "row_ends".to_string(),
@@ -800,7 +800,7 @@ fn serialized_grid_without_row_metadata_deserializes_with_default_rows() {
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
     serialized_grid_object
-        .remove("row_meta")
+        .remove("row_metadata")
         .expect("current metadata exists");
 
     let restored_grid: Grid =
@@ -836,7 +836,7 @@ fn serialized_grid_with_metadata_count_different_from_rows_is_rejected() {
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
     serialized_grid_object
-        .get_mut("row_meta")
+        .get_mut("row_metadata")
         .and_then(serde_json::Value::as_array_mut)
         .expect("row metadata is an array")
         .pop();
@@ -856,7 +856,7 @@ fn legacy_serialized_grid_with_row_end_count_different_from_rows_is_rejected() {
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
     serialized_grid_object
-        .remove("row_meta")
+        .remove("row_metadata")
         .expect("current metadata exists");
     serialized_grid_object.insert("row_ends".to_string(), serde_json::json!(["Hard"]));
 

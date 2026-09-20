@@ -553,7 +553,7 @@ fn serialized_content_table_is_deduplicated_and_rebuilds_the_same_state() {
         .as_array()
         .expect("placements are an array")
     {
-        assert!(placement["record"].get("image").is_none());
+        assert!(placement["image_record"].get("decoded_image").is_none());
         assert!(placement["raster"].is_null());
     }
 
@@ -595,7 +595,7 @@ fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries(
     assert_eq!(error.to_string(), "image content identities must be unique");
 
     let mut dangling = base.clone();
-    dangling["primary_image_placements"][0]["content_id"] = serde_json::json!(999);
+    dangling["primary_image_placements"][0]["image_content_id"] = serde_json::json!(999);
     let error = serde_json::from_value::<TerminalState>(dangling)
         .expect_err("a missing content identity must be rejected");
     assert_eq!(
@@ -605,7 +605,7 @@ fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries(
 
     let mut unreferenced_content_state = base.clone();
     let mut unreferenced_image_content = content.clone();
-    unreferenced_image_content["id"] = serde_json::json!(999);
+    unreferenced_image_content["image_content_id"] = serde_json::json!(999);
     unreferenced_content_state["image_contents"] =
         serde_json::json!([content.clone(), unreferenced_image_content]);
     let error = serde_json::from_value::<TerminalState>(unreferenced_content_state)
@@ -616,7 +616,8 @@ fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries(
     );
 
     let mut inline = base.clone();
-    inline["primary_image_placements"][0]["record"]["image"] = content["image"].clone();
+    inline["primary_image_placements"][0]["image_record"]["decoded_image"] =
+        content["decoded_image"].clone();
     let error = serde_json::from_value::<TerminalState>(inline)
         .expect_err("content-table records must not carry inline pixels");
     assert_eq!(
@@ -625,7 +626,7 @@ fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries(
     );
 
     let mut collision = base;
-    collision["next_image_content_id"] = content["id"].clone();
+    collision["next_image_content_id"] = content["image_content_id"].clone();
     let error = serde_json::from_value::<TerminalState>(collision)
         .expect_err("the next content identity cannot collide");
     assert_eq!(
@@ -667,7 +668,7 @@ fn serialized_content_table_rejects_legacy_raster_fields_and_combined_count_over
     );
 
     let mut legacy_raster = base.clone();
-    legacy_raster["primary_image_placements"][0]["raster"] = content["image"].clone();
+    legacy_raster["primary_image_placements"][0]["raster"] = content["decoded_image"].clone();
     let error = serde_json::from_value::<TerminalState>(legacy_raster)
         .expect_err("new-format placements must not carry legacy raster data");
     assert_eq!(
@@ -679,7 +680,7 @@ fn serialized_content_table_rejects_legacy_raster_fields_and_combined_count_over
     let mut placements = Vec::with_capacity(MAX_IMAGE_PLACEMENT_COUNT);
     for placement_id in 1..=MAX_IMAGE_PLACEMENT_COUNT {
         let mut placement = placement.clone();
-        placement["id"] = serde_json::json!(placement_id);
+        placement["image_placement_id"] = serde_json::json!(placement_id);
         placements.push(placement);
     }
     let mut count_overflow = base;
@@ -719,17 +720,17 @@ fn raw_image_state_deserialization_shares_one_byte_budget_across_all_fields() {
         .apply_image_record(&image_record)
         .expect("the image fits the grid");
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    let serialized_image_bytes = serialized_state["image_contents"][0]["image"].clone();
+    let serialized_image_bytes = serialized_state["image_contents"][0]["decoded_image"].clone();
     let mut placement = serialized_state["primary_image_placements"][0].clone();
     placement
         .as_object_mut()
         .expect("placement is an object")
-        .remove("content_id");
-    placement["record"]["image"] = serialized_image_bytes.clone();
+        .remove("image_content_id");
+    placement["image_record"]["decoded_image"] = serialized_image_bytes.clone();
     serialized_state["primary_image_placements"] = serde_json::json!([placement.clone()]);
     serialized_state["primary_image_history"] = serde_json::json!([placement.clone()]);
     serialized_state["alternate_image_placements"] = serde_json::json!([placement]);
-    let mut kitty = serialized_state["primary_image_placements"][0]["record"].clone();
+    let mut kitty = serialized_state["primary_image_placements"][0]["image_record"].clone();
     kitty["action"] = serde_json::json!("Transmit");
     serialized_state["kitty_images"] = serde_json::json!([kitty]);
 
@@ -1594,7 +1595,7 @@ fn serialized_primary_row_counter_must_leave_room_for_live_rows() {
         .expect("the image fits");
 
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    serialized_state["scrollback"]["total_pushed"] = serde_json::json!(u64::MAX);
+    serialized_state["scrollback"]["total_pushed_line_count"] = serde_json::json!(u64::MAX);
 
     let error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a live-row range that overflows u64 must be rejected");
@@ -1615,7 +1616,7 @@ fn serialized_scrollback_cannot_exceed_its_absolute_row_count() {
         .push_row(&[Cell::blank()], RowMetadata::default());
 
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    serialized_state["scrollback"]["total_pushed"] = serde_json::json!(0);
+    serialized_state["scrollback"]["total_pushed_line_count"] = serde_json::json!(0);
 
     let error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("retained rows must have nonnegative absolute row numbers");
@@ -2011,7 +2012,7 @@ fn malformed_serialized_image_placement_is_rejected_before_use() {
         .and_then(|placements| placements.first_mut())
         .expect("the serialized placement exists");
     placement["anchor"] = serde_json::json!([u16::MAX, 0]);
-    placement["record"]["anchor"] = serde_json::json!([u16::MAX, 0]);
+    placement["image_record"]["anchor"] = serde_json::json!([u16::MAX, 0]);
 
     let error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("an overflowing placement must be rejected");
@@ -2049,7 +2050,7 @@ fn serialized_image_placement_outside_grid_is_rejected() {
         .and_then(|placements| placements.first_mut())
         .expect("the serialized placement exists");
     placement["anchor"] = serde_json::json!([7, 7]);
-    placement["record"]["anchor"] = serde_json::json!([7, 7]);
+    placement["image_record"]["anchor"] = serde_json::json!([7, 7]);
 
     let error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("an out-of-grid placement must be rejected");
@@ -2155,7 +2156,7 @@ fn serialized_image_placement_count_is_bounded_before_state_use() {
         (1..=MAX_IMAGE_PLACEMENT_COUNT + 1)
             .map(|placement_id| {
                 let mut placement = placement.clone();
-                placement["id"] = serde_json::json!(placement_id);
+                placement["image_placement_id"] = serde_json::json!(placement_id);
                 placement
             })
             .collect(),

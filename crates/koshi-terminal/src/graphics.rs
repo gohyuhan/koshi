@@ -67,35 +67,35 @@ pub enum GraphicsAbandonment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphicsTransportState {
     /// Bytes that rebuild this parser's own active sequence or transfer.
-    #[serde(rename = "carry", default)]
+    #[serde(default)]
     pub carry_bytes: Vec<u8>,
     /// Whether [`carry_bytes`](Self::carry_bytes) contains a complete bounded rebuild.
     /// `false` means [`graphics_abandonment`](Self::graphics_abandonment) describes how to drain
     /// the open transfer after restore.
-    #[serde(rename = "carryable", default = "default_is_true")]
+    #[serde(default = "default_is_true")]
     pub is_carryable: bool,
     /// How to drain an open sequence when `is_carryable` is false.
-    #[serde(rename = "abandonment", default)]
+    #[serde(default)]
     pub graphics_abandonment: Option<GraphicsAbandonment>,
     /// Whether the next DCS is a GNU Screen continuation wrapper.
-    #[serde(rename = "screen_continuation", default)]
+    #[serde(default)]
     pub is_screen_continuation: bool,
     /// Whether the carried bytes are inside an open GNU Screen wrapper.
-    #[serde(rename = "screen_wrapper_active", default)]
+    #[serde(default)]
     pub is_screen_wrapper_active: bool,
     /// The parser state inside the carried GNU Screen wrapper, when that
     /// wrapper ended while its enclosed stream was incomplete.
-    #[serde(rename = "screen_inner", default)]
+    #[serde(default)]
     pub screen_inner_transport: Option<Box<GraphicsTransportState>>,
     /// Whether the next DCS is a tmux continuation wrapper.
-    #[serde(rename = "tmux_continuation", default)]
+    #[serde(default)]
     pub is_tmux_continuation: bool,
     /// Whether the carried bytes are inside an open tmux wrapper.
-    #[serde(rename = "tmux_wrapper_active", default)]
+    #[serde(default)]
     pub is_tmux_wrapper_active: bool,
     /// The parser state inside the carried tmux wrapper, when that wrapper
     /// ended while its enclosed stream was incomplete.
-    #[serde(rename = "tmux_inner", default)]
+    #[serde(default)]
     pub tmux_inner_transport: Option<Box<GraphicsTransportState>>,
 }
 
@@ -154,9 +154,9 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
 
         while let Some(field_name) = transport_state_map.next_key::<String>()? {
             match field_name.as_str() {
-                "carry" => {
+                "carry_bytes" => {
                     if carry_bytes.is_some() {
-                        return Err(de::Error::duplicate_field("carry"));
+                        return Err(de::Error::duplicate_field("carry_bytes"));
                     }
                     carry_bytes = Some(transport_state_map.next_value_seed(
                         BoundedBytesSeed::from_byte_limit_and_error_label(
@@ -165,33 +165,33 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
                         ),
                     )?);
                 }
-                "carryable" => {
+                "is_carryable" => {
                     if is_carryable.is_some() {
-                        return Err(de::Error::duplicate_field("carryable"));
+                        return Err(de::Error::duplicate_field("is_carryable"));
                     }
                     is_carryable = Some(transport_state_map.next_value()?);
                 }
-                "abandonment" => {
+                "graphics_abandonment" => {
                     if graphics_abandonment.is_some() {
-                        return Err(de::Error::duplicate_field("abandonment"));
+                        return Err(de::Error::duplicate_field("graphics_abandonment"));
                     }
                     graphics_abandonment = Some(transport_state_map.next_value()?);
                 }
-                "screen_continuation" => {
+                "is_screen_continuation" => {
                     if is_screen_continuation.is_some() {
-                        return Err(de::Error::duplicate_field("screen_continuation"));
+                        return Err(de::Error::duplicate_field("is_screen_continuation"));
                     }
                     is_screen_continuation = Some(transport_state_map.next_value()?);
                 }
-                "screen_wrapper_active" => {
+                "is_screen_wrapper_active" => {
                     if is_screen_wrapper_active.is_some() {
-                        return Err(de::Error::duplicate_field("screen_wrapper_active"));
+                        return Err(de::Error::duplicate_field("is_screen_wrapper_active"));
                     }
                     is_screen_wrapper_active = Some(transport_state_map.next_value()?);
                 }
-                "screen_inner" => {
+                "screen_inner_transport" => {
                     if screen_inner_transport.is_some() {
-                        return Err(de::Error::duplicate_field("screen_inner"));
+                        return Err(de::Error::duplicate_field("screen_inner_transport"));
                     }
                     screen_inner_transport = Some(transport_state_map.next_value_seed(
                         GraphicsTransportOptionSeed {
@@ -199,21 +199,21 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
                         },
                     )?);
                 }
-                "tmux_continuation" => {
+                "is_tmux_continuation" => {
                     if is_tmux_continuation.is_some() {
-                        return Err(de::Error::duplicate_field("tmux_continuation"));
+                        return Err(de::Error::duplicate_field("is_tmux_continuation"));
                     }
                     is_tmux_continuation = Some(transport_state_map.next_value()?);
                 }
-                "tmux_wrapper_active" => {
+                "is_tmux_wrapper_active" => {
                     if is_tmux_wrapper_active.is_some() {
-                        return Err(de::Error::duplicate_field("tmux_wrapper_active"));
+                        return Err(de::Error::duplicate_field("is_tmux_wrapper_active"));
                     }
                     is_tmux_wrapper_active = Some(transport_state_map.next_value()?);
                 }
-                "tmux_inner" => {
+                "tmux_inner_transport" => {
                     if tmux_inner_transport.is_some() {
-                        return Err(de::Error::duplicate_field("tmux_inner"));
+                        return Err(de::Error::duplicate_field("tmux_inner_transport"));
                     }
                     tmux_inner_transport = Some(transport_state_map.next_value_seed(
                         GraphicsTransportOptionSeed {

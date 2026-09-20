@@ -281,7 +281,7 @@ fn a_kind_this_build_does_not_have_is_refused_by_name_and_the_connection_keeps_s
         let _: IpcResponse = caller_connection.recv().expect("read the hello answer");
         // A newer koshi's verb, spelled straight onto the wire.
         caller_connection
-            .send(&serde_json::json!({"request_id": 2, "kind": {"Rehome": {"pane": 3}}}))
+            .send(&serde_json::json!({"request_id": 2, "request_kind": {"Rehome": {"pane_id": 3}}}))
             .expect("send an unfamiliar kind");
         let refusal_response: IpcResponse = caller_connection.recv().expect("read the refusal");
         // Still serving: the next familiar request is dispatched as usual.
@@ -375,7 +375,7 @@ fn a_kind_this_build_does_not_have_before_the_hello_is_refused_as_hello_required
 
         let mut caller_connection = Connection::connect(&socket_address).expect("connect");
         caller_connection
-            .send(&serde_json::json!({"request_id": 1, "kind": {"Rehome": {"pane": 3}}}))
+            .send(&serde_json::json!({"request_id": 1, "request_kind": {"Rehome": {"pane_id": 3}}}))
             .expect("send an unfamiliar kind first");
         let refusal_response: IpcResponse = caller_connection.recv().expect("read the refusal");
         caller_connection

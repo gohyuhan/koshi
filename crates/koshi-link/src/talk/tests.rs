@@ -24,11 +24,8 @@ fn a_version_inside_the_range_this_build_sent_is_accepted() {
         .validate_settled_protocol_version(4)
         .expect("4 is the only session version");
     ROUTER_PEER_WORDS
-        .validate_settled_protocol_version(1)
-        .expect("1 is the router floor");
-    ROUTER_PEER_WORDS
-        .validate_settled_protocol_version(2)
-        .expect("2 is the router ceiling");
+        .validate_settled_protocol_version(3)
+        .expect("3 is the router floor and ceiling");
 }
 
 #[test]
@@ -47,12 +44,12 @@ fn a_session_version_above_the_range_names_both_the_version_and_the_range() {
 #[test]
 fn a_router_version_above_the_range_names_the_control_plane_in_its_own_words() {
     let refusal = ROUTER_PEER_WORDS
-        .validate_settled_protocol_version(3)
-        .expect_err("3 is outside the 1 to 2 this build speaks");
+        .validate_settled_protocol_version(4)
+        .expect_err("4 is outside the 3 to 3 this build speaks");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the router settled on control-plane protocol version 3, which is outside the 1 to 2 \
+        "the router settled on control-plane protocol version 4, which is outside the 3 to 3 \
          this koshi asked for"
     );
 }
@@ -74,11 +71,11 @@ fn a_version_below_the_floor_is_refused_the_same_way() {
 fn a_router_version_below_the_floor_names_the_control_plane_range() {
     let refusal = ROUTER_PEER_WORDS
         .validate_settled_protocol_version(0)
-        .expect_err("0 is below the router floor of 1");
+        .expect_err("0 is below the router floor of 3");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the router settled on control-plane protocol version 0, which is outside the 1 to 2 \
+        "the router settled on control-plane protocol version 0, which is outside the 3 to 3 \
          this koshi asked for"
     );
 }
@@ -362,13 +359,13 @@ fn a_hello_answer_this_build_cannot_name_stops_the_exchange() {
 #[test]
 fn a_router_hello_hands_back_the_build_the_router_named() {
     let incoming_response = build_router_response(RouterResult::Hello {
-        protocol_version: 2,
+        protocol_version: 3,
         build_version: "0.9.9".to_string(),
     });
 
     assert_eq!(
         parse_router_hello_version(incoming_response)
-            .expect("2 is inside the 1 to 2 this build speaks"),
+            .expect("3 is inside the 3 to 3 this build speaks"),
         "0.9.9"
     );
 }
@@ -376,16 +373,16 @@ fn a_router_hello_hands_back_the_build_the_router_named() {
 #[test]
 fn a_router_hello_naming_a_version_outside_the_range_stops_the_exchange() {
     let incoming_response = build_router_response(RouterResult::Hello {
-        protocol_version: 3,
+        protocol_version: 4,
         build_version: "0.9.9".to_string(),
     });
 
     let refusal =
-        parse_router_hello_version(incoming_response).expect_err("3 is outside the 1 to 2");
+        parse_router_hello_version(incoming_response).expect_err("4 is outside the 3 to 3");
 
     assert_eq!(
         extract_ipc_unavailable_detail(refusal),
-        "the router settled on control-plane protocol version 3, which is outside the 1 to 2 \
+        "the router settled on control-plane protocol version 4, which is outside the 3 to 3 \
          this koshi asked for"
     );
 }

@@ -27,11 +27,8 @@ use crate::{
 /// hold different zoom. The tab holds the tree that every client solves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
-    #[serde(rename = "id")]
     tab_id: TabId,
-    #[serde(rename = "name")]
     tab_name: String,
-    #[serde(rename = "index")]
     tab_index: usize,
     layout: LayoutNode,
     lifecycle: TabLifecycle,
@@ -141,10 +138,8 @@ impl Tab {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
     /// Unique id, stable for the session's whole life.
-    #[serde(rename = "id")]
     pub session_id: SessionId,
     /// Human-facing name; attach and list address sessions by it.
-    #[serde(rename = "name")]
     pub session_name: String,
     /// When the session was created. Supplied by the caller at the creation
     /// boundary, never read from the clock here.

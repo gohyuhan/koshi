@@ -475,10 +475,10 @@ fn nothing_in_the_request_can_raise_the_clients_authority() {
             viewer
                 .send(&serde_json::json!({
                     "request_id": 2,
-                    "kind": {
+                    "request_kind": {
                         "Attach": {
-                            "viewport": { "cols": 80, "rows": 24 },
-                            "filter": "All",
+                            "viewport": { "column_count": 80, "row_count": 24 },
+                            "event_filter": "All",
                             "tier": "admin"
                         }
                     }
@@ -883,7 +883,7 @@ fn a_frame_this_build_cannot_read_costs_one_request_not_the_stream() {
             viewer
                 .send(&serde_json::json!({
                     "request_id": 20,
-                    "kind": { "SubmitCommand": command_envelope_json },
+                    "request_kind": { "SubmitCommand": command_envelope_json },
                 }))
                 .expect("send a frame this build cannot read");
 

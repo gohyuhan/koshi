@@ -275,7 +275,6 @@ pub fn fold_uppercase_character(character: char) -> (char, bool) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct KeyChord {
     /// The modifier keys held down.
-    #[serde(rename = "mods")]
     pub modifier_flags: ModFlags,
     /// The key pressed.
     pub key: Key,

@@ -438,38 +438,38 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
         serde_json::to_value(build_populated_test_session_overview()).expect("overview encodes"),
         json!({
             "session": {
-                "id": "00000000-0000-0000-0000-000000000001",
-                "name": "quiet-lake",
+                "session_id": "00000000-0000-0000-0000-000000000001",
+                "session_name": "quiet-lake",
                 "created_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
-                "attached_clients": ["00000000-0000-0000-0000-000000000001"],
+                "attached_client_ids": ["00000000-0000-0000-0000-000000000001"],
                 "pane_count": 1
             },
             "tabs": [{
-                "id": "00000000-0000-0000-0000-000000000001",
+                "tab_id": "00000000-0000-0000-0000-000000000001",
                 "session_id": "00000000-0000-0000-0000-000000000001",
-                "name": "editor",
-                "index": 0,
-                "active_pane": "00000000-0000-0000-0000-000000000001",
+                "tab_name": "editor",
+                "tab_index": 0,
+                "active_pane_id": "00000000-0000-0000-0000-000000000001",
                 "pane_count": 1
             }],
             "panes": [{
-                "id": "00000000-0000-0000-0000-000000000001",
+                "pane_id": "00000000-0000-0000-0000-000000000001",
                 "tab_id": "00000000-0000-0000-0000-000000000001",
                 "session_id": "00000000-0000-0000-0000-000000000001",
-                "title": "vim",
-                "cwd": "/home/user",
-                "command": null,
-                "state": "running",
-                "focused_by_clients": ["00000000-0000-0000-0000-000000000001"]
+                "pane_title": "vim",
+                "working_directory": "/home/user",
+                "command_argv": null,
+                "lifecycle": "Running",
+                "focused_by_client_ids": ["00000000-0000-0000-0000-000000000001"]
             }],
             "clients": [{
-                "id": "00000000-0000-0000-0000-000000000001",
+                "client_id": "00000000-0000-0000-0000-000000000001",
                 "session_id": "00000000-0000-0000-0000-000000000001",
                 "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
-                "viewport_size": { "cols": 80, "rows": 24 },
-                "active_tab": "00000000-0000-0000-0000-000000000001",
-                "focused_pane": "00000000-0000-0000-0000-000000000001",
-                "lock_state": "Normal",
+                "viewport_size": { "column_count": 80, "row_count": 24 },
+                "active_tab_id": "00000000-0000-0000-0000-000000000001",
+                "focused_pane_id": "00000000-0000-0000-0000-000000000001",
+                "lock_mode": "Normal",
                 "origin": "Local",
                 "pane_area": null
             }]
@@ -498,13 +498,13 @@ fn the_plane_a_remote_client_reaches_names_no_token_verb() {
 fn a_client_row_decodes_across_the_shape_that_added_origin() {
     // A client row written without `origin` decodes with `origin: None`.
     let without_origin = json!({
-        "id": "00000000-0000-0000-0000-000000000001",
+        "client_id": "00000000-0000-0000-0000-000000000001",
         "session_id": "00000000-0000-0000-0000-000000000001",
         "attached_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 },
-        "viewport_size": { "cols": 80, "rows": 24 },
-        "active_tab": "00000000-0000-0000-0000-000000000001",
-        "focused_pane": null,
-        "lock_state": "Normal"
+        "viewport_size": { "column_count": 80, "row_count": 24 },
+        "active_tab_id": "00000000-0000-0000-0000-000000000001",
+        "focused_pane_id": null,
+        "lock_mode": "Normal"
     });
     let decoded: ClientDiscovery =
         serde_json::from_value(without_origin).expect("a row from a build without origin decodes");
@@ -518,21 +518,20 @@ fn a_client_row_decodes_across_the_shape_that_added_origin() {
     #[derive(Deserialize)]
     #[allow(dead_code)]
     struct OldClientInfo {
-        #[serde(rename = "id")]
         client_id: ClientId,
         session_id: SessionId,
         attached_at: SystemTime,
         viewport_size: Size,
-        active_tab: TabId,
-        focused_pane: Option<PaneId>,
-        lock_state: LockMode,
+        active_tab_id: TabId,
+        focused_pane_id: Option<PaneId>,
+        lock_mode: LockMode,
     }
     let mut written = build_populated_test_session_overview().clients.remove(0);
     written.origin = Some(ClientOrigin::Remote);
     let written = serde_json::to_value(written).expect("a client row encodes");
     let legacy_client_info: OldClientInfo =
         serde_json::from_value(written).expect("the older shape reads a row carrying origin");
-    assert_eq!(legacy_client_info.lock_state, LockMode::Normal);
+    assert_eq!(legacy_client_info.lock_mode, LockMode::Normal);
 }
 
 #[test]
@@ -555,10 +554,10 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
         serde_json::to_value(&request).expect("request encodes"),
         json!({
             "request_id": 2,
-            "kind": {
+            "request_kind": {
                 "SubmitCommand": {
-                    "id": "00000000-0000-0000-0000-000000000001",
-                    "source": {
+                    "command_id": "00000000-0000-0000-0000-000000000001",
+                    "command_source": {
                         "InSessionCli": {
                             "session_id": "00000000-0000-0000-0000-000000000001",
                             "client_id": "00000000-0000-0000-0000-000000000001",
@@ -573,19 +572,19 @@ fn the_submit_command_wire_shape_belongs_to_this_protocol_version() {
                     },
                     "command": {
                         "NewPane": {
-                            "source": "00000000-0000-0000-0000-000000000001",
-                            "tab": "00000000-0000-0000-0000-000000000001",
+                            "source_pane_id": "00000000-0000-0000-0000-000000000001",
+                            "tab_id": "00000000-0000-0000-0000-000000000001",
                             "direction": "Down",
-                            "stacked": true,
-                            "cwd": "/home/user",
-                            "command": {
+                            "should_stack": true,
+                            "working_directory": "/home/user",
+                            "spawn_spec": {
                                 "program": "/bin/zsh",
-                                "args": ["-l"],
-                                "cwd": "/home/user",
-                                "env": { "KOSHI_PANE_ID": "pane-1" },
+                                "arguments": ["-l"],
+                                "working_directory": "/home/user",
+                                "environment_variables": { "KOSHI_PANE_ID": "pane-1" },
                                 "shell_kind": "Zsh"
                             },
-                            "client": "00000000-0000-0000-0000-000000000001"
+                            "client_id": "00000000-0000-0000-0000-000000000001"
                         }
                     }
                 }
@@ -623,11 +622,11 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
         serde_json::to_value(&request).expect("request encodes"),
         json!({
             "request_id": 4,
-            "kind": {
+            "request_kind": {
                 "Attach": {
-                    "viewport": { "cols": 80, "rows": 24 },
-                    "filter": "All",
-                    "resume": null,
+                    "viewport": { "column_count": 80, "row_count": 24 },
+                    "event_filter": "All",
+                    "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": null
                 }
@@ -650,23 +649,23 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
         serde_json::to_value(&response).expect("response encodes"),
         json!({
             "request_id": 4,
-            "result": {
+            "answer_result": {
                 "Attached": {
                     "client_id": "00000000-0000-0000-0000-000000000001",
                     "session_id": "00000000-0000-0000-0000-000000000001",
-                    "structure": {
-                        "id": "00000000-0000-0000-0000-000000000001",
-                        "name": "quiet-lake",
+                    "session_structure": {
+                        "session_id": "00000000-0000-0000-0000-000000000001",
+                        "session_name": "quiet-lake",
                         "tabs": [{
-                            "id": "00000000-0000-0000-0000-000000000001",
-                            "name": "editor",
-                            "index": 0,
+                            "tab_id": "00000000-0000-0000-0000-000000000001",
+                            "tab_name": "editor",
+                            "tab_index": 0,
                             "layout": { "Pane": "00000000-0000-0000-0000-000000000001" },
                             "focus_mru": ["00000000-0000-0000-0000-000000000001"]
                         }],
                         "panes": [{
-                            "id": "00000000-0000-0000-0000-000000000001",
-                            "kind": "Terminal"
+                            "pane_id": "00000000-0000-0000-0000-000000000001",
+                            "pane_kind": "Terminal"
                         }]
                     },
                     "resume_token": null,
@@ -702,14 +701,14 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
         serde_json::to_value(&supported).expect("the capability report encodes"),
         json!({
             "request_id": 4,
-            "kind": {
+            "request_kind": {
                 "Attach": {
-                    "viewport": { "cols": 80, "rows": 24 },
-                    "filter": "All",
-                    "resume": null,
+                    "viewport": { "column_count": 80, "row_count": 24 },
+                    "event_filter": "All",
+                    "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": null,
-                    "graphics": { "kitty": true, "iterm": false, "sixel": false }
+                    "graphics_capabilities": { "supports_kitty": true, "supports_iterm": false, "supports_sixel": false }
                 }
             }
         })
@@ -717,11 +716,11 @@ fn attach_reports_positive_kitty_support_and_defaults_an_absent_report_to_false(
 
     let absent: IpcRequest = serde_json::from_value(json!({
         "request_id": 4,
-        "kind": {
+        "request_kind": {
             "Attach": {
-                "viewport": { "cols": 80, "rows": 24 },
-                "filter": "All",
-                "resume": null,
+                "viewport": { "column_count": 80, "row_count": 24 },
+                "event_filter": "All",
+                "resume_client_id": null,
                 "resume_token": null,
                 "pane_area": null
             }
@@ -778,7 +777,7 @@ fn graphics_capabilities_default_and_native_detection_cover_each_protocol() {
 #[test]
 fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
     let decoded: GraphicsCapabilities = serde_json::from_value(json!({
-        "kitty": true,
+        "supports_kitty": true,
         "vendor_extension": "ignored"
     }))
     .expect("unknown capability fields are ignored");
@@ -790,6 +789,36 @@ fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
             supports_iterm: false,
             supports_sixel: false,
         }
+    );
+}
+
+#[test]
+fn graphics_capabilities_reject_retired_field_names() {
+    for retired_field_name in ["kitty", "iterm", "sixel"] {
+        let capability_json = format!(r#"{{"{retired_field_name}":true}}"#);
+        let retired_field_error = serde_json::from_str::<GraphicsCapabilities>(&capability_json)
+            .expect_err("a retired capability field is refused");
+
+        assert_eq!(
+            retired_field_error.to_string(),
+            format!(
+                "unknown field `{retired_field_name}`, expected one of `supports_kitty`, \
+                 `supports_iterm`, `supports_sixel` at line 1 column 8"
+            )
+        );
+    }
+}
+
+#[test]
+fn attach_rejects_retired_graphics_capability_fields() {
+    let attach_request_json = r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All","resume_client_id":null,"resume_token":null,"pane_area":null,"graphics_capabilities":{"kitty":true}}}}"#;
+    let retired_field_error = serde_json::from_str::<IpcRequest>(attach_request_json)
+        .expect_err("an attach request cannot use a retired capability field");
+
+    assert_eq!(
+        retired_field_error.to_string(),
+        "unknown field `kitty`, expected one of `supports_kitty`, `supports_iterm`, \
+         `supports_sixel` at line 1 column 202"
     );
 }
 
@@ -840,12 +869,12 @@ fn hello_request_encodes_to_the_expected_shape() {
         serde_json::to_value(&request).expect("request encodes"),
         json!({
             "request_id": 1,
-            "kind": {
+            "request_kind": {
                 "Hello": {
                     "min_protocol_version": 1,
                     "max_protocol_version": 2,
-                    "token": "k7QxSecret",
-                    "remote": false
+                    "connection_token": "k7QxSecret",
+                    "is_remote": false
                 }
             }
         })
@@ -866,7 +895,8 @@ fn a_hello_marking_a_remote_caller_round_trips_and_encodes_true() {
 
     assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
-        serde_json::to_value(&request).expect("request encodes")["kind"]["Hello"]["remote"],
+        serde_json::to_value(&request).expect("request encodes")["request_kind"]["Hello"]
+            ["is_remote"],
         json!(true)
     );
 }
@@ -874,13 +904,13 @@ fn a_hello_marking_a_remote_caller_round_trips_and_encodes_true() {
 #[test]
 fn a_hello_whose_token_is_not_a_string_is_refused() {
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"token":5}}}"#,
+        r#"{"request_id":1,"request_kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"connection_token":5}}}"#,
     );
 
     let error = decoded.expect_err("a number where the token goes decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "invalid type: integer `5`, expected a string at line 1 column 92"
+        "invalid type: integer `5`, expected a string at line 1 column 111"
     );
 }
 
@@ -939,12 +969,13 @@ fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
     assert_eq!(round_trip_wire_message(&attach), attach);
     assert_eq!(round_trip_wire_message(&resize), resize);
     assert_eq!(
-        serde_json::to_value(&attach).expect("attach encodes")["kind"]["Attach"]["cell_size"],
-        json!({ "width": 10, "height": 20 })
+        serde_json::to_value(&attach).expect("attach encodes")["request_kind"]["Attach"]
+            ["cell_size"],
+        json!({ "pixel_width": 10, "pixel_height": 20 })
     );
     assert_eq!(
         serde_json::from_str::<IpcRequest>(
-            r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+            r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All"}}}"#,
         )
         .expect("legacy attach decodes"),
         IpcRequest {
@@ -962,7 +993,7 @@ fn attach_and_resize_keep_cell_measurements_and_default_old_wire_frames() {
     );
     assert_eq!(
         serde_json::from_str::<IpcRequest>(
-            r#"{"request_id":6,"kind":{"Resize":{"viewport":{"cols":120,"rows":40}}}}"#,
+            r#"{"request_id":6,"request_kind":{"Resize":{"viewport":{"column_count":120,"row_count":40}}}}"#,
         )
         .expect("legacy resize decodes"),
         IpcRequest {
@@ -1005,7 +1036,7 @@ fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
     // An attach written without `resume` and `resume_token` decodes with both
     // `None`.
     let decoded: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All"}}}"#,
     )
     .expect("an attach without the resume fields decodes");
 
@@ -1063,7 +1094,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
     // An attach written with `resume` and without `resume_token` decodes with
     // `resume_token: None`.
     let decoded: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","resume":"00000000-0000-0000-0000-000000000001"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All","resume_client_id":"00000000-0000-0000-0000-000000000001"}}}"#,
     )
     .expect("an attach without the resume token field decodes");
 
@@ -1091,7 +1122,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
 fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
     // An attach written without `pane_area` decodes with `pane_area: None`.
     let decoded: IpcRequest = serde_json::from_str(
-        r#"{"request_id":1,"kind":{"Attach":{"viewport":{"cols":120,"rows":40},"filter":"All","resume":null,"resume_token":null}}}"#,
+        r#"{"request_id":1,"request_kind":{"Attach":{"viewport":{"column_count":120,"row_count":40},"event_filter":"All","resume_client_id":null,"resume_token":null}}}"#,
     )
     .expect("an attach without the pane area field decodes");
 
@@ -1118,26 +1149,26 @@ fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
 #[test]
 fn an_attach_naming_an_unknown_pane_area_is_refused() {
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":1,"kind":{"Attach":{"viewport":{"cols":120,"rows":40},"filter":"All","pane_area":"Bogus"}}}"#,
+        r#"{"request_id":1,"request_kind":{"Attach":{"viewport":{"column_count":120,"row_count":40},"event_filter":"All","pane_area":"Bogus"}}}"#,
     );
 
     let error = decoded.expect_err("an unknown pane area decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown variant `Bogus`, expected `Reported` or `Starving` at line 1 column 102"
+        "unknown variant `Bogus`, expected `Reported` or `Starving` at line 1 column 129"
     );
 }
 
 #[test]
 fn an_attach_naming_an_unknown_filter_is_refused() {
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"Some"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"Some"}}}"#,
     );
 
     let error = decoded.expect_err("an unknown filter decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown variant `Some`, expected `All` at line 1 column 82"
+        "unknown variant `Some`, expected `All` at line 1 column 109"
     );
 }
 
@@ -1166,13 +1197,13 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
         serde_json::to_value(&reported).expect("the attach encodes"),
         json!({
             "request_id": 1,
-            "kind": {
+            "request_kind": {
                 "Attach": {
-                    "viewport": { "cols": 120, "rows": 40 },
-                    "filter": "All",
-                    "resume": null,
+                    "viewport": { "column_count": 120, "row_count": 40 },
+                    "event_filter": "All",
+                    "resume_client_id": null,
                     "resume_token": null,
-                    "pane_area": { "Reported": { "cols": 100, "rows": 30 } }
+                    "pane_area": { "Reported": { "column_count": 100, "row_count": 30 } }
                 }
             }
         })
@@ -1199,11 +1230,11 @@ fn an_attach_request_reporting_a_pane_area_round_trips() {
         serde_json::to_value(&starving).expect("the attach encodes"),
         json!({
             "request_id": 1,
-            "kind": {
+            "request_kind": {
                 "Attach": {
-                    "viewport": { "cols": 120, "rows": 40 },
-                    "filter": "All",
-                    "resume": null,
+                    "viewport": { "column_count": 120, "row_count": 40 },
+                    "event_filter": "All",
+                    "resume_client_id": null,
                     "resume_token": null,
                     "pane_area": "Starving"
                 }
@@ -1223,7 +1254,7 @@ fn restart_request_round_trips() {
     assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
-        json!({ "request_id": 5, "kind": "Restart" })
+        json!({ "request_id": 5, "request_kind": "Restart" })
     );
 }
 
@@ -1237,7 +1268,7 @@ fn restarting_response_round_trips() {
     assert_eq!(round_trip_wire_message(&response), response);
     assert_eq!(
         serde_json::to_value(&response).expect("response encodes"),
-        json!({ "request_id": 5, "result": "Restarting" })
+        json!({ "request_id": 5, "answer_result": "Restarting" })
     );
 }
 
@@ -1286,7 +1317,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
     let decoded: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","structure":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[],"panes":[]}}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"panes":[]}}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
 
@@ -1315,7 +1346,7 @@ fn an_attached_reply_written_without_a_pane_area_decodes_as_none() {
     // An attached answer written without `pane_area` decodes with
     // `pane_area: None`.
     let decoded: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","structure":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","tabs":[{"id":"00000000-0000-0000-0000-000000000001","name":"editor","index":0,"layout":{"Pane":"00000000-0000-0000-0000-000000000001"},"focus_mru":["00000000-0000-0000-0000-000000000001"]}],"panes":[{"id":"00000000-0000-0000-0000-000000000001","kind":"Terminal"}]},"resume_token":null}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[{"tab_id":"00000000-0000-0000-0000-000000000001","tab_name":"editor","tab_index":0,"layout":{"Pane":"00000000-0000-0000-0000-000000000001"},"focus_mru":["00000000-0000-0000-0000-000000000001"]}],"panes":[{"pane_id":"00000000-0000-0000-0000-000000000001","pane_kind":"Terminal"}]},"resume_token":null}}}"#,
     )
     .expect("an attached answer without the pane area field decodes");
 
@@ -1339,7 +1370,7 @@ fn an_attach_envelope_carrying_an_authority_field_is_refused() {
     // The envelope's own fields are fixed: an attach frame that adds one beside
     // `request_id` and `kind` fails to decode.
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":4,"tier":"admin","kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+        r#"{"request_id":4,"tier":"admin","request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All"}}}"#,
     );
 
     // The same frame without `tier` decodes in
@@ -1347,7 +1378,7 @@ fn an_attach_envelope_carrying_an_authority_field_is_refused() {
     let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown field `tier`, expected `request_id` or `kind` at line 1 column 22"
+        "unknown field `tier`, expected `request_id` or `request_kind` at line 1 column 22"
     );
 }
 
@@ -1356,13 +1387,13 @@ fn an_attach_envelope_naming_where_it_connected_from_is_refused() {
     // An attach frame naming `origin` beside `request_id` and `kind` fails to
     // decode.
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":4,"origin":"Remote","kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+        r#"{"request_id":4,"origin":"Remote","request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All"}}}"#,
     );
 
     let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown field `origin`, expected `request_id` or `kind` at line 1 column 24"
+        "unknown field `origin`, expected `request_id` or `request_kind` at line 1 column 24"
     );
 }
 
@@ -1371,7 +1402,7 @@ fn an_attach_naming_where_it_connected_from_carries_none_of_it() {
     // An `origin` inside the `Attach` payload is ignored. The decoded request
     // holds the viewport and filter and nothing of it.
     let with_origin: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","origin":"Remote"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All","origin":"Remote"}}}"#,
     )
     .expect("an attach carrying an extra field still decodes");
 
@@ -1401,12 +1432,12 @@ fn an_attach_naming_its_own_authority_carries_none_of_it() {
     // ignored. The decoded request holds the viewport and filter and nothing
     // of it.
     let with_tier: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All","tier":"admin"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All","tier":"admin"}}}"#,
     )
     .expect("an attach carrying an extra field still decodes");
 
     let without_tier: IpcRequest = serde_json::from_str(
-        r#"{"request_id":4,"kind":{"Attach":{"viewport":{"cols":80,"rows":24},"filter":"All"}}}"#,
+        r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All"}}}"#,
     )
     .expect("the same attach without the extra field decodes");
 
@@ -1527,8 +1558,8 @@ fn a_resize_request_reporting_a_starving_pane_area_round_trips() {
         serde_json::to_value(&request).expect("request encodes"),
         json!({
             "request_id": 6,
-            "kind": {
-                "Resize": { "viewport": { "cols": 2, "rows": 2 }, "pane_area": "Starving" }
+            "request_kind": {
+                "Resize": { "viewport": { "column_count": 2, "row_count": 2 }, "pane_area": "Starving" }
             }
         })
     );
@@ -1538,7 +1569,7 @@ fn a_resize_request_reporting_a_starving_pane_area_round_trips() {
 fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
     // A resize written without `pane_area` decodes with `pane_area: None`.
     let decoded: IpcRequest = serde_json::from_str(
-        r#"{"request_id":6,"kind":{"Resize":{"viewport":{"cols":120,"rows":40}}}}"#,
+        r#"{"request_id":6,"request_kind":{"Resize":{"viewport":{"column_count":120,"row_count":40}}}}"#,
     )
     .expect("a resize without the pane area field decodes");
 
@@ -1596,12 +1627,12 @@ fn a_mouse_request_keeps_its_round_in_the_order_it_was_sent() {
 #[test]
 fn a_mouse_action_carrying_an_unknown_field_ignores_it() {
     let with_pixels: IpcRequest = serde_json::from_str(
-        r#"{"request_id":7,"kind":{"Mouse":[{"Scroll":{"pane":"00000000-0000-0000-0000-000000000001","up":true,"lines":3,"pixels":9}}]}}"#,
+        r#"{"request_id":7,"request_kind":{"Mouse":[{"Scroll":{"pane_id":"00000000-0000-0000-0000-000000000001","is_scrolling_up":true,"scroll_line_count":3,"pixels":9}}]}}"#,
     )
     .expect("a field this build does not know is ignored");
 
     let without_it: IpcRequest = serde_json::from_str(
-        r#"{"request_id":7,"kind":{"Mouse":[{"Scroll":{"pane":"00000000-0000-0000-0000-000000000001","up":true,"lines":3}}]}}"#,
+        r#"{"request_id":7,"request_kind":{"Mouse":[{"Scroll":{"pane_id":"00000000-0000-0000-0000-000000000001","is_scrolling_up":true,"scroll_line_count":3}}]}}"#,
     )
     .expect("the same round without the extra field decodes");
 
@@ -1685,7 +1716,7 @@ fn discovery_request_encodes_to_the_expected_shape() {
 
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
-        json!({ "request_id": 3, "kind": "Discovery" })
+        json!({ "request_id": 3, "request_kind": "Discovery" })
     );
 }
 
@@ -1711,7 +1742,7 @@ fn recent_events_request_round_trips() {
     assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
-        json!({ "request_id": 9, "kind": "RecentEvents" })
+        json!({ "request_id": 9, "request_kind": "RecentEvents" })
     );
 }
 
@@ -1725,7 +1756,7 @@ fn leaving_request_round_trips() {
     assert_eq!(round_trip_wire_message(&request), request);
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
-        json!({ "request_id": 10, "kind": "Leaving" })
+        json!({ "request_id": 10, "request_kind": "Leaving" })
     );
 }
 
@@ -1744,10 +1775,11 @@ fn hello_response_round_trips() {
 
 #[test]
 fn a_hello_response_written_without_the_build_version_decodes_as_empty() {
-    // A Hello answer written without `version` decodes with `version` empty.
-    let decoded: IpcResponse =
-        serde_json::from_str(r#"{"request_id":1,"result":{"Hello":{"protocol_version":2}}}"#)
-            .expect("a hello answer without the build version decodes");
+    // A Hello answer written without `build_version` decodes with `build_version` empty.
+    let decoded: IpcResponse = serde_json::from_str(
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":2}}}"#,
+    )
+    .expect("a hello answer without the build version decodes");
 
     assert_eq!(
         decoded,
@@ -1764,7 +1796,7 @@ fn a_hello_response_written_without_the_build_version_decodes_as_empty() {
 #[test]
 fn a_hello_answer_carrying_an_unknown_field_ignores_it() {
     let decoded: IpcResponse = serde_json::from_str(
-        r#"{"request_id":1,"result":{"Hello":{"protocol_version":2,"version":"0.3.0","build_date":"2026-01-01"}}}"#,
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":2,"build_version":"0.3.0","build_date":"2026-01-01"}}}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -1852,7 +1884,7 @@ fn a_layout_request_encodes_to_the_expected_shape() {
         serde_json::to_value(&request).expect("request encodes"),
         json!({
             "request_id": 4,
-            "kind": { "Layout": { "tab": "00000000-0000-0000-0000-000000000001" } }
+            "request_kind": { "Layout": { "tab_id": "00000000-0000-0000-0000-000000000001" } }
         })
     );
 }
@@ -1866,15 +1898,16 @@ fn a_layout_request_for_every_tab_encodes_a_null_tab() {
 
     assert_eq!(
         serde_json::to_value(&request).expect("request encodes"),
-        json!({ "request_id": 4, "kind": { "Layout": { "tab": null } } })
+        json!({ "request_id": 4, "request_kind": { "Layout": { "tab_id": null } } })
     );
 }
 
 #[test]
 fn a_layout_request_carrying_an_unknown_field_ignores_it() {
-    let decoded: IpcRequest =
-        serde_json::from_str(r#"{"request_id":4,"kind":{"Layout":{"tab":null,"junk":5}}}"#)
-            .expect("a field this build does not know is ignored");
+    let decoded: IpcRequest = serde_json::from_str(
+        r#"{"request_id":4,"request_kind":{"Layout":{"tab_id":null,"junk":5}}}"#,
+    )
+    .expect("a field this build does not know is ignored");
 
     assert_eq!(
         decoded,
@@ -1887,8 +1920,9 @@ fn a_layout_request_carrying_an_unknown_field_ignores_it() {
 
 #[test]
 fn a_layout_request_written_without_a_tab_decodes_as_every_tab() {
-    let decoded: IpcRequest = serde_json::from_str(r#"{"request_id":4,"kind":{"Layout":{}}}"#)
-        .expect("a layout request naming no tab decodes");
+    let decoded: IpcRequest =
+        serde_json::from_str(r#"{"request_id":4,"request_kind":{"Layout":{}}}"#)
+            .expect("a layout request naming no tab decodes");
 
     assert_eq!(
         decoded,
@@ -1903,12 +1937,12 @@ fn a_layout_request_written_without_a_tab_decodes_as_every_tab() {
 fn a_request_envelope_carrying_an_unknown_field_is_still_refused() {
     // A misspelled `request_id` beside a correct one is refused.
     let decoded: Result<IpcRequest, _> =
-        serde_json::from_str(r#"{"request_id":4,"requst_id":9,"kind":"Discovery"}"#);
+        serde_json::from_str(r#"{"request_id":4,"requst_id":9,"request_kind":"Discovery"}"#);
 
     let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown field `requst_id`, expected `request_id` or `kind` at line 1 column 27"
+        "unknown field `requst_id`, expected `request_id` or `request_kind` at line 1 column 27"
     );
 }
 
@@ -1959,8 +1993,8 @@ fn error_response_encodes_its_code_in_snake_case() {
         serde_json::to_value(&response).expect("response encodes"),
         json!({
             "request_id": 4,
-            "result": {
-                "Error": { "code": "hello_required", "message": "open the connection first" }
+            "answer_result": {
+                "Error": { "code": "HelloRequired", "message": "open the connection first" }
             }
         })
     );
@@ -1981,9 +2015,9 @@ fn a_refusal_naming_the_other_users_setting_round_trips() {
         serde_json::to_value(&response).expect("response encodes"),
         json!({
             "request_id": 7,
-            "result": {
+            "answer_result": {
                 "Error": {
-                    "code": "other_users_off",
+                    "code": "OtherUsersOff",
                     "message": "this Koshi serves only the user who started it"
                 }
             }
@@ -2041,14 +2075,14 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
     // The match is exhaustive: a refusal code missing from it does not
     // compile.
     let wire_name = |code: IpcErrorCode| match code {
-        IpcErrorCode::BadToken => "bad_token",
-        IpcErrorCode::UnsupportedVersion => "unsupported_version",
-        IpcErrorCode::UnsupportedKind => "unsupported_kind",
-        IpcErrorCode::MalformedRequest => "malformed_request",
-        IpcErrorCode::NotFound => "not_found",
-        IpcErrorCode::HelloRequired => "hello_required",
-        IpcErrorCode::OtherUsersOff => "other_users_off",
-        IpcErrorCode::Unknown => "unknown",
+        IpcErrorCode::BadToken => "BadToken",
+        IpcErrorCode::UnsupportedVersion => "UnsupportedVersion",
+        IpcErrorCode::UnsupportedKind => "UnsupportedKind",
+        IpcErrorCode::MalformedRequest => "MalformedRequest",
+        IpcErrorCode::NotFound => "NotFound",
+        IpcErrorCode::HelloRequired => "HelloRequired",
+        IpcErrorCode::OtherUsersOff => "OtherUsersOff",
+        IpcErrorCode::Unknown => "Unknown",
     };
 
     for code in [
@@ -2247,7 +2281,7 @@ fn variants_lists_every_result_in_declaration_order() {
 #[test]
 fn a_request_naming_a_kind_this_build_does_not_have_reads_as_unknown() {
     let decoded: IncomingRequest =
-        serde_json::from_str(r#"{"request_id":9,"kind":{"Floating":{"pane":3}}}"#)
+        serde_json::from_str(r#"{"request_id":9,"request_kind":{"Floating":{"pane_id":3}}}"#)
             .expect("a kind this build does not have decodes as unknown");
 
     assert_eq!(
@@ -2264,7 +2298,7 @@ fn a_request_naming_a_kind_this_build_does_not_have_reads_as_unknown() {
 #[test]
 fn a_request_naming_a_kind_this_build_has_reads_as_known() {
     let decoded: IncomingRequest =
-        serde_json::from_str(r#"{"request_id":9,"kind":{"Layout":{"tab":null}}}"#)
+        serde_json::from_str(r#"{"request_id":9,"request_kind":{"Layout":{"tab_id":null}}}"#)
             .expect("a kind this build has decodes as known");
 
     assert_eq!(
@@ -2278,8 +2312,9 @@ fn a_request_naming_a_kind_this_build_has_reads_as_known() {
 
 #[test]
 fn a_response_naming_a_result_this_build_does_not_have_reads_as_unknown() {
-    let decoded: IncomingResponse = serde_json::from_str(r#"{"request_id":9,"result":"Rebooted"}"#)
-        .expect("a result this build does not have decodes as unknown");
+    let decoded: IncomingResponse =
+        serde_json::from_str(r#"{"request_id":9,"answer_result":"Rebooted"}"#)
+            .expect("a result this build does not have decodes as unknown");
 
     assert_eq!(
         decoded,
@@ -2295,7 +2330,7 @@ fn a_response_naming_a_result_this_build_does_not_have_reads_as_unknown() {
 #[test]
 fn a_response_naming_a_result_this_build_has_reads_as_known() {
     let decoded: IncomingResponse =
-        serde_json::from_str(r#"{"request_id":9,"result":"Restarting"}"#)
+        serde_json::from_str(r#"{"request_id":9,"answer_result":"Restarting"}"#)
             .expect("a result this build has decodes as known");
 
     assert_eq!(
@@ -2315,21 +2350,22 @@ fn a_response_with_a_misspelled_request_id_is_refused() {
     // `a_response_envelope_this_build_reads_decodes`; the misspelled field is
     // the only fault in these bytes.
     let decoded: Result<IpcResponse, _> = serde_json::from_str(
-        r#"{"requst_id":7,"result":{"Hello":{"protocol_version":2}},"request_id":7}"#,
+        r#"{"requst_id":7,"answer_result":{"Hello":{"protocol_version":2}},"request_id":7}"#,
     );
 
     let error = decoded.expect_err("a misspelled envelope field decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown field `requst_id`, expected `request_id` or `result` at line 1 column 12"
+        "unknown field `requst_id`, expected `request_id` or `answer_result` at line 1 column 12"
     );
 }
 
 #[test]
 fn a_response_envelope_this_build_reads_decodes() {
-    let decoded: IpcResponse =
-        serde_json::from_str(r#"{"request_id":7,"result":{"Hello":{"protocol_version":2}}}"#)
-            .expect("the same bytes without the misspelling decode");
+    let decoded: IpcResponse = serde_json::from_str(
+        r#"{"request_id":7,"answer_result":{"Hello":{"protocol_version":2}}}"#,
+    )
+    .expect("the same bytes without the misspelling decode");
 
     assert_eq!(
         decoded,
@@ -2346,12 +2382,12 @@ fn a_response_envelope_this_build_reads_decodes() {
 #[test]
 fn a_request_carrying_an_unknown_field_is_refused() {
     let decoded: Result<IpcRequest, _> =
-        serde_json::from_str(r#"{"request_id":1,"kind":"Discovery","junk":5}"#);
+        serde_json::from_str(r#"{"request_id":1,"request_kind":"Discovery","junk":5}"#);
 
     let error = decoded.expect_err("an unknown envelope field decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "unknown field `junk`, expected `request_id` or `kind` at line 1 column 41"
+        "unknown field `junk`, expected `request_id` or `request_kind` at line 1 column 49"
     );
 }
 
@@ -2360,7 +2396,7 @@ fn a_request_carrying_an_unknown_field_is_refused() {
 #[test]
 fn a_hello_carrying_an_unknown_field_ignores_it() {
     let decoded: IpcRequest = serde_json::from_str(
-        r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"token":"k7QxSecret","junk":5}}}"#,
+        r#"{"request_id":1,"request_kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"connection_token":"k7QxSecret","junk":5}}}"#,
     )
     .expect("a field this build does not know is ignored");
 
@@ -2382,13 +2418,13 @@ fn a_hello_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_hello_missing_a_version_is_refused() {
     let decoded: Result<IpcRequest, _> = serde_json::from_str(
-        r#"{"request_id":1,"kind":{"Hello":{"max_protocol_version":2,"token":"k7QxSecret"}}}"#,
+        r#"{"request_id":1,"request_kind":{"Hello":{"max_protocol_version":2,"connection_token":"k7QxSecret"}}}"#,
     );
 
     let error = decoded.expect_err("a Hello missing a version decoded instead of failing");
     assert_eq!(
         error.to_string(),
-        "missing field `min_protocol_version` at line 1 column 79"
+        "missing field `min_protocol_version` at line 1 column 98"
     );
 }
 

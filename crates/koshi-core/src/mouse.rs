@@ -79,13 +79,10 @@ pub enum MouseKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MouseInput {
     /// What the mouse did.
-    #[serde(rename = "kind")]
     pub mouse_kind: MouseKind,
     /// The client cell the event landed on — raw, not yet hit-tested.
-    #[serde(rename = "at")]
     pub position: Point,
     /// The modifier keys held during the event.
-    #[serde(rename = "mods")]
     pub modifier_flags: ModFlags,
 }
 
@@ -95,36 +92,30 @@ pub struct MouseInput {
 /// empty variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseAnswer {
-    /// Where `pane`'s view landed after a scroll: `top` is the line now on its
-    /// top row, or `None` for a pane with no terminal. Consumed by
+    /// Where the `pane_id` view landed after a scroll: `top_row_number` is the
+    /// line now on its top row, or `None` for a pane with no terminal. Consumed by
     /// `Client::note_scroll_applied`.
     Scrolled {
         /// The pane whose view the scroll moved.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// The line the view now shows on its top row.
-        #[serde(rename = "top")]
         top_row_number: Option<u64>,
     },
     /// How many cells of a requested border move the session accepted, which is
     /// fewer than asked for when the border hit a wall. Consumed by
     /// `Client::note_resize_applied`.
     ///
-    /// `pane`, `side` and `step` repeat the move this answers, so a round
-    /// carrying several border moves is read back move by move.
+    /// `pane_id`, `border_side` and `resize_step` repeat the move this answers,
+    /// so a round carrying several border moves is read back move by move.
     Resized {
         /// The pane whose border the move was asked for.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// Which of the pane's borders the move was asked for.
-        #[serde(rename = "side")]
         border_side: Direction,
         /// The direction the move was asked in: `1` grows the pane, `-1`
         /// shrinks it.
-        #[serde(rename = "step")]
         resize_step: i16,
         /// The number of cells the border actually moved.
-        #[serde(rename = "applied")]
         applied_cell_count: u16,
     },
 }

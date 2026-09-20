@@ -481,11 +481,11 @@ fn payload_lifecycle_states_serialize_their_fields_with_times_as_seconds_and_nan
 
     assert_eq!(
         serde_json::to_string(&exited).expect("serialize"),
-        r#"{"Exited":{"code":null,"at":{"secs_since_epoch":5,"nanos_since_epoch":400}}}"#
+        r#"{"Exited":{"exit_code":null,"exited_at":{"secs_since_epoch":5,"nanos_since_epoch":400}}}"#
     );
     assert_eq!(
         serde_json::to_string(&closing).expect("serialize"),
-        r#"{"Closing":{"since":{"secs_since_epoch":0,"nanos_since_epoch":0}}}"#
+        r#"{"Closing":{"close_requested_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}}"#
     );
 }
 
@@ -514,11 +514,12 @@ fn an_unknown_lifecycle_state_fails_to_deserialize() {
 
 #[test]
 fn an_exited_state_without_a_time_fails_to_deserialize() {
-    let deserialization_error = serde_json::from_str::<PaneLifecycle>(r#"{"Exited":{"code":0}}"#)
-        .expect_err("missing field");
+    let deserialization_error =
+        serde_json::from_str::<PaneLifecycle>(r#"{"Exited":{"exit_code":0}}"#)
+            .expect_err("missing field");
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `at` at line 1 column 20"
+        "missing field `exited_at` at line 1 column 25"
     );
 }

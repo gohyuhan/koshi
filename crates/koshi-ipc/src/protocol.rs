@@ -26,7 +26,8 @@ use koshi_core::key::KeyInput;
 use koshi_core::mouse::MouseInput;
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::attach::AttachedSessionStructureSnapshot;
@@ -77,8 +78,8 @@ pub fn compute_agreed_protocol_version(
 /// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
 ///   the endpoint file and the socket. `serde_json::to_string(&hello)` on the
 ///   Hello [`hello`](IpcRequestKind::build_hello_request) builds yields
-///   `{"Hello":{"min_protocol_version":2,"max_protocol_version":3,
-///   "token":"k7Qx…","remote":false}}`, secret included.
+///   `{"Hello":{"min_protocol_version":4,"max_protocol_version":4,
+///   "connection_token":"k7Qx…","is_remote":false}}`, secret included.
 /// - `Debug` and `Display` write `***`. A token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
 ///
@@ -163,17 +164,143 @@ pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 /// Each field defaults to `false`, so a client that does not report this
 /// record receives placement metadata without pixel transfers. New protocol
 /// fields can be added without changing the attach shape.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+const GRAPHICS_CAPABILITY_FIELD_NAMES: &[&str] =
+    &["supports_kitty", "supports_iterm", "supports_sixel"];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct GraphicsCapabilities {
     /// The terminal answered the Kitty graphics protocol query with `OK`.
-    #[serde(default, rename = "kitty")]
     pub supports_kitty: bool,
     /// The terminal advertised the iTerm2 inline-image protocol.
-    #[serde(default, rename = "iterm")]
     pub supports_iterm: bool,
     /// The terminal advertised the DEC Sixel protocol.
-    #[serde(default, rename = "sixel")]
     pub supports_sixel: bool,
+}
+
+enum GraphicsCapabilitiesField {
+    SupportsKitty,
+    SupportsIterm,
+    SupportsSixel,
+    RetiredKitty,
+    RetiredIterm,
+    RetiredSixel,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for GraphicsCapabilitiesField {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        struct GraphicsCapabilitiesFieldVisitor;
+
+        impl<'de> Visitor<'de> for GraphicsCapabilitiesFieldVisitor {
+            type Value = GraphicsCapabilitiesField;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a graphics capability field name")
+            }
+
+            fn visit_str<ErrorType>(self, value: &str) -> Result<Self::Value, ErrorType>
+            where
+                ErrorType: de::Error,
+            {
+                Ok(match value {
+                    "supports_kitty" => GraphicsCapabilitiesField::SupportsKitty,
+                    "supports_iterm" => GraphicsCapabilitiesField::SupportsIterm,
+                    "supports_sixel" => GraphicsCapabilitiesField::SupportsSixel,
+                    "kitty" => GraphicsCapabilitiesField::RetiredKitty,
+                    "iterm" => GraphicsCapabilitiesField::RetiredIterm,
+                    "sixel" => GraphicsCapabilitiesField::RetiredSixel,
+                    _ => GraphicsCapabilitiesField::Unknown,
+                })
+            }
+        }
+
+        deserializer.deserialize_identifier(GraphicsCapabilitiesFieldVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for GraphicsCapabilities {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        struct GraphicsCapabilitiesVisitor;
+
+        impl<'de> Visitor<'de> for GraphicsCapabilitiesVisitor {
+            type Value = GraphicsCapabilities;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a graphics capability object")
+            }
+
+            fn visit_map<MapType>(self, mut map: MapType) -> Result<Self::Value, MapType::Error>
+            where
+                MapType: MapAccess<'de>,
+            {
+                let mut supports_kitty = None;
+                let mut supports_iterm = None;
+                let mut supports_sixel = None;
+
+                while let Some(field) = map.next_key::<GraphicsCapabilitiesField>()? {
+                    match field {
+                        GraphicsCapabilitiesField::SupportsKitty => {
+                            if supports_kitty.is_some() {
+                                return Err(de::Error::duplicate_field("supports_kitty"));
+                            }
+                            supports_kitty = Some(map.next_value()?);
+                        }
+                        GraphicsCapabilitiesField::SupportsIterm => {
+                            if supports_iterm.is_some() {
+                                return Err(de::Error::duplicate_field("supports_iterm"));
+                            }
+                            supports_iterm = Some(map.next_value()?);
+                        }
+                        GraphicsCapabilitiesField::SupportsSixel => {
+                            if supports_sixel.is_some() {
+                                return Err(de::Error::duplicate_field("supports_sixel"));
+                            }
+                            supports_sixel = Some(map.next_value()?);
+                        }
+                        GraphicsCapabilitiesField::RetiredKitty => {
+                            return Err(de::Error::unknown_field(
+                                "kitty",
+                                GRAPHICS_CAPABILITY_FIELD_NAMES,
+                            ));
+                        }
+                        GraphicsCapabilitiesField::RetiredIterm => {
+                            return Err(de::Error::unknown_field(
+                                "iterm",
+                                GRAPHICS_CAPABILITY_FIELD_NAMES,
+                            ));
+                        }
+                        GraphicsCapabilitiesField::RetiredSixel => {
+                            return Err(de::Error::unknown_field(
+                                "sixel",
+                                GRAPHICS_CAPABILITY_FIELD_NAMES,
+                            ));
+                        }
+                        GraphicsCapabilitiesField::Unknown => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(GraphicsCapabilities {
+                    supports_kitty: supports_kitty.unwrap_or(false),
+                    supports_iterm: supports_iterm.unwrap_or(false),
+                    supports_sixel: supports_sixel.unwrap_or(false),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(GraphicsCapabilitiesVisitor)
+    }
 }
 
 impl GraphicsCapabilities {
@@ -222,18 +349,17 @@ pub enum IpcRequestKind {
         /// The highest protocol version the caller speaks.
         max_protocol_version: u32,
         /// The secret read from the endpoint file.
-        #[serde(rename = "token")]
         connection_token: ConnectionToken,
         /// Whether the connection this Hello opens carries a caller on
         /// another machine. The router sets it on the local connection it
         /// opens for a remote caller. Absent means `false`. It changes nothing
         /// about whether the Hello is accepted. The server records it as the
         /// origin of every client attached on this connection.
-        #[serde(default, rename = "remote")]
+        #[serde(default)]
         is_remote: bool,
     },
     /// Join the session as a viewing client: the server mints the client,
-    /// registers it for the events `filter` selects, and answers with
+    /// registers it for the events `event_filter` selects, and answers with
     /// [`IpcResult::Attached`].
     ///
     /// The caller names no identity of its own. Who the client is, what it may
@@ -243,7 +369,6 @@ pub enum IpcRequestKind {
         /// the client's viewport.
         viewport: Size,
         /// Which of the session's events the client receives.
-        #[serde(rename = "filter")]
         event_filter: EventFilterSpec,
         /// The client record to come back as, named by a caller re-attaching
         /// after the session replaced its own process image. The server hands
@@ -251,7 +376,7 @@ pub enum IpcRequestKind {
         /// viewing still exists, and no connection is streaming for it, and
         /// mints a fresh client in every other case. Absent on a first attach,
         /// and from a caller that predates this field.
-        #[serde(default, rename = "resume")]
+        #[serde(default)]
         resume_client_id: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
         /// presented to get that attach's view back: the active tab, the
@@ -267,11 +392,7 @@ pub enum IpcRequestKind {
         /// client as its viewport minus two rows.
         #[serde(default)]
         pane_area: Option<PaneArea>,
-        #[serde(
-            default,
-            rename = "graphics",
-            skip_serializing_if = "GraphicsCapabilities::is_empty"
-        )]
+        #[serde(default, skip_serializing_if = "GraphicsCapabilities::is_empty")]
         graphics_capabilities: GraphicsCapabilities,
         /// The cell dimensions measured by this terminal before the attach,
         /// or `None` when the terminal has no usable measurement.
@@ -304,14 +425,12 @@ pub enum IpcRequestKind {
     /// The attached client measured the pixel dimensions of one terminal cell.
     CellSize {
         /// The nonzero pixel dimensions of one cell.
-        #[serde(rename = "size")]
         cell_size: koshi_core::geometry::PixelCellSize,
     },
     /// Text the attached client's outer terminal pasted, for the pane it is
     /// typing into. Carried whole: no character of it fires a keybinding.
     Paste {
         /// The pasted text, exactly as the client's terminal delivered it.
-        #[serde(rename = "text")]
         pasted_text: String,
     },
     /// One round of mouse actions the attached client decided, in the order
@@ -328,7 +447,6 @@ pub enum IpcRequestKind {
     /// rectangles each viewing client solves it to.
     Layout {
         /// The one tab to describe, or every tab when absent.
-        #[serde(rename = "tab")]
         tab_id: Option<TabId>,
     },
     /// Ask the session for the events it published most recently, newest last.
@@ -399,56 +517,44 @@ impl IpcRequestKind {
 /// decodes here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireMouseAction {
-    /// Move this client's scrollback view of `pane` by `lines`, up into
-    /// history or back down toward live output.
+    /// Move this client's scrollback view of `pane_id` by `scroll_line_count`,
+    /// up into history or back down toward live output.
     Scroll {
         /// The pane whose view moves.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// Up into history, or down toward live output.
-        #[serde(rename = "up")]
         is_scrolling_up: bool,
         /// Lines to move.
-        #[serde(rename = "lines")]
         scroll_line_count: usize,
     },
-    /// Hand the event to the program in `pane` as a mouse report. The session
+    /// Hand the event to the program in `pane_id` as a mouse report. The session
     /// encodes it from that pane's live tracking level and encoding.
     Forward {
         /// The pane whose program receives the report.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// The event, with the cell it landed on and the modifiers held.
-        #[serde(rename = "mouse")]
         mouse_input: MouseInput,
     },
-    /// Send `count` cursor arrow keys to `pane` — the alternate-scroll
+    /// Send `arrow_count` cursor arrow keys to `pane_id` — the alternate-scroll
     /// (`?1007`) translation of a wheel tick on the alternate screen.
     AltScrollArrows {
         /// The pane whose program receives the arrows.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// Up-arrows, or down-arrows.
-        #[serde(rename = "up")]
         is_scrolling_up: bool,
         /// How many.
-        #[serde(rename = "count")]
         arrow_count: usize,
     },
-    /// Move `pane`'s `side` border `count` cells, one cell per step, in the
-    /// direction `step` names.
+    /// Move `pane_id`'s `border_side` border `requested_cell_count` cells, one
+    /// cell per step, in the direction `resize_step` names.
     Resize {
         /// The pane whose border moves.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// Which of the pane's borders was grabbed.
-        #[serde(rename = "side")]
         border_side: Direction,
         /// `1` grows the pane, `-1` shrinks it.
-        #[serde(rename = "step")]
         resize_step: i16,
         /// How many single-cell steps the pointer travelled.
-        #[serde(rename = "count")]
         requested_cell_count: u16,
     },
     /// Run the command through the session's command door, attributed to this
@@ -495,7 +601,7 @@ pub enum IpcResult {
         protocol_version: u32,
         /// The build version of the answering session server, e.g. `0.3.0`.
         /// Empty when the session server predates this field.
-        #[serde(default, rename = "version")]
+        #[serde(default)]
         build_version: String,
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
@@ -508,7 +614,6 @@ pub enum IpcResult {
         /// The session the client joined.
         session_id: SessionId,
         /// What the session contains right now, built for this reply.
-        #[serde(rename = "structure")]
         session_structure: AttachedSessionStructureSnapshot,
         /// The fresh secret this attach minted, presented on the next attach
         /// to get this attach's view back. `None` from a session server that
@@ -557,7 +662,6 @@ pub struct IpcErrorPayload {
 
 /// The kinds of refusal a request can meet.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
     /// The token presented does not match the session's.
     BadToken,

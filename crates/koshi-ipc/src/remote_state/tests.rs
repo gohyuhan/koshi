@@ -97,6 +97,30 @@ fn a_certificate_file_at_another_format_number_is_refused() {
 }
 
 #[test]
+fn a_previous_certificate_file_with_format_field_is_unreadable() {
+    let test_directory = TempDir::new().expect("make a test directory");
+    let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
+    let previous_certificate_bytes = br#"{"format":1,"cert_der":[],"key_der":[]}"#;
+    std::fs::create_dir_all(remote_file_path.parent().expect("the remote directory"))
+        .expect("make the remote directory");
+    std::fs::write(&remote_file_path, previous_certificate_bytes)
+        .expect("write the previous certificate file");
+
+    let unreadable_certificate_error =
+        CertFile::load_from_path(&remote_file_path).expect_err("the previous format is refused");
+    let error_detail = serde_json::from_slice::<CertFile>(previous_certificate_bytes)
+        .expect_err("the previous field name is refused")
+        .to_string();
+    assert_eq!(
+        unreadable_certificate_error.to_string(),
+        format!(
+            "the remote access certificate at {} is unreadable: {error_detail}",
+            remote_file_path.display()
+        )
+    );
+}
+
+#[test]
 fn a_missing_certificate_file_is_an_error() {
     let test_directory = TempDir::new().expect("make a test directory");
     let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
@@ -135,6 +159,32 @@ fn remote_access_is_off_until_the_enabled_file_is_written() {
         ))
         .expect("read it back"),
         enabled_file
+    );
+}
+
+#[test]
+fn a_previous_enabled_file_with_format_field_leaves_remote_access_off() {
+    let test_directory = TempDir::new().expect("make a test directory");
+    let remote_file_path = EnabledFile::resolve_enabled_file_path(test_directory.path());
+    let previous_enabled_bytes =
+        br#"{"format":1,"enabled_at":{"secs_since_epoch":1000,"nanos_since_epoch":0}}"#;
+    std::fs::create_dir_all(remote_file_path.parent().expect("the remote directory"))
+        .expect("make the remote directory");
+    std::fs::write(&remote_file_path, previous_enabled_bytes)
+        .expect("write the previous enabled file");
+
+    assert!(!is_remote_enabled(test_directory.path()));
+    let unreadable_enabled_error =
+        EnabledFile::load_from_path(&remote_file_path).expect_err("the previous format is refused");
+    let error_detail = serde_json::from_slice::<EnabledFile>(previous_enabled_bytes)
+        .expect_err("the previous field name is refused")
+        .to_string();
+    assert_eq!(
+        unreadable_enabled_error.to_string(),
+        format!(
+            "the remote access record at {} is unreadable: {error_detail}",
+            remote_file_path.display()
+        )
     );
 }
 
@@ -242,29 +292,29 @@ fn junk_bytes_are_an_unreadable_certificate() {
 
 #[test]
 fn a_certificate_file_carrying_an_unknown_field_is_unreadable() {
-    let certificate_json =
-        format!(r#"{{"issuer":"ada","format":{CERT_FILE_FORMAT},"cert_der":[],"key_der":[]}}"#);
+    let certificate_json = format!(
+        r#"{{"issuer":"ada","file_format":{CERT_FILE_FORMAT},"cert_der":[],"key_der":[]}}"#
+    );
 
     let unknown_field_error =
         serde_json::from_str::<CertFile>(&certificate_json).expect_err("refused");
     assert_eq!(
         unknown_field_error.to_string(),
-        "unknown field `issuer`, expected one of `format`, `cert_der`, `key_der` at line 1 \
-         column 9"
+        "unknown field `issuer`, expected one of `file_format`, `cert_der`, `key_der` at line 1 column 9"
     );
 }
 
 #[test]
 fn an_enabled_file_carrying_an_unknown_field_is_unreadable() {
     let enabled_file_json = format!(
-        r#"{{"by":"ada","format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
+        r#"{{"by":"ada","file_format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
     );
 
     let unknown_field_error =
         serde_json::from_str::<EnabledFile>(&enabled_file_json).expect_err("refused");
     assert_eq!(
         unknown_field_error.to_string(),
-        "unknown field `by`, expected `format` or `enabled_at` at line 1 column 5"
+        "unknown field `by`, expected `file_format` or `enabled_at` at line 1 column 5"
     );
 }
 
@@ -382,7 +432,7 @@ fn the_two_files_are_written_as_these_exact_bytes() {
             test_directory.path()
         ))
         .expect("read the certificate file"),
-        format!(r#"{{"format":{CERT_FILE_FORMAT},"cert_der":[1,2,3,4],"key_der":[5,6,7,8]}}"#)
+        format!(r#"{{"file_format":{CERT_FILE_FORMAT},"cert_der":[1,2,3,4],"key_der":[5,6,7,8]}}"#)
     );
     assert_eq!(
         std::fs::read_to_string(EnabledFile::resolve_enabled_file_path(
@@ -390,7 +440,7 @@ fn the_two_files_are_written_as_these_exact_bytes() {
         ))
         .expect("read the enabled file"),
         format!(
-            r#"{{"format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
+            r#"{{"file_format":{ENABLED_FILE_FORMAT},"enabled_at":{{"secs_since_epoch":1000,"nanos_since_epoch":0}}}}"#
         )
     );
 }

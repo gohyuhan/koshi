@@ -104,16 +104,12 @@ pub struct LayoutSolve {
 pub struct StackHeader {
     /// The collapsed pane this header represents; clicking the strip
     /// activates it.
-    #[serde(rename = "pane")]
     pub pane_id: PaneId,
     /// The strip itself: one row spanning the stack's width.
-    #[serde(rename = "rect")]
     pub header_rect: Rect,
     /// Zero-based position of this member within its stack.
-    #[serde(rename = "position")]
     pub member_index: usize,
     /// Total members in the stack, the active one included.
-    #[serde(rename = "total")]
     pub member_count: usize,
 }
 

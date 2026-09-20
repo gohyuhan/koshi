@@ -48,7 +48,8 @@ An unknown key exits 2 and suggests the nearest known key.
 
 `check` and `migrate` scan `koshi.kdl`, `keybinding.kdl`, `themes/*.kdl`, and
 `profile/*.kdl`. Migration does not repair bad KDL or bad fields. Current
-schema version is `1`, so valid version `1` files stay unchanged.
+schema version is `2`. Valid version `1` files migrate to version `2`.
+Valid version `2` files stay unchanged.
 
 Each path must be a regular file or a symlink to one. Both commands report all
 read and schema errors before migration writes anything. Migration keeps the

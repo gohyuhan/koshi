@@ -98,28 +98,21 @@ pub struct Scrollback {
     /// with its row metadata. A row holds what [`get_retained_cells`] keeps of it: a
     /// hard-ended row stops at its last content cell and reads as blank right
     /// of that.
-    #[serde(rename = "lines")]
     retained_lines: VecDeque<(Vec<Cell>, RowMetadata)>,
     /// Maximum rows retained before the oldest are dropped.
-    #[serde(rename = "max_lines")]
     maximum_line_count: usize,
     /// Maximum total bytes (UTF-8 text payload) retained before the oldest rows
     /// are dropped.
-    #[serde(rename = "max_bytes")]
     maximum_byte_count: usize,
     /// The sum of [`compute_line_byte_count`] over every retained row, updated on every
     /// push, replacement, eviction and clear.
-    #[serde(rename = "byte_total")]
     retained_byte_count: usize,
     /// Count of rows ever pushed into the buffer. It only grows:
     /// [`clear`](Self::clear) does not reset it.
-    #[serde(rename = "total_pushed")]
     total_pushed_line_count: u64,
     /// Count of rows dropped to honor the caps. It only grows.
-    #[serde(rename = "dropped_lines")]
     dropped_line_count: u64,
     /// Bytes dropped to honor the caps. It only grows.
-    #[serde(rename = "dropped_bytes")]
     dropped_byte_count: u64,
 }
 
@@ -293,17 +286,11 @@ enum SerializedLine {
 /// as dropped.
 #[derive(Deserialize)]
 struct ScrollbackFields {
-    #[serde(rename = "lines")]
     retained_lines: VecDeque<SerializedLine>,
-    #[serde(rename = "max_lines")]
     maximum_line_count: usize,
-    #[serde(rename = "max_bytes")]
     maximum_byte_count: usize,
-    #[serde(rename = "total_pushed")]
     total_pushed_line_count: u64,
-    #[serde(rename = "dropped_lines")]
     dropped_line_count: u64,
-    #[serde(rename = "dropped_bytes")]
     dropped_byte_count: u64,
 }
 

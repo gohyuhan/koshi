@@ -38,9 +38,9 @@ fn decoded_image_round_trips_with_rgba_bytes() {
     assert_eq!(
         serialized_decoded_image,
         serde_json::json!({
-            "width": 2,
-            "height": 1,
-            "rgba": [1, 2, 3, 4, 5, 6, 7, 8]
+            "pixel_width": 2,
+            "pixel_height": 1,
+            "rgba_bytes": [1, 2, 3, 4, 5, 6, 7, 8]
         })
     );
     assert_eq!(
@@ -52,8 +52,13 @@ fn decoded_image_round_trips_with_rgba_bytes() {
 
 #[test]
 fn decoded_image_rejects_zero_dimensions_and_mismatched_bytes() {
-    let zero_pixel_width = serde_json::json!({"width": 0, "height": 1, "rgba": []});
-    let mismatched_rgba_length = serde_json::json!({"width": 2, "height": 1, "rgba": [1, 2, 3, 4]});
+    let zero_pixel_width =
+        serde_json::json!({"pixel_width": 0, "pixel_height": 1, "rgba_bytes": []});
+    let mismatched_rgba_length = serde_json::json!({
+        "pixel_width": 2,
+        "pixel_height": 1,
+        "rgba_bytes": [1, 2, 3, 4]
+    });
 
     assert_eq!(
         serde_json::from_value::<DecodedImage>(zero_pixel_width)
@@ -72,9 +77,9 @@ fn decoded_image_rejects_zero_dimensions_and_mismatched_bytes() {
 #[test]
 fn decoded_image_rejects_a_side_above_the_limit() {
     let invalid_image_json = serde_json::json!({
-        "width": MAX_IMAGE_SIDE_PIXEL_COUNT as u32 + 1,
-        "height": 1,
-        "rgba": []
+        "pixel_width": MAX_IMAGE_SIDE_PIXEL_COUNT as u32 + 1,
+        "pixel_height": 1,
+        "rgba_bytes": []
     });
 
     assert_eq!(

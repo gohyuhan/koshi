@@ -209,7 +209,7 @@ fn a_weight_serializes_to_its_exact_json_shape() {
     };
     assert_eq!(
         serde_json::to_string(&weight).unwrap(),
-        r#"{"primary":{"Flex":2},"min":20,"preferred":null,"resize_delta":-3}"#
+        r#"{"primary_constraint":{"Flex":2},"minimum_cell_count":20,"preferred_cell_count":null,"resize_delta":-3}"#
     );
 }
 
@@ -229,7 +229,7 @@ fn every_constraint_kind_serializes_as_a_tagged_object() {
     );
     assert_eq!(
         serde_json::to_string(&SizeConstraint::Minimum(10)).unwrap(),
-        r#"{"Min":10}"#
+        r#"{"Minimum":10}"#
     );
     assert_eq!(
         serde_json::to_string(&SizeConstraint::Preferred(120)).unwrap(),
@@ -240,21 +240,21 @@ fn every_constraint_kind_serializes_as_a_tagged_object() {
 #[test]
 fn absent_overlays_deserialize_as_none_and_resize_delta_is_required() {
     let weight: SizeWeight =
-        serde_json::from_str(r#"{"primary":{"Flex":1},"resize_delta":0}"#).unwrap();
+        serde_json::from_str(r#"{"primary_constraint":{"Flex":1},"resize_delta":0}"#).unwrap();
     assert_eq!(weight, SizeWeight::default());
 
     let deserialization_error =
-        serde_json::from_str::<SizeWeight>(r#"{"primary":{"Flex":1}}"#).unwrap_err();
+        serde_json::from_str::<SizeWeight>(r#"{"primary_constraint":{"Flex":1}}"#).unwrap_err();
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `resize_delta` at line 1 column 22"
+        "missing field `resize_delta` at line 1 column 33"
     );
 }
 
 #[test]
 fn deserialization_keeps_out_of_range_values_as_stored() {
     let weight: SizeWeight = serde_json::from_str(
-        r#"{"primary":{"Percent":250},"min":0,"preferred":0,"resize_delta":0}"#,
+        r#"{"primary_constraint":{"Percent":250},"minimum_cell_count":0,"preferred_cell_count":0,"resize_delta":0}"#,
     )
     .unwrap();
     assert_eq!(

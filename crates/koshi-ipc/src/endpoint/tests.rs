@@ -139,7 +139,7 @@ fn the_file_on_disk_carries_the_real_secret() {
     let endpoint_json = std::fs::read_to_string(&endpoint_file_path).expect("read file bytes");
     assert_eq!(
         endpoint_json,
-        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret","pid":4242}"#
+        r#"{"socket_address":"/run/koshi/session-abc.sock","connection_token":"k7QxSecret","process_id":4242}"#
     );
 }
 
@@ -262,7 +262,7 @@ fn a_file_with_an_unknown_field_is_unreadable() {
     let endpoint_file_path = test_directory.path().join("session-unknown.json");
     std::fs::write(
         &endpoint_file_path,
-        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret","pid":4242,"extra":1}"#,
+        r#"{"socket_address":"/run/koshi/session-abc.sock","connection_token":"k7QxSecret","process_id":4242,"extra":1}"#,
     )
     .expect("write file");
 
@@ -277,7 +277,7 @@ fn a_file_with_an_unknown_field_is_unreadable() {
             );
             assert_eq!(
                 error_detail,
-                "unknown field `extra`, expected one of `socket`, `token`, `pid` at line 1 column 79"
+                "unknown field `extra`, expected one of `socket_address`, `connection_token`, `process_id` at line 1 column 105"
             );
         }
         unexpected_error => {
@@ -292,7 +292,7 @@ fn a_file_missing_a_field_is_unreadable() {
     let endpoint_file_path = test_directory.path().join("session-partial.json");
     std::fs::write(
         &endpoint_file_path,
-        r#"{"socket":"/run/koshi/session-abc.sock","pid":4242}"#,
+        r#"{"socket_address":"/run/koshi/session-abc.sock","process_id":4242}"#,
     )
     .expect("write file");
 
@@ -305,7 +305,10 @@ fn a_file_missing_a_field_is_unreadable() {
                 reported_endpoint_file_path,
                 endpoint_file_path.display().to_string()
             );
-            assert_eq!(error_detail, "missing field `token` at line 1 column 51");
+            assert_eq!(
+                error_detail,
+                "missing field `connection_token` at line 1 column 66"
+            );
         }
         unexpected_error => {
             panic!("expected EndpointFileUnreadable, got {unexpected_error:?}")

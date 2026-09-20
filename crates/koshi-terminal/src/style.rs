@@ -10,13 +10,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Style {
     /// Foreground (text) color.
-    #[serde(rename = "fg")]
     foreground_color: Color,
     /// Background color.
-    #[serde(rename = "bg")]
     background_color: Color,
     /// Boolean text attributes (bold, italic, …).
-    #[serde(rename = "attrs")]
     attributes: AttrFlags,
     /// Underline color (SGR `58`). `None`, the default restored by SGR `59`,
     /// follows the foreground color.

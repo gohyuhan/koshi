@@ -49,15 +49,14 @@ use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::SUPERVISOR_PROTOCOL`].
 ///
-/// Version 1 is the first version of the link.
+/// Version 2 is the current version of the link.
 pub const SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.maximum_version;
 
 /// The lowest supervisor-link protocol version this build speaks. A peer whose
 /// highest is below this one is refused with
 /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion).
 ///
-/// The floor is 1, the first version of the link. Raising it drops support
-/// for every build below it.
+/// The floor is 2. Raising it drops support for every build below it.
 pub const MIN_SUPERVISOR_PROTOCOL_VERSION: u32 = SUPERVISOR_PROTOCOL.minimum_version;
 
 /// One message from a session server to its supervisor.
@@ -96,20 +95,17 @@ pub enum SupervisorRequestKind {
         /// speaks.
         max_protocol_version: u32,
         /// The secret the session server started this supervisor with.
-        #[serde(rename = "token")]
         connection_token: ConnectionToken,
     },
-    /// Open a pane: the supervisor makes a pseudo-terminal of `size` and
-    /// launches `spec` inside it. Answered with
+    /// Open a pane: the supervisor makes a pseudo-terminal of `pty_size` and
+    /// launches `spawn_spec` inside it. Answered with
     /// [`Spawned`](SupervisorResult::Spawned).
     Spawn {
         /// The pane the supervisor keys this child by.
         pane_id: PaneId,
         /// What to launch.
-        #[serde(rename = "spec")]
         spawn_spec: SpawnSpec,
         /// The size the pane's terminal opens at.
-        #[serde(rename = "size")]
         pty_size: PtySize,
     },
     /// Retune an open pane's terminal, which its child sees as a window-size
@@ -118,17 +114,15 @@ pub enum SupervisorRequestKind {
         /// The pane to retune.
         pane_id: PaneId,
         /// The new size.
-        #[serde(rename = "size")]
         pty_size: PtySize,
     },
     /// Send bytes to a pane's child, which reach it as typed input.
     Write {
         /// The pane to write to.
         pane_id: PaneId,
-        /// The bytes to write. They travel as one base64 string, the shape
-        /// [`bytes`](crate::bytes) spells out.
+        /// The `input_bytes` travel as one base64 string, as described by
+        /// [`bytes`](crate::bytes).
         #[serde(with = "crate::bytes")]
-        #[serde(rename = "bytes")]
         input_bytes: Vec<u8>,
     },
     /// End a pane's child and drop the pane. No output and no exit for that
@@ -219,10 +213,8 @@ pub struct SupervisorPane {
     /// The pane this record is for.
     pub pane_id: PaneId,
     /// The process id of the pane's child.
-    #[serde(rename = "pid")]
     pub process_id: u32,
     /// The last size the pane's terminal was set to.
-    #[serde(rename = "size")]
     pub pty_size: PtySize,
 }
 
@@ -242,7 +234,6 @@ pub enum SupervisorResult {
     /// child is running under this process id.
     Spawned {
         /// The process id of the new child.
-        #[serde(rename = "pid")]
         process_id: u32,
     },
     /// Answers [`SupervisorRequestKind::ListPanes`]: one record per pane the
@@ -276,10 +267,9 @@ pub enum SupervisorEvent {
     Output {
         /// The pane that printed these bytes.
         pane_id: PaneId,
-        /// The bytes themselves. They travel as one base64 string, the shape
-        /// [`bytes`](crate::bytes) spells out.
+        /// The `output_bytes` travel as one base64 string, as described by
+        /// [`bytes`](crate::bytes).
         #[serde(with = "crate::bytes")]
-        #[serde(rename = "bytes")]
         output_bytes: Vec<u8>,
     },
     /// A pane's child ended. It comes after the last
@@ -288,7 +278,6 @@ pub enum SupervisorEvent {
         /// The pane whose child ended.
         pane_id: PaneId,
         /// How it ended.
-        #[serde(rename = "status")]
         exit_status: ExitStatus,
     },
 }

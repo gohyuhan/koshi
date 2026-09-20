@@ -177,14 +177,12 @@ impl Command {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewPaneArgs {
     /// Pane to split from; `None` uses the focused pane.
-    #[serde(rename = "source")]
     pub source_pane_id: Option<PaneId>,
     /// Tab the new pane joins when no source pane names one: the split
     /// anchor becomes that tab's most recently focused pane (its first pane
-    /// in layout order until one is focused). Ignored when `source` is set —
-    /// a source pane's own tab wins.
+    /// in layout order until one is focused). Ignored when `source_pane_id` is
+    /// set because that pane's own tab wins.
     #[serde(default)]
-    #[serde(rename = "tab")]
     pub tab_id: Option<TabId>,
     /// Split direction, always named by the client that issues the command:
     /// the direction its own `layout.new-pane-direction` setting resolves to,
@@ -192,13 +190,10 @@ pub struct NewPaneArgs {
     /// `should_stack` is set — a stack has no direction.
     pub direction: Direction,
     /// Stack the new pane onto the source instead of splitting space.
-    #[serde(rename = "stacked")]
     pub should_stack: bool,
     /// Working directory; `None` inherits.
-    #[serde(rename = "cwd")]
     pub working_directory: Option<PathBuf>,
     /// Spawn specification; `None` launches the default shell.
-    #[serde(rename = "command")]
     pub spawn_spec: Option<SpawnSpec>,
     /// Client to show the new pane on.
     ///
@@ -208,7 +203,6 @@ pub struct NewPaneArgs {
     /// - `None`: the issuing client; for a source with no client, the
     ///   session's sole client. A session with several attached clients and
     ///   no named target is rejected.
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -216,16 +210,13 @@ pub struct NewPaneArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ClosePaneArgs {
     /// Pane to close; `None` closes the focused pane.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// Kill the pane's child immediately, overriding its close policy.
-    #[serde(rename = "force")]
     pub should_force_close: bool,
     /// Kill the child's whole process group: every descendant it spawned
     /// stops with it. Changes kill scope only; a `ConfirmIfBusy` pane still
     /// rejects the close while busy.
     #[serde(default)]
-    #[serde(rename = "tree")]
     pub should_kill_process_tree: bool,
 }
 
@@ -233,7 +224,6 @@ pub struct ClosePaneArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResizePaneArgs {
     /// Pane to resize; `None` resizes the focused pane.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// Which of the pane's borders moves.
     pub direction: Direction,
@@ -241,7 +231,6 @@ pub struct ResizePaneArgs {
     /// the pane grows toward `direction` and the neighbor on that side
     /// donates the cells; negative moves it inward — the pane shrinks and
     /// that neighbor gains the cells. Zero is rejected at dispatch.
-    #[serde(rename = "size")]
     pub resize_amount_cells: i16,
 }
 
@@ -259,11 +248,9 @@ pub enum FocusTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusPaneArgs {
     /// Pane to focus, by id or by direction from the focused pane.
-    #[serde(rename = "target")]
     pub focus_target: FocusTarget,
     /// Client whose focus moves; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -286,11 +273,9 @@ pub enum PanePlacementAnchor {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct NewTabArgs {
     /// Working directory for the tab's first pane; `None` inherits.
-    #[serde(rename = "cwd")]
     pub working_directory: Option<PathBuf>,
     /// Client that switches onto the new tab; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -298,16 +283,13 @@ pub struct NewTabArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CloseTabArgs {
     /// Tab to close; `None` closes the focused tab.
-    #[serde(rename = "tab")]
     pub tab_id: Option<TabId>,
     /// Kill every pane's child immediately, overriding each close policy.
-    #[serde(rename = "force")]
     pub should_force_close: bool,
     /// Kill each child's whole process group: every descendant stops with
     /// its pane. Changes kill scope only; a `ConfirmIfBusy` pane still
     /// rejects the close while busy.
     #[serde(default)]
-    #[serde(rename = "tree")]
     pub should_kill_process_tree: bool,
 }
 
@@ -328,11 +310,9 @@ pub enum TabTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FocusTabArgs {
     /// Which tab to focus.
-    #[serde(rename = "target")]
     pub focus_target: TabTarget,
     /// Client whose view switches; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -340,10 +320,8 @@ pub struct FocusTabArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WriteToPaneArgs {
     /// Pane to write to; `None` writes to the focused pane.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// Raw bytes to inject into the pane's input.
-    #[serde(rename = "data")]
     pub input_bytes: Vec<u8>,
 }
 
@@ -351,12 +329,10 @@ pub struct WriteToPaneArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockModeArgs {
     /// Whether the client should be locked (input passed through verbatim).
-    #[serde(rename = "locked")]
     pub is_locked: bool,
     /// Client whose lock mode changes; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -366,7 +342,6 @@ pub struct ToggleLockModeArgs {
     /// Client whose lock mode flips; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -375,30 +350,24 @@ pub struct ToggleLockModeArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCommandPaneArgs {
     /// The command to spawn.
-    #[serde(rename = "command")]
     pub spawn_spec: SpawnSpec,
     /// Working directory; `None` inherits.
-    #[serde(rename = "cwd")]
     pub working_directory: Option<PathBuf>,
     /// Pane to split from; `None` uses the focused pane.
-    #[serde(rename = "source")]
     pub source_pane_id: Option<PaneId>,
     /// Tab the new pane joins when no source pane names one; resolved by the
     /// same rules as [`NewPaneArgs::tab_id`].
     #[serde(default)]
-    #[serde(rename = "tab")]
     pub tab_id: Option<TabId>,
     /// Split direction for the new pane, resolved by the issuing client the
     /// same way [`NewPaneArgs::direction`] is. Unused when `should_stack` is set —
     /// a stack has no direction.
     pub direction: Direction,
     /// Stack the new pane onto the source pane instead of splitting space.
-    #[serde(rename = "stacked")]
     pub should_stack: bool,
     /// Client to show the new pane on; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -406,10 +375,8 @@ pub struct RunCommandPaneArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveTabArgs {
     /// Tab to move; `None` moves the focused tab.
-    #[serde(rename = "tab")]
     pub tab_id: Option<TabId>,
     /// Destination zero-based index.
-    #[serde(rename = "index")]
     pub target_tab_index: usize,
 }
 
@@ -417,7 +384,6 @@ pub struct MoveTabArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MovePaneArgs {
     /// Tiled pane to move; `None` moves the focused pane.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// Direction in which to choose the visible neighbor.
     pub direction: Direction,
@@ -427,10 +393,8 @@ pub struct MovePaneArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwapPanesArgs {
     /// Pane whose occupant moves; `None` uses the focused pane.
-    #[serde(rename = "a")]
     pub source_pane_id: Option<PaneId>,
     /// Pane whose slot receives the source occupant.
-    #[serde(rename = "b")]
     pub target_pane_id: PaneId,
 }
 
@@ -438,10 +402,8 @@ pub struct SwapPanesArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrollPaneArgs {
     /// Pane whose view scrolls; `None` uses the target client's focused pane.
-    #[serde(rename = "pane")]
     pub pane_id: Option<PaneId>,
     /// Signed scroll line count: positive moves toward history, negative moves toward live output.
-    #[serde(rename = "lines")]
     pub scroll_line_count: i32,
 }
 
@@ -451,7 +413,6 @@ pub struct DetachArgs {
     /// Client that detaches; resolved by the same rules as
     /// [`NewPaneArgs::client_id`].
     #[serde(default)]
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
 }
 
@@ -461,11 +422,9 @@ pub struct SwitchSessionArgs {
     /// Client to move; `None` moves the issuing client. A session with several
     /// attached clients and no named target is rejected.
     #[serde(default)]
-    #[serde(rename = "client")]
     pub client_id: Option<ClientId>,
     /// Session the client moves to. The caller resolves it; this session never
     /// looks a name up.
-    #[serde(rename = "session")]
     pub session_id: SessionId,
 }
 
@@ -495,7 +454,6 @@ pub enum VisualCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSelectionArgs {
     /// The pane to highlight in.
-    #[serde(rename = "pane")]
     pub pane_id: PaneId,
     /// The highlight to put there, replacing any the pane already had.
     pub selection: Selection,
@@ -508,7 +466,6 @@ pub struct SetSelectionArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClearSelectionArgs {
     /// The pane whose highlight is dropped.
-    #[serde(rename = "pane")]
     pub pane_id: PaneId,
 }
 
@@ -519,17 +476,14 @@ pub struct ClearSelectionArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyArgs {
     /// The pane whose highlight is copied.
-    #[serde(rename = "pane")]
     pub pane_id: PaneId,
     /// Where the copied text goes.
-    #[serde(rename = "target")]
     pub clipboard_target: CopyTarget,
     /// Whether blanks at the end of each copied row are dropped.
     ///
     /// A terminal row is padded to the pane's full width with blank cells: a
     /// highlight over `hello` in an 80-column pane covers 75 trailing blanks.
     /// `true` copies `hello`; `false` copies `hello` followed by those blanks.
-    #[serde(rename = "trim_trailing_whitespace")]
     pub should_trim_trailing_whitespace: bool,
 }
 
@@ -554,7 +508,6 @@ pub enum PluginCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallPluginArgs {
     /// Where to fetch the plugin from (path, URL, or registry ref).
-    #[serde(rename = "source")]
     pub plugin_source: String,
 }
 
@@ -562,7 +515,6 @@ pub struct InstallPluginArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UninstallPluginArgs {
     /// The plugin to remove.
-    #[serde(rename = "plugin")]
     pub plugin_id: PluginId,
 }
 
@@ -570,7 +522,6 @@ pub struct UninstallPluginArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnablePluginArgs {
     /// The plugin to enable.
-    #[serde(rename = "plugin")]
     pub plugin_id: PluginId,
 }
 
@@ -578,7 +529,6 @@ pub struct EnablePluginArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisablePluginArgs {
     /// The plugin to disable.
-    #[serde(rename = "plugin")]
     pub plugin_id: PluginId,
 }
 
@@ -586,7 +536,6 @@ pub struct DisablePluginArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdatePluginArgs {
     /// The plugin to update.
-    #[serde(rename = "plugin")]
     pub plugin_id: PluginId,
 }
 
@@ -594,7 +543,6 @@ pub struct UpdatePluginArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadPluginArgs {
     /// The plugin to reload.
-    #[serde(rename = "plugin")]
     pub plugin_id: PluginId,
 }
 
@@ -651,7 +599,6 @@ pub enum CommandSource {
         /// client and an issuing client separately, and this one is never the
         /// issuer.
         #[serde(default)]
-        #[serde(rename = "target_client")]
         target_client_id: Option<ClientId>,
     },
     /// A command issued by a plugin.
@@ -778,10 +725,8 @@ impl std::error::Error for CommandEnvelopeError {}
 #[serde(try_from = "CommandEnvelopeWire")]
 pub struct CommandEnvelope {
     /// Unique id for this command transaction.
-    #[serde(rename = "id")]
     pub command_id: CommandId,
     /// Where the command originated.
-    #[serde(rename = "source")]
     pub command_source: CommandSource,
     /// Client the command is attributed to; mirrors the command source's client when it
     /// names one, and is `None` for sources that do not.
@@ -834,9 +779,7 @@ impl CommandEnvelope {
 /// [`CommandEnvelope::validate_command_envelope`], which rejects inconsistent attribution.
 #[derive(Deserialize)]
 struct CommandEnvelopeWire {
-    #[serde(rename = "id")]
     command_id: CommandId,
-    #[serde(rename = "source")]
     command_source: CommandSource,
     client_id: Option<ClientId>,
     issued_at: SystemTime,

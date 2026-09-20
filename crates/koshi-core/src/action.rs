@@ -347,13 +347,12 @@ pub enum TargetKind {
     Client,
 }
 
-/// Whether the runtime implements an action. Serializes in kebab-case:
-/// `available`, `coming-soon`.
+/// Whether the runtime implements an action. It serializes with the variant
+/// names `Available` and `ComingSoon`.
 ///
 /// Introspection (`koshi actions list`/`explain`) hides `ComingSoon` actions,
 /// and resolving one is rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum ActionStatus {
     /// The runtime implements this action; binding and invoking it work.
     Available,
@@ -388,21 +387,18 @@ pub struct ActionMetadata {
     /// One-line description for `describe`/which-key output.
     pub description: String,
     /// How broad the action's effect is.
-    #[serde(rename = "scope_class")]
     pub scope: ActionScope,
     /// Entity kinds the action can target.
-    #[serde(rename = "target_compat")]
     pub target_kinds: Vec<TargetKind>,
     /// How the action is dispatched.
     pub handler: ActionHandlerReference,
     /// Whether the runtime implements the action.
-    #[serde(rename = "status")]
     pub action_status: ActionStatus,
     /// Whether the action repeats from a held prefix: fired from a
     /// multi-chord binding, the binding's prefix stays armed and the next
     /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
     /// per action here, never in a binding. Absent on the wire means `false`.
-    #[serde(default, rename = "continuous")]
+    #[serde(default)]
     pub is_continuous: bool,
 }
 

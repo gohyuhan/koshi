@@ -655,7 +655,7 @@ fn update_state_survives_a_serialize_deserialize_round_trip() {
 fn a_release_object_deserializes_its_tag_name() {
     let release: Release = serde_json::from_str(r#"{"tag_name":"v0.2.0","name":"ignored"}"#)
         .expect("a release object with extra fields still parses");
-    assert_eq!(release.release_tag, "v0.2.0");
+    assert_eq!(release.tag_name, "v0.2.0");
 }
 
 #[test]
@@ -665,7 +665,7 @@ fn a_release_list_deserializes_every_tag_in_order() {
             .expect("a release array parses");
     let release_tags: Vec<String> = releases
         .into_iter()
-        .map(|release| release.release_tag)
+        .map(|release| release.tag_name)
         .collect();
     assert_eq!(
         release_tags,
@@ -925,7 +925,7 @@ fn highest_release_version_picks_semver_order_not_list_order() {
         release_tags
             .iter()
             .map(|release_tag| Release {
-                release_tag: (*release_tag).to_string(),
+                tag_name: (*release_tag).to_string(),
             })
             .collect()
     };

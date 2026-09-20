@@ -242,7 +242,7 @@ fn start_session_server(
         .read_line(&mut ready_line)
         .expect("the session server prints where it listens");
     assert!(
-        ready_line.contains("\"socket\""),
+        ready_line.contains("\"socket_address\""),
         "the ready line named no socket: {ready_line}"
     );
     RunningSession {

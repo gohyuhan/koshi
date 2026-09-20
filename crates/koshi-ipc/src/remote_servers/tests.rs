@@ -254,15 +254,15 @@ fn a_record_carries_the_four_fields_a_listing_reports_and_the_secret_it_leaves_b
         field_names,
         [
             "added_at",
-            "address",
-            "fingerprint",
+            "certificate_fingerprint",
+            "connection_token",
             "last_used_at",
-            "name",
-            "secret"
+            "server_address",
+            "server_name"
         ]
     );
     assert_eq!(
-        saved_server_fields["secret"],
+        saved_server_fields["connection_token"],
         serde_json::Value::String("a secret".to_string()),
         "the secret travels in the file, so the next connection presents it"
     );
@@ -278,7 +278,7 @@ fn a_record_with_no_pinned_fingerprint_travels_without_the_field_and_reads_back(
         .as_object()
         .expect("a record encodes as an object");
     assert!(
-        !saved_server_fields.contains_key("fingerprint"),
+        !saved_server_fields.contains_key("certificate_fingerprint"),
         "no pinned fingerprint leaves the file without the field: {saved_server_fields:?}"
     );
 
@@ -290,10 +290,10 @@ fn a_record_with_no_pinned_fingerprint_travels_without_the_field_and_reads_back(
 #[test]
 fn a_file_written_when_every_record_carried_a_fingerprint_still_reads() {
     let previous_saved_server_json = serde_json::json!({
-        "name": "work",
-        "address": "laptop.local:7654",
-        "secret": "a secret",
-        "fingerprint": "ab".repeat(32),
+        "server_name": "work",
+        "server_address": "laptop.local:7654",
+        "connection_token": "a secret",
+        "certificate_fingerprint": "ab".repeat(32),
         "added_at": SystemTime::UNIX_EPOCH,
         "last_used_at": null,
     });
@@ -706,7 +706,7 @@ fn a_store_holding_one_record_is_written_as_these_exact_bytes() {
     assert_eq!(
         serialized_store_text,
         format!(
-            r#"{{"format":{SERVER_STORE_FORMAT},"records":[{{"name":"work","address":"laptop.local:7654","secret":"a secret","fingerprint":"{}","added_at":{{"secs_since_epoch":100,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#,
+            r#"{{"store_format":{SERVER_STORE_FORMAT},"saved_servers":[{{"server_name":"work","server_address":"laptop.local:7654","connection_token":"a secret","certificate_fingerprint":"{}","added_at":{{"secs_since_epoch":100,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#,
             "ab".repeat(32)
         )
     );
@@ -764,7 +764,7 @@ fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
     let test_directory = TempDir::new().expect("make a test directory");
     let server_store_path = resolve_server_store_path(test_directory.path());
     let serialized_store_json = format!(
-        r#"{{"format":{SERVER_STORE_FORMAT},"records":[{{"name":"work","address":"laptop.local:7654","secret":"a secret","colour":"red","added_at":{{"secs_since_epoch":100,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
+        r#"{{"store_format":{SERVER_STORE_FORMAT},"saved_servers":[{{"server_name":"work","server_address":"laptop.local:7654","connection_token":"a secret","colour":"red","added_at":{{"secs_since_epoch":100,"nanos_since_epoch":0}},"last_used_at":null}}]}}"#
     );
     std::fs::create_dir_all(server_store_path.parent().expect("the remote directory"))
         .expect("make it");
@@ -787,23 +787,23 @@ fn a_record_carrying_an_unknown_field_makes_the_store_unreadable() {
 #[test]
 fn a_store_carrying_an_unknown_top_level_field_is_unreadable() {
     let serialized_store_json =
-        format!(r#"{{"owner":"ada","format":{SERVER_STORE_FORMAT},"records":[]}}"#);
+        format!(r#"{{"owner":"ada","store_format":{SERVER_STORE_FORMAT},"saved_servers":[]}}"#);
 
     let unknown_field_store_error =
         serde_json::from_str::<ServerStore>(&serialized_store_json).expect_err("refused");
     assert_eq!(
         unknown_field_store_error.to_string(),
-        "unknown field `owner`, expected `format` or `records` at line 1 column 8"
+        "unknown field `owner`, expected `store_format` or `saved_servers` at line 1 column 8"
     );
 }
 
 #[test]
 fn a_fingerprint_written_as_null_reads_back_as_none() {
     let saved_server_json = serde_json::json!({
-        "name": "work",
-        "address": "laptop.local:7654",
-        "secret": "a secret",
-        "fingerprint": null,
+        "server_name": "work",
+        "server_address": "laptop.local:7654",
+        "connection_token": "a secret",
+        "certificate_fingerprint": null,
         "added_at": SystemTime::UNIX_EPOCH,
         "last_used_at": null,
     });

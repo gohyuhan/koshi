@@ -105,7 +105,7 @@ fn mouse_input_serde_wire_form_carries_the_kind_cell_and_modifiers() {
 
     assert_eq!(
         serde_json::to_string(&left_click).expect("serialize"),
-        "{\"kind\":{\"Press\":\"Left\"},\"at\":{\"x\":10,\"y\":3},\"mods\":1}"
+        "{\"mouse_kind\":{\"Press\":\"Left\"},\"position\":{\"column\":10,\"row\":3},\"modifier_flags\":1}"
     );
 }
 
@@ -119,7 +119,7 @@ fn mouse_answer_serde_wire_form_names_the_variant_and_its_fields() {
             top_row_number: Some(101)
         })
         .expect("serialize"),
-        "{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\",\"top\":101}}"
+        "{\"Scrolled\":{\"pane_id\":\"00000000-0000-0000-0000-000000000000\",\"top_row_number\":101}}"
     );
     assert_eq!(
         serde_json::to_string(&MouseAnswer::Scrolled {
@@ -127,7 +127,7 @@ fn mouse_answer_serde_wire_form_names_the_variant_and_its_fields() {
             top_row_number: None,
         })
         .expect("serialize"),
-        "{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\",\"top\":null}}"
+        "{\"Scrolled\":{\"pane_id\":\"00000000-0000-0000-0000-000000000000\",\"top_row_number\":null}}"
     );
     assert_eq!(
         serde_json::to_string(&MouseAnswer::Resized {
@@ -137,8 +137,8 @@ fn mouse_answer_serde_wire_form_names_the_variant_and_its_fields() {
             applied_cell_count: 3
         })
         .expect("serialize"),
-        "{\"Resized\":{\"pane\":\"00000000-0000-0000-0000-000000000000\",\
-         \"side\":\"Up\",\"step\":-1,\"applied\":3}}"
+        "{\"Resized\":{\"pane_id\":\"00000000-0000-0000-0000-000000000000\",\
+         \"border_side\":\"Up\",\"resize_step\":-1,\"applied_cell_count\":3}}"
     );
 }
 
@@ -374,9 +374,10 @@ fn decoding_refuses_a_mouse_kind_no_variant_names() {
 
 #[test]
 fn a_scrolled_answer_missing_its_top_line_decodes_as_none() {
-    let decoded_mouse_answer: MouseAnswer =
-        serde_json::from_str("{\"Scrolled\":{\"pane\":\"00000000-0000-0000-0000-000000000000\"}}")
-            .expect("a missing `top` reads as `None`");
+    let decoded_mouse_answer: MouseAnswer = serde_json::from_str(
+        "{\"Scrolled\":{\"pane_id\":\"00000000-0000-0000-0000-000000000000\"}}",
+    )
+    .expect("a missing `top_row_number` reads as `None`");
     assert_eq!(
         decoded_mouse_answer,
         MouseAnswer::Scrolled {

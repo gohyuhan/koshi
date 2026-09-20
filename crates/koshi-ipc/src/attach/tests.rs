@@ -227,10 +227,10 @@ fn a_pane_missing_its_kind_is_refused() {
     encoded_json["panes"][0]
         .as_object_mut()
         .expect("a pane encodes as an object")
-        .remove("kind");
+        .remove("pane_kind");
 
     let decode_error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded_json)
         .expect_err("a pane without its kind decoded instead of failing");
 
-    assert_eq!(decode_error.to_string(), "missing field `kind`");
+    assert_eq!(decode_error.to_string(), "missing field `pane_kind`");
 }

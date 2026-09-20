@@ -236,39 +236,39 @@ fn image_content_events_have_the_pinned_wire_shape() {
         .expect("the image start encodes"),
         json!({
             "ImageContentStart": {
-                "image": {
-                    "id": 1,
-                    "record": {
+                "image_transfer": {
+                    "image_content_id": 1,
+                    "image_record": {
                         "protocol": "Kitty",
-                        "width": 2,
-                        "height": 1,
-                        "action": "Display",
+                        "pixel_width": 2,
+                        "pixel_height": 1,
+                        "image_action": "Display",
                         "display": {
-                            "width": null,
-                            "height": null,
-                            "preserve_aspect_ratio": true,
+                            "requested_width": null,
+                            "requested_height": null,
+                            "is_aspect_ratio_preserved": true,
                             "sixel_background": null,
                             "image_id": null,
                             "image_number": null,
                             "placement_id": null,
                             "usage_hints": 0,
-                            "unicode_placeholder": false,
+                            "is_unicode_placeholder": false,
                             "z_index": 0,
                             "relative_image_id": null,
                             "relative_placement_id": null,
-                            "relative_offset_x": 0,
-                            "relative_offset_y": 0,
-                            "cell_columns": null,
-                            "cell_rows": null,
-                            "source_offset_x": null,
-                            "source_offset_y": null,
-                            "cell_offset_x": null,
-                            "cell_offset_y": null,
-                            "move_cursor": true
+                            "relative_column_offset": 0,
+                            "relative_row_offset": 0,
+                            "requested_column_count": null,
+                            "requested_row_count": null,
+                            "source_pixel_offset_x": null,
+                            "source_pixel_offset_y": null,
+                            "cell_pixel_offset_x": null,
+                            "cell_pixel_offset_y": null,
+                            "should_move_cursor": true
                         },
-                        "anchor": [0, 0]
+                        "anchor_cell": [0, 0]
                     },
-                    "byte_len": 8
+                    "image_byte_count": 8
                 }
             }
         })
@@ -285,11 +285,11 @@ fn image_content_events_have_the_pinned_wire_shape() {
         .expect("the image chunk encodes"),
         json!({
             "ImageContentChunk": {
-                "chunk": {
-                    "transfer_id": 1,
-                    "offset": 0,
-                    "last": true,
-                    "bytes": "AAECAwQFBgc="
+                "image_chunk": {
+                    "image_transfer_id": 1,
+                    "byte_offset": 0,
+                    "is_last": true,
+                    "chunk_bytes": "AAECAwQFBgc="
                 }
             }
         })
@@ -404,7 +404,7 @@ fn a_painted_frame_carrying_an_unknown_field_ignores_it() {
         frame: Box::new(build_test_painted_frame()),
     })
     .expect("event encodes");
-    encoded_json["Painted"]["frame"]["panes"][0]
+    encoded_json["Painted"]["frame"]["pane_snapshots"][0]
         .as_object_mut()
         .expect("a pane encodes as an object")
         .insert("zoomed".to_string(), serde_json::Value::Bool(true));
@@ -477,17 +477,17 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
                 "client_id": wire_identifier,
                 "tab_id": wire_identifier,
                 "pane_id": wire_identifier,
-                "prior_pane": wire_identifier
+                "previous_pane_id": wire_identifier
             } }),
             json!({ "LayoutChanged": { "tab_id": wire_identifier } }),
             json!({ "TabCreated": { "tab_id": wire_identifier } }),
             json!({ "TabClosed": { "tab_id": wire_identifier } }),
-            json!({ "TabFocused": { "client_id": wire_identifier, "tab_id": wire_identifier, "prior_tab": wire_identifier } }),
-            json!({ "TabMoved": { "tab_id": wire_identifier, "old_index": 2, "new_index": 0 } }),
+            json!({ "TabFocused": { "client_id": wire_identifier, "tab_id": wire_identifier, "previous_tab_id": wire_identifier } }),
+            json!({ "TabMoved": { "tab_id": wire_identifier, "previous_tab_index": 2, "new_tab_index": 0 } }),
             json!("Quit"),
             json!("Restarting"),
             json!("Detached"),
-            json!({ "Resync": { "dropped_count": 4 } }),
+            json!({ "Resync": { "dropped_event_count": 4 } }),
             json!({ "SwitchTo": { "session_id": wire_identifier } }),
         ]
     );
@@ -496,12 +496,12 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
 #[test]
 fn an_event_carrying_an_unknown_field_ignores_it() {
     let decoded_event_with_unknown_field: SessionEvent = serde_json::from_str(
-        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","old_index":2,"new_index":0,"pinned":true}}"#,
+        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","previous_tab_index":2,"new_tab_index":0,"pinned":true}}"#,
     )
     .expect("a field this build does not know is ignored");
 
     let decoded_event_without_unknown_field: SessionEvent = serde_json::from_str(
-        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","old_index":2,"new_index":0}}"#,
+        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","previous_tab_index":2,"new_tab_index":0}}"#,
     )
     .expect("the same frame without the extra field decodes");
 
@@ -586,9 +586,9 @@ fn the_payload_frames_wire_shape_belongs_to_this_protocol_version() {
         .expect("event encodes"),
         json!({ "MouseAnswer": {
             "request_id": 9,
-            "answers": [
-                { "Scrolled": { "pane": wire_identifier, "top": 938 } },
-                { "Resized": { "pane": wire_identifier, "side": "Up", "step": -1, "applied": 0 } }
+            "mouse_answers": [
+                { "Scrolled": { "pane_id": wire_identifier, "top_row_number": 938 } },
+                { "Resized": { "pane_id": wire_identifier, "border_side": "Up", "resize_step": -1, "applied_cell_count": 0 } }
             ]
         } })
     );
@@ -597,7 +597,7 @@ fn the_payload_frames_wire_shape_belongs_to_this_protocol_version() {
             host_output_bytes: vec![0x1b, b']', 0xc3, 0xa9],
         })
         .expect("event encodes"),
-        json!({ "HostWrite": { "bytes": "G13DqQ==" } })
+        json!({ "HostWrite": { "host_output_bytes": "G13DqQ==" } })
     );
 }
 
@@ -611,7 +611,7 @@ fn a_host_write_travels_as_one_base64_string() {
 
     assert_eq!(
         serialized_event_json,
-        r#"{"HostWrite":{"bytes":"G13DqQ=="}}"#
+        r#"{"HostWrite":{"host_output_bytes":"G13DqQ=="}}"#
     );
     let decoded_event: SessionEvent =
         serde_json::from_str(&serialized_event_json).expect("event decodes");
@@ -629,7 +629,7 @@ fn every_byte_value_survives_a_host_write() {
 
     assert_eq!(
         serialized_event_json,
-        json!({ "HostWrite": { "bytes": "\
+        json!({ "HostWrite": { "host_output_bytes": "\
 AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7\
 PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3\
 eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKz\
@@ -651,7 +651,8 @@ tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v
 #[test]
 fn a_host_write_carrying_a_list_of_numbers_still_reads() {
     let decoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"bytes":[27,93,195,169]}}"#).expect("event decodes");
+        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":[27,93,195,169]}}"#)
+            .expect("event decodes");
 
     assert_eq!(
         decoded_event,
@@ -663,16 +664,16 @@ fn a_host_write_carrying_a_list_of_numbers_still_reads() {
     // from.
     assert_eq!(
         serde_json::to_string(&decoded_event).expect("event encodes"),
-        r#"{"HostWrite":{"bytes":"G13DqQ=="}}"#
+        r#"{"HostWrite":{"host_output_bytes":"G13DqQ=="}}"#
     );
 }
 
 #[test]
 fn an_empty_host_write_reads_from_either_shape() {
     let list_encoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"bytes":[]}}"#).expect("event decodes");
+        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":[]}}"#).expect("event decodes");
     let base64_encoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"bytes":""}}"#).expect("event decodes");
+        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":""}}"#).expect("event decodes");
 
     assert_eq!(
         list_encoded_event,
@@ -685,8 +686,9 @@ fn an_empty_host_write_reads_from_either_shape() {
 
 #[test]
 fn a_host_write_list_entry_outside_a_byte_is_refused() {
-    let decode_error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":[27,256]}}"#)
-        .expect_err("256 is not a byte");
+    let decode_error =
+        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":[27,256]}}"#)
+            .expect_err("256 is not a byte");
 
     assert!(
         decode_error.to_string().contains("invalid value"),
@@ -696,8 +698,9 @@ fn a_host_write_list_entry_outside_a_byte_is_refused() {
 
 #[test]
 fn a_host_write_carrying_neither_shape_is_refused() {
-    let decode_error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":27}}"#)
-        .expect_err("a number is neither shape");
+    let decode_error =
+        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":27}}"#)
+            .expect_err("a number is neither shape");
 
     assert!(
         decode_error
@@ -709,8 +712,9 @@ fn a_host_write_carrying_neither_shape_is_refused() {
 
 #[test]
 fn a_host_write_carrying_text_that_is_not_base64_is_refused() {
-    let decode_error = serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"bytes":"a"}}"#)
-        .expect_err("one character is not a base64 group");
+    let decode_error =
+        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":"a"}}"#)
+            .expect_err("one character is not a base64 group");
 
     assert!(
         decode_error
@@ -763,22 +767,22 @@ fn numeric_fields_round_trip_at_their_extremes() {
 #[test]
 fn an_event_whose_count_is_negative_is_refused() {
     let dropped_event: Result<SessionEvent, _> =
-        serde_json::from_str(r#"{"Resync":{"dropped_count":-4}}"#);
+        serde_json::from_str(r#"{"Resync":{"dropped_event_count":-4}}"#);
     let malformed_tab_move_event: Result<SessionEvent, _> = serde_json::from_str(
-        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","old_index":-1,"new_index":0}}"#,
+        r#"{"TabMoved":{"tab_id":"00000000-0000-0000-0000-000000000001","previous_tab_index":-1,"new_tab_index":0}}"#,
     );
 
     assert_eq!(
         dropped_event
             .expect_err("a negative dropped count decoded instead of failing")
             .to_string(),
-        "invalid value: integer `-4`, expected u64 at line 1 column 29"
+        "invalid value: integer `-4`, expected u64 at line 1 column 35"
     );
     assert_eq!(
         malformed_tab_move_event
             .expect_err("a negative index decoded instead of failing")
             .to_string(),
-        "invalid value: integer `-1`, expected usize at line 1 column 75"
+        "invalid value: integer `-1`, expected usize at line 1 column 84"
     );
 }
 
@@ -833,7 +837,7 @@ fn a_pane_exit_frame_without_a_signal_field_decodes_with_no_signal() {
 fn a_frame_this_build_has_reads_as_known() {
     let bare_event: IncomingEvent = serde_json::from_str(r#""Quit""#).expect("a bare name decodes");
     let event_with_fields: IncomingEvent =
-        serde_json::from_str(r#"{"Resync":{"dropped_count":4}}"#).expect("a frame decodes");
+        serde_json::from_str(r#"{"Resync":{"dropped_event_count":4}}"#).expect("a frame decodes");
 
     assert_eq!(bare_event, MaybeKnown::Known(SessionEvent::Quit));
     assert_eq!(

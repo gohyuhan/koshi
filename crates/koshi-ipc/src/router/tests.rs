@@ -68,19 +68,19 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     // pair that does not. The version moves once per release cycle, not once
     // per change, so a shape edit inside an unreleased cycle leaves it alone.
     //
-    // Shape as of control-plane protocol version 2. Round-trip tests cannot
+    // Shape as of control-plane protocol version 3. Round-trip tests cannot
     // catch this: one build encoding and decoding its own structs always
     // agrees with itself.
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
             request_id: 1,
             request_kind: RouterRequestKind::Hello {
-                min_protocol_version: 1,
-                max_protocol_version: 1,
+                min_protocol_version: 3,
+                max_protocol_version: 3,
                 connection_token: build_test_connection_token(),
             },
         }),
-        r#"{"request_id":1,"kind":{"Hello":{"min_protocol_version":1,"max_protocol_version":1,"token":"k7QxSecret"}}}"#
+        r#"{"request_id":1,"request_kind":{"Hello":{"min_protocol_version":3,"max_protocol_version":3,"connection_token":"k7QxSecret"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -91,7 +91,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 is_other_user_access_allowed: None,
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":null}}}"#
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":null,"working_directory":null,"is_other_user_access_allowed":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -102,7 +102,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 is_other_user_access_allowed: None,
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":null,"allow_other_users":null}}}"#
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":"dev","working_directory":null,"is_other_user_access_allowed":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -113,7 +113,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 is_other_user_access_allowed: None,
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":"dev","cwd":"/home/dev/api","allow_other_users":null}}}"#
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":"dev","working_directory":"/home/dev/api","is_other_user_access_allowed":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -124,7 +124,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 is_other_user_access_allowed: Some(true),
             },
         }),
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":true}}}"#
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":null,"working_directory":null,"is_other_user_access_allowed":true}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -135,21 +135,21 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 )),
             },
         }),
-        r#"{"request_id":3,"kind":{"AttachLookup":{"selector":{"Id":"00000000-0000-0000-0000-000000000001"}}}}"#
+        r#"{"request_id":3,"request_kind":{"AttachLookup":{"session_selector":{"SessionId":"00000000-0000-0000-0000-000000000001"}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
             request_id: 4,
             request_kind: RouterRequestKind::ListSessions,
         }),
-        r#"{"request_id":4,"kind":"ListSessions"}"#
+        r#"{"request_id":4,"request_kind":"ListSessions"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
             request_id: 5,
             request_kind: RouterRequestKind::Restart,
         }),
-        r#"{"request_id":5,"kind":"Restart"}"#
+        r#"{"request_id":5,"request_kind":"Restart"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -160,7 +160,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 expires_in: Some(Duration::from_secs(3600)),
             },
         }),
-        r#"{"request_id":6,"kind":{"GrantToken":{"identity":"build-box","scope":"HostWide","expires_in":{"secs":3600,"nanos":0}}}}"#
+        r#"{"request_id":6,"request_kind":{"GrantToken":{"identity":"build-box","scope":"HostWide","expires_in":{"secs":3600,"nanos":0}}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -171,7 +171,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 expires_in: None,
             },
         }),
-        r#"{"request_id":6,"kind":{"GrantToken":{"identity":"build-box","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"expires_in":null}}}"#
+        r#"{"request_id":6,"request_kind":{"GrantToken":{"identity":"build-box","scope":{"Session":"00000000-0000-0000-0000-000000000001"},"expires_in":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -181,7 +181,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 scope: None,
             },
         }),
-        r#"{"request_id":7,"kind":{"RevokeToken":{"identity":"build-box","scope":null}}}"#
+        r#"{"request_id":7,"request_kind":{"RevokeToken":{"identity":"build-box","scope":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -191,14 +191,14 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 scope: Some(TokenScope::HostWide),
             },
         }),
-        r#"{"request_id":7,"kind":{"RevokeToken":{"identity":"build-box","scope":"HostWide"}}}"#
+        r#"{"request_id":7,"request_kind":{"RevokeToken":{"identity":"build-box","scope":"HostWide"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
             request_id: 8,
             request_kind: RouterRequestKind::ListTokens { scope: None },
         }),
-        r#"{"request_id":8,"kind":{"ListTokens":{"scope":null}}}"#
+        r#"{"request_id":8,"request_kind":{"ListTokens":{"scope":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -209,7 +209,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 ))),
             },
         }),
-        r#"{"request_id":8,"kind":{"ListTokens":{"scope":{"Session":"00000000-0000-0000-0000-000000000001"}}}}"#
+        r#"{"request_id":8,"request_kind":{"ListTokens":{"scope":{"Session":"00000000-0000-0000-0000-000000000001"}}}}"#
     );
 
     assert_eq!(
@@ -220,35 +220,35 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 build_version: "0.9.9".to_string(),
             },
         }),
-        r#"{"request_id":1,"result":{"Hello":{"protocol_version":2,"version":"0.9.9"}}}"#
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":3,"build_version":"0.9.9"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(2),
             answer_result: RouterResult::Created(build_test_session_address()),
         }),
-        r#"{"request_id":2,"result":{"Created":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock","pid":4242}}}"#
+        r#"{"request_id":2,"answer_result":{"Created":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","socket_address":"/run/koshi/session.sock","process_id":4242}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(3),
             answer_result: RouterResult::Found(build_test_session_address()),
         }),
-        r#"{"request_id":3,"result":{"Found":{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock","pid":4242}}}"#
+        r#"{"request_id":3,"answer_result":{"Found":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","socket_address":"/run/koshi/session.sock","process_id":4242}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(4),
             answer_result: RouterResult::Sessions(vec![build_test_session_discovery()]),
         }),
-        r#"{"request_id":4,"result":{"Sessions":[{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","created_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"attached_clients":["00000000-0000-0000-0000-000000000001"],"pane_count":1}]}}"#
+        r#"{"request_id":4,"answer_result":{"Sessions":[{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","created_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"attached_client_ids":["00000000-0000-0000-0000-000000000001"],"pane_count":1}]}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(5),
             answer_result: RouterResult::Restarting,
         }),
-        r#"{"request_id":5,"result":"Restarting"}"#
+        r#"{"request_id":5,"answer_result":"Restarting"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -258,7 +258,7 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 did_replace_active_grant: true,
             },
         }),
-        r#"{"request_id":6,"result":{"Granted":{"token":"k7QxSecret","replaced":true}}}"#
+        r#"{"request_id":6,"answer_result":{"Granted":{"connection_token":"k7QxSecret","did_replace_active_grant":true}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -268,14 +268,14 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 TokenScope::Session(SessionId::from_uuid(build_fixed_test_uuid())),
             ]),
         }),
-        r#"{"request_id":7,"result":{"Revoked":["HostWide",{"Session":"00000000-0000-0000-0000-000000000001"}]}}"#
+        r#"{"request_id":7,"answer_result":{"Revoked":["HostWide",{"Session":"00000000-0000-0000-0000-000000000001"}]}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(8),
             answer_result: RouterResult::Tokens(vec![build_test_token_entry()]),
         }),
-        r#"{"request_id":8,"result":{"Tokens":[{"identity":"build-box","scope":"HostWide","issued_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null}]}}"#
+        r#"{"request_id":8,"answer_result":{"Tokens":[{"identity":"build-box","scope":"HostWide","issued_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"expires_at":null,"last_used_at":null,"revoked_at":null}]}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -285,15 +285,15 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
                 message: "the request could not be read".to_string(),
             }),
         }),
-        r#"{"request_id":null,"result":{"Error":{"code":"malformed_request","message":"the request could not be read"}}}"#
+        r#"{"request_id":null,"answer_result":{"Error":{"code":"MalformedRequest","message":"the request could not be read"}}}"#
     );
 
     assert_eq!(
         serialize_test_wire_message(&SessionServerReady {
-            protocol_version: 1,
+            protocol_version: 3,
             socket_address: "/run/koshi/session.sock".to_string(),
         }),
-        r#"{"protocol_version":1,"socket":"/run/koshi/session.sock"}"#
+        r#"{"protocol_version":3,"socket_address":"/run/koshi/session.sock"}"#
     );
 }
 
@@ -306,7 +306,7 @@ fn an_attach_lookup_by_name_carries_the_name() {
                 session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
             },
         }),
-        r#"{"request_id":3,"kind":{"AttachLookup":{"selector":{"Name":"quiet-lake"}}}}"#
+        r#"{"request_id":3,"request_kind":{"AttachLookup":{"session_selector":{"SessionName":"quiet-lake"}}}}"#
     );
 }
 
@@ -317,14 +317,14 @@ fn the_remote_access_requests_travel_as_bare_names() {
             request_id: 9,
             request_kind: RouterRequestKind::RemoteStatus,
         }),
-        r#"{"request_id":9,"kind":"RemoteStatus"}"#
+        r#"{"request_id":9,"request_kind":"RemoteStatus"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
             request_id: 10,
             request_kind: RouterRequestKind::EnableRemote,
         }),
-        r#"{"request_id":10,"kind":"EnableRemote"}"#
+        r#"{"request_id":10,"request_kind":"EnableRemote"}"#
     );
 }
 
@@ -342,7 +342,7 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
             },
         }),
         format!(
-            r#"{{"request_id":9,"result":{{"RemoteStatus":{{"address":"0.0.0.0:7654","enabled":true,"listening":false,"fingerprint":"{}","remote_connections":2}}}}}}"#,
+            r#"{{"request_id":9,"answer_result":{{"RemoteStatus":{{"remote_listen_address":"0.0.0.0:7654","is_remote_access_enabled":true,"is_listening":false,"certificate_fingerprint":"{}","remote_connection_count":2}}}}}}"#,
             "ab".repeat(32)
         )
     );
@@ -357,7 +357,7 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
                 remote_connection_count: None,
             },
         }),
-        r#"{"request_id":9,"result":{"RemoteStatus":{"address":null,"enabled":false,"listening":false,"fingerprint":null,"remote_connections":null}}}"#
+        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null,"remote_connection_count":null}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -368,7 +368,7 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
             },
         }),
         format!(
-            r#"{{"request_id":10,"result":{{"RemoteEnabled":{{"address":"0.0.0.0:7654","fingerprint":"{}"}}}}}}"#,
+            r#"{{"request_id":10,"answer_result":{{"RemoteEnabled":{{"remote_listen_address":"0.0.0.0:7654","certificate_fingerprint":"{}"}}}}}}"#,
             "ab".repeat(32)
         )
     );
@@ -377,7 +377,7 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
 #[test]
 fn a_remote_status_without_a_connection_count_decodes_with_none() {
     let response: RouterResponse = serde_json::from_str(
-        r#"{"request_id":9,"result":{"RemoteStatus":{"address":null,"enabled":false,"listening":false,"fingerprint":null}}}"#,
+        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null}}}"#,
     )
     .expect("a status without a count decodes");
 
@@ -397,12 +397,11 @@ fn a_remote_status_without_a_connection_count_decodes_with_none() {
 }
 
 #[test]
-fn this_build_speaks_control_plane_versions_one_to_two() {
-    // Version 2 is this build's own: a session the router does not have is
-    // refused with NotFound, where version 1 sent MalformedRequest. The floor
-    // stays 1, the version 0.2.0 speaks, so those callers are still served.
-    assert_eq!(ROUTER_PROTOCOL_VERSION, 2);
-    assert_eq!(MIN_ROUTER_PROTOCOL_VERSION, 1);
+fn this_build_speaks_control_plane_version_three_only() {
+    // Version 3 is this build's own: a session the router does not have is
+    // refused with NotFound.
+    assert_eq!(ROUTER_PROTOCOL_VERSION, 3);
+    assert_eq!(MIN_ROUTER_PROTOCOL_VERSION, 3);
 }
 
 #[test]
@@ -583,9 +582,10 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
 
 #[test]
 fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
-    let decoded: RouterRequest<MaybeKnown<RouterRequestKind>> =
-        serde_json::from_str(r#"{"request_id":9,"kind":{"RehomeToken":{"identity":"build-box"}}}"#)
-            .expect("a kind this build does not have still reads");
+    let decoded: RouterRequest<MaybeKnown<RouterRequestKind>> = serde_json::from_str(
+        r#"{"request_id":9,"request_kind":{"RehomeToken":{"identity":"build-box"}}}"#,
+    )
+    .expect("a kind this build does not have still reads");
 
     assert_eq!(
         decoded,
@@ -601,7 +601,7 @@ fn a_request_kind_this_build_lacks_reads_as_unknown_carrying_its_name() {
 #[test]
 fn an_unknown_kind_sent_as_a_bare_name_reads_as_unknown_carrying_its_name() {
     let decoded: RouterRequest<MaybeKnown<RouterRequestKind>> =
-        serde_json::from_str(r#"{"request_id":9,"kind":"RehomeToken"}"#)
+        serde_json::from_str(r#"{"request_id":9,"request_kind":"RehomeToken"}"#)
             .expect("a kind this build does not have still reads");
 
     assert_eq!(
@@ -617,22 +617,24 @@ fn an_unknown_kind_sent_as_a_bare_name_reads_as_unknown_carrying_its_name() {
 
 #[test]
 fn a_kind_this_build_has_with_a_payload_it_cannot_read_keeps_the_decoding_error() {
-    let decoded: Result<RouterRequest<MaybeKnown<RouterRequestKind>>, _> =
-        serde_json::from_str(r#"{"request_id":3,"kind":{"AttachLookup":{"selector":7}}}"#);
+    let decoded: Result<RouterRequest<MaybeKnown<RouterRequestKind>>, _> = serde_json::from_str(
+        r#"{"request_id":3,"request_kind":{"AttachLookup":{"session_selector":7}}}"#,
+    );
 
     assert_eq!(
         decoded
             .expect_err("a selector that names no session is not this version's shape")
             .to_string(),
-        "expected value at line 1 column 29"
+        "expected value at line 1 column 37"
     );
 }
 
 #[test]
 fn an_answer_this_build_does_not_have_reads_as_unknown_carrying_its_name() {
-    let decoded: IncomingRouterResponse =
-        serde_json::from_str(r#"{"request_id":9,"result":{"Rehomed":{"identity":"build-box"}}}"#)
-            .expect("an answer this build does not have still reads");
+    let decoded: IncomingRouterResponse = serde_json::from_str(
+        r#"{"request_id":9,"answer_result":{"Rehomed":{"identity":"build-box"}}}"#,
+    )
+    .expect("an answer this build does not have still reads");
 
     assert_eq!(
         decoded,
@@ -647,20 +649,21 @@ fn an_answer_this_build_does_not_have_reads_as_unknown_carrying_its_name() {
 
 #[test]
 fn a_request_missing_its_id_is_refused() {
-    let decoded: Result<RouterRequest, _> = serde_json::from_str(r#"{"kind":"ListSessions"}"#);
+    let decoded: Result<RouterRequest, _> =
+        serde_json::from_str(r#"{"request_kind":"ListSessions"}"#);
 
     assert_eq!(
         decoded
             .expect_err("a request without an id is not this version's shape")
             .to_string(),
-        "missing field `request_id` at line 1 column 23"
+        "missing field `request_id` at line 1 column 31"
     );
 }
 
 #[test]
 fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
     let decoded: RouterRequest = serde_json::from_str(
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":null,"tab_count":3}}}"#,
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":null,"working_directory":null,"is_other_user_access_allowed":null,"tab_count":3}}}"#,
     )
     .expect("a field this build lacks is passed over");
 
@@ -680,7 +683,7 @@ fn a_request_kind_carrying_a_field_this_build_does_not_know_still_reads() {
 #[test]
 fn a_session_address_carrying_a_field_this_build_does_not_know_still_reads() {
     let decoded: SessionAddress = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock","pid":4242,"uptime":7}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","socket_address":"/run/koshi/session.sock","process_id":4242,"uptime":7}"#,
     )
     .expect("a field this build lacks is passed over");
 
@@ -690,14 +693,14 @@ fn a_session_address_carrying_a_field_this_build_does_not_know_still_reads() {
 #[test]
 fn a_ready_line_carrying_a_field_this_build_does_not_know_still_reads() {
     let decoded: SessionServerReady = serde_json::from_str(
-        r#"{"protocol_version":1,"socket":"/run/koshi/session.sock","pid":4242}"#,
+        r#"{"protocol_version":3,"socket_address":"/run/koshi/session.sock","process_id":4242}"#,
     )
     .expect("a field this build lacks is passed over");
 
     assert_eq!(
         decoded,
         SessionServerReady {
-            protocol_version: 1,
+            protocol_version: 3,
             socket_address: "/run/koshi/session.sock".to_string(),
         }
     );
@@ -722,20 +725,20 @@ fn printing_a_granted_answer_reveals_no_secret() {
 #[test]
 fn a_request_carrying_an_unknown_field_is_refused() {
     let decoded: Result<RouterRequest, _> =
-        serde_json::from_str(r#"{"request_id":1,"kind":"ListSessions","junk":5}"#);
+        serde_json::from_str(r#"{"request_id":1,"request_kind":"ListSessions","junk":5}"#);
 
     assert_eq!(
         decoded
             .expect_err("an unknown field is not this version's shape")
             .to_string(),
-        "unknown field `junk`, expected `request_id` or `kind` at line 1 column 44"
+        "unknown field `junk`, expected `request_id` or `request_kind` at line 1 column 52"
     );
 }
 
 #[test]
 fn a_create_session_carrying_the_other_users_answer_decodes() {
     let decoded: RouterRequest = serde_json::from_str(
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null,"allow_other_users":true}}}"#,
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":null,"working_directory":null,"is_other_user_access_allowed":true}}}"#,
     )
     .expect("a create naming the other-users answer is this version's shape");
 
@@ -758,7 +761,7 @@ fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
     // like here. It reads as "no answer given", which leaves the session's own
     // `koshi.kdl` to decide, so such a caller keeps the reachability it had.
     let decoded: RouterRequest = serde_json::from_str(
-        r#"{"request_id":2,"kind":{"CreateSession":{"profile":null,"cwd":null}}}"#,
+        r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":null,"working_directory":null}}}"#,
     )
     .expect("a create naming no other-users answer still reads");
 
@@ -779,15 +782,16 @@ fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
 // absent field reads as an empty string.
 #[test]
 fn a_hello_without_a_version_field_decodes_with_an_empty_version() {
-    let response: RouterResponse =
-        serde_json::from_str(r#"{"request_id":1,"result":{"Hello":{"protocol_version":2}}}"#)
-            .expect("a version-less Hello decodes");
+    let response: RouterResponse = serde_json::from_str(
+        r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":3}}}"#,
+    )
+    .expect("a version-less Hello decodes");
     assert_eq!(
         response,
         RouterResponse {
             request_id: Some(1),
             answer_result: RouterResult::Hello {
-                protocol_version: 2,
+                protocol_version: 3,
                 build_version: String::new(),
             },
         }
@@ -796,10 +800,11 @@ fn a_hello_without_a_version_field_decodes_with_an_empty_version() {
 
 #[test]
 fn a_restart_and_its_answer_read_back_from_their_wire_text() {
-    let request: RouterRequest = serde_json::from_str(r#"{"request_id":5,"kind":"Restart"}"#)
-        .expect("a restart request is this version's shape");
+    let request: RouterRequest =
+        serde_json::from_str(r#"{"request_id":5,"request_kind":"Restart"}"#)
+            .expect("a restart request is this version's shape");
     let response: RouterResponse =
-        serde_json::from_str(r#"{"request_id":5,"result":"Restarting"}"#)
+        serde_json::from_str(r#"{"request_id":5,"answer_result":"Restarting"}"#)
             .expect("a restarting answer is this version's shape");
 
     assert_eq!(
@@ -824,14 +829,14 @@ fn a_session_address_missing_its_pid_is_refused() {
     // must fail rather than fill in a default, so the mismatch surfaces
     // instead of producing a row that names process 0.
     let decoded: Result<SessionAddress, _> = serde_json::from_str(
-        r#"{"id":"00000000-0000-0000-0000-000000000001","name":"quiet-lake","socket":"/run/koshi/session.sock"}"#,
+        r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","socket_address":"/run/koshi/session.sock"}"#,
     );
 
     assert_eq!(
         decoded
             .expect_err("an address without a pid is not this version's shape")
             .to_string(),
-        "missing field `pid` at line 1 column 100"
+        "missing field `process_id` at line 1 column 124"
     );
 }
 
@@ -859,8 +864,8 @@ fn a_hello_built_here_names_this_builds_range() {
     assert_eq!(
         RouterRequestKind::build_hello_request(build_test_connection_token()),
         RouterRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 2,
+            min_protocol_version: 3,
+            max_protocol_version: 3,
             connection_token: build_test_connection_token(),
         }
     );

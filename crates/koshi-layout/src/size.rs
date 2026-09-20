@@ -26,7 +26,6 @@ pub enum SizeConstraint {
     /// An exact number of cells.
     Fixed(u16),
     /// A floor: behaves like `Flex(1)` but never solves below this many cells.
-    #[serde(rename = "Min")]
     Minimum(u16),
     /// A target honored when slack allows: behaves like `Flex(1)` that aims
     /// for this many cells.
@@ -142,18 +141,15 @@ impl SizeConstraint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SizeWeight {
     /// The distribution strategy for this child.
-    #[serde(rename = "primary")]
     pub primary_constraint: SizeConstraint,
     /// Floor in cells along the split axis: a guaranteed minimum applied
     /// after the primary distribution, whatever the primary is. Combinable
     /// with `preferred_cell_count` — both overlays may be set at once.
-    #[serde(rename = "min")]
     pub minimum_cell_count: Option<u16>,
     /// Target in cells along the split axis, honored only with slack that
     /// flexible siblings can give after the primary distribution and
     /// without pushing anyone below a floor. Combinable with
     /// `minimum_cell_count`.
-    #[serde(rename = "preferred")]
     pub preferred_cell_count: Option<u16>,
     /// Accumulated user-resize offset in cells, applied after `primary_constraint`.
     pub resize_delta: i32,

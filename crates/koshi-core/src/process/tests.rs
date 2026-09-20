@@ -35,7 +35,7 @@ fn kill_policy_serializes_timeout_as_seconds() {
     };
     let policy_json = serde_json::to_string(&policy).expect("serialize");
     // Timeout is a bare integer count of seconds, not a struct.
-    assert_eq!(policy_json, r#"{"Graceful":{"timeout":3}}"#);
+    assert_eq!(policy_json, r#"{"Graceful":{"timeout_duration":3}}"#);
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn kill_policy_graceful_tree_serializes_timeout_as_seconds() {
     };
     let policy_json = serde_json::to_string(&policy).expect("serialize");
     // Timeout is a bare integer count of seconds, not a struct.
-    assert_eq!(policy_json, r#"{"GracefulTree":{"timeout":3}}"#);
+    assert_eq!(policy_json, r#"{"GracefulTree":{"timeout_duration":3}}"#);
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn kill_policy_force_and_tree_serialize_as_bare_names() {
 #[test]
 fn kill_policy_refuses_a_negative_timeout() {
     let negative_timeout_parse_error =
-        serde_json::from_str::<KillPolicy>(r#"{"Graceful":{"timeout":-1}}"#)
+        serde_json::from_str::<KillPolicy>(r#"{"Graceful":{"timeout_duration":-1}}"#)
             .expect_err("a negative second count is refused");
     assert!(
         negative_timeout_parse_error.to_string().contains("u64"),
@@ -309,7 +309,7 @@ fn kill_policy_refuses_a_negative_timeout() {
 #[test]
 fn kill_policy_refuses_a_fractional_timeout() {
     let fractional_timeout_parse_error =
-        serde_json::from_str::<KillPolicy>(r#"{"GracefulTree":{"timeout":3.5}}"#)
+        serde_json::from_str::<KillPolicy>(r#"{"GracefulTree":{"timeout_duration":3.5}}"#)
             .expect_err("a fractional second count is refused");
     assert!(
         fractional_timeout_parse_error.to_string().contains("u64"),
@@ -331,7 +331,7 @@ fn kill_policy_zero_and_max_timeouts_roundtrip() {
             timeout_duration: Duration::ZERO
         })
         .expect("serialize"),
-        r#"{"Graceful":{"timeout":0}}"#
+        r#"{"Graceful":{"timeout_duration":0}}"#
     );
 }
 
@@ -364,7 +364,7 @@ fn pty_size_serializes_cols_then_rows() {
             row_count: 24,
         })
         .expect("serialize"),
-        r#"{"cols":80,"rows":24}"#
+        r#"{"column_count":80,"row_count":24}"#
     );
 }
 
@@ -389,8 +389,9 @@ fn pty_size_zero_and_max_roundtrip() {
 
 #[test]
 fn pty_size_refuses_a_dimension_past_u16() {
-    let pty_size_parse_error = serde_json::from_str::<PtySize>(r#"{"cols":65536,"rows":24}"#)
-        .expect_err("a column count past u16 is refused");
+    let pty_size_parse_error =
+        serde_json::from_str::<PtySize>(r#"{"column_count":65536,"row_count":24}"#)
+            .expect_err("a column count past u16 is refused");
     assert!(
         pty_size_parse_error.to_string().contains("u16"),
         "{pty_size_parse_error}"
@@ -411,7 +412,7 @@ fn spawn_spec_serializes_with_its_field_names_and_sorted_env() {
     };
     assert_eq!(
         serde_json::to_string(&spawn_spec).expect("serialize"),
-        r#"{"program":"/bin/zsh","args":["-l"],"cwd":"/home/u","env":{"LANG":"en_US.UTF-8","TERM":"xterm-256color"},"shell_kind":"Zsh"}"#
+        r#"{"program":"/bin/zsh","arguments":["-l"],"working_directory":"/home/u","environment_variables":{"LANG":"en_US.UTF-8","TERM":"xterm-256color"},"shell_kind":"Zsh"}"#
     );
 }
 
@@ -420,7 +421,7 @@ fn spawn_spec_with_no_cwd_serializes_cwd_as_null() {
     let spawn_spec = SpawnSpec::from_shell_program(PathBuf::from("/bin/sh"), None, BTreeMap::new());
     assert_eq!(
         serde_json::to_string(&spawn_spec).expect("serialize"),
-        r#"{"program":"/bin/sh","args":[],"cwd":null,"env":{},"shell_kind":{"Other":"sh"}}"#
+        r#"{"program":"/bin/sh","arguments":[],"working_directory":null,"environment_variables":{},"shell_kind":{"Other":"sh"}}"#
     );
 }
 

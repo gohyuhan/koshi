@@ -1651,7 +1651,7 @@ fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_s
     connection
         .send(&serde_json::json!({
             "request_id": 2,
-            "kind": { "Floating": { "pane": "00000000-0000-0000-0000-000000000001" } }
+            "request_kind": { "Floating": { "pane_id": "00000000-0000-0000-0000-000000000001" } }
         }))
         .expect("send a kind this build does not have");
 
@@ -1702,7 +1702,7 @@ fn a_kind_this_build_lacks_before_hello_is_refused_as_hello_required() {
     connection
         .send(&serde_json::json!({
             "request_id": 9,
-            "kind": { "Floating": { "pane": "00000000-0000-0000-0000-000000000001" } }
+            "request_kind": { "Floating": { "pane_id": "00000000-0000-0000-0000-000000000001" } }
         }))
         .expect("send a kind this build does not have, before the hello");
 
@@ -2371,7 +2371,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
     connection
         .send(&serde_json::json!({
             "request_id": 3,
-            "kind": { "Floating": { "pane": "00000000-0000-0000-0000-000000000001" } }
+            "request_kind": { "Floating": { "pane_id": "00000000-0000-0000-0000-000000000001" } }
         }))
         .expect("send a kind this build does not have");
     connection

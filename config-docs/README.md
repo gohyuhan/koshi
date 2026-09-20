@@ -49,7 +49,7 @@ Every file must declare one top-level `version` with one integer argument,
 starting at 1, and no child block:
 
 ```kdl
-version 1
+version 2
 ```
 
 `koshi config check` validates every present known file without changing it.
@@ -60,9 +60,9 @@ fail the check. Errors from all files are reported together.
 registered version step in order and validates after each step. Invalid input
 or a missing step stops migration before any file is written.
 
-Current schema version is `1`, so valid version `1` files are reported as
-current and stay unchanged. Migration does not repair invalid config and never
-runs during startup.
+Current schema version is `2`. Valid version `1` files migrate to version `2`.
+Valid version `2` files are reported as current and stay unchanged. Migration
+does not repair invalid config and never runs during startup.
 
 Changed files use atomic replacement, one file at a time. Config symlinks stay;
 their regular-file targets change. A write error lists earlier completed files

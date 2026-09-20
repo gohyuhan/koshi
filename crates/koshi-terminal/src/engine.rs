@@ -84,7 +84,6 @@ const END_SYNCHRONIZED_OUTPUT_BYTES: &[u8; 8] = b"\x1b[?2026l";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SynchronizedOutputTransport {
     terminal_input: C1InputNormalizer,
-    #[serde(rename = "bytes")]
     normalized_bytes: Vec<u8>,
     deadline: Option<SystemTime>,
 }
@@ -110,7 +109,6 @@ impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
         struct SerializedSynchronizedOutputTransport {
             terminal_input: C1InputNormalizer,
             #[serde(deserialize_with = "deserialize_synchronized_output_bytes")]
-            #[serde(rename = "bytes")]
             normalized_bytes: Vec<u8>,
             deadline: Option<SystemTime>,
         }
@@ -430,15 +428,10 @@ enum C1InputState {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct C1InputNormalizer {
-    #[serde(rename = "state")]
     input_state: C1InputState,
-    #[serde(rename = "utf8_continuations")]
     remaining_utf8_continuation_count: u8,
-    #[serde(rename = "tail")]
     trailing_bytes: [u8; 8],
-    #[serde(rename = "tail_len")]
     trailing_byte_count: usize,
-    #[serde(rename = "tail_next")]
     trailing_start_index: usize,
 }
 
@@ -1212,8 +1205,9 @@ impl TerminalEngine {
 
     /// The complete graphics-parser state needed by a process-image swap.
     ///
-    /// Example: a split Screen wrapper returns a state with `screen_inner`;
-    /// `undecoded_graphics_bytes` contains the raw bytes without wrapper state.
+    /// Example: a split Screen wrapper returns a state with
+    /// `screen_inner_transport`; `undecoded_graphics_bytes` contains the raw
+    /// bytes without wrapper state.
     pub fn get_graphics_transport_state(&self) -> Option<GraphicsTransportState> {
         self.graphics_parser.get_graphics_transport_state()
     }

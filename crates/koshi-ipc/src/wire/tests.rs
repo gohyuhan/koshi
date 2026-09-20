@@ -17,10 +17,7 @@ use crate::supervisor::{SupervisorEvent, SupervisorRequestKind, SupervisorResult
 /// `Keep` and `Bare`, and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Sample {
-    Keep {
-        #[serde(rename = "value")]
-        payload_number: u32,
-    },
+    Keep { payload_number: u32 },
     Bare,
 }
 
@@ -39,7 +36,8 @@ impl WireName for Sample {
 
 #[test]
 fn a_variant_this_build_has_decodes_as_itself() {
-    let decoded: MaybeKnown<Sample> = serde_json::from_str(r#"{"Keep":{"value":7}}"#).unwrap();
+    let decoded: MaybeKnown<Sample> =
+        serde_json::from_str(r#"{"Keep":{"payload_number":7}}"#).unwrap();
     assert_eq!(
         decoded,
         MaybeKnown::Known(Sample::Keep { payload_number: 7 })
@@ -97,7 +95,7 @@ fn a_known_variant_spelled_without_its_fields_is_an_error() {
 #[test]
 fn whitespace_around_a_value_does_not_change_what_it_names() {
     let known: MaybeKnown<Sample> =
-        serde_json::from_str(" { \"Keep\" : { \"value\" : 7 } } ").unwrap();
+        serde_json::from_str(" { \"Keep\" : { \"payload_number\" : 7 } } ").unwrap();
     assert_eq!(known, MaybeKnown::Known(Sample::Keep { payload_number: 7 }));
 
     for text in [" \"Added\" ", " { \"Added\" : 1 } "] {
@@ -125,11 +123,12 @@ fn a_non_ascii_name_is_kept_as_the_peer_spelled_it() {
 
 #[test]
 fn a_variant_this_build_has_but_cannot_read_is_an_error_not_an_unknown() {
-    let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(r#"{"Keep":{"value":"x"}}"#);
+    let decoded: Result<MaybeKnown<Sample>, _> =
+        serde_json::from_str(r#"{"Keep":{"payload_number":"x"}}"#);
     let error = decoded.expect_err("a known variant with an unreadable payload is an error");
     assert_eq!(
         error.to_string(),
-        r#"invalid type: string "x", expected u32 at line 1 column 20"#
+        r#"invalid type: string "x", expected u32 at line 1 column 29"#
     );
 }
 
@@ -149,7 +148,7 @@ fn a_value_that_names_no_variant_is_an_error() {
 #[test]
 fn an_unknown_field_inside_a_known_variant_is_ignored() {
     let decoded: MaybeKnown<Sample> =
-        serde_json::from_str(r#"{"Keep":{"value":7,"added_later":true}}"#).unwrap();
+        serde_json::from_str(r#"{"Keep":{"payload_number":7,"added_later":true}}"#).unwrap();
     assert_eq!(
         decoded,
         MaybeKnown::Known(Sample::Keep { payload_number: 7 })
@@ -162,8 +161,8 @@ fn an_unknown_field_inside_a_known_variant_is_ignored() {
 #[test]
 fn an_object_with_a_second_key_names_no_variant() {
     for text in [
-        r#"{"Keep":{"value":1},"Added":2}"#,
-        r#"{"Added":2,"Keep":{"value":1}}"#,
+        r#"{"Keep":{"payload_number":1},"Added":2}"#,
+        r#"{"Added":2,"Keep":{"payload_number":1}}"#,
         r#"{"Added":1,"AlsoAdded":2}"#,
     ] {
         let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(text);
@@ -241,33 +240,33 @@ fn a_payload_nested_past_the_decoders_depth_limit_still_names_its_variant() {
 /// The raw text is borrowed from the input, and a reader lends nothing.
 #[test]
 fn decoding_from_a_reader_that_lends_no_bytes_is_an_error() {
-    let reader = std::io::Cursor::new(br#"{"Keep":{"value":7}}"#.to_vec());
+    let reader = std::io::Cursor::new(br#"{"Keep":{"payload_number":7}}"#.to_vec());
     let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_reader(reader);
     let error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
     assert_eq!(
         error.to_string(),
-        r#"invalid type: string "{\"Keep\":{\"value\":7}}", expected raw value"#
+        r#"invalid type: string "{\"Keep\":{\"payload_number\":7}}", expected raw value"#
     );
 }
 
-/// The refusal for an unreadable payload is positioned inside the kind's own
-/// text, not inside the whole envelope: column 20 here is the `"x"` counted
-/// from the start of `{"Keep":…}`, which sits at column 39 of the envelope.
+/// The refusal for an unreadable payload is positioned inside the request kind's
+/// own text, not inside the whole envelope: column 29 here is counted from the
+/// start of `{"Keep":…}`.
 #[test]
 fn a_payload_fault_inside_an_envelope_keeps_the_kind_relative_position() {
     let decoded: Result<Envelope<MaybeKnown<Sample>>, _> =
-        serde_json::from_str(r#"{"request_id":1,"kind":{"Keep":{"value":"x"}}}"#);
+        serde_json::from_str(r#"{"request_id":1,"request_kind":{"Keep":{"payload_number":"x"}}}"#);
     let error = decoded.expect_err("a known variant with an unreadable payload is an error");
     assert_eq!(
         error.to_string(),
-        r#"invalid type: string "x", expected u32 at line 1 column 20"#
+        r#"invalid type: string "x", expected u32 at line 1 column 29"#
     );
 }
 
 #[test]
 fn an_envelope_carrying_a_kind_this_build_lacks_reads_as_unknown() {
     let decoded: Envelope<MaybeKnown<Sample>> =
-        serde_json::from_str(r#"{"request_id":9,"kind":{"Added":{"pane":3}}}"#).unwrap();
+        serde_json::from_str(r#"{"request_id":9,"request_kind":{"Added":{"pane":3}}}"#).unwrap();
     assert_eq!(
         decoded,
         Envelope {
@@ -281,33 +280,52 @@ fn an_envelope_carrying_a_kind_this_build_lacks_reads_as_unknown() {
 
 #[test]
 fn an_envelope_without_a_request_id_is_refused() {
-    let decoded: Result<Envelope<Sample>, _> = serde_json::from_str(r#"{"kind":"Bare"}"#);
+    let decoded: Result<Envelope<Sample>, _> = serde_json::from_str(r#"{"request_kind":"Bare"}"#);
     let error = decoded.expect_err("the request id is not optional");
     assert_eq!(
         error.to_string(),
-        "missing field `request_id` at line 1 column 15"
+        "missing field `request_id` at line 1 column 23"
     );
 }
 
 #[test]
 fn an_envelope_with_a_field_it_does_not_know_is_refused() {
     let decoded: Result<Envelope<Sample>, _> =
-        serde_json::from_str(r#"{"request_id":1,"kind":"Bare","extra":true}"#);
+        serde_json::from_str(r#"{"request_id":1,"request_kind":"Bare","extra":true}"#);
     let error = decoded.expect_err("an envelope has exactly two fields");
     assert_eq!(
         error.to_string(),
-        "unknown field `extra`, expected `request_id` or `kind` at line 1 column 37"
+        "unknown field `extra`, expected `request_id` or `request_kind` at line 1 column 45"
     );
 }
 
 #[test]
 fn an_answer_with_a_field_it_does_not_know_is_refused() {
     let decoded: Result<Answer<Sample>, _> =
-        serde_json::from_str(r#"{"request_id":1,"result":"Bare","extra":true}"#);
+        serde_json::from_str(r#"{"request_id":1,"answer_result":"Bare","extra":true}"#);
     let error = decoded.expect_err("an answer has exactly two fields");
     assert_eq!(
         error.to_string(),
-        "unknown field `extra`, expected `request_id` or `result` at line 1 column 39"
+        "unknown field `extra`, expected `request_id` or `answer_result` at line 1 column 46"
+    );
+}
+
+#[test]
+fn retired_envelope_names_are_rejected() {
+    let request_error =
+        serde_json::from_str::<Envelope<Sample>>(r#"{"request_id":1,"kind":"Bare"}"#)
+            .expect_err("the retired request field is not accepted");
+    assert_eq!(
+        request_error.to_string(),
+        "unknown field `kind`, expected `request_id` or `request_kind` at line 1 column 22"
+    );
+
+    let answer_error =
+        serde_json::from_str::<Answer<Sample>>(r#"{"request_id":1,"result":"Bare"}"#)
+            .expect_err("the retired answer field is not accepted");
+    assert_eq!(
+        answer_error.to_string(),
+        "unknown field `result`, expected `request_id` or `answer_result` at line 1 column 24"
     );
 }
 
@@ -321,7 +339,7 @@ fn an_envelope_and_an_answer_write_their_fields_in_order() {
     };
     assert_eq!(
         serde_json::to_string(&envelope).unwrap(),
-        r#"{"request_id":7,"kind":{"Keep":{"value":1}}}"#
+        r#"{"request_id":7,"request_kind":{"Keep":{"payload_number":1}}}"#
     );
 
     let response = Answer {
@@ -330,14 +348,14 @@ fn an_envelope_and_an_answer_write_their_fields_in_order() {
     };
     assert_eq!(
         serde_json::to_string(&response).unwrap(),
-        r#"{"request_id":null,"result":"Bare"}"#
+        r#"{"request_id":null,"answer_result":"Bare"}"#
     );
 }
 
 #[test]
 fn an_answer_carrying_a_result_this_build_lacks_reads_as_unknown() {
     let decoded: Answer<MaybeKnown<Sample>> =
-        serde_json::from_str(r#"{"request_id":9,"result":{"Added":{"pane":3}}}"#).unwrap();
+        serde_json::from_str(r#"{"request_id":9,"answer_result":{"Added":{"pane":3}}}"#).unwrap();
     assert_eq!(
         decoded,
         Answer {
@@ -354,8 +372,8 @@ fn an_answer_carrying_a_result_this_build_lacks_reads_as_unknown() {
 #[test]
 fn an_answer_with_no_request_id_reads_as_none() {
     for text in [
-        r#"{"result":"Bare"}"#,
-        r#"{"request_id":null,"result":"Bare"}"#,
+        r#"{"answer_result":"Bare"}"#,
+        r#"{"request_id":null,"answer_result":"Bare"}"#,
     ] {
         let decoded: Answer<Sample> = serde_json::from_str(text).unwrap();
         assert_eq!(
@@ -374,7 +392,8 @@ fn an_answer_with_no_request_id_reads_as_none() {
 #[test]
 fn naming_an_unknown_variant_never_reads_its_payload() {
     let decoded: MaybeKnown<Sample> =
-        serde_json::from_str(r#"{"Added":{"value":{"deeply":["nested",1,true,null]}}}"#).unwrap();
+        serde_json::from_str(r#"{"Added":{"payload_number":{"deeply":["nested",1,true,null]}}}"#)
+            .unwrap();
     assert_eq!(
         decoded,
         MaybeKnown::Unknown {
@@ -391,33 +410,30 @@ fn naming_an_unknown_variant_never_reads_its_payload() {
 fn a_value_that_decodes_is_known_even_when_variants_omits_its_name() {
     #[derive(Debug, PartialEq, Eq, Deserialize)]
     enum Partial {
-        Listed {
-            #[serde(rename = "value")]
-            payload_number: u32,
-        },
-        Unlisted {
-            #[serde(rename = "value")]
-            payload_number: u32,
-        },
+        Listed { payload_number: u32 },
+        Unlisted { payload_number: u32 },
     }
 
     impl WireVariants for Partial {
         const VARIANTS: &'static [&'static str] = &["Listed"];
     }
 
-    let decoded: MaybeKnown<Partial> = serde_json::from_str(r#"{"Unlisted":{"value":3}}"#).unwrap();
+    let decoded: MaybeKnown<Partial> =
+        serde_json::from_str(r#"{"Unlisted":{"payload_number":3}}"#).unwrap();
     assert_eq!(
         decoded,
         MaybeKnown::Known(Partial::Unlisted { payload_number: 3 })
     );
 
-    let listed: MaybeKnown<Partial> = serde_json::from_str(r#"{"Listed":{"value":4}}"#).unwrap();
+    let listed: MaybeKnown<Partial> =
+        serde_json::from_str(r#"{"Listed":{"payload_number":4}}"#).unwrap();
     assert_eq!(
         listed,
         MaybeKnown::Known(Partial::Listed { payload_number: 4 })
     );
 
-    let absent: MaybeKnown<Partial> = serde_json::from_str(r#"{"Added":{"value":5}}"#).unwrap();
+    let absent: MaybeKnown<Partial> =
+        serde_json::from_str(r#"{"Added":{"payload_number":5}}"#).unwrap();
     assert_eq!(
         absent,
         MaybeKnown::Unknown {

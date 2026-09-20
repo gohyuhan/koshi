@@ -14,12 +14,11 @@
 //! does change, so
 //! [`ResumeHeader::resume_format`] numbers it: [`RESUME_FORMAT`] is what this build
 //! writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and [`read_resume_body`] refuses
-//! anything outside that range. Formats 1 and 2 differ in one key: format 1
-//! carries a `tier` key on every attached client, format 2 carries none.
-//! Format 3 carries prompt metadata with every terminal row.
+//! anything outside that range. This build reads and writes format 4, which uses
+//! the declared field names in the saved records.
 //!
 //! Example: a server holding two panes writes
-//! `{"header":{"format":3,…,"panes":[{"pane_id":…,"pid":51234,"rows":20,"cols":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit":null},…]},"body":{…}}`.
+//! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":51234,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"body":{…}}`.
 //! The next image reads the header, checks that descriptor 9 is still the
 //! master of `/dev/ttys009`, takes it and process 51234 back as that pane, then
 //! reads the body and puts the pane's screen back under it.
@@ -60,13 +59,10 @@ pub struct CarriedPane {
     /// The pane this record is for.
     pub pane_id: PaneId,
     /// The process id of the pane's child.
-    #[serde(rename = "pid")]
     pub process_id: u32,
     /// Height in cells of the pane's terminal.
-    #[serde(rename = "rows")]
     pub row_count: u16,
     /// Width in cells of the pane's terminal.
-    #[serde(rename = "cols")]
     pub column_count: u16,
     /// The descriptor of the pane's own terminal on Unix. Always `None` on
     /// Windows, where the pseudoconsole stays in the supervisor process and no
@@ -88,7 +84,7 @@ pub struct CarriedPane {
     /// `None` says the child was still running and the next image waits on it
     /// itself. It is also what a header written by a build that recorded no
     /// status carries.
-    #[serde(default, rename = "exit")]
+    #[serde(default)]
     pub exit_status: Option<ExitStatus>,
 }
 
@@ -109,14 +105,12 @@ impl CarriedPane {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeHeader {
     /// Which format the body is written in.
-    #[serde(rename = "format")]
     pub resume_format: u32,
     /// The session the writing process serves.
     pub session_id: SessionId,
     /// That session's display name.
     pub session_name: String,
     /// Every live pane, in the order the PTY backend reported them.
-    #[serde(rename = "panes")]
     pub carried_panes: Vec<CarriedPane>,
 }
 
@@ -126,12 +120,10 @@ pub struct ResumeHeader {
 pub struct ResumeBody {
     /// Every session the writing process held, keyed by id. Each one owns its
     /// tabs, layout trees, pane records and attached clients.
-    #[serde(rename = "sessions")]
     pub session_by_id: HashMap<SessionId, Session>,
     /// Each pane's screen state, keyed by pane id: grids, scrollback, modes and
-    /// cursor. The parser that fed it is not carried; `undecoded` carries that
-    /// parser's position.
-    #[serde(rename = "engines")]
+    /// cursor. The parser that fed it is not carried;
+    /// `undecoded_bytes_by_pane_id` carries that parser's position.
     pub terminal_state_by_pane_id: HashMap<PaneId, TerminalState>,
     /// The bytes that put each pane's next parser where the last one stood,
     /// keyed by pane id, exactly as
@@ -142,7 +134,7 @@ pub struct ResumeBody {
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(rename = "undecoded", default)]
+    #[serde(default)]
     pub undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>>,
     /// The raw bytes that put each pane's graphics parser where the last one
     /// stood, keyed by pane id. The next image uses this compatibility field
@@ -150,39 +142,35 @@ pub struct ResumeBody {
     /// when no nested wrapper state is present.
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(
-        rename = "graphics_undecoded",
-        default,
-        deserialize_with = "deserialize_graphics_undecoded"
-    )]
+    #[serde(default, deserialize_with = "deserialize_graphics_undecoded")]
     pub graphics_undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>>,
     /// Whether each pane's graphics parser expects the next DCS to carry the
     /// next GNU Screen passthrough fragment.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(rename = "graphics_screen_continuation", default)]
+    #[serde(default)]
     pub graphics_screen_continuation_by_pane_id: HashMap<PaneId, bool>,
     /// Whether each pane's carried graphics bytes are inside a GNU Screen
     /// passthrough DCS string.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(rename = "graphics_screen_wrapper_active", default)]
+    #[serde(default)]
     pub graphics_screen_wrapper_active_by_pane_id: HashMap<PaneId, bool>,
     /// Whether each pane's graphics parser expects the next DCS to carry the
     /// next tmux passthrough fragment.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(rename = "graphics_tmux_continuation", default)]
+    #[serde(default)]
     pub graphics_tmux_continuation_by_pane_id: HashMap<PaneId, bool>,
     /// Whether each pane's carried graphics bytes are inside an open tmux
     /// passthrough DCS string.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(rename = "graphics_tmux_wrapper_active", default)]
+    #[serde(default)]
     pub graphics_tmux_wrapper_active_by_pane_id: HashMap<PaneId, bool>,
     /// Complete image records and recoverable image errors waiting for each
     /// pane's terminal caller, keyed by pane id. The next image restores them
@@ -190,25 +178,20 @@ pub struct ResumeBody {
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
-    #[serde(
-        rename = "graphics_events",
-        default,
-        deserialize_with = "deserialize_graphics_events"
-    )]
+    #[serde(default, deserialize_with = "deserialize_graphics_events")]
     pub graphics_events_by_pane_id: HashMap<PaneId, Vec<GraphicsEvent>>,
     /// The complete graphics-parser state for each pane, including parser
     /// state nested inside a split tmux or GNU Screen wrapper. The next image
     /// restores it before reading new PTY output. A Screen-wrapped iTerm2
-    /// command split after `File=` is represented by `screen_inner` here.
+    /// command split after `File=` is represented by `screen_inner_transport`
+    /// here.
     ///
     /// A body whose JSON carries no map for this field reads back as an empty
     /// one.
     #[serde(default)]
-    #[serde(rename = "graphics_transport")]
     pub graphics_transport_by_pane_id: HashMap<PaneId, GraphicsTransportState>,
     /// Open synchronized-output groups keyed by pane id.
     #[serde(default)]
-    #[serde(rename = "synchronized_output")]
     pub synchronized_output_by_pane_id: HashMap<PaneId, SynchronizedOutputTransport>,
     /// A quit that was applied and not yet carried out, and how it must be
     /// carried out.
@@ -223,7 +206,6 @@ pub struct ResumeBody {
     ///
     /// A body whose JSON carries no value for this field reads back as `None`.
     #[serde(default)]
-    #[serde(rename = "quit")]
     pub carried_quit: Option<CarriedQuit>,
 }
 
@@ -244,7 +226,6 @@ pub enum CarriedQuit {
 #[derive(Debug, Deserialize)]
 struct ResumeFile {
     header: ResumeHeader,
-    #[serde(rename = "body")]
     raw_body: Box<RawValue>,
 }
 
@@ -253,7 +234,7 @@ struct ResumeFile {
 #[derive(Debug, Serialize)]
 struct ResumeFileRef<'a> {
     header: &'a ResumeHeader,
-    body: &'a ResumeBody,
+    raw_body: &'a ResumeBody,
 }
 
 /// Write `header` and `resume_body` to `resume_file_path`, replacing whatever is there.
@@ -271,7 +252,7 @@ pub fn write_resume_file(
 ) -> Result<(), StorageError> {
     let resume_file_bytes = serde_json::to_vec(&ResumeFileRef {
         header,
-        body: resume_body,
+        raw_body: resume_body,
     })
     .map_err(|serialization_error| StorageError::Io {
         detail: format!(
