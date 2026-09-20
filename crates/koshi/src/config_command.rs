@@ -43,7 +43,7 @@ struct ConfigFieldHelp {
 }
 
 const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
-    build_config_field_help("koshi.version", "koshi.kdl", "1", "Config schema version."),
+    build_config_field_help("koshi.version", "koshi.kdl", "2", "Config schema version."),
     build_config_field_help(
         "koshi.theme",
         "koshi.kdl",
@@ -210,7 +210,7 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
     build_config_field_help(
         "keybinding.version",
         "keybinding.kdl",
-        "1",
+        "2",
         "Config schema version.",
     ),
     build_config_field_help(
@@ -246,7 +246,7 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
     build_config_field_help(
         "theme.version",
         "themes/<name>.kdl",
-        "1",
+        "2",
         "Config schema version.",
     ),
     build_config_field_help(
@@ -330,7 +330,7 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
     build_config_field_help(
         "profile.version",
         "profile/<name>.kdl",
-        "1",
+        "2",
         "Config schema version.",
     ),
 ];
@@ -403,7 +403,7 @@ fn explain_config_key(config_key: &str) -> Result<String, CliError> {
 /// What validating every config file in one directory produced.
 pub(crate) struct ConfigReport {
     /// One line per file that validated, in path order:
-    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1)"` for a file on
+    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 2)"` for a file on
     /// this build's schema, and
     /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1; migrate to version 2)"`
     /// for one on an older schema.

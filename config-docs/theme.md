@@ -13,7 +13,7 @@ Select a theme in [`koshi.kdl`](koshi.md):
 
 ```kdl
 // koshi.kdl
-version 1
+version 2
 theme "midnight"        // reads themes/midnight.kdl
 ```
 
@@ -66,7 +66,7 @@ Every theme field at its default value:
 
 ```kdl
 // themes/midnight.kdl — every color, at its default value.
-version 1
+version 2
 
 colors {
     ramp-start "#d0a5ff"

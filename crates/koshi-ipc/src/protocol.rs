@@ -26,7 +26,8 @@ use koshi_core::key::KeyInput;
 use koshi_core::mouse::MouseInput;
 use koshi_core::recent_event::RecentEvent;
 use koshi_core::redact::REDACTED;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::attach::AttachedSessionStructureSnapshot;
@@ -163,17 +164,143 @@ pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 /// Each field defaults to `false`, so a client that does not report this
 /// record receives placement metadata without pixel transfers. New protocol
 /// fields can be added without changing the attach shape.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+const GRAPHICS_CAPABILITY_FIELD_NAMES: &[&str] =
+    &["supports_kitty", "supports_iterm", "supports_sixel"];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct GraphicsCapabilities {
     /// The terminal answered the Kitty graphics protocol query with `OK`.
-    #[serde(default)]
     pub supports_kitty: bool,
     /// The terminal advertised the iTerm2 inline-image protocol.
-    #[serde(default)]
     pub supports_iterm: bool,
     /// The terminal advertised the DEC Sixel protocol.
-    #[serde(default)]
     pub supports_sixel: bool,
+}
+
+enum GraphicsCapabilitiesField {
+    SupportsKitty,
+    SupportsIterm,
+    SupportsSixel,
+    RetiredKitty,
+    RetiredIterm,
+    RetiredSixel,
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for GraphicsCapabilitiesField {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        struct GraphicsCapabilitiesFieldVisitor;
+
+        impl<'de> Visitor<'de> for GraphicsCapabilitiesFieldVisitor {
+            type Value = GraphicsCapabilitiesField;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a graphics capability field name")
+            }
+
+            fn visit_str<ErrorType>(self, value: &str) -> Result<Self::Value, ErrorType>
+            where
+                ErrorType: de::Error,
+            {
+                Ok(match value {
+                    "supports_kitty" => GraphicsCapabilitiesField::SupportsKitty,
+                    "supports_iterm" => GraphicsCapabilitiesField::SupportsIterm,
+                    "supports_sixel" => GraphicsCapabilitiesField::SupportsSixel,
+                    "kitty" => GraphicsCapabilitiesField::RetiredKitty,
+                    "iterm" => GraphicsCapabilitiesField::RetiredIterm,
+                    "sixel" => GraphicsCapabilitiesField::RetiredSixel,
+                    _ => GraphicsCapabilitiesField::Unknown,
+                })
+            }
+        }
+
+        deserializer.deserialize_identifier(GraphicsCapabilitiesFieldVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for GraphicsCapabilities {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        struct GraphicsCapabilitiesVisitor;
+
+        impl<'de> Visitor<'de> for GraphicsCapabilitiesVisitor {
+            type Value = GraphicsCapabilities;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a graphics capability object")
+            }
+
+            fn visit_map<MapType>(self, mut map: MapType) -> Result<Self::Value, MapType::Error>
+            where
+                MapType: MapAccess<'de>,
+            {
+                let mut supports_kitty = None;
+                let mut supports_iterm = None;
+                let mut supports_sixel = None;
+
+                while let Some(field) = map.next_key::<GraphicsCapabilitiesField>()? {
+                    match field {
+                        GraphicsCapabilitiesField::SupportsKitty => {
+                            if supports_kitty.is_some() {
+                                return Err(de::Error::duplicate_field("supports_kitty"));
+                            }
+                            supports_kitty = Some(map.next_value()?);
+                        }
+                        GraphicsCapabilitiesField::SupportsIterm => {
+                            if supports_iterm.is_some() {
+                                return Err(de::Error::duplicate_field("supports_iterm"));
+                            }
+                            supports_iterm = Some(map.next_value()?);
+                        }
+                        GraphicsCapabilitiesField::SupportsSixel => {
+                            if supports_sixel.is_some() {
+                                return Err(de::Error::duplicate_field("supports_sixel"));
+                            }
+                            supports_sixel = Some(map.next_value()?);
+                        }
+                        GraphicsCapabilitiesField::RetiredKitty => {
+                            return Err(de::Error::unknown_field(
+                                "kitty",
+                                GRAPHICS_CAPABILITY_FIELD_NAMES,
+                            ));
+                        }
+                        GraphicsCapabilitiesField::RetiredIterm => {
+                            return Err(de::Error::unknown_field(
+                                "iterm",
+                                GRAPHICS_CAPABILITY_FIELD_NAMES,
+                            ));
+                        }
+                        GraphicsCapabilitiesField::RetiredSixel => {
+                            return Err(de::Error::unknown_field(
+                                "sixel",
+                                GRAPHICS_CAPABILITY_FIELD_NAMES,
+                            ));
+                        }
+                        GraphicsCapabilitiesField::Unknown => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                Ok(GraphicsCapabilities {
+                    supports_kitty: supports_kitty.unwrap_or(false),
+                    supports_iterm: supports_iterm.unwrap_or(false),
+                    supports_sixel: supports_sixel.unwrap_or(false),
+                })
+            }
+        }
+
+        deserializer.deserialize_map(GraphicsCapabilitiesVisitor)
+    }
 }
 
 impl GraphicsCapabilities {

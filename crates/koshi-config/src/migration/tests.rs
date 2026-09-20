@@ -49,6 +49,78 @@ fn production_registry_covers_every_supported_version() {
 }
 
 #[test]
+fn production_migration_updates_each_config_file_kind() {
+    let config_files = [
+        (
+            ConfigFileKind::App,
+            Path::new("koshi.kdl"),
+            "version 1\n",
+            "version 2\n",
+        ),
+        (
+            ConfigFileKind::Keybinding,
+            Path::new("keybinding.kdl"),
+            "version 1\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
+            "version 2\nmode \"normal\" { bind \"<C-y>\" \"core:new-tab\" }\n",
+        ),
+        (
+            ConfigFileKind::Theme,
+            Path::new("themes/plain.kdl"),
+            "version 1\ncolors { accent \"#ffffff\" }\n",
+            "version 2\ncolors { accent \"#ffffff\" }\n",
+        ),
+        (
+            ConfigFileKind::Profile,
+            Path::new("profile/dev.kdl"),
+            "version 1\ntab { pane }\n",
+            "version 2\ntab { pane }\n",
+        ),
+    ];
+
+    for (config_file_kind, config_path, config_source_text, expected_source_text) in config_files {
+        let migrated_config =
+            migrate_config(config_file_kind, config_path, config_source_text).unwrap();
+
+        assert_eq!(migrated_config.source_schema_version, 1);
+        assert_eq!(migrated_config.target_schema_version, 2);
+        assert!(migrated_config.is_changed);
+        assert_eq!(migrated_config.migrated_source, expected_source_text);
+    }
+}
+
+#[test]
+fn an_older_valid_file_reports_that_it_needs_migration() {
+    let validated_config =
+        validate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 1\n").unwrap();
+
+    assert_eq!(
+        validated_config,
+        ValidatedConfig {
+            schema_version: 1,
+            is_current: false,
+        }
+    );
+}
+
+#[test]
+fn schema_one_migration_changes_only_the_version_value() {
+    let config_source_text =
+        "// keep café\nversion 1 // keep this comment\ncolors { accent \"#ffffff\" }\n";
+
+    let migrated_config = migrate_config(
+        ConfigFileKind::Theme,
+        Path::new("themes/plain.kdl"),
+        config_source_text,
+    )
+    .unwrap();
+
+    assert_eq!(
+        migrated_config.migrated_source,
+        "// keep café\nversion 2 // keep this comment\ncolors { accent \"#ffffff\" }\n"
+    );
+}
+
+#[test]
 fn missing_version_is_rejected() {
     let migration_error = validate_config(
         ConfigFileKind::Theme,

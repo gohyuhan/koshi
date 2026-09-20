@@ -113,7 +113,7 @@ const CONFIG_SCHEMAS: &[ConfigSchema] = &[
     ConfigSchema {
         schema_version: 1,
         validate_config_file: validate_schema,
-        migrate_to_next_schema: Some(reject_schema_one_migration),
+        migrate_to_next_schema: Some(migrate_schema_one_to_two),
     },
     ConfigSchema {
         schema_version: 2,
@@ -134,9 +134,6 @@ pub fn validate_config(
 ) -> Result<ValidatedConfig, MigrationError> {
     validate_schema_registry(CONFIG_SCHEMAS)?;
     let schema_version = read_schema_version(config_path, config_source_text)?;
-    if schema_version < SCHEMA_VERSION {
-        return Err(build_old_schema_version_error(config_path, schema_version));
-    }
     if schema_version > SCHEMA_VERSION {
         return Err(MigrationError::Version {
             config_path: config_path.display().to_string(),
@@ -163,13 +160,6 @@ pub fn migrate_config(
     config_path: &Path,
     config_source_text: &str,
 ) -> Result<MigratedConfig, MigrationError> {
-    let source_schema_version = read_schema_version(config_path, config_source_text)?;
-    if source_schema_version < SCHEMA_VERSION {
-        return Err(build_old_schema_version_error(
-            config_path,
-            source_schema_version,
-        ));
-    }
     migrate_with_registry(
         config_file_kind,
         config_path,
@@ -377,23 +367,27 @@ fn build_version_error(
     }
 }
 
-fn build_old_schema_version_error(
+fn migrate_schema_one_to_two(
     config_path: &Path,
-    declared_schema_version: u32,
-) -> MigrationError {
-    build_version_error(
-        config_path,
-        format!(
-            "schema version {declared_schema_version} is older than this koshi supports ({SCHEMA_VERSION})"
-        ),
-    )
-}
-
-fn reject_schema_one_migration(
-    config_path: &Path,
-    _config_source_text: &str,
+    config_source_text: &str,
 ) -> Result<String, MigrationError> {
-    Err(build_old_schema_version_error(config_path, 1))
+    let config_document = parse_kdl(config_path, config_source_text).map_err(build_parse_error)?;
+    let version_node = config_document
+        .nodes()
+        .iter()
+        .find(|node| node.name().value() == "version")
+        .ok_or_else(|| build_version_error(config_path, "file must declare `version`"))?;
+    let version_entry = version_node.entries().first().ok_or_else(|| {
+        build_version_error(config_path, "`version` takes exactly one integer argument")
+    })?;
+    let version_span = version_entry.span();
+    let version_start = version_span.offset();
+    let version_end = version_start + version_span.len();
+    let mut migrated_source = String::with_capacity(config_source_text.len() + 1);
+    migrated_source.push_str(&config_source_text[..version_start]);
+    migrated_source.push('2');
+    migrated_source.push_str(&config_source_text[version_end..]);
+    Ok(migrated_source)
 }
 
 fn find_schema_by_version(

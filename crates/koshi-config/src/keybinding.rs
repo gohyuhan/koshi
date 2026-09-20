@@ -4,7 +4,7 @@
 //! The keybinding file is the whole keybindings section, one file. Top-level
 //! setting nodes (`chord-timeout-ms 500`, `which-key-delay-ms 400`,
 //! `max-chord-depth 4`, `leader "<C-p>"`, `unlock-alternative "<A-u>"`, a
-//! required `version 1`) sit beside `mode "name"` blocks holding the
+//! required `version 2`) sit beside `mode "name"` blocks holding the
 //! bindings: `bind "<C-y>" "core:new-tab"` maps a key sequence to a full
 //! action reference, and `remove "<Tab>"` clears the key in that mode, voiding
 //! whatever a lower layer bound on it. Named keys need their brackets — a bare

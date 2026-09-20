@@ -121,7 +121,7 @@ fn explain_answers_for_the_profile_version() {
 
     assert_eq!(
         explanation,
-        "profile.version\nfile: profile/<name>.kdl\ndefault: 1\n\
+        "profile.version\nfile: profile/<name>.kdl\ndefault: 2\n\
          Config schema version.\n"
     );
 }
@@ -255,6 +255,22 @@ fn check_reports_read_and_validation_errors_together() {
             theme_config_path.display()
         )
     );
+}
+
+#[test]
+fn migrate_command_updates_a_schema_one_file_to_schema_two() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").unwrap();
+
+    let migration_report =
+        run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
+
+    assert_eq!(
+        migration_report,
+        format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(fs::read_to_string(app_config_path).unwrap(), "version 2\n");
 }
 
 fn migrate_config_for_test(

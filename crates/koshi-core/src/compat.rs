@@ -145,24 +145,24 @@ pub const SAVED_SERVER_FORMAT: Surface = Surface {
 /// The remote certificate file: the certificate and private key this machine
 /// generated for its remote listener.
 ///
-/// `v0.3.0` and this build both write 1. This build reads a certificate an
-/// older build generated.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. A file with
+/// format 1 is not read.
 pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
     surface_name: "remote certificate file format",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 
 /// The remote access record: the file saying the operator switched remote
 /// access on for this machine.
 ///
-/// `v0.3.0` and this build both write 1. This build reads a record an older
-/// build wrote, and keeps the port open.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. A file with format 1
+/// is not read.
 pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
     surface_name: "remote access record format",
-    minimum_version: 1,
-    maximum_version: 1,
+    minimum_version: 2,
+    maximum_version: 2,
     released_version: Some(1),
 };
 

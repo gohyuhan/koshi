@@ -97,6 +97,30 @@ fn a_certificate_file_at_another_format_number_is_refused() {
 }
 
 #[test]
+fn a_previous_certificate_file_with_format_field_is_unreadable() {
+    let test_directory = TempDir::new().expect("make a test directory");
+    let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
+    let previous_certificate_bytes = br#"{"format":1,"cert_der":[],"key_der":[]}"#;
+    std::fs::create_dir_all(remote_file_path.parent().expect("the remote directory"))
+        .expect("make the remote directory");
+    std::fs::write(&remote_file_path, previous_certificate_bytes)
+        .expect("write the previous certificate file");
+
+    let unreadable_certificate_error =
+        CertFile::load_from_path(&remote_file_path).expect_err("the previous format is refused");
+    let error_detail = serde_json::from_slice::<CertFile>(previous_certificate_bytes)
+        .expect_err("the previous field name is refused")
+        .to_string();
+    assert_eq!(
+        unreadable_certificate_error.to_string(),
+        format!(
+            "the remote access certificate at {} is unreadable: {error_detail}",
+            remote_file_path.display()
+        )
+    );
+}
+
+#[test]
 fn a_missing_certificate_file_is_an_error() {
     let test_directory = TempDir::new().expect("make a test directory");
     let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
@@ -135,6 +159,32 @@ fn remote_access_is_off_until_the_enabled_file_is_written() {
         ))
         .expect("read it back"),
         enabled_file
+    );
+}
+
+#[test]
+fn a_previous_enabled_file_with_format_field_leaves_remote_access_off() {
+    let test_directory = TempDir::new().expect("make a test directory");
+    let remote_file_path = EnabledFile::resolve_enabled_file_path(test_directory.path());
+    let previous_enabled_bytes =
+        br#"{"format":1,"enabled_at":{"secs_since_epoch":1000,"nanos_since_epoch":0}}"#;
+    std::fs::create_dir_all(remote_file_path.parent().expect("the remote directory"))
+        .expect("make the remote directory");
+    std::fs::write(&remote_file_path, previous_enabled_bytes)
+        .expect("write the previous enabled file");
+
+    assert!(!is_remote_enabled(test_directory.path()));
+    let unreadable_enabled_error =
+        EnabledFile::load_from_path(&remote_file_path).expect_err("the previous format is refused");
+    let error_detail = serde_json::from_slice::<EnabledFile>(previous_enabled_bytes)
+        .expect_err("the previous field name is refused")
+        .to_string();
+    assert_eq!(
+        unreadable_enabled_error.to_string(),
+        format!(
+            "the remote access record at {} is unreadable: {error_detail}",
+            remote_file_path.display()
+        )
     );
 }
 

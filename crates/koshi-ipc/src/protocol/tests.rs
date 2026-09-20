@@ -793,6 +793,36 @@ fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
 }
 
 #[test]
+fn graphics_capabilities_reject_retired_field_names() {
+    for retired_field_name in ["kitty", "iterm", "sixel"] {
+        let capability_json = format!(r#"{{"{retired_field_name}":true}}"#);
+        let retired_field_error = serde_json::from_str::<GraphicsCapabilities>(&capability_json)
+            .expect_err("a retired capability field is refused");
+
+        assert_eq!(
+            retired_field_error.to_string(),
+            format!(
+                "unknown field `{retired_field_name}`, expected one of `supports_kitty`, \
+                 `supports_iterm`, `supports_sixel` at line 1 column 8"
+            )
+        );
+    }
+}
+
+#[test]
+fn attach_rejects_retired_graphics_capability_fields() {
+    let attach_request_json = r#"{"request_id":4,"request_kind":{"Attach":{"viewport":{"column_count":80,"row_count":24},"event_filter":"All","resume_client_id":null,"resume_token":null,"pane_area":null,"graphics_capabilities":{"kitty":true}}}}"#;
+    let retired_field_error = serde_json::from_str::<IpcRequest>(attach_request_json)
+        .expect_err("an attach request cannot use a retired capability field");
+
+    assert_eq!(
+        retired_field_error.to_string(),
+        "unknown field `kitty`, expected one of `supports_kitty`, `supports_iterm`, \
+         `supports_sixel` at line 1 column 202"
+    );
+}
+
+#[test]
 fn an_overview_missing_a_field_this_version_needs_is_refused() {
     // A tab record without `session_id` fails to decode; no default fills it
     // in.

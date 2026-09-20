@@ -241,8 +241,8 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
             ("token store format", 2, 2, Some(1)),
             ("remote doorway", 2, 2, Some(1)),
             ("saved server file format", 2, 2, Some(1)),
-            ("remote certificate file format", 1, 1, Some(1)),
-            ("remote access record format", 1, 1, Some(1)),
+            ("remote certificate file format", 2, 2, Some(1)),
+            ("remote access record format", 2, 2, Some(1)),
             ("resume file format", 4, 4, Some(3)),
             ("config schema", 2, 2, Some(1)),
         ]

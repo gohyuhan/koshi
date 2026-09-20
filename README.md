@@ -287,8 +287,9 @@ that can be bound.
 
 ## Configuration
 
-Koshi uses four optional KDL file types. Each present file must declare
-`version 1`.
+Koshi uses four optional KDL file types. Each present file must declare a
+supported version. New files use `version 2`; valid `version 1` files migrate
+to version 2.
 
 | File | Contents |
 |---|---|
@@ -314,8 +315,8 @@ Available config commands:
 | `koshi config check` | Validate every known config file |
 | `koshi config migrate` | Validate files and apply registered schema updates |
 
-Current schema version is `1`. Migration leaves valid version `1` files
-unchanged.
+Current schema version is `2`. Migration upgrades valid version `1` files to
+version `2` and leaves valid version `2` files unchanged.
 
 Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 [themes-example/](themes-example/).
