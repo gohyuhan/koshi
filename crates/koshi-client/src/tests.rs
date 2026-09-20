@@ -72,6 +72,7 @@ fn build_render_snapshot(
     Box::new(RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id: active_tab_id,
@@ -91,6 +92,7 @@ fn build_render_snapshot(
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
             client_id,
+            client_revision: 0,
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,

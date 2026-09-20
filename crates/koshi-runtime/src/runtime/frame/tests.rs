@@ -229,6 +229,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
     RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 17,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -303,6 +304,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
         ],
         client_snapshot: ClientSnapshot {
             client_id,
+            client_revision: 19,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6,
@@ -850,6 +852,7 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         painted_frame.client_snapshot,
         FrameClient {
             client_id: render_snapshot.client_snapshot.client_id,
+            client_revision: render_snapshot.client_snapshot.client_revision,
             viewport_size: Size {
                 column_count: 20,
                 row_count: 6

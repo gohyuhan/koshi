@@ -95,6 +95,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
     PaintedFrame {
         session_snapshot: FrameSession {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: FrameTab {
                 tab_id: active_tab_id,
@@ -114,6 +115,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
         pane_snapshots: Vec::new(),
         client_snapshot: FrameClient {
             client_id: ClientId::new(),
+            client_revision: 0,
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
@@ -1180,6 +1182,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
     MouseFrame {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: String::from("fixture"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -1204,6 +1207,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            client_revision: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: mouse_panes.first().map(|mouse_pane| mouse_pane.pane_id),
@@ -3566,6 +3570,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
     RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -3634,6 +3639,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
         }],
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            client_revision: 0,
             viewport_size: TEST_VIEWPORT_SIZE,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),

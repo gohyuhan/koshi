@@ -974,6 +974,7 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "new-pane",
         "new-tab",
         "next-tab",
+        "place-pane",
         "plugin",
         "previous-tab",
         "remote",
@@ -1834,6 +1835,42 @@ fn resize_pane_requires_a_direction() {
 }
 
 #[test]
+fn place_pane_requires_a_pane_tab_and_direction() {
+    let pane_flag = format!("pane-{}", build_fixed_test_uuid());
+    for argv in [
+        vec![
+            "koshi",
+            "place-pane",
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+        ],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            pane_flag.as_str(),
+            "--direction",
+            "left",
+        ],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            pane_flag.as_str(),
+            "--tab",
+            "logs",
+        ],
+    ] {
+        assert_eq!(
+            parse_cli_error(&argv).kind(),
+            ErrorKind::MissingRequiredArgument
+        );
+    }
+}
+
+#[test]
 fn input_parses_its_text_target_and_enter_flag() {
     assert_eq!(
         parse_cli_command(&["koshi", "input", "ls"]),
@@ -2507,6 +2544,28 @@ fn action_subcommands_map_to_their_exact_commands() {
         (
             vec![
                 "koshi",
+                "place-pane",
+                "--pane",
+                &pane_flag,
+                "--tab",
+                &tab_flag,
+                "--direction",
+                "left",
+            ],
+            "place-pane",
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: pane,
+                placement_target: PanePlacementTarget::Split {
+                    destination_tab_id: tab,
+                    anchor: PanePlacementAnchor::Tab,
+                    direction: Direction::Left,
+                },
+                expected_placement_revision: None,
+            }),
+        ),
+        (
+            vec![
+                "koshi",
                 "scroll-pane",
                 "--lines",
                 "-5",
@@ -2787,6 +2846,16 @@ fn target_tab_names_the_tab_of_every_verb_that_takes_one() {
         vec!["koshi", "close-tab", "--tab", "logs"],
         vec!["koshi", "move-tab", "--index", "0", "--tab", "logs"],
         vec!["koshi", "focus-tab", "--tab", "logs"],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            "pane-0192f0c1-2345-7000-8000-000000000001",
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+        ],
     ];
     for argv in &argvs {
         assert_eq!(
@@ -2832,6 +2901,16 @@ fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
             &pane_flag,
         ],
         vec!["koshi", "swap-panes", "--with", &pane_flag],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane_flag,
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+        ],
         vec![
             "koshi",
             "swap-panes",
@@ -2901,6 +2980,18 @@ fn target_client_names_the_client_of_every_verb_that_takes_one() {
         vec!["koshi", "unlock", "--client", &client_flag],
         vec!["koshi", "toggle-lock", "--client", &client_flag],
         vec!["koshi", "toggle-pane-fullscreen", "--client", &client_flag],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane_flag,
+            "--tab",
+            "logs",
+            "--direction",
+            "left",
+            "--client",
+            &client_flag,
+        ],
         vec![
             "koshi",
             "scroll-pane",
@@ -3585,7 +3676,7 @@ fn a_discovery_query_names_its_session_scope() {
 }
 
 /// Every action name `build_action_command` builds is a registered core action, and the
-/// nineteen action verbs name nineteen different actions.
+/// Twenty action verbs name twenty different actions.
 #[test]
 fn every_to_action_name_is_a_registered_core_action() {
     use std::collections::BTreeSet;
@@ -3603,6 +3694,16 @@ fn every_to_action_name_is_a_registered_core_action() {
         vec!["koshi", "resize-pane", "--direction", "left"],
         vec!["koshi", "move-pane", "--direction", "left"],
         vec!["koshi", "swap-panes", "--with", &pane],
+        vec![
+            "koshi",
+            "place-pane",
+            "--pane",
+            &pane,
+            "--tab",
+            "tab-0192f0c1-2345-7000-8000-000000000001",
+            "--direction",
+            "left",
+        ],
         vec!["koshi", "scroll-pane", "--lines", "3"],
         vec!["koshi", "toggle-pane-fullscreen"],
         vec!["koshi", "input", "echo hi"],
@@ -3641,6 +3742,7 @@ fn every_to_action_name_is_a_registered_core_action() {
         "core:new-pane",
         "core:new-tab",
         "core:next-tab",
+        "core:place-pane",
         "core:previous-tab",
         "core:resize-pane",
         "core:run",

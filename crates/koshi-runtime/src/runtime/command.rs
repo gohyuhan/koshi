@@ -30,10 +30,10 @@ use koshi_core::{
     command::{
         ClearSelectionArgs, ClosePaneArgs, CloseTabArgs, Command, CommandEnvelope, CommandResult,
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
-        LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs,
-        RunCommandPaneArgs, ScrollPaneArgs, Selection, SelectionKind, SetSelectionArgs,
-        SwapPanesArgs, SwitchSessionArgs, TabTarget, ToggleLockModeArgs, VisualCommand,
-        WriteToPaneArgs,
+        LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor,
+        PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
+        Selection, SelectionKind, SetSelectionArgs, SwapPanesArgs, SwitchSessionArgs, TabTarget,
+        ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
         Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused, PaneProcessExited,
@@ -68,10 +68,98 @@ use koshi_session::session::{
     cascade::{on_child_exit, remove_pane_cascade},
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
+    placement::commit_cross_tab_placement,
     policy::EmptyTabPolicy,
     state::Session,
     tab_ops,
 };
+
+/// List every attached client whose committed view can change when one of the
+/// named tabs changes, plus an explicitly selected client when it is attached.
+fn list_clients_affected_by_tabs(
+    session: &Session,
+    tab_ids: &[TabId],
+    additional_client_id: Option<ClientId>,
+) -> Vec<ClientId> {
+    session
+        .clients
+        .list_attached_clients()
+        .filter(|client| {
+            Some(client.get_client_id()) == additional_client_id
+                || tab_ids.iter().any(|tab_id| {
+                    *tab_id == client.get_active_tab()
+                        || client.get_focused_pane(*tab_id).is_some()
+                        || client.get_zoomed_pane(*tab_id).is_some()
+                })
+        })
+        .map(|client| client.get_client_id())
+        .collect()
+}
+
+/// Refuse a transaction when its shared placement generation cannot advance.
+fn ensure_session_placement_revision_capacity(session: &Session) -> Result<(), Rejection> {
+    if session.can_advance_placement_revision() {
+        return Ok(());
+    }
+    Err(Rejection::from_reason_and_help(
+        RejectReason::InvalidState,
+        "placement revision cannot advance",
+    ))
+}
+
+/// Refuse a transaction when one of its affected client generations cannot
+/// advance.
+fn ensure_client_placement_revision_capacity(
+    session: &Session,
+    client_ids: &[ClientId],
+) -> Result<(), Rejection> {
+    if client_ids.iter().all(|client_id| {
+        session
+            .clients
+            .get_client_by_id(*client_id)
+            .is_some_and(Client::can_advance_placement_revision)
+    }) {
+        return Ok(());
+    }
+    Err(Rejection::from_reason_and_help(
+        RejectReason::InvalidState,
+        "placement revision cannot advance",
+    ))
+}
+
+/// Advance the shared placement generation after a committed session change.
+fn advance_session_placement_revision(session: &mut Session) {
+    debug_assert!(session.advance_placement_revision());
+}
+
+/// Advance the shared placement generation when it has capacity, leaving a
+/// saturated generation at its maximum value.
+fn advance_session_placement_revision_when_possible(session: &mut Session) {
+    let _ = session.advance_placement_revision();
+}
+
+/// Advance each affected client's placement generation after a committed view
+/// or geometry change.
+fn advance_client_placement_revisions(session: &mut Session, client_ids: &[ClientId]) {
+    for client_id in client_ids {
+        if let Some(client) = session.clients.get_client_mut_by_id(*client_id) {
+            debug_assert!(client.advance_placement_revision());
+        }
+    }
+}
+
+/// Advance each affected client's placement generation when its counter has
+/// capacity, leaving a saturated counter at its maximum value.
+fn advance_client_placement_revisions_when_possible(
+    session: &mut Session,
+    client_ids: &[ClientId],
+) {
+    for client_id in client_ids {
+        if let Some(client) = session.clients.get_client_mut_by_id(*client_id) {
+            let _ = client.advance_placement_revision();
+        }
+    }
+}
 
 /// The PTY size for a tab's sole root pane filling `viewport`: solve the
 /// single-pane layout, take the root's content rect, and clamp it to a PTY size.
@@ -230,6 +318,15 @@ struct FocusTabTarget {
     tab_id: TabId,
 }
 
+/// The resolved source, destination, and acting view for a checked pane
+/// placement.
+struct PlacePaneTarget {
+    session_id: SessionId,
+    source_tab_id: TabId,
+    destination_tab_id: TabId,
+    client_id: ClientId,
+}
+
 impl Server {
     /// Dispatch one command and report its outcome.
     ///
@@ -276,6 +373,9 @@ impl Server {
             }
             Command::SwapPanes(command_args) => {
                 self.handle_swap_panes(command_id, &envelope.command_source, &command_args)
+            }
+            Command::PlacePane(command_args) => {
+                self.handle_place_pane(command_id, &envelope.command_source, &command_args)
             }
             Command::ScrollPane(command_args) => {
                 self.handle_scroll_pane(command_id, &envelope.command_source, &command_args)

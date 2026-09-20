@@ -26,6 +26,7 @@ fn build_render_snapshot() -> RenderSnapshot {
     RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: "one".to_string(),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -50,6 +51,7 @@ fn build_render_snapshot() -> RenderSnapshot {
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            client_revision: 0,
             viewport_size: Size {
                 column_count: 80,
                 row_count: 24,

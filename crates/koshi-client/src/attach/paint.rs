@@ -82,6 +82,7 @@ fn build_render_snapshot_with_images(
     RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id: painted_frame.session_snapshot.session_id,
+            session_revision: painted_frame.session_snapshot.session_revision,
             session_name: sanitize_reported_text(&painted_frame.session_snapshot.session_name),
             active_tab_snapshot: TabSnapshot {
                 tab_id: active_tab_snapshot.tab_id,
@@ -111,6 +112,7 @@ fn build_render_snapshot_with_images(
             .collect(),
         client_snapshot: ClientSnapshot {
             client_id: painted_frame.client_snapshot.client_id,
+            client_revision: painted_frame.client_snapshot.client_revision,
             viewport_size: painted_frame.client_snapshot.viewport_size,
             active_tab_id: painted_frame.client_snapshot.active_tab_id,
             focused_pane_id: painted_frame.client_snapshot.focused_pane_id,

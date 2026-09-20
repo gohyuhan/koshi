@@ -66,6 +66,8 @@ pub enum Command {
     MovePane(MovePaneArgs),
     /// Exchange two tiled pane occupants within one tab.
     SwapPanes(SwapPanesArgs),
+    /// Commit a checked tiled pane placement across tabs.
+    PlacePane(PlacePaneArgs),
     /// Move one client's view of a pane through its scrollback.
     ScrollPane(ScrollPaneArgs),
     /// Prompt the issuing client to quit the client or session.
@@ -125,6 +127,8 @@ pub enum CommandKind {
     MovePane,
     /// Discriminant of [`Command::SwapPanes`].
     SwapPanes,
+    /// Discriminant of [`Command::PlacePane`].
+    PlacePane,
     /// Discriminant of [`Command::ScrollPane`].
     ScrollPane,
     /// Discriminant of [`Command::Quit`].
@@ -160,6 +164,7 @@ impl Command {
             Command::MoveTab(_) => CommandKind::MoveTab,
             Command::MovePane(_) => CommandKind::MovePane,
             Command::SwapPanes(_) => CommandKind::SwapPanes,
+            Command::PlacePane(_) => CommandKind::PlacePane,
             Command::ScrollPane(_) => CommandKind::ScrollPane,
             Command::Quit => CommandKind::Quit,
             Command::Detach(_) => CommandKind::Detach,
@@ -266,6 +271,34 @@ pub enum PanePlacementAnchor {
     Group(Vec<PaneId>),
     /// The whole tab rectangle.
     Tab,
+}
+
+/// The checked destination of [`Command::PlacePane`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PanePlacementTarget {
+    /// Exchange the source pane with the pane in the destination slot.
+    Swap {
+        /// The pane whose slot receives the source pane.
+        target_pane_id: PaneId,
+    },
+    /// Insert the source pane beside a visible destination span.
+    Split {
+        /// The tab that receives the source pane.
+        destination_tab_id: TabId,
+        /// The pane, group, or whole tab span to split.
+        anchor: PanePlacementAnchor,
+        /// The side of the anchor where the source pane lands.
+        direction: Direction,
+    },
+}
+
+/// The committed generations a placement confirmation was built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementRevision {
+    /// Generation of committed layout, membership, and shared sizing.
+    pub session_revision: u64,
+    /// Generation of the acting client's committed geometry and view.
+    pub client_revision: u64,
 }
 
 /// Arguments for [`Command::NewTab`]. The tab's name is not supplied by the
@@ -396,6 +429,18 @@ pub struct SwapPanesArgs {
     pub source_pane_id: Option<PaneId>,
     /// Pane whose slot receives the source occupant.
     pub target_pane_id: PaneId,
+}
+
+/// Arguments for [`Command::PlacePane`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacePaneArgs {
+    /// The live pane being placed.
+    pub source_pane_id: PaneId,
+    /// The checked destination in the same session.
+    pub placement_target: PanePlacementTarget,
+    /// Revisions captured by an interactive preview, or `None` for a direct
+    /// command planned against the current state in this dispatcher turn.
+    pub expected_placement_revision: Option<PlacementRevision>,
 }
 
 /// Arguments for [`Command::ScrollPane`].

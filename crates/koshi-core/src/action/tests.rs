@@ -745,6 +745,12 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
+            "core:place-pane",
+            CommandKind::PlacePane,
+            PaneSession,
+            vec![Pane, TabTarget],
+        ),
+        (
             "core:focus-pane",
             CommandKind::FocusPane,
             Client,
@@ -1066,6 +1072,7 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:new-pane-up",
         "core:new-tab",
         "core:next-tab",
+        "core:place-pane",
         "core:plugin-disable",
         "core:plugin-enable",
         "core:plugin-install",

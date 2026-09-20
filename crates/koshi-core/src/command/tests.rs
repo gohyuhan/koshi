@@ -72,6 +72,47 @@ fn pane_commands_roundtrip() {
         source_pane_id: Some(PaneId::new()),
         target_pane_id: PaneId::new(),
     }));
+    let source_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+    let split_place_pane_command = Command::PlacePane(PlacePaneArgs {
+        source_pane_id,
+        placement_target: PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Group(vec![PaneId::new(), PaneId::new()]),
+            direction: Direction::Up,
+        },
+        expected_placement_revision: None,
+    });
+    assert_json_roundtrip(&split_place_pane_command);
+    let swap_place_pane_command = Command::PlacePane(PlacePaneArgs {
+        source_pane_id,
+        placement_target: PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        },
+        expected_placement_revision: Some(PlacementRevision {
+            session_revision: 7,
+            client_revision: 11,
+        }),
+    });
+    assert_json_roundtrip(&swap_place_pane_command);
+    let mut omitted_revision_json =
+        serde_json::to_value(&split_place_pane_command).expect("serialize place-pane command");
+    omitted_revision_json
+        .get_mut("PlacePane")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("place-pane command object")
+        .remove("expected_placement_revision");
+    assert_eq!(
+        serde_json::from_value::<Command>(omitted_revision_json).expect("decode omitted revision"),
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id,
+            placement_target: match split_place_pane_command {
+                Command::PlacePane(place_pane_args) => place_pane_args.placement_target,
+                _ => unreachable!("split command variant"),
+            },
+            expected_placement_revision: None,
+        })
+    );
     assert_json_roundtrip(&Command::ScrollPane(ScrollPaneArgs {
         pane_id: Some(PaneId::new()),
         scroll_line_count: -7,
@@ -1419,7 +1460,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `Plugin`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `SwapPanes`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `Plugin`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `SwapPanes`, `PlacePane`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

@@ -94,6 +94,9 @@ pub struct PaintedFrame {
 pub struct FrameSession {
     /// The session's stable id.
     pub session_id: SessionId,
+    /// The session's committed layout, membership, and shared-sizing revision.
+    #[serde(default)]
+    pub session_revision: u64,
     /// The session's display name.
     pub session_name: String,
     /// The tab this client is shown, solved and ready to draw.
@@ -566,6 +569,9 @@ fn compute_frame_image_byte_count(
 pub struct FrameClient {
     /// The client's stable id.
     pub client_id: ClientId,
+    /// The client's committed geometry and view revision.
+    #[serde(default)]
+    pub client_revision: u64,
     /// The client's terminal size in cells.
     pub viewport_size: Size,
     /// The tab the client is viewing.

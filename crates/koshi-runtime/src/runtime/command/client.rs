@@ -24,26 +24,33 @@ impl Server {
         else {
             return;
         };
-        let active_tab_id = self
-            .session_by_id
-            .get_mut(&session_id)
-            .and_then(|session| session.clients.get_client_mut_by_id(client_id))
-            .map(|client| {
-                client.update_cell_size(cell_size);
-                client.get_active_tab()
-            });
-        if let Some(active_tab_id) = active_tab_id {
-            let pty_backend = Arc::clone(self.get_pty_backend());
-            let mut emitted_events = Vec::new();
-            self.reflow_tab_if_viewed(
-                pty_backend.as_ref(),
-                session_id,
-                active_tab_id,
-                &mut emitted_events,
-            );
-            self.render_scheduler.invalidate();
-            self.publish_events(&emitted_events);
+        let Some(session) = self.session_by_id.get_mut(&session_id) else {
+            return;
+        };
+        let Some(client) = session.clients.get_client_by_id(client_id) else {
+            return;
+        };
+        let active_tab_id = client.get_active_tab();
+        let cell_size_changed = client.get_cell_size() != Some(cell_size);
+        let affected_client_ids =
+            list_clients_affected_by_tabs(session, &[active_tab_id], Some(client_id));
+        if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
+            client.update_cell_size(cell_size);
         }
+        if cell_size_changed {
+            advance_session_placement_revision_when_possible(session);
+            advance_client_placement_revisions_when_possible(session, &affected_client_ids);
+        }
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let mut emitted_events = Vec::new();
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            session_id,
+            active_tab_id,
+            &mut emitted_events,
+        );
+        self.render_scheduler.invalidate();
+        self.publish_events(&emitted_events);
     }
 
     /// Serve one attach arriving over the control socket, in this single
@@ -241,19 +248,28 @@ impl Server {
         // needs no `&self` across the mutation.
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = Vec::new();
+        let Some(session) = self.session_by_id.get(&session_id) else {
+            return emitted_events;
+        };
+        if session.clients.get_client_by_id(client_id).is_none() {
+            return emitted_events;
+        }
         // The restored pane and the one it replaces, set when the focus pass
         // moves `active_tab_id` off the pane the attach focused.
         let mut focus_change = None;
 
         {
-            let Some(session) = self.session_by_id.get_mut(&session_id) else {
-                return emitted_events;
-            };
+            let session = self
+                .session_by_id
+                .get_mut(&session_id)
+                .expect("session located above");
             let tab_by_id = &session.tabs;
             let pane_registry = &session.panes;
             let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
                 return emitted_events;
             };
+            let focused_panes_before = client.list_focused_panes().clone();
+            let zoomed_panes_before = client.list_zoomed_panes().clone();
             let prior_pane_id = client.get_focused_pane(active_tab_id);
             for (&tab_id, &pane_id) in &saved_view.focused_pane_id_by_tab_id {
                 if tab_by_id.contains_key(&tab_id)
@@ -288,6 +304,11 @@ impl Server {
                     );
                     client.set_scroll_offset(pane_id, scroll_offset.min(retained_line_count));
                 }
+            }
+            let client_view_changed = focused_panes_before != *client.list_focused_panes()
+                || zoomed_panes_before != *client.list_zoomed_panes();
+            if client_view_changed {
+                advance_client_placement_revisions_when_possible(session, &[client_id]);
             }
         }
 
@@ -401,7 +422,10 @@ impl Server {
             Some(session) if session.tabs.contains_key(&active_tab_id) => {}
             _ => return Vec::new(),
         }
-
+        let target_client_was_existing = self
+            .session_by_id
+            .get(&session_id)
+            .is_some_and(|session| session.clients.get_client_by_id(client_id).is_some());
         // If the id already lives in a different session, detach it there first
         // and reflow the tab it leaves. One id is never held in two registries.
         if let Some(old_session_id) = self
@@ -416,6 +440,15 @@ impl Server {
                 let old_tab_id = old_session
                     .detach_client(client_id)
                     .map(|client| client.get_active_tab());
+                if let Some(old_tab_id) = old_tab_id {
+                    let old_affected_client_ids =
+                        list_clients_affected_by_tabs(old_session, &[old_tab_id], None);
+                    advance_session_placement_revision_when_possible(old_session);
+                    advance_client_placement_revisions_when_possible(
+                        old_session,
+                        &old_affected_client_ids,
+                    );
+                }
                 if let Some(old_tab_id) = old_tab_id {
                     self.reflow_tab_if_viewed(
                         pty_backend.as_ref(),
@@ -507,6 +540,23 @@ impl Server {
             }
         }
 
+        let mut affected_tab_ids = vec![active_tab_id];
+        if let Some(prior_tab_id) = prior_tab_id {
+            if prior_tab_id != active_tab_id {
+                affected_tab_ids.push(prior_tab_id);
+            }
+        }
+        let affected_client_ids =
+            list_clients_affected_by_tabs(session, &affected_tab_ids, Some(client_id));
+        let clients_to_advance = affected_client_ids
+            .into_iter()
+            .filter(|affected_client_id| {
+                target_client_was_existing || *affected_client_id != client_id
+            })
+            .collect::<Vec<_>>();
+        advance_session_placement_revision_when_possible(session);
+        advance_client_placement_revisions_when_possible(session, &clients_to_advance);
+
         // Reflow the tab the client now views, plus — on a same-session move —
         // the one it left.
         self.reflow_tab_if_viewed(
@@ -565,13 +615,25 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .expect("session located above");
-        let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
+        let Some(client) = session.clients.get_client_by_id(client_id) else {
             return Vec::new();
         };
         let active_tab_id = client.get_active_tab();
+        let view_changed = client.get_viewport_size() != viewport_size
+            || client.get_reported_pane_area() != pane_area
+            || client.get_cell_size() != cell_size;
+        let affected_client_ids =
+            list_clients_affected_by_tabs(session, &[active_tab_id], Some(client_id));
+        let Some(client) = session.clients.get_client_mut_by_id(client_id) else {
+            return Vec::new();
+        };
         client.update_viewport(viewport_size);
         client.update_pane_area(pane_area);
         client.replace_cell_size(cell_size);
+        if view_changed {
+            advance_session_placement_revision_when_possible(session);
+            advance_client_placement_revisions_when_possible(session, &affected_client_ids);
+        }
 
         let mut emitted_events = Vec::new();
         self.reflow_tab_if_viewed(
@@ -666,6 +728,18 @@ impl Server {
         else {
             return Vec::new();
         };
+        let Some(session) = self.session_by_id.get(&session_id) else {
+            return Vec::new();
+        };
+        let Some(removed_client) = session.clients.get_client_by_id(client_id) else {
+            return Vec::new();
+        };
+        let active_tab_id = removed_client.get_active_tab();
+        let affected_client_ids: Vec<ClientId> =
+            list_clients_affected_by_tabs(session, &[active_tab_id], None)
+                .into_iter()
+                .filter(|affected_client_id| *affected_client_id != client_id)
+                .collect();
         let session = self
             .session_by_id
             .get_mut(&session_id)
@@ -677,6 +751,10 @@ impl Server {
         let active_tab_id = removed_client
             .as_ref()
             .map(|client| client.get_active_tab());
+        if removed_client.is_some() {
+            advance_session_placement_revision_when_possible(session);
+            advance_client_placement_revisions_when_possible(session, &affected_client_ids);
+        }
         // A client did leave, and none is left attached.
         let is_session_empty = removed_client.is_some() && !session.clients.has_clients();
         self.unsubscribe_client(client_id);

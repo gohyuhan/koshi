@@ -634,6 +634,15 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Available,
         ),
         build_core_action_seed(
+            "place-pane",
+            "Place Pane",
+            "Insert a pane into another tab's tiled layout",
+            PaneSession,
+            vec![Pane, TabTarget],
+            CoreCommand(CommandKind::PlacePane),
+            Available,
+        ),
+        build_core_action_seed(
             "focus-pane",
             "Focus Pane",
             "Move the issuing client's focus to a pane",

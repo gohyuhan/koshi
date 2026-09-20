@@ -34,6 +34,7 @@ fn build_test_painted_frame() -> PaintedFrame {
     PaintedFrame {
         session_snapshot: FrameSession {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            session_revision: 0,
             session_name: "quiet-lake".to_string(),
             active_tab_snapshot: FrameTab {
                 tab_id,
@@ -101,6 +102,7 @@ fn build_test_painted_frame() -> PaintedFrame {
         }],
         client_snapshot: FrameClient {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
+            client_revision: 0,
             viewport_size: Size {
                 column_count: 4,
                 row_count: 3,

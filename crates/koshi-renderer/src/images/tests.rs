@@ -93,6 +93,7 @@ fn build_render_snapshot(
     RenderSnapshot {
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
+            session_revision: 0,
             session_name: String::from("session"),
             active_tab_snapshot: TabSnapshot {
                 tab_id,
@@ -125,6 +126,7 @@ fn build_render_snapshot(
         pane_snapshots: vec![pane_snapshot],
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
+            client_revision: 0,
             viewport_size,
             active_tab_id: tab_id,
             focused_pane_id: Some(pane_id),

@@ -109,6 +109,35 @@ fn a_new_session_stores_the_supplied_creation_time() {
 }
 
 #[test]
+fn a_session_placement_revision_advances_once_and_refuses_wraparound() {
+    let mut session = build_empty_session();
+
+    assert_eq!(session.get_placement_revision(), 0);
+    assert!(session.can_advance_placement_revision());
+    assert!(session.advance_placement_revision());
+    assert_eq!(session.get_placement_revision(), 1);
+
+    session.placement_revision = u64::MAX;
+    assert!(!session.can_advance_placement_revision());
+    assert!(!session.advance_placement_revision());
+    assert_eq!(session.get_placement_revision(), u64::MAX);
+}
+
+#[test]
+fn an_old_session_record_reads_a_zero_placement_revision() {
+    let session = build_empty_session();
+    let mut serialized_session = serde_json::to_value(&session).expect("session serializes");
+    serialized_session
+        .as_object_mut()
+        .expect("session is an object")
+        .remove("placement_revision");
+
+    let restored_session: Session =
+        serde_json::from_value(serialized_session).expect("old session decodes");
+    assert_eq!(restored_session.get_placement_revision(), 0);
+}
+
+#[test]
 fn tab_viewport_with_exactly_one_viewer_returns_its_own_reserved_size() {
     let tab = TabId::new();
     let mut session = Session::from_identity_and_client_registry(
@@ -875,6 +904,12 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     tiled_client.update_focused_pane(tab_one, pane_one);
     tiled_client.set_scroll_offset(pane_three, 3);
     session.attach_client(tiled_client);
+    assert!(session.advance_placement_revision());
+    assert!(session
+        .clients
+        .get_client_mut_by_id(zoomed_client_id)
+        .expect("zoomed client is attached")
+        .advance_placement_revision());
 
     let serialized_session_json = serde_json::to_string(&session).expect("the session writes out");
     let decoded_session: Session =
@@ -884,6 +919,15 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(decoded_session.session_name, "carried");
     assert_eq!(decoded_session.created_at, SystemTime::UNIX_EPOCH);
     assert_eq!(*decoded_session.get_lifecycle(), SessionLifecycle::Running);
+    assert_eq!(decoded_session.get_placement_revision(), 1);
+    assert_eq!(
+        decoded_session
+            .clients
+            .get_client_by_id(zoomed_client_id)
+            .expect("zoomed client is carried")
+            .get_placement_revision(),
+        1
+    );
 
     assert_eq!(decoded_session.tabs.len(), 2);
     let recovered_one = decoded_session
