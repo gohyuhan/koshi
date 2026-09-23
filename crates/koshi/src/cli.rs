@@ -1251,6 +1251,7 @@ impl CliCommand {
                 Command::SwapPanes(SwapPanesArgs {
                     source_pane_id: *pane_id,
                     target_pane_id: *target_pane_id,
+                    expected_placement_revision: None,
                 }),
             ),
             CliCommand::PlacePane {

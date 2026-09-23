@@ -24,7 +24,7 @@ use koshi_config::types::{ClientConfig, ServerConfig};
 use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, PaneId, SessionId, SubscriberId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use koshi_core::process::PtySize;
 use koshi_core::registry::ActionRegistry;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
@@ -686,6 +686,55 @@ impl Server {
             has_sent_switch |= self.event_bus.try_send_switch(subscriber_id, session_id);
         }
         has_sent_switch
+    }
+
+    /// Build and queue one read-only placement preview for `client_id`.
+    pub(crate) fn send_placement_snapshot(
+        &mut self,
+        client_id: ClientId,
+        request_id: u64,
+        source_pane_id: PaneId,
+        destination_tab_id: TabId,
+    ) -> bool {
+        let Some(subscriber_id) = self
+            .subscriptions
+            .iter()
+            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
+            .map(|&(subscriber_id, _)| subscriber_id)
+        else {
+            return false;
+        };
+        match self.build_placement_snapshot(client_id, source_pane_id, destination_tab_id) {
+            Ok(placement_snapshot) => self.event_bus.try_send_placement_snapshot(
+                subscriber_id,
+                request_id,
+                Box::new(placement_snapshot),
+            ),
+            Err(placement_error) => self.event_bus.try_send_placement_refusal(
+                subscriber_id,
+                request_id,
+                placement_error,
+            ),
+        }
+    }
+
+    /// Put one rejected placement command on the queue of the client that sent
+    /// it.
+    pub(crate) fn send_placement_command_rejection(
+        &mut self,
+        client_id: ClientId,
+        command_id: CommandId,
+    ) -> bool {
+        let Some(subscriber_id) = self
+            .subscriptions
+            .iter()
+            .find(|&&(_, viewed_client_id)| viewed_client_id == client_id)
+            .map(|&(subscriber_id, _)| subscriber_id)
+        else {
+            return false;
+        };
+        self.event_bus
+            .try_send_placement_command_rejection(subscriber_id, command_id)
     }
 
     /// Log each of `events`, add it to the recent-events ring, then deliver it

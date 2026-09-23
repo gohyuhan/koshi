@@ -84,6 +84,7 @@ fn paint_statusline(
         StatuslineInputs {
             keymap_hints,
             pending_key_sequence,
+            placement_status: None,
         },
         theme,
         render_area,
@@ -1288,5 +1289,65 @@ fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 40)),
         "…"
+    );
+}
+
+#[test]
+fn placement_statusline_reserves_the_right_edge_and_styles_each_status_kind() {
+    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new(), false);
+    let status_text = "MOVE D | swap with B";
+    let valid_placement_status = PlacementStatus {
+        placement_status_kind: PlacementStatusKind::Valid,
+        status_text: status_text.to_string(),
+    };
+    let invalid_placement_status = PlacementStatus {
+        placement_status_kind: PlacementStatusKind::Invalid,
+        status_text: "MOVE D | choose a destination".to_string(),
+    };
+    let loading_placement_status = PlacementStatus {
+        placement_status_kind: PlacementStatusKind::Loading,
+        status_text: "MOVE D | loading logs".to_string(),
+    };
+
+    let render_status = |placement_status: &PlacementStatus| {
+        let render_area = RatatuiRect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+        let mut render_buffer = Buffer::empty(render_area);
+        draw_statusline(
+            StatuslineInputs {
+                keymap_hints: &keymap_hints,
+                pending_key_sequence: None,
+                placement_status: Some(placement_status),
+            },
+            &Theme::default(),
+            render_area,
+            &mut render_buffer,
+        );
+        render_buffer
+    };
+
+    let valid_render_buffer = render_status(&valid_placement_status);
+    let invalid_render_buffer = render_status(&invalid_placement_status);
+    let loading_render_buffer = render_status(&loading_placement_status);
+    assert_eq!(
+        format_rendered_row(&valid_render_buffer),
+        format!("{:>80}", format!(" {status_text} ")).trim_end()
+    );
+    let valid_status_start_column = 80 - (status_text.chars().count() as u16 + 2);
+    assert_eq!(
+        valid_render_buffer[(valid_status_start_column, 0)].symbol(),
+        " "
+    );
+    assert_ne!(
+        valid_render_buffer[(79, 0)].bg,
+        invalid_render_buffer[(79, 0)].bg
+    );
+    assert_ne!(
+        invalid_render_buffer[(79, 0)].fg,
+        loading_render_buffer[(79, 0)].fg
     );
 }

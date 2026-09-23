@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use koshi_config::hints::KeyMatch;
 use koshi_config::key::Leader;
@@ -14,17 +15,25 @@ use koshi_config::types::{
     BoundAction, KeybindingsConfig, ModeBindings, ModeName, RgbColor, WheelScroll,
 };
 use koshi_core::action::{ActionReference, MOUSE_SELECT_HINT, MOUSE_UNSELECT_HINT};
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{EventClass, InputModeChanged, MouseSelectChanged, SubscriberLagged};
-use koshi_core::geometry::Direction;
-use koshi_core::ids::{PaneId, SessionId, SubscriberId, TabId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
+use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseAnswer;
 use koshi_core::resolve::ActionArgs;
+use koshi_ipc::frame::FrameSlot;
+use koshi_ipc::placement::{
+    PanePlacementClientSnapshot, PanePlacementPaneSnapshot, PanePlacementSizing,
+    PanePlacementSnapshot, PanePlacementTabSnapshot,
+};
+use koshi_ipc::protocol::IpcErrorCode;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, PluginUiSnapshot, RenderSnapshot, SessionSnapshot, TabSnapshot,
+    ClientSnapshot, PaneKind, PluginUiSnapshot, RenderSnapshot, SessionSnapshot, TabSnapshot,
 };
 
 use super::*;
@@ -51,6 +60,814 @@ pub(crate) fn build_test_client_with_event_sender() -> (Client, mpsc::SyncSender
         TerminalCleanupGuard::new(),
     );
     (client, tx)
+}
+
+pub(crate) fn build_test_placement_snapshot(
+    session_id: SessionId,
+    client_id: ClientId,
+    source_pane_id: PaneId,
+    source_tab_id: TabId,
+    destination_tab_id: TabId,
+    session_placement_revision: u64,
+    client_placement_revision: u64,
+) -> PanePlacementSnapshot {
+    let destination_pane_id = PaneId::new();
+    let pane_slot = |pane_id| FrameSlot {
+        pane_id,
+        outer_rect: Rect::from_size_at_origin(TEST_VIEWPORT_SIZE),
+        content_rect: Some(Rect::from_size_at_origin(TEST_VIEWPORT_SIZE)),
+        pane_kind: PaneKind::Terminal,
+        is_visible: true,
+        is_suppressed: false,
+        is_dead: false,
+    };
+    let pane_snapshot = |pane_id| PanePlacementPaneSnapshot {
+        pane_id,
+        terminal_window: None,
+        image_placement_snapshots: Vec::new(),
+    };
+    PanePlacementSnapshot {
+        session_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        session_placement_revision,
+        client_placement_revision,
+        source_tab_snapshot: PanePlacementTabSnapshot {
+            tab_id: source_tab_id,
+            tab_name: "source".to_string(),
+            layout_tree: LayoutNode::Pane(source_pane_id),
+            pane_slots: vec![pane_slot(source_pane_id)],
+            effective_cell_size: TEST_VIEWPORT_SIZE,
+            stack_headers: Vec::new(),
+            layout_mode: LayoutMode::Tiled,
+            is_every_pane_suppressed: false,
+            gap_cell_count: 0,
+            pane_snapshots: vec![pane_snapshot(source_pane_id)],
+        },
+        destination_tab_snapshot: Some(PanePlacementTabSnapshot {
+            tab_id: destination_tab_id,
+            tab_name: "destination".to_string(),
+            layout_tree: LayoutNode::Pane(destination_pane_id),
+            pane_slots: vec![pane_slot(destination_pane_id)],
+            effective_cell_size: TEST_VIEWPORT_SIZE,
+            stack_headers: Vec::new(),
+            layout_mode: LayoutMode::Tiled,
+            is_every_pane_suppressed: false,
+            gap_cell_count: 0,
+            pane_snapshots: vec![pane_snapshot(destination_pane_id)],
+        }),
+        client_snapshot: PanePlacementClientSnapshot {
+            client_id,
+            viewport_size: TEST_VIEWPORT_SIZE,
+            pane_area: None,
+            active_tab_id: source_tab_id,
+            focused_pane_id: Some(source_pane_id),
+        },
+        pane_sizing: PanePlacementSizing {
+            minimum_size: Size {
+                column_count: 1,
+                row_count: 1,
+            },
+            gap_cell_count: 0,
+        },
+    }
+}
+
+#[test]
+fn a_same_tab_insertion_that_preserves_the_layout_sends_no_command() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let mut placement_snapshot = build_test_placement_snapshot(
+        SessionId::new(),
+        client.get_client_id(),
+        source_pane_id,
+        source_tab_id,
+        source_tab_id,
+        0,
+        0,
+    );
+    placement_snapshot.destination_tab_snapshot = None;
+    placement_snapshot.source_tab_snapshot.layout_tree =
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(target_pane_id),
+                LayoutNode::Pane(source_pane_id),
+            ],
+        ));
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: source_tab_id,
+        anchor: PanePlacementAnchor::Pane(target_pane_id),
+        direction: Direction::Right,
+    };
+    client.placement_snapshot = Some(Box::new(placement_snapshot));
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id: source_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(placement_target),
+        is_placement_submitted: false,
+    });
+
+    assert_eq!(
+        client.submit_placement_command(),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(client.get_placement_target(), None);
+    assert!(!client.is_placement_confirmation_pending());
+}
+
+#[test]
+fn placement_read_accepts_only_the_current_session_and_request() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let client_id = client.get_client_id();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    client.set_session_id(session_id);
+
+    let request_started_at = Instant::now();
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, request_started_at,));
+    assert!(!client.begin_placement_read(
+        2,
+        source_pane_id,
+        destination_tab_id,
+        request_started_at,
+    ));
+
+    let placement_snapshot = build_test_placement_snapshot(
+        session_id,
+        client_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        0,
+        0,
+    );
+    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+    assert!(client.get_placement_snapshot().is_some());
+    assert!(client.begin_placement_read(2, source_pane_id, destination_tab_id, request_started_at,));
+}
+
+#[test]
+fn image_cache_reset_clears_preview_without_cancelling_pending_read() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, Instant::now(),));
+    client.clear_placement_snapshot();
+
+    assert!(client.get_placement_snapshot().is_none());
+    assert!(!client.begin_placement_read(2, source_pane_id, destination_tab_id, Instant::now(),));
+}
+
+#[test]
+fn placement_read_is_cleared_when_a_new_frame_changes_placement_revisions() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let source_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+    client.set_session_id(session_id);
+
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, Instant::now(),));
+    client.set_placement_revisions(1, 0);
+
+    assert!(client.get_placement_snapshot().is_none());
+    assert!(client.begin_placement_read(2, source_pane_id, destination_tab_id, Instant::now(),));
+}
+
+#[test]
+fn placement_read_rejects_a_snapshot_from_another_session() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let client_id = client.get_client_id();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    client.set_session_id(session_id);
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, Instant::now(),));
+
+    let placement_snapshot = build_test_placement_snapshot(
+        SessionId::new(),
+        client_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        0,
+        0,
+    );
+    assert!(!client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+    assert!(client.get_placement_snapshot().is_none());
+    assert!(client.begin_placement_read(2, source_pane_id, destination_tab_id, Instant::now(),));
+}
+
+#[test]
+fn placement_read_expires_at_its_deadline_and_preserves_the_newest_queued_destination() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let first_destination_tab_id = TabId::new();
+    let newest_destination_tab_id = TabId::new();
+    let request_started_at = Instant::now();
+
+    assert!(client.begin_placement_read(
+        1,
+        source_pane_id,
+        first_destination_tab_id,
+        request_started_at,
+    ));
+    assert!(!client.begin_placement_read(
+        2,
+        source_pane_id,
+        newest_destination_tab_id,
+        request_started_at + Duration::from_millis(1),
+    ));
+    assert_eq!(
+        client.next_placement_read_wakeup(request_started_at),
+        Some(PLACEMENT_READ_TIMEOUT_DURATION)
+    );
+    assert!(!client.expire_placement_read(
+        request_started_at + PLACEMENT_READ_TIMEOUT_DURATION - Duration::from_nanos(1),
+    ));
+    assert!(client.expire_placement_read(request_started_at + PLACEMENT_READ_TIMEOUT_DURATION,));
+    assert_eq!(client.next_placement_read_wakeup(request_started_at), None);
+    assert_eq!(
+        client.take_queued_placement_read(),
+        Some((source_pane_id, newest_destination_tab_id))
+    );
+    assert!(client.begin_placement_read(
+        2,
+        source_pane_id,
+        newest_destination_tab_id,
+        request_started_at + PLACEMENT_READ_TIMEOUT_DURATION,
+    ));
+}
+
+#[test]
+fn placement_read_rejects_a_delayed_snapshot_after_expiry() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let client_id = client.get_client_id();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let request_started_at = Instant::now();
+    client.set_session_id(session_id);
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, request_started_at,));
+
+    let placement_snapshot = build_test_placement_snapshot(
+        session_id,
+        client_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        0,
+        0,
+    );
+    assert!(client.expire_placement_read(request_started_at + PLACEMENT_READ_TIMEOUT_DURATION,));
+    assert!(!client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+    assert!(client.get_placement_snapshot().is_none());
+}
+
+#[test]
+fn placement_read_rejects_a_snapshot_that_arrives_after_its_deadline() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let client_id = client.get_client_id();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let request_started_at = Instant::now();
+    client.set_session_id(session_id);
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, request_started_at,));
+
+    let placement_snapshot = build_test_placement_snapshot(
+        session_id,
+        client_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        0,
+        0,
+    );
+    let expired_at = request_started_at
+        .checked_add(PLACEMENT_READ_TIMEOUT_DURATION)
+        .and_then(|deadline| deadline.checked_add(Duration::from_nanos(1)))
+        .expect("test deadline should be representable");
+
+    assert!(!client.accept_placement_snapshot(1, placement_snapshot, expired_at));
+    assert!(client
+        .next_placement_read_wakeup(request_started_at)
+        .is_none());
+}
+
+#[test]
+fn placement_read_rejects_a_refusal_that_arrives_after_its_deadline() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let request_started_at = Instant::now();
+    let source_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+    let newest_destination_tab_id = TabId::new();
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, request_started_at,));
+    assert!(!client.begin_placement_read(
+        2,
+        source_pane_id,
+        newest_destination_tab_id,
+        request_started_at,
+    ));
+    let expired_at = request_started_at
+        .checked_add(PLACEMENT_READ_TIMEOUT_DURATION)
+        .and_then(|deadline| deadline.checked_add(Duration::from_nanos(1)))
+        .expect("test deadline should be representable");
+
+    assert!(!client.accept_placement_refusal(1, IpcErrorCode::ResourceLimit, expired_at,));
+    assert!(!client.is_placement_read_pending());
+    assert_eq!(
+        client.take_queued_placement_read(),
+        Some((source_pane_id, newest_destination_tab_id))
+    );
+}
+
+#[test]
+fn a_missing_placement_target_cancels_the_active_interaction() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let request_started_at = Instant::now();
+    client.set_session_id(session_id);
+    client.set_frame_view(source_tab_id, Some(source_pane_id), vec![source_tab_id]);
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, request_started_at,));
+    assert!(client.accept_placement_refusal(
+        1,
+        IpcErrorCode::NotFound,
+        request_started_at + Duration::from_millis(1),
+    ));
+    assert!(client.placement_mode.is_none());
+    assert!(!client.is_placement_mode_active());
+}
+
+#[test]
+fn a_stale_missing_target_refusal_keeps_the_newer_placement_selection() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let stale_destination_tab_id = TabId::new();
+    let current_destination_tab_id = TabId::new();
+    let request_started_at = Instant::now();
+    client.set_session_id(SessionId::new());
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        vec![
+            source_tab_id,
+            stale_destination_tab_id,
+            current_destination_tab_id,
+        ],
+    );
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id: current_destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+
+    assert!(client.begin_placement_read(
+        17,
+        source_pane_id,
+        stale_destination_tab_id,
+        request_started_at,
+    ));
+    assert!(client.accept_placement_refusal(
+        17,
+        IpcErrorCode::NotFound,
+        request_started_at + Duration::from_millis(1),
+    ));
+
+    assert!(client.is_placement_mode_active());
+    assert_eq!(
+        client
+            .placement_mode
+            .as_ref()
+            .map(|placement_mode| placement_mode.destination_tab_id),
+        Some(current_destination_tab_id),
+    );
+}
+
+#[test]
+fn clearing_unconfirmed_placement_read_discards_the_selected_target() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(destination_pane_id),
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: false,
+    });
+
+    client.clear_placement_read();
+
+    assert!(client.get_placement_target().is_none());
+    assert!(client
+        .placement_mode
+        .as_ref()
+        .is_some_and(|placement_mode| !placement_mode.is_placement_submitted));
+}
+
+#[test]
+fn clearing_placement_read_keeps_a_submitted_target_pending() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_pane_id = PaneId::new();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(destination_pane_id),
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: true,
+    });
+
+    client.clear_placement_read();
+
+    assert!(client.get_placement_target().is_some());
+    assert!(client
+        .placement_mode
+        .as_ref()
+        .is_some_and(|placement_mode| placement_mode.is_placement_submitted));
+}
+
+#[test]
+fn an_unchanged_revision_frame_keeps_a_submitted_placement_target_pending() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(PaneId::new()),
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: true,
+    });
+
+    client.set_placement_revisions(0, 0);
+
+    assert!(client.get_placement_target().is_some());
+    assert!(client
+        .placement_mode
+        .as_ref()
+        .is_some_and(|placement_mode| placement_mode.is_placement_submitted));
+}
+
+#[test]
+fn a_changed_revision_frame_clears_a_submitted_placement_target() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(PaneId::new()),
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: true,
+    });
+
+    client.set_placement_revisions(1, 0);
+
+    assert!(client.get_placement_target().is_none());
+    assert!(client
+        .placement_mode
+        .as_ref()
+        .is_some_and(|placement_mode| !placement_mode.is_placement_submitted));
+}
+
+#[test]
+fn a_changed_revision_frame_keeps_keyboard_move_pane_mode_and_requests_one_preview_refresh() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+
+    client.set_placement_revisions(1, 0);
+
+    assert!(client.is_placement_mode_active());
+    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert!(client.get_placement_target().is_none());
+    assert!(!client.is_placement_confirmation_pending());
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((source_pane_id, destination_tab_id))
+    );
+    assert_eq!(client.take_placement_preview_refresh(), None);
+}
+
+#[test]
+fn a_changed_revision_frame_refreshes_an_unconfirmed_keyboard_placement() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: false,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+
+    client.set_placement_revisions(1, 0);
+
+    assert!(client.is_placement_mode_active());
+    assert!(client.get_placement_target().is_none());
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((source_pane_id, destination_tab_id))
+    );
+}
+
+#[test]
+fn a_changed_revision_frame_refreshes_an_unconfirmed_mouse_placement() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: false,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Mouse;
+
+    client.set_placement_revisions(1, 0);
+
+    assert!(client.is_placement_mode_active());
+    assert!(client.get_placement_target().is_none());
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((source_pane_id, destination_tab_id))
+    );
+}
+
+#[test]
+fn a_reconciled_keyboard_placement_keeps_move_pane_mode_when_the_active_tab_changes() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        vec![source_tab_id, destination_tab_id],
+    );
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Tab,
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+    client.set_placement_revisions(1, 0);
+
+    client.set_frame_view(
+        destination_tab_id,
+        Some(source_pane_id),
+        vec![source_tab_id, destination_tab_id],
+    );
+
+    assert!(client.is_placement_mode_active());
+    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert_eq!(client.active_tab_id, Some(destination_tab_id));
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((source_pane_id, destination_tab_id))
+    );
+}
+
+#[test]
+fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let destination_tab_id = TabId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(PaneId::new()),
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: false,
+    });
+    client.prepare_placement_reconciliation();
+    assert!(client.get_placement_target().is_none());
+
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(PaneId::new()),
+            direction: Direction::Right,
+        }),
+        is_placement_submitted: true,
+    });
+    client.prepare_placement_reconciliation();
+    assert!(client.get_placement_target().is_some());
+    assert!(client
+        .placement_mode
+        .as_ref()
+        .is_some_and(|placement_mode| placement_mode.is_placement_submitted));
+
+    client.set_frame_view(TabId::new(), None, Vec::new());
+
+    assert!(client.get_placement_target().is_none());
+    assert!(!client.is_placement_confirmation_pending());
+    assert!(client.is_placement_mode_active());
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((
+            client
+                .placement_mode
+                .as_ref()
+                .expect("keyboard placement mode remains after reconciliation")
+                .source_pane_id,
+            destination_tab_id,
+        ))
+    );
+}
+
+#[test]
+fn authoritative_revision_clears_a_submitted_mouse_placement_mode() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Mouse;
+
+    client.set_placement_revisions(1, 0);
+
+    assert!(client.placement_mode.is_none());
+    assert!(!client.is_placement_confirmation_pending());
+    assert!(!client.is_placement_mode_active());
+}
+
+#[test]
+fn rejected_keyboard_placement_clears_target_and_requests_a_fresh_preview() {
+    let (mut client, delivery_sender) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let command_id = CommandId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+    client.set_pending_placement_command_id(command_id);
+    delivery_sender
+        .send(Delivery::PlacementCommandRejected(command_id))
+        .expect("the test client queue accepts the placement rejection");
+
+    assert_eq!(client.apply_events(), 1);
+    assert!(client.is_placement_mode_active());
+    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert!(client.get_placement_target().is_none());
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((source_pane_id, destination_tab_id))
+    );
+    assert_eq!(client.take_placement_preview_refresh(), None);
+}
+
+#[test]
+fn rejected_mouse_placement_returns_to_the_base_mode() {
+    let (mut client, delivery_sender) = build_test_client_with_event_sender();
+    let command_id = CommandId::new();
+    client.set_lock_mode(LockMode::Locked);
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Mouse;
+    client.set_pending_placement_command_id(command_id);
+    delivery_sender
+        .send(Delivery::PlacementCommandRejected(command_id))
+        .expect("the test client queue accepts the placement rejection");
+
+    assert_eq!(client.apply_events(), 1);
+    assert!(!client.is_placement_mode_active());
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+    assert!(client.placement_mode.is_none());
+}
+
+#[test]
+fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let current_command_id = CommandId::new();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+    client.set_pending_placement_command_id(current_command_id);
+
+    assert!(!client.reject_placement_command(CommandId::new()));
+    assert!(client.is_placement_confirmation_pending());
+    assert!(client.get_placement_target().is_some());
 }
 
 /// A viewer that read a theme file painting the focused border `color`.
@@ -576,6 +1393,50 @@ fn a_keybinding_file_cannot_smuggle_colors_in_through_koshi_kdl() {
 }
 
 #[test]
+fn a_keybinding_file_without_a_move_pane_cancel_binding_is_refused() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let mut mode_bindings_by_name = BTreeMap::new();
+    mode_bindings_by_name.insert(
+        ModeName::from_text("move-pane"),
+        ModeBindings {
+            bound_action_by_key_sequence: BTreeMap::new(),
+            removed_key_sequences: BTreeSet::from([escape_sequence.clone()]),
+        },
+    );
+    let (mut client, _tx) = build_test_client_with_event_sender();
+
+    let report = client.load_startup_config(
+        None,
+        None,
+        Some(PartialKeybindingsConfig {
+            mode_bindings_by_name: Some(mode_bindings_by_name),
+            ..PartialKeybindingsConfig::default()
+        }),
+    );
+
+    let conflict_report = report.expect("a keybinding file was given");
+    assert_eq!(
+        conflict_report.diagnostics,
+        vec![koshi_config::conflict::ConflictDiagnostic::MovePaneCancelBindingMissing]
+    );
+    assert_eq!(conflict_report.get_verdict(), KeymapVerdict::Reject);
+    assert_eq!(
+        client
+            .keymap_catalog
+            .match_sequence(LockMode::MovePane, &escape_sequence)
+            .exact_bound_action,
+        Some(BoundAction {
+            action_reference: ActionReference::from_core_action_name("cancel-pane-move")
+                .expect("valid core action name"),
+            action_arguments: ActionArgs::None,
+        })
+    );
+}
+
+#[test]
 fn a_refused_keybinding_file_keeps_the_reserved_unlock_firing() {
     // Binding the reserved unlock chord in locked mode is fatal: the file is
     // refused whole and the guaranteed escape stays live.
@@ -922,11 +1783,11 @@ fn frame_hints_follow_the_viewers_own_mode() {
 
     assert_eq!(
         normal_mode_hints.hint_bindings.len(),
-        22,
+        23,
         "the shipped normal-mode bindings"
     );
-    // The reserved unlock (pinned) plus the quit and mouse-select chords.
-    assert_eq!(locked_mode_hints.hint_bindings.len(), 3);
+    // The reserved unlock (pinned), move opener, quit, and mouse-select chords.
+    assert_eq!(locked_mode_hints.hint_bindings.len(), 4);
     assert!(locked_mode_hints.hint_bindings.iter().any(|hint_binding| {
         hint_binding.action_display_name == "Unlock" && hint_binding.is_pinned
     }));

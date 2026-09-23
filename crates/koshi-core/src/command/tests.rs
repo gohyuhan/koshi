@@ -71,6 +71,7 @@ fn pane_commands_roundtrip() {
     assert_json_roundtrip(&Command::SwapPanes(SwapPanesArgs {
         source_pane_id: Some(PaneId::new()),
         target_pane_id: PaneId::new(),
+        expected_placement_revision: None,
     }));
     let source_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
@@ -327,6 +328,7 @@ fn command_variant_names_are_canonical() {
             Command::SwapPanes(SwapPanesArgs {
                 source_pane_id: None,
                 target_pane_id: PaneId::new(),
+                expected_placement_revision: None,
             }),
             "SwapPanes",
         ),
@@ -504,6 +506,7 @@ fn command_kind_mirrors_command() {
             Command::SwapPanes(SwapPanesArgs {
                 source_pane_id: None,
                 target_pane_id: PaneId::new(),
+                expected_placement_revision: None,
             }),
             CommandKind::SwapPanes,
         ),

@@ -51,6 +51,11 @@ pub enum HitRegion {
         /// side ([`Left`](Direction::Left)/[`Right`](Direction::Right)).
         side: Direction,
     },
+    /// The painted placement handle in a pane's top border.
+    PlacementHandle {
+        /// The pane whose handle was hit.
+        pane_id: PaneId,
+    },
     /// A collapsed stack member's title strip; clicking it activates that pane.
     StackHeader {
         /// The collapsed pane the strip represents.
@@ -153,14 +158,53 @@ pub fn hit_test(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion
             }
         }
         if pane_slot.outer_rect.is_point_inside(layout_point) {
+            let border_side = get_border_side(pane_slot.outer_rect, layout_point);
+            if border_side == Direction::Up
+                && frame_layout.viewer_chrome.placement_handle_pane_id == Some(pane_slot.pane_id)
+                && is_placement_handle_cell(pane_slot.outer_rect, layout_point)
+            {
+                return HitRegion::PlacementHandle {
+                    pane_id: pane_slot.pane_id,
+                };
+            }
             return HitRegion::PaneBorder {
                 pane_id: pane_slot.pane_id,
-                side: get_border_side(pane_slot.outer_rect, layout_point),
+                side: border_side,
             };
         }
     }
 
     HitRegion::None
+}
+
+/// The number of cells painted for one placement handle.
+pub const PLACEMENT_HANDLE_COLUMN_COUNT: u16 = 3;
+
+/// Return whether `screen_point` is one of the painted placement-handle cells.
+#[must_use]
+pub fn is_placement_handle_cell(outer_rect: Rect, screen_point: Point) -> bool {
+    let Some(handle_rect) = compute_placement_handle_rect(outer_rect) else {
+        return false;
+    };
+    handle_rect.is_point_inside(screen_point)
+}
+
+/// Return the placement handle's cells in layout coordinates.
+#[must_use]
+pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
+    let minimum_column_count = PLACEMENT_HANDLE_COLUMN_COUNT.saturating_add(2);
+    (outer_rect.cell_size.column_count >= minimum_column_count).then(|| {
+        Rect::from_origin_and_size(
+            Point {
+                column: outer_rect.origin.column.saturating_add(1),
+                row: outer_rect.origin.row,
+            },
+            koshi_core::geometry::Size {
+                column_count: PLACEMENT_HANDLE_COLUMN_COUNT,
+                row_count: 1,
+            },
+        )
+    })
 }
 
 /// Classify a cell on the tabline row at column `x`: a scroll arrow, the tab

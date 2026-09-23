@@ -8,9 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use koshi_config::conflict::{KeymapLayer, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+use koshi_core::geometry::Direction;
+use koshi_core::ids::{PaneId, SessionId, TabId};
 use koshi_core::registry::ActionRegistry;
 
-use crate::Client;
+use crate::{Client, PlacementMode, PlacementModeEntry};
 
 /// A viewer on the built-in keymap.
 fn build_test_client() -> Client {
@@ -28,27 +31,36 @@ fn build_keymap_for_mode(
     mode_name: &str,
     key_bindings: &[(KeySequence, &str)],
 ) -> KeymapHintCatalog {
-    let key_binding_entries = key_bindings
-        .iter()
-        .map(|(key_sequence, action_name)| {
-            (
-                key_sequence.clone(),
-                BoundAction {
-                    action_reference: ActionReference::from_core_action_name(action_name)
-                        .expect("valid core action name"),
-                    action_arguments: ActionArgs::None,
-                },
-            )
-        })
-        .collect();
+    build_keymap_for_modes(&[(mode_name, key_bindings)])
+}
+
+/// A resolved keymap holding exactly the supplied bindings in each named mode.
+fn build_keymap_for_modes(
+    mode_binding_sets: &[(&str, &[(KeySequence, &str)])],
+) -> KeymapHintCatalog {
     let mut mode_bindings_by_name = BTreeMap::new();
-    mode_bindings_by_name.insert(
-        ModeName::from_text(mode_name),
-        ModeBindings {
-            bound_action_by_key_sequence: key_binding_entries,
-            removed_key_sequences: BTreeSet::new(),
-        },
-    );
+    for (mode_name, key_bindings) in mode_binding_sets {
+        let key_binding_entries = key_bindings
+            .iter()
+            .map(|(key_sequence, action_name)| {
+                (
+                    key_sequence.clone(),
+                    BoundAction {
+                        action_reference: ActionReference::from_core_action_name(action_name)
+                            .expect("valid core action name"),
+                        action_arguments: ActionArgs::None,
+                    },
+                )
+            })
+            .collect();
+        mode_bindings_by_name.insert(
+            ModeName::from_text(*mode_name),
+            ModeBindings {
+                bound_action_by_key_sequence: key_binding_entries,
+                removed_key_sequences: BTreeSet::new(),
+            },
+        );
+    }
     KeymapHintCatalog::from_parts(
         &[KeymapLayer {
             origin: LayerOrigin::Defaults,
@@ -196,6 +208,209 @@ fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
 }
 
 #[test]
+fn placement_submode_owns_the_locked_keyboard_and_restores_locked_mode() {
+    let mut client = build_test_client();
+    client.set_lock_mode(LockMode::Locked);
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert_eq!(
+        client.resolve_key(client.keymap_catalog.get_unlock_chord(), Instant::now()),
+        KeyOutcome::Discard,
+        "the placement keymap has priority over the locked keymap"
+    );
+    let KeyOutcome::Fire(bound_action) = client.resolve_key(ESCAPE_KEY_CHORD, Instant::now())
+    else {
+        panic!("the default placement cancel binding must fire");
+    };
+    assert_eq!(
+        bound_action.action_reference,
+        ActionReference::from_core_action_name("cancel-pane-move").expect("valid name")
+    );
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::CancelPaneMove),
+        PlacementInputAction::CancelPlacement
+    );
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+}
+
+#[test]
+fn submitted_placement_consumes_navigation_without_changing_its_target() {
+    let (mut client, _) = crate::tests::build_test_client_with_event_sender();
+    let session_id = SessionId::new();
+    let client_id = client.get_client_id();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(PaneId::new()),
+        direction: Direction::Right,
+    };
+    client.set_session_id(session_id);
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        vec![source_tab_id, destination_tab_id],
+    );
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(placement_target.clone()),
+        is_placement_submitted: false,
+    });
+    client.placement_snapshot = Some(Box::new(crate::tests::build_test_placement_snapshot(
+        session_id,
+        client_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        0,
+        0,
+    )));
+
+    assert!(matches!(
+        client.submit_placement_command(),
+        Some(PlacementInputAction::SubmitPlacement(_))
+    ));
+    let submitted_mode = client.placement_mode.clone();
+
+    for placement_chord in [
+        ClientActionKind::SelectNextPlacementTab,
+        ClientActionKind::SelectPaneTarget(Direction::Right),
+        ClientActionKind::CyclePanePlacementSpan,
+    ] {
+        assert_eq!(
+            client.apply_client_action(placement_chord),
+            PlacementInputAction::Consumed
+        );
+        assert_eq!(client.placement_mode, submitted_mode);
+    }
+    assert_eq!(client.get_placement_target(), Some(placement_target));
+}
+
+#[test]
+fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
+    let mut client = build_test_client();
+    client.set_lock_mode(LockMode::Locked);
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Mouse;
+
+    assert!(!client.is_placement_mode_active());
+    assert!(client.is_placement_confirmation_pending());
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::CancelPaneMove),
+        PlacementInputAction::Consumed
+    );
+    assert!(client.is_placement_confirmation_pending());
+    assert_eq!(client.get_active_input_mode(), LockMode::Locked);
+}
+
+#[test]
+fn submitted_keyboard_placement_keeps_move_pane_mode_and_ignores_cancel() {
+    let mut client = build_test_client();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+
+    assert!(client.is_placement_mode_active());
+    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::CancelPaneMove),
+        PlacementInputAction::Consumed
+    );
+    assert!(client.is_placement_mode_active());
+    assert!(client.is_placement_confirmation_pending());
+}
+
+#[test]
+fn changing_input_owner_cancels_an_unconfirmed_placement() {
+    let (mut client, _) = crate::tests::build_test_client_with_event_sender();
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: false,
+    });
+
+    client.set_lock_mode(LockMode::Locked);
+
+    assert!(!client.is_placement_mode_active());
+    assert!(client.get_placement_target().is_none());
+
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: false,
+    });
+    client.set_mouse_selection_enabled(true);
+
+    assert!(!client.is_placement_mode_active());
+    assert!(client.get_placement_target().is_none());
+}
+
+#[test]
+fn a_new_frame_owner_cancels_an_unconfirmed_placement() {
+    let mut client = build_test_client();
+    let source_tab_id = TabId::new();
+    let source_pane_id = PaneId::new();
+    client.set_frame_view(source_tab_id, Some(source_pane_id), vec![source_tab_id]);
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id: source_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: false,
+    });
+
+    client.set_frame_view(TabId::new(), None, Vec::new());
+
+    assert!(!client.is_placement_mode_active());
+    assert!(client.get_placement_target().is_none());
+}
+
+#[test]
 fn locked_mode_still_passes_keys_it_does_not_bind() {
     // Locked mode is pass-through: that is the whole point of it.
     let mut client = build_test_client();
@@ -204,6 +419,44 @@ fn locked_mode_still_passes_keys_it_does_not_bind() {
         client.resolve_key(build_key_chord(ModFlags::NONE, 'a'), Instant::now()),
         KeyOutcome::PassThrough(build_key_chord(ModFlags::NONE, 'a'))
     );
+}
+
+#[test]
+fn locked_mode_opens_move_pane_without_changing_the_base_mode() {
+    let mut client = build_test_client();
+    let source_tab_id = TabId::new();
+    let source_pane_id = PaneId::new();
+    client.set_frame_view(source_tab_id, Some(source_pane_id), vec![source_tab_id]);
+    client.set_lock_mode(LockMode::Locked);
+
+    assert_eq!(
+        client.resolve_key(
+            KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+            Instant::now(),
+        ),
+        KeyOutcome::Pending
+    );
+    let KeyOutcome::Fire(bound_action) = client.resolve_key(
+        KeyChord::from_parts(ModFlags::NONE, Key::Char('m')),
+        Instant::now(),
+    ) else {
+        panic!("the locked move opener must fire");
+    };
+    assert_eq!(
+        bound_action.action_reference,
+        ActionReference::from_core_action_name("move-pane").expect("valid action name")
+    );
+
+    assert!(matches!(
+        client.apply_client_action(ClientActionKind::BeginPaneMove),
+        PlacementInputAction::ReadPlacement {
+            source_pane_id: actual_source_pane_id,
+            destination_tab_id: actual_destination_tab_id,
+        } if actual_source_pane_id == source_pane_id
+            && actual_destination_tab_id == source_tab_id
+    ));
+    assert_eq!(client.get_lock_mode(), LockMode::Locked);
+    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
 }
 
 #[test]
@@ -289,6 +542,70 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
         panic!("the bare `<Left>` fires focus-pane-left again, got {key_outcome:?}");
     };
     assert_eq!(bound_action.action_reference, focus_left_action);
+}
+
+#[test]
+fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
+    let mut client = build_test_client();
+    let leader_chord = build_key_chord(ModFlags::CTRL, 'p');
+    let right_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Right));
+    client.keymap_catalog = build_keymap_for_mode(
+        "normal",
+        &[(
+            KeySequence::from_first_and_rest(leader_chord, vec![right_chord]),
+            "quit",
+        )],
+    );
+
+    assert_eq!(
+        client.resolve_key(leader_chord, Instant::now()),
+        KeyOutcome::Pending
+    );
+    let normal_mode_outcome = client.resolve_key(right_chord, Instant::now());
+    let KeyOutcome::Fire(bound_action) = normal_mode_outcome else {
+        panic!("the custom normal-mode arrow binding must fire, got {normal_mode_outcome:?}");
+    };
+    assert_eq!(
+        bound_action.action_reference,
+        ActionReference::from_core_action_name("quit").expect("valid name")
+    );
+
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+
+    assert_eq!(
+        client.resolve_key(right_chord, Instant::now()),
+        KeyOutcome::Discard,
+        "the active pane keymap is checked instead of the normal keymap"
+    );
+
+    client.keymap_catalog = build_keymap_for_modes(&[
+        (
+            "normal",
+            &[(
+                KeySequence::from_first_and_rest(leader_chord, vec![right_chord]),
+                "quit",
+            )],
+        ),
+        (
+            "move-pane",
+            &[(KeySequence::from(right_chord), "cancel-pane-move")],
+        ),
+    ]);
+    assert_eq!(
+        client.resolve_key(right_chord, Instant::now()),
+        KeyOutcome::Fire(BoundAction {
+            action_reference: ActionReference::from_core_action_name("cancel-pane-move")
+                .expect("valid name"),
+            action_arguments: ActionArgs::None,
+        })
+    );
 }
 
 #[test]

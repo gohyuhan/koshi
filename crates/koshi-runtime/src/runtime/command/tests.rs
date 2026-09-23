@@ -46,6 +46,7 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 
 use crate::runtime::bus::EventFilter;
 use crate::runtime::event::RuntimeEvent;
+use crate::runtime::render_schedule::FRAME_INTERVAL_DURATION;
 use koshi_renderer::snapshot::Delivery;
 
 use super::*;
@@ -492,6 +493,7 @@ fn build_command_for_kind(command_kind: CommandKind, tab_id: TabId, pane_id: Pan
         CommandKind::SwapPanes => Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(pane_id),
             target_pane_id: pane_id,
+            expected_placement_revision: None,
         }),
         CommandKind::PlacePane => Command::PlacePane(PlacePaneArgs {
             source_pane_id: pane_id,
@@ -907,12 +909,11 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
     }
 
     // The kinds that reach their handler on this fixture, so the comparison
-    // above is not two matching refusals every time. The six missing kinds are
-    // refused by the fixture or by command admission, identically on both
+    // above is not two matching refusals every time. The five missing kinds
+    // are refused by the fixture or by command admission, identically on both
     // sides: a resize has no border to move in a single-pane tab, a move has
-    // no neighbor, a write has no running child, placement names its source
-    // tab as its destination, a plugin command has no handler, and the switch
-    // has no connected viewer to receive the move.
+    // no neighbor, a write has no running child, a plugin command has no
+    // handler, and the switch has no connected viewer to receive the move.
     assert_eq!(
         applied_command_kinds,
         vec![
@@ -930,6 +931,7 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             CommandKind::TogglePaneFullscreen,
             CommandKind::MoveTab,
             CommandKind::SwapPanes,
+            CommandKind::PlacePane,
             CommandKind::ScrollPane,
             CommandKind::Quit,
             CommandKind::Detach,
@@ -8220,6 +8222,7 @@ fn swap_panes_exchanges_explicit_pane_occupants() {
         Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(root_pane_id),
             target_pane_id: pane_id_a,
+            expected_placement_revision: None,
         }),
     );
     let command_id = command_envelope.command_id;
@@ -8265,6 +8268,7 @@ fn swapping_a_pane_with_itself_is_a_no_op() {
         Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(pane_id_a),
             target_pane_id: pane_id_a,
+            expected_placement_revision: None,
         }),
     );
     let command_id = command_envelope.command_id;
@@ -8307,6 +8311,7 @@ fn swapping_panes_in_different_tabs_exchanges_slots_without_lifecycle_events() {
         Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(first_pane_id),
             target_pane_id: second_pane_id,
+            expected_placement_revision: None,
         }),
     );
     let command_id = command_envelope.command_id;
@@ -8448,6 +8453,7 @@ fn swapping_a_sole_source_pane_reflows_source_viewers_without_closing_source_tab
         Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(source_root_pane_id),
             target_pane_id: destination_pane_id,
+            expected_placement_revision: None,
         }),
     )) {
         CommandResult::Ok { emitted_events, .. } => emitted_events,
@@ -8944,6 +8950,8 @@ fn a_stale_place_pane_confirmation_is_rejected_without_mutating_session_state() 
         CommandResult::Ok { .. }
     ));
     let serialized_session_before_retry = serialize_session_records(&runtime);
+    let rendered_at = Instant::now();
+    assert!(runtime.render_scheduler.poll(rendered_at));
 
     let retry = build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -8967,6 +8975,10 @@ fn a_stale_place_pane_confirmation_is_rejected_without_mutating_session_state() 
     assert_eq!(
         serialize_session_records(&runtime),
         serialized_session_before_retry
+    );
+    assert_eq!(
+        runtime.render_scheduler.next_wakeup(rendered_at),
+        Some(FRAME_INTERVAL_DURATION)
     );
 }
 

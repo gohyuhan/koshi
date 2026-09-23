@@ -13,15 +13,17 @@ mod statusline_hints;
 pub mod theme;
 
 pub use hit_test::{
-    compute_clamped_pane_cell, compute_pane_local_cell, find_first_visible_tab_index, hit_test,
-    pane_content_rect, HitRegion,
+    compute_clamped_pane_cell, compute_pane_local_cell, compute_placement_handle_rect,
+    find_first_visible_tab_index, hit_test, is_placement_handle_cell, pane_content_rect, HitRegion,
+    PLACEMENT_HANDLE_COLUMN_COUNT,
 };
 pub use images::{
-    build_image_cell_snapshot, build_image_paints, ImageCellSnapshot, ImageCellState, ImagePaint,
-    ImagePlacementKey, ImageRenderMode, ImageSourceRect, MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT,
+    build_image_cell_snapshot, build_image_paints, draw_image_placeholders, ImageCellSnapshot,
+    ImageCellState, ImageOutputKey, ImagePaint, ImagePlacementKey, ImageRenderMode,
+    ImageSourceRect, PlacementPreviewImageKey, MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT,
     TERMINAL_IMAGE_UNAVAILABLE,
 };
 pub use render::{
-    get_cursor_position, get_cursor_style, render_frame, render_frame_with_image_availability,
-    render_frame_with_images,
+    draw_grid_preview, get_cursor_position, get_cursor_style, render_frame,
+    render_frame_with_image_availability, render_frame_with_images,
 };

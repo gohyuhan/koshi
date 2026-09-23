@@ -18,8 +18,9 @@
 //!   Non-keybinding config is unaffected. A user binding whose key is held
 //!   only by the defaults layer is a *steal*, not a collision: the user's
 //!   binding takes the key and the displaced default action becomes unbound.
-//! - **A fatal finding** — the locked-mode unlock escape shadowed, missing,
-//!   or typeable — refuses the keymap outright ([`KeymapVerdict::Reject`]).
+//! - **A fatal finding** — the locked-mode unlock escape is shadowed, missing,
+//!   or typeable, or the `move-pane` mode has no live cancellation binding —
+//!   refuses the keymap outright ([`KeymapVerdict::Reject`]).
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
 //! when the resolver accepts it as written AND a keypress can reach it. It
@@ -226,6 +227,9 @@ pub enum ConflictDiagnostic {
         /// The configured alternative chord.
         unlock_alternative_chord: KeyChord,
     },
+    /// The effective `move-pane` map has no live `core:cancel-pane-move`
+    /// binding, so an active placement cannot be cancelled from the keyboard.
+    MovePaneCancelBindingMissing,
     /// A locked-mode sequence of two or more chords holds the reserved unlock
     /// chord. The chord resolves the instant it is pressed, ahead of the
     /// keymap and whether or not a sequence is open, and the sequence never
@@ -325,7 +329,8 @@ impl ConflictDiagnostic {
             Self::KeyCollision { .. } => ConflictSeverity::Collision,
             Self::ReservedUnlockShadowed { .. }
             | Self::ReservedUnlockMissing { .. }
-            | Self::UnlockAlternativeTypeable { .. } => ConflictSeverity::Fatal,
+            | Self::UnlockAlternativeTypeable { .. }
+            | Self::MovePaneCancelBindingMissing => ConflictSeverity::Fatal,
             Self::AmbiguousPrefix { .. }
             | Self::DeadUnderReservedUnlock { .. }
             | Self::ExceedsChordDepth { .. }
@@ -410,6 +415,11 @@ impl fmt::Display for ConflictDiagnostic {
                 f,
                 "`unlock_alternative` `{unlock_alternative_chord}` is a key plain typing produces; \
                  hold Ctrl, Alt, or Super"
+            ),
+            Self::MovePaneCancelBindingMissing => write!(
+                f,
+                "the `move-pane` mode has no live `core:cancel-pane-move` binding; \
+                 bind that action to a key before removing its last cancellation key"
             ),
             Self::DeadUnderReservedUnlock {
                 layer_origin,
@@ -598,6 +608,7 @@ pub fn detect_conflicts(
         &locked_mode_name,
         &mut conflict_diagnostics,
     );
+    validate_move_pane_cancel_binding(&effective_bindings_by_mode, &mut conflict_diagnostics);
 
     ConflictReport {
         diagnostics: conflict_diagnostics,
@@ -1024,6 +1035,33 @@ fn validate_reserved_unlock_binding(
         None => conflict_diagnostics.push(ConflictDiagnostic::ReservedUnlockMissing {
             reserved_unlock_chord,
         }),
+    }
+}
+
+/// The effective `move-pane` map must keep one live cancellation action so a
+/// keyboard placement always has a reachable exit.
+fn validate_move_pane_cancel_binding(
+    effective_bindings_by_mode: &BTreeMap<
+        &ModeName,
+        BTreeMap<&KeySequence, (LayerOrigin, &BoundAction)>,
+    >,
+    conflict_diagnostics: &mut Vec<ConflictDiagnostic>,
+) {
+    let move_pane_mode_name = ModeName::from_text("move-pane");
+    let cancel_action_reference = ActionReference::from_core_action_name("cancel-pane-move")
+        .expect(
+            "the built-in pane-move cancellation action name satisfies the action-name grammar",
+        );
+    let has_cancel_binding = effective_bindings_by_mode
+        .get(&move_pane_mode_name)
+        .is_some_and(|mode_bindings| {
+            mode_bindings
+                .values()
+                .any(|(_, bound_action)| bound_action.action_reference == cancel_action_reference)
+        });
+
+    if !has_cancel_binding {
+        conflict_diagnostics.push(ConflictDiagnostic::MovePaneCancelBindingMissing);
     }
 }
 

@@ -14,6 +14,7 @@
 //! [`ActionRegistry`](crate::registry::ActionRegistry).
 
 use crate::command::CommandKind;
+use crate::geometry::Direction;
 use crate::ids::PluginId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -365,10 +366,33 @@ pub enum ActionStatus {
 pub enum ActionHandlerReference {
     /// Build and dispatch the named core [`Command`](crate::command::Command).
     CoreCommand(CommandKind),
+    /// Run a viewer-local action without sending a session command.
+    CoreClient(ClientActionKind),
     /// Route to a plugin via a host command request.
     PluginHostCall(PluginId),
     /// Fire a sequence of actions in order (a macro); halts on first failure.
     Sequence(Vec<ActionReference>),
+}
+
+/// A core action handled by the attached viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ClientActionKind {
+    /// Open persistent pane placement mode for the focused pane.
+    BeginPaneMove,
+    /// Select the visible pane target in `direction` during placement mode.
+    SelectPaneTarget(Direction),
+    /// Select the insertion edge in `direction` during placement mode.
+    SelectPaneInsertion(Direction),
+    /// Cycle the available insertion spans during placement mode.
+    CyclePanePlacementSpan,
+    /// Preview the next visible tab during placement mode.
+    SelectNextPlacementTab,
+    /// Preview the previous visible tab during placement mode.
+    SelectPreviousPlacementTab,
+    /// Confirm the selected pane placement.
+    ConfirmPanePlacement,
+    /// Cancel pane placement and return to the base input mode.
+    CancelPaneMove,
 }
 
 /// Everything the registry knows about one action: how to show it, what it can
@@ -443,19 +467,20 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// The built-in action table, loaded into the runtime registry at startup.
 /// `koshi actions list` prints the `Available` entries in this order.
 ///
-/// Every entry is in the `core:` namespace. Actions sharing a [`CommandKind`]
-/// differ only by the values their NAME bakes into the command the resolver
-/// builds — `lock`/`unlock` both build `SetLockMode`; the `new-pane-*`,
-/// `focus-pane-*`, and `resize-pane-*` families each build their family's
-/// command with the named direction; `next-tab`/`previous-tab`/`focus-tab`
-/// all build `FocusTab`.
+/// Every entry is in the `core:` namespace. The `move-pane` action starts a
+/// viewer-local placement mode. Its placement actions select and confirm
+/// viewer-local targets; the other command-backed actions use values
+/// their NAME bakes into the command the resolver builds — `lock`/`unlock`
+/// both build `SetLockMode`; the `new-pane-*`, `focus-pane-*`, and
+/// `resize-pane-*` families each build their family's command with the named
+/// direction; `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`.
 ///
 /// The `copy-selection` and `plugin-*` actions are seeded `ComingSoon`; every
 /// other action is `Available`. The `resize-pane*`, `focus-pane*`, and
 /// `scroll-pane*` actions are `continuous`; every other action is not.
 #[must_use]
 pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
-    use ActionHandlerReference::CoreCommand;
+    use ActionHandlerReference::{CoreClient, CoreCommand};
     use ActionScope::{Client, Global, PaneSession, Tab};
     use ActionStatus::{Available, ComingSoon};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
@@ -582,10 +607,127 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
         build_core_action_seed(
             "move-pane",
             "Move Pane",
-            "Move the focused pane into the slot of a neighboring pane",
+            "Open pane placement mode for the focused pane",
             PaneSession,
             vec![Pane],
-            CoreCommand(CommandKind::MovePane),
+            CoreClient(ClientActionKind::BeginPaneMove),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-target-left",
+            "Select Pane Target Left",
+            "Select the visible pane target to the left in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneTarget(Direction::Left)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-target-down",
+            "Select Pane Target Down",
+            "Select the visible pane target below in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneTarget(Direction::Down)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-target-up",
+            "Select Pane Target Up",
+            "Select the visible pane target above in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneTarget(Direction::Up)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-target-right",
+            "Select Pane Target Right",
+            "Select the visible pane target to the right in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneTarget(Direction::Right)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-insertion-left",
+            "Select Pane Insertion Left",
+            "Select the left insertion edge in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Left)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-insertion-down",
+            "Select Pane Insertion Down",
+            "Select the lower insertion edge in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Down)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-insertion-up",
+            "Select Pane Insertion Up",
+            "Select the upper insertion edge in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Up)),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-pane-insertion-right",
+            "Select Pane Insertion Right",
+            "Select the right insertion edge in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Right)),
+            Available,
+        ),
+        build_core_action_seed(
+            "cycle-pane-placement-span",
+            "Cycle Pane Placement Span",
+            "Cycle the available insertion spans in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CyclePanePlacementSpan),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-next-placement-tab",
+            "Select Next Placement Tab",
+            "Preview the next visible tab in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectNextPlacementTab),
+            Available,
+        ),
+        build_core_action_seed(
+            "select-previous-placement-tab",
+            "Select Previous Placement Tab",
+            "Preview the previous visible tab in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::SelectPreviousPlacementTab),
+            Available,
+        ),
+        build_core_action_seed(
+            "confirm-pane-placement",
+            "Confirm Pane Placement",
+            "Submit the selected pane placement in placement mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::ConfirmPanePlacement),
+            Available,
+        ),
+        build_core_action_seed(
+            "cancel-pane-move",
+            "Cancel Pane Move",
+            "Discard the pane placement and return to the base input mode",
+            Client,
+            vec![ClientTarget],
+            CoreClient(ClientActionKind::CancelPaneMove),
             Available,
         ),
         build_core_action_seed(

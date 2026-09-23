@@ -6,8 +6,9 @@ use serde::Serialize;
 use super::*;
 use crate::event::SessionEvent;
 use crate::frame::{
-    FrameGraphicsProtocol, FrameImageAction, FrameImageChunk, FrameImageDisplay,
-    FrameImageRecordHeader, FrameImageTransfer,
+    FrameAttrs, FrameCell, FrameGraphicsProtocol, FrameImageAction, FrameImageChunk,
+    FrameImageDisplay, FrameImageRecordHeader, FrameImageTransfer, FrameRow, FrameRun, FrameSlot,
+    FrameStyle, FrameWindow,
 };
 use crate::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use crate::router::{RouterRequestKind, RouterResult};
@@ -765,6 +766,10 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
         ))),
         IpcRequestKind::Discovery,
         IpcRequestKind::Layout { tab_id: None },
+        IpcRequestKind::ReadPanePlacement {
+            pane_id: koshi_core::ids::PaneId::new(),
+            destination_tab_id: koshi_core::ids::TabId::new(),
+        },
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving,
@@ -857,6 +862,17 @@ fn sample_events() -> Vec<SessionEvent> {
                 chunk_bytes: vec![0],
             },
         },
+        SessionEvent::PanePlacementSnapshot {
+            request_id: 1,
+            snapshot: Box::new(build_test_placement_snapshot()),
+        },
+        SessionEvent::PanePlacementRefused {
+            request_id: 1,
+            error: crate::protocol::IpcErrorPayload {
+                code: crate::protocol::IpcErrorCode::ResourceLimit,
+                message: String::new(),
+            },
+        },
         SessionEvent::PaneCreated {
             pane_id: PaneId::new(),
             tab_id: TabId::new(),
@@ -914,7 +930,125 @@ fn sample_events() -> Vec<SessionEvent> {
         SessionEvent::SwitchTo {
             session_id: SessionId::new(),
         },
+        SessionEvent::PlacementCommandRejected {
+            command_id: koshi_core::ids::CommandId::new(),
+        },
     ]
+}
+
+#[test]
+fn placement_snapshot_fixture_passes_validation() {
+    build_test_placement_snapshot()
+        .validate()
+        .expect("the wire placement fixture must remain valid");
+}
+
+fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
+    use koshi_core::geometry::{Rect, Size};
+    use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+    use koshi_layout::mode::LayoutMode;
+    use koshi_layout::tree::LayoutNode;
+    use koshi_pane::pane::state::PaneKind;
+
+    let source_pane_id = PaneId::new();
+    let destination_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    let viewport_rect = Rect::from_size_at_origin(viewport_size);
+    let build_frame_cell = || FrameCell {
+        character: ' ',
+        combining_characters: Vec::new(),
+        cell_width: 1,
+        style: FrameStyle {
+            foreground_color: Default::default(),
+            background_color: Default::default(),
+            underline_color: None,
+            text_attributes: FrameAttrs {
+                is_bold: false,
+                is_italic: false,
+                is_reverse: false,
+                is_faint: false,
+                is_blinking: false,
+                is_concealed: false,
+                is_struck_through: false,
+                is_overlined: false,
+                underline_style: Default::default(),
+            },
+        },
+    };
+    let build_frame_window = || FrameWindow {
+        column_count: viewport_size.column_count,
+        row_snapshots: vec![
+            FrameRow {
+                cell_runs: vec![FrameRun {
+                    repeat_count: viewport_size.column_count,
+                    cell: build_frame_cell(),
+                }],
+                row_end: Default::default(),
+            };
+            usize::from(viewport_size.row_count)
+        ],
+        view_row_offset: 0,
+    };
+    let build_tab_snapshot = |tab_id: TabId, pane_id: PaneId, tab_name: &str| {
+        crate::placement::PanePlacementTabSnapshot {
+            tab_id,
+            tab_name: tab_name.to_string(),
+            layout_tree: LayoutNode::Pane(pane_id),
+            pane_slots: vec![FrameSlot {
+                pane_id,
+                outer_rect: viewport_rect,
+                content_rect: Some(viewport_rect),
+                pane_kind: PaneKind::Terminal,
+                is_visible: true,
+                is_suppressed: false,
+                is_dead: false,
+            }],
+            effective_cell_size: viewport_size,
+            stack_headers: Vec::new(),
+            layout_mode: LayoutMode::Tiled,
+            is_every_pane_suppressed: false,
+            gap_cell_count: 0,
+            pane_snapshots: vec![crate::placement::PanePlacementPaneSnapshot {
+                pane_id,
+                terminal_window: Some(build_frame_window()),
+                image_placement_snapshots: Vec::new(),
+            }],
+        }
+    };
+
+    crate::placement::PanePlacementSnapshot {
+        session_id: SessionId::new(),
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        session_placement_revision: 1,
+        client_placement_revision: 2,
+        source_tab_snapshot: build_tab_snapshot(source_tab_id, source_pane_id, "source"),
+        destination_tab_snapshot: Some(build_tab_snapshot(
+            destination_tab_id,
+            destination_pane_id,
+            "destination",
+        )),
+        client_snapshot: crate::placement::PanePlacementClientSnapshot {
+            client_id: ClientId::new(),
+            viewport_size,
+            pane_area: None,
+            active_tab_id: destination_tab_id,
+            focused_pane_id: Some(destination_pane_id),
+        },
+        pane_sizing: crate::placement::PanePlacementSizing {
+            minimum_size: Size {
+                column_count: 1,
+                row_count: 1,
+            },
+            gap_cell_count: 0,
+        },
+    }
 }
 
 /// One value per [`RouterRequestKind`] variant.

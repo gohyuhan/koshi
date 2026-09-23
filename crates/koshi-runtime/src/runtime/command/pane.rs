@@ -757,7 +757,7 @@ impl Server {
             return Ok(TransactionScope::new().commit(command_id, &mut self.event_bus));
         }
         if source_pane_target.tab_id != destination_pane_target.tab_id {
-            return self.handle_place_pane(
+            return self.apply_place_pane(
                 command_id,
                 command_source,
                 &PlacePaneArgs {
@@ -765,7 +765,7 @@ impl Server {
                     placement_target: PanePlacementTarget::Swap {
                         target_pane_id: destination_pane_target.pane_id,
                     },
-                    expected_placement_revision: None,
+                    expected_placement_revision: command_args.expected_placement_revision,
                 },
             );
         }
@@ -824,7 +824,7 @@ impl Server {
     /// Handle [`Command::PlacePane`]: install one prepared tiled placement
     /// across two tabs, then reflow every tab whose viewers change.
     /// Every fallible layout and revision check runs before the session commit.
-    pub(super) fn handle_place_pane(
+    pub(super) fn apply_place_pane(
         &mut self,
         command_id: CommandId,
         command_source: &CommandSource,
@@ -833,6 +833,9 @@ impl Server {
         let acting_session = self.resolve_acting_session(command_source)?;
         let placement_target =
             self.resolve_place_pane_target(command_args, command_source, acting_session)?;
+        if placement_target.source_tab_id == placement_target.destination_tab_id {
+            return self.apply_place_pane_within_tab(command_id, command_args, placement_target);
+        }
         let pane_sizing = self.get_pane_sizing();
         let (source_tab_will_close, landing_tab_id) = {
             let session = self
@@ -991,6 +994,79 @@ impl Server {
             );
         }
 
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
+    }
+
+    /// Apply a checked insertion within one tab.
+    fn apply_place_pane_within_tab(
+        &mut self,
+        command_id: CommandId,
+        command_args: &PlacePaneArgs,
+        placement_target: PlacePaneTarget,
+    ) -> Result<CommandResult, Rejection> {
+        let pane_sizing = self.get_pane_sizing();
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let (session, viewport) = self.resolve_session_and_viewport(
+            placement_target.session_id,
+            placement_target.source_tab_id,
+        )?;
+        let tab_rect = Rect::from_size_at_origin(viewport);
+        let tab_state = session
+            .tabs
+            .get(&placement_target.source_tab_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let layout_target = match &command_args.placement_target {
+            PanePlacementTarget::Split {
+                anchor, direction, ..
+            } => PlacementTarget::Insert {
+                anchor: anchor.clone(),
+                direction: *direction,
+            },
+            PanePlacementTarget::Swap { .. } => {
+                return Err(Rejection::from_reason(RejectReason::InvalidState));
+            }
+        };
+        let placed_layout_tree = place_pane_within_tab(
+            tab_state.get_layout_tree(),
+            command_args.source_pane_id,
+            &layout_target,
+            tab_rect,
+            pane_sizing,
+        )
+        .map_err(|placement_error| Self::placement_rejection(&placement_error))?;
+        let affected_client_ids = list_clients_affected_by_tabs(
+            session,
+            &[placement_target.source_tab_id],
+            Some(placement_target.client_id),
+        );
+        ensure_session_placement_revision_capacity(session)?;
+        ensure_client_placement_revision_capacity(session, &affected_client_ids)?;
+        let tab_state = session
+            .tabs
+            .get_mut(&placement_target.source_tab_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        tab_state.update_layout(placed_layout_tree);
+        if let Some(client) = session
+            .clients
+            .get_client_mut_by_id(placement_target.client_id)
+        {
+            client.clear_zoom(placement_target.source_tab_id);
+        }
+        advance_session_placement_revision(session);
+        advance_client_placement_revisions(session, &affected_client_ids);
+        let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged {
+            tab_id: placement_target.source_tab_id,
+        })];
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            placement_target.session_id,
+            placement_target.source_tab_id,
+            &mut emitted_events,
+        );
         Ok(Self::commit_events(
             &mut self.event_bus,
             command_id,

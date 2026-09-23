@@ -5,7 +5,8 @@
 use super::*;
 
 use crate::action::{
-    build_core_action_seeds, ActionMetadata, ActionNamespace, ActionScope, TargetKind,
+    build_core_action_seeds, ActionMetadata, ActionNamespace, ActionScope, ClientActionKind,
+    TargetKind,
 };
 use crate::command::CommandKind;
 use crate::process::ShellKind;
@@ -48,16 +49,34 @@ fn build_run_spawn_spec() -> SpawnSpec {
 /// through a CLI command, which builds its [`Command`] directly.
 /// `resolve_action` refuses every one of them whatever the arguments.
 /// Pinned against the seed table by [`available_action_table_matches_seeds`].
-const CLI_ONLY: [&str; 9] = [
+const CLI_ONLY: [&str; 8] = [
     "resize-pane",
     "focus-pane",
     "focus-tab",
     "move-tab",
-    "move-pane",
     "swap-panes",
     "place-pane",
     "scroll-pane",
     "write-to-pane",
+];
+
+/// Available viewer-local actions. They are resolved to [`DispatchPlan::ClientAction`]
+/// and therefore do not belong to the command table below.
+const CLIENT_ACTIONS: [&str; 14] = [
+    "move-pane",
+    "select-pane-target-left",
+    "select-pane-target-down",
+    "select-pane-target-up",
+    "select-pane-target-right",
+    "select-pane-insertion-left",
+    "select-pane-insertion-down",
+    "select-pane-insertion-up",
+    "select-pane-insertion-right",
+    "cycle-pane-placement-span",
+    "select-next-placement-tab",
+    "select-previous-placement-tab",
+    "confirm-pane-placement",
+    "cancel-pane-move",
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this
@@ -448,6 +467,7 @@ fn available_action_table_matches_seeds() {
         .into_iter()
         .map(|(action_name, _, _)| action_name.to_string())
         .chain(CLI_ONLY.into_iter().map(str::to_string))
+        .chain(CLIENT_ACTIONS.into_iter().map(str::to_string))
         .collect();
     tabled_action_names.sort();
 
@@ -473,6 +493,22 @@ fn every_available_action_resolves_to_its_exact_command() {
             "core:{action_name}"
         );
     }
+}
+
+#[test]
+fn move_pane_resolves_to_the_viewer_local_action() {
+    let registry = ActionRegistry::new();
+    let move_pane_action = build_core_action_reference("move-pane");
+
+    assert_eq!(
+        resolve_action(
+            &move_pane_action,
+            &ActionArgs::None,
+            &registry,
+            CLIENT_SPLIT,
+        ),
+        Ok(DispatchPlan::ClientAction(ClientActionKind::BeginPaneMove))
+    );
 }
 
 #[test]

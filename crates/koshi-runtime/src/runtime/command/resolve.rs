@@ -403,6 +403,27 @@ impl Server {
                 "panes must be in the same session",
             ));
         }
+        if let Some(expected_placement_revision) = command_args.expected_placement_revision {
+            let owner_session = self
+                .session_by_id
+                .get(&source_pane_target.session_id)
+                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
+            let client_id = Self::resolve_view_client(
+                command_source.get_target_client_id(),
+                command_source,
+                owner_session,
+            )?;
+            let client = Self::require_client(owner_session, client_id)?;
+            if expected_placement_revision.session_revision
+                != owner_session.get_placement_revision()
+                || expected_placement_revision.client_revision != client.get_placement_revision()
+            {
+                return Err(Rejection::from_reason_and_help(
+                    RejectReason::InvalidState,
+                    "placement preview is stale; refresh and confirm again",
+                ));
+            }
+        }
         Ok((source_pane_target, target_pane_target))
     }
 
@@ -443,7 +464,12 @@ impl Server {
                 *destination_tab_id
             }
         };
-        if destination_tab_id == source_pane_target.tab_id {
+        if destination_tab_id == source_pane_target.tab_id
+            && !matches!(
+                &command_args.placement_target,
+                PanePlacementTarget::Split { .. }
+            )
+        {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
                 "placement destination must be another tab",

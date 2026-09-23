@@ -542,7 +542,7 @@ pub enum FrameImageAction {
 }
 
 /// Validate frame image dimensions and return the exact RGBA byte count.
-fn compute_frame_image_byte_count(
+pub(crate) fn compute_frame_image_byte_count(
     pixel_width: u32,
     pixel_height: u32,
 ) -> Result<u64, &'static str> {

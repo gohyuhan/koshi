@@ -29,13 +29,14 @@
 use std::sync::Arc;
 
 use koshi_core::event::{Event, SubscriberLagged};
-use koshi_core::geometry::{Rect, Size};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::geometry::{PaneArea, Rect, Size};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
-use koshi_layout::solver::StackHeader;
+use koshi_layout::solver::{PaneSizing, StackHeader};
+use koshi_layout::tree::LayoutNode;
 use koshi_terminal::graphics::{
     ImageAction, ImageRecord, MAX_IMAGE_BYTE_COUNT, MAX_IMAGE_PIXEL_COUNT,
     MAX_IMAGE_SIDE_PIXEL_COUNT,
@@ -71,6 +72,101 @@ pub struct RenderSnapshot {
     /// Plugin-contributed UI (statusline/tabline segments, notifications,
     /// overlays). Empty for a stock, plugin-free Koshi.
     pub plugin_ui_snapshot: PluginUiSnapshot,
+}
+
+/// A read-only placement preview built from one client's view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementSnapshot {
+    /// The session that produced the preview.
+    pub session_id: SessionId,
+    /// The pane named by the request.
+    pub source_pane_id: PaneId,
+    /// The tab that currently contains `source_pane_id`.
+    pub source_tab_id: TabId,
+    /// The tab named as the destination.
+    pub destination_tab_id: TabId,
+    /// The session placement revision used for this preview.
+    pub session_placement_revision: u64,
+    /// The client placement revision used for this preview.
+    pub client_placement_revision: u64,
+    /// The source tab's solved layout, tree, and visible pane content.
+    pub source_tab_snapshot: PlacementTabSnapshot,
+    /// The destination tab's solved layout, tree, and visible pane content.
+    /// `None` means that the destination is the source tab.
+    pub destination_tab_snapshot: Option<PlacementTabSnapshot>,
+    /// The client's retained view inputs.
+    pub client_snapshot: PlacementClientSnapshot,
+    /// The shared sizing inputs used by the solver.
+    pub pane_sizing: PaneSizing,
+}
+
+/// The presentation state of the viewer's placement statusline entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementStatusKind {
+    /// The selected destination snapshot is still being read.
+    Loading,
+    /// The viewer has no confirmed destination to submit.
+    Invalid,
+    /// The viewer has a destination that can be confirmed.
+    Valid,
+}
+
+/// One viewer-local placement statusline entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementStatus {
+    /// The style and validation state shown with `status_text`.
+    pub placement_status_kind: PlacementStatusKind,
+    /// The one-line text shown in the statusline.
+    pub status_text: String,
+}
+
+/// One source or destination tab in a placement preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementTabSnapshot {
+    /// The unsolved layout tree.
+    pub layout_tree: LayoutNode,
+    /// The solved tab layout.
+    pub tab_snapshot: TabSnapshot,
+    /// Visible content matched to the tab's pane slots by pane id.
+    pub pane_snapshots: Vec<PlacementPaneSnapshot>,
+}
+
+/// One pane's bounded content in a placement preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementPaneSnapshot {
+    /// The pane this content belongs to.
+    pub pane_id: PaneId,
+    /// The visible terminal cells, without scrollback metadata.
+    pub terminal_grid_view: Option<GridView>,
+    /// Native-image placements whose records may follow in bounded events.
+    pub image_placement_snapshots: Vec<ImagePlacementSnapshot>,
+}
+
+/// The client view values that are needed to reproduce a placement preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementClientSnapshot {
+    /// The requesting client.
+    pub client_snapshot: ClientSnapshot,
+    /// The pane area this client reported, if any.
+    pub reported_pane_area: Option<PaneArea>,
+}
+
+/// The typed reasons a placement preview cannot be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementSnapshotErrorCode {
+    /// The source pane or destination tab does not exist.
+    NotFound,
+    /// The requested preview exceeds a bounded resource limit.
+    ResourceLimit,
+}
+
+/// A placement preview refusal that travels through the attached event stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementSnapshotError {
+    /// The typed refusal code.
+    pub code: PlacementSnapshotErrorCode,
+    /// The human-readable refusal message.
+    pub message: String,
 }
 
 impl RenderSnapshot {
@@ -154,6 +250,20 @@ pub enum Delivery {
         /// class.
         lag_report: SubscriberLagged,
     },
+    /// A bounded read-only placement preview for the client that asked for it.
+    PanePlacementSnapshot {
+        /// The request this preview answers.
+        request_id: u64,
+        /// The source and destination snapshot.
+        snapshot: Box<PlacementSnapshot>,
+    },
+    /// A placement preview request was refused.
+    PanePlacementRefused {
+        /// The request this refusal answers.
+        request_id: u64,
+        /// The typed refusal.
+        error: PlacementSnapshotError,
+    },
     /// What one round of mouse actions did, for the client that asked for the
     /// round.
     MouseAnswer {
@@ -169,14 +279,17 @@ pub enum Delivery {
     HostWrite(Vec<u8>),
     /// The session the subscriber's client leaves this one for.
     SwitchTo(SessionId),
+    /// A pane placement command from the subscriber was rejected.
+    PlacementCommandRejected(CommandId),
 }
 
-/// The three things about a frame the viewer decides, not the session: which
-/// pane its pointer is over, where its tab strip is scrolled to, and whether it
-/// is dialing the session again.
+/// The viewer-owned frame state: which pane the pointer is over, which top
+/// border exposes a placement handle, which input mode owns the keymap, where
+/// the tab strip is scrolled, and whether the viewer is dialing the session
+/// again.
 ///
-/// All three belong to one viewer. None is stored on the session or carried in
-/// a snapshot; the viewer hands them in when it hit-tests a frame and again
+/// These values belong to one viewer. None is stored on the session or carried
+/// in a snapshot; the viewer hands them in when it hit-tests a frame and again
 /// when it paints one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ViewerChrome {
@@ -185,6 +298,11 @@ pub struct ViewerChrome {
     /// color so the wheel target is visible; the focused pane keeps its focus
     /// color.
     pub hovered_pane_id: Option<PaneId>,
+    /// The pane whose top border currently exposes the placement handle.
+    pub placement_handle_pane_id: Option<PaneId>,
+    /// The effective input mode for the viewer's keymap and mode tag. `None`
+    /// lets generic frame consumers use the mode carried by the session frame.
+    pub active_input_mode: Option<LockMode>,
     /// Where the viewer's tab strip is scrolled: `None` follows the active tab —
     /// the strip always reveals it — while `Some(i)` peeks from tab index `i`
     /// without changing focus. The renderer windows the tab list from this and
@@ -252,7 +370,10 @@ impl<'a> FrameLayout<'a> {
         TablineInputs {
             session_name: &self.session_snapshot.session_name,
             tabs_metadata: &self.session_snapshot.tabs_metadata,
-            lock_mode: self.client_snapshot.lock_mode,
+            lock_mode: self
+                .viewer_chrome
+                .active_input_mode
+                .unwrap_or(self.client_snapshot.lock_mode),
             is_mouse_selection_enabled: self.client_snapshot.is_mouse_selection_enabled,
             reconnecting: self.viewer_chrome.reconnecting,
             tabline_offset: self.viewer_chrome.tabline_offset,

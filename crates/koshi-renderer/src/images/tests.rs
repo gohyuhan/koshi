@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
+use ratatui::style::{Color as RatatuiColor, Modifier, Style as RatatuiStyle};
 
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -19,7 +20,7 @@ use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
 };
 use koshi_terminal::grid::state::{Cell, Grid};
-use koshi_terminal::style::Style;
+use koshi_terminal::style::{Color as CellColor, Style};
 
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot,
@@ -202,6 +203,41 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
             combining_characters: vec!['\u{300}'],
             style: Style::default(),
         })
+    );
+}
+
+#[test]
+fn image_cell_snapshot_overlay_reads_rendered_preview_cells() {
+    let mut image_cell_snapshot = ImageCellSnapshot::from_cell_states(
+        RatatuiRect::new(0, 0, 2, 1),
+        vec![ImageCellState::default(), ImageCellState::default()],
+    )
+    .expect("the test area has two cells");
+    let mut render_buffer = Buffer::empty(RatatuiRect::new(0, 0, 2, 1));
+    render_buffer[(0, 0)]
+        .set_char('X')
+        .set_fg(RatatuiColor::LightRed)
+        .set_bg(RatatuiColor::Rgb(1, 2, 3))
+        .set_style(RatatuiStyle::default().add_modifier(Modifier::BOLD));
+
+    image_cell_snapshot.overlay_buffer(RatatuiRect::new(0, 0, 1, 1), &render_buffer);
+
+    let cell_state = image_cell_snapshot
+        .find_cell(0, 0)
+        .expect("the cell is present");
+    assert_eq!(cell_state.character, 'X');
+    assert_eq!(
+        cell_state.style.get_foreground_color(),
+        CellColor::Indexed(9)
+    );
+    assert_eq!(
+        cell_state.style.get_background_color(),
+        CellColor::Rgb(1, 2, 3)
+    );
+    assert!(cell_state.style.get_attributes().is_bold());
+    assert_eq!(
+        image_cell_snapshot.find_cell(1, 0),
+        Some(&ImageCellState::default())
     );
 }
 
@@ -965,6 +1001,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         ViewerChrome::default(),
         ImageRenderMode::Native,
         Some(&[]),
+        None,
         viewport_area,
         &mut unavailable_buffer,
     );
@@ -983,6 +1020,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         ViewerChrome::default(),
         ImageRenderMode::Native,
         Some(&[(pane_id, 1)]),
+        None,
         viewport_area,
         &mut available_buffer,
     );

@@ -38,8 +38,9 @@ Keys use angle brackets. Spaces join keys into a sequence.
 
 ## `mode` blocks
 
-A `mode` block holds the bindings for one mode — `"normal"` (the usual mode) or
-`"locked"` (keys pass straight to the program, except the unlock chord).
+A `mode` block holds the bindings for one built-in keymap — `"normal"`,
+`"locked"`, or `"move-pane"`. Normal and locked are base modes. Move-pane is
+a local placement submode that takes priority while a pane move is open.
 
 - `bind "<key>" "core:action"` — exactly two strings: the key sequence and the
   **full** action reference (namespaced, e.g. `core:new-tab`; a bare `new-tab`
@@ -76,6 +77,7 @@ mode "normal" {
     bind "<leader>p j" "core:new-pane-down"
     bind "<leader>p k" "core:new-pane-up"
     bind "<leader>p l" "core:new-pane-right"
+    bind "<leader>p m" "core:move-pane"
     bind "<leader>p x" "core:close-pane-tree"
     bind "<leader>p <Left>" "core:focus-pane-left"
     bind "<leader>p <Down>" "core:focus-pane-down"
@@ -98,6 +100,62 @@ mode "locked" {
     // locked mode passes every other key straight to the program.
     bind "<C-l>" "core:unlock"
     bind "<leader>q" "core:quit"
+    bind "<leader>p m" "core:move-pane"
     bind "<leader>g" "core:mouse-select"
 }
+
+mode "move-pane" {
+    // Placement owns these keys while a pane move is open.
+    bind "<Left>" "core:select-pane-target-left"
+    bind "<Down>" "core:select-pane-target-down"
+    bind "<Up>" "core:select-pane-target-up"
+    bind "<Right>" "core:select-pane-target-right"
+    bind "<S-Left>" "core:select-pane-insertion-left"
+    bind "<S-Down>" "core:select-pane-insertion-down"
+    bind "<S-Up>" "core:select-pane-insertion-up"
+    bind "<S-Right>" "core:select-pane-insertion-right"
+    bind "<Space>" "core:cycle-pane-placement-span"
+    bind "<Tab>" "core:select-next-placement-tab"
+    bind "<S-Tab>" "core:select-previous-placement-tab"
+    bind "<CR>" "core:confirm-pane-placement"
+    bind "<Esc>" "core:cancel-pane-move"
+}
 ```
+
+## Pane placement mode
+
+`core:move-pane` opens the local `move-pane` mode. It keeps the current base
+mode: entering from locked mode keeps the client locked after cancellation.
+While it is active, the `move-pane` keymap has priority over the normal or locked
+keymap. An unbound key and every key release are consumed by placement.
+
+The default `move-pane` bindings are:
+
+- Arrow keys choose a destination pane.
+- Shift+Arrow keys choose a split edge.
+- Space cycles the available split spans.
+- Tab and Shift+Tab preview the next or previous visible tab.
+- A left-button drag previews the pane under the pointer and a valid release
+  submits the placement.
+- Enter submits the selected placement and keeps placement mode active.
+- Escape runs `core:cancel-pane-move`, discards the unconfirmed placement, and
+  returns to the base normal or locked mode.
+
+Every placement action is a normal bindable action in the `move-pane` block. For
+example, this changes the cancel key while keeping Escape available for a
+different placement action:
+
+```kdl
+mode "move-pane" {
+    bind "<Esc>" "core:select-pane-target-right"
+    bind "<C-c>" "core:cancel-pane-move"
+}
+```
+
+The effective `move-pane` map must keep one live `core:cancel-pane-move`
+binding. Removing Escape without binding that action to another key rejects the
+keymap.
+
+`<leader>p m` opens the mode, then `<Right>` selects a destination instead of
+running `core:focus-pane-right`. A normal-mode binding for `<leader>p
+<Right>` still applies before placement opens.

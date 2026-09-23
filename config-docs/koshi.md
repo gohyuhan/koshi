@@ -12,9 +12,9 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `koshi config check` and `migrate` reject them. A bad value in `update` rejects
 the whole app file for that launch.
 
-Settings use blocks. `theme`, `image-support`, `allow-beta-features`,
-`allow-other-users`, `remote-listen`, `remote-reconnect`, `shared-sessions-dir`
-and `auto-close-session` are top-level.
+Settings use blocks. `theme`, `image-support`, `reduced-motion`,
+`allow-beta-features`, `allow-other-users`, `remote-listen`, `remote-reconnect`,
+`shared-sessions-dir` and `auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -377,6 +377,16 @@ A link to a session on this machine ends the terminal either way.
 |---|---|---|---|
 | `remote-reconnect` | boolean — dial a session on another machine again when the link drops | `#true` | ≥ 0.3.0 |
 
+## `reduced-motion`
+
+Controls placement preview interpolation for this viewer. `#true` shows the
+selected destination and confirmation state without moving the preview through
+intermediate rectangles.
+
+| Setting | Meaning | Default | Since |
+|---|---|---|---|
+| `reduced-motion` | boolean — skip placement preview interpolation | `#false` | ≥ 0.5.0 |
+
 ## `auto-close-session`
 
 A terminal leaving a session normally leaves the session running with nothing
@@ -496,6 +506,7 @@ allow-other-users #false
 // shared-sessions-dir "/var/run/koshi"  // optional override
 auto-close-session #false
 image-support #true
+reduced-motion #false
 remote-reconnect #true
 
 pane {

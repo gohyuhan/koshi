@@ -285,6 +285,8 @@ fn render_snapshot_with_hover(
         None,
         ViewerChrome {
             hovered_pane_id,
+            placement_handle_pane_id: None,
+            active_input_mode: None,
             tabline_offset: None,
             reconnecting: None,
         },
@@ -1010,6 +1012,8 @@ fn tabline_peek_offset_ignores_the_active_tab() {
     );
     let peeking = ViewerChrome {
         hovered_pane_id: None,
+        placement_handle_pane_id: None,
+        active_input_mode: None,
         tabline_offset: Some(0),
         reconnecting: None,
     };
@@ -1086,6 +1090,8 @@ fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
     );
     let dialing = ViewerChrome {
         hovered_pane_id: None,
+        placement_handle_pane_id: None,
+        active_input_mode: None,
         tabline_offset: None,
         reconnecting: Some(Reconnecting {
             attempt: 3,
@@ -1514,6 +1520,52 @@ fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
         render_buffer[(0, 1)].fg,
         Theme::default().focused_border_color,
         "the focused pane's border is unaffected by hovering elsewhere"
+    );
+}
+
+#[test]
+fn move_pane_hover_uses_a_bright_border_and_gray_content_tint() {
+    let focused_pane_id = PaneId::new();
+    let hovered_pane_id = PaneId::new();
+    let render_snapshot = build_render_snapshot(
+        "sess",
+        &[("a", true), ("b", true)],
+        &[
+            (focused_pane_id, build_cell_rect(0, 1, 20, 6), true),
+            (hovered_pane_id, build_cell_rect(20, 1, 20, 6), true),
+        ],
+        Some(focused_pane_id),
+        LockMode::Locked,
+        Size {
+            column_count: 40,
+            row_count: 8,
+        },
+    );
+    let viewport_area = RatatuiRect::new(0, 0, 40, 8);
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(40, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome {
+            hovered_pane_id: Some(hovered_pane_id),
+            placement_handle_pane_id: None,
+            active_input_mode: Some(LockMode::MovePane),
+            tabline_offset: None,
+            reconnecting: None,
+        },
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(render_buffer[(20, 1)].fg, Theme::default().accent_color);
+    assert_eq!(render_buffer[(20, 1)].modifier, Modifier::BOLD);
+    assert_eq!(render_buffer[(21, 2)].bg, Color::Rgb(0x3a, 0x3a, 0x3a));
+    assert_eq!(
+        render_buffer[(0, 1)].fg,
+        Theme::default().focused_border_color
     );
 }
 
@@ -3543,7 +3595,10 @@ fn the_mode_indicator_names_every_lock_mode() {
     assert_eq!(build_mode_tags(LockMode::Normal, false, None), "BASE");
     assert_eq!(build_mode_tags(LockMode::Locked, false, None), "LOCK");
     assert_eq!(build_mode_tags(LockMode::Resize, false, None), "RESIZE");
-    assert_eq!(build_mode_tags(LockMode::PaneMode, false, None), "PANE");
+    assert_eq!(
+        build_mode_tags(LockMode::MovePane, false, None),
+        "MOVE PANE"
+    );
     assert_eq!(build_mode_tags(LockMode::TabMode, false, None), "TAB");
     assert_eq!(build_mode_tags(LockMode::ScrollMode, false, None), "SCROLL");
 
@@ -3553,8 +3608,8 @@ fn the_mode_indicator_names_every_lock_mode() {
         "RESIZE · SELECT"
     );
     assert_eq!(
-        build_mode_tags(LockMode::PaneMode, true, None),
-        "PANE · SELECT"
+        build_mode_tags(LockMode::MovePane, true, None),
+        "MOVE PANE · SELECT"
     );
     assert_eq!(
         build_mode_tags(LockMode::TabMode, true, None),

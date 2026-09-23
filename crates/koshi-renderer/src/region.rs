@@ -6,7 +6,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
 
-use crate::snapshot::{KeymapHints, Reconnecting, TabMeta};
+use crate::snapshot::{KeymapHints, PlacementStatus, Reconnecting, TabMeta};
 
 /// The compiled-in region geometry, in solve order: a one-row tabline on the
 /// top edge, then a one-row statusline on the bottom edge.
@@ -27,8 +27,8 @@ pub fn solve_core_regions(viewport: Size) -> SolvedRegions {
     solve_region_rects(viewport, &CORE_REGION_GEOMETRIES)
 }
 
-/// The statusline facts needed to paint it: the keybinding hints and the open
-/// key sequence.
+/// The statusline facts needed to paint it: keybinding hints, the open key
+/// sequence, and viewer-local placement status.
 ///
 /// This value excludes colors. [`crate::statusline_hints::draw_statusline`]
 /// takes the theme as its own argument.
@@ -40,6 +40,8 @@ pub(crate) struct StatuslineInputs<'a> {
     /// The chords already pressed of an open key sequence. `None` when no
     /// sequence is open.
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
+    /// The viewer-local placement status, shown at the row's right edge.
+    pub(crate) placement_status: Option<&'a PlacementStatus>,
 }
 
 /// The tabline facts needed to solve its geometry and paint it.

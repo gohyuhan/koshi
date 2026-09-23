@@ -737,6 +737,21 @@ fn image_support_folds_onto_the_viewer_side_only() {
 }
 
 #[test]
+fn reduced_motion_folds_onto_the_viewer_side_only() {
+    assert!(!ClientConfig::default().should_reduce_motion);
+
+    let layer = PartialKoshiConfig {
+        should_reduce_motion: Some(true),
+        ..Default::default()
+    };
+    let client = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert!(client.should_reduce_motion);
+
+    let server = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(server, ServerConfig::default());
+}
+
+#[test]
 fn mouse_overrides_fold_onto_the_viewer_side_only() {
     let layer = PartialKoshiConfig {
         mouse: Some(PartialMouseConfig {

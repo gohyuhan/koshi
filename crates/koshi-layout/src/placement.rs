@@ -177,6 +177,25 @@ pub fn place_pane_within_tab(
     }
 }
 
+/// Return whether a same-tab placement produces the original layout tree.
+#[must_use]
+pub fn is_same_tab_placement_noop(
+    layout_tree: &LayoutNode,
+    source_pane_id: PaneId,
+    placement_target: &PlacementTarget,
+    tab_rect: Rect,
+    pane_sizing: PaneSizing,
+) -> bool {
+    place_pane_within_tab(
+        layout_tree,
+        source_pane_id,
+        placement_target,
+        tab_rect,
+        pane_sizing,
+    )
+    .is_ok_and(|proposed_layout_tree| proposed_layout_tree == *layout_tree)
+}
+
 /// Place `source_pane_id`, a leaf of `source_tree`, at `placement_target` in
 /// `destination_tree`, a different tab's tree.
 ///

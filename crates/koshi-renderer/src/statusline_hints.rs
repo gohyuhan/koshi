@@ -24,7 +24,7 @@ use ratatui::widgets::{Clear, Widget};
 
 use crate::region::StatuslineInputs;
 use crate::render::{compute_bar_style, get_line_width, set_line_clipped};
-use crate::snapshot::KeymapHints;
+use crate::snapshot::{KeymapHints, PlacementStatus, PlacementStatusKind};
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
@@ -35,15 +35,17 @@ const REVERT_MARKER: &str = " keys! ";
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
 /// 1. Blanks the row, then fills it with the theme's bar background.
-/// 2. Draws the ` keys! ` marker against the right edge when the user keymap
-///    was reverted. The marker holds that edge, and every hint below stops
-///    short of it.
-/// 3. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
+/// 2. Draws the placement status at the right edge when placement owns the
+///    viewer. The status holds that edge, and every item below stops short of it.
+/// 3. Draws the ` keys! ` marker before the placement status when the user
+///    keymap was reverted. The marker holds its edge, and every hint below
+///    stops short of it.
+/// 4. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
 ///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
 ///    chord's prefix label, and only when bindings sit under it.
-/// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
+/// 5. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
-/// 5. Draws a `…` marker where the row ran out of room, and stops there.
+/// 6. Draws a `…` marker where the row ran out of room, and stops there.
 pub(crate) fn draw_statusline(
     statusline_inputs: StatuslineInputs<'_>,
     theme: &Theme,
@@ -56,6 +58,7 @@ pub(crate) fn draw_statusline(
     let StatuslineInputs {
         keymap_hints,
         pending_key_sequence,
+        placement_status,
     } = statusline_inputs;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
@@ -65,6 +68,21 @@ pub(crate) fn draw_statusline(
 
     let pending_chords = pending_key_sequence.map_or(&[][..], KeySequence::list_chords);
     let mut right_edge_column = statusline_area.right();
+    if let Some(placement_status) = placement_status {
+        let placement_status_line = build_placement_status_line(placement_status, theme);
+        let placement_status_width = get_line_width(&placement_status_line);
+        let placement_status_start_column = right_edge_column
+            .saturating_sub(placement_status_width)
+            .max(statusline_area.x);
+        set_line_clipped(
+            buffer,
+            placement_status_start_column,
+            statusline_area.y,
+            &placement_status_line,
+            right_edge_column - placement_status_start_column,
+        );
+        right_edge_column = placement_status_start_column;
+    }
     if keymap_hints.is_reverted_to_defaults {
         let revert_marker_line =
             Line::from(Span::styled(REVERT_MARKER, compute_revert_marker_style()));
@@ -202,6 +220,34 @@ pub(crate) fn draw_statusline(
                 return;
             }
         }
+    }
+}
+
+/// Build the right-aligned placement statusline entry.
+fn build_placement_status_line(placement_status: &PlacementStatus, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {} ", placement_status.status_text),
+        compute_placement_status_style(placement_status.placement_status_kind, theme),
+    ))
+}
+
+/// Style one placement status according to whether its destination is loading,
+/// invalid, or valid.
+fn compute_placement_status_style(
+    placement_status_kind: PlacementStatusKind,
+    theme: &Theme,
+) -> Style {
+    match placement_status_kind {
+        PlacementStatusKind::Loading => Style::default()
+            .fg(theme.dimmed_ramp_text_color)
+            .add_modifier(Modifier::DIM),
+        PlacementStatusKind::Invalid => Style::default()
+            .fg(theme.accent_color)
+            .add_modifier(Modifier::BOLD),
+        PlacementStatusKind::Valid => Style::default()
+            .fg(theme.accent_block_text_color)
+            .bg(theme.accent_color)
+            .add_modifier(Modifier::BOLD),
     }
 }
 

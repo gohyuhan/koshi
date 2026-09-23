@@ -28,7 +28,7 @@ use koshi_renderer::snapshot::{
 };
 
 use crate::tests::TEST_VIEWPORT_SIZE;
-use crate::Client;
+use crate::{Client, PlacementMode, PlacementModeEntry};
 
 /// A viewer on the stock settings — `scroll_line_count` 3, `wheel` scroll-scrollback.
 fn build_test_client() -> Client {
@@ -2495,4 +2495,79 @@ fn a_scroll_step_already_due_asks_the_loop_to_wake_at_once() {
         Some(Duration::ZERO),
         "a step already behind the clock asks for no further wait"
     );
+}
+
+#[test]
+fn placement_target_point_keeps_the_grabbed_pointer_offset() {
+    let mut viewer = build_test_client();
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id: TabId::new(),
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    viewer.begin_placement_drag(
+        Point { column: 4, row: 5 },
+        Size {
+            column_count: 2,
+            row_count: 3,
+        },
+    );
+
+    assert_eq!(
+        viewer.compute_placement_target_point(Point {
+            column: 12,
+            row: 14
+        }),
+        Point {
+            column: 10,
+            row: 11
+        }
+    );
+}
+
+#[test]
+fn a_non_left_placement_release_cancels_mouse_capture_without_submitting() {
+    let pane_id = PaneId::new();
+    let frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let tab_id = frame.client_snapshot.active_tab_id;
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![tab_id];
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id: pane_id,
+        source_tab_id: tab_id,
+        destination_tab_id: tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    viewer.placement_mode_entry = PlacementModeEntry::Keyboard;
+    viewer.begin_placement_drag(
+        Point { column: 4, row: 5 },
+        Size {
+            column_count: 1,
+            row_count: 1,
+        },
+    );
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            MouseInput {
+                mouse_kind: MouseKind::Release(MouseButton::Right),
+                position: Point {
+                    column: 12,
+                    row: 14
+                },
+                modifier_flags: ModFlags::NONE,
+            },
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(viewer.placement_drag, None);
+    assert!(viewer.is_placement_mode_active());
+    assert!(!viewer.is_placement_confirmation_pending());
 }

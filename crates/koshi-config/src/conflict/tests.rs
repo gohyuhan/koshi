@@ -219,7 +219,7 @@ fn layer_origin_display_is_exact() {
 #[test]
 fn list_builtin_mode_names_returns_every_lock_mode() {
     let expected_mode_names = BTreeSet::from(
-        ["normal", "locked", "resize", "pane", "tab", "scroll"].map(parse_mode_name),
+        ["normal", "locked", "resize", "move-pane", "tab", "scroll"].map(parse_mode_name),
     );
     assert_eq!(list_builtin_mode_names(), expected_mode_names);
 }
@@ -972,13 +972,16 @@ fn typeable_alternative_is_fatal() {
 }
 
 #[test]
-fn no_layers_report_the_unlock_missing() {
+fn no_layers_report_missing_required_bindings() {
     let report = detect_test_conflicts(&[]);
     assert_eq!(
         report.diagnostics,
-        vec![ConflictDiagnostic::ReservedUnlockMissing {
-            reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
-        }]
+        vec![
+            ConflictDiagnostic::ReservedUnlockMissing {
+                reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
+            },
+            ConflictDiagnostic::MovePaneCancelBindingMissing,
+        ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
 }
@@ -1014,6 +1017,7 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
             ambiguous(Key::Char('j'), "new-pane-down"),
             ambiguous(Key::Char('k'), "new-pane-up"),
             ambiguous(Key::Char('l'), "new-pane-right"),
+            ambiguous(Key::Char('m'), "move-pane"),
             ambiguous(Key::Char('n'), "new-pane"),
             ambiguous(Key::Char('x'), "close-pane-tree"),
             ambiguous(Key::Named(NamedKey::Left), "focus-pane-left"),
@@ -1443,6 +1447,10 @@ fn severity_table() {
             ConflictSeverity::Fatal,
         ),
         (
+            ConflictDiagnostic::MovePaneCancelBindingMissing,
+            ConflictSeverity::Fatal,
+        ),
+        (
             ConflictDiagnostic::AmbiguousPrefix {
                 mode_name: parse_mode_name("normal"),
                 prefix_sequence: build_single_chord_sequence(ModFlags::CTRL, 'p'),
@@ -1578,6 +1586,13 @@ fn display_messages_are_exact() {
     assert_eq!(
         typeable_alt.to_string(),
         "`unlock_alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
+    );
+
+    let move_pane_cancel_binding_missing = ConflictDiagnostic::MovePaneCancelBindingMissing;
+    assert_eq!(
+        move_pane_cancel_binding_missing.to_string(),
+        "the `move-pane` mode has no live `core:cancel-pane-move` binding; bind that action to a key \
+         before removing its last cancellation key"
     );
 
     let dead = ConflictDiagnostic::DeadUnderReservedUnlock {
@@ -1825,6 +1840,118 @@ fn removing_the_locked_unlock_binding_is_fatal() {
 }
 
 #[test]
+fn removing_the_move_pane_cancel_binding_is_fatal() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let report = detect_test_conflicts(&[
+        build_default_key_map_layer(),
+        build_key_map_layer_with_removed(
+            LayerOrigin::User,
+            "move-pane",
+            Vec::new(),
+            vec![escape_sequence],
+        ),
+    ]);
+
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::MovePaneCancelBindingMissing]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
+fn rebinding_move_pane_cancel_action_keeps_the_effective_map_valid() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let custom_cancel_sequence =
+        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')));
+    let report = detect_test_conflicts(&[
+        build_default_key_map_layer(),
+        build_key_map_layer_with_removed(
+            LayerOrigin::User,
+            "move-pane",
+            vec![(
+                custom_cancel_sequence,
+                build_bound_action("cancel-pane-move"),
+            )],
+            vec![escape_sequence],
+        ),
+    ]);
+
+    assert_eq!(report.diagnostics, Vec::new());
+    assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
+}
+
+#[test]
+fn higher_layer_removing_the_last_move_pane_cancel_binding_is_fatal() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let custom_cancel_sequence =
+        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')));
+    let report = detect_test_conflicts(&[
+        build_default_key_map_layer(),
+        build_key_map_layer_with_removed(
+            LayerOrigin::User,
+            "move-pane",
+            Vec::new(),
+            vec![escape_sequence],
+        ),
+        build_key_map_layer(
+            LayerOrigin::Session,
+            "move-pane",
+            vec![(
+                custom_cancel_sequence.clone(),
+                build_bound_action("cancel-pane-move"),
+            )],
+        ),
+        build_key_map_layer_with_removed(
+            LayerOrigin::Layout,
+            "move-pane",
+            Vec::new(),
+            vec![custom_cancel_sequence],
+        ),
+    ]);
+
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::MovePaneCancelBindingMissing]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
+fn replacing_move_pane_cancel_action_without_another_cancel_binding_is_fatal() {
+    let escape_sequence = KeySequence::from(KeyChord::from_parts(
+        ModFlags::NONE,
+        Key::Named(NamedKey::Esc),
+    ));
+    let replacement_sequence =
+        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')));
+    let report = detect_test_conflicts(&[
+        build_default_key_map_layer(),
+        build_key_map_layer_with_removed(
+            LayerOrigin::User,
+            "move-pane",
+            vec![(replacement_sequence, build_bound_action("lock"))],
+            vec![escape_sequence],
+        ),
+    ]);
+
+    assert_eq!(
+        report.diagnostics,
+        vec![ConflictDiagnostic::MovePaneCancelBindingMissing]
+    );
+    assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
+}
+
+#[test]
 fn removed_binding_draws_no_per_binding_warns() {
     // The user layer binds an orphan action on a typeable key; session
     // removes the key. The removed binding draws neither the orphan warning
@@ -1996,8 +2123,8 @@ fn an_orphan_action_on_a_reserved_led_sequence_warns_orphan_not_dead() {
 #[test]
 fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
     // With every sequence at least one chord, a cap of 0 makes the whole
-    // keymap unreachable — including the locked-mode unlock, which the
-    // guarantee check reports as missing.
+    // keymap unreachable — including the locked-mode unlock and pane-move
+    // cancellation bindings, which the guarantee checks report as missing.
     let report = detect_conflicts(
         &[build_default_key_map_layer()],
         Leader::default(),
@@ -2007,9 +2134,12 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
     );
     assert_eq!(
         report.diagnostics,
-        vec![ConflictDiagnostic::ReservedUnlockMissing {
-            reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
-        }]
+        vec![
+            ConflictDiagnostic::ReservedUnlockMissing {
+                reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
+            },
+            ConflictDiagnostic::MovePaneCancelBindingMissing,
+        ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
 }

@@ -6,7 +6,8 @@ use clap::error::ErrorKind;
 use clap::CommandFactory;
 use clap::Parser;
 use koshi_config::app_config::parse_app_config;
-use koshi_core::action::{build_core_action_seeds, ActionHandlerReference};
+use koshi_core::action::{build_core_action_seeds, ActionHandlerReference, ClientActionKind};
+use koshi_core::command::CommandKind;
 use std::path::Path;
 
 use super::*;
@@ -2524,6 +2525,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::SwapPanes(SwapPanesArgs {
                 source_pane_id: None,
                 target_pane_id: pane,
+                expected_placement_revision: None,
             }),
         ),
         (
@@ -2539,6 +2541,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             Command::SwapPanes(SwapPanesArgs {
                 source_pane_id: Some(pane),
                 target_pane_id: pane,
+                expected_placement_revision: None,
             }),
         ),
         (
@@ -2744,10 +2747,22 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
             .iter()
             .find(|(seeded, _)| *seeded == action)
             .unwrap_or_else(|| panic!("action {action} is not in the seed table"));
-        let ActionHandlerReference::CoreCommand(kind) = &metadata.handler else {
-            panic!("action {action} is seeded with a non-core handler");
+        let expected_command_kind = match &metadata.handler {
+            ActionHandlerReference::CoreCommand(kind) => *kind,
+            ActionHandlerReference::CoreClient(ClientActionKind::BeginPaneMove)
+                if action
+                    == ActionReference::from_core_action_name("move-pane")
+                        .expect("move-pane is a valid action name") =>
+            {
+                CommandKind::MovePane
+            }
+            _ => panic!("action {action} is seeded with an unexpected handler"),
         };
-        assert_eq!(mapped.get_command_kind(), *kind, "for {argv:?}");
+        assert_eq!(
+            mapped.get_command_kind(),
+            expected_command_kind,
+            "for {argv:?}"
+        );
     }
 }
 
