@@ -453,10 +453,8 @@ pub enum IpcRequestKind {
     /// `destination_tab_id`. The answer arrives on the attached event stream.
     ReadPanePlacement {
         /// The pane whose current visible content is previewed.
-        #[serde(rename = "pane")]
         pane_id: PaneId,
         /// The tab whose current layout is previewed as the destination.
-        #[serde(rename = "tab")]
         destination_tab_id: TabId,
     },
     /// Ask the session for the events it published most recently, newest last.

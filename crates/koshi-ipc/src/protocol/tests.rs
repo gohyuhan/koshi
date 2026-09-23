@@ -2301,15 +2301,15 @@ fn placement_request_uses_the_declared_wire_field_names() {
         destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
     };
     let encoded_json = serde_json::to_value(request_kind).expect("request kind encodes");
-    let placement_fields = encoded_json
-        .get("ReadPanePlacement")
-        .and_then(serde_json::Value::as_object)
-        .expect("placement fields encode as an object");
-
-    assert!(placement_fields.contains_key("pane"));
-    assert!(placement_fields.contains_key("tab"));
-    assert!(!placement_fields.contains_key("pane_id"));
-    assert!(!placement_fields.contains_key("destination_tab_id"));
+    assert_eq!(
+        encoded_json,
+        json!({
+            "ReadPanePlacement": {
+                "pane_id": "00000000-0000-0000-0000-000000000001",
+                "destination_tab_id": "00000000-0000-0000-0000-000000000001"
+            }
+        })
+    );
 }
 
 #[test]
