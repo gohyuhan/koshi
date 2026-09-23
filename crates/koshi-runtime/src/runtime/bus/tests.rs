@@ -1129,6 +1129,27 @@ fn a_switch_reaches_the_subscriber_as_the_session_it_names() {
 }
 
 #[test]
+fn a_rejected_placement_command_reaches_the_subscriber_with_its_command_id() {
+    let command_id = CommandId::new();
+    let mut bus = EventBus::new();
+    let (subscriber_id, subscriber_receiver) = bus.subscribe(EventFilter::All);
+
+    assert!(bus.try_send_placement_command_rejection(subscriber_id, command_id));
+
+    let queued_delivery = subscriber_receiver
+        .try_recv()
+        .expect("the placement rejection reaches its subscriber");
+    assert_eq!(
+        queued_delivery,
+        Delivery::PlacementCommandRejected(command_id)
+    );
+    assert_eq!(
+        wire_event(&queued_delivery),
+        Some(SessionEvent::PlacementCommandRejected { command_id })
+    );
+}
+
+#[test]
 fn a_full_queue_desyncs_the_subscriber_and_drops_the_switch() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();

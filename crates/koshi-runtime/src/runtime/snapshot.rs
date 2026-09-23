@@ -25,11 +25,11 @@
 //! keymap.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::{Rect, Size};
-use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
@@ -38,16 +38,100 @@ use koshi_pane::pane::lifecycle::PaneLifecycle;
 use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, OwnedFrameLayout, PaneSlot,
-    PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans,
-    SessionSnapshot, TabMeta, TabSnapshot,
+    PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
+    PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, PluginUiSnapshot,
+    RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
 };
-use koshi_session::session::state::Tab;
+use koshi_session::client::Client;
+use koshi_session::session::state::{Session, Tab};
+use koshi_terminal::graphics::DecodedImage;
 use koshi_terminal::grid::state::Grid;
 use koshi_terminal::scrollback::Scrollback;
 use koshi_terminal::selection::order_selection_positions;
 use koshi_terminal::state::Screen;
 
 use crate::server::Server;
+
+use koshi_ipc::placement::{
+    MAX_PLACEMENT_SNAPSHOT_CELL_COUNT, MAX_PLACEMENT_SNAPSHOT_IMAGE_BYTE_COUNT,
+    MAX_PLACEMENT_SNAPSHOT_IMAGE_COUNT, MAX_PLACEMENT_SNAPSHOT_PANE_COUNT,
+};
+
+struct SolvedPlacementTab {
+    layout_solve: LayoutSolve,
+    pane_slots: Vec<PaneSlot>,
+}
+
+#[derive(Default)]
+struct PlacementSnapshotResourceCount {
+    cell_count: u64,
+    image_count: usize,
+    image_byte_count: u64,
+    pane_ids: HashSet<PaneId>,
+    image_memory_addresses: HashSet<*const DecodedImage>,
+}
+
+impl PlacementSnapshotResourceCount {
+    fn add_live_placement_tab_resources(&mut self, server: &Server, pane_slots: &[PaneSlot]) {
+        for pane_slot in pane_slots.iter().filter(|pane_slot| pane_slot.is_visible) {
+            self.add_live_placement_pane_resources(server, pane_slot.pane_id);
+        }
+    }
+
+    fn add_live_placement_pane_resources(&mut self, server: &Server, pane_id: PaneId) {
+        if !self.pane_ids.insert(pane_id) {
+            return;
+        }
+        let Some(terminal_engine) = server.terminal_engine_by_pane_id.get(&pane_id) else {
+            return;
+        };
+        let terminal_state = terminal_engine.get_terminal_state();
+        let (row_count, column_count) = terminal_state.get_active_grid().get_grid_dimensions();
+        self.cell_count = self
+            .cell_count
+            .saturating_add(u64::from(row_count).saturating_mul(u64::from(column_count)));
+        let image_placements = terminal_state.list_image_placements_for_view(0);
+        self.image_count = self.image_count.saturating_add(image_placements.len());
+        for image_placement in image_placements {
+            let image_record = image_placement.get_image_record();
+            if self
+                .image_memory_addresses
+                .insert(Arc::as_ptr(&image_record.image))
+            {
+                self.image_byte_count = self.image_byte_count.saturating_add(
+                    u64::try_from(image_record.image.rgba_bytes.len()).unwrap_or(u64::MAX),
+                );
+            }
+        }
+    }
+
+    fn validate_placement_snapshot_resource_limits(
+        &self,
+        pane_count: usize,
+    ) -> Result<(), PlacementSnapshotError> {
+        if pane_count > MAX_PLACEMENT_SNAPSHOT_PANE_COUNT {
+            return Err(build_placement_resource_limit_error(
+                "the placement preview has too many panes",
+            ));
+        }
+        if self.cell_count > MAX_PLACEMENT_SNAPSHOT_CELL_COUNT {
+            return Err(build_placement_resource_limit_error(
+                "the placement preview has too many cells",
+            ));
+        }
+        if self.image_count > MAX_PLACEMENT_SNAPSHOT_IMAGE_COUNT {
+            return Err(build_placement_resource_limit_error(
+                "the placement preview has too many images",
+            ));
+        }
+        if self.image_byte_count > MAX_PLACEMENT_SNAPSHOT_IMAGE_BYTE_COUNT {
+            return Err(build_placement_resource_limit_error(
+                "the placement preview references too many image bytes",
+            ));
+        }
+        Ok(())
+    }
+}
 
 impl Server {
     /// Freeze the world the way `client_id` sees it into a [`RenderSnapshot`].
@@ -86,6 +170,199 @@ impl Server {
             client_snapshot: owned_frame_layout.client_snapshot,
             plugin_ui_snapshot: PluginUiSnapshot::default(),
         })
+    }
+
+    /// Freeze the source pane and selected destination tab for one read-only
+    /// placement preview. This method reads live state only; it never changes
+    /// a tab, a client, a pane, focus, membership, or terminal size.
+    pub(crate) fn build_placement_snapshot(
+        &self,
+        client_id: ClientId,
+        source_pane_id: PaneId,
+        destination_tab_id: TabId,
+    ) -> Result<PlacementSnapshot, PlacementSnapshotError> {
+        let session = self.get_session_for_client(client_id).ok_or_else(|| {
+            build_placement_not_found_error("the requesting client is not attached")
+        })?;
+        let client = session.clients.get_client_by_id(client_id).ok_or_else(|| {
+            build_placement_not_found_error("the requesting client is not attached")
+        })?;
+        let source_tab = session
+            .tabs
+            .values()
+            .find(|tab| tab.get_layout_tree().contains_pane(source_pane_id))
+            .ok_or_else(|| build_placement_not_found_error("the source pane does not exist"))?;
+        let destination_tab = session
+            .tabs
+            .get(&destination_tab_id)
+            .ok_or_else(|| build_placement_not_found_error("the destination tab does not exist"))?;
+        let source_tab_id = source_tab.get_tab_id();
+        let source_viewport = if source_tab_id == destination_tab_id {
+            session.get_tab_viewport(source_tab_id).unwrap_or_else(|| {
+                client.get_pane_area().unwrap_or(Size {
+                    column_count: 0,
+                    row_count: 0,
+                })
+            })
+        } else {
+            compute_placement_preview_viewport(session, client_id, source_tab_id, false)
+        };
+        let destination_viewport = if source_tab_id == destination_tab_id {
+            source_viewport
+        } else {
+            compute_placement_preview_viewport(session, client_id, destination_tab_id, true)
+        };
+        let source_tab_layout =
+            self.solve_placement_tab_layout(session, source_tab, source_viewport);
+        let destination_tab_layout = (source_tab_id != destination_tab_id).then(|| {
+            self.solve_placement_tab_layout(session, destination_tab, destination_viewport)
+        });
+        let source_pane_count = source_tab_layout.pane_slots.len();
+        let destination_pane_count = destination_tab_layout
+            .as_ref()
+            .map_or(0, |tab_layout| tab_layout.pane_slots.len());
+        let pane_count = source_pane_count.saturating_add(destination_pane_count);
+        let mut placement_resource_count = PlacementSnapshotResourceCount::default();
+        placement_resource_count
+            .add_live_placement_tab_resources(self, &source_tab_layout.pane_slots);
+        if source_tab_id != destination_tab_id {
+            placement_resource_count.add_live_placement_pane_resources(self, source_pane_id);
+        }
+        if let Some(destination_tab_layout) = destination_tab_layout.as_ref() {
+            placement_resource_count
+                .add_live_placement_tab_resources(self, &destination_tab_layout.pane_slots);
+        }
+        placement_resource_count.validate_placement_snapshot_resource_limits(pane_count)?;
+
+        let source_tab_snapshot = self.build_placement_tab_snapshot(
+            source_tab,
+            source_viewport,
+            source_tab_layout,
+            (source_tab_id != destination_tab_id).then_some(source_pane_id),
+        );
+        let destination_tab_snapshot = destination_tab_layout.map(|tab_layout| {
+            self.build_placement_tab_snapshot(
+                destination_tab,
+                destination_viewport,
+                tab_layout,
+                None,
+            )
+        });
+        Ok(PlacementSnapshot {
+            session_id: session.session_id,
+            source_pane_id,
+            source_tab_id,
+            destination_tab_id,
+            session_placement_revision: session.get_placement_revision(),
+            client_placement_revision: client.get_placement_revision(),
+            source_tab_snapshot,
+            destination_tab_snapshot,
+            client_snapshot: PlacementClientSnapshot {
+                client_snapshot: ClientSnapshot {
+                    client_id: client.get_client_id(),
+                    client_revision: client.get_placement_revision(),
+                    viewport_size: client.get_viewport_size(),
+                    active_tab_id: client.get_active_tab(),
+                    focused_pane_id: client.get_focused_pane(client.get_active_tab()),
+                    lock_mode: client.get_lock_mode(),
+                    is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
+                },
+                reported_pane_area: client.get_reported_pane_area(),
+            },
+            pane_sizing: self.get_pane_sizing(),
+        })
+    }
+
+    /// Build one tab's solved placement and visible pane content for a preview.
+    fn solve_placement_tab_layout(
+        &self,
+        session: &Session,
+        tab: &Tab,
+        effective_cell_size: Size,
+    ) -> SolvedPlacementTab {
+        // Placement previews use the complete tiled tree, even when the
+        // requesting client currently shows a fullscreen or zoomed pane.
+        let layout_mode = LayoutMode::Tiled;
+        let pane_sizing = self.get_pane_sizing();
+        let layout_solve = solve_tab_layout(tab, layout_mode, effective_cell_size, pane_sizing);
+        let computed_content_rects = list_content_rects(&layout_solve);
+        let suppressed_pane_ids: HashSet<PaneId> =
+            layout_solve.suppressed_pane_ids.iter().copied().collect();
+        let pane_slots = layout_solve
+            .pane_rects
+            .iter()
+            .zip(computed_content_rects.iter())
+            .map(
+                |(&(pane_id, outer_rect), &(content_pane_id, content_rect))| {
+                    debug_assert_eq!(pane_id, content_pane_id);
+                    let pane_record = session.panes.get_pane_record_by_id(pane_id);
+                    PaneSlot {
+                        pane_id,
+                        outer_rect,
+                        content_rect,
+                        pane_kind: pane_record.map_or(PaneKind::Terminal, |pane_record| {
+                            *pane_record.get_pane_kind()
+                        }),
+                        is_visible: content_rect.is_some(),
+                        is_suppressed: suppressed_pane_ids.contains(&pane_id),
+                        is_dead: pane_record.is_some_and(|pane_record| {
+                            matches!(pane_record.get_lifecycle(), PaneLifecycle::Exited { .. })
+                        }),
+                    }
+                },
+            )
+            .collect();
+        SolvedPlacementTab {
+            layout_solve,
+            pane_slots,
+        }
+    }
+
+    fn build_placement_tab_snapshot(
+        &self,
+        tab: &Tab,
+        effective_cell_size: Size,
+        solved_placement_tab: SolvedPlacementTab,
+        retained_pane_id: Option<PaneId>,
+    ) -> PlacementTabSnapshot {
+        let layout_mode = LayoutMode::Tiled;
+        let pane_sizing = self.get_pane_sizing();
+        let SolvedPlacementTab {
+            layout_solve,
+            pane_slots,
+        } = solved_placement_tab;
+        let pane_snapshots = pane_slots
+            .iter()
+            .map(|pane_slot| {
+                if !pane_slot.is_visible && Some(pane_slot.pane_id) != retained_pane_id {
+                    return PlacementPaneSnapshot {
+                        pane_id: pane_slot.pane_id,
+                        terminal_grid_view: None,
+                        image_placement_snapshots: Vec::new(),
+                    };
+                }
+                let pane_snapshot = self.build_pane_snapshot(pane_slot.pane_id, 0, None);
+                PlacementPaneSnapshot {
+                    pane_id: pane_snapshot.pane_id,
+                    terminal_grid_view: pane_snapshot.terminal_grid_view,
+                    image_placement_snapshots: pane_snapshot.image_placement_snapshots,
+                }
+            })
+            .collect();
+        PlacementTabSnapshot {
+            layout_tree: tab.get_layout_tree().clone(),
+            tab_snapshot: TabSnapshot {
+                tab_id: tab.get_tab_id(),
+                tab_name: tab.get_tab_name().to_owned(),
+                pane_slots,
+                effective_cell_size,
+                stack_headers: layout_solve.stack_headers,
+                layout_mode,
+                are_all_panes_suppressed: layout_solve.is_all_panes_suppressed,
+                gap_cell_count: pane_sizing.gap_cell_count,
+            },
+            pane_snapshots,
+        }
     }
 
     /// Freeze only where `client_id`'s surfaces sit: the solved layout, the tab
@@ -349,6 +626,90 @@ fn shorten_home_path(display_path: &std::path::Path, home_path_text: Option<&str
         }
     }
     display_path_text
+}
+
+fn compute_placement_preview_viewport(
+    session: &Session,
+    requesting_client_id: ClientId,
+    tab_id: TabId,
+    should_include_requesting_client: bool,
+) -> Size {
+    let shared_viewport = session
+        .clients
+        .list_attached_clients()
+        .filter(|client| {
+            (should_include_requesting_client && client.get_client_id() == requesting_client_id)
+                || (client.get_client_id() != requesting_client_id
+                    && client.get_active_tab() == tab_id)
+        })
+        .filter_map(Client::get_pane_area)
+        .reduce(Size::compute_minimum_axes);
+    shared_viewport.unwrap_or_else(|| {
+        if should_include_requesting_client {
+            session
+                .clients
+                .get_client_by_id(requesting_client_id)
+                .and_then(Client::get_pane_area)
+                .unwrap_or(Size {
+                    column_count: 0,
+                    row_count: 0,
+                })
+        } else {
+            Size {
+                column_count: 0,
+                row_count: 0,
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+fn count_placement_snapshot_resources(
+    source_tab_snapshot: &PlacementTabSnapshot,
+    destination_tab_snapshot: Option<&PlacementTabSnapshot>,
+) -> (u64, usize, u64) {
+    let mut cell_count = 0u64;
+    let mut image_count = 0usize;
+    let mut image_byte_count = 0u64;
+    let mut counted_image_memory_addresses = HashSet::new();
+    for tab_snapshot in [Some(source_tab_snapshot), destination_tab_snapshot]
+        .into_iter()
+        .flatten()
+    {
+        for pane_snapshot in &tab_snapshot.pane_snapshots {
+            if let Some(terminal_grid_view) = &pane_snapshot.terminal_grid_view {
+                let (row_count, column_count) = terminal_grid_view.grid.get_grid_dimensions();
+                cell_count = cell_count
+                    .saturating_add(u64::from(row_count).saturating_mul(u64::from(column_count)));
+            }
+            image_count = image_count.saturating_add(pane_snapshot.image_placement_snapshots.len());
+            for image_placement_snapshot in &pane_snapshot.image_placement_snapshots {
+                let Some(image_record) = image_placement_snapshot.get_image_record() else {
+                    continue;
+                };
+                if counted_image_memory_addresses.insert(Arc::as_ptr(&image_record.image)) {
+                    image_byte_count = image_byte_count.saturating_add(
+                        u64::try_from(image_record.image.rgba_bytes.len()).unwrap_or(u64::MAX),
+                    );
+                }
+            }
+        }
+    }
+    (cell_count, image_count, image_byte_count)
+}
+
+fn build_placement_not_found_error(message: &str) -> PlacementSnapshotError {
+    PlacementSnapshotError {
+        code: PlacementSnapshotErrorCode::NotFound,
+        message: message.to_owned(),
+    }
+}
+
+fn build_placement_resource_limit_error(message: &str) -> PlacementSnapshotError {
+    PlacementSnapshotError {
+        code: PlacementSnapshotErrorCode::ResourceLimit,
+        message: message.to_owned(),
+    }
 }
 
 /// Solve `tab`'s current layout in `mode` over a `viewport`-sized rect at origin

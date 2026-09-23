@@ -70,6 +70,7 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
     "terminal",
     "logging",
     "image-support",
+    "reduced-motion",
     "remote-reconnect",
     "allow-beta-features",
     "allow-other-users",
@@ -184,6 +185,12 @@ pub fn parse_app_config(
             }
             "image-support" => set_top_level_field(
                 &mut partial_koshi_config.supports_image_protocols,
+                parse_boolean_kdl_value(config_node),
+                config_section_name,
+                &mut parse_warnings,
+            ),
+            "reduced-motion" => set_top_level_field(
+                &mut partial_koshi_config.should_reduce_motion,
                 parse_boolean_kdl_value(config_node),
                 config_section_name,
                 &mut parse_warnings,

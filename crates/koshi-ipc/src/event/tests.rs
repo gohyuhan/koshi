@@ -4,7 +4,7 @@
 //! and a frame this build has no name for reads as unknown.
 
 use koshi_core::geometry::{Direction, Point, Rect, Size};
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseTracking};
 use koshi_layout::mode::LayoutMode;
@@ -136,6 +136,7 @@ fn build_test_image_transfer() -> FrameImageTransfer {
 /// tests below.
 fn list_test_events() -> Vec<SessionEvent> {
     let client_id = ClientId::from_uuid(build_fixed_test_uuid());
+    let command_id = CommandId::from_uuid(build_fixed_test_uuid());
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let tab_id = TabId::from_uuid(build_fixed_test_uuid());
 
@@ -177,6 +178,7 @@ fn list_test_events() -> Vec<SessionEvent> {
         SessionEvent::SwitchTo {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         },
+        SessionEvent::PlacementCommandRejected { command_id },
     ]
 }
 
@@ -460,7 +462,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
     // the same commit; adding a whole frame, which an older client skips as
     // unknown and keeps reading past, does not.
     //
-    // Shape as of protocol version 3. Round-trip tests cannot catch this: one
+    // Shape as of protocol version 4. Round-trip tests cannot catch this: one
     // build encoding and decoding its own structs always agrees with itself.
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
 
@@ -491,6 +493,7 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
             json!("Detached"),
             json!({ "Resync": { "dropped_event_count": 4 } }),
             json!({ "SwitchTo": { "session_id": wire_identifier } }),
+            json!({ "PlacementCommandRejected": { "command_id": wire_identifier } }),
         ]
     );
 }

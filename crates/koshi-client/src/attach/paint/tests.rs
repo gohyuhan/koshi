@@ -482,7 +482,8 @@ fn a_complete_cached_image_is_reused_by_the_next_frame() {
 
     assert_eq!(reused_snapshot, Some(expected_render_snapshot));
     assert_eq!(cache.image_record_by_content_id.len(), 1);
-    assert!(cache.missing_image_content_ids.is_empty());
+    assert!(cache.missing_painted_image_content_ids.is_empty());
+    assert!(cache.missing_placement_image_content_ids.is_empty());
     assert_eq!(
         cache
             .pending_image_transfer
@@ -622,7 +623,8 @@ fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
     );
     assert_eq!(cache.image_record_by_content_id.len(), 0);
     assert_eq!(cache.retained_image_byte_count, 0);
-    assert_eq!(cache.missing_image_content_ids.len(), 0);
+    assert_eq!(cache.missing_painted_image_content_ids.len(), 0);
+    assert_eq!(cache.missing_placement_image_content_ids.len(), 0);
 }
 
 #[test]
@@ -670,7 +672,8 @@ fn a_returning_image_waits_for_its_new_connection_identity() {
         None
     );
     assert_eq!(cache.image_record_by_content_id.len(), 0);
-    assert_eq!(cache.missing_image_content_ids, HashSet::from([2]));
+    assert_eq!(cache.missing_painted_image_content_ids, HashSet::from([2]));
+    assert!(cache.missing_placement_image_content_ids.is_empty());
     let mut image_transfer = build_image_transfer(2);
     image_transfer.image_content_id = 2;
     cache
@@ -768,7 +771,8 @@ fn one_pane_cannot_repeat_a_terminal_image_placement_identity() {
     assert_eq!(cache.image_record_by_content_id.len(), 0);
     assert_eq!(cache.retained_image_byte_count, 0);
     assert_eq!(cache.painted_frame, None);
-    assert_eq!(cache.missing_image_content_ids.len(), 0);
+    assert_eq!(cache.missing_painted_image_content_ids.len(), 0);
+    assert_eq!(cache.missing_placement_image_content_ids.len(), 0);
     assert_eq!(
         cache
             .pending_image_transfer
@@ -797,7 +801,8 @@ fn an_image_cache_reset_discards_complete_and_incomplete_connection_state() {
     assert_eq!(cache.image_record_by_content_id.len(), 0);
     assert_eq!(cache.retained_image_byte_count, 0);
     assert_eq!(cache.painted_frame, None);
-    assert_eq!(cache.missing_image_content_ids.len(), 0);
+    assert_eq!(cache.missing_painted_image_content_ids.len(), 0);
+    assert_eq!(cache.missing_placement_image_content_ids.len(), 0);
     assert_eq!(
         cache
             .pending_image_transfer
@@ -1045,6 +1050,51 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
             image_content_id: 2,
         })
     );
+}
+
+#[test]
+fn stale_placement_image_transfers_are_drained_without_cache_mutation() {
+    let image_render_snapshot = build_render_snapshot(vec![
+        build_content_pane_snapshot_with_image(PaneId::new()),
+        build_empty_pane_snapshot(PaneId::new()),
+    ]);
+    let empty_render_snapshot = build_render_snapshot(vec![
+        build_empty_pane_snapshot(PaneId::new()),
+        build_empty_pane_snapshot(PaneId::new()),
+    ]);
+    let mut image_cache = ImageCache::new();
+
+    image_cache
+        .adopt_painted_frame(Box::new(wire_frame(&empty_render_snapshot)))
+        .expect("the base frame reads");
+    image_cache.ignore_stale_placement_image_transfers();
+
+    image_cache
+        .start_image_transfer(build_image_transfer(9))
+        .expect("the stale transfer starts without a retained placement");
+    assert_eq!(
+        image_cache
+            .accept_image_chunk(build_image_chunk(9))
+            .expect("the stale transfer is drained"),
+        None
+    );
+    assert!(image_cache.image_record_by_content_id.is_empty());
+
+    assert_eq!(
+        image_cache
+            .adopt_painted_frame(Box::new(wire_frame(&image_render_snapshot)))
+            .expect("the current frame reads"),
+        None
+    );
+    image_cache
+        .start_image_transfer(build_image_transfer(1))
+        .expect("the current frame transfer starts");
+    let rebuilt_render_snapshot = image_cache
+        .accept_image_chunk(build_image_chunk(1))
+        .expect("the current frame transfer reads")
+        .expect("the current frame redraws");
+
+    assert_eq!(rebuilt_render_snapshot, image_render_snapshot);
 }
 
 #[test]

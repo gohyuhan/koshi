@@ -86,13 +86,16 @@ use koshi_ipc::validate::{
 };
 use koshi_ipc::wire::MaybeKnown;
 use koshi_observability::logging::recent_events;
-use koshi_renderer::snapshot::{Delivery, ImagePlacementSnapshot, RenderSnapshot};
+use koshi_renderer::snapshot::{
+    Delivery, ImagePlacementSnapshot, PlacementSnapshot, RenderSnapshot,
+};
 use koshi_terminal::graphics::ImageRecord;
 
 use crate::runtime::bus::wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
     wire_frame, wire_frame_with_content_ids, wire_image_chunk_sources, wire_image_transfer,
+    wire_placement_snapshot,
 };
 
 /// How long the accept loop sleeps after a failed accept before it accepts
@@ -823,7 +826,8 @@ fn serve_connection(
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
             | IpcRequestKind::Paste { .. }
-            | IpcRequestKind::Mouse(_) => return,
+            | IpcRequestKind::Mouse(_)
+            | IpcRequestKind::ReadPanePlacement { .. } => return,
             IpcRequestKind::Discovery => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
@@ -905,8 +909,11 @@ fn serve_connection(
 /// structure, while this thread reads the client's own frames. A `Keyboard`, a
 /// `Resize`, a `Paste`, a `SubmitCommand` and a `Mouse` round all cross to the
 /// dispatcher over the inbox, and this half writes nothing back for any of
-/// them: the first four are answered by the next painted frame, and a `Mouse`
-/// round is answered on the writing half by exactly one
+/// them: keyboard, resize, and paste requests are reflected by the next
+/// painted frame; a submitted command is reflected by the next painted frame
+/// or, for a rejected pane placement command, one
+/// [`SessionEvent::PlacementCommandRejected`] carrying its `command_id`; and
+/// a `Mouse` round is answered on the writing half by exactly one
 /// [`SessionEvent::MouseAnswer`] carrying that round's `request_id`. A request
 /// of any other kind, end of stream, a transport fault, an oversize frame, or a
 /// dispatcher that is gone all end the reading loop.
@@ -1011,12 +1018,26 @@ fn stream_events(
                     graphics_capabilities,
                     client_id,
                 ),
+                Delivery::PanePlacementSnapshot {
+                    request_id,
+                    snapshot,
+                } => send_placement_snapshot(
+                    &mut writer,
+                    &mut image_cache,
+                    *request_id,
+                    snapshot,
+                    graphics_capabilities,
+                    client_id,
+                ),
                 _ => false,
             };
             if write_failed {
                 break;
             }
-            if matches!(delivery, Delivery::Frame(_)) {
+            if matches!(
+                delivery,
+                Delivery::Frame(_) | Delivery::PanePlacementSnapshot { .. }
+            ) {
                 continue;
             }
             let session_event = wire_event(&delivery);
@@ -1133,6 +1154,15 @@ fn stream_events(
                     response_sender,
                 }
             }
+            IpcRequestKind::ReadPanePlacement {
+                pane_id,
+                destination_tab_id,
+            } => RuntimeEvent::ReadPanePlacement {
+                client_id,
+                request_id: incoming_request.request_id,
+                source_pane_id: pane_id,
+                destination_tab_id,
+            },
             // The client sends nothing more on this connection, and everything
             // it did send is handed over above.
             IpcRequestKind::Leaving => break,
@@ -1209,6 +1239,29 @@ impl ConnectionImageCache {
             });
         let image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> =
             image_placements.collect();
+        let (should_reset_image_cache, image_uploads) =
+            self.prepare_image_records(image_placements);
+
+        let painted_frame =
+            wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
+                self.cached_image_by_pane_and_placement_id
+                    .get(&(pane_id, image_placement.get_placement_id()))
+                    .map_or(image_placement.get_image_content_id(), |cached_image| {
+                        cached_image.image_content_id
+                    })
+            });
+        PreparedImageFrame {
+            should_reset_image_cache,
+            painted_frame,
+            image_uploads,
+        }
+    }
+
+    /// Assign stable content identities and list image records not sent on this connection.
+    fn prepare_image_records(
+        &mut self,
+        image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)>,
+    ) -> (bool, Vec<(u64, Arc<ImageRecord>)>) {
         let changed_image_count = image_placements
             .iter()
             .filter(|(placement_key, image_placement)| {
@@ -1294,18 +1347,54 @@ impl ConnectionImageCache {
         }
         self.cached_image_by_pane_and_placement_id
             .retain(|placement_key, _| retained_placement_keys.contains(placement_key));
+        (should_reset_image_cache, image_uploads)
+    }
 
-        let painted_frame =
-            wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
+    /// Prepare a placement preview and its connection-local image transfers.
+    fn prepare_placement_snapshot(
+        &mut self,
+        placement_snapshot: &PlacementSnapshot,
+    ) -> PreparedPlacementSnapshot {
+        let image_placements = [
+            Some(&placement_snapshot.source_tab_snapshot),
+            placement_snapshot.destination_tab_snapshot.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .flat_map(|tab_snapshot| {
+            tab_snapshot
+                .pane_snapshots
+                .iter()
+                .flat_map(|pane_snapshot| {
+                    pane_snapshot.image_placement_snapshots.iter().map(
+                        move |image_placement_snapshot| {
+                            (
+                                (
+                                    pane_snapshot.pane_id,
+                                    image_placement_snapshot.get_placement_id(),
+                                ),
+                                image_placement_snapshot,
+                            )
+                        },
+                    )
+                })
+        })
+        .collect();
+        let (should_reset_image_cache, image_uploads) =
+            self.prepare_image_records(image_placements);
+        let placement_snapshot = crate::runtime::frame::wire_placement_snapshot_with_content_ids(
+            placement_snapshot,
+            |pane_id, image_placement| {
                 self.cached_image_by_pane_and_placement_id
                     .get(&(pane_id, image_placement.get_placement_id()))
                     .map_or(image_placement.get_image_content_id(), |cached_image| {
                         cached_image.image_content_id
                     })
-            });
-        PreparedImageFrame {
+            },
+        );
+        PreparedPlacementSnapshot {
             should_reset_image_cache,
-            painted_frame,
+            placement_snapshot,
             image_uploads,
         }
     }
@@ -1324,6 +1413,16 @@ struct PreparedImageFrame {
     should_reset_image_cache: bool,
     /// Placement geometry and connection-local content identities.
     painted_frame: PaintedFrame,
+    /// New content identities and the records uploaded under them.
+    image_uploads: Vec<(u64, Arc<ImageRecord>)>,
+}
+
+/// A placement preview plus the image records its connection still needs.
+struct PreparedPlacementSnapshot {
+    /// Whether the client must discard every record before this preview.
+    should_reset_image_cache: bool,
+    /// The preview with connection-local image identities.
+    placement_snapshot: koshi_ipc::placement::PanePlacementSnapshot,
     /// New content identities and the records uploaded under them.
     image_uploads: Vec<(u64, Arc<ImageRecord>)>,
 }
@@ -1433,6 +1532,134 @@ fn send_painted_frame(
         }
     }
     false
+}
+
+/// Send one placement preview and each new image record after it.
+fn send_placement_snapshot(
+    writer: &mut FrameWriter,
+    image_cache: &mut ConnectionImageCache,
+    request_id: u64,
+    placement_snapshot: &PlacementSnapshot,
+    graphics_capabilities: GraphicsCapabilities,
+    client_id: ClientId,
+) -> bool {
+    if !graphics_capabilities.has_native_image_protocol() {
+        let mut wire_snapshot = wire_placement_snapshot(placement_snapshot);
+        hide_placement_image_records(&mut wire_snapshot);
+        let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
+            request_id,
+            snapshot: Box::new(wire_snapshot),
+        };
+        return match writer.send(&placement_snapshot_event) {
+            Ok(()) => false,
+            Err(write_error) => report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "the placement snapshot",
+            ),
+        };
+    }
+    let prepared_placement_snapshot = image_cache.prepare_placement_snapshot(placement_snapshot);
+    if prepared_placement_snapshot.should_reset_image_cache {
+        if let Err(write_error) = writer.send(&SessionEvent::ImageCacheReset) {
+            return report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "the placement image cache reset",
+            );
+        }
+    }
+    let repeated_placement_snapshot = (prepared_placement_snapshot.image_uploads.len()
+        > MAX_FRAME_IMAGE_TRANSFER_COUNT)
+        .then(|| prepared_placement_snapshot.placement_snapshot.clone());
+    let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
+        request_id,
+        snapshot: Box::new(prepared_placement_snapshot.placement_snapshot),
+    };
+    if let Err(write_error) = writer.send(&placement_snapshot_event) {
+        return report_image_send_error(
+            image_cache,
+            client_id,
+            write_error,
+            "the placement snapshot",
+        );
+    }
+    for (upload_index, (image_content_id, image_record)) in prepared_placement_snapshot
+        .image_uploads
+        .into_iter()
+        .enumerate()
+    {
+        if upload_index != 0 && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0 {
+            let repeated_placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
+                request_id,
+                snapshot: Box::new(
+                    repeated_placement_snapshot
+                        .as_ref()
+                        .expect("a repeated image batch retained its placement snapshot")
+                        .clone(),
+                ),
+            };
+            if let Err(write_error) = writer.send(&repeated_placement_snapshot_event) {
+                return report_image_send_error(
+                    image_cache,
+                    client_id,
+                    write_error,
+                    "the placement snapshot",
+                );
+            }
+        }
+        let image_transfer_start_event = SessionEvent::ImageContentStart {
+            image_transfer: wire_image_transfer(image_content_id, &image_record),
+        };
+        if let Err(write_error) = writer.send(&image_transfer_start_event) {
+            return report_image_send_error(
+                image_cache,
+                client_id,
+                write_error,
+                "a placement image transfer start",
+            );
+        }
+        for (byte_offset, is_last_chunk, chunk_bytes) in wire_image_chunk_sources(&image_record) {
+            let image_transfer_chunk_event = SessionEvent::ImageContentChunk {
+                image_chunk: FrameImageChunk {
+                    image_transfer_id: image_content_id,
+                    byte_offset,
+                    is_last: is_last_chunk,
+                    chunk_bytes: chunk_bytes.to_vec(),
+                },
+            };
+            if let Err(write_error) = writer.send(&image_transfer_chunk_event) {
+                return report_image_send_error(
+                    image_cache,
+                    client_id,
+                    write_error,
+                    "a placement image transfer chunk",
+                );
+            }
+        }
+    }
+    false
+}
+
+fn hide_placement_image_records(
+    placement_snapshot: &mut koshi_ipc::placement::PanePlacementSnapshot,
+) {
+    for placement_tab_snapshot in [
+        Some(&mut placement_snapshot.source_tab_snapshot),
+        placement_snapshot.destination_tab_snapshot.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for pane_snapshot in &mut placement_tab_snapshot.pane_snapshots {
+            for image_placement in &mut pane_snapshot.image_placement_snapshots {
+                image_placement.image_record = None;
+                image_placement.is_available = false;
+            }
+        }
+    }
 }
 
 /// Report one image-stream write failure and say whether the connection stays usable.

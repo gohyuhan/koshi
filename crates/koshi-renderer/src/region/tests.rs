@@ -229,10 +229,12 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
     let first_statusline_inputs = StatuslineInputs {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
+        placement_status: None,
     };
     let second_statusline_inputs = StatuslineInputs {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
+        placement_status: None,
     };
 
     assert!(
@@ -282,6 +284,7 @@ fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
             attempt: 3,
             retry_in_seconds: 8,
         }),
+        active_input_mode: None,
         tabline_offset: Some(2),
         ..ViewerChrome::default()
     };

@@ -325,6 +325,10 @@ fn every_request_kind() -> Vec<IpcRequestKind> {
         IpcRequestKind::SubmitCommand(Box::new(build_test_command_envelope())),
         IpcRequestKind::Discovery,
         IpcRequestKind::Layout { tab_id: None },
+        IpcRequestKind::ReadPanePlacement {
+            pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+        },
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,
         IpcRequestKind::Leaving,
@@ -1709,6 +1713,7 @@ fn pane_command_requests_round_trip_without_a_protocol_change() {
         Command::SwapPanes(SwapPanesArgs {
             source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+            expected_placement_revision: None,
         }),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
@@ -2137,6 +2142,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::NotFound => "NotFound",
         IpcErrorCode::HelloRequired => "HelloRequired",
         IpcErrorCode::OtherUsersOff => "OtherUsersOff",
+        IpcErrorCode::ResourceLimit => "ResourceLimit",
         IpcErrorCode::Unknown => "Unknown",
     };
 
@@ -2148,6 +2154,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::NotFound,
         IpcErrorCode::HelloRequired,
         IpcErrorCode::OtherUsersOff,
+        IpcErrorCode::ResourceLimit,
         IpcErrorCode::Unknown,
     ] {
         assert_eq!(
@@ -2285,6 +2292,24 @@ fn each_result_is_tagged_with_its_own_name() {
         ),
         "Error"
     );
+}
+
+#[test]
+fn placement_request_uses_the_declared_wire_field_names() {
+    let request_kind = IpcRequestKind::ReadPanePlacement {
+        pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+        destination_tab_id: TabId::from_uuid(build_fixed_test_uuid()),
+    };
+    let encoded_json = serde_json::to_value(request_kind).expect("request kind encodes");
+    let placement_fields = encoded_json
+        .get("ReadPanePlacement")
+        .and_then(serde_json::Value::as_object)
+        .expect("placement fields encode as an object");
+
+    assert!(placement_fields.contains_key("pane"));
+    assert!(placement_fields.contains_key("tab"));
+    assert!(!placement_fields.contains_key("pane_id"));
+    assert!(!placement_fields.contains_key("destination_tab_id"));
 }
 
 #[test]

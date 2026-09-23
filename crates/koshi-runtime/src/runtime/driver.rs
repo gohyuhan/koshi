@@ -9,6 +9,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use koshi_core::command::{Command, CommandResult, CommandSource};
 use koshi_core::ids::PaneId;
 use koshi_core::process::KillPolicy;
 use koshi_terminal::engine::TerminalEngine;
@@ -70,6 +71,9 @@ impl Server {
             RuntimeEvent::MouseInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
             }
+            RuntimeEvent::OuterTerminalFocusLost { client_id } => {
+                tracing::debug!(%client_id, "dropping an outer-terminal focus event");
+            }
             RuntimeEvent::HostPaste {
                 client_id,
                 pasted_text,
@@ -116,7 +120,19 @@ impl Server {
                 envelope,
                 response_sender,
             } => {
+                let placement_client_id = match (&envelope.command_source, &envelope.command) {
+                    (
+                        CommandSource::KeyBinding { client_id },
+                        Command::PlacePane(_) | Command::SwapPanes(_),
+                    ) => Some(*client_id),
+                    _ => None,
+                };
                 let command_result = self.submit_command(envelope);
+                if let (Some(client_id), CommandResult::Rejected { command_id, .. }) =
+                    (placement_client_id, &command_result)
+                {
+                    let _ = self.send_placement_command_rejection(client_id, *command_id);
+                }
                 // A closed reply channel means the connection thread is gone;
                 // the command has already applied, so there is nothing to undo.
                 let _ = response_sender.send(command_result);
@@ -154,6 +170,19 @@ impl Server {
                 response_sender,
             } => {
                 let _ = response_sender.send(self.build_session_layout(tab_id));
+            }
+            RuntimeEvent::ReadPanePlacement {
+                client_id,
+                request_id,
+                source_pane_id,
+                destination_tab_id,
+            } => {
+                self.send_placement_snapshot(
+                    client_id,
+                    request_id,
+                    source_pane_id,
+                    destination_tab_id,
+                );
             }
             // The verdict is answered here and the swap runs after the loop
             // ends, so the caller reads the reply on a socket that is still up.

@@ -22,9 +22,9 @@ pub enum LockMode {
     /// Resize mode: directional keys resize the focused pane instead of
     /// reaching it.
     Resize,
-    /// Pane mode: keys manage panes — new, close, focus, and move — rather than
-    /// reaching the focused pane.
-    PaneMode,
+    /// Move-pane submode: placement actions own the keyboard and the viewer
+    /// overlays it on Normal or Locked without changing the stored base mode.
+    MovePane,
     /// Tab mode: keys manage tabs — new, close, focus, and move.
     TabMode,
     /// Scroll mode: keys navigate the focused pane's scrollback.
@@ -34,7 +34,7 @@ pub enum LockMode {
 impl LockMode {
     /// Whether input that binds nothing reaches the pane in this mode.
     /// `Normal` and `Locked` pass what they do not bind; the modal layers
-    /// (`Resize`, `PaneMode`, `TabMode`, `ScrollMode`) own the keyboard while
+    /// (`Resize`, `MovePane`, `TabMode`, `ScrollMode`) own the keyboard while
     /// they are held and discard it.
     #[must_use]
     pub fn should_pass_unbound_input_to_pane(self) -> bool {
@@ -46,7 +46,7 @@ impl LockMode {
         LockMode::Normal,
         LockMode::Locked,
         LockMode::Resize,
-        LockMode::PaneMode,
+        LockMode::MovePane,
         LockMode::TabMode,
         LockMode::ScrollMode,
     ];
@@ -59,7 +59,7 @@ impl LockMode {
             LockMode::Normal => "normal",
             LockMode::Locked => "locked",
             LockMode::Resize => "resize",
-            LockMode::PaneMode => "pane",
+            LockMode::MovePane => "move-pane",
             LockMode::TabMode => "tab",
             LockMode::ScrollMode => "scroll",
         }

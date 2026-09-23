@@ -327,6 +327,20 @@ fn every_cell_classifies_as_what_was_painted() {
                     );
                     seen_border += 1;
                 }
+                HitRegion::PlacementHandle { pane_id } => {
+                    let content_rect = pane_content_rect(layout, pane_id)
+                        .unwrap_or_else(|| panic!("pane {pane_id:?} has no content rect"));
+                    assert!(
+                        !content_rect.is_point_inside(point),
+                        "placement handle hit at ({column}, {row_index}) is inside {content_rect:?}"
+                    );
+                    assert_eq!(
+                        painted_cell.symbol(),
+                        "⠿",
+                        "placement handle cell ({column}, {row_index}) was not painted"
+                    );
+                    seen_border += 1;
+                }
                 HitRegion::StackHeader { pane_id } => {
                     assert_eq!(pane_id, collapsed);
                     assert_eq!(

@@ -4,8 +4,8 @@
 //! [`Buffer`] as three stock zones: a **tabline** (session name, the running
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
-//! border highlighted), and the **statusline** — a koshi-owned keybinding row
-//! painted from the per-mode keybinding data the caller passes in. The
+//! border highlighted), and the **statusline** — a koshi-owned row with
+//! per-mode keybinding hints and viewer-local placement status. The
 //! committed region solve supplies all three zones.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
@@ -32,17 +32,20 @@ use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
+use crate::hit_test::{compute_placement_handle_rect, PLACEMENT_HANDLE_COLUMN_COUNT};
 use crate::images::{
     compute_image_placeholder_rects, compute_selected_image_placeholder_rects,
     draw_image_placeholders, ImagePlacementKey, ImageRenderMode,
 };
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
-    CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, Reconnecting, RenderSnapshot,
-    SelectionSpans, ViewerChrome,
+    CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, PlacementStatus, Reconnecting,
+    RenderSnapshot, SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
+
+const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
 
 /// Paint `render_snapshot` into `buffer` over `viewport_area` with the selected image mode.
 ///
@@ -129,6 +132,7 @@ pub fn render_frame_with_images(
         viewer_chrome,
         image_mode,
         None,
+        None,
         viewport_area,
         buffer,
     );
@@ -146,6 +150,7 @@ pub fn render_frame_with_image_availability(
     viewer_chrome: ViewerChrome,
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
+    placement_status: Option<&PlacementStatus>,
     viewport_area: RatatuiRect,
     buffer: &mut Buffer,
 ) {
@@ -197,10 +202,20 @@ pub fn render_frame_with_image_availability(
         render_snapshot,
         theme,
         viewer_chrome.hovered_pane_id,
+        viewer_chrome.placement_handle_pane_id,
+        viewer_chrome.active_input_mode == Some(LockMode::MovePane),
         layout_origin,
         buffer,
     );
     draw_pane_contents(render_snapshot, layout_origin, buffer);
+    draw_placement_hover_tints(
+        render_snapshot,
+        viewer_chrome.hovered_pane_id,
+        viewer_chrome.placement_handle_pane_id,
+        viewer_chrome.active_input_mode == Some(LockMode::MovePane),
+        layout_origin,
+        buffer,
+    );
     match image_mode {
         ImageRenderMode::Placeholder => {
             let placeholder_rects = compute_image_placeholder_rects(
@@ -248,6 +263,7 @@ pub fn render_frame_with_image_availability(
             StatuslineInputs {
                 keymap_hints: hints,
                 pending_key_sequence,
+                placement_status,
             },
             theme,
             statusline_rect,
@@ -381,12 +397,15 @@ pub(crate) fn find_pane_snapshot(
 /// focused pane's border (and an unfocused hovered pane's), writing the pane's
 /// resolved title into its top border line, and — when the pane is scrolled
 /// back — its scroll position into its bottom border. `hovered_pane_id` is the
-/// pane the viewer's pointer is over; `layout_origin` shifts each pane into the centered
-/// content rect.
+/// pane the viewer's pointer is over. `placement_handle_pane_id` identifies the
+/// top border that shows the placement handle. `layout_origin` shifts each pane
+/// into the centered content rect.
 fn draw_panes(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
     hovered_pane_id: Option<PaneId>,
+    placement_handle_pane_id: Option<PaneId>,
+    is_move_pane_mode: bool,
     layout_origin: Point,
     buffer: &mut Buffer,
 ) {
@@ -399,9 +418,11 @@ fn draw_panes(
         if !pane_slot.is_visible {
             continue;
         }
-        // The focus color wins over the hover color: the hover color marks
-        // only an unfocused pane, the one the wheel scrolls.
-        let border_style = if Some(pane_slot.pane_id) == focused_pane_id {
+        let is_placement_hovered = Some(pane_slot.pane_id) == placement_handle_pane_id
+            || (is_move_pane_mode && Some(pane_slot.pane_id) == hovered_pane_id);
+        let border_style = if is_placement_hovered {
+            compute_placement_hover_border_style(theme)
+        } else if Some(pane_slot.pane_id) == focused_pane_id {
             compute_focused_border_style(theme)
         } else if Some(pane_slot.pane_id) == hovered_pane_id {
             compute_hover_border_style(theme)
@@ -434,6 +455,14 @@ fn draw_panes(
             }
         }
 
+        if Some(pane_slot.pane_id) == placement_handle_pane_id {
+            if let Some(handle_rect) = compute_placement_handle_rect(pane_slot.outer_rect) {
+                let handle_origin = place_cell_rect(handle_rect, layout_origin);
+                let handle_text = "⠿".repeat(usize::from(PLACEMENT_HANDLE_COLUMN_COUNT));
+                buffer.set_string(handle_origin.x, handle_origin.y, &handle_text, border_style);
+            }
+        }
+
         // When this pane is scrolled back, its position sits in the bottom
         // border, right-aligned: ` up/total `. A pane at the live tail shows
         // nothing. Each pane carries its own offset, so several can show at once.
@@ -452,6 +481,40 @@ fn draw_panes(
                     &scroll_line,
                     scroll_text_width,
                 );
+            }
+        }
+    }
+}
+
+/// Tint the content of the pane under the placement pointer.
+fn draw_placement_hover_tints(
+    render_snapshot: &RenderSnapshot,
+    hovered_pane_id: Option<PaneId>,
+    placement_handle_pane_id: Option<PaneId>,
+    is_move_pane_mode: bool,
+    layout_origin: Point,
+    buffer: &mut Buffer,
+) {
+    for pane_slot in &render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+    {
+        if !pane_slot.is_visible {
+            continue;
+        }
+        let is_placement_hovered = Some(pane_slot.pane_id) == placement_handle_pane_id
+            || (is_move_pane_mode && Some(pane_slot.pane_id) == hovered_pane_id);
+        if !is_placement_hovered {
+            continue;
+        }
+        let Some(content_rect) = pane_slot.content_rect else {
+            continue;
+        };
+        let content_area = place_cell_rect(content_rect, layout_origin).intersection(buffer.area);
+        for row_index in content_area.top()..content_area.bottom() {
+            for column_index in content_area.left()..content_area.right() {
+                buffer[(column_index, row_index)].set_bg(PLACEMENT_HOVER_TINT_COLOR);
             }
         }
     }
@@ -514,6 +577,15 @@ fn draw_pane_contents(render_snapshot: &RenderSnapshot, layout_origin: Point, bu
             buffer,
         );
     }
+}
+
+/// Paint a terminal grid into a preview rectangle.
+///
+/// The grid uses its original cell order and clips at the target rectangle.
+/// This keeps preview rendering bounded when the source grid is larger than
+/// the preview panel.
+pub fn draw_grid_preview(terminal_grid: &Grid, target_area: RatatuiRect, buffer: &mut Buffer) {
+    draw_grid(terminal_grid, target_area, false, None, buffer);
 }
 
 /// Paint one terminal `terminal_grid` into `target_area`, one buffer cell per grid cell.
@@ -749,7 +821,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::Normal => None,
         LockMode::Locked => Some("LOCK"),
         LockMode::Resize => Some("RESIZE"),
-        LockMode::PaneMode => Some("PANE"),
+        LockMode::MovePane => Some("MOVE PANE"),
         LockMode::TabMode => Some("TAB"),
         LockMode::ScrollMode => Some("SCROLL"),
     }

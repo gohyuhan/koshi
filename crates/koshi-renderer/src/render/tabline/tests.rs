@@ -73,6 +73,8 @@ fn build_tabline_frame(
         render_snapshot,
         viewer_chrome: ViewerChrome {
             hovered_pane_id: None,
+            placement_handle_pane_id: None,
+            active_input_mode: None,
             tabline_offset,
             reconnecting: None,
         },
@@ -702,6 +704,23 @@ fn a_lock_mode_tag_is_the_same_width_as_base() {
     assert_eq!(
         layout.right_block_start_column,
         14 + VERSION_BADGE_COLUMN_COUNT
+    );
+}
+
+#[test]
+fn the_active_move_pane_mode_is_shown_in_the_right_block() {
+    let mut tabline_test_frame =
+        build_tabline_frame("s", &[("a", true)], None, LockMode::Locked, false);
+    tabline_test_frame.viewer_chrome.active_input_mode = Some(LockMode::MovePane);
+
+    assert_eq!(
+        format_right_block_text(
+            tabline_test_frame
+                .render_snapshot
+                .build_frame_layout(tabline_test_frame.viewer_chrome)
+                .get_tabline_inputs()
+        ),
+        " MOVE PANE "
     );
 }
 

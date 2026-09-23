@@ -247,7 +247,8 @@ impl Server {
 
     /// Dispatch every command `plan` names, in order, attributed to
     /// `client_id`'s keybinding. A command the dispatcher rejects does not stop
-    /// the ones after it. A [`DispatchPlan::PluginHostCall`] runs nothing.
+    /// the ones after it. Viewer-local actions and
+    /// [`DispatchPlan::PluginHostCall`] run nothing in the session runtime.
     fn dispatch_action_plan(&mut self, client_id: ClientId, dispatch_action_plan: DispatchPlan) {
         match dispatch_action_plan {
             DispatchPlan::Command(command) => {
@@ -264,6 +265,7 @@ impl Server {
                     self.dispatch_action_plan(client_id, dispatch_action_plan);
                 }
             }
+            DispatchPlan::ClientAction(_) => {}
             DispatchPlan::PluginHostCall { .. } => {}
         }
     }

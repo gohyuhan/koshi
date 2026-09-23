@@ -30,8 +30,15 @@ use koshi_ipc::frame::{
     FrameSlot, FrameStyle, FrameTab, FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame,
     MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
 };
+use koshi_ipc::placement::{
+    PanePlacementClientSnapshot as WirePlacementClientSnapshot,
+    PanePlacementPaneSnapshot as WirePlacementPaneSnapshot,
+    PanePlacementSizing as WirePlacementSizing, PanePlacementSnapshot as WirePlacementSnapshot,
+    PanePlacementTabSnapshot as WirePlacementTabSnapshot,
+};
 use koshi_renderer::snapshot::{
-    GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, RenderSnapshot, TabMeta,
+    GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPaneSnapshot,
+    PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabMeta,
 };
 use koshi_terminal::graphics::{
     GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
@@ -103,6 +110,110 @@ pub(crate) fn wire_frame_with_content_ids(
             lock_mode: client_snapshot.lock_mode,
             is_mouse_selection_enabled: client_snapshot.is_mouse_selection_enabled,
         },
+    }
+}
+
+/// Turn a read-only placement preview into wire form with local image ids.
+#[must_use]
+pub(crate) fn wire_placement_snapshot(
+    placement_snapshot: &PlacementSnapshot,
+) -> WirePlacementSnapshot {
+    let mut next_image_content_id = 1u64;
+    wire_placement_snapshot_with_content_ids(placement_snapshot, |_, _| {
+        let image_content_id = next_image_content_id;
+        next_image_content_id = next_image_content_id.saturating_add(1);
+        image_content_id
+    })
+}
+
+/// Turn a read-only placement preview into wire form with connection-selected image ids.
+#[must_use]
+pub(crate) fn wire_placement_snapshot_with_content_ids(
+    placement_snapshot: &PlacementSnapshot,
+    mut assign_image_content_id: impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
+) -> WirePlacementSnapshot {
+    WirePlacementSnapshot {
+        session_id: placement_snapshot.session_id,
+        source_pane_id: placement_snapshot.source_pane_id,
+        source_tab_id: placement_snapshot.source_tab_id,
+        destination_tab_id: placement_snapshot.destination_tab_id,
+        session_placement_revision: placement_snapshot.session_placement_revision,
+        client_placement_revision: placement_snapshot.client_placement_revision,
+        source_tab_snapshot: wire_placement_tab(
+            &placement_snapshot.source_tab_snapshot,
+            &mut assign_image_content_id,
+        ),
+        destination_tab_snapshot: placement_snapshot
+            .destination_tab_snapshot
+            .as_ref()
+            .map(|tab_snapshot| wire_placement_tab(tab_snapshot, &mut assign_image_content_id)),
+        client_snapshot: WirePlacementClientSnapshot {
+            client_id: placement_snapshot.client_snapshot.client_snapshot.client_id,
+            viewport_size: placement_snapshot
+                .client_snapshot
+                .client_snapshot
+                .viewport_size,
+            pane_area: placement_snapshot.client_snapshot.reported_pane_area,
+            active_tab_id: placement_snapshot
+                .client_snapshot
+                .client_snapshot
+                .active_tab_id,
+            focused_pane_id: placement_snapshot
+                .client_snapshot
+                .client_snapshot
+                .focused_pane_id,
+        },
+        pane_sizing: WirePlacementSizing {
+            minimum_size: placement_snapshot.pane_sizing.minimum_size,
+            gap_cell_count: placement_snapshot.pane_sizing.gap_cell_count,
+        },
+    }
+}
+
+fn wire_placement_tab(
+    placement_tab_snapshot: &PlacementTabSnapshot,
+    assign_image_content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
+) -> WirePlacementTabSnapshot {
+    let tab_snapshot = &placement_tab_snapshot.tab_snapshot;
+    WirePlacementTabSnapshot {
+        tab_id: tab_snapshot.tab_id,
+        tab_name: tab_snapshot.tab_name.clone(),
+        layout_tree: placement_tab_snapshot.layout_tree.clone(),
+        pane_slots: tab_snapshot.pane_slots.iter().map(wire_slot).collect(),
+        effective_cell_size: tab_snapshot.effective_cell_size,
+        stack_headers: tab_snapshot.stack_headers.clone(),
+        layout_mode: tab_snapshot.layout_mode,
+        is_every_pane_suppressed: tab_snapshot.are_all_panes_suppressed,
+        gap_cell_count: tab_snapshot.gap_cell_count,
+        pane_snapshots: placement_tab_snapshot
+            .pane_snapshots
+            .iter()
+            .map(|pane_snapshot| wire_placement_pane(pane_snapshot, assign_image_content_id))
+            .collect(),
+    }
+}
+
+fn wire_placement_pane(
+    placement_pane_snapshot: &PlacementPaneSnapshot,
+    assign_image_content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
+) -> WirePlacementPaneSnapshot {
+    WirePlacementPaneSnapshot {
+        pane_id: placement_pane_snapshot.pane_id,
+        terminal_window: placement_pane_snapshot
+            .terminal_grid_view
+            .as_ref()
+            .map(wire_window),
+        image_placement_snapshots: placement_pane_snapshot
+            .image_placement_snapshots
+            .iter()
+            .map(|image_placement_snapshot| {
+                wire_image_placement(
+                    placement_pane_snapshot.pane_id,
+                    image_placement_snapshot,
+                    assign_image_content_id,
+                )
+            })
+            .collect(),
     }
 }
 

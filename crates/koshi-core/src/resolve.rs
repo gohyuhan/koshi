@@ -23,8 +23,9 @@
 //!
 //! # Routes
 //!
-//! A registry entry's [`ActionHandlerReference`] picks one of three plans. A
+//! A registry entry's [`ActionHandlerReference`] picks one of four plans. A
 //! [`CoreCommand`](ActionHandlerReference::CoreCommand) builds a typed command. A
+//! [`CoreClient`](ActionHandlerReference::CoreClient) returns a viewer-local action.
 //! [`PluginHostCall`](ActionHandlerReference::PluginHostCall) becomes a
 //! [`DispatchPlan::PluginHostCall`] carrying the arguments uninterpreted. A
 //! [`Sequence`](ActionHandlerReference::Sequence) fans out into the plans of the
@@ -35,7 +36,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::action::{ActionHandlerReference, ActionReference, ActionStatus};
+use crate::action::{ActionHandlerReference, ActionReference, ActionStatus, ClientActionKind};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     MovePaneArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
@@ -108,6 +109,8 @@ pub enum ActionArgs {
 pub enum DispatchPlan {
     /// Dispatch one typed command.
     Command(Command),
+    /// Run one viewer-local action without sending a session command.
+    ClientAction(ClientActionKind),
     /// Hand the action to the plugin that owns it.
     PluginHostCall {
         /// The plugin that registered the action.
@@ -258,6 +261,14 @@ fn resolve_action_at_depth(
             scroll_line_count,
         )
         .map(DispatchPlan::Command),
+        ActionHandlerReference::CoreClient(client_action_kind) => {
+            if action_arguments != &ActionArgs::None {
+                return Err(ResolveError::ArgsMismatch {
+                    action_reference: action_reference.clone(),
+                });
+            }
+            Ok(DispatchPlan::ClientAction(*client_action_kind))
+        }
         ActionHandlerReference::PluginHostCall(plugin_id) => Ok(DispatchPlan::PluginHostCall {
             plugin_id: *plugin_id,
             action_reference: action_reference.clone(),

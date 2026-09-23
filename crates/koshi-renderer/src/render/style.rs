@@ -117,3 +117,10 @@ pub(super) fn compute_hover_border_style(theme: &Theme) -> Style {
         .fg(theme.hover_border_color)
         .add_modifier(Modifier::BOLD)
 }
+
+/// The pane under the placement pointer: the theme's accent color, in bold.
+pub(super) fn compute_placement_hover_border_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.accent_color)
+        .add_modifier(Modifier::BOLD)
+}

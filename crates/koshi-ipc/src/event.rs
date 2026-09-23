@@ -16,7 +16,7 @@
 //! events. An unchanged record is referenced again without sending its RGBA
 //! bytes again.
 //!
-//! Four frames here are not session facts.
+//! Five frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
 //! sends it when a client's queue overflowed and dropped an event the stream
 //! cannot skip, and it names how many events went missing.
@@ -28,11 +28,15 @@
 //! write.
 //! [`SwitchTo`](crate::event::SessionEvent::SwitchTo) is the fourth: it names
 //! the session the client leaves this one for.
+//! [`PlacementCommandRejected`](crate::event::SessionEvent::PlacementCommandRejected)
+//! is the fifth: it names a placement command that the session rejected.
 
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::{FrameImageChunk, FrameImageTransfer, PaintedFrame};
+use crate::placement::PanePlacementSnapshot;
+use crate::protocol::IpcErrorPayload;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 
 /// An event as a client reads it: it may name a frame this build does not
@@ -63,6 +67,20 @@ pub enum SessionEvent {
     ImageContentChunk {
         /// The image bytes and their position in the transfer.
         image_chunk: FrameImageChunk,
+    },
+    /// A read-only placement preview for one request.
+    PanePlacementSnapshot {
+        /// The request this preview answers.
+        request_id: u64,
+        /// The bounded source and destination snapshot.
+        snapshot: Box<PanePlacementSnapshot>,
+    },
+    /// A read-only placement preview request was refused.
+    PanePlacementRefused {
+        /// The request this refusal answers.
+        request_id: u64,
+        /// The typed refusal and its human-readable message.
+        error: IpcErrorPayload,
     },
     /// A pane was created and registered.
     PaneCreated {
@@ -185,6 +203,11 @@ pub enum SessionEvent {
         /// and connection token from the endpoint file keyed by this id.
         session_id: SessionId,
     },
+    /// A pane placement command from this client was rejected.
+    PlacementCommandRejected {
+        /// The rejected command.
+        command_id: CommandId,
+    },
 }
 
 impl SessionEvent {
@@ -197,6 +220,8 @@ impl SessionEvent {
             SessionEvent::ImageCacheReset => "ImageCacheReset",
             SessionEvent::ImageContentStart { .. } => "ImageContentStart",
             SessionEvent::ImageContentChunk { .. } => "ImageContentChunk",
+            SessionEvent::PanePlacementSnapshot { .. } => "PanePlacementSnapshot",
+            SessionEvent::PanePlacementRefused { .. } => "PanePlacementRefused",
             SessionEvent::PaneCreated { .. } => "PaneCreated",
             SessionEvent::PaneProcessExited { .. } => "PaneProcessExited",
             SessionEvent::PaneClosing { .. } => "PaneClosing",
@@ -214,6 +239,7 @@ impl SessionEvent {
             SessionEvent::MouseAnswer { .. } => "MouseAnswer",
             SessionEvent::HostWrite { .. } => "HostWrite",
             SessionEvent::SwitchTo { .. } => "SwitchTo",
+            SessionEvent::PlacementCommandRejected { .. } => "PlacementCommandRejected",
         }
     }
 }
@@ -226,6 +252,8 @@ impl WireVariants for SessionEvent {
         "ImageCacheReset",
         "ImageContentStart",
         "ImageContentChunk",
+        "PanePlacementSnapshot",
+        "PanePlacementRefused",
         "PaneCreated",
         "PaneProcessExited",
         "PaneClosing",
@@ -243,6 +271,7 @@ impl WireVariants for SessionEvent {
         "MouseAnswer",
         "HostWrite",
         "SwitchTo",
+        "PlacementCommandRejected",
     ];
 }
 

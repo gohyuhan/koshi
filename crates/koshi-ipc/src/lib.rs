@@ -33,6 +33,8 @@ pub mod frame;
 pub mod handshake;
 /// One session's layout: each tab's split tree and the rectangles it solves to.
 pub mod layout;
+/// Bounded read-only placement previews for attached clients.
+pub mod placement;
 /// What every server does the same way, on whichever protocol it speaks: the
 /// framing faults, the unknown request kind, and the Hello.
 pub mod plane;

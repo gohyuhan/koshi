@@ -67,9 +67,9 @@
 //! and pushes it down the event stream, which this loop paints. This terminal's
 //! keys, pastes and resizes travel back up the same connection: a key the
 //! viewer's keymap does not bind goes up as a key press, a binding that fires
-//! is resolved against the action table here and goes up as the commands it
-//! runs, a paste goes up whole, and a resize goes up as the new viewport and
-//! the pane area left by the built-in rows.
+//! is resolved against the action table here, a viewer-local action runs here,
+//! a session command goes up, a paste goes up whole, and a resize goes up as
+//! the new viewport and the pane area left by the built-in rows.
 //! Every request leaves on its own writer thread, so a session slow to take
 //! the bytes backs that thread up and never this terminal's input. The stream
 //! also carries escapes a pane sent to this terminal itself rather than to the
@@ -107,10 +107,12 @@ use serde_json::value::RawValue;
 
 use crate::input::KeyOutcome;
 use crate::mouse::MouseAction;
+use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client};
 use koshi_config::types::BoundAction;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, SwitchSessionArgs, VisualCommand,
+    Command, CommandEnvelope, CommandResult, CommandSource, PanePlacementAnchor,
+    PanePlacementTarget, SwitchSessionArgs, VisualCommand,
 };
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -135,7 +137,8 @@ use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
 use koshi_renderer::get_cursor_position;
 use koshi_renderer::snapshot::{
-    CommittedRegions, CursorStyle, MouseFrame, Reconnecting, RenderSnapshot, ViewerChrome,
+    CommittedRegions, CursorStyle, MouseFrame, PlacementSnapshot, PlacementStatus,
+    PlacementStatusKind, Reconnecting, RenderSnapshot, ViewerChrome,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 
@@ -253,7 +256,7 @@ pub(crate) struct ViewerPaint {
     /// The pane under the pointer and where the tab strip sits, for the tab the
     /// frame on the screen shows.
     pub(crate) chrome: ViewerChrome,
-    /// The input mode the hint bar lists bindings for.
+    /// The active base or placement mode whose bindings the hint bar lists.
     pub(crate) lock_mode: LockMode,
     /// Whether the frame's viewer takes the mouse for text selection.
     pub(crate) is_mouse_selection_enabled: bool,
@@ -261,6 +264,47 @@ pub(crate) struct ViewerPaint {
     /// breadcrumb ahead of the chords that continue it. `None` when no sequence
     /// is open.
     pub(crate) pending_key_sequence: Option<KeySequence>,
+    /// The checked placement target shown by the preview overlay.
+    pub(crate) placement_target: Option<PanePlacementTarget>,
+    /// The placement status shown in the keybinding statusline.
+    pub(crate) placement_status: Option<PlacementStatus>,
+}
+
+const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
+const PLACEMENT_ANIMATION_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// The viewer-owned interpolation between two placement previews.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlacementAnimation {
+    /// The authoritative preview used as the animation's fixed target base.
+    base_snapshot: PlacementSnapshot,
+    /// The preview geometry visible when this animation began.
+    from_snapshot: PlacementSnapshot,
+    /// The preview geometry this animation reaches.
+    to_snapshot: PlacementSnapshot,
+    /// The target whose outline belongs to `to_snapshot`.
+    placement_target: Option<PanePlacementTarget>,
+    /// The monotonic time at which this interpolation began.
+    started_at: Instant,
+}
+
+impl PlacementAnimation {
+    /// Return the bounded ease-out progress at `current_time`.
+    fn compute_animation_progress(&self, current_time: Instant) -> f32 {
+        let elapsed_duration = current_time.saturating_duration_since(self.started_at);
+        let linear_progress =
+            (elapsed_duration.as_secs_f32() / PLACEMENT_ANIMATION_DURATION.as_secs_f32()).min(1.0);
+        1.0 - (1.0 - linear_progress).powi(3)
+    }
+
+    /// Return the interpolated preview at `current_time`.
+    fn build_placement_snapshot(&self, current_time: Instant) -> PlacementSnapshot {
+        terminal::interpolate_placement_snapshot(
+            &self.from_snapshot,
+            &self.to_snapshot,
+            self.compute_animation_progress(current_time),
+        )
+    }
 }
 
 impl ViewerPaint {
@@ -274,11 +318,18 @@ impl ViewerPaint {
         } else {
             None
         };
+        let active_input_mode = if client.is_placement_mode_active() {
+            LockMode::MovePane
+        } else {
+            snapshot.client_snapshot.lock_mode
+        };
         ViewerPaint {
             chrome: client.build_viewer_chrome(snapshot.client_snapshot.active_tab_id),
-            lock_mode: snapshot.client_snapshot.lock_mode,
+            lock_mode: active_input_mode,
             is_mouse_selection_enabled: snapshot.client_snapshot.is_mouse_selection_enabled,
             pending_key_sequence,
+            placement_target: client.get_placement_target(),
+            placement_status: build_placement_status(client, snapshot),
         }
     }
 
@@ -289,10 +340,144 @@ impl ViewerPaint {
     fn from_client_and_tab(client: &Client, active_tab_id: TabId) -> Self {
         ViewerPaint {
             chrome: client.build_viewer_chrome(active_tab_id),
-            lock_mode: client.get_lock_mode(),
+            lock_mode: client.get_active_input_mode(),
             is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             pending_key_sequence: client.get_pending_key_sequence().cloned(),
+            placement_target: client.get_placement_target(),
+            placement_status: None,
         }
+    }
+
+    /// Add the placement status built from the latest frame.
+    fn with_placement_status(mut self, client: &Client, snapshot: &RenderSnapshot) -> Self {
+        self.placement_status = build_placement_status(client, snapshot);
+        self
+    }
+}
+
+/// Build the viewer-local placement status from the current target and frame labels.
+fn build_placement_status(client: &Client, snapshot: &RenderSnapshot) -> Option<PlacementStatus> {
+    if client.get_active_input_mode() != LockMode::MovePane {
+        return None;
+    }
+    let source_pane_id = client.get_placement_source_pane_id()?;
+    let destination_tab_id = client.get_placement_destination_tab_id()?;
+    let source_pane_label = snapshot
+        .pane_snapshots
+        .iter()
+        .find(|pane_snapshot| pane_snapshot.pane_id == source_pane_id)
+        .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
+        .filter(|pane_title| !pane_title.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| source_pane_id.to_string());
+    let destination_tab_label = snapshot
+        .session_snapshot
+        .tabs_metadata
+        .iter()
+        .find(|tab_metadata| tab_metadata.tab_id == destination_tab_id)
+        .map(|tab_metadata| tab_metadata.tab_name.clone())
+        .unwrap_or_else(|| destination_tab_id.to_string());
+    let placement_status_kind = if client.get_placement_snapshot().is_none() {
+        if client.is_placement_read_pending() {
+            PlacementStatusKind::Loading
+        } else {
+            PlacementStatusKind::Invalid
+        }
+    } else if client.get_placement_target().is_some() {
+        PlacementStatusKind::Valid
+    } else {
+        PlacementStatusKind::Invalid
+    };
+    let status_text = match placement_status_kind {
+        PlacementStatusKind::Loading => {
+            format!("MOVE {source_pane_label} | loading {destination_tab_label}")
+        }
+        PlacementStatusKind::Invalid => {
+            format!("MOVE {source_pane_label} | {destination_tab_label}: choose a destination")
+        }
+        PlacementStatusKind::Valid => {
+            let placement_target = client
+                .get_placement_target()
+                .expect("a valid placement status has a placement target");
+            let placement_description = format_placement_target_description(
+                &placement_target,
+                &destination_tab_label,
+                snapshot,
+            );
+            if client.is_placement_confirmation_pending() {
+                format!(
+                    "MOVE {source_pane_label} | {destination_tab_label}: {placement_description} | placing"
+                )
+            } else {
+                format!(
+                    "MOVE {source_pane_label} | {destination_tab_label}: {placement_description} | Enter: place | Esc: cancel"
+                )
+            }
+        }
+    };
+    Some(PlacementStatus {
+        placement_status_kind,
+        status_text,
+    })
+}
+
+/// Describe one checked placement target for the placement statusline.
+fn format_placement_target_description(
+    placement_target: &PanePlacementTarget,
+    destination_tab_label: &str,
+    snapshot: &RenderSnapshot,
+) -> String {
+    match placement_target {
+        PanePlacementTarget::Swap { target_pane_id } => format!(
+            "swap with {}",
+            format_placement_pane_label(*target_pane_id, snapshot)
+        ),
+        PanePlacementTarget::Split {
+            anchor, direction, ..
+        } => {
+            let direction_label = format_placement_direction_label(*direction);
+            match anchor {
+                PanePlacementAnchor::Pane(target_pane_id) => format!(
+                    "insert {direction_label} {}",
+                    format_placement_pane_label(*target_pane_id, snapshot)
+                ),
+                PanePlacementAnchor::Group(target_pane_ids) => {
+                    let group_pane_labels = target_pane_ids
+                        .iter()
+                        .map(|target_pane_id| {
+                            format_placement_pane_label(*target_pane_id, snapshot)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("insert {direction_label} group [{group_pane_labels}]")
+                }
+                PanePlacementAnchor::Tab => {
+                    format!("insert {direction_label} {destination_tab_label}")
+                }
+            }
+        }
+    }
+}
+
+/// Return the display label for one pane in the current frame.
+fn format_placement_pane_label(pane_id: PaneId, snapshot: &RenderSnapshot) -> String {
+    snapshot
+        .pane_snapshots
+        .iter()
+        .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
+        .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
+        .filter(|pane_title| !pane_title.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| pane_id.to_string())
+}
+
+/// Return the text for one placement insertion direction.
+fn format_placement_direction_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Up => "above",
+        Direction::Down => "below",
+        Direction::Left => "left of",
+        Direction::Right => "right of",
     }
 }
 
@@ -316,6 +501,14 @@ struct Screen<B: Backend> {
     /// again without re-reading the frame. Its grids travel behind `Arc`s, so
     /// retaining it does not copy cell data. `None` until the first draw.
     last_snapshot: Option<RenderSnapshot>,
+    /// The retained read-only placement preview, if one is accepted.
+    placement_snapshot: Option<PlacementSnapshot>,
+    /// The placement preview used by the last successful paint.
+    shown_placement_snapshot: Option<PlacementSnapshot>,
+    /// The interpolated placement preview used by the last successful paint.
+    shown_placement_render_snapshot: Option<PlacementSnapshot>,
+    /// The viewer-owned placement interpolation, if one is active.
+    placement_animation: Option<PlacementAnimation>,
     /// The region solve and input revision committed with the frame on the
     /// screen. It starts with the compiled-in two-row solve.
     committed_regions: CommittedRegions,
@@ -362,6 +555,10 @@ impl<B: Backend> Screen<B> {
             last_window_title: String::new(),
             last_cursor_style: None,
             last_snapshot: None,
+            placement_snapshot: None,
+            shown_placement_snapshot: None,
+            shown_placement_render_snapshot: None,
+            placement_animation: None,
             committed_regions: CommittedRegions::core(viewport, 0),
             shown_viewer_paint: None,
             pending_snapshot: None,
@@ -411,7 +608,24 @@ impl<B: Backend> Screen<B> {
         client: &mut Client,
         current_time: Instant,
     ) -> Option<MouseFrame> {
-        let snapshot = self.pending_snapshot.as_ref()?;
+        if client.get_placement_snapshot().is_none() {
+            self.placement_snapshot = None;
+        }
+        let is_placement_snapshot_stale = {
+            let snapshot = self.pending_snapshot.as_ref()?;
+            self.placement_snapshot
+                .as_ref()
+                .is_some_and(|placement_snapshot| {
+                    placement_snapshot.session_placement_revision
+                        != snapshot.session_snapshot.session_revision
+                        || placement_snapshot.client_placement_revision
+                            != snapshot.client_snapshot.client_revision
+                })
+        };
+        if is_placement_snapshot_stale {
+            self.placement_snapshot = None;
+            self.discard_stale_placement_animation();
+        }
         let is_native_image_output = self.image_output_state.output_kind().is_some();
         if is_native_image_output
             && self
@@ -420,9 +634,22 @@ impl<B: Backend> Screen<B> {
         {
             return None;
         }
-        let committed_regions =
-            self.compute_committed_regions(snapshot.client_snapshot.viewport_size);
+        let viewport_size = self
+            .pending_snapshot
+            .as_ref()?
+            .client_snapshot
+            .viewport_size;
+        let committed_regions = self.compute_committed_regions(viewport_size);
+        let placement_display_snapshot = self.update_placement_animation(
+            client,
+            client.get_placement_target().as_ref(),
+            current_time,
+        );
+        let snapshot = self.pending_snapshot.as_ref()?;
         let frame_paint = ViewerPaint::from_frame(client, snapshot);
+        let placement_render_snapshot = placement_display_snapshot
+            .as_ref()
+            .or(self.placement_snapshot.as_ref());
         match paint_with_graphics(
             &mut self.terminal,
             client,
@@ -434,6 +661,8 @@ impl<B: Backend> Screen<B> {
             self.cell_size,
             &mut self.last_window_title,
             &mut self.last_cursor_style,
+            self.placement_snapshot.as_ref(),
+            placement_display_snapshot.as_ref(),
         ) {
             Ok(true) => {
                 if is_native_image_output {
@@ -471,6 +700,8 @@ impl<B: Backend> Screen<B> {
         apply_frame_to_client(client, &snapshot);
         self.committed_regions = committed_regions.clone();
         self.shown_viewer_paint = Some(frame_paint);
+        self.shown_placement_snapshot = self.placement_snapshot.clone();
+        self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
         let mouse_frame = MouseFrame::from_snapshot(&snapshot, committed_regions);
         self.last_snapshot = Some(snapshot);
         Some(mouse_frame)
@@ -502,11 +733,41 @@ impl<B: Backend> Screen<B> {
         if client.get_viewport_size() != self.committed_regions.viewport_size {
             return None;
         }
-        let viewer_paint = ViewerPaint::from_client_and_tab(client, active_tab_id);
-        if self.shown_viewer_paint.as_ref() == Some(&viewer_paint) {
+        if client.get_placement_snapshot().is_none() {
+            self.placement_snapshot = None;
+        }
+        let is_placement_snapshot_stale = {
+            let snapshot = self.last_snapshot.as_ref()?;
+            self.placement_snapshot
+                .as_ref()
+                .is_some_and(|placement_snapshot| {
+                    placement_snapshot.session_placement_revision
+                        != snapshot.session_snapshot.session_revision
+                        || placement_snapshot.client_placement_revision
+                            != snapshot.client_snapshot.client_revision
+                })
+        };
+        if is_placement_snapshot_stale {
+            self.placement_snapshot = None;
+            self.discard_stale_placement_animation();
+        }
+        let placement_display_snapshot = self.update_placement_animation(
+            client,
+            client.get_placement_target().as_ref(),
+            current_time,
+        );
+        let snapshot = self.last_snapshot.as_ref()?;
+        let viewer_paint = ViewerPaint::from_client_and_tab(client, active_tab_id)
+            .with_placement_status(client, snapshot);
+        let placement_render_snapshot = placement_display_snapshot
+            .as_ref()
+            .or(self.placement_snapshot.as_ref());
+        if self.shown_viewer_paint.as_ref() == Some(&viewer_paint)
+            && self.shown_placement_snapshot == self.placement_snapshot
+            && self.shown_placement_render_snapshot.as_ref() == placement_render_snapshot
+        {
             return None;
         }
-        let snapshot = self.last_snapshot.as_ref()?;
         if !is_frame_committed(paint_with_graphics(
             &mut self.terminal,
             client,
@@ -518,6 +779,8 @@ impl<B: Backend> Screen<B> {
             self.cell_size,
             &mut self.last_window_title,
             &mut self.last_cursor_style,
+            self.placement_snapshot.as_ref(),
+            placement_display_snapshot.as_ref(),
         )) {
             return None;
         }
@@ -532,7 +795,97 @@ impl<B: Backend> Screen<B> {
             ),
         );
         self.shown_viewer_paint = Some(viewer_paint);
+        self.shown_placement_snapshot = self.placement_snapshot.clone();
+        self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
         None
+    }
+
+    /// Update the local placement interpolation and return its current frame.
+    fn update_placement_animation(
+        &mut self,
+        client: &Client,
+        placement_target: Option<&PanePlacementTarget>,
+        current_time: Instant,
+    ) -> Option<PlacementSnapshot> {
+        let base_snapshot = self
+            .placement_snapshot
+            .as_ref()
+            .or_else(|| {
+                self.placement_animation
+                    .as_ref()
+                    .map(|animation| &animation.base_snapshot)
+            })
+            .cloned();
+        let Some(base_snapshot) = base_snapshot else {
+            self.placement_animation = None;
+            return None;
+        };
+        let desired_snapshot = if self.placement_snapshot.is_some() {
+            terminal::build_placement_preview_snapshot(&base_snapshot, placement_target)
+        } else {
+            base_snapshot.clone()
+        };
+        let is_already_showing_desired_snapshot = self.shown_placement_snapshot.as_ref()
+            == self.placement_snapshot.as_ref()
+            && self.shown_placement_render_snapshot.as_ref() == Some(&desired_snapshot);
+        if self.placement_animation.is_none() && is_already_showing_desired_snapshot {
+            return self
+                .placement_snapshot
+                .is_some()
+                .then_some(desired_snapshot);
+        }
+        if client.get_client_config().should_reduce_motion {
+            self.placement_animation = None;
+            return self
+                .placement_snapshot
+                .is_some()
+                .then_some(desired_snapshot);
+        }
+        let should_start_animation = self.placement_animation.as_ref().is_none_or(|animation| {
+            animation.base_snapshot != base_snapshot
+                || animation.to_snapshot != desired_snapshot
+                || animation.placement_target.as_ref() != placement_target
+        });
+        if should_start_animation {
+            let from_snapshot = self
+                .placement_animation
+                .as_ref()
+                .map(|animation| animation.build_placement_snapshot(current_time))
+                .unwrap_or_else(|| base_snapshot.clone());
+            if from_snapshot == desired_snapshot {
+                self.placement_animation = None;
+                return self
+                    .placement_snapshot
+                    .is_some()
+                    .then_some(desired_snapshot);
+            }
+            self.placement_animation = Some(PlacementAnimation {
+                base_snapshot,
+                from_snapshot,
+                to_snapshot: desired_snapshot.clone(),
+                placement_target: placement_target.cloned(),
+                started_at: current_time,
+            });
+        }
+        let placement_animation = self
+            .placement_animation
+            .as_ref()
+            .expect("placement animation starts before it is read");
+        if placement_animation.compute_animation_progress(current_time) >= 1.0 {
+            self.placement_animation = None;
+            return self
+                .placement_snapshot
+                .is_some()
+                .then_some(desired_snapshot);
+        }
+        Some(placement_animation.build_placement_snapshot(current_time))
+    }
+
+    /// Drop placement geometry that belongs to an older authoritative frame.
+    fn discard_stale_placement_animation(&mut self) {
+        self.placement_animation = None;
+        self.shown_placement_snapshot = None;
+        self.shown_placement_render_snapshot = None;
     }
 
     /// Return the next wakeup while native image output has work or needs a retry.
@@ -553,6 +906,14 @@ impl<B: Backend> Screen<B> {
                 retry_time.saturating_duration_since(current_time)
             });
         native_frame_pending.then_some(retry_delay)
+    }
+
+    /// Return the next redraw interval for an active placement interpolation.
+    fn next_placement_animation_wakeup_at(&self, current_time: Instant) -> Option<Duration> {
+        let placement_animation = self.placement_animation.as_ref()?;
+        let animation_remaining = PLACEMENT_ANIMATION_DURATION
+            .saturating_sub(current_time.saturating_duration_since(placement_animation.started_at));
+        Some(animation_remaining.min(PLACEMENT_ANIMATION_FRAME_INTERVAL))
     }
 
     /// Update the pixel dimensions used to scale native image output.
@@ -578,11 +939,18 @@ impl<B: Backend> Screen<B> {
         }
     }
 
+    /// Replace the placement preview shown with the next refresh.
+    fn set_placement_snapshot(&mut self, placement_snapshot: Option<PlacementSnapshot>) {
+        self.placement_snapshot = placement_snapshot;
+    }
+
     /// Reset native output state after the session image cache or connection changes.
     fn reset_connection(&mut self) {
         self.image_output_state.reset_connection();
         self.native_retry_delay = IMAGE_OUTPUT_STEP_DELAY_DURATION;
         self.native_retry_at = None;
+        self.placement_animation = None;
+        self.shown_placement_render_snapshot = None;
     }
 
     /// Select the compiled-in region solve for a painted frame's viewport.
@@ -615,6 +983,8 @@ fn paint_with_graphics<B: Backend>(
     cell_size: Option<PixelCellSize>,
     last_window_title: &mut String,
     last_cursor_style: &mut Option<CursorStyle>,
+    placement_snapshot: Option<&PlacementSnapshot>,
+    placement_display_snapshot: Option<&PlacementSnapshot>,
 ) -> Result<bool, terminal::PaintError<B::Error>> {
     terminal::paint_frame_with_images(
         terminal,
@@ -627,6 +997,8 @@ fn paint_with_graphics<B: Backend>(
         cell_size,
         last_window_title,
         last_cursor_style,
+        placement_snapshot,
+        placement_display_snapshot,
     )
 }
 
@@ -758,14 +1130,48 @@ impl Uplink {
         request_id
     }
 
-    /// Resolve one fired binding against the action table and send every
-    /// command it runs, in order.
+    /// Queue one placement preview request when this client has no request in flight.
+    pub fn send_placement_read(
+        &mut self,
+        client: &mut Client,
+        source_pane_id: PaneId,
+        destination_tab_id: TabId,
+    ) -> Option<u64> {
+        let request_id = self.next_request_id;
+        if !client.begin_placement_read(
+            request_id,
+            source_pane_id,
+            destination_tab_id,
+            Instant::now(),
+        ) {
+            return None;
+        }
+        Some(self.send_request(IpcRequestKind::ReadPanePlacement {
+            pane_id: source_pane_id,
+            destination_tab_id,
+        }))
+    }
+
+    /// Queue one checked placement command and retain its id for rejection handling.
+    pub(crate) fn submit_placement_command(&mut self, client: &mut Client, command: Command) {
+        let command_id = CommandId::new();
+        client.set_pending_placement_command_id(command_id);
+        let envelope = CommandEnvelope::from_parts(
+            command_id,
+            CommandSource::from_key_binding(client.get_client_id()),
+            SystemTime::now(),
+            command,
+        );
+        self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
+    }
+
+    /// Resolve one fired binding against the action table and run its plan.
     ///
     /// `new_pane_direction` is this viewer's own setting, so a pane-opening
     /// binding that names no direction already says where the pane goes by the
-    /// time the command leaves. An action the table refuses, and one the plugin
-    /// host owns, send nothing.
-    fn submit_bound_action(&mut self, client: &Client, bound_action: BoundAction) {
+    /// time the command leaves. A viewer-local action runs here; an action the
+    /// table refuses, and one the plugin host owns, sends no session command.
+    fn submit_bound_action(&mut self, client: &mut Client, bound_action: BoundAction) {
         let new_pane_direction = client.get_client_config().layout.new_pane_direction;
         let Ok(dispatch_plan) = resolve_action_with_scroll_line_count(
             &bound_action.action_reference,
@@ -776,14 +1182,41 @@ impl Uplink {
         ) else {
             return;
         };
-        for command in build_commands(dispatch_plan) {
-            let envelope = CommandEnvelope::from_parts(
-                CommandId::new(),
-                CommandSource::from_key_binding(client.get_client_id()),
-                SystemTime::now(),
-                command,
-            );
-            self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
+        self.submit_dispatch_plan(client, dispatch_plan);
+    }
+
+    /// Run one resolved action plan in order.
+    fn submit_dispatch_plan(&mut self, client: &mut Client, dispatch_plan: DispatchPlan) {
+        match dispatch_plan {
+            DispatchPlan::Command(command) => {
+                let envelope = CommandEnvelope::from_parts(
+                    CommandId::new(),
+                    CommandSource::from_key_binding(client.get_client_id()),
+                    SystemTime::now(),
+                    command,
+                );
+                self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
+            }
+            DispatchPlan::ClientAction(client_action_kind) => {
+                match client.apply_client_action(client_action_kind) {
+                    PlacementInputAction::ReadPlacement {
+                        source_pane_id,
+                        destination_tab_id,
+                    } => {
+                        self.send_placement_read(client, source_pane_id, destination_tab_id);
+                    }
+                    PlacementInputAction::SubmitPlacement(command) => {
+                        self.submit_placement_command(client, command);
+                    }
+                    PlacementInputAction::CancelPlacement | PlacementInputAction::Consumed => {}
+                }
+            }
+            DispatchPlan::PluginHostCall { .. } => {}
+            DispatchPlan::Sequence(dispatch_plans) => {
+                for dispatch_plan in dispatch_plans {
+                    self.submit_dispatch_plan(client, dispatch_plan);
+                }
+            }
         }
     }
 }
@@ -1209,6 +1642,7 @@ fn attach_once(
         cleanup,
         loaded_config,
     );
+    client.set_session_id(session_id);
     let mut uplink = Uplink {
         request_sender: spawn_uplink_writer(writer),
         registry: ActionRegistry::new(),
@@ -1315,7 +1749,16 @@ fn run_attachment<B: Backend>(
                 client.next_key_wakeup(current_time),
                 client.next_mouse_wakeup(current_time),
             ),
-            screen.next_image_wakeup_at(current_time),
+            select_earliest_duration(
+                client.next_placement_read_wakeup(current_time),
+                select_earliest_duration(
+                    client.next_placement_tab_hover_wakeup(current_time),
+                    select_earliest_duration(
+                        screen.next_image_wakeup_at(current_time),
+                        screen.next_placement_animation_wakeup_at(current_time),
+                    ),
+                ),
+            ),
         );
         let incoming_event = match deferred_incoming_event.take() {
             Some(incoming_event) => Some(incoming_event),
@@ -1368,6 +1811,19 @@ fn run_attachment<B: Backend>(
                                 {
                                     last_mouse_frame = Some(mouse_frame);
                                 }
+                                if client.get_placement_snapshot().is_none() {
+                                    if let Err(snapshot_error) =
+                                        image_cache.clear_placement_snapshot()
+                                    {
+                                        tracing::warn!(
+                                            %snapshot_error,
+                                            "could not clear a stale placement snapshot"
+                                        );
+                                        attachment_ending = Some(AttachmentEnding::ConnectionDied);
+                                        break;
+                                    }
+                                    screen.set_placement_snapshot(None);
+                                }
                             }
                             Ok(None) => {}
                             Err(painted_frame_error) => {
@@ -1381,6 +1837,8 @@ fn run_attachment<B: Backend>(
                         },
                         Ok(SessionEvent::ImageCacheReset) => {
                             image_cache.clear_image_cache();
+                            client.clear_placement_snapshot();
+                            screen.set_placement_snapshot(None);
                             screen.reset_connection();
                         }
                         Ok(SessionEvent::ImageContentStart { image_transfer }) => {
@@ -1395,19 +1853,86 @@ fn run_attachment<B: Backend>(
                         Ok(SessionEvent::ImageContentChunk { image_chunk }) => {
                             match image_cache.accept_image_chunk(image_chunk) {
                                 Ok(Some(render_snapshot)) => {
+                                    screen.set_placement_snapshot(
+                                        image_cache.build_placement_render_snapshot(),
+                                    );
                                     screen.set_cell_size(cell_size_query.get_current_cell_size());
                                     if let Some(mouse_frame) =
                                         screen.draw_snapshot(client, render_snapshot)
                                     {
                                         last_mouse_frame = Some(mouse_frame);
                                     }
+                                    if client.get_placement_snapshot().is_none() {
+                                        if let Err(snapshot_error) =
+                                            image_cache.clear_placement_snapshot()
+                                        {
+                                            tracing::warn!(
+                                                %snapshot_error,
+                                                "could not clear a stale placement snapshot"
+                                            );
+                                            attachment_ending =
+                                                Some(AttachmentEnding::ConnectionDied);
+                                            break;
+                                        }
+                                        screen.set_placement_snapshot(None);
+                                    }
                                 }
-                                Ok(None) => {}
+                                Ok(None) => {
+                                    screen.set_placement_snapshot(
+                                        image_cache.build_placement_render_snapshot(),
+                                    );
+                                }
                                 Err(chunk_error) => {
                                     tracing::warn!(%chunk_error, "could not accept an image chunk");
                                     attachment_ending = Some(AttachmentEnding::ConnectionDied);
                                     break;
                                 }
+                            }
+                        }
+                        Ok(SessionEvent::PanePlacementSnapshot {
+                            request_id,
+                            snapshot,
+                        }) => {
+                            let placement_snapshot = *snapshot;
+                            if !client.accept_placement_snapshot(
+                                request_id,
+                                placement_snapshot.clone(),
+                                Instant::now(),
+                            ) {
+                                tracing::debug!(request_id, "ignored stale placement snapshot");
+                                image_cache.ignore_stale_placement_image_transfers();
+                                send_next_queued_placement_read(client, uplink);
+                                continue;
+                            }
+                            if let Err(snapshot_error) =
+                                image_cache.adopt_placement_snapshot(Box::new(placement_snapshot))
+                            {
+                                tracing::warn!(%snapshot_error, "could not accept a placement snapshot");
+                                attachment_ending = Some(AttachmentEnding::ConnectionDied);
+                                break;
+                            }
+                            screen.set_placement_snapshot(
+                                image_cache.build_placement_render_snapshot(),
+                            );
+                            send_next_queued_placement_read(client, uplink);
+                        }
+                        Ok(SessionEvent::PanePlacementRefused { request_id, error }) => {
+                            let is_refusal_accepted = client.accept_placement_refusal(
+                                request_id,
+                                error.code,
+                                Instant::now(),
+                            );
+                            if !is_refusal_accepted {
+                                tracing::debug!(request_id, "ignored stale placement refusal");
+                            }
+                            if is_refusal_accepted || !client.is_placement_read_pending() {
+                                send_next_queued_placement_read(client, uplink);
+                            }
+                            tracing::debug!(request_id, message = %error.message, "placement preview refused");
+                        }
+                        Ok(SessionEvent::PlacementCommandRejected { command_id }) => {
+                            if !client.reject_placement_command(command_id) {
+                                tracing::debug!(%command_id, "ignored stale placement command rejection");
                             }
                         }
                         Ok(SessionEvent::MouseAnswer {
@@ -1434,6 +1959,7 @@ fn run_attachment<B: Backend>(
                         // Nothing is released by this: no round ever waited.
                         Ok(SessionEvent::Resync { .. }) => {
                             sent_border_moves.clear();
+                            client.prepare_placement_reconciliation();
                         }
                         // Bytes a pane aimed at this terminal, such as an OSC 52
                         // clipboard write, go to it verbatim.
@@ -1462,13 +1988,23 @@ fn run_attachment<B: Backend>(
                     // the first paint there is no frame to place it against.
                     RuntimeEvent::MouseInput { mouse_input, .. } => {
                         if let Some(mouse_frame) = last_mouse_frame.as_ref() {
-                            handle_mouse_event(
+                            if !handle_placement_mouse_event(
                                 client,
+                                uplink,
                                 mouse_frame,
                                 mouse_input,
-                                &mut pending_mouse_actions,
-                            );
+                            ) {
+                                handle_mouse_event(
+                                    client,
+                                    mouse_frame,
+                                    mouse_input,
+                                    &mut pending_mouse_actions,
+                                );
+                            }
                         }
+                    }
+                    RuntimeEvent::OuterTerminalFocusLost { .. } => {
+                        client.cancel_placement_mode();
                     }
                     other_runtime_event => process_runtime_input_with_cell_size(
                         client,
@@ -1490,6 +2026,8 @@ fn run_attachment<B: Backend>(
                     // The last request on this connection. The queue is written
                     // in order, so it leaves behind every key already on it.
                     uplink.send_request(IpcRequestKind::Leaving);
+                    client.prepare_placement_reconciliation();
+                    screen.set_placement_snapshot(None);
                     reconnect_after_restart(
                         home,
                         session_id,
@@ -1511,6 +2049,8 @@ fn run_attachment<B: Backend>(
                     Home::Remote { server }
                         if client.get_client_config().should_reconnect_remote_session =>
                     {
+                        client.prepare_placement_reconciliation();
+                        screen.set_placement_snapshot(None);
                         match redial_remote_session(
                             server,
                             session_id,
@@ -1574,7 +2114,20 @@ fn run_attachment<B: Backend>(
             screen.reset_connection();
             continue;
         }
-        fire_expired_key_sequence(client, uplink, Instant::now());
+        let current_time = Instant::now();
+        fire_expired_key_sequence(client, uplink, current_time);
+        if client.expire_placement_read(current_time) {
+            send_next_queued_placement_read(client, uplink);
+        }
+        if let Some((source_pane_id, destination_tab_id)) =
+            client.expire_placement_tab_hover(current_time)
+        {
+            uplink.send_placement_read(client, source_pane_id, destination_tab_id);
+        }
+        if let Some((source_pane_id, destination_tab_id)) = client.take_placement_preview_refresh()
+        {
+            uplink.send_placement_read(client, source_pane_id, destination_tab_id);
+        }
         // A selection drag held past a pane's edge keeps scrolling while the
         // pointer sits still, so the clock drives it. Asking on every iteration
         // is what re-arms the timer at each firing.
@@ -2682,10 +3235,12 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::KeyInput { key_input, .. } => {
-            // A release, and a key no binding can name, resolve nothing: both
-            // go up whole, and an open selection gesture stays open.
+            // A release has no binding chord. Placement owns releases while
+            // active; every other release goes to the focused pane.
             let Some(chord) = key_input.to_binding_chord() else {
-                uplink.send_request(IpcRequestKind::Keyboard { key_input });
+                if !client.is_placement_mode_active() {
+                    uplink.send_request(IpcRequestKind::Keyboard { key_input });
+                }
                 return;
             };
             match client.resolve_key(chord, Instant::now()) {
@@ -2696,10 +3251,9 @@ fn process_runtime_input_with_cell_size(
                     client.end_mouse_selection();
                     uplink.send_request(IpcRequestKind::Keyboard { key_input });
                 }
-                // Held or dropped: nothing reaches the session. A chord
-                // that opens or closes a sequence moves the breadcrumb the
-                // hint bar draws, and the pass draws it. A discard moves
-                // nothing and draws nothing.
+                // Held or dropped: nothing reaches the session. A chord that
+                // opens or closes a sequence moves the breadcrumb the hint
+                // bar draws. A discard moves nothing and draws nothing.
                 KeyOutcome::Pending | KeyOutcome::Discard => {}
             }
         }
@@ -2723,12 +3277,22 @@ fn process_runtime_input_with_cell_size(
             }
         }
         RuntimeEvent::HostPaste { pasted_text, .. } => {
+            if client.is_placement_mode_active() {
+                return;
+            }
             // The text belongs to the program in the pane, so a selection
             // gesture over it is over.
             client.end_mouse_selection();
             uplink.send_request(IpcRequestKind::Paste { pasted_text });
         }
         _ => {}
+    }
+}
+
+/// Start the newest placement read retained while an earlier read was in flight.
+fn send_next_queued_placement_read(client: &mut Client, uplink: &mut Uplink) {
+    if let Some((source_pane_id, destination_tab_id)) = client.take_queued_placement_read() {
+        uplink.send_placement_read(client, source_pane_id, destination_tab_id);
     }
 }
 
@@ -2754,6 +3318,33 @@ fn fire_expired_key_sequence(client: &mut Client, uplink: &mut Uplink, current_t
 /// rounds are still unanswered. Every [`MouseAction::Forward`] carrying a press
 /// records the capture here, through [`Client::note_press_forwarded`], before
 /// the round is written.
+fn handle_placement_mouse_event(
+    client: &mut Client,
+    uplink: &mut Uplink,
+    mouse_frame: &MouseFrame,
+    mouse_input: MouseInput,
+) -> bool {
+    client.apply_events();
+    let Some(placement_action) =
+        client.handle_placement_mouse(mouse_input, mouse_frame, Instant::now())
+    else {
+        return false;
+    };
+    match placement_action {
+        PlacementInputAction::ReadPlacement {
+            source_pane_id,
+            destination_tab_id,
+        } => {
+            uplink.send_placement_read(client, source_pane_id, destination_tab_id);
+        }
+        PlacementInputAction::SubmitPlacement(command) => {
+            uplink.submit_placement_command(client, command);
+        }
+        PlacementInputAction::CancelPlacement | PlacementInputAction::Consumed => {}
+    }
+    true
+}
+
 fn handle_mouse_event(
     client: &mut Client,
     mouse_frame: &MouseFrame,
@@ -3196,11 +3787,13 @@ fn select_earliest_duration(
         .min()
 }
 
-/// Every command a plan runs, in order. A plugin host call runs none from here:
-/// the plugin host lives on the session.
+/// Every command a plan runs, in order. Viewer-local actions and plugin host calls
+/// run outside this command-only test helper.
+#[cfg(test)]
 fn build_commands(dispatch_plan: DispatchPlan) -> Vec<Command> {
     match dispatch_plan {
         DispatchPlan::Command(command) => vec![command],
+        DispatchPlan::ClientAction(_) => Vec::new(),
         DispatchPlan::Sequence(dispatch_plans) => dispatch_plans
             .into_iter()
             .flat_map(build_commands)
@@ -3216,6 +3809,20 @@ fn build_commands(dispatch_plan: DispatchPlan) -> Vec<Command> {
 /// The caller runs this after the frame paint succeeds. The hint bar lists the
 /// bindings of the mode this sets.
 fn apply_frame_to_client(client: &mut Client, snapshot: &RenderSnapshot) {
+    client.set_placement_revisions(
+        snapshot.session_snapshot.session_revision,
+        snapshot.client_snapshot.client_revision,
+    );
+    client.set_frame_view(
+        snapshot.client_snapshot.active_tab_id,
+        snapshot.client_snapshot.focused_pane_id,
+        snapshot
+            .session_snapshot
+            .tabs_metadata
+            .iter()
+            .map(|tab_meta| tab_meta.tab_id)
+            .collect(),
+    );
     client.set_lock_mode(snapshot.client_snapshot.lock_mode);
     client.note_active_tab(snapshot.client_snapshot.active_tab_id);
     client.set_mouse_selection_enabled(snapshot.client_snapshot.is_mouse_selection_enabled);

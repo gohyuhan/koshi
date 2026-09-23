@@ -11,14 +11,21 @@ use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
+use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_renderer::snapshot::PluginUiSnapshot;
+use koshi_renderer::snapshot::{
+    ImagePlacementSnapshot, PlacementPaneSnapshot, PlacementTabSnapshot, PluginUiSnapshot,
+    TabSnapshot,
+};
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::graphics::{
+    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
+};
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -534,6 +541,110 @@ fn native_image_fragments_keep_one_content_id_across_snapshot_placements() {
 }
 
 #[test]
+fn placement_resource_count_shares_one_decoded_image_across_placements() {
+    let pane_id = PaneId::new();
+    let tab_id = TabId::new();
+    let image_record = Arc::new(ImageRecord {
+        protocol: GraphicsProtocol::Iterm2,
+        image: Arc::new(DecodedImage {
+            pixel_width: 2,
+            pixel_height: 2,
+            rgba_bytes: vec![255; 16],
+        }),
+        animation: None,
+        action: ImageAction::Display,
+        display: ImageDisplay::default(),
+        anchor: (0, 0),
+    });
+    let image_placement_snapshots = vec![
+        ImagePlacementSnapshot::with_content_id(1, 7, Arc::clone(&image_record), (0, 0), 1, 1)
+            .expect("first image placement"),
+        ImagePlacementSnapshot::with_content_id(2, 7, image_record, (1, 0), 1, 1)
+            .expect("second image placement"),
+    ];
+    let placement_tab_snapshot = PlacementTabSnapshot {
+        layout_tree: LayoutNode::Pane(pane_id),
+        tab_snapshot: TabSnapshot {
+            tab_id,
+            tab_name: "preview".to_string(),
+            pane_slots: Vec::new(),
+            effective_cell_size: Size {
+                column_count: 2,
+                row_count: 1,
+            },
+            stack_headers: Vec::new(),
+            layout_mode: LayoutMode::Tiled,
+            are_all_panes_suppressed: false,
+            gap_cell_count: 0,
+        },
+        pane_snapshots: vec![PlacementPaneSnapshot {
+            pane_id,
+            terminal_grid_view: None,
+            image_placement_snapshots,
+        }],
+    };
+
+    assert_eq!(
+        super::count_placement_snapshot_resources(&placement_tab_snapshot, None),
+        (0, 2, 16)
+    );
+}
+
+#[test]
+fn placement_resource_count_distinguishes_same_local_id_from_different_images() {
+    let pane_id = PaneId::new();
+    let tab_id = TabId::new();
+    let build_image_record = |byte: u8| {
+        Arc::new(ImageRecord {
+            protocol: GraphicsProtocol::Iterm2,
+            image: Arc::new(DecodedImage {
+                pixel_width: 2,
+                pixel_height: 2,
+                rgba_bytes: vec![byte; 16],
+            }),
+            animation: None,
+            action: ImageAction::Display,
+            display: ImageDisplay::default(),
+            anchor: (0, 0),
+        })
+    };
+    let first_image_record = build_image_record(0);
+    let second_image_record = build_image_record(255);
+    let image_placement_snapshots = vec![
+        ImagePlacementSnapshot::with_content_id(1, 7, first_image_record, (0, 0), 1, 1)
+            .expect("first image placement"),
+        ImagePlacementSnapshot::with_content_id(2, 7, second_image_record, (1, 0), 1, 1)
+            .expect("second image placement"),
+    ];
+    let placement_tab_snapshot = PlacementTabSnapshot {
+        layout_tree: LayoutNode::Pane(pane_id),
+        tab_snapshot: TabSnapshot {
+            tab_id,
+            tab_name: "preview".to_string(),
+            pane_slots: Vec::new(),
+            effective_cell_size: Size {
+                column_count: 2,
+                row_count: 1,
+            },
+            stack_headers: Vec::new(),
+            layout_mode: LayoutMode::Tiled,
+            are_all_panes_suppressed: false,
+            gap_cell_count: 0,
+        },
+        pane_snapshots: vec![PlacementPaneSnapshot {
+            pane_id,
+            terminal_grid_view: None,
+            image_placement_snapshots,
+        }],
+    };
+
+    assert_eq!(
+        super::count_placement_snapshot_resources(&placement_tab_snapshot, None),
+        (0, 2, 32)
+    );
+}
+
+#[test]
 fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
     let mut server = build_test_runtime();
     let (mut session, session_id, tab_id, pane_id, big_client) = build_session_with_client(Size {
@@ -580,6 +691,91 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
             column_count: 40,
             row_count: 8
         }
+    );
+}
+
+#[test]
+fn placement_destination_size_includes_requesting_client_before_destination_viewers() {
+    let mut server = build_test_runtime();
+    let (mut session, session_id, source_tab_id, source_pane_id, requesting_client_id) =
+        build_session_with_client_reporting(
+            Size {
+                column_count: 160,
+                row_count: 50,
+            },
+            Some(PaneArea::Reported(Size {
+                column_count: 80,
+                row_count: 20,
+            })),
+        );
+    let destination_tab_id = TabId::new();
+    let destination_pane_id = PaneId::new();
+    session
+        .panes
+        .register_pane_record(PaneRecord::from_terminal_pane(
+            destination_pane_id,
+            SystemTime::now(),
+        ))
+        .expect("unique pane id");
+    session.tabs.insert(
+        destination_tab_id,
+        Tab::from_root_pane(
+            destination_tab_id,
+            "destination".to_string(),
+            1,
+            destination_pane_id,
+        ),
+    );
+
+    let destination_viewer_id = ClientId::new();
+    let mut destination_viewer = Client::from_attachment(
+        destination_viewer_id,
+        session_id,
+        SystemTime::now(),
+        Size {
+            column_count: 240,
+            row_count: 60,
+        },
+        Some(PaneArea::Reported(Size {
+            column_count: 120,
+            row_count: 40,
+        })),
+        destination_tab_id,
+        ClientOrigin::Local,
+        "C-test-destination-viewer".to_string(),
+        0,
+    );
+    destination_viewer.update_focused_pane(destination_tab_id, destination_pane_id);
+    session.attach_client(destination_viewer);
+    server.session_by_id.insert(session_id, session);
+    server.terminal_engine_by_pane_id.insert(
+        destination_pane_id,
+        TerminalEngine::from_pty_size(PtySize {
+            column_count: 118,
+            row_count: 38,
+        }),
+    );
+
+    let placement_snapshot = server
+        .build_placement_snapshot(requesting_client_id, source_pane_id, destination_tab_id)
+        .expect("placement snapshot");
+
+    assert_eq!(placement_snapshot.source_tab_id, source_tab_id);
+    assert_eq!(
+        placement_snapshot
+            .destination_tab_snapshot
+            .as_ref()
+            .expect("cross-tab destination")
+            .tab_snapshot
+            .effective_cell_size,
+        Size {
+            column_count: 80,
+            row_count: 20,
+        }
+    );
+    assert_eq!(
+        crate::runtime::frame::wire_placement_snapshot(&placement_snapshot).validate(),
+        Ok(())
     );
 }
 
@@ -672,6 +868,111 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
             (second_pane, true, false, None)
         ]
     );
+}
+
+#[test]
+fn placement_snapshot_omits_cells_for_suppressed_panes() {
+    let mut server = build_test_runtime();
+    let (session, session_id, tab_id, pane_id, client_id) = build_session_with_client_reporting(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        Some(PaneArea::Starving),
+    );
+    server.session_by_id.insert(session_id, session);
+    server.terminal_engine_by_pane_id.insert(
+        pane_id,
+        TerminalEngine::from_pty_size(PtySize {
+            column_count: 80,
+            row_count: 24,
+        }),
+    );
+
+    let placement_snapshot = server
+        .build_placement_snapshot(client_id, pane_id, tab_id)
+        .expect("placement snapshot");
+    let pane_slot = &placement_snapshot
+        .source_tab_snapshot
+        .tab_snapshot
+        .pane_slots[0];
+    let pane_snapshot = &placement_snapshot.source_tab_snapshot.pane_snapshots[0];
+
+    assert!(pane_slot.is_suppressed);
+    assert!(!pane_slot.is_visible);
+    assert_eq!(pane_snapshot.terminal_grid_view, None);
+    assert!(pane_snapshot.image_placement_snapshots.is_empty());
+}
+
+#[test]
+fn cross_tab_placement_snapshot_retains_a_suppressed_source_pane_for_transfer() {
+    let mut server = build_test_runtime();
+    let (mut session, session_id, source_tab_id, source_pane_id, client_id) =
+        build_session_with_client_reporting(
+            Size {
+                column_count: 80,
+                row_count: 24,
+            },
+            Some(PaneArea::Reported(Size {
+                column_count: 80,
+                row_count: 24,
+            })),
+        );
+    let destination_tab_id = TabId::new();
+    let destination_pane_id = PaneId::new();
+    session
+        .panes
+        .register_pane_record(PaneRecord::from_terminal_pane(
+            destination_pane_id,
+            SystemTime::now(),
+        ))
+        .expect("unique pane id");
+    session.tabs.insert(
+        destination_tab_id,
+        Tab::from_root_pane(
+            destination_tab_id,
+            "destination".to_string(),
+            1,
+            destination_pane_id,
+        ),
+    );
+    server.session_by_id.insert(session_id, session);
+    server.terminal_engine_by_pane_id.insert(
+        source_pane_id,
+        TerminalEngine::from_pty_size(PtySize {
+            column_count: 80,
+            row_count: 24,
+        }),
+    );
+    server.terminal_engine_by_pane_id.insert(
+        destination_pane_id,
+        TerminalEngine::from_pty_size(PtySize {
+            column_count: 80,
+            row_count: 24,
+        }),
+    );
+
+    let placement_snapshot = server
+        .build_placement_snapshot(client_id, source_pane_id, destination_tab_id)
+        .expect("placement snapshot");
+    let source_pane_slot = &placement_snapshot
+        .source_tab_snapshot
+        .tab_snapshot
+        .pane_slots[0];
+    let source_pane_snapshot = &placement_snapshot.source_tab_snapshot.pane_snapshots[0];
+
+    assert!(source_pane_slot.is_suppressed);
+    assert!(!source_pane_slot.is_visible);
+    let source_grid_view = source_pane_snapshot
+        .terminal_grid_view
+        .as_ref()
+        .expect("the moved pane needs content for the destination preview");
+    assert_eq!(source_grid_view.grid.get_grid_dimensions(), (24, 80));
+    assert_eq!(
+        crate::runtime::frame::wire_placement_snapshot(&placement_snapshot).validate(),
+        Ok(())
+    );
+    assert_eq!(placement_snapshot.source_tab_id, source_tab_id);
 }
 
 #[test]

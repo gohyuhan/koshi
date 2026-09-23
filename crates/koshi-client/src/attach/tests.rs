@@ -4177,7 +4177,10 @@ fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
         .expect("paint");
     let locked = get_hint_row(&screen);
 
-    assert_eq!(locked, " Ctrl +  l  Unlock  g  Mouse Select  q  Quit");
+    assert_eq!(
+        locked,
+        " Ctrl +  l  Unlock  g  Mouse Select  p  PANE  q  Quit"
+    );
     assert_ne!(normal, locked);
 }
 

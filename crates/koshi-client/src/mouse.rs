@@ -43,23 +43,33 @@
 
 use std::time::{Duration, Instant};
 
+use ratatui::layout::Rect as RatatuiRect;
+
 use koshi_config::types::WheelScroll;
 use koshi_core::command::{
     ClearSelectionArgs, Command, CopyArgs, CopyTarget, FocusPaneArgs, FocusTabArgs, FocusTarget,
-    GridPosition, Selection, SelectionKind, SetSelectionArgs, TabTarget, VisualCommand,
+    GridPosition, PanePlacementAnchor, PanePlacementTarget, Selection, SelectionKind,
+    SetSelectionArgs, TabTarget, VisualCommand,
 };
-use koshi_core::geometry::{Direction, Point};
+use koshi_core::geometry::{Direction, Point, Size};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::ModFlags;
 use koshi_core::mouse::{
     is_mouse_kind_reported, MouseButton, MouseInput, MouseKind, MouseTracking, ScrollDirection,
 };
+use koshi_ipc::placement::{PanePlacementSnapshot, PanePlacementTabSnapshot};
+use koshi_layout::placement::PlacementDestinations;
 use koshi_renderer::snapshot::{MouseFrame, MousePane, PaneKind, PaneSlot, ViewerChrome};
 use koshi_renderer::{
-    compute_clamped_pane_cell, find_first_visible_tab_index, hit_test, pane_content_rect, HitRegion,
+    compute_clamped_pane_cell, compute_placement_handle_rect, find_first_visible_tab_index,
+    hit_test, pane_content_rect, HitRegion,
 };
 
-use crate::Client;
+use crate::input::{build_placement_destinations, is_same_tab_placement_noop};
+use crate::terminal::{
+    compute_placement_preview_tab_rects, compute_placement_tab_layout_rect, project_core_rect,
+};
+use crate::{Client, PlacementInputAction};
 
 #[cfg(test)]
 mod tests;
@@ -81,6 +91,19 @@ const SELECTION_SCROLL_LINE_COUNT: usize = 1;
 
 /// Cells of horizontal drag that scroll the tab strip by one tab.
 pub const TABLINE_DRAG_CELL_COUNT: i32 = 6;
+
+/// Return whether a screen point lies in a ratatui rectangle.
+fn is_point_in_ratatui_rect(screen_point: Point, target_rect: RatatuiRect) -> bool {
+    u32::from(screen_point.column) >= u32::from(target_rect.x)
+        && u32::from(screen_point.row) >= u32::from(target_rect.y)
+        && u32::from(screen_point.column)
+            < u32::from(target_rect.x).saturating_add(u32::from(target_rect.width))
+        && u32::from(screen_point.row)
+            < u32::from(target_rect.y).saturating_add(u32::from(target_rect.height))
+}
+
+/// A pointer cell this close to a span edge selects insertion instead of swap.
+const PLACEMENT_MOUSE_EDGE_CELL_COUNT: u16 = 1;
 
 /// What the viewer decided one wheel tick means: where the pointer is, and what
 /// the session must do about it.
@@ -275,6 +298,8 @@ impl Client {
     pub fn build_viewer_chrome(&self, active_tab_id: TabId) -> ViewerChrome {
         ViewerChrome {
             hovered_pane_id: self.hovered_pane_id,
+            placement_handle_pane_id: self.placement_handle_pane_id,
+            active_input_mode: Some(self.get_active_input_mode()),
             tabline_offset: self
                 .tabline_peek
                 .filter(|tabline_peek| tabline_peek.active_tab_id == active_tab_id)
@@ -294,6 +319,293 @@ impl Client {
         self.tabline_peek = self
             .tabline_peek
             .filter(|tabline_peek| tabline_peek.active_tab_id == active_tab_id);
+    }
+
+    /// Let placement mode own tab and pane geometry without focusing or resizing it.
+    pub(crate) fn handle_placement_mouse(
+        &mut self,
+        mouse_input: MouseInput,
+        frame: &MouseFrame,
+        current_time: Instant,
+    ) -> Option<PlacementInputAction> {
+        let frame_layout = self.build_frame_layout(frame);
+        let region = hit_test(frame_layout, mouse_input.position);
+        if !self.is_placement_mode_active() {
+            if let (MouseKind::Press(MouseButton::Left), HitRegion::PlacementHandle { pane_id }) =
+                (mouse_input.mouse_kind, region)
+            {
+                let active_tab_id = frame.client_snapshot.active_tab_id;
+                let Some((source_pane_id, destination_tab_id)) =
+                    self.begin_mouse_placement_mode(pane_id, active_tab_id)
+                else {
+                    return Some(PlacementInputAction::Consumed);
+                };
+                self.begin_placement_drag(
+                    mouse_input.position,
+                    compute_placement_grab_offset(frame, pane_id, mouse_input.position),
+                );
+                return Some(PlacementInputAction::ReadPlacement {
+                    source_pane_id,
+                    destination_tab_id,
+                });
+            }
+            return None;
+        }
+        if self.is_placement_confirmation_pending() {
+            self.end_placement_drag();
+            return Some(PlacementInputAction::Consumed);
+        }
+        self.update_pointer_hover(frame, mouse_input.position, region);
+        self.update_placement_tab_hover(
+            match region {
+                HitRegion::Tab { tab_id } => Some(tab_id),
+                _ => None,
+            },
+            current_time,
+        );
+        let placement_action = match mouse_input.mouse_kind {
+            MouseKind::Press(MouseButton::Left) => match region {
+                HitRegion::Tab { tab_id } => self.select_placement_destination_tab(tab_id).map_or(
+                    PlacementInputAction::Consumed,
+                    |(source_pane_id, destination_tab_id)| PlacementInputAction::ReadPlacement {
+                        source_pane_id,
+                        destination_tab_id,
+                    },
+                ),
+                HitRegion::PlacementHandle { pane_id } | HitRegion::PaneContent { pane_id } => {
+                    let placement_source_selection = self
+                        .select_placement_source_pane(pane_id, frame.client_snapshot.active_tab_id);
+                    self.begin_placement_drag(
+                        mouse_input.position,
+                        compute_placement_grab_offset(frame, pane_id, mouse_input.position),
+                    );
+                    placement_source_selection.map_or(
+                        PlacementInputAction::Consumed,
+                        |(source_pane_id, destination_tab_id)| {
+                            PlacementInputAction::ReadPlacement {
+                                source_pane_id,
+                                destination_tab_id,
+                            }
+                        },
+                    )
+                }
+                HitRegion::PaneBorder { .. }
+                | HitRegion::StackHeader { .. }
+                | HitRegion::Tabline
+                | HitRegion::TablineScrollLeft { .. }
+                | HitRegion::TablineScrollRight { .. }
+                | HitRegion::Statusline
+                | HitRegion::None => PlacementInputAction::Consumed,
+            },
+            MouseKind::Drag(MouseButton::Left) => {
+                match region {
+                    HitRegion::TablineScrollLeft { target_tab_index }
+                    | HitRegion::TablineScrollRight { target_tab_index } => {
+                        self.peek_tabline(frame, target_tab_index);
+                    }
+                    _ => {}
+                }
+                if self.has_placement_drag_moved(mouse_input.position) {
+                    if let Some(placement_target) =
+                        self.find_placement_target_at(mouse_input.position, frame)
+                    {
+                        self.set_mouse_placement_target(Some(placement_target));
+                    } else {
+                        self.clear_mouse_placement_target();
+                    }
+                } else {
+                    self.clear_mouse_placement_target();
+                }
+                PlacementInputAction::Consumed
+            }
+            MouseKind::Scroll(scroll_direction) => {
+                if let Some(target_tab_index) = self.tabline_step(frame, region, scroll_direction) {
+                    self.peek_tabline(frame, target_tab_index);
+                }
+                PlacementInputAction::Consumed
+            }
+            MouseKind::Release(released_button) => {
+                let should_submit = released_button == MouseButton::Left
+                    && self.has_placement_drag_moved(mouse_input.position);
+                if should_submit {
+                    let placement_target =
+                        self.find_placement_target_at(mouse_input.position, frame);
+                    self.set_mouse_placement_target(placement_target);
+                } else {
+                    self.clear_mouse_placement_target();
+                }
+                self.end_placement_drag();
+                let placement_action = if should_submit {
+                    self.submit_placement_command()
+                        .unwrap_or(PlacementInputAction::Consumed)
+                } else {
+                    PlacementInputAction::Consumed
+                };
+                if self.is_mouse_placement_mode() {
+                    self.cancel_placement_mode();
+                }
+                placement_action
+            }
+            MouseKind::Motion => PlacementInputAction::Consumed,
+            _ => PlacementInputAction::Consumed,
+        };
+        Some(placement_action)
+    }
+
+    /// Clear a placement target when a drag leaves all drawn destination panes.
+    fn clear_mouse_placement_target(&mut self) {
+        if self.is_placement_confirmation_pending() {
+            return;
+        }
+        let Some(placement_mode) = self.placement_mode.as_mut() else {
+            return;
+        };
+        if placement_mode.placement_target.take().is_some() {
+            placement_mode.is_placement_submitted = false;
+        }
+    }
+
+    /// Retain the target named by a placement drag.
+    fn set_mouse_placement_target(&mut self, placement_target: Option<PanePlacementTarget>) {
+        if self.is_placement_confirmation_pending() {
+            return;
+        }
+        let does_placement_target_preserve_layout =
+            placement_target.as_ref().is_some_and(|placement_target| {
+                self.get_placement_snapshot()
+                    .is_some_and(|placement_snapshot| {
+                        is_same_tab_placement_noop(placement_snapshot, placement_target)
+                    })
+            });
+        let Some(placement_mode) = self.placement_mode.as_mut() else {
+            return;
+        };
+        let is_target_source_pane = placement_mode.destination_tab_id
+            == placement_mode.source_tab_id
+            && placement_target.as_ref().is_some_and(|placement_target| {
+                matches!(
+                    placement_target,
+                    PanePlacementTarget::Swap { target_pane_id }
+                        | PanePlacementTarget::Split {
+                            anchor: PanePlacementAnchor::Pane(target_pane_id),
+                            ..
+                        } if *target_pane_id == placement_mode.source_pane_id
+                )
+            });
+        if is_target_source_pane || does_placement_target_preserve_layout {
+            placement_mode.placement_target = None;
+        } else {
+            placement_mode.placement_target = placement_target;
+        }
+        placement_mode.is_placement_submitted = false;
+    }
+
+    /// Return the placement target under the grabbed pane's fixed pointer offset.
+    fn find_placement_target_at(
+        &self,
+        screen_point: Point,
+        frame: &MouseFrame,
+    ) -> Option<PanePlacementTarget> {
+        let placement_mode = self.placement_mode.as_ref()?;
+        let placement_snapshot = self.get_placement_snapshot()?;
+        if placement_snapshot.destination_tab_id != placement_mode.destination_tab_id {
+            return None;
+        }
+        let tab_snapshot = Self::find_destination_tab_snapshot(placement_snapshot);
+        if tab_snapshot.is_every_pane_suppressed {
+            return None;
+        }
+        let viewport_size = frame.client_snapshot.viewport_size;
+        let render_area =
+            RatatuiRect::new(0, 0, viewport_size.column_count, viewport_size.row_count);
+        let (_, destination_tab_rect) = compute_placement_preview_tab_rects(render_area)?;
+        let destination_layout_rect = compute_placement_tab_layout_rect(destination_tab_rect)?;
+        let target_point = self.compute_placement_target_point(screen_point);
+        if !is_point_in_ratatui_rect(target_point, destination_layout_rect) {
+            return None;
+        }
+        if tab_snapshot.effective_cell_size.column_count == 0
+            || tab_snapshot.effective_cell_size.row_count == 0
+        {
+            return None;
+        }
+        let destination_tab_id = placement_mode.destination_tab_id;
+        let placement_destinations = build_placement_destinations(
+            tab_snapshot,
+            placement_mode.source_pane_id,
+            placement_snapshot.pane_sizing,
+        );
+        let edge_insertion_target = find_mouse_insertion_target(
+            target_point,
+            destination_layout_rect,
+            tab_snapshot.effective_cell_size,
+            destination_tab_id,
+            &placement_destinations,
+            true,
+        );
+        if edge_insertion_target.is_some() {
+            return edge_insertion_target;
+        }
+
+        let swap_slot = placement_destinations.swap_slots.iter().find(|swap_slot| {
+            project_core_rect(
+                swap_slot.slot_rect,
+                tab_snapshot.effective_cell_size,
+                destination_layout_rect,
+            )
+            .is_some_and(|slot_rect| is_point_in_ratatui_rect(target_point, slot_rect))
+        });
+        if let Some(swap_slot) = swap_slot {
+            if destination_tab_id == placement_snapshot.source_tab_id {
+                return Some(PanePlacementTarget::Swap {
+                    target_pane_id: swap_slot.pane_id,
+                });
+            }
+            let slot_rect = project_core_rect(
+                swap_slot.slot_rect,
+                tab_snapshot.effective_cell_size,
+                destination_layout_rect,
+            )?;
+            return Some(PanePlacementTarget::Split {
+                destination_tab_id,
+                anchor: PanePlacementAnchor::Pane(swap_slot.pane_id),
+                direction: compute_nearest_edge_direction(target_point, slot_rect),
+            });
+        }
+
+        find_mouse_insertion_target(
+            target_point,
+            destination_layout_rect,
+            tab_snapshot.effective_cell_size,
+            destination_tab_id,
+            &placement_destinations,
+            false,
+        )
+    }
+
+    /// Apply the pointer offset captured when the placement drag started.
+    fn compute_placement_target_point(&self, screen_point: Point) -> Point {
+        let Some(placement_drag) = self.placement_drag else {
+            return screen_point;
+        };
+        Point {
+            column: screen_point
+                .column
+                .saturating_sub(placement_drag.grab_offset.column_count),
+            row: screen_point
+                .row
+                .saturating_sub(placement_drag.grab_offset.row_count),
+        }
+    }
+
+    /// Use the destination snapshot when it is cross-tab, or the source snapshot otherwise.
+    fn find_destination_tab_snapshot(
+        placement_snapshot: &PanePlacementSnapshot,
+    ) -> &PanePlacementTabSnapshot {
+        placement_snapshot
+            .destination_tab_snapshot
+            .as_ref()
+            .unwrap_or(&placement_snapshot.source_tab_snapshot)
     }
 
     /// Decide what `mouse_input` means against `frame`, the last frame
@@ -336,10 +648,8 @@ impl Client {
             MouseKind::Drag(MouseButton::Left) => self.left_drag(mouse_input, frame, current_time),
             MouseKind::Release(_) => self.release_mouse_gesture(mouse_input, frame),
             MouseKind::Motion => {
-                self.hovered_pane_id = find_pane_under_region(hit_test(
-                    self.build_frame_layout(frame),
-                    mouse_input.position,
-                ));
+                let hit_region = hit_test(self.build_frame_layout(frame), mouse_input.position);
+                self.update_pointer_hover(frame, mouse_input.position, hit_region);
                 self.forward_mouse_input(mouse_input, frame)
             }
             MouseKind::Press(_) | MouseKind::Drag(_) => {
@@ -489,6 +799,15 @@ impl Client {
         self.resize_drag = None;
         self.tabline_drag = None;
         self.mouse_capture = None;
+        self.placement_drag = None;
+        if self.is_mouse_placement_mode() {
+            self.cancel_placement_mode();
+        } else if !self.is_placement_confirmation_pending() {
+            if let Some(placement_mode) = self.placement_mode.as_mut() {
+                placement_mode.placement_target = None;
+                placement_mode.is_placement_submitted = false;
+            }
+        }
     }
 
     /// Decide what wheel tick `mouse_input` means against `frame`, the last frame this
@@ -616,6 +935,7 @@ impl Client {
                 }
                 Vec::new()
             }
+            HitRegion::PlacementHandle { .. } => Vec::new(),
             HitRegion::Tabline => {
                 // A frame carrying no first visible tab index begins no
                 // peek-drag.
@@ -1106,6 +1426,48 @@ impl Client {
         self.hovered_pane_id = self
             .hovered_pane_id
             .filter(|&pane_id| is_pane_drawn(pane_id));
+        self.placement_handle_pane_id = self
+            .placement_handle_pane_id
+            .filter(|&pane_id| is_pane_drawn(pane_id));
+        let is_source_tab_visible = self.visible_tab_ids.is_empty()
+            || self.placement_mode.as_ref().is_none_or(|placement_mode| {
+                self.visible_tab_ids.contains(&placement_mode.source_tab_id)
+            });
+        let is_source_pane_missing_from_current_tab =
+            self.placement_mode.as_ref().is_some_and(|placement_mode| {
+                placement_mode.source_tab_id == frame.client_snapshot.active_tab_id
+                    && !is_pane_drawn(placement_mode.source_pane_id)
+            });
+        if !is_source_tab_visible || is_source_pane_missing_from_current_tab {
+            self.cancel_placement_mode();
+        }
+    }
+
+    /// Update the viewer-owned hover state from the region under the pointer.
+    fn update_pointer_hover(
+        &mut self,
+        frame: &MouseFrame,
+        screen_point: Point,
+        hit_region: HitRegion,
+    ) {
+        let hovered_pane_id = match hit_region {
+            HitRegion::PaneContent { pane_id }
+            | HitRegion::PlacementHandle { pane_id }
+            | HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+            } => Some(pane_id),
+            _ => find_pane_under_region(hit_region),
+        };
+        self.hovered_pane_id = hovered_pane_id;
+        self.placement_handle_pane_id = match hit_region {
+            HitRegion::PlacementHandle { pane_id }
+            | HitRegion::PaneBorder {
+                pane_id,
+                side: Direction::Up,
+            } => find_visible_pane_handle(frame, pane_id, screen_point),
+            _ => None,
+        };
     }
 
     /// The position in `pane`'s text that the screen cell `at` names, with a
@@ -1183,6 +1545,153 @@ fn find_pane_under_region(hit_region: HitRegion) -> Option<PaneId> {
     match hit_region {
         HitRegion::PaneContent { pane_id } => Some(pane_id),
         _ => None,
+    }
+}
+
+/// Find the smallest placement span under the pointer.
+fn find_mouse_insertion_target(
+    screen_point: Point,
+    destination_layout_rect: RatatuiRect,
+    destination_cell_size: Size,
+    destination_tab_id: TabId,
+    placement_destinations: &PlacementDestinations,
+    should_require_edge: bool,
+) -> Option<PanePlacementTarget> {
+    let mut selected_insertion_candidate: Option<(u32, u16, usize, PanePlacementTarget)> = None;
+    for (insertion_span_index, insertion_span) in
+        placement_destinations.insertion_spans.iter().enumerate()
+    {
+        let Some(span_rect) = project_core_rect(
+            insertion_span.span_rect,
+            destination_cell_size,
+            destination_layout_rect,
+        ) else {
+            continue;
+        };
+        if !is_point_in_ratatui_rect(screen_point, span_rect) {
+            continue;
+        }
+        let edge_distance = compute_rect_edge_distance(screen_point, span_rect);
+        if should_require_edge && edge_distance > PLACEMENT_MOUSE_EDGE_CELL_COUNT {
+            continue;
+        }
+        let span_area = u32::from(span_rect.width).saturating_mul(u32::from(span_rect.height));
+        let insertion_candidate_rank = (span_area, edge_distance, insertion_span_index);
+        let should_replace = selected_insertion_candidate.as_ref().is_none_or(
+            |(selected_span_area, selected_edge_distance, selected_span_index, _)| {
+                insertion_candidate_rank
+                    < (
+                        *selected_span_area,
+                        *selected_edge_distance,
+                        *selected_span_index,
+                    )
+            },
+        );
+        if should_replace {
+            selected_insertion_candidate = Some((
+                span_area,
+                edge_distance,
+                insertion_span_index,
+                PanePlacementTarget::Split {
+                    destination_tab_id,
+                    anchor: insertion_span.anchor.clone(),
+                    direction: compute_nearest_edge_direction(screen_point, span_rect),
+                },
+            ));
+        }
+    }
+    selected_insertion_candidate.map(|(_, _, _, placement_target)| placement_target)
+}
+
+/// Return the pointer's distance from the nearest edge of a screen rectangle.
+fn compute_rect_edge_distance(screen_point: Point, target_rect: RatatuiRect) -> u16 {
+    let left_distance = screen_point.column.saturating_sub(target_rect.x);
+    let right_edge = target_rect
+        .x
+        .saturating_add(target_rect.width.saturating_sub(1));
+    let right_distance = right_edge.saturating_sub(screen_point.column);
+    let top_distance = screen_point.row.saturating_sub(target_rect.y);
+    let bottom_edge = target_rect
+        .y
+        .saturating_add(target_rect.height.saturating_sub(1));
+    let bottom_distance = bottom_edge.saturating_sub(screen_point.row);
+    left_distance
+        .min(right_distance)
+        .min(top_distance)
+        .min(bottom_distance)
+}
+
+/// Return the side of a screen rectangle nearest to the pointer.
+fn compute_nearest_edge_direction(screen_point: Point, target_rect: RatatuiRect) -> Direction {
+    let left_distance = screen_point.column.saturating_sub(target_rect.x);
+    let right_edge = target_rect
+        .x
+        .saturating_add(target_rect.width.saturating_sub(1));
+    let right_distance = right_edge.saturating_sub(screen_point.column);
+    let top_distance = screen_point.row.saturating_sub(target_rect.y);
+    let bottom_edge = target_rect
+        .y
+        .saturating_add(target_rect.height.saturating_sub(1));
+    let bottom_distance = bottom_edge.saturating_sub(screen_point.row);
+    let nearest_edge_distance = left_distance
+        .min(right_distance)
+        .min(top_distance)
+        .min(bottom_distance);
+    if nearest_edge_distance == top_distance {
+        Direction::Up
+    } else if nearest_edge_distance == bottom_distance {
+        Direction::Down
+    } else if nearest_edge_distance == left_distance {
+        Direction::Left
+    } else {
+        Direction::Right
+    }
+}
+
+/// Return the visible pane's outer rectangle in client screen coordinates.
+fn find_pane_outer_screen_rect(
+    frame: &MouseFrame,
+    pane_id: PaneId,
+) -> Option<koshi_core::geometry::Rect> {
+    let content_rect =
+        pane_content_rect(frame.build_frame_layout(ViewerChrome::default()), pane_id)?;
+    Some(koshi_core::geometry::Rect::from_origin_and_size(
+        Point {
+            column: content_rect.origin.column.saturating_sub(1),
+            row: content_rect.origin.row.saturating_sub(1),
+        },
+        Size {
+            column_count: content_rect.cell_size.column_count.saturating_add(2),
+            row_count: content_rect.cell_size.row_count.saturating_add(2),
+        },
+    ))
+}
+
+/// Return the pane id when the pointer is inside its painted placement handle.
+fn find_visible_pane_handle(
+    frame: &MouseFrame,
+    pane_id: PaneId,
+    screen_point: Point,
+) -> Option<PaneId> {
+    let pane_outer_rect = find_pane_outer_screen_rect(frame, pane_id)?;
+    compute_placement_handle_rect(pane_outer_rect)
+        .filter(|handle_rect| handle_rect.is_point_inside(screen_point))
+        .map(|_| pane_id)
+}
+
+/// Return the pointer's offset from the source pane's outer top-left cell.
+fn compute_placement_grab_offset(frame: &MouseFrame, pane_id: PaneId, screen_point: Point) -> Size {
+    let Some(pane_outer_rect) = find_pane_outer_screen_rect(frame, pane_id) else {
+        return Size {
+            column_count: 0,
+            row_count: 0,
+        };
+    };
+    Size {
+        column_count: screen_point
+            .column
+            .saturating_sub(pane_outer_rect.origin.column),
+        row_count: screen_point.row.saturating_sub(pane_outer_rect.origin.row),
     }
 }
 

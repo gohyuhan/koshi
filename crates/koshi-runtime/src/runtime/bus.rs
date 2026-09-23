@@ -41,11 +41,13 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 
 use koshi_core::event::{classify_event, Event, EventClass, SubscriberLagged};
-use koshi_core::ids::{SessionId, SubscriberId};
+use koshi_core::ids::{CommandId, SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::EventFilterSpec;
-use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
+use koshi_renderer::snapshot::{
+    Delivery, PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, RenderSnapshot,
+};
 
 use crate::runtime::event::{EndingNotice, SessionEnding};
 use crate::runtime::frame::wire_frame;
@@ -408,13 +410,64 @@ impl EventBus {
         }
     }
 
-    /// Put the `mouse_answers` to mouse round `request_id` on live subscriber
-    /// `subscriber_id`'s
-    /// queue.
+    /// Put one placement preview on a live subscriber's queue.
     ///
-    /// Returns `true` once the answers are queued, `false` otherwise
-    /// ([`Self::try_send_delivery`]). A lost answer leaves the viewer's drag
-    /// anchor where it was.
+    /// Returns `true` when queued. A full queue marks the subscriber
+    /// desynchronized, and a missing or disconnected subscriber returns
+    /// `false`.
+    pub(crate) fn try_send_placement_snapshot(
+        &mut self,
+        subscriber_id: SubscriberId,
+        request_id: u64,
+        placement_snapshot: Box<PlacementSnapshot>,
+    ) -> bool {
+        match self.try_send_delivery(
+            subscriber_id,
+            Delivery::PanePlacementSnapshot {
+                request_id,
+                snapshot: placement_snapshot,
+            },
+        ) {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
+                tracing::warn!(
+                    subscriber = %subscriber_id,
+                    request_id,
+                    "placement preview dropped; subscriber desynced, awaiting snapshot"
+                );
+                false
+            }
+            QueueDeliveryStatus::Skipped => false,
+        }
+    }
+
+    /// Put a placement preview refusal on a live subscriber's queue.
+    pub(crate) fn try_send_placement_refusal(
+        &mut self,
+        subscriber_id: SubscriberId,
+        request_id: u64,
+        placement_error: PlacementSnapshotError,
+    ) -> bool {
+        match self.try_send_delivery(
+            subscriber_id,
+            Delivery::PanePlacementRefused {
+                request_id,
+                error: placement_error,
+            },
+        ) {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
+                tracing::warn!(
+                    subscriber = %subscriber_id,
+                    request_id,
+                    "placement refusal dropped; subscriber desynced, awaiting snapshot"
+                );
+                false
+            }
+            QueueDeliveryStatus::Skipped => false,
+        }
+    }
+
     pub(crate) fn try_send_answer(
         &mut self,
         subscriber_id: SubscriberId,
@@ -490,6 +543,32 @@ impl EventBus {
         }
     }
 
+    /// Put a rejected pane placement command on the live subscriber's queue.
+    ///
+    /// Returns `true` when the rejection is queued and `false` when the
+    /// subscriber is missing, disconnected, or desynchronized.
+    pub(crate) fn try_send_placement_command_rejection(
+        &mut self,
+        subscriber_id: SubscriberId,
+        command_id: CommandId,
+    ) -> bool {
+        match self.try_send_delivery(
+            subscriber_id,
+            Delivery::PlacementCommandRejected(command_id),
+        ) {
+            QueueDeliveryStatus::Sent => true,
+            QueueDeliveryStatus::Dropped => {
+                tracing::warn!(
+                    subscriber = %subscriber_id,
+                    %command_id,
+                    "placement command rejection dropped; subscriber desynced, awaiting snapshot"
+                );
+                false
+            }
+            QueueDeliveryStatus::Skipped => false,
+        }
+    }
+
     /// How many subscribers are registered. Counts subscribers whose receiver
     /// is already gone but whose removal awaits the next publish or delivery.
     #[cfg(test)]
@@ -519,6 +598,9 @@ impl EventBus {
 ///
 /// A [`Delivery::SwitchTo`] becomes [`SessionEvent::SwitchTo`] carrying the id
 /// of the session the client attaches to next.
+///
+/// A [`Delivery::PlacementCommandRejected`] becomes
+/// [`SessionEvent::PlacementCommandRejected`] carrying the rejected command id.
 ///
 /// Every [`Event`] variant with no [`SessionEvent`] spelling is named here and
 /// returns `None`. The match takes no wildcard arm, so a new variant is a
@@ -613,6 +695,29 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
         Delivery::Frame(render_snapshot) => Some(SessionEvent::Painted {
             frame: Box::new(wire_frame(render_snapshot)),
         }),
+        Delivery::PanePlacementSnapshot {
+            request_id,
+            snapshot,
+        } => Some(SessionEvent::PanePlacementSnapshot {
+            request_id: *request_id,
+            snapshot: Box::new(crate::runtime::frame::wire_placement_snapshot(snapshot)),
+        }),
+        Delivery::PanePlacementRefused { request_id, error } => {
+            Some(SessionEvent::PanePlacementRefused {
+                request_id: *request_id,
+                error: koshi_ipc::protocol::IpcErrorPayload {
+                    code: match error.code {
+                        PlacementSnapshotErrorCode::NotFound => {
+                            koshi_ipc::protocol::IpcErrorCode::NotFound
+                        }
+                        PlacementSnapshotErrorCode::ResourceLimit => {
+                            koshi_ipc::protocol::IpcErrorCode::ResourceLimit
+                        }
+                    },
+                    message: error.message.clone(),
+                },
+            })
+        }
         Delivery::Snapshot { lag_report, .. } => Some(SessionEvent::Resync {
             dropped_event_count: lag_report.dropped_event_count,
         }),
@@ -629,6 +734,11 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
         Delivery::SwitchTo(session_id) => Some(SessionEvent::SwitchTo {
             session_id: *session_id,
         }),
+        Delivery::PlacementCommandRejected(command_id) => {
+            Some(SessionEvent::PlacementCommandRejected {
+                command_id: *command_id,
+            })
+        }
     }
 }
 

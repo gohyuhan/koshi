@@ -186,6 +186,8 @@ pub struct PartialKoshiConfig {
     pub update: Option<PartialUpdateConfig>,
     /// Native image support override.
     pub supports_image_protocols: Option<bool>,
+    /// Placement-animation override.
+    pub should_reduce_motion: Option<bool>,
     /// Remote-reconnect override.
     pub should_reconnect_remote_session: Option<bool>,
     /// Beta-feature gate override.
@@ -269,6 +271,10 @@ impl PartialKoshiConfig {
         merge_override_field(
             &mut client_config.supports_image_protocols,
             self.supports_image_protocols,
+        );
+        merge_override_field(
+            &mut client_config.should_reduce_motion,
+            self.should_reduce_motion,
         );
         merge_override_field(
             &mut client_config.should_reconnect_remote_session,

@@ -628,6 +628,25 @@ fn image_support_defaults_to_enabled_and_accepts_false() {
 }
 
 #[test]
+fn reduced_motion_defaults_to_disabled_and_accepts_true() {
+    assert!(!ClientConfig::default().should_reduce_motion);
+    assert_eq!(
+        parse_config("reduced-motion #true").should_reduce_motion,
+        Some(true)
+    );
+}
+
+#[test]
+fn a_non_boolean_reduced_motion_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("reduced-motion \"yes\"");
+    assert_eq!(layer.should_reduce_motion, None);
+    assert_eq!(
+        warnings,
+        vec!["ignored `reduced-motion`: expected a boolean (#true or #false)".to_string()]
+    );
+}
+
+#[test]
 fn an_absent_remote_reconnect_leaves_dialing_again_on() {
     // Absent leaves the field unset; the built-in `true` stands.
     assert_eq!(parse_config("").should_reconnect_remote_session, None);

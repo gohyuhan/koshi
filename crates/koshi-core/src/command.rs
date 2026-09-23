@@ -429,6 +429,10 @@ pub struct SwapPanesArgs {
     pub source_pane_id: Option<PaneId>,
     /// Pane whose slot receives the source occupant.
     pub target_pane_id: PaneId,
+    /// Revisions captured by an interactive placement preview, or `None` for
+    /// a direct swap planned against the current state in this dispatcher turn.
+    #[serde(default)]
+    pub expected_placement_revision: Option<PlacementRevision>,
 }
 
 /// Arguments for [`Command::PlacePane`].

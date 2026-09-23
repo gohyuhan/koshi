@@ -146,6 +146,11 @@ pub enum RuntimeEvent {
         /// The decoded event: kind, cell position, and modifiers.
         mouse_input: MouseInput,
     },
+    /// The outer terminal lost focus while this client was attached.
+    OuterTerminalFocusLost {
+        /// Client whose outer terminal lost focus.
+        client_id: ClientId,
+    },
     /// Text the client's outer terminal pasted — the OS paste key pressed in
     /// the terminal koshi runs in, delivered whole so no character of it can
     /// fire a keybinding.
@@ -220,6 +225,17 @@ pub enum RuntimeEvent {
         tab_id: Option<TabId>,
         /// Where the dispatcher sends the layout.
         response_sender: Sender<Option<SessionLayout>>,
+    },
+    /// A client requests a bounded read-only preview of a pane placement.
+    ReadPanePlacement {
+        /// The client whose attached event stream receives the reply.
+        client_id: ClientId,
+        /// The request this reply answers.
+        request_id: u64,
+        /// The pane whose current content is previewed.
+        source_pane_id: PaneId,
+        /// The destination tab whose current layout is previewed.
+        destination_tab_id: TabId,
     },
     /// A restart request delivered over the IPC socket: the caller asks this
     /// process to replace its own image with the binary at the path it started

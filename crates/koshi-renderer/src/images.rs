@@ -10,14 +10,14 @@
 
 use std::sync::Arc;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect as RatatuiRect;
-use ratatui::style::Style;
+use ratatui::style::{Color as RatatuiColor, Modifier, Style};
 
 use koshi_core::ids::PaneId;
 use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
-use koshi_terminal::style::Style as CellStyle;
+use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
 
 use crate::render::{compute_content_rect, compute_pane_area, find_pane_snapshot, place_cell_rect};
 use crate::snapshot::{CommittedRegions, ImagePlacementSnapshot, RenderSnapshot};
@@ -30,6 +30,26 @@ pub const MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT: usize = 262_144;
 
 /// The identity of one image placement in a rendered pane.
 pub type ImagePlacementKey = (PaneId, ImagePlacementId);
+
+/// The identity of one image placement in a placement-preview panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlacementPreviewImageKey {
+    /// The preview panel: zero for the source panel and one for the destination panel.
+    pub panel_index: u8,
+    /// The pane that owns the image in the preview snapshot.
+    pub pane_id: PaneId,
+    /// The terminal-local image placement identity.
+    pub placement_id: ImagePlacementId,
+}
+
+/// The identity used by native image output for one rendered image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageOutputKey {
+    /// An image in the normal frame.
+    Frame(ImagePlacementKey),
+    /// An image in a placement-preview panel.
+    PlacementPreview(PlacementPreviewImageKey),
+}
 
 /// The cell facts needed to classify image composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +72,62 @@ impl Default for ImageCellState {
             combining_characters: Vec::new(),
             style: CellStyle::default(),
         }
+    }
+}
+
+impl ImageCellState {
+    fn from_buffer_cell(buffer_cell: &Cell) -> Self {
+        let mut symbol_characters = buffer_cell.symbol().chars();
+        let character = symbol_characters.next().unwrap_or(' ');
+        let combining_characters = symbol_characters.collect();
+        let mut style = CellStyle::default();
+        style.set_foreground_color(convert_ratatui_color(buffer_cell.fg));
+        style.set_background_color(convert_ratatui_color(buffer_cell.bg));
+        let modifiers = buffer_cell.modifier;
+        style.set_bold(modifiers.contains(Modifier::BOLD));
+        style.set_faint(modifiers.contains(Modifier::DIM));
+        style.set_italic(modifiers.contains(Modifier::ITALIC));
+        style.set_underline(if modifiers.contains(Modifier::UNDERLINED) {
+            UnderlineStyle::Single
+        } else {
+            UnderlineStyle::None
+        });
+        style.set_blink(
+            modifiers.contains(Modifier::SLOW_BLINK) || modifiers.contains(Modifier::RAPID_BLINK),
+        );
+        style.set_conceal(modifiers.contains(Modifier::HIDDEN));
+        style.set_strike(modifiers.contains(Modifier::CROSSED_OUT));
+        style.set_reverse(modifiers.contains(Modifier::REVERSED));
+        Self {
+            character,
+            cell_width: 1,
+            combining_characters,
+            style,
+        }
+    }
+}
+
+fn convert_ratatui_color(color: RatatuiColor) -> CellColor {
+    match color {
+        RatatuiColor::Reset => CellColor::Default,
+        RatatuiColor::Black => CellColor::Indexed(0),
+        RatatuiColor::Red => CellColor::Indexed(1),
+        RatatuiColor::Green => CellColor::Indexed(2),
+        RatatuiColor::Yellow => CellColor::Indexed(3),
+        RatatuiColor::Blue => CellColor::Indexed(4),
+        RatatuiColor::Magenta => CellColor::Indexed(5),
+        RatatuiColor::Cyan => CellColor::Indexed(6),
+        RatatuiColor::Gray => CellColor::Indexed(7),
+        RatatuiColor::DarkGray => CellColor::Indexed(8),
+        RatatuiColor::LightRed => CellColor::Indexed(9),
+        RatatuiColor::LightGreen => CellColor::Indexed(10),
+        RatatuiColor::LightYellow => CellColor::Indexed(11),
+        RatatuiColor::LightBlue => CellColor::Indexed(12),
+        RatatuiColor::LightMagenta => CellColor::Indexed(13),
+        RatatuiColor::LightCyan => CellColor::Indexed(14),
+        RatatuiColor::White => CellColor::Indexed(15),
+        RatatuiColor::Rgb(red, green, blue) => CellColor::Rgb(red, green, blue),
+        RatatuiColor::Indexed(color_index) => CellColor::Indexed(color_index),
     }
 }
 
@@ -81,6 +157,35 @@ impl ImageCellSnapshot {
             screen_area,
             cell_states,
         })
+    }
+
+    /// Overlay the rendered cells in one bounded rectangle.
+    pub fn overlay_buffer(&mut self, overlay_area: RatatuiRect, buffer: &Buffer) {
+        let target_area = overlay_area
+            .intersection(self.screen_area)
+            .intersection(buffer.area);
+        if target_area.width == 0 || target_area.height == 0 {
+            return;
+        }
+        for row_offset in 0..target_area.height {
+            for column_offset in 0..target_area.width {
+                let screen_column = target_area.x + column_offset;
+                let screen_row = target_area.y + row_offset;
+                let row_index = usize::from(screen_row - self.screen_area.y);
+                let column_index = usize::from(screen_column - self.screen_area.x);
+                let Some(cell_index) = row_index
+                    .checked_mul(usize::from(self.screen_area.width))
+                    .and_then(|cell_index| cell_index.checked_add(column_index))
+                else {
+                    continue;
+                };
+                let Some(cell_state) = self.cell_states.get_mut(cell_index) else {
+                    continue;
+                };
+                *cell_state =
+                    ImageCellState::from_buffer_cell(&buffer[(screen_column, screen_row)]);
+            }
+        }
     }
 
     /// Return the cell at an absolute frame position.
@@ -236,6 +341,7 @@ pub struct ImagePaint {
     pub cell_pixel_offset_y: Option<u32>,
     /// The protocol z-index used to order overlaps.
     pub z_index: i32,
+    output_key: ImageOutputKey,
     draw_order: usize,
 }
 
@@ -267,8 +373,26 @@ impl ImagePaint {
             cell_pixel_offset_x,
             cell_pixel_offset_y,
             z_index,
+            output_key: ImageOutputKey::Frame((pane_id, placement_id)),
             draw_order: 0,
         }
+    }
+
+    /// Set the native-output identity for an image in a placement-preview panel.
+    #[must_use]
+    pub fn with_placement_preview_key(mut self, panel_index: u8) -> Self {
+        self.output_key = ImageOutputKey::PlacementPreview(PlacementPreviewImageKey {
+            panel_index,
+            pane_id: self.pane_id,
+            placement_id: self.placement_id,
+        });
+        self
+    }
+
+    /// Return the identity used by native image output.
+    #[must_use]
+    pub fn get_output_key(&self) -> ImageOutputKey {
+        self.output_key
     }
 
     fn with_draw_order(mut self, draw_order: usize) -> Self {
@@ -554,7 +678,7 @@ pub(crate) fn compute_selected_image_placeholder_rects(
 }
 
 /// Paint unsupported-image text over each image rectangle in draw order.
-pub(crate) fn draw_image_placeholders(placeholder_rects: &[RatatuiRect], buffer: &mut Buffer) {
+pub fn draw_image_placeholders(placeholder_rects: &[RatatuiRect], buffer: &mut Buffer) {
     for placeholder_rect in placeholder_rects {
         let target_area = placeholder_rect.intersection(buffer.area);
         if target_area.width == 0 || target_area.height == 0 {

@@ -1261,6 +1261,40 @@ fn every_listed_insertion_span_places_without_error() {
 }
 
 #[test]
+fn an_insertion_that_restores_the_source_layout_is_a_noop() {
+    let pane_ids = build_sorted_pane_ids();
+    let [_, _, pane_c, pane_d] = pane_ids;
+    let fixture_tree = build_fixture_tree(pane_ids);
+    let insertion_target = build_insert_target(PanePlacementAnchor::Pane(pane_c), Direction::Right);
+
+    assert!(is_same_tab_placement_noop(
+        &fixture_tree,
+        pane_d,
+        &insertion_target,
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    ));
+    assert!(!is_same_tab_placement_noop(
+        &fixture_tree,
+        pane_d,
+        &build_insert_target(PanePlacementAnchor::Pane(pane_c), Direction::Left),
+        FIXTURE_TAB_RECT,
+        PaneSizing::default(),
+    ));
+    assert_eq!(
+        place_pane_within_tab(
+            &fixture_tree,
+            pane_d,
+            &insertion_target,
+            FIXTURE_TAB_RECT,
+            PaneSizing::default(),
+        )
+        .expect("the insertion is valid"),
+        fixture_tree
+    );
+}
+
+#[test]
 fn a_stack_is_one_group_and_its_members_are_swap_slots_but_not_spans() {
     let [pane_a, pane_b, pane_c, _] = build_sorted_pane_ids();
     let stack_tree = build_horizontal_split(

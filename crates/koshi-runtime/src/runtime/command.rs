@@ -353,6 +353,7 @@ impl Server {
     ) -> (CommandResult, Option<u16>) {
         let command_id = envelope.command_id;
         if let Err(rejection) = self.validate_command(&envelope) {
+            self.render_scheduler.invalidate();
             return (Self::rejected(command_id, rejection), None);
         }
         let outcome = match envelope.command {
@@ -375,7 +376,7 @@ impl Server {
                 self.handle_swap_panes(command_id, &envelope.command_source, &command_args)
             }
             Command::PlacePane(command_args) => {
-                self.handle_place_pane(command_id, &envelope.command_source, &command_args)
+                self.apply_place_pane(command_id, &envelope.command_source, &command_args)
             }
             Command::ScrollPane(command_args) => {
                 self.handle_scroll_pane(command_id, &envelope.command_source, &command_args)

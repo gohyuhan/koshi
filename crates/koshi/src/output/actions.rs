@@ -174,11 +174,13 @@ pub(super) fn format_target_label(target_kind: TargetKind) -> &'static str {
     }
 }
 
-/// The internal command an action dispatches, as a label: the core command's
-/// name, `plugin-host` for a plugin call, or `sequence` for a macro.
+/// The dispatch route an action uses: the core command's name, `client` for a
+/// viewer-local action, `plugin-host` for a plugin call, or `sequence` for a
+/// macro.
 pub(super) fn format_command_label(action_handler: &ActionHandlerReference) -> String {
     match action_handler {
         ActionHandlerReference::CoreCommand(command_kind) => format!("{command_kind:?}"),
+        ActionHandlerReference::CoreClient(_) => "client".to_string(),
         ActionHandlerReference::PluginHostCall(_) => "plugin-host".to_string(),
         ActionHandlerReference::Sequence(_) => "sequence".to_string(),
     }

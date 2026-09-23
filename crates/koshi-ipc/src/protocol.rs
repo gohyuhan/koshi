@@ -449,6 +449,16 @@ pub enum IpcRequestKind {
         /// The one tab to describe, or every tab when absent.
         tab_id: Option<TabId>,
     },
+    /// Ask for a bounded read-only preview of moving `pane_id` toward
+    /// `destination_tab_id`. The answer arrives on the attached event stream.
+    ReadPanePlacement {
+        /// The pane whose current visible content is previewed.
+        #[serde(rename = "pane")]
+        pane_id: PaneId,
+        /// The tab whose current layout is previewed as the destination.
+        #[serde(rename = "tab")]
+        destination_tab_id: TabId,
+    },
     /// Ask the session for the events it published most recently, newest last.
     /// The answer holds each event's name and the ids it named, and no payload
     /// content of any kind.
@@ -498,6 +508,7 @@ impl IpcRequestKind {
             IpcRequestKind::SubmitCommand(_) => "SubmitCommand",
             IpcRequestKind::Discovery => "Discovery",
             IpcRequestKind::Layout { .. } => "Layout",
+            IpcRequestKind::ReadPanePlacement { .. } => "ReadPanePlacement",
             IpcRequestKind::RecentEvents => "RecentEvents",
             IpcRequestKind::Restart => "Restart",
             IpcRequestKind::Leaving => "Leaving",
@@ -676,6 +687,8 @@ pub enum IpcErrorCode {
     /// The caller named a target this build does not have. The message names
     /// it.
     NotFound,
+    /// The requested read-only snapshot exceeds a bounded resource limit.
+    ResourceLimit,
     /// A request arrived before [`IpcRequestKind::Hello`] opened the
     /// connection.
     HelloRequired,
@@ -725,6 +738,7 @@ impl WireVariants for IpcRequestKind {
         "SubmitCommand",
         "Discovery",
         "Layout",
+        "ReadPanePlacement",
         "RecentEvents",
         "Restart",
         "Leaving",
