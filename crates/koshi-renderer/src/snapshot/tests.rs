@@ -448,6 +448,8 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
             active_input_mode: None,
             tabline_offset: None,
             reconnecting: None,
+            is_pane_placement_visible: false,
+            placement_source_pane_id: None,
         }
     );
 }
@@ -464,6 +466,7 @@ fn a_snapshot_layout_borrows_the_frame_and_holds_no_committed_regions() {
             attempt: 4,
             retry_in_seconds: 8,
         }),
+        ..ViewerChrome::default()
     };
 
     let layout = snap.build_frame_layout(viewer);
@@ -479,7 +482,7 @@ fn an_active_viewer_mode_replaces_the_frames_base_mode_in_tabline_inputs() {
     let mut render_snapshot = fixture(fixture_grid());
     render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
     let viewer_chrome = ViewerChrome {
-        active_input_mode: Some(LockMode::MovePane),
+        active_input_mode: Some(LockMode::PanePlacement),
         ..ViewerChrome::default()
     };
 
@@ -488,7 +491,7 @@ fn an_active_viewer_mode_replaces_the_frames_base_mode_in_tabline_inputs() {
             .build_frame_layout(viewer_chrome)
             .get_tabline_inputs()
             .lock_mode,
-        LockMode::MovePane
+        LockMode::PanePlacement
     );
 }
 
@@ -540,6 +543,7 @@ fn the_tabline_view_takes_its_fields_from_the_session_client_and_viewer() {
         active_input_mode: None,
         tabline_offset: Some(2),
         reconnecting: Some(reconnecting),
+        ..ViewerChrome::default()
     };
 
     let layout = snap.build_frame_layout(viewer);

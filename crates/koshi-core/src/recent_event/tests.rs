@@ -69,6 +69,18 @@ fn list_omitted_event_ids(event: &Event) -> BTreeSet<String> {
             .to_string()
             .trim_start_matches("tab-")
             .to_string()]),
+        Event::PanePlacementCommitted(_) => {
+            let named_event_ids =
+                collect_ids_from_json(&serde_json::to_value(event).expect("event encodes"));
+            let recorded_event_ids = collect_ids_from_json(
+                &serde_json::to_value(record_event(event, occurred_at()))
+                    .expect("recent event encodes"),
+            );
+            named_event_ids
+                .difference(&recorded_event_ids)
+                .cloned()
+                .collect()
+        }
         _ => BTreeSet::new(),
     }
 }

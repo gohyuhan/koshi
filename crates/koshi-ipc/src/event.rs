@@ -31,6 +31,7 @@
 //! [`PlacementCommandRejected`](crate::event::SessionEvent::PlacementCommandRejected)
 //! is the fifth: it names a placement command that the session rejected.
 
+use koshi_core::command::PanePlacementTarget;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +131,19 @@ pub enum SessionEvent {
         /// The tab whose layout tree changed.
         tab_id: TabId,
     },
+    /// A checked pane placement committed in the session.
+    PanePlacementCommitted {
+        /// The command whose transaction committed this placement.
+        command_id: CommandId,
+        /// The pane placed in the destination layout.
+        source_pane_id: PaneId,
+        /// The tab that owned the pane before the placement.
+        source_tab_id: TabId,
+        /// The tab that owns the pane after the placement.
+        destination_tab_id: TabId,
+        /// The checked swap or insertion target used by the transaction.
+        placement_target: PanePlacementTarget,
+    },
     /// A tab was created.
     TabCreated {
         /// The new tab.
@@ -228,6 +242,7 @@ impl SessionEvent {
             SessionEvent::PaneRemoved { .. } => "PaneRemoved",
             SessionEvent::PaneFocused { .. } => "PaneFocused",
             SessionEvent::LayoutChanged { .. } => "LayoutChanged",
+            SessionEvent::PanePlacementCommitted { .. } => "PanePlacementCommitted",
             SessionEvent::TabCreated { .. } => "TabCreated",
             SessionEvent::TabClosed { .. } => "TabClosed",
             SessionEvent::TabFocused { .. } => "TabFocused",
@@ -260,6 +275,7 @@ impl WireVariants for SessionEvent {
         "PaneRemoved",
         "PaneFocused",
         "LayoutChanged",
+        "PanePlacementCommitted",
         "TabCreated",
         "TabClosed",
         "TabFocused",

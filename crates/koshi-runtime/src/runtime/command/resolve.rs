@@ -120,7 +120,6 @@ impl Server {
                 | Command::ClosePane(_)
                 | Command::ResizePane(_)
                 | Command::MovePane(_)
-                | Command::SwapPanes(_)
                 | Command::PlacePane(_)
                 | Command::ScrollPane(_)
                 | Command::TogglePaneFullscreen
@@ -275,9 +274,6 @@ impl Server {
             Command::MovePane(command_args) => self
                 .resolve_move_pane_target(command_args, command_source, session)
                 .map(drop),
-            Command::SwapPanes(command_args) => self
-                .resolve_swap_panes_target(command_args, command_source, session)
-                .map(drop),
             Command::PlacePane(command_args) => self
                 .resolve_place_pane_target(command_args, command_source, session)
                 .map(drop),
@@ -386,49 +382,9 @@ impl Server {
         })
     }
 
-    /// Resolve both panes of a same-tab swap.
-    pub(super) fn resolve_swap_panes_target(
-        &self,
-        command_args: &SwapPanesArgs,
-        command_source: &CommandSource,
-        session: Option<&Session>,
-    ) -> Result<(PaneTarget, PaneTarget), Rejection> {
-        let source_pane_target =
-            self.resolve_pane_target(command_args.source_pane_id, command_source, session)?;
-        let target_pane_target =
-            self.resolve_pane_target(Some(command_args.target_pane_id), command_source, session)?;
-        if source_pane_target.session_id != target_pane_target.session_id {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                "panes must be in the same session",
-            ));
-        }
-        if let Some(expected_placement_revision) = command_args.expected_placement_revision {
-            let owner_session = self
-                .session_by_id
-                .get(&source_pane_target.session_id)
-                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetGone))?;
-            let client_id = Self::resolve_view_client(
-                command_source.get_target_client_id(),
-                command_source,
-                owner_session,
-            )?;
-            let client = Self::require_client(owner_session, client_id)?;
-            if expected_placement_revision.session_revision
-                != owner_session.get_placement_revision()
-                || expected_placement_revision.client_revision != client.get_placement_revision()
-            {
-                return Err(Rejection::from_reason_and_help(
-                    RejectReason::InvalidState,
-                    "placement preview is stale; refresh and confirm again",
-                ));
-            }
-        }
-        Ok((source_pane_target, target_pane_target))
-    }
-
     /// Resolve the source pane, destination tab, and acting client of a checked
-    /// cross-tab placement. The destination target must stay inside the source
+    /// placement. A swap's destination tab is the tab of its target pane, which
+    /// may be the source tab. The destination target must stay inside the source
     /// pane's session, and the selected client must be attached there.
     pub(super) fn resolve_place_pane_target(
         &self,
@@ -464,17 +420,6 @@ impl Server {
                 *destination_tab_id
             }
         };
-        if destination_tab_id == source_pane_target.tab_id
-            && !matches!(
-                &command_args.placement_target,
-                PanePlacementTarget::Split { .. }
-            )
-        {
-            return Err(Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                "placement destination must be another tab",
-            ));
-        }
         let client_id = Self::resolve_view_client(
             command_source.get_target_client_id(),
             command_source,

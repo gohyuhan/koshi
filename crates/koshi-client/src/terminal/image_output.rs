@@ -20,8 +20,8 @@ use koshi_kitty::{
     write_kitty_visible_placement_delete, KittyOutputError, KittyPlacement, KittyUpload,
 };
 use koshi_renderer::{
-    ImageCellSnapshot, ImageCellState, ImageOutputKey, ImagePaint, ImagePlacementKey,
-    ImageSourceRect, PlacementPreviewImageKey, MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT,
+    ImageCellSnapshot, ImageCellState, ImagePaint, ImagePlacementKey, ImageSourceRect,
+    MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT,
 };
 use koshi_sixel::{
     PreparedSixelPalette, SixelEncodeOptions, SixelEncoder, MAX_PALETTE_COLOR_COUNT,
@@ -128,9 +128,7 @@ pub(crate) fn write_image_abort<W: Write>(writer: &mut W) -> io::Result<()> {
 /// One image's current connection-local output state.
 #[derive(Debug, Clone)]
 struct OutputPaint {
-    #[cfg(test)]
     placement_key: ImagePlacementKey,
-    output_key: ImageOutputKey,
     image_content_id: u64,
     image_record: Arc<ImageRecord>,
     target_area: Rect,
@@ -144,9 +142,7 @@ struct OutputPaint {
 impl OutputPaint {
     fn from_paint(image_paint: &ImagePaint, alpha_stats: Option<AlphaStats>) -> Self {
         Self {
-            #[cfg(test)]
             placement_key: (image_paint.pane_id, image_paint.placement_id),
-            output_key: image_paint.get_output_key(),
             image_content_id: image_paint.image_content_id,
             image_record: Arc::clone(&image_paint.image_record),
             target_area: image_paint.target_area,
@@ -161,7 +157,6 @@ impl OutputPaint {
     #[cfg(test)]
     fn set_placement_key(&mut self, placement_key: ImagePlacementKey) {
         self.placement_key = placement_key;
-        self.output_key = ImageOutputKey::Frame(placement_key);
     }
 
     /// Return whether this paint's encoded pixels read the cells it covers.
@@ -224,7 +219,7 @@ struct CompositionPaint {
     image_memory_address: usize,
     image_content_id: u64,
     image_record: Arc<ImageRecord>,
-    output_key: ImageOutputKey,
+    placement_key: ImagePlacementKey,
     target_area: Rect,
     source_rect: ImageSourceKey,
     z_index: i32,
@@ -243,7 +238,7 @@ impl CompositionFrame {
                     image_memory_address: Arc::as_ptr(&output_paint.image_record.image) as usize,
                     image_content_id: output_paint.image_content_id,
                     image_record: Arc::clone(&output_paint.image_record),
-                    output_key: output_paint.output_key,
+                    placement_key: output_paint.placement_key,
                     target_area: output_paint.target_area,
                     source_rect: ImageSourceKey::from_source_rect(output_paint.source_rect),
                     z_index: output_paint.z_index,
@@ -358,7 +353,7 @@ struct WorkerRequest {
 #[derive(Debug)]
 struct OutputUnit {
     frame_generation: u64,
-    output_key: ImageOutputKey,
+    placement_key: ImagePlacementKey,
     output_kind: ImageOutputKind,
     tile_offset: (u16, u16),
     output_bytes: Arc<[u8]>,
@@ -369,12 +364,12 @@ struct OutputUnit {
 enum WorkerMessage {
     Prepared {
         frame_generation: u64,
-        output_key: ImageOutputKey,
+        placement_key: ImagePlacementKey,
         image_compatibility: ImageCompatibility,
     },
     Unavailable {
         frame_generation: u64,
-        output_key: ImageOutputKey,
+        placement_key: ImagePlacementKey,
     },
     Unit(OutputUnit),
     Finished {
@@ -399,20 +394,17 @@ pub(crate) struct ImageOutputState {
     active_job: Option<ActiveJob>,
     pending_worker_request: Option<WorkerRequest>,
     latest_output_paints: Vec<OutputPaint>,
-    latest_paint_index_by_output_key: HashMap<ImageOutputKey, usize>,
+    latest_paint_index_by_placement_key: HashMap<ImagePlacementKey, usize>,
     latest_encode_keys: Vec<EncodeKey>,
     /// The composition revision of the cells under each output paint in the latest frame.
     latest_composition_revisions: Vec<u64>,
-    composition_state_by_output_key: HashMap<ImageOutputKey, VersionedComposition>,
+    composition_state_by_placement_key: HashMap<ImagePlacementKey, VersionedComposition>,
     next_composition_revision: u64,
     is_settled: bool,
     is_ready: bool,
     prepared_placement_keys: Vec<ImagePlacementKey>,
     prepared_placement_key_set: HashSet<ImagePlacementKey>,
-    prepared_preview_image_keys: Vec<PlacementPreviewImageKey>,
-    prepared_preview_image_key_set: HashSet<PlacementPreviewImageKey>,
-    prepared_output_key_set: HashSet<ImageOutputKey>,
-    compatibility_by_output_key: HashMap<ImageOutputKey, ImageCompatibility>,
+    compatibility_by_placement_key: HashMap<ImagePlacementKey, ImageCompatibility>,
     output_units: Vec<OutputUnit>,
     output_unit_byte_count: usize,
     has_host_pixels: bool,
@@ -438,12 +430,12 @@ pub(crate) struct ImageOutputState {
 
 impl ImageOutputState {
     fn rebuild_latest_index(&mut self) {
-        self.latest_paint_index_by_output_key.clear();
-        self.latest_paint_index_by_output_key.extend(
+        self.latest_paint_index_by_placement_key.clear();
+        self.latest_paint_index_by_placement_key.extend(
             self.latest_output_paints
                 .iter()
                 .enumerate()
-                .map(|(paint_index, output_paint)| (output_paint.output_key, paint_index)),
+                .map(|(paint_index, output_paint)| (output_paint.placement_key, paint_index)),
         );
     }
 
@@ -474,19 +466,16 @@ impl ImageOutputState {
             active_job: None,
             pending_worker_request: None,
             latest_output_paints: Vec::new(),
-            latest_paint_index_by_output_key: HashMap::new(),
+            latest_paint_index_by_placement_key: HashMap::new(),
             latest_encode_keys: Vec::new(),
             latest_composition_revisions: Vec::new(),
-            composition_state_by_output_key: HashMap::new(),
+            composition_state_by_placement_key: HashMap::new(),
             next_composition_revision: 0,
             is_settled: false,
             is_ready: true,
             prepared_placement_keys: Vec::new(),
             prepared_placement_key_set: HashSet::new(),
-            prepared_preview_image_keys: Vec::new(),
-            prepared_preview_image_key_set: HashSet::new(),
-            prepared_output_key_set: HashSet::new(),
-            compatibility_by_output_key: HashMap::new(),
+            compatibility_by_placement_key: HashMap::new(),
             output_units: Vec::new(),
             output_unit_byte_count: 0,
             has_host_pixels: false,
@@ -518,18 +507,13 @@ impl ImageOutputState {
         &self.prepared_placement_keys
     }
 
-    /// Return prepared placement-preview image keys for renderer selection.
-    pub(crate) fn list_prepared_preview_image_keys(&self) -> &[PlacementPreviewImageKey] {
-        &self.prepared_preview_image_keys
-    }
-
     /// Return the host composition status for one prepared frame placement.
     pub(crate) fn get_image_compatibility(
         &self,
         placement_key: ImagePlacementKey,
     ) -> Option<ImageCompatibility> {
-        self.compatibility_by_output_key
-            .get(&ImageOutputKey::Frame(placement_key))
+        self.compatibility_by_placement_key
+            .get(&placement_key)
             .copied()
     }
 
@@ -562,7 +546,9 @@ impl ImageOutputState {
                 .latest_output_paints
                 .iter()
                 .zip(latest_output_paints)
-                .all(|(held_paint, next_paint)| held_paint.output_key == next_paint.output_key)
+                .all(|(held_paint, next_paint)| {
+                    held_paint.placement_key == next_paint.placement_key
+                })
     }
 
     /// Assign one Kitty image number per output paint in `self.latest_output_paints`.
@@ -853,55 +839,39 @@ impl ImageOutputState {
             match worker_message {
                 WorkerMessage::Prepared {
                     frame_generation,
-                    output_key,
+                    placement_key,
                     image_compatibility,
                 } => {
                     if self.is_current_generation(frame_generation)
                         && self
-                            .latest_paint_index_by_output_key
-                            .contains_key(&output_key)
+                            .latest_paint_index_by_placement_key
+                            .contains_key(&placement_key)
                     {
-                        if self.prepared_output_key_set.insert(output_key) {
-                            match output_key {
-                                ImageOutputKey::Frame(placement_key) => {
-                                    if self.prepared_placement_keys.len() < MAX_OUTPUT_PAINT_COUNT
-                                        && self.prepared_placement_key_set.insert(placement_key)
-                                    {
-                                        self.prepared_placement_keys.push(placement_key);
-                                    }
-                                }
-                                ImageOutputKey::PlacementPreview(preview_image_key) => {
-                                    if self.prepared_preview_image_keys.len()
-                                        < MAX_OUTPUT_PAINT_COUNT
-                                        && self
-                                            .prepared_preview_image_key_set
-                                            .insert(preview_image_key)
-                                    {
-                                        self.prepared_preview_image_keys.push(preview_image_key);
-                                    }
-                                }
-                            }
+                        if self.prepared_placement_key_set.insert(placement_key)
+                            && self.prepared_placement_keys.len() < MAX_OUTPUT_PAINT_COUNT
+                        {
+                            self.prepared_placement_keys.push(placement_key);
                         }
-                        self.compatibility_by_output_key
-                            .insert(output_key, image_compatibility);
+                        self.compatibility_by_placement_key
+                            .insert(placement_key, image_compatibility);
                     }
                 }
                 WorkerMessage::Unavailable {
                     frame_generation,
-                    output_key,
+                    placement_key,
                 } => {
                     if self.is_current_generation(frame_generation) {
-                        self.compatibility_by_output_key.remove(&output_key);
+                        self.compatibility_by_placement_key.remove(&placement_key);
                     }
                 }
                 WorkerMessage::Unit(output_unit) => {
                     if self.is_current_generation(output_unit.frame_generation)
                         && self
-                            .prepared_output_key_set
-                            .contains(&output_unit.output_key)
+                            .prepared_placement_key_set
+                            .contains(&output_unit.placement_key)
                         && self
-                            .latest_paint_index_by_output_key
-                            .contains_key(&output_unit.output_key)
+                            .latest_paint_index_by_placement_key
+                            .contains_key(&output_unit.placement_key)
                     {
                         let Some(next_output_byte_count) = self
                             .output_unit_byte_count
@@ -1005,8 +975,8 @@ impl ImageOutputState {
             .map_err(|_| invalid_output("image output storage could not be allocated"))?;
         for output_unit in &self.output_units {
             let Some(&paint_index) = self
-                .latest_paint_index_by_output_key
-                .get(&output_unit.output_key)
+                .latest_paint_index_by_placement_key
+                .get(&output_unit.placement_key)
             else {
                 continue;
             };
@@ -1050,7 +1020,7 @@ impl ImageOutputState {
 
     /// Adopt the newest frame after its base cells and native bytes are written.
     pub(crate) fn commit_frame(&mut self) {
-        self.has_host_pixels = !self.prepared_output_key_set.is_empty();
+        self.has_host_pixels = !self.prepared_placement_key_set.is_empty();
         self.is_settled = true;
         self.is_ready = true;
         self.needs_screen_reset = false;
@@ -1072,7 +1042,7 @@ impl ImageOutputState {
         self.next_generation();
         self.clear_prepared_output();
         self.latest_output_paints.clear();
-        self.latest_paint_index_by_output_key.clear();
+        self.latest_paint_index_by_placement_key.clear();
         self.latest_encode_keys.clear();
         self.latest_composition_revisions.clear();
         self.alpha_stats_by_image_and_source.clear();
@@ -1095,10 +1065,10 @@ impl ImageOutputState {
         }
         self.frame_generation = self.frame_generation.wrapping_add(1).max(1);
         self.clear_prepared_output();
-        self.composition_state_by_output_key.clear();
+        self.composition_state_by_placement_key.clear();
         self.next_composition_revision = 0;
         self.latest_output_paints.clear();
-        self.latest_paint_index_by_output_key.clear();
+        self.latest_paint_index_by_placement_key.clear();
         self.latest_encode_keys.clear();
         self.latest_composition_revisions.clear();
         self.needs_screen_reset = self.has_host_pixels;
@@ -1113,14 +1083,14 @@ impl ImageOutputState {
         output_paints: &[OutputPaint],
     ) -> Vec<u64> {
         if self.next_composition_revision == u64::MAX {
-            self.composition_state_by_output_key.clear();
+            self.composition_state_by_placement_key.clear();
             self.next_composition_revision = 0;
         }
         let composition_frame = Arc::new(CompositionFrame::from_cell_snapshot_and_output_paints(
             cell_snapshot,
             output_paints,
         ));
-        let mut active_output_keys = HashSet::new();
+        let mut active_placement_keys = HashSet::new();
         let revisions = output_paints
             .iter()
             .enumerate()
@@ -1128,22 +1098,22 @@ impl ImageOutputState {
                 if !output_kind.uses_cell_composition() {
                     return 0;
                 }
-                active_output_keys.insert(output_paint.output_key);
+                active_placement_keys.insert(output_paint.placement_key);
                 let composition_state = CompositionState {
                     composition_frame: Arc::clone(&composition_frame),
                     composition_paint_index: paint_index,
                 };
                 if let Some(versioned_composition) = self
-                    .composition_state_by_output_key
-                    .get(&output_paint.output_key)
+                    .composition_state_by_placement_key
+                    .get(&output_paint.placement_key)
                 {
                     if versioned_composition.composition_state == composition_state {
                         return versioned_composition.composition_revision;
                     }
                 }
                 self.next_composition_revision += 1;
-                self.composition_state_by_output_key.insert(
-                    output_paint.output_key,
+                self.composition_state_by_placement_key.insert(
+                    output_paint.placement_key,
                     VersionedComposition {
                         composition_state,
                         composition_revision: self.next_composition_revision,
@@ -1152,8 +1122,8 @@ impl ImageOutputState {
                 self.next_composition_revision
             })
             .collect();
-        self.composition_state_by_output_key
-            .retain(|output_key, _| active_output_keys.contains(output_key));
+        self.composition_state_by_placement_key
+            .retain(|placement_key, _| active_placement_keys.contains(placement_key));
         revisions
     }
 
@@ -1196,10 +1166,7 @@ impl ImageOutputState {
     fn clear_prepared_output(&mut self) {
         self.prepared_placement_keys.clear();
         self.prepared_placement_key_set.clear();
-        self.prepared_preview_image_keys.clear();
-        self.prepared_preview_image_key_set.clear();
-        self.prepared_output_key_set.clear();
-        self.compatibility_by_output_key.clear();
+        self.compatibility_by_placement_key.clear();
         self.output_units.clear();
         self.output_unit_byte_count = 0;
     }
@@ -1274,7 +1241,7 @@ fn is_output_paint_sequence_equal(
     committed_output_paints.len() == next_output_paints.len()
         && committed_output_paints.iter().zip(next_output_paints).all(
             |(committed_output_paint, next_output_paint)| {
-                committed_output_paint.output_key == next_output_paint.output_key
+                committed_output_paint.placement_key == next_output_paint.placement_key
                     && committed_output_paint.image_content_id == next_output_paint.image_content_id
                     && Arc::ptr_eq(
                         &committed_output_paint.image_record.image,
@@ -1808,7 +1775,7 @@ fn run_worker_job_with_limit(
                 &worker_request.cancellation_token,
                 WorkerMessage::Unavailable {
                     frame_generation: worker_request.frame_generation,
-                    output_key: image_plan.output_paint.output_key,
+                    placement_key: image_plan.output_paint.placement_key,
                 },
             )?;
             continue;
@@ -1860,7 +1827,7 @@ fn run_worker_job_with_limit(
                 &worker_request.cancellation_token,
                 WorkerMessage::Unavailable {
                     frame_generation: worker_request.frame_generation,
-                    output_key: image_plan.output_paint.output_key,
+                    placement_key: image_plan.output_paint.placement_key,
                 },
             )?;
             continue;
@@ -1880,7 +1847,7 @@ fn run_worker_job_with_limit(
             &worker_request.cancellation_token,
             WorkerMessage::Prepared {
                 frame_generation: worker_request.frame_generation,
-                output_key: image_plan.output_paint.output_key,
+                placement_key: image_plan.output_paint.placement_key,
                 image_compatibility: image_plan.image_compatibility,
             },
         )?;
@@ -1890,7 +1857,7 @@ fn run_worker_job_with_limit(
                 &worker_request.cancellation_token,
                 WorkerMessage::Unit(OutputUnit {
                     frame_generation: worker_request.frame_generation,
-                    output_key: image_plan.output_paint.output_key,
+                    placement_key: image_plan.output_paint.placement_key,
                     output_kind: worker_request.output_kind,
                     tile_offset: template_unit.tile_offset,
                     output_bytes: Arc::clone(&template_unit.output_bytes),
@@ -1965,7 +1932,7 @@ fn run_kitty_worker_job(
             &worker_request.cancellation_token,
             WorkerMessage::Prepared {
                 frame_generation: worker_request.frame_generation,
-                output_key: output_paint.output_key,
+                placement_key: output_paint.placement_key,
                 image_compatibility: ImageCompatibility::exact(),
             },
         )?;
@@ -1976,7 +1943,7 @@ fn run_kitty_worker_job(
         &worker_request.cancellation_token,
         WorkerMessage::Unit(OutputUnit {
             frame_generation: worker_request.frame_generation,
-            output_key: first_output_paint.output_key,
+            placement_key: first_output_paint.placement_key,
             output_kind: worker_request.output_kind,
             tile_offset: (0, 0),
             output_bytes: bounded_output.into_output_bytes().into(),

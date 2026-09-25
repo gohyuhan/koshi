@@ -330,7 +330,6 @@ fn maximum_visible_placements_reach_the_worker_without_drops() {
 
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use koshi_core::geometry::PixelCellSize;
 use koshi_core::ids::PaneId;
@@ -370,7 +369,6 @@ fn build_output_paint(
     let placement_key = (PaneId::new(), 1);
     OutputPaint {
         placement_key,
-        output_key: ImageOutputKey::Frame(placement_key),
         image_content_id: 1,
         image_record,
         target_area: Rect::new(0, 0, image_pixel_width as u16, image_pixel_height as u16),
@@ -1423,113 +1421,7 @@ fn i_term_packet_accounting_uses_the_native_frame_limit() {
 }
 
 #[test]
-fn frame_and_preview_output_keys_stay_distinct_in_prepared_state() {
-    let pane_id = PaneId::new();
-    let frame_key = (pane_id, 1);
-    let preview_key = PlacementPreviewImageKey {
-        panel_index: 1,
-        pane_id,
-        placement_id: 1,
-    };
-    let mut frame_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-    frame_output_paint.set_placement_key(frame_key);
-    let mut preview_output_paint = frame_output_paint.clone();
-    preview_output_paint.output_key = ImageOutputKey::PlacementPreview(preview_key);
-
-    let mut output_state = ImageOutputState::disabled();
-    output_state.frame_generation = 1;
-    output_state.latest_output_paints = vec![frame_output_paint, preview_output_paint];
-    output_state.rebuild_latest_index();
-    let (message_sender, message_receiver) = mpsc::sync_channel(4);
-    output_state.worker_messages = Some(message_receiver);
-    message_sender
-        .send(WorkerMessage::Prepared {
-            frame_generation: 1,
-            output_key: ImageOutputKey::Frame(frame_key),
-            image_compatibility: ImageCompatibility::exact(),
-        })
-        .expect("the frame result queues");
-    message_sender
-        .send(WorkerMessage::Prepared {
-            frame_generation: 1,
-            output_key: ImageOutputKey::PlacementPreview(preview_key),
-            image_compatibility: ImageCompatibility::exact(),
-        })
-        .expect("the preview result queues");
-    message_sender
-        .send(WorkerMessage::Finished {
-            frame_generation: 1,
-            has_failed: false,
-        })
-        .expect("the worker completion queues");
-
-    output_state.poll();
-
-    assert_eq!(output_state.list_prepared_placement_keys(), &[frame_key]);
-    assert_eq!(
-        output_state.list_prepared_preview_image_keys(),
-        &[preview_key]
-    );
-    assert_eq!(output_state.prepared_output_key_set.len(), 2);
-}
-
-#[test]
-fn placement_preview_images_reach_each_native_output_protocol() {
-    for output_kind in [
-        ImageOutputKind::Kitty,
-        ImageOutputKind::Iterm,
-        ImageOutputKind::Sixel {
-            palette_color_count: 256,
-            max_pixel_width: None,
-            max_pixel_height: None,
-        },
-    ] {
-        let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-        let preview_key = PlacementPreviewImageKey {
-            panel_index: 1,
-            pane_id: output_paint.placement_key.0,
-            placement_id: output_paint.placement_key.1,
-        };
-        let image_paint = ImagePaint::from_image_placement(
-            output_paint.placement_key.0,
-            output_paint.placement_key.1,
-            Arc::clone(&output_paint.image_record),
-            output_paint.target_area,
-            output_paint.source_rect,
-            output_paint.z_index,
-        )
-        .with_placement_preview_key(preview_key.panel_index);
-        let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell");
-        let cell_snapshot = output_kind
-            .uses_cell_composition()
-            .then(|| Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1))));
-        let measured_pixel_cell_size = output_kind.is_sixel().then_some(cell_size);
-        let mut output_state = ImageOutputState::from_output_kind(Some(output_kind));
-        let deadline = Instant::now() + Duration::from_secs(5);
-
-        while !output_state.prepare_frame(
-            std::slice::from_ref(&image_paint),
-            cell_snapshot.clone(),
-            measured_pixel_cell_size,
-        ) {
-            assert!(Instant::now() < deadline, "{output_kind:?} did not settle");
-            std::thread::yield_now();
-        }
-
-        assert_eq!(output_state.list_prepared_placement_keys(), &[]);
-        assert_eq!(
-            output_state.list_prepared_preview_image_keys(),
-            &[preview_key]
-        );
-        assert!(!output_state
-            .frame_output(None)
-            .expect("the preview output writes")
-            .is_empty());
-    }
-}
-
-#[test]
-fn output_key_reuses_pixels_across_frame_record_wrappers() {
+fn placement_key_reuses_pixels_across_frame_record_wrappers() {
     let first_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let mut second_output_paint = first_output_paint.clone();
     second_output_paint.image_record = Arc::new(first_output_paint.image_record.as_ref().clone());
@@ -1743,10 +1635,7 @@ fn worker_emits_shared_templates_in_original_paint_order() {
         assert_eq!(
             output_units
                 .iter()
-                .map(|unit| match unit.output_key {
-                    ImageOutputKey::Frame(placement_key) => placement_key,
-                    ImageOutputKey::PlacementPreview(_) => unreachable!(),
-                })
+                .map(|unit| unit.placement_key)
                 .collect::<Vec<_>>(),
             [(pane, 1), (pane, 2), (pane, 3)],
             "{output_kind:?}"
@@ -1827,20 +1716,14 @@ fn unavailable_paint_does_not_skip_independent_output() {
             let unavailable_placement_keys = worker_messages
                 .iter()
                 .filter_map(|message| match message {
-                    WorkerMessage::Unavailable {
-                        output_key: ImageOutputKey::Frame(placement_key),
-                        ..
-                    } => Some(*placement_key),
+                    WorkerMessage::Unavailable { placement_key, .. } => Some(*placement_key),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
             let available_placement_keys = worker_messages
                 .iter()
                 .filter_map(|message| match message {
-                    WorkerMessage::Unit(unit) => match unit.output_key {
-                        ImageOutputKey::Frame(placement_key) => Some(placement_key),
-                        ImageOutputKey::PlacementPreview(_) => None,
-                    },
+                    WorkerMessage::Unit(unit) => Some(unit.placement_key),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -1937,16 +1820,13 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
 #[test]
 fn rejected_cumulative_worker_output_cancels_the_generation() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-    let placement_key = match output_paint.output_key {
-        ImageOutputKey::Frame(placement_key) => placement_key,
-        ImageOutputKey::PlacementPreview(_) => unreachable!(),
-    };
+    let placement_key = output_paint.placement_key;
     let cancellation_token = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = mpsc::sync_channel(2);
     sender
         .send(WorkerMessage::Unit(OutputUnit {
             frame_generation: 1,
-            output_key: ImageOutputKey::Frame(placement_key),
+            placement_key,
             output_kind: ImageOutputKind::Iterm,
             tile_offset: (0, 0),
             output_bytes: Arc::from(&b"x"[..]),
@@ -1965,8 +1845,8 @@ fn rejected_cumulative_worker_output_cancels_the_generation() {
     output_state.latest_output_paints = vec![output_paint];
     output_state.rebuild_latest_index();
     output_state
-        .prepared_output_key_set
-        .insert(ImageOutputKey::Frame(placement_key));
+        .prepared_placement_key_set
+        .insert(placement_key);
     output_state.output_unit_byte_count = MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT;
     output_state.worker_messages = Some(receiver);
     output_state.active_job = Some(ActiveJob {
@@ -2067,7 +1947,7 @@ fn i_term_unit_output_has_exact_position_payload_and_cursor_restore() {
     output_state.rebuild_latest_index();
     output_state.output_units.push(OutputUnit {
         frame_generation: 1,
-        output_key: output_state.latest_output_paints[0].output_key,
+        placement_key: output_state.latest_output_paints[0].placement_key,
         output_kind: ImageOutputKind::Iterm,
         tile_offset: (0, 0),
         output_bytes: Arc::from(&b"body"[..]),
@@ -2091,7 +1971,7 @@ fn sixel_unit_output_has_exact_mode_boundaries_and_cursor_restore() {
     output_state.rebuild_latest_index();
     output_state.output_units.push(OutputUnit {
         frame_generation: 1,
-        output_key: output_state.latest_output_paints[0].output_key,
+        placement_key: output_state.latest_output_paints[0].placement_key,
         output_kind,
         tile_offset: (0, 0),
         output_bytes: Arc::from(&b"sixel"[..]),

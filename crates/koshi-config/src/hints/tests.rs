@@ -73,8 +73,8 @@ fn build_hint_catalog_with_config(config: &KeybindingsConfig) -> KeymapHintCatal
 fn normal_mode_joins_defaults_to_display_names() {
     let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Normal);
 
-    // All 23 shipped normal-mode bindings fire in this build.
-    assert_eq!(hints.hint_bindings.len(), 23);
+    // All 24 shipped normal-mode bindings fire in this build.
+    assert_eq!(hints.hint_bindings.len(), 24);
 
     let new_pane_key_sequence = KeySequence::from_first_and_rest(
         build_control_chord('p'),
@@ -109,7 +109,7 @@ fn quit_binding_surfaces_in_both_modes() {
 fn locked_mode_pins_the_reserved_unlock() {
     let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::Locked);
     // The reserved unlock (the same `<C-l>` that locks in normal mode), the
-    // move opener, and the quit and mouse-select chords.
+    // pane placement opener, and the quit and mouse-select chords.
     assert_eq!(hints.hint_bindings.len(), 4);
     let hint_binding = hints
         .hint_bindings
@@ -136,8 +136,8 @@ fn modes_without_defaults_are_empty() {
 }
 
 #[test]
-fn move_pane_mode_hints_expose_every_rebindable_placement_action() {
-    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::MovePane);
+fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
+    let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::PanePlacement);
     let expected_bindings = [
         (
             KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Left)),
@@ -189,7 +189,7 @@ fn move_pane_mode_hints_expose_every_rebindable_placement_action() {
         ),
         (
             KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
-            "Cancel Pane Move",
+            "Cancel Pane Placement",
         ),
     ];
 
@@ -200,7 +200,7 @@ fn move_pane_mode_hints_expose_every_rebindable_placement_action() {
             .hint_bindings
             .iter()
             .find(|hint_binding| hint_binding.key_sequence == key_sequence)
-            .unwrap_or_else(|| panic!("move-pane mode binds {key_sequence}"));
+            .unwrap_or_else(|| panic!("pane placement mode binds {key_sequence}"));
         assert_eq!(hint_binding.action_display_name, action_display_name);
         assert!(!hint_binding.is_user_authored);
         assert!(!hint_binding.is_pinned);
@@ -396,7 +396,7 @@ fn a_user_binding_takes_the_default_key_and_shows_as_user_set() {
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
 
     // The user entry replaces the default on that key rather than adding one.
-    assert_eq!(hints.hint_bindings.len(), 23);
+    assert_eq!(hints.hint_bindings.len(), 24);
     let hint_binding = hints
         .hint_bindings
         .iter()
@@ -423,7 +423,7 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
     );
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
 
-    assert_eq!(hints.hint_bindings.len(), 22);
+    assert_eq!(hints.hint_bindings.len(), 23);
     assert_eq!(
         hints
             .hint_bindings
@@ -460,7 +460,7 @@ fn a_binding_the_resolver_refuses_yields_no_hint() {
     );
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
 
-    assert_eq!(hints.hint_bindings.len(), 23);
+    assert_eq!(hints.hint_bindings.len(), 24);
     assert_eq!(
         hints
             .hint_bindings
@@ -653,7 +653,7 @@ fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
             .build_hints_for_mode(LockMode::Normal)
             .hint_bindings
             .len(),
-        23
+        24
     );
 }
 
@@ -693,7 +693,7 @@ fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
         build_hint_catalog_with_user("normal", BTreeMap::new(), BTreeSet::from([unbound.clone()]));
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
 
-    assert_eq!(hints.hint_bindings.len(), 23);
+    assert_eq!(hints.hint_bindings.len(), 24);
     assert_eq!(
         *hints.removed_key_sequences,
         BTreeSet::from([unbound.clone()])

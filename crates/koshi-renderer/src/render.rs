@@ -5,8 +5,10 @@
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
 //! border highlighted), and the **statusline** — a koshi-owned row with
-//! per-mode keybinding hints and viewer-local placement status. The
-//! committed region solve supplies all three zones.
+//! per-mode keybinding hints and viewer-local placement status. Pane borders
+//! and collapsed stack headers show pane id suffixes in pane placement mode
+//! and terminal titles in other modes: `pane-…123456789abc` replaces `nvim`.
+//! The committed region solve supplies all three zones.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
 //! in the pane area, and each visible terminal pane's cells are painted into its
@@ -19,14 +21,17 @@
 //! surrounding margin is filled with a dim letterbox. Nothing here draws
 //! plugin-contributed segments.
 
+use std::borrow::Cow;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect as RatatuiRect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Widget};
 
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::geometry::{Point, Rect, Size};
-use koshi_core::ids::PaneId;
+use koshi_core::ids::{PaneId, TabId};
 use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_terminal::grid::state::{Cell, Grid};
@@ -46,6 +51,7 @@ use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
 
 const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
+const PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT: usize = 12;
 
 /// Paint `render_snapshot` into `buffer` over `viewport_area` with the selected image mode.
 ///
@@ -57,8 +63,9 @@ const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
 ///
 /// 1. Blanks every cell of `viewport_area`, so a buffer reused across frames shows no
 ///    stale cells.
-/// 2. Draws one bordered box per visible pane, its title in the top border and
-///    its scroll position in the bottom border when it is scrolled back.
+/// 2. Draws one bordered box per visible pane: the terminal title in the top
+///    border, or a pane id suffix in pane placement mode, and the scroll
+///    position in the bottom border when the pane is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect.
 /// 4. Keeps pane cells under native images or writes the unsupported-image
 ///    text over unavailable coverage.
@@ -123,7 +130,7 @@ pub fn render_frame_with_images(
     viewport_area: RatatuiRect,
     buffer: &mut Buffer,
 ) {
-    render_frame_with_image_availability(
+    render_frame_with_placement_target(
         render_snapshot,
         committed_regions,
         theme,
@@ -133,15 +140,23 @@ pub fn render_frame_with_images(
         image_mode,
         None,
         None,
+        None,
         viewport_area,
         buffer,
     );
 }
 
-/// Paint one frame with a selected set of image placements kept beneath native
-/// output.
+/// Paint one frame with a selected set of native images and placement target.
+///
+/// In `Native` mode, `available_image_keys` names the image placements whose
+/// native bytes are ready, and every other image shows the unavailable-image
+/// text; `None` shows that text only over images whose record is missing.
+/// `placement_status` fills the placement entry of the statusline. Every pane
+/// and collapsed stack header that `placement_target` names in the displayed
+/// tab takes the placement hover color: an insertion above `pane-123` colors
+/// `pane-123`'s border.
 #[allow(clippy::too_many_arguments)]
-pub fn render_frame_with_image_availability(
+pub fn render_frame_with_placement_target(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     theme: &Theme,
@@ -151,6 +166,7 @@ pub fn render_frame_with_image_availability(
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
     placement_status: Option<&PlacementStatus>,
+    placement_target: Option<&PanePlacementTarget>,
     viewport_area: RatatuiRect,
     buffer: &mut Buffer,
 ) {
@@ -201,21 +217,13 @@ pub fn render_frame_with_image_availability(
     draw_panes(
         render_snapshot,
         theme,
-        viewer_chrome.hovered_pane_id,
-        viewer_chrome.placement_handle_pane_id,
-        viewer_chrome.active_input_mode == Some(LockMode::MovePane),
+        viewer_chrome,
+        placement_target,
         layout_origin,
         buffer,
     );
     draw_pane_contents(render_snapshot, layout_origin, buffer);
-    draw_placement_hover_tints(
-        render_snapshot,
-        viewer_chrome.hovered_pane_id,
-        viewer_chrome.placement_handle_pane_id,
-        viewer_chrome.active_input_mode == Some(LockMode::MovePane),
-        layout_origin,
-        buffer,
-    );
+    draw_placement_hover_tints(render_snapshot, viewer_chrome, layout_origin, buffer);
     match image_mode {
         ImageRenderMode::Placeholder => {
             let placeholder_rects = compute_image_placeholder_rects(
@@ -244,7 +252,14 @@ pub fn render_frame_with_image_availability(
             draw_image_placeholders(&placeholder_rects, buffer);
         }
     }
-    draw_stack_headers(render_snapshot, theme, layout_origin, buffer);
+    draw_stack_headers(
+        render_snapshot,
+        theme,
+        viewer_chrome,
+        placement_target,
+        layout_origin,
+        buffer,
+    );
 
     // The margin fills first; the tabline and statusline paint over it.
     draw_letterbox(viewport_area, effective_layout_rect, theme, buffer);
@@ -394,22 +409,36 @@ pub(crate) fn find_pane_snapshot(
 }
 
 /// Draw a bordered box for every visible pane in the active tab, coloring the
-/// focused pane's border (and an unfocused hovered pane's), writing the pane's
-/// resolved title into its top border line, and — when the pane is scrolled
-/// back — its scroll position into its bottom border. `hovered_pane_id` is the
-/// pane the viewer's pointer is over. `placement_handle_pane_id` identifies the
-/// top border that shows the placement handle. `layout_origin` shifts each pane
-/// into the centered content rect.
+/// focused pane's border (and an unfocused hovered pane's), writing its title
+/// into the top border or its id suffix while pane placement is visible, and
+/// drawing its scroll position when it is scrolled back.
+///
+/// `viewer_chrome.hovered_pane_id` is the pane the viewer's pointer is over.
+/// `viewer_chrome.placement_handle_pane_id` names the top border that shows the
+/// placement handle. `viewer_chrome.placement_source_pane_id` takes the focus
+/// color, and every pane `placement_target` names takes the placement hover
+/// color. While `viewer_chrome.is_pane_placement_visible` is `true`, the
+/// pointer colors and the handle are not drawn: hovering `pane-123` does not
+/// change its border color. `layout_origin` shifts each pane into the centered
+/// content rect.
 fn draw_panes(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
-    hovered_pane_id: Option<PaneId>,
-    placement_handle_pane_id: Option<PaneId>,
-    is_move_pane_mode: bool,
+    viewer_chrome: ViewerChrome,
+    placement_target: Option<&PanePlacementTarget>,
     layout_origin: Point,
     buffer: &mut Buffer,
 ) {
-    let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id;
+    let ViewerChrome {
+        hovered_pane_id,
+        placement_handle_pane_id,
+        is_pane_placement_visible,
+        placement_source_pane_id,
+        ..
+    } = viewer_chrome;
+    let focused_pane_id =
+        placement_source_pane_id.or(render_snapshot.client_snapshot.focused_pane_id);
+    let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
     for pane_slot in &render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -418,13 +447,15 @@ fn draw_panes(
         if !pane_slot.is_visible {
             continue;
         }
-        let is_placement_hovered = Some(pane_slot.pane_id) == placement_handle_pane_id
-            || (is_move_pane_mode && Some(pane_slot.pane_id) == hovered_pane_id);
-        let border_style = if is_placement_hovered {
-            compute_placement_hover_border_style(theme)
-        } else if Some(pane_slot.pane_id) == focused_pane_id {
+        let is_placement_target =
+            is_placement_target_pane(pane_slot.pane_id, displayed_tab_id, placement_target);
+        let is_placement_handle_hovered =
+            !is_pane_placement_visible && Some(pane_slot.pane_id) == placement_handle_pane_id;
+        let border_style = if Some(pane_slot.pane_id) == focused_pane_id {
             compute_focused_border_style(theme)
-        } else if Some(pane_slot.pane_id) == hovered_pane_id {
+        } else if is_placement_target || is_placement_handle_hovered {
+            compute_placement_hover_border_style(theme)
+        } else if !is_pane_placement_visible && Some(pane_slot.pane_id) == hovered_pane_id {
             compute_hover_border_style(theme)
         } else {
             compute_unfocused_border_style(theme)
@@ -437,25 +468,22 @@ fn draw_panes(
 
         let pane_snapshot = find_pane_snapshot(render_snapshot, pane_slot.pane_id);
 
-        // The pane's title sits in the top border as ` title `, starting two
-        // cells in and clipped four cells short of the box width, which leaves
-        // the corner glyphs.
-        if let Some(pane_title) =
-            pane_snapshot.and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
-        {
-            if !pane_title.is_empty() && pane_rect.width > 4 {
-                let title_line = Line::from(Span::styled(format!(" {pane_title} "), border_style));
-                set_line_clipped(
-                    buffer,
-                    pane_rect.x + 2,
-                    pane_rect.y,
-                    &title_line,
-                    pane_rect.width - 4,
-                );
-            }
+        // The pane label starts two cells in and stops four cells short of the
+        // box width, which leaves the corner glyphs.
+        let pane_label =
+            format_pane_label(pane_slot.pane_id, pane_snapshot, is_pane_placement_visible);
+        if !pane_label.is_empty() && pane_rect.width > 4 {
+            let pane_label_line = Line::from(Span::styled(format!(" {pane_label} "), border_style));
+            set_line_clipped(
+                buffer,
+                pane_rect.x + 2,
+                pane_rect.y,
+                &pane_label_line,
+                pane_rect.width - 4,
+            );
         }
 
-        if Some(pane_slot.pane_id) == placement_handle_pane_id {
+        if is_placement_handle_hovered {
             if let Some(handle_rect) = compute_placement_handle_rect(pane_slot.outer_rect) {
                 let handle_origin = place_cell_rect(handle_rect, layout_origin);
                 let handle_text = "⠿".repeat(usize::from(PLACEMENT_HANDLE_COLUMN_COUNT));
@@ -486,15 +514,45 @@ fn draw_panes(
     }
 }
 
-/// Tint the content of the pane under the placement pointer.
+/// Return whether `placement_target` names `pane_id` in the tab `displayed_tab_id`.
+///
+/// A swap names its target pane in every tab. An insertion names panes only in
+/// its destination tab: its anchor pane, every pane of its anchor group, or
+/// every pane for a whole-tab anchor. `None` names no pane.
+#[must_use]
+pub fn is_placement_target_pane(
+    pane_id: PaneId,
+    displayed_tab_id: TabId,
+    placement_target: Option<&PanePlacementTarget>,
+) -> bool {
+    match placement_target {
+        Some(PanePlacementTarget::Swap { target_pane_id }) => pane_id == *target_pane_id,
+        Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor,
+            ..
+        }) if *destination_tab_id == displayed_tab_id => match anchor {
+            PanePlacementAnchor::Pane(target_pane_id) => pane_id == *target_pane_id,
+            PanePlacementAnchor::Group(target_pane_ids) => target_pane_ids.contains(&pane_id),
+            PanePlacementAnchor::Tab => true,
+        },
+        Some(PanePlacementTarget::Split { .. }) | None => false,
+    }
+}
+
+/// Tint the content of the pane named by `viewer_chrome.placement_handle_pane_id`
+/// while the pointer rests on its handle. Nothing is tinted while
+/// `viewer_chrome.is_pane_placement_visible` is `true`.
 fn draw_placement_hover_tints(
     render_snapshot: &RenderSnapshot,
-    hovered_pane_id: Option<PaneId>,
-    placement_handle_pane_id: Option<PaneId>,
-    is_move_pane_mode: bool,
+    viewer_chrome: ViewerChrome,
     layout_origin: Point,
     buffer: &mut Buffer,
 ) {
+    if viewer_chrome.is_pane_placement_visible {
+        return;
+    }
+    let placement_handle_pane_id = viewer_chrome.placement_handle_pane_id;
     for pane_slot in &render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -503,8 +561,7 @@ fn draw_placement_hover_tints(
         if !pane_slot.is_visible {
             continue;
         }
-        let is_placement_hovered = Some(pane_slot.pane_id) == placement_handle_pane_id
-            || (is_move_pane_mode && Some(pane_slot.pane_id) == hovered_pane_id);
+        let is_placement_hovered = Some(pane_slot.pane_id) == placement_handle_pane_id;
         if !is_placement_hovered {
             continue;
         }
@@ -577,15 +634,6 @@ fn draw_pane_contents(render_snapshot: &RenderSnapshot, layout_origin: Point, bu
             buffer,
         );
     }
-}
-
-/// Paint a terminal grid into a preview rectangle.
-///
-/// The grid uses its original cell order and clips at the target rectangle.
-/// This keeps preview rendering bounded when the source grid is larger than
-/// the preview panel.
-pub fn draw_grid_preview(terminal_grid: &Grid, target_area: RatatuiRect, buffer: &mut Buffer) {
-    draw_grid(terminal_grid, target_area, false, None, buffer);
 }
 
 /// Paint one terminal `terminal_grid` into `target_area`, one buffer cell per grid cell.
@@ -709,17 +757,23 @@ fn get_cell_color(cell_color: CellColor) -> Color {
     }
 }
 
-/// Draw the one-row title strip for every collapsed stack member: a collapse
-/// arrow and the pane title on the left, a `[position/total]` indicator
-/// right-aligned, over a theme-filled row that marks the strip as
-/// koshi-owned. `layout_origin` shifts each strip into the centered content rect.
+/// Draw one header strip for each collapsed stack member: a collapse arrow and
+/// the pane title on the left, and a `[position/total]` indicator on the right.
+/// While `viewer_chrome.is_pane_placement_visible` is `true`, the strip shows the
+/// pane id suffix in place of the title: a collapsed pane with id
+/// `pane-0192f0c1-0000-7000-8000-000000000001` shows `pane-…000000000001`. The
+/// strip of `viewer_chrome.placement_source_pane_id` takes the focus color, and
+/// a strip that `placement_target` names takes the placement hover color.
+/// `layout_origin` shifts each strip into the centered content rect.
 fn draw_stack_headers(
     render_snapshot: &RenderSnapshot,
     theme: &Theme,
+    viewer_chrome: ViewerChrome,
+    placement_target: Option<&PanePlacementTarget>,
     layout_origin: Point,
     buffer: &mut Buffer,
 ) {
-    let stack_header_style = compute_stack_header_style(theme);
+    let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
     for stack_header in &render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -730,17 +784,32 @@ fn draw_stack_headers(
             continue;
         }
 
-        // Fill the whole row first: the gap between the title and the indicator
+        let stack_header_style = if Some(stack_header.pane_id)
+            == viewer_chrome.placement_source_pane_id
+        {
+            compute_focused_border_style(theme)
+        } else if is_placement_target_pane(stack_header.pane_id, displayed_tab_id, placement_target)
+        {
+            compute_placement_hover_border_style(theme)
+        } else {
+            compute_stack_header_style(theme)
+        };
+
+        // Fill the whole row first: the gap between the pane label and indicator
         // carries the strip background too.
         buffer.set_style(header_rect, stack_header_style);
 
-        let pane_title = get_stack_header_title(render_snapshot, stack_header.pane_id);
-        let title_line = Line::from(format!("▸ {pane_title}"));
+        let pane_label = format_pane_label(
+            stack_header.pane_id,
+            find_pane_snapshot(render_snapshot, stack_header.pane_id),
+            viewer_chrome.is_pane_placement_visible,
+        );
+        let pane_label_line = Line::from(format!("▸ {pane_label}"));
         set_line_clipped(
             buffer,
             header_rect.x,
             header_rect.y,
-            &title_line,
+            &pane_label_line,
             header_rect.width,
         );
 
@@ -766,12 +835,28 @@ fn draw_stack_headers(
     }
 }
 
-/// The title drawn on a stack member's header strip: the pane's terminal title,
-/// or empty when the pane has none.
-fn get_stack_header_title(render_snapshot: &RenderSnapshot, pane_id: PaneId) -> &str {
-    find_pane_snapshot(render_snapshot, pane_id)
+/// Return the label drawn for `pane_id`: `pane-…` and the last 12 hex digits of
+/// the id while `is_pane_placement_visible` is `true`, else the terminal title
+/// in `pane_snapshot`, or `""` when it has none. Pane id
+/// `pane-0192f0c1-0000-7000-8000-000000000001` gives `pane-…000000000001`.
+fn format_pane_label<'snapshot>(
+    pane_id: PaneId,
+    pane_snapshot: Option<&'snapshot PaneSnapshot>,
+    is_pane_placement_visible: bool,
+) -> Cow<'snapshot, str> {
+    if is_pane_placement_visible {
+        let pane_id_hex = pane_id.get_uuid().simple().to_string();
+        let pane_id_suffix_start_byte_offset =
+            pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
+        return Cow::Owned(format!(
+            "pane-…{}",
+            &pane_id_hex[pane_id_suffix_start_byte_offset..]
+        ));
+    }
+    pane_snapshot
         .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
-        .unwrap_or_default()
+        .map(Cow::Borrowed)
+        .unwrap_or(Cow::Borrowed(""))
 }
 
 /// The mode indicator shown in the tabline: every active mode label joined with
@@ -821,7 +906,7 @@ fn lock_mode_tag(lock_mode: LockMode) -> Option<&'static str> {
         LockMode::Normal => None,
         LockMode::Locked => Some("LOCK"),
         LockMode::Resize => Some("RESIZE"),
-        LockMode::MovePane => Some("MOVE PANE"),
+        LockMode::PanePlacement => Some("PLACE PANE"),
         LockMode::TabMode => Some("TAB"),
         LockMode::ScrollMode => Some("SCROLL"),
     }
@@ -876,7 +961,7 @@ pub(crate) fn find_region_area(
 }
 
 /// Return the pane rectangle left by the committed regions in frame coordinates.
-pub(crate) fn compute_pane_area(
+pub fn compute_pane_area(
     committed_regions: &CommittedRegions,
     viewport_area: RatatuiRect,
 ) -> RatatuiRect {
@@ -928,10 +1013,7 @@ pub(crate) fn set_line_clipped(
 ///
 /// A pane area larger than `effective` leaves a letterbox margin around the
 /// rect. Each dimension is clamped to the pane area's own.
-pub(crate) fn compute_content_rect(
-    pane_area: RatatuiRect,
-    effective_cell_size: Size,
-) -> RatatuiRect {
+pub fn compute_content_rect(pane_area: RatatuiRect, effective_cell_size: Size) -> RatatuiRect {
     let column_count = effective_cell_size.column_count.min(pane_area.width);
     let row_count = effective_cell_size.row_count.min(pane_area.height);
     RatatuiRect {

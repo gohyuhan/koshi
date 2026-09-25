@@ -1295,18 +1295,18 @@ fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
 #[test]
 fn placement_statusline_reserves_the_right_edge_and_styles_each_status_kind() {
     let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new(), false);
-    let status_text = "MOVE D | swap with B";
+    let status_text = "PLACE D | swap with B";
     let valid_placement_status = PlacementStatus {
         placement_status_kind: PlacementStatusKind::Valid,
         status_text: status_text.to_string(),
     };
     let invalid_placement_status = PlacementStatus {
         placement_status_kind: PlacementStatusKind::Invalid,
-        status_text: "MOVE D | choose a destination".to_string(),
+        status_text: "PLACE D | choose a destination".to_string(),
     };
     let loading_placement_status = PlacementStatus {
         placement_status_kind: PlacementStatusKind::Loading,
-        status_text: "MOVE D | loading logs".to_string(),
+        status_text: "PLACE D | loading logs".to_string(),
     };
 
     let render_status = |placement_status: &PlacementStatus| {

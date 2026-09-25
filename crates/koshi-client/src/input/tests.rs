@@ -9,11 +9,15 @@ use koshi_config::conflict::{KeymapLayer, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
 use koshi_config::types::{KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
-use koshi_core::geometry::Direction;
-use koshi_core::ids::{PaneId, SessionId, TabId};
+use koshi_core::geometry::{Direction, Point, Size, SplitDirection};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::registry::ActionRegistry;
+use koshi_ipc::frame::FrameSlot;
+use koshi_ipc::placement::PanePlacementPaneSnapshot;
+use koshi_layout::tree::{LayoutNode, SplitNode};
+use koshi_renderer::snapshot::PaneKind;
 
-use crate::{Client, PlacementMode, PlacementModeEntry};
+use crate::{Client, PlacementMode, PlacementModeLifetime};
 
 /// A viewer on the built-in keymap.
 fn build_test_client() -> Client {
@@ -221,7 +225,7 @@ fn placement_submode_owns_the_locked_keyboard_and_restores_locked_mode() {
     });
 
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
-    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
     assert_eq!(
         client.resolve_key(client.keymap_catalog.get_unlock_chord(), Instant::now()),
         KeyOutcome::Discard,
@@ -233,10 +237,10 @@ fn placement_submode_owns_the_locked_keyboard_and_restores_locked_mode() {
     };
     assert_eq!(
         bound_action.action_reference,
-        ActionReference::from_core_action_name("cancel-pane-move").expect("valid name")
+        ActionReference::from_core_action_name("cancel-pane-placement").expect("valid name")
     );
     assert_eq!(
-        client.apply_client_action(ClientActionKind::CancelPaneMove),
+        client.apply_client_action(ClientActionKind::CancelPanePlacement),
         PlacementInputAction::CancelPlacement
     );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -280,10 +284,19 @@ fn submitted_placement_consumes_navigation_without_changing_its_target() {
         0,
     )));
 
-    assert!(matches!(
+    assert_eq!(
         client.submit_placement_command(),
-        Some(PlacementInputAction::SubmitPlacement(_))
-    ));
+        Some(PlacementInputAction::SubmitPlacement(Command::PlacePane(
+            PlacePaneArgs {
+                source_pane_id,
+                placement_target: placement_target.clone(),
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            }
+        )))
+    );
     let submitted_mode = client.placement_mode.clone();
 
     for placement_chord in [
@@ -314,13 +327,13 @@ fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
         }),
         is_placement_submitted: true,
     });
-    client.placement_mode_entry = PlacementModeEntry::Mouse;
+    client.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
 
     assert!(!client.is_placement_mode_active());
     assert!(client.is_placement_confirmation_pending());
     assert_eq!(client.get_active_input_mode(), LockMode::Locked);
     assert_eq!(
-        client.apply_client_action(ClientActionKind::CancelPaneMove),
+        client.apply_client_action(ClientActionKind::CancelPanePlacement),
         PlacementInputAction::Consumed
     );
     assert!(client.is_placement_confirmation_pending());
@@ -328,7 +341,7 @@ fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
 }
 
 #[test]
-fn submitted_keyboard_placement_keeps_move_pane_mode_and_ignores_cancel() {
+fn submitted_keyboard_placement_keeps_pane_placement_mode_and_ignores_cancel() {
     let mut client = build_test_client();
     client.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
@@ -340,12 +353,12 @@ fn submitted_keyboard_placement_keeps_move_pane_mode_and_ignores_cancel() {
         }),
         is_placement_submitted: true,
     });
-    client.placement_mode_entry = PlacementModeEntry::Keyboard;
+    client.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
 
     assert!(client.is_placement_mode_active());
-    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
     assert_eq!(
-        client.apply_client_action(ClientActionKind::CancelPaneMove),
+        client.apply_client_action(ClientActionKind::CancelPanePlacement),
         PlacementInputAction::Consumed
     );
     assert!(client.is_placement_mode_active());
@@ -388,6 +401,29 @@ fn changing_input_owner_cancels_an_unconfirmed_placement() {
 }
 
 #[test]
+fn placement_accepts_the_dragged_pane_focus_frame_before_cancelling_other_focus() {
+    let initial_focused_pane_id = PaneId::new();
+    let dragged_pane_id = PaneId::new();
+    let tab_id = TabId::new();
+    let mut client = build_test_client();
+    client.set_frame_view(tab_id, Some(initial_focused_pane_id), vec![tab_id]);
+    client.placement_mode = Some(PlacementMode {
+        source_pane_id: dragged_pane_id,
+        source_tab_id: tab_id,
+        destination_tab_id: tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+
+    client.set_frame_view(tab_id, Some(dragged_pane_id), vec![tab_id]);
+    assert!(client.is_placement_mode_active());
+
+    client.set_frame_view(tab_id, Some(initial_focused_pane_id), vec![tab_id]);
+    assert!(!client.is_placement_mode_active());
+}
+
+#[test]
 fn a_new_frame_owner_cancels_an_unconfirmed_placement() {
     let mut client = build_test_client();
     let source_tab_id = TabId::new();
@@ -422,7 +458,503 @@ fn locked_mode_still_passes_keys_it_does_not_bind() {
 }
 
 #[test]
-fn locked_mode_opens_move_pane_without_changing_the_base_mode() {
+fn keyboard_pane_placement_opens_on_the_active_tab_when_other_tabs_exist() {
+    let mut client = build_test_client();
+    let active_tab_id = TabId::new();
+    let newer_tab_id = TabId::new();
+    let source_pane_id = PaneId::new();
+    client.set_frame_view(
+        active_tab_id,
+        Some(source_pane_id),
+        vec![active_tab_id, newer_tab_id],
+    );
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::BeginPanePlacement),
+        PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: None,
+            source_pane_id,
+            destination_tab_id: active_tab_id,
+        }
+    );
+    assert_eq!(
+        client.get_placement_destination_tab_id(),
+        Some(active_tab_id)
+    );
+}
+
+/// A keyboard move of `source_pane_id` on `source_tab_id` after Tab asked for a
+/// preview of `destination_tab_id`, with that read in flight as request `1`.
+/// Returns the client and the preview that answers the read.
+fn build_client_reading_next_placement_tab(
+    session_id: SessionId,
+    source_pane_id: PaneId,
+    source_tab_id: TabId,
+    destination_tab_id: TabId,
+) -> (Client, PanePlacementSnapshot) {
+    let mut client = build_test_client();
+    client.set_session_id(session_id);
+    client.set_frame_view(
+        source_tab_id,
+        Some(source_pane_id),
+        vec![source_tab_id, destination_tab_id],
+    );
+    client.apply_client_action(ClientActionKind::BeginPanePlacement);
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::SelectNextPlacementTab),
+        PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: None,
+            source_pane_id,
+            destination_tab_id,
+        }
+    );
+    assert!(client.begin_placement_read(1, source_pane_id, destination_tab_id, Instant::now()));
+    let placement_snapshot = crate::tests::build_test_placement_snapshot(
+        session_id,
+        client.get_client_id(),
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        0,
+        0,
+    );
+    (client, placement_snapshot)
+}
+
+#[test]
+fn next_placement_tab_selects_insertion_right_of_that_whole_tab_and_enter_places_the_pane() {
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let (mut client, placement_snapshot) = build_client_reading_next_placement_tab(
+        SessionId::new(),
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+    );
+    let whole_tab_insertion_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Tab,
+        direction: Direction::Right,
+    };
+
+    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+
+    assert_eq!(
+        client.get_placement_target(),
+        Some(whole_tab_insertion_target.clone())
+    );
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
+        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
+            source_pane_id,
+            placement_target: whole_tab_insertion_target,
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: 0,
+                client_revision: 0,
+            }),
+        }))
+    );
+}
+
+#[test]
+fn previous_placement_tab_back_to_the_source_tab_selects_no_target() {
+    let session_id = SessionId::new();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let (mut client, placement_snapshot) = build_client_reading_next_placement_tab(
+        session_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+    );
+    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::SelectPreviousPlacementTab),
+        PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: None,
+            source_pane_id,
+            destination_tab_id: source_tab_id,
+        }
+    );
+    assert!(client.begin_placement_read(2, source_pane_id, source_tab_id, Instant::now()));
+    let mut source_tab_placement_snapshot = crate::tests::build_test_placement_snapshot(
+        session_id,
+        client.get_client_id(),
+        source_pane_id,
+        source_tab_id,
+        source_tab_id,
+        0,
+        0,
+    );
+    source_tab_placement_snapshot.destination_tab_snapshot = None;
+    assert!(client.accept_placement_snapshot(2, source_tab_placement_snapshot, Instant::now()));
+
+    assert_eq!(client.get_placement_target(), None);
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
+        PlacementInputAction::Consumed
+    );
+}
+
+#[test]
+fn a_next_tab_preview_accepted_during_a_drag_selects_no_target() {
+    let source_pane_id = PaneId::new();
+    let (mut client, placement_snapshot) = build_client_reading_next_placement_tab(
+        SessionId::new(),
+        source_pane_id,
+        TabId::new(),
+        TabId::new(),
+    );
+    client.begin_placement_drag(Point { column: 0, row: 0 }, false);
+
+    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+
+    assert_eq!(client.get_placement_target(), None);
+}
+
+#[test]
+fn shift_arrow_on_the_whole_tab_target_selects_that_edge_of_the_tab() {
+    let destination_tab_id = TabId::new();
+    let (mut client, placement_snapshot) = build_client_reading_next_placement_tab(
+        SessionId::new(),
+        PaneId::new(),
+        TabId::new(),
+        destination_tab_id,
+    );
+    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::SelectPaneInsertion(Direction::Left)),
+        PlacementInputAction::Consumed
+    );
+
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Tab,
+            direction: Direction::Left,
+        })
+    );
+}
+
+#[test]
+fn arrow_on_the_whole_tab_target_selects_a_swap_in_the_previewed_tab() {
+    let (mut client, placement_snapshot) = build_client_reading_next_placement_tab(
+        SessionId::new(),
+        PaneId::new(),
+        TabId::new(),
+        TabId::new(),
+    );
+    let destination_pane_id = placement_snapshot
+        .destination_tab_snapshot
+        .as_ref()
+        .expect("a preview of another tab carries that tab")
+        .pane_slots[0]
+        .pane_id;
+    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Right)),
+        PlacementInputAction::Consumed
+    );
+
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: destination_pane_id,
+        })
+    );
+}
+
+#[test]
+fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again_after_the_refresh() {
+    let session_id = SessionId::new();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let (mut client, placement_snapshot) = build_client_reading_next_placement_tab(
+        session_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+    );
+    let whole_tab_insertion_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Tab,
+        direction: Direction::Right,
+    };
+    assert!(client.accept_placement_snapshot(1, placement_snapshot.clone(), Instant::now()));
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
+        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
+            source_pane_id,
+            placement_target: whole_tab_insertion_target.clone(),
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: 0,
+                client_revision: 0,
+            }),
+        }))
+    );
+    let command_id = CommandId::new();
+    client.set_pending_placement_command_id(command_id);
+
+    assert!(client.reject_placement_command(command_id));
+    assert_eq!(client.get_placement_target(), None);
+    assert_eq!(
+        client.take_placement_preview_refresh(),
+        Some((source_pane_id, destination_tab_id))
+    );
+    assert!(client.begin_placement_read(2, source_pane_id, destination_tab_id, Instant::now()));
+    assert!(client.accept_placement_snapshot(2, placement_snapshot, Instant::now()));
+
+    assert_eq!(
+        client.get_placement_target(),
+        Some(whole_tab_insertion_target)
+    );
+}
+
+/// A same-tab placement preview of `layout_tree` for moving `source_pane_id`,
+/// with every slot and stack header where the tiled solve over the test
+/// viewport puts it. A collapsed stack member's slot is its header strip and is
+/// not visible.
+fn build_solved_placement_snapshot(
+    session_id: SessionId,
+    client_id: ClientId,
+    source_pane_id: PaneId,
+    tab_id: TabId,
+    layout_tree: LayoutNode,
+) -> PanePlacementSnapshot {
+    let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
+        session_id,
+        client_id,
+        source_pane_id,
+        tab_id,
+        tab_id,
+        0,
+        0,
+    );
+    placement_snapshot.destination_tab_snapshot = None;
+    let layout_solve = solve_layout_with_mode(
+        &layout_tree,
+        LayoutMode::Tiled,
+        Rect::from_size_at_origin(crate::tests::TEST_VIEWPORT_SIZE),
+        PaneSizing {
+            minimum_size: Size {
+                column_count: 1,
+                row_count: 1,
+            },
+            gap_cell_count: 0,
+        },
+    );
+    let collapsed_pane_ids: Vec<PaneId> = layout_solve
+        .stack_headers
+        .iter()
+        .map(|stack_header| stack_header.pane_id)
+        .collect();
+    let tab_snapshot = &mut placement_snapshot.source_tab_snapshot;
+    tab_snapshot.pane_slots = layout_solve
+        .pane_rects
+        .iter()
+        .map(|&(pane_id, outer_rect)| {
+            let is_visible = !collapsed_pane_ids.contains(&pane_id);
+            FrameSlot {
+                pane_id,
+                outer_rect,
+                content_rect: is_visible.then_some(outer_rect),
+                pane_kind: PaneKind::Terminal,
+                is_visible,
+                is_suppressed: false,
+                is_dead: false,
+            }
+        })
+        .collect();
+    tab_snapshot.pane_snapshots = layout_tree
+        .list_leaf_pane_ids()
+        .into_iter()
+        .map(|pane_id| PanePlacementPaneSnapshot {
+            pane_id,
+            terminal_window: None,
+            image_placement_snapshots: Vec::new(),
+        })
+        .collect();
+    tab_snapshot.stack_headers = layout_solve.stack_headers;
+    tab_snapshot.layout_tree = layout_tree;
+    placement_snapshot
+}
+
+/// The panes of `H[Stack[S1, S2, S3 open], P]`: a stack on the left whose
+/// third member is open below the headers of the first two, and a plain pane on
+/// the right.
+struct StackBesidePlainPane {
+    first_stack_pane_id: PaneId,
+    second_stack_pane_id: PaneId,
+    open_stack_pane_id: PaneId,
+    plain_pane_id: PaneId,
+}
+
+impl StackBesidePlainPane {
+    fn new() -> Self {
+        Self {
+            first_stack_pane_id: PaneId::new(),
+            second_stack_pane_id: PaneId::new(),
+            open_stack_pane_id: PaneId::new(),
+            plain_pane_id: PaneId::new(),
+        }
+    }
+
+    fn build_layout_tree(&self) -> LayoutNode {
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                    vec![
+                        self.first_stack_pane_id,
+                        self.second_stack_pane_id,
+                        self.open_stack_pane_id,
+                    ],
+                    2,
+                )),
+                LayoutNode::Pane(self.plain_pane_id),
+            ],
+        ))
+    }
+
+    /// A client in keyboard pane placement mode moving `source_pane_id` inside this
+    /// layout's tab, with the solved preview retained.
+    fn build_client_moving(&self, source_pane_id: PaneId) -> Client {
+        let mut client = build_test_client();
+        let session_id = SessionId::new();
+        let tab_id = TabId::new();
+        client.set_session_id(session_id);
+        client.set_frame_view(tab_id, Some(source_pane_id), vec![tab_id]);
+        client.placement_mode = Some(PlacementMode {
+            source_pane_id,
+            source_tab_id: tab_id,
+            destination_tab_id: tab_id,
+            placement_direction: Direction::Right,
+            placement_target: None,
+            is_placement_submitted: false,
+        });
+        client.placement_snapshot = Some(Box::new(build_solved_placement_snapshot(
+            session_id,
+            client.get_client_id(),
+            source_pane_id,
+            tab_id,
+            self.build_layout_tree(),
+        )));
+        client
+    }
+}
+
+#[test]
+fn arrows_from_the_open_stack_member_walk_the_collapsed_members_above_it() {
+    let stack_layout = StackBesidePlainPane::new();
+    let mut client = stack_layout.build_client_moving(stack_layout.open_stack_pane_id);
+
+    client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Up));
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: stack_layout.second_stack_pane_id,
+        })
+    );
+    client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Up));
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: stack_layout.first_stack_pane_id,
+        })
+    );
+    client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Down));
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: stack_layout.second_stack_pane_id,
+        })
+    );
+}
+
+#[test]
+fn arrow_right_from_a_stack_member_selects_the_plain_pane_and_enter_swaps_them() {
+    let stack_layout = StackBesidePlainPane::new();
+    let mut client = stack_layout.build_client_moving(stack_layout.open_stack_pane_id);
+
+    client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Right));
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
+        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
+            source_pane_id: stack_layout.open_stack_pane_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: stack_layout.plain_pane_id,
+            },
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: 0,
+                client_revision: 0,
+            }),
+        }))
+    );
+}
+
+#[test]
+fn a_plain_pane_reaches_a_collapsed_stack_member_and_enter_swaps_them() {
+    let stack_layout = StackBesidePlainPane::new();
+    let mut client = stack_layout.build_client_moving(stack_layout.plain_pane_id);
+
+    client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Left));
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: stack_layout.open_stack_pane_id,
+        })
+    );
+    client.apply_client_action(ClientActionKind::SelectPaneTarget(Direction::Up));
+
+    assert_eq!(
+        client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
+        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
+            source_pane_id: stack_layout.plain_pane_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: stack_layout.second_stack_pane_id,
+            },
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: 0,
+                client_revision: 0,
+            }),
+        }))
+    );
+}
+
+#[test]
+fn shift_arrow_toward_a_stack_selects_insertion_beside_the_whole_stack() {
+    let stack_layout = StackBesidePlainPane::new();
+    let mut client = stack_layout.build_client_moving(stack_layout.plain_pane_id);
+    let tab_id = client
+        .get_placement_destination_tab_id()
+        .expect("pane placement mode names a destination tab");
+
+    client.apply_client_action(ClientActionKind::SelectPaneInsertion(Direction::Left));
+
+    assert_eq!(
+        client.get_placement_target(),
+        Some(PanePlacementTarget::Split {
+            destination_tab_id: tab_id,
+            anchor: PanePlacementAnchor::Group(vec![
+                stack_layout.first_stack_pane_id,
+                stack_layout.second_stack_pane_id,
+                stack_layout.open_stack_pane_id,
+            ]),
+            direction: Direction::Left,
+        })
+    );
+}
+
+#[test]
+fn locked_mode_opens_pane_placement_without_changing_the_base_mode() {
     let mut client = build_test_client();
     let source_tab_id = TabId::new();
     let source_pane_id = PaneId::new();
@@ -440,23 +972,24 @@ fn locked_mode_opens_move_pane_without_changing_the_base_mode() {
         KeyChord::from_parts(ModFlags::NONE, Key::Char('m')),
         Instant::now(),
     ) else {
-        panic!("the locked move opener must fire");
+        panic!("the locked pane placement opener must fire");
     };
     assert_eq!(
         bound_action.action_reference,
-        ActionReference::from_core_action_name("move-pane").expect("valid action name")
+        ActionReference::from_core_action_name("begin-pane-placement").expect("valid action name")
     );
 
     assert!(matches!(
-        client.apply_client_action(ClientActionKind::BeginPaneMove),
+        client.apply_client_action(ClientActionKind::BeginPanePlacement),
         PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: None,
             source_pane_id: actual_source_pane_id,
             destination_tab_id: actual_destination_tab_id,
         } if actual_source_pane_id == source_pane_id
             && actual_destination_tab_id == source_tab_id
     ));
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
-    assert_eq!(client.get_active_input_mode(), LockMode::MovePane);
+    assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
 }
 
 #[test]
@@ -594,14 +1127,14 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
             )],
         ),
         (
-            "move-pane",
-            &[(KeySequence::from(right_chord), "cancel-pane-move")],
+            "pane-placement",
+            &[(KeySequence::from(right_chord), "cancel-pane-placement")],
         ),
     ]);
     assert_eq!(
         client.resolve_key(right_chord, Instant::now()),
         KeyOutcome::Fire(BoundAction {
-            action_reference: ActionReference::from_core_action_name("cancel-pane-move")
+            action_reference: ActionReference::from_core_action_name("cancel-pane-placement")
                 .expect("valid name"),
             action_arguments: ActionArgs::None,
         })

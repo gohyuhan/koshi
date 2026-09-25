@@ -38,8 +38,8 @@ impl Server {
             client.update_cell_size(cell_size);
         }
         if cell_size_changed {
-            advance_session_placement_revision_when_possible(session);
-            advance_client_placement_revisions_when_possible(session, &affected_client_ids);
+            advance_session_placement_revision(session);
+            advance_client_placement_revisions(session, &affected_client_ids);
         }
         let pty_backend = Arc::clone(self.get_pty_backend());
         let mut emitted_events = Vec::new();
@@ -308,7 +308,7 @@ impl Server {
             let client_view_changed = focused_panes_before != *client.list_focused_panes()
                 || zoomed_panes_before != *client.list_zoomed_panes();
             if client_view_changed {
-                advance_client_placement_revisions_when_possible(session, &[client_id]);
+                advance_client_placement_revisions(session, &[client_id]);
             }
         }
 
@@ -443,11 +443,8 @@ impl Server {
                 if let Some(old_tab_id) = old_tab_id {
                     let old_affected_client_ids =
                         list_clients_affected_by_tabs(old_session, &[old_tab_id], None);
-                    advance_session_placement_revision_when_possible(old_session);
-                    advance_client_placement_revisions_when_possible(
-                        old_session,
-                        &old_affected_client_ids,
-                    );
+                    advance_session_placement_revision(old_session);
+                    advance_client_placement_revisions(old_session, &old_affected_client_ids);
                 }
                 if let Some(old_tab_id) = old_tab_id {
                     self.reflow_tab_if_viewed(
@@ -554,8 +551,8 @@ impl Server {
                 target_client_was_existing || *affected_client_id != client_id
             })
             .collect::<Vec<_>>();
-        advance_session_placement_revision_when_possible(session);
-        advance_client_placement_revisions_when_possible(session, &clients_to_advance);
+        advance_session_placement_revision(session);
+        advance_client_placement_revisions(session, &clients_to_advance);
 
         // Reflow the tab the client now views, plus — on a same-session move —
         // the one it left.
@@ -631,8 +628,8 @@ impl Server {
         client.update_pane_area(pane_area);
         client.replace_cell_size(cell_size);
         if view_changed {
-            advance_session_placement_revision_when_possible(session);
-            advance_client_placement_revisions_when_possible(session, &affected_client_ids);
+            advance_session_placement_revision(session);
+            advance_client_placement_revisions(session, &affected_client_ids);
         }
 
         let mut emitted_events = Vec::new();
@@ -752,8 +749,8 @@ impl Server {
             .as_ref()
             .map(|client| client.get_active_tab());
         if removed_client.is_some() {
-            advance_session_placement_revision_when_possible(session);
-            advance_client_placement_revisions_when_possible(session, &affected_client_ids);
+            advance_session_placement_revision(session);
+            advance_client_placement_revisions(session, &affected_client_ids);
         }
         // A client did leave, and none is left attached.
         let is_session_empty = removed_client.is_some() && !session.clients.has_clients();

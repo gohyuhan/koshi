@@ -6,8 +6,7 @@ use clap::error::ErrorKind;
 use clap::CommandFactory;
 use clap::Parser;
 use koshi_config::app_config::parse_app_config;
-use koshi_core::action::{build_core_action_seeds, ActionHandlerReference, ClientActionKind};
-use koshi_core::command::CommandKind;
+use koshi_core::action::{build_core_action_seeds, ActionHandlerReference};
 use std::path::Path;
 
 use super::*;
@@ -988,7 +987,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "serve-session",
         "server-version",
         "share",
-        "swap-panes",
         "toggle-lock",
         "toggle-pane-fullscreen",
         "unlock",
@@ -2520,31 +2518,6 @@ fn action_subcommands_map_to_their_exact_commands() {
             }),
         ),
         (
-            vec!["koshi", "swap-panes", "--with", &pane_flag],
-            "swap-panes",
-            Command::SwapPanes(SwapPanesArgs {
-                source_pane_id: None,
-                target_pane_id: pane,
-                expected_placement_revision: None,
-            }),
-        ),
-        (
-            vec![
-                "koshi",
-                "swap-panes",
-                "--with",
-                &pane_flag,
-                "--pane",
-                &pane_flag,
-            ],
-            "swap-panes",
-            Command::SwapPanes(SwapPanesArgs {
-                source_pane_id: Some(pane),
-                target_pane_id: pane,
-                expected_placement_revision: None,
-            }),
-        ),
-        (
             vec![
                 "koshi",
                 "place-pane",
@@ -2715,12 +2688,6 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
         &["koshi", "close-pane"],
         &["koshi", "resize-pane", "--direction", "left"],
         &["koshi", "move-pane", "--direction", "right"],
-        &[
-            "koshi",
-            "swap-panes",
-            "--with",
-            "0192f0c1-2345-7000-8000-000000000001",
-        ],
         &["koshi", "scroll-pane", "--lines", "3"],
         &["koshi", "toggle-pane-fullscreen"],
         &["koshi", "new-tab"],
@@ -2747,16 +2714,8 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
             .iter()
             .find(|(seeded, _)| *seeded == action)
             .unwrap_or_else(|| panic!("action {action} is not in the seed table"));
-        let expected_command_kind = match &metadata.handler {
-            ActionHandlerReference::CoreCommand(kind) => *kind,
-            ActionHandlerReference::CoreClient(ClientActionKind::BeginPaneMove)
-                if action
-                    == ActionReference::from_core_action_name("move-pane")
-                        .expect("move-pane is a valid action name") =>
-            {
-                CommandKind::MovePane
-            }
-            _ => panic!("action {action} is seeded with an unexpected handler"),
+        let ActionHandlerReference::CoreCommand(expected_command_kind) = metadata.handler else {
+            panic!("action {action} is seeded with an unexpected handler");
         };
         assert_eq!(
             mapped.get_command_kind(),
@@ -2923,7 +2882,6 @@ fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
             "--pane",
             &pane_flag,
         ],
-        vec!["koshi", "swap-panes", "--with", &pane_flag],
         vec![
             "koshi",
             "place-pane",
@@ -2933,14 +2891,6 @@ fn target_pane_names_the_pane_of_every_verb_that_takes_one() {
             "logs",
             "--direction",
             "left",
-        ],
-        vec![
-            "koshi",
-            "swap-panes",
-            "--with",
-            &pane_flag,
-            "--pane",
-            &pane_flag,
         ],
         vec!["koshi", "scroll-pane", "--lines", "3", "--pane", &pane_flag],
         vec!["koshi", "input", "--pane", &pane_flag, "ls"],
@@ -3757,7 +3707,6 @@ fn every_to_action_name_is_a_registered_core_action() {
         vec!["koshi", "close-pane"],
         vec!["koshi", "resize-pane", "--direction", "left"],
         vec!["koshi", "move-pane", "--direction", "left"],
-        vec!["koshi", "swap-panes", "--with", &pane],
         vec![
             "koshi",
             "place-pane",
@@ -3816,7 +3765,6 @@ fn every_to_action_name_is_a_registered_core_action() {
         "core:resize-pane",
         "core:run",
         "core:scroll-pane",
-        "core:swap-panes",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
         "core:unlock",

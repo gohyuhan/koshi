@@ -99,7 +99,7 @@ fn no_layers_yield_an_empty_merged_map() {
 #[test]
 fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_map() {
     // A built-in mode never seeds an entry of its own. The shipped defaults
-    // bind `normal`, `locked`, and `move-pane`; `resize` gets no entry.
+    // bind `normal`, `locked`, and `pane-placement`; `resize` gets no entry.
     let merged = merge_keymaps(
         &[build_default_key_map_layer()],
         None,
@@ -110,8 +110,8 @@ fn a_built_in_mode_no_layer_binds_is_absent_from_the_merged_map() {
         merged.mode_map_by_name.keys().cloned().collect::<Vec<_>>(),
         vec![
             parse_mode_name("locked"),
-            parse_mode_name("move-pane"),
             parse_mode_name("normal"),
+            parse_mode_name("pane-placement"),
         ]
     );
 }
@@ -158,8 +158,8 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
     let merged = merge_test_keymaps(&[build_default_key_map_layer()]);
     let normal = &merged.mode_map_by_name[&parse_mode_name("normal")];
 
-    // All 23 shipped normal-mode defaults fire in this build.
-    assert_eq!(normal.default_bindings_by_key_sequence.len(), 23);
+    // All 24 shipped normal-mode defaults fire in this build.
+    assert_eq!(normal.default_bindings_by_key_sequence.len(), 24);
     assert_eq!(
         normal.default_bindings_by_key_sequence[&build_default_fullscreen_key_sequence()],
         build_bound_action("toggle-pane-fullscreen")
@@ -186,7 +186,7 @@ fn defaults_alone_fill_the_defaults_map_and_nothing_else() {
             KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
             vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('m'))],
         )],
-        build_bound_action("move-pane")
+        build_bound_action("begin-pane-placement")
     );
     assert_eq!(
         locked.default_bindings_by_key_sequence[&build_single_chord_sequence(ModFlags::CTRL, 'g')],
@@ -240,7 +240,7 @@ fn user_binding_on_a_fresh_key_adds_without_touching_defaults() {
             layer_origin: LayerOrigin::User,
         }
     );
-    assert_eq!(normal.default_bindings_by_key_sequence.len(), 23);
+    assert_eq!(normal.default_bindings_by_key_sequence.len(), 24);
     assert_eq!(
         normal.default_bindings_by_key_sequence[&build_default_fullscreen_key_sequence()],
         build_bound_action("toggle-pane-fullscreen")
@@ -272,7 +272,7 @@ fn a_layout_layer_is_user_authored_and_carries_its_own_attribution() {
             layer_origin: LayerOrigin::Layout,
         }
     );
-    assert_eq!(normal.default_bindings_by_key_sequence.len(), 23);
+    assert_eq!(normal.default_bindings_by_key_sequence.len(), 24);
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn user_binding_steals_a_defaulted_key() {
         build_bound_action("toggle-pane-fullscreen")
     );
     // Sibling defaults untouched.
-    assert_eq!(normal.default_bindings_by_key_sequence.len(), 22);
+    assert_eq!(normal.default_bindings_by_key_sequence.len(), 23);
     assert_eq!(
         normal.default_bindings_by_key_sequence[&build_single_chord_sequence(ModFlags::CTRL, 'l')],
         build_bound_action("lock")
@@ -569,7 +569,7 @@ fn remove_of_an_unheld_key_is_recorded_and_nothing_more() {
     let normal = &merged.mode_map_by_name[&parse_mode_name("normal")];
 
     assert_eq!(normal.removed_key_sequences, BTreeSet::from([key]));
-    assert_eq!(normal.default_bindings_by_key_sequence.len(), 23);
+    assert_eq!(normal.default_bindings_by_key_sequence.len(), 24);
     assert_eq!(normal.user_bindings_by_key_sequence, BTreeMap::new());
     assert_eq!(
         normal.unbound_default_bindings_by_key_sequence,
@@ -879,8 +879,8 @@ fn unregistered_mode_is_skipped() {
         merged.mode_map_by_name.keys().cloned().collect::<Vec<_>>(),
         vec![
             parse_mode_name("locked"),
-            parse_mode_name("move-pane"),
             parse_mode_name("normal"),
+            parse_mode_name("pane-placement"),
         ]
     );
 }

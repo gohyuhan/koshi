@@ -500,10 +500,10 @@ fn action_handler_reference_serialization_uses_stable_wire_forms() {
     );
     assert_eq!(
         serde_json::to_value(ActionHandlerReference::CoreClient(
-            ClientActionKind::BeginPaneMove
+            ClientActionKind::BeginPanePlacement
         ))
         .expect("serialize"),
-        json!({ "CoreClient": "BeginPaneMove" })
+        json!({ "CoreClient": "BeginPanePlacement" })
     );
     let plugin_id = PluginId::new();
     assert_eq!(
@@ -524,7 +524,7 @@ fn action_handler_reference_serialization_uses_stable_wire_forms() {
 fn action_handler_reference_roundtrips_through_serde() {
     assert_json_roundtrip(&ActionHandlerReference::CoreCommand(CommandKind::NewPane));
     assert_json_roundtrip(&ActionHandlerReference::CoreClient(
-        ClientActionKind::BeginPaneMove,
+        ClientActionKind::BeginPanePlacement,
     ));
     assert_json_roundtrip(&ActionHandlerReference::PluginHostCall(PluginId::new()));
     assert_json_roundtrip(&ActionHandlerReference::Sequence(vec![
@@ -720,32 +720,8 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![Pane],
         ),
         (
-            "core:move-pane-left",
+            "core:move-pane",
             CommandKind::MovePane,
-            PaneSession,
-            vec![Pane],
-        ),
-        (
-            "core:move-pane-down",
-            CommandKind::MovePane,
-            PaneSession,
-            vec![Pane],
-        ),
-        (
-            "core:move-pane-up",
-            CommandKind::MovePane,
-            PaneSession,
-            vec![Pane],
-        ),
-        (
-            "core:move-pane-right",
-            CommandKind::MovePane,
-            PaneSession,
-            vec![Pane],
-        ),
-        (
-            "core:swap-panes",
-            CommandKind::SwapPanes,
             PaneSession,
             vec![Pane],
         ),
@@ -918,8 +894,8 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             .collect();
     let expected_client_seed_metadata = vec![
         (
-            "core:move-pane".to_string(),
-            ClientActionKind::BeginPaneMove,
+            "core:begin-pane-placement".to_string(),
+            ClientActionKind::BeginPanePlacement,
             PaneSession,
             vec![Pane],
         ),
@@ -996,8 +972,8 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
         (
-            "core:cancel-pane-move".to_string(),
-            ClientActionKind::CancelPaneMove,
+            "core:cancel-pane-placement".to_string(),
+            ClientActionKind::CancelPanePlacement,
             Client,
             vec![ClientTarget],
         ),
@@ -1072,7 +1048,7 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
         ("select-next-placement-tab", vec![TargetKind::Client]),
         ("select-previous-placement-tab", vec![TargetKind::Client]),
         ("confirm-pane-placement", vec![TargetKind::Client]),
-        ("cancel-pane-move", vec![TargetKind::Client]),
+        ("cancel-pane-placement", vec![TargetKind::Client]),
     ];
     for (action_name, target_kinds) in client_scoped_action_cases {
         let action_metadata = get_action_metadata(action_name);
@@ -1165,7 +1141,8 @@ fn core_action_seed_name_snapshot_is_stable() {
     action_names.sort();
 
     let expected_action_names = vec![
-        "core:cancel-pane-move",
+        "core:begin-pane-placement",
+        "core:cancel-pane-placement",
         "core:close-pane",
         "core:close-pane-tree",
         "core:close-tab",
@@ -1181,10 +1158,6 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:lock",
         "core:mouse-select",
         "core:move-pane",
-        "core:move-pane-down",
-        "core:move-pane-left",
-        "core:move-pane-right",
-        "core:move-pane-up",
         "core:move-tab",
         "core:new-pane",
         "core:new-pane-down",
@@ -1222,7 +1195,6 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:select-pane-target-right",
         "core:select-pane-target-up",
         "core:select-previous-placement-tab",
-        "core:swap-panes",
         "core:toggle-lock",
         "core:toggle-pane-fullscreen",
         "core:unlock",

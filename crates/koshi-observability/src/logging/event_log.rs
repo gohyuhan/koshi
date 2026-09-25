@@ -75,6 +75,16 @@ pub fn log_event(runtime_event: &Event) {
                 "pane focused"
             );
         }
+        Event::PanePlacementCommitted(event_payload) => {
+            tracing::info!(
+                command_id = %event_payload.command_id,
+                source_pane_id = %event_payload.source_pane_id,
+                source_tab_id = %event_payload.source_tab_id,
+                destination_tab_id = %event_payload.destination_tab_id,
+                placement_target = ?event_payload.placement_target,
+                "pane placement committed"
+            );
+        }
         Event::TabCreated(event_payload) => {
             tracing::info!(tab_id = %event_payload.tab_id, "tab created");
         }

@@ -31,26 +31,6 @@ pub const MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT: usize = 262_144;
 /// The identity of one image placement in a rendered pane.
 pub type ImagePlacementKey = (PaneId, ImagePlacementId);
 
-/// The identity of one image placement in a placement-preview panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PlacementPreviewImageKey {
-    /// The preview panel: zero for the source panel and one for the destination panel.
-    pub panel_index: u8,
-    /// The pane that owns the image in the preview snapshot.
-    pub pane_id: PaneId,
-    /// The terminal-local image placement identity.
-    pub placement_id: ImagePlacementId,
-}
-
-/// The identity used by native image output for one rendered image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ImageOutputKey {
-    /// An image in the normal frame.
-    Frame(ImagePlacementKey),
-    /// An image in a placement-preview panel.
-    PlacementPreview(PlacementPreviewImageKey),
-}
-
 /// The cell facts needed to classify image composition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageCellState {
@@ -341,7 +321,6 @@ pub struct ImagePaint {
     pub cell_pixel_offset_y: Option<u32>,
     /// The protocol z-index used to order overlaps.
     pub z_index: i32,
-    output_key: ImageOutputKey,
     draw_order: usize,
 }
 
@@ -373,26 +352,8 @@ impl ImagePaint {
             cell_pixel_offset_x,
             cell_pixel_offset_y,
             z_index,
-            output_key: ImageOutputKey::Frame((pane_id, placement_id)),
             draw_order: 0,
         }
-    }
-
-    /// Set the native-output identity for an image in a placement-preview panel.
-    #[must_use]
-    pub fn with_placement_preview_key(mut self, panel_index: u8) -> Self {
-        self.output_key = ImageOutputKey::PlacementPreview(PlacementPreviewImageKey {
-            panel_index,
-            pane_id: self.pane_id,
-            placement_id: self.placement_id,
-        });
-        self
-    }
-
-    /// Return the identity used by native image output.
-    #[must_use]
-    pub fn get_output_key(&self) -> ImageOutputKey {
-        self.output_key
     }
 
     fn with_draw_order(mut self, draw_order: usize) -> Self {

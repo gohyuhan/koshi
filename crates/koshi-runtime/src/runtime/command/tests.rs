@@ -22,7 +22,7 @@ use koshi_core::command::{
     EnablePluginArgs, FocusPaneArgs, FocusTabArgs, GridPosition, LockModeArgs, MovePaneArgs,
     MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs,
     PlacementRevision, PluginCommand, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
-    Selection, SelectionKind, SwapPanesArgs, TabTarget, VisualCommand, WriteToPaneArgs,
+    Selection, SelectionKind, TabTarget, VisualCommand, WriteToPaneArgs,
 };
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
 use koshi_core::geometry::{Direction, PaneArea, PixelCellSize, Size, SplitDirection};
@@ -399,7 +399,7 @@ fn build_command_matrix_server(
 
 /// Every command kind this build has, one entry each. [`build_command_for_kind`] matches
 /// over the enum, so a new variant stops the build there.
-const ALL_COMMAND_KINDS: [CommandKind; 24] = [
+const ALL_COMMAND_KINDS: [CommandKind; 23] = [
     CommandKind::NewPane,
     CommandKind::ClosePane,
     CommandKind::ResizePane,
@@ -417,7 +417,6 @@ const ALL_COMMAND_KINDS: [CommandKind; 24] = [
     CommandKind::TogglePaneFullscreen,
     CommandKind::MoveTab,
     CommandKind::MovePane,
-    CommandKind::SwapPanes,
     CommandKind::PlacePane,
     CommandKind::ScrollPane,
     CommandKind::Quit,
@@ -489,11 +488,6 @@ fn build_command_for_kind(command_kind: CommandKind, tab_id: TabId, pane_id: Pan
         CommandKind::MovePane => Command::MovePane(MovePaneArgs {
             pane_id: Some(pane_id),
             direction: Direction::Right,
-        }),
-        CommandKind::SwapPanes => Command::SwapPanes(SwapPanesArgs {
-            source_pane_id: Some(pane_id),
-            target_pane_id: pane_id,
-            expected_placement_revision: None,
         }),
         CommandKind::PlacePane => Command::PlacePane(PlacePaneArgs {
             source_pane_id: pane_id,
@@ -930,7 +924,6 @@ fn every_command_answers_a_remote_client_the_same_as_a_local_one() {
             CommandKind::Visual,
             CommandKind::TogglePaneFullscreen,
             CommandKind::MoveTab,
-            CommandKind::SwapPanes,
             CommandKind::PlacePane,
             CommandKind::ScrollPane,
             CommandKind::Quit,
@@ -8118,7 +8111,7 @@ fn build_resize_fixture() -> (
 }
 
 #[test]
-fn move_pane_swaps_the_focused_pane_with_its_directional_neighbor() {
+fn move_pane_swaps_the_focused_pane_with_its_directional_neighbor_and_announces_the_placement() {
     let (
         mut runtime,
         _fake_pty_backend,
@@ -8129,6 +8122,11 @@ fn move_pane_swaps_the_focused_pane_with_its_directional_neighbor() {
         pane_id_a,
         _pane_pty_size_a,
     ) = build_resize_fixture();
+    let tab_id = runtime.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_active_tab();
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -8144,17 +8142,27 @@ fn move_pane_swaps_the_focused_pane_with_its_directional_neighbor() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(list_event_names(&emitted_events), ["LayoutChanged"]);
+            assert_eq!(
+                list_event_names(&emitted_events),
+                ["PanePlacementCommitted", "LayoutChanged"]
+            );
+            assert_eq!(
+                emitted_events[0],
+                Event::PanePlacementCommitted(PanePlacementCommitted {
+                    command_id,
+                    source_pane_id: pane_id_a,
+                    source_tab_id: tab_id,
+                    destination_tab_id: tab_id,
+                    placement_target: PanePlacementTarget::Swap {
+                        target_pane_id: root_pane_id,
+                    },
+                })
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
 
     let session = &runtime.session_by_id[&session_id];
-    let tab_id = session
-        .clients
-        .get_client_by_id(client_id)
-        .expect("client")
-        .get_active_tab();
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
         vec![pane_id_a, root_pane_id]
@@ -8205,7 +8213,7 @@ fn move_pane_without_a_neighbor_is_rejected_without_changing_the_layout() {
 }
 
 #[test]
-fn swap_panes_exchanges_explicit_pane_occupants() {
+fn a_same_tab_swap_placement_exchanges_pane_occupants() {
     let (
         mut runtime,
         _fake_pty_backend,
@@ -8219,9 +8227,11 @@ fn swap_panes_exchanges_explicit_pane_occupants() {
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
-        Command::SwapPanes(SwapPanesArgs {
-            source_pane_id: Some(root_pane_id),
-            target_pane_id: pane_id_a,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: root_pane_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: pane_id_a,
+            },
             expected_placement_revision: None,
         }),
     );
@@ -8232,7 +8242,10 @@ fn swap_panes_exchanges_explicit_pane_occupants() {
             emitted_events,
         } => {
             assert_eq!(ok_id, command_id);
-            assert_eq!(list_event_names(&emitted_events), ["LayoutChanged"]);
+            assert_eq!(
+                list_event_names(&emitted_events),
+                ["PanePlacementCommitted", "LayoutChanged"]
+            );
         }
         other => panic!("expected Ok, got {other:?}"),
     }
@@ -8246,6 +8259,58 @@ fn swap_panes_exchanges_explicit_pane_occupants() {
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree().list_leaf_pane_ids(),
         vec![pane_id_a, root_pane_id]
+    );
+}
+
+#[test]
+fn a_confirmed_same_tab_swap_advances_session_and_client_placement_revisions() {
+    let (
+        mut runtime,
+        _fake_pty_backend,
+        _runtime_event_sender,
+        session_id,
+        client_id,
+        root_pane_id,
+        pane_id_a,
+        _pane_pty_size_a,
+    ) = build_resize_fixture();
+    let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
+    let client_revision_before = runtime.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(client_id)
+        .expect("client")
+        .get_placement_revision();
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_key_binding(client_id),
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: root_pane_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: pane_id_a,
+            },
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: session_revision_before,
+                client_revision: client_revision_before,
+            }),
+        }),
+    );
+    assert!(matches!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Ok { .. }
+    ));
+
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.get_placement_revision(),
+        session_revision_before + 1
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(client_id)
+            .expect("client")
+            .get_placement_revision(),
+        client_revision_before + 1
     );
 }
 
@@ -8265,9 +8330,11 @@ fn swapping_a_pane_with_itself_is_a_no_op() {
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
-        Command::SwapPanes(SwapPanesArgs {
-            source_pane_id: Some(pane_id_a),
-            target_pane_id: pane_id_a,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: pane_id_a,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: pane_id_a,
+            },
             expected_placement_revision: None,
         }),
     );
@@ -8308,9 +8375,11 @@ fn swapping_panes_in_different_tabs_exchanges_slots_without_lifecycle_events() {
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
-        Command::SwapPanes(SwapPanesArgs {
-            source_pane_id: Some(first_pane_id),
-            target_pane_id: second_pane_id,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: first_pane_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: second_pane_id,
+            },
             expected_placement_revision: None,
         }),
     );
@@ -8324,6 +8393,7 @@ fn swapping_panes_in_different_tabs_exchanges_slots_without_lifecycle_events() {
             assert_eq!(
                 list_event_names(&emitted_events),
                 [
+                    "PanePlacementCommitted",
                     "LayoutChanged",
                     "LayoutChanged",
                     "TabFocused",
@@ -8450,9 +8520,11 @@ fn swapping_a_sole_source_pane_reflows_source_viewers_without_closing_source_tab
 
     let emitted_events = match runtime.dispatch(build_command_envelope(
         CommandSource::from_key_binding(acting_client_id),
-        Command::SwapPanes(SwapPanesArgs {
-            source_pane_id: Some(source_root_pane_id),
-            target_pane_id: destination_pane_id,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id: source_root_pane_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: destination_pane_id,
+            },
             expected_placement_revision: None,
         }),
     )) {
@@ -8543,7 +8615,27 @@ fn placing_a_sole_pane_in_another_tab_closes_only_the_empty_source_tab() {
             assert_eq!(ok_id, command_id);
             assert_eq!(
                 list_event_names(&emitted_events),
-                ["LayoutChanged", "TabFocused", "PaneFocused", "TabClosed"]
+                [
+                    "PanePlacementCommitted",
+                    "LayoutChanged",
+                    "TabFocused",
+                    "PaneFocused",
+                    "TabClosed"
+                ]
+            );
+            assert_eq!(
+                emitted_events[0],
+                Event::PanePlacementCommitted(PanePlacementCommitted {
+                    command_id,
+                    source_pane_id: first_pane_id,
+                    source_tab_id: first_tab_id,
+                    destination_tab_id: second_tab_id,
+                    placement_target: PanePlacementTarget::Split {
+                        destination_tab_id: second_tab_id,
+                        anchor: PanePlacementAnchor::Tab,
+                        direction: Direction::Right,
+                    },
+                })
             );
             assert!(!emitted_events
                 .iter()
@@ -8664,6 +8756,7 @@ fn placing_a_sole_pane_reflows_the_tab_where_source_viewers_land() {
             assert_eq!(
                 list_event_names(&emitted_events),
                 [
+                    "PanePlacementCommitted",
                     "LayoutChanged",
                     "TabFocused",
                     "PaneFocused",
@@ -15587,7 +15680,7 @@ fn client_scoped_is_exactly_toggle_mouse_select() {
         .map(|command_kind| build_command_for_kind(*command_kind, tab_id, pane_id))
         .collect();
 
-    assert_eq!(cases.len(), 24);
+    assert_eq!(cases.len(), 23);
     for command in &cases {
         assert_eq!(
             Server::is_client_scoped(command),

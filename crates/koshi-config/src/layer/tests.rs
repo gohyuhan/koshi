@@ -737,6 +737,21 @@ fn image_support_folds_onto_the_viewer_side_only() {
 }
 
 #[test]
+fn stay_in_pane_placement_mode_after_placement_folds_onto_the_viewer_side_only() {
+    assert!(ClientConfig::default().should_stay_in_pane_placement_mode_after_placement);
+
+    let layer = PartialKoshiConfig {
+        should_stay_in_pane_placement_mode_after_placement: Some(false),
+        ..Default::default()
+    };
+    let client = merge_client(ClientConfig::default(), vec![layer.clone()]);
+    assert!(!client.should_stay_in_pane_placement_mode_after_placement);
+
+    let server = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(server, ServerConfig::default());
+}
+
+#[test]
 fn reduced_motion_folds_onto_the_viewer_side_only() {
     assert!(!ClientConfig::default().should_reduce_motion);
 

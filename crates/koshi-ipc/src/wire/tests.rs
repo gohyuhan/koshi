@@ -833,7 +833,15 @@ fn build_test_session_discovery() -> koshi_core::discovery::SessionDiscovery {
 
 /// One value per [`SessionEvent`] variant.
 fn sample_events() -> Vec<SessionEvent> {
-    use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+    use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
+    use koshi_core::geometry::Direction;
+    use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let command_id = CommandId::new();
 
     vec![
         SessionEvent::Painted {
@@ -871,6 +879,17 @@ fn sample_events() -> Vec<SessionEvent> {
             error: crate::protocol::IpcErrorPayload {
                 code: crate::protocol::IpcErrorCode::ResourceLimit,
                 message: String::new(),
+            },
+        },
+        SessionEvent::PanePlacementCommitted {
+            command_id,
+            source_pane_id,
+            source_tab_id,
+            destination_tab_id,
+            placement_target: PanePlacementTarget::Split {
+                destination_tab_id,
+                anchor: PanePlacementAnchor::Pane(target_pane_id),
+                direction: Direction::Right,
             },
         },
         SessionEvent::PaneCreated {

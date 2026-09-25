@@ -39,8 +39,8 @@ use std::path::PathBuf;
 use crate::action::{ActionHandlerReference, ActionReference, ActionStatus, ClientActionKind};
 use crate::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
-    MovePaneArgs, NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
-    TabTarget, ToggleLockModeArgs,
+    NewPaneArgs, NewTabArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs, TabTarget,
+    ToggleLockModeArgs,
 };
 use crate::error::{DomainCategory, DomainError, Severity};
 use crate::geometry::Direction;
@@ -347,10 +347,6 @@ fn resolve_core_action(
             ("focus-pane-down", ActionArgs::None) => build_focus_pane_command(Direction::Down),
             ("focus-pane-up", ActionArgs::None) => build_focus_pane_command(Direction::Up),
             ("focus-pane-right", ActionArgs::None) => build_focus_pane_command(Direction::Right),
-            ("move-pane-left", ActionArgs::None) => build_move_pane_command(Direction::Left),
-            ("move-pane-down", ActionArgs::None) => build_move_pane_command(Direction::Down),
-            ("move-pane-up", ActionArgs::None) => build_move_pane_command(Direction::Up),
-            ("move-pane-right", ActionArgs::None) => build_move_pane_command(Direction::Right),
             ("toggle-pane-fullscreen", ActionArgs::None) => Command::TogglePaneFullscreen,
 
             // --- Tabs ---
@@ -470,14 +466,6 @@ fn build_focus_pane_command(direction: Direction) -> Command {
     Command::FocusPane(FocusPaneArgs {
         focus_target: FocusTarget::Direction(direction),
         client_id: None,
-    })
-}
-
-/// The command a `move-pane-<direction>` action builds.
-fn build_move_pane_command(direction: Direction) -> Command {
-    Command::MovePane(MovePaneArgs {
-        pane_id: None,
-        direction,
     })
 }
 

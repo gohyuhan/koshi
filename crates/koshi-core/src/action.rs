@@ -378,21 +378,21 @@ pub enum ActionHandlerReference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ClientActionKind {
     /// Open persistent pane placement mode for the focused pane.
-    BeginPaneMove,
-    /// Select the visible pane target in `direction` during placement mode.
+    BeginPanePlacement,
+    /// Select the visible pane target in `direction` during pane placement mode.
     SelectPaneTarget(Direction),
-    /// Select the insertion edge in `direction` during placement mode.
+    /// Select the insertion edge in `direction` during pane placement mode.
     SelectPaneInsertion(Direction),
-    /// Cycle the available insertion spans during placement mode.
+    /// Cycle the available insertion spans during pane placement mode.
     CyclePanePlacementSpan,
-    /// Preview the next visible tab during placement mode.
+    /// Preview the next visible tab during pane placement mode.
     SelectNextPlacementTab,
-    /// Preview the previous visible tab during placement mode.
+    /// Preview the previous visible tab during pane placement mode.
     SelectPreviousPlacementTab,
     /// Confirm the selected pane placement.
     ConfirmPanePlacement,
     /// Cancel pane placement and return to the base input mode.
-    CancelPaneMove,
+    CancelPanePlacement,
 }
 
 /// Everything the registry knows about one action: how to show it, what it can
@@ -467,9 +467,9 @@ pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 /// The built-in action table, loaded into the runtime registry at startup.
 /// `koshi actions list` prints the `Available` entries in this order.
 ///
-/// Every entry is in the `core:` namespace. The `move-pane` action starts a
-/// viewer-local placement mode. Its placement actions select and confirm
-/// viewer-local targets; the other command-backed actions use values
+/// Every entry is in the `core:` namespace. The `begin-pane-placement` action
+/// starts the viewer-local pane placement mode. Its placement actions select
+/// and confirm viewer-local targets; the other command-backed actions use values
 /// their NAME bakes into the command the resolver builds — `lock`/`unlock`
 /// both build `SetLockMode`; the `new-pane-*`, `focus-pane-*`, and
 /// `resize-pane-*` families each build their family's command with the named
@@ -605,12 +605,12 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Available,
         ),
         build_core_action_seed(
-            "move-pane",
-            "Move Pane",
+            "begin-pane-placement",
+            "Begin Pane Placement",
             "Open pane placement mode for the focused pane",
             PaneSession,
             vec![Pane],
-            CoreClient(ClientActionKind::BeginPaneMove),
+            CoreClient(ClientActionKind::BeginPanePlacement),
             Available,
         ),
         build_core_action_seed(
@@ -722,57 +722,21 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Available,
         ),
         build_core_action_seed(
-            "cancel-pane-move",
-            "Cancel Pane Move",
+            "cancel-pane-placement",
+            "Cancel Pane Placement",
             "Discard the pane placement and return to the base input mode",
             Client,
             vec![ClientTarget],
-            CoreClient(ClientActionKind::CancelPaneMove),
+            CoreClient(ClientActionKind::CancelPanePlacement),
             Available,
         ),
         build_core_action_seed(
-            "move-pane-left",
-            "Move Pane Left",
-            "Move the focused pane into the slot of its left neighbor",
+            "move-pane",
+            "Move Pane",
+            "Swap a pane with its visible neighbor in one direction and commit the swap at once",
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::MovePane),
-            Available,
-        ),
-        build_core_action_seed(
-            "move-pane-down",
-            "Move Pane Down",
-            "Move the focused pane into the slot of its lower neighbor",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::MovePane),
-            Available,
-        ),
-        build_core_action_seed(
-            "move-pane-up",
-            "Move Pane Up",
-            "Move the focused pane into the slot of its upper neighbor",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::MovePane),
-            Available,
-        ),
-        build_core_action_seed(
-            "move-pane-right",
-            "Move Pane Right",
-            "Move the focused pane into the slot of its right neighbor",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::MovePane),
-            Available,
-        ),
-        build_core_action_seed(
-            "swap-panes",
-            "Swap Panes",
-            "Exchange two pane occupants within one session, including across tabs",
-            PaneSession,
-            vec![Pane],
-            CoreCommand(CommandKind::SwapPanes),
             Available,
         ),
         build_core_action_seed(

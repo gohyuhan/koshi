@@ -71,6 +71,7 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
     "logging",
     "image-support",
     "reduced-motion",
+    "stay-in-pane-placement-mode-after-placement",
     "remote-reconnect",
     "allow-beta-features",
     "allow-other-users",
@@ -191,6 +192,12 @@ pub fn parse_app_config(
             ),
             "reduced-motion" => set_top_level_field(
                 &mut partial_koshi_config.should_reduce_motion,
+                parse_boolean_kdl_value(config_node),
+                config_section_name,
+                &mut parse_warnings,
+            ),
+            "stay-in-pane-placement-mode-after-placement" => set_top_level_field(
+                &mut partial_koshi_config.should_stay_in_pane_placement_mode_after_placement,
                 parse_boolean_kdl_value(config_node),
                 config_section_name,
                 &mut parse_warnings,

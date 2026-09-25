@@ -120,8 +120,8 @@ pub(crate) struct PlacementMode {
 pub(crate) struct PlacementDrag {
     /// The screen position where the drag began.
     pub(crate) start_position: Point,
-    /// The pointer's offset inside the source pane when the drag began.
-    pub(crate) grab_offset: Size,
+    /// Shift+drag selects insertion targets; a plain drag selects swaps.
+    pub(crate) is_insertion_drag: bool,
 }
 
 /// A placement tab hover waiting for its one preview read.
@@ -135,20 +135,25 @@ pub(crate) struct PlacementTabHover {
     pub(crate) is_preview_requested: bool,
 }
 
-/// The input path that opened placement mode.
+/// How long the current placement mode lasts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlacementModeEntry {
-    /// Placement was opened by the keyboard binding and remains active after confirmation.
-    Keyboard,
-    /// Placement was opened by a mouse handle and ends after its drag completes.
-    Mouse,
+pub(crate) enum PlacementModeLifetime {
+    /// Until Esc. `core:begin-pane-placement` (`<C-p> m` by default) opens
+    /// this lifetime. A mouse drop the session accepts switches to it while
+    /// `stay-in-pane-placement-mode-after-placement` is `#true`. With that
+    /// setting `#false`, an accepted placement ends it.
+    UntilCancelled,
+    /// Until the pane-handle drag that opened it ends.
+    UntilDragEnds,
 }
 
-/// What placement mode does with one owned key.
+/// What placement mode does with one owned key or mouse event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlacementInputAction {
-    /// Read the selected destination tab without changing session focus.
+    /// Read the selected destination tab and optionally focus its source pane.
     ReadPlacement {
+        /// The pane a mouse pickup focuses, or `None` when focus stays where it is.
+        pane_id_to_focus: Option<PaneId>,
         source_pane_id: PaneId,
         destination_tab_id: TabId,
     },
@@ -267,11 +272,12 @@ pub struct Client {
     placement_snapshot: Option<Box<PanePlacementSnapshot>>,
     /// The local placement interaction, if the viewer is choosing a destination.
     placement_mode: Option<PlacementMode>,
-    /// The input path that opened the current placement interaction.
-    placement_mode_entry: PlacementModeEntry,
+    /// How long the current placement interaction lasts.
+    placement_mode_lifetime: PlacementModeLifetime,
     /// Whether the next authoritative frame must reconcile a submitted placement.
     needs_placement_reconciliation: bool,
-    /// Whether the next reconciled keyboard placement needs a fresh preview read.
+    /// Whether the next reconciled placement that keeps pane placement mode active needs a
+    /// fresh preview read.
     needs_placement_preview_refresh: bool,
     /// The active tab in the newest painted frame.
     active_tab_id: Option<TabId>,
@@ -338,7 +344,7 @@ impl Client {
             placement_read_request: None,
             placement_snapshot: None,
             placement_mode: None,
-            placement_mode_entry: PlacementModeEntry::Keyboard,
+            placement_mode_lifetime: PlacementModeLifetime::UntilCancelled,
             needs_placement_reconciliation: false,
             needs_placement_preview_refresh: false,
             active_tab_id: None,
@@ -482,7 +488,7 @@ impl Client {
         let should_cancel_placement = self.is_placement_mode_active()
             && !is_reconciling_submitted_placement
             && (has_active_tab_changed
-                || has_focused_pane_changed
+                || (has_focused_pane_changed && !self.is_placement_source_pane(focused_pane_id))
                 || (has_visible_tab_list_changed
                     && !visible_tab_ids.is_empty()
                     && self.placement_mode.as_ref().is_some_and(|placement_mode| {
@@ -496,7 +502,17 @@ impl Client {
         self.visible_tab_ids = visible_tab_ids;
     }
 
-    /// Record the placement revisions carried by the newest painted frame.
+    /// Record the placement revisions carried by the newest painted frame. When
+    /// either revision changed:
+    ///
+    /// - With a confirmation pending, the session accepted that placement. With
+    ///   `stay-in-pane-placement-mode-after-placement #true`, pane placement
+    ///   mode stays on until Esc and reads a fresh preview; a mode opened by a
+    ///   pane-handle drag switches to [`PlacementModeLifetime::UntilCancelled`].
+    ///   With `#false`, the mode ends.
+    /// - With nothing pending, the unconfirmed target clears, the mode stays
+    ///   on, and a drag in progress keeps going: the focus frame that a mouse
+    ///   pickup causes does not end the drag that pickup started.
     pub(crate) fn set_placement_revisions(
         &mut self,
         session_placement_revision: u64,
@@ -510,46 +526,67 @@ impl Client {
         self.session_placement_revision = session_placement_revision;
         self.client_placement_revision = client_placement_revision;
         if has_placement_revision_changed {
+            let placement_drag = self.placement_drag;
+            let should_stay_in_pane_placement_mode = self
+                .client_config
+                .should_stay_in_pane_placement_mode_after_placement;
+            if is_placement_confirmation_pending && should_stay_in_pane_placement_mode {
+                self.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+            }
             self.clear_placement_draft();
+            if is_placement_confirmation_pending
+                && is_placement_mode_active
+                && !should_stay_in_pane_placement_mode
+            {
+                self.cancel_placement_mode();
+            }
+            if !is_placement_confirmation_pending {
+                self.placement_drag = placement_drag;
+            }
             self.needs_placement_reconciliation = is_placement_confirmation_pending;
-            self.needs_placement_preview_refresh = is_placement_mode_active;
+            self.needs_placement_preview_refresh = self.is_placement_mode_active();
         }
     }
 
-    /// Enter local placement mode for the focused pane.
+    /// Enter local placement mode for the focused pane, until Esc. The preview
+    /// starts on the active tab: `<C-p> m` on tab `#1` of `[#1, #2]` previews
+    /// `#1`. Returns `None` when placement mode is already on, a placement
+    /// waits for the session, or nothing is focused.
     pub(crate) fn begin_placement_mode(&mut self) -> Option<(PaneId, TabId)> {
-        if self.is_placement_mode_active() || self.is_placement_confirmation_pending() {
-            return None;
-        }
         let source_pane_id = self.focused_pane_id?;
         let source_tab_id = self.active_tab_id?;
-        let destination_tab_id = self
-            .visible_tab_ids
-            .iter()
-            .copied()
-            .find(|&tab_id| tab_id != source_tab_id)
-            .unwrap_or(source_tab_id);
-        self.placement_mode = Some(PlacementMode {
+        self.open_placement_mode(
             source_pane_id,
             source_tab_id,
-            destination_tab_id,
-            placement_direction: Direction::Right,
-            placement_target: None,
-            is_placement_submitted: false,
-        });
-        self.placement_mode_entry = PlacementModeEntry::Keyboard;
-        self.placement_drag = None;
-        self.placement_tab_hover = None;
-        self.pending_key_sequence = None;
-        self.clear_placement_read();
-        Some((source_pane_id, destination_tab_id))
+            PlacementModeLifetime::UntilCancelled,
+        )
     }
 
-    /// Enter local placement mode from a painted pane handle.
+    /// Enter local placement mode for `source_pane_id` from a press on its
+    /// painted placement handle, until the drag ends. Returns `None` when
+    /// placement mode is already on or a placement waits for the session.
     pub(crate) fn begin_mouse_placement_mode(
         &mut self,
         source_pane_id: PaneId,
         source_tab_id: TabId,
+    ) -> Option<(PaneId, TabId)> {
+        self.open_placement_mode(
+            source_pane_id,
+            source_tab_id,
+            PlacementModeLifetime::UntilDragEnds,
+        )
+    }
+
+    /// Start a placement of `source_pane_id` that previews `source_tab_id`
+    /// with no target, drops any open key sequence, tab hover, and preview
+    /// read, and returns `(source_pane_id, source_tab_id)`. Returns `None`,
+    /// changing nothing, when placement mode is already on or a placement
+    /// waits for the session.
+    fn open_placement_mode(
+        &mut self,
+        source_pane_id: PaneId,
+        source_tab_id: TabId,
+        placement_mode_lifetime: PlacementModeLifetime,
     ) -> Option<(PaneId, TabId)> {
         if self.is_placement_mode_active() || self.is_placement_confirmation_pending() {
             return None;
@@ -562,7 +599,7 @@ impl Client {
             placement_target: None,
             is_placement_submitted: false,
         });
-        self.placement_mode_entry = PlacementModeEntry::Mouse;
+        self.placement_mode_lifetime = placement_mode_lifetime;
         self.placement_drag = None;
         self.placement_tab_hover = None;
         self.pending_key_sequence = None;
@@ -575,8 +612,27 @@ impl Client {
     pub(crate) fn is_placement_mode_active(&self) -> bool {
         self.placement_mode.as_ref().is_some_and(|placement_mode| {
             !placement_mode.is_placement_submitted
-                || self.placement_mode_entry == PlacementModeEntry::Keyboard
+                || self.placement_mode_lifetime == PlacementModeLifetime::UntilCancelled
         })
+    }
+
+    /// Return whether pane placement mode draws its placement view: pane labels
+    /// such as `pane-…000000000001`, with no hover tint and no placement handle.
+    /// It stays `true` while a submitted placement command waits for its
+    /// accepted frame.
+    #[must_use]
+    pub(crate) fn is_pane_placement_visible(&self) -> bool {
+        self.is_placement_mode_active() || self.is_placement_confirmation_pending()
+    }
+
+    /// Return whether `focused_pane_id` names the source pane of the active
+    /// placement. A mouse pickup of `pane-123` focuses `pane-123`, so
+    /// `Some(pane-123)` returns `true`. `None` returns `false`.
+    #[must_use]
+    fn is_placement_source_pane(&self, focused_pane_id: Option<PaneId>) -> bool {
+        self.placement_mode
+            .as_ref()
+            .is_some_and(|placement_mode| focused_pane_id == Some(placement_mode.source_pane_id))
     }
 
     /// The checked target currently selected by placement mode.
@@ -618,7 +674,6 @@ impl Client {
             }
             placement_mode.destination_tab_id = destination_tab_id;
             placement_mode.placement_target = None;
-            placement_mode.is_placement_submitted = false;
             placement_mode.source_pane_id
         };
         self.placement_drag = None;
@@ -714,7 +769,6 @@ impl Client {
                 placement_mode.destination_tab_id = source_tab_id;
             }
             placement_mode.placement_target = None;
-            placement_mode.is_placement_submitted = false;
             placement_mode.destination_tab_id
         };
         self.placement_drag = None;
@@ -723,11 +777,11 @@ impl Client {
     }
 
     /// Record the start of a viewer-owned placement drag.
-    pub(crate) fn begin_placement_drag(&mut self, start_position: Point, grab_offset: Size) {
+    pub(crate) fn begin_placement_drag(&mut self, start_position: Point, is_insertion_drag: bool) {
         if self.is_placement_mode_active() && !self.is_placement_confirmation_pending() {
             self.placement_drag = Some(PlacementDrag {
                 start_position,
-                grab_offset,
+                is_insertion_drag,
             });
         }
     }
@@ -738,10 +792,11 @@ impl Client {
             .is_some_and(|placement_drag| placement_drag.start_position != position)
     }
 
-    /// Return whether a mouse-only placement interaction should leave its mode.
+    /// Return whether the active placement mode ends when its drag ends.
     #[must_use]
-    pub(crate) fn is_mouse_placement_mode(&self) -> bool {
-        self.is_placement_mode_active() && self.placement_mode_entry == PlacementModeEntry::Mouse
+    pub(crate) fn should_placement_mode_end_with_drag(&self) -> bool {
+        self.is_placement_mode_active()
+            && self.placement_mode_lifetime == PlacementModeLifetime::UntilDragEnds
     }
 
     /// End the viewer-owned placement drag.
@@ -812,7 +867,9 @@ impl Client {
     }
 
     /// Accept a placement preview only when it answers the current request and
-    /// still describes the revisions that were current when it was sent.
+    /// still describes the revisions that were current when it was sent. An
+    /// accepted preview of another tab with no target selected and no drag
+    /// active selects insertion at the right edge of that whole tab.
     pub(crate) fn accept_placement_snapshot(
         &mut self,
         request_id: u64,
@@ -850,6 +907,7 @@ impl Client {
             return false;
         }
         self.placement_snapshot = Some(Box::new(placement_snapshot));
+        self.select_whole_tab_insertion_target();
         true
     }
 
@@ -910,7 +968,7 @@ impl Client {
             return;
         }
         self.placement_mode = None;
-        self.placement_mode_entry = PlacementModeEntry::Keyboard;
+        self.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
         self.placement_tab_hover = None;
         self.pending_key_sequence = None;
         self.clear_placement_read();
@@ -926,11 +984,11 @@ impl Client {
         self.placement_drag = None;
         self.placement_tab_hover = None;
         self.clear_placement_snapshot();
-        let is_mouse_confirmation_pending = self.is_placement_confirmation_pending()
-            && self.placement_mode_entry == PlacementModeEntry::Mouse;
-        if is_mouse_confirmation_pending {
+        let is_drag_confirmation_pending = self.is_placement_confirmation_pending()
+            && self.placement_mode_lifetime == PlacementModeLifetime::UntilDragEnds;
+        if is_drag_confirmation_pending {
             self.placement_mode = None;
-            self.placement_mode_entry = PlacementModeEntry::Keyboard;
+            self.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
         } else if let Some(placement_mode) = self.placement_mode.as_mut() {
             placement_mode.placement_target = None;
             placement_mode.is_placement_submitted = false;
@@ -942,21 +1000,28 @@ impl Client {
         self.pending_placement_command_id = Some(command_id);
     }
 
+    /// Return whether `command_id` is the placement command this client sent
+    /// and the session has not yet answered.
+    pub(crate) fn is_pending_placement_command(&self, command_id: CommandId) -> bool {
+        self.pending_placement_command_id == Some(command_id)
+    }
+
     /// Clear a rejected placement confirmation.
     pub(crate) fn reject_placement_command(&mut self, command_id: CommandId) -> bool {
-        if self.pending_placement_command_id != Some(command_id) {
+        if !self.is_pending_placement_command(command_id) {
             return false;
         }
-        let should_refresh_keyboard_preview =
-            self.placement_mode_entry == PlacementModeEntry::Keyboard;
+        let should_refresh_placement_preview =
+            self.placement_mode_lifetime == PlacementModeLifetime::UntilCancelled;
         self.clear_placement_draft();
-        if should_refresh_keyboard_preview && self.is_placement_mode_active() {
+        if should_refresh_placement_preview && self.is_placement_mode_active() {
             self.needs_placement_preview_refresh = true;
         }
         true
     }
 
-    /// Return whether Enter already submitted the current placement target.
+    /// Whether a placement command awaits an accepted frame.
+    /// Releasing over `pane-123` keeps this true until that frame arrives.
     #[must_use]
     pub(crate) fn is_placement_confirmation_pending(&self) -> bool {
         self.placement_mode
@@ -967,20 +1032,22 @@ impl Client {
     /// Mark a submitted placement for reconciliation with the next frame.
     pub(crate) fn prepare_placement_reconciliation(&mut self) {
         let is_placement_confirmation_pending = self.is_placement_confirmation_pending();
-        let is_keyboard_placement_mode = self.placement_mode_entry == PlacementModeEntry::Keyboard;
+        let is_placement_mode_until_cancelled =
+            self.placement_mode_lifetime == PlacementModeLifetime::UntilCancelled;
         self.placement_read_request = None;
         self.queued_placement_read = None;
         self.placement_drag = None;
         self.clear_placement_snapshot();
         self.needs_placement_reconciliation = is_placement_confirmation_pending;
         self.needs_placement_preview_refresh =
-            is_placement_confirmation_pending && is_keyboard_placement_mode;
+            is_placement_confirmation_pending && is_placement_mode_until_cancelled;
         if !is_placement_confirmation_pending {
             self.clear_placement_draft();
         }
     }
 
-    /// Return the one fresh preview read needed after a confirmed keyboard placement.
+    /// Return the one fresh preview read needed after an accepted placement
+    /// that keeps pane placement mode active.
     pub(crate) fn take_placement_preview_refresh(&mut self) -> Option<(PaneId, TabId)> {
         if !self.needs_placement_preview_refresh {
             return None;

@@ -7,8 +7,8 @@
 //! maps to its privacy tier, and no `SensitiveBlocked` variant holds content.
 
 use super::*;
-use crate::command::{GridPosition, SelectionKind};
-use crate::geometry::{PaneArea, Point, Size};
+use crate::command::{GridPosition, PanePlacementAnchor, PanePlacementTarget, SelectionKind};
+use crate::geometry::{Direction, PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::process::PtySize;
 use std::time::{Duration, UNIX_EPOCH};
@@ -252,6 +252,7 @@ fn plugin_events_roundtrip() {
 /// both `Some` and `None` for `PaneFocused::previous_pane_id`.
 #[test]
 fn remaining_event_variants_survive_a_json_round_trip() {
+    let destination_tab_id = TabId::new();
     assert_json_roundtrip(&Event::PaneClosing(PaneClosing {
         pane_id: PaneId::new(),
     }));
@@ -269,6 +270,17 @@ fn remaining_event_variants_survive_a_json_round_trip() {
     }));
     assert_json_roundtrip(&Event::LayoutChanged(LayoutChanged {
         tab_id: TabId::new(),
+    }));
+    assert_json_roundtrip(&Event::PanePlacementCommitted(PanePlacementCommitted {
+        command_id: CommandId::new(),
+        source_pane_id: PaneId::new(),
+        source_tab_id: TabId::new(),
+        destination_tab_id,
+        placement_target: PanePlacementTarget::Split {
+            destination_tab_id,
+            anchor: PanePlacementAnchor::Pane(PaneId::new()),
+            direction: Direction::Down,
+        },
     }));
     assert_json_roundtrip(&Event::TabCreated(TabCreated {
         tab_id: TabId::new(),
@@ -444,7 +456,7 @@ fn get_variant_name<DebugValue: std::fmt::Debug>(debug_value: &DebugValue) -> St
 
 /// One instance per top-level `Event` variant with its canonical name and
 /// delivery class. The array length is the variant count.
-pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 38] {
+pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 39] {
     [
         (
             Event::PaneCreated(PaneCreated {
@@ -526,6 +538,19 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 38] {
                 tab_id: TabId::new(),
             }),
             "LayoutChanged",
+            EventClass::Critical,
+        ),
+        (
+            Event::PanePlacementCommitted(PanePlacementCommitted {
+                command_id: CommandId::new(),
+                source_pane_id: PaneId::new(),
+                source_tab_id: TabId::new(),
+                destination_tab_id: TabId::new(),
+                placement_target: PanePlacementTarget::Swap {
+                    target_pane_id: PaneId::new(),
+                },
+            }),
+            "PanePlacementCommitted",
             EventClass::Critical,
         ),
         (
@@ -770,13 +795,13 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str, EventClass); 38] {
     ]
 }
 
-/// Checks 38 distinct top-level event names against `Debug` and
+/// Checks 39 distinct top-level event names against `Debug` and
 /// [`Event::get_event_name`].
 #[test]
 fn event_variant_names_are_canonical() {
     let event_cases = list_event_cases();
     let mut event_names = std::collections::BTreeSet::new();
-    assert_eq!(event_cases.len(), 38);
+    assert_eq!(event_cases.len(), 39);
     for (event, event_name, _) in event_cases {
         assert_eq!(get_variant_name(&event), event_name);
         assert_eq!(event.get_event_name(), event_name);
@@ -785,7 +810,7 @@ fn event_variant_names_are_canonical() {
             "duplicate event name: {event_name}"
         );
     }
-    assert_eq!(event_names.len(), 38);
+    assert_eq!(event_names.len(), 39);
 }
 
 #[test]
@@ -803,7 +828,7 @@ fn classify_maps_every_event_variant() {
     }
 
     assert_eq!(lossy_event_count, 7);
-    assert_eq!(critical_event_count, 31);
+    assert_eq!(critical_event_count, 32);
 }
 
 /// One instance per [`PluginEvent`] variant with its canonical name. The array

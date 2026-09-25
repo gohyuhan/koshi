@@ -3,10 +3,11 @@
 //! decide nothing; what a press, a drag and a release do over each region —
 //! focusing a tab or a pane, peeking the tab strip, moving a border, and
 //! highlighting text; the run of clicks that picks a highlight's shape; the
-//! capture that keeps a gesture with the pane its press landed on; the edge
-//! scroll a held drag drives on the clock; and the gestures a new frame ends.
+//! capture that keeps a gesture with the pane its press landed on; plain pane
+//! drags swap, Shift-pane drags insert, edge scroll a held text drag drives on
+//! the clock; and the gestures a new frame ends.
 //!
-//! Each test builds a frame by hand — one tab, one or two panes, no build_viewer_chrome
+//! Each test builds a frame by hand — one tab, one or two panes, no chrome
 //! beyond the tabline and hint bar — so a case can be set up that a live
 //! session would take many steps to reach.
 
@@ -15,20 +16,25 @@ use super::*;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::event::{Event, MouseSelectChanged};
-use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::ModFlags;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseTracking};
+use koshi_ipc::placement::{
+    PanePlacementPaneSnapshot, PanePlacementSnapshot, PanePlacementTabSnapshot,
+};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry};
+use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMeta,
     TabSnapshot,
 };
 
 use crate::tests::TEST_VIEWPORT_SIZE;
-use crate::{Client, PlacementMode, PlacementModeEntry};
+use crate::{Client, PlacementMode, PlacementModeLifetime};
 
 /// A viewer on the stock settings — `scroll_line_count` 3, `wheel` scroll-scrollback.
 fn build_test_client() -> Client {
@@ -180,6 +186,129 @@ fn get_content_cell(mouse_frame: &MouseFrame, pane_index: usize) -> Point {
         column: content_rect.origin.column + 1,
         row: content_rect.origin.row + 2,
     }
+}
+
+/// Build a same-tab placement snapshot whose geometry and pane ids match `frame`.
+fn build_mouse_placement_snapshot(
+    frame: &MouseFrame,
+    source_pane_id: PaneId,
+    layout_tree: LayoutNode,
+) -> PanePlacementSnapshot {
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
+        SessionId::new(),
+        ClientId::new(),
+        source_pane_id,
+        active_tab_id,
+        active_tab_id,
+        0,
+        0,
+    );
+    placement_snapshot.destination_tab_snapshot = None;
+    placement_snapshot.source_tab_snapshot.layout_tree = layout_tree;
+    let frame_tab_snapshot = frame.session_snapshot.active_tab_snapshot.clone();
+    placement_snapshot.source_tab_snapshot.tab_name = frame_tab_snapshot.tab_name;
+    placement_snapshot.source_tab_snapshot.pane_slots = frame_tab_snapshot
+        .pane_slots
+        .into_iter()
+        .map(|pane_slot| koshi_ipc::frame::FrameSlot {
+            pane_id: pane_slot.pane_id,
+            outer_rect: pane_slot.outer_rect,
+            content_rect: pane_slot.content_rect,
+            pane_kind: pane_slot.pane_kind,
+            is_visible: pane_slot.is_visible,
+            is_suppressed: pane_slot.is_suppressed,
+            is_dead: pane_slot.is_dead,
+        })
+        .collect();
+    placement_snapshot.source_tab_snapshot.effective_cell_size =
+        frame_tab_snapshot.effective_cell_size;
+    placement_snapshot.source_tab_snapshot.stack_headers = frame_tab_snapshot.stack_headers;
+    placement_snapshot.source_tab_snapshot.layout_mode = frame_tab_snapshot.layout_mode;
+    placement_snapshot
+        .source_tab_snapshot
+        .is_every_pane_suppressed = frame_tab_snapshot.are_all_panes_suppressed;
+    placement_snapshot.source_tab_snapshot.gap_cell_count = frame_tab_snapshot.gap_cell_count;
+    placement_snapshot.source_tab_snapshot.pane_snapshots = placement_snapshot
+        .source_tab_snapshot
+        .layout_tree
+        .list_leaf_pane_ids()
+        .into_iter()
+        .map(|pane_id| PanePlacementPaneSnapshot {
+            pane_id,
+            terminal_window: None,
+            image_placement_snapshots: Vec::new(),
+        })
+        .collect();
+    placement_snapshot
+}
+
+/// Build a cross-tab placement snapshot with destination slots matching a frame.
+fn build_cross_tab_mouse_placement_snapshot(
+    frame: &MouseFrame,
+    source_pane_id: PaneId,
+    destination_tab_id: TabId,
+    destination_pane_ids: [PaneId; 2],
+) -> PanePlacementSnapshot {
+    let source_tab_id = frame.client_snapshot.active_tab_id;
+    let mut placement_snapshot =
+        build_mouse_placement_snapshot(frame, source_pane_id, LayoutNode::Pane(source_pane_id));
+    placement_snapshot
+        .source_tab_snapshot
+        .pane_slots
+        .retain(|pane_slot| pane_slot.pane_id == source_pane_id);
+    placement_snapshot
+        .source_tab_snapshot
+        .pane_snapshots
+        .retain(|pane_snapshot| pane_snapshot.pane_id == source_pane_id);
+
+    let frame_tab_snapshot = &frame.session_snapshot.active_tab_snapshot;
+    let destination_pane_slots = frame_tab_snapshot
+        .pane_slots
+        .iter()
+        .zip(destination_pane_ids)
+        .map(
+            |(pane_slot, destination_pane_id)| koshi_ipc::frame::FrameSlot {
+                pane_id: destination_pane_id,
+                outer_rect: pane_slot.outer_rect,
+                content_rect: pane_slot.content_rect,
+                pane_kind: pane_slot.pane_kind,
+                is_visible: pane_slot.is_visible,
+                is_suppressed: pane_slot.is_suppressed,
+                is_dead: pane_slot.is_dead,
+            },
+        )
+        .collect();
+    let destination_pane_snapshots = destination_pane_ids
+        .into_iter()
+        .map(|pane_id| PanePlacementPaneSnapshot {
+            pane_id,
+            terminal_window: None,
+            image_placement_snapshots: Vec::new(),
+        })
+        .collect();
+    let destination_tab_snapshot = PanePlacementTabSnapshot {
+        tab_id: destination_tab_id,
+        tab_name: "destination".to_owned(),
+        layout_tree: LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Vertical,
+            destination_pane_ids
+                .into_iter()
+                .map(LayoutNode::Pane)
+                .collect(),
+        )),
+        pane_slots: destination_pane_slots,
+        effective_cell_size: frame_tab_snapshot.effective_cell_size,
+        stack_headers: Vec::new(),
+        layout_mode: frame_tab_snapshot.layout_mode,
+        is_every_pane_suppressed: frame_tab_snapshot.are_all_panes_suppressed,
+        gap_cell_count: frame_tab_snapshot.gap_cell_count,
+        pane_snapshots: destination_pane_snapshots,
+    };
+    placement_snapshot.source_tab_id = source_tab_id;
+    placement_snapshot.destination_tab_id = destination_tab_id;
+    placement_snapshot.destination_tab_snapshot = Some(destination_tab_snapshot);
+    placement_snapshot
 }
 
 /// A wheel tick at `at`.
@@ -475,7 +604,7 @@ fn a_tick_over_chrome_falls_through_to_the_focused_pane_and_hovers_nothing() {
     let focused_pane_id = PaneId::new();
     let frame = build_one_pane_mouse_frame(build_plain_mouse_pane(focused_pane_id));
 
-    // The hint bar on the bottom row is build_viewer_chrome: no pane sits under the pointer.
+    // The hint bar on the bottom row is chrome: no pane sits under the pointer.
     let decision = build_test_client()
         .handle_mouse_wheel(
             build_mouse_wheel(
@@ -489,10 +618,7 @@ fn a_tick_over_chrome_falls_through_to_the_focused_pane_and_hovers_nothing() {
         )
         .expect("a wheel tick decides");
 
-    assert_eq!(
-        decision.hovered_pane_id, None,
-        "build_viewer_chrome hovers no pane"
-    );
+    assert_eq!(decision.hovered_pane_id, None, "chrome hovers no pane");
     assert_eq!(
         decision.mouse_action,
         Some(MouseAction::Scroll {
@@ -682,7 +808,7 @@ fn every_kind_but_the_wheel_is_left_to_the_session() {
 
 #[test]
 fn a_tick_over_chrome_with_nothing_focused_decides_nothing() {
-    // A tab with no focusable pane leaves a tick over build_viewer_chrome with no target.
+    // A tab with no focusable pane leaves a tick over chrome with no target.
     let frame = build_mouse_frame(
         &[build_plain_mouse_pane(PaneId::new())],
         None,
@@ -2041,6 +2167,76 @@ fn a_press_on_an_unfocused_pane_only_focuses_it() {
 }
 
 #[test]
+fn dragging_a_pane_focuses_the_source_and_hides_pointer_chrome() {
+    let focused_pane_id = PaneId::new();
+    let dragged_pane_id = PaneId::new();
+    let frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(focused_pane_id),
+            build_plain_mouse_pane(dragged_pane_id),
+        ],
+        Some(focused_pane_id),
+        PaneKind::Terminal,
+    );
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let mut viewer = build_test_client();
+    viewer.set_frame_view(active_tab_id, Some(focused_pane_id), vec![active_tab_id]);
+    assert_eq!(
+        viewer.begin_placement_mode(),
+        Some((focused_pane_id, active_tab_id))
+    );
+
+    let placement_action = viewer.handle_placement_mouse(
+        build_left_mouse_press(get_content_cell(&frame, 1)),
+        &frame,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        placement_action,
+        Some(PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: Some(dragged_pane_id),
+            source_pane_id: dragged_pane_id,
+            destination_tab_id: active_tab_id,
+        })
+    );
+    assert_eq!(viewer.get_placement_source_pane_id(), Some(dragged_pane_id));
+    let viewer_chrome = viewer.build_viewer_chrome(active_tab_id);
+    assert_eq!(viewer_chrome.hovered_pane_id, None);
+    assert_eq!(viewer_chrome.placement_handle_pane_id, None);
+}
+
+#[test]
+fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
+    let pane_id = PaneId::new();
+    let frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let mut viewer = build_test_client();
+    viewer.set_frame_view(active_tab_id, Some(pane_id), vec![active_tab_id]);
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id: pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap {
+            target_pane_id: PaneId::new(),
+        }),
+        is_placement_submitted: true,
+    });
+    viewer.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_motion(get_content_cell(&frame, 0)),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert!(viewer.is_placement_confirmation_pending());
+}
+
+#[test]
 fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
     let pane = PaneId::new();
     let mut content = build_plain_mouse_pane(pane);
@@ -2498,33 +2694,558 @@ fn a_scroll_step_already_due_asks_the_loop_to_wake_at_once() {
 }
 
 #[test]
-fn placement_target_point_keeps_the_grabbed_pointer_offset() {
+fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(target_pane_id),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let placement_snapshot = build_mouse_placement_snapshot(
+        &frame,
+        source_pane_id,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Vertical,
+            vec![
+                LayoutNode::Pane(source_pane_id),
+                LayoutNode::Pane(target_pane_id),
+            ],
+        )),
+    );
+
     let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![active_tab_id];
     viewer.placement_mode = Some(PlacementMode {
-        source_pane_id: PaneId::new(),
-        source_tab_id: TabId::new(),
-        destination_tab_id: TabId::new(),
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
         is_placement_submitted: false,
     });
-    viewer.begin_placement_drag(
-        Point { column: 4, row: 5 },
+    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    let source_content_rect = frame.session_snapshot.active_tab_snapshot.pane_slots[0]
+        .content_rect
+        .expect("the source pane has content");
+    let source_point = Point {
+        column: source_content_rect.origin.column + 1,
+        row: source_content_rect.origin.row + source_content_rect.cell_size.row_count - 1,
+    };
+    let target_point = get_content_cell(&frame, 1);
+    let target_outer_rect = frame.session_snapshot.active_tab_snapshot.pane_slots[1].outer_rect;
+    let target_border_point = Point {
+        column: target_outer_rect.origin.column,
+        row: target_outer_rect.origin.row + 1,
+    };
+    let statusline_point = Point {
+        column: 0,
+        row: TEST_VIEWPORT_SIZE.row_count - 1,
+    };
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                source_point,
+                ModFlags::NONE,
+            ),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        viewer.find_placement_target_at(source_point, &frame),
+        None,
+        "the dragged source cannot become its own destination"
+    );
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Drag(MouseButton::Left),
+            target_point,
+            ModFlags::SHIFT,
+        ),
+        &frame,
+        Instant::now(),
+    );
+    assert_eq!(
+        viewer.find_placement_target_at(target_point, &frame),
+        Some(PanePlacementTarget::Swap { target_pane_id })
+    );
+    assert_eq!(
+        viewer.find_placement_target_at(target_border_point, &frame),
+        Some(PanePlacementTarget::Swap { target_pane_id }),
+        "the target pane border names the same pane as its content"
+    );
+    assert_eq!(
+        viewer.find_placement_target_at(statusline_point, &frame),
+        None,
+        "the statusline does not name a pane target"
+    );
+    viewer.end_placement_drag();
+    viewer.clear_mouse_placement_target();
+
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Left),
+            source_point,
+            ModFlags::SHIFT,
+        ),
+        &frame,
+        Instant::now(),
+    );
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Drag(MouseButton::Left),
+            target_point,
+            ModFlags::NONE,
+        ),
+        &frame,
+        Instant::now(),
+    );
+    assert_eq!(
+        viewer.find_placement_target_at(target_point, &frame),
+        Some(PanePlacementTarget::Split {
+            destination_tab_id: active_tab_id,
+            anchor: PanePlacementAnchor::Pane(target_pane_id),
+            direction: Direction::Up,
+        })
+    );
+}
+
+#[test]
+fn placement_target_uses_fixed_base_geometry_while_the_preview_moves_panes() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(target_pane_id),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let placement_snapshot = build_mouse_placement_snapshot(
+        &frame,
+        source_pane_id,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Vertical,
+            vec![
+                LayoutNode::Pane(source_pane_id),
+                LayoutNode::Pane(target_pane_id),
+            ],
+        )),
+    );
+    let target_point = get_content_cell(&frame, 1);
+    let mut moved_preview_frame = frame.clone();
+    let first_pane_slot = moved_preview_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .clone();
+    let second_pane_slot = moved_preview_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[1]
+        .clone();
+    moved_preview_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .outer_rect = second_pane_slot.outer_rect;
+    moved_preview_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .content_rect = second_pane_slot.content_rect;
+    moved_preview_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[1]
+        .outer_rect = first_pane_slot.outer_rect;
+    moved_preview_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[1]
+        .content_rect = first_pane_slot.content_rect;
+
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![active_tab_id];
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.begin_placement_drag(target_point, false);
+
+    assert_eq!(
+        viewer.find_placement_target_at(target_point, &moved_preview_frame),
+        Some(PanePlacementTarget::Swap { target_pane_id })
+    );
+}
+
+#[test]
+fn cross_tab_mouse_target_uses_the_destination_pane_under_the_pointer() {
+    let source_pane_id = PaneId::new();
+    let destination_first_pane_id = PaneId::new();
+    let destination_second_pane_id = PaneId::new();
+    let frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(PaneId::new()),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let source_tab_id = frame.client_snapshot.active_tab_id;
+    let destination_tab_id = TabId::new();
+    let placement_snapshot = build_cross_tab_mouse_placement_snapshot(
+        &frame,
+        source_pane_id,
+        destination_tab_id,
+        [destination_first_pane_id, destination_second_pane_id],
+    );
+    let target_point = get_content_cell(&frame, 1);
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![source_tab_id, destination_tab_id];
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.begin_placement_drag(target_point, false);
+
+    assert_eq!(
+        viewer.find_placement_target_at(target_point, &frame),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: destination_second_pane_id,
+        })
+    );
+}
+
+#[test]
+fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
+    let source_pane_id = PaneId::new();
+    let expanded_stack_pane_id = PaneId::new();
+    let collapsed_stack_pane_id = PaneId::new();
+    let mut frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(expanded_stack_pane_id),
+            build_plain_mouse_pane(collapsed_stack_pane_id),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let stack_header_rect = Rect::from_origin_and_size(
+        Point { column: 0, row: 21 },
         Size {
-            column_count: 2,
-            row_count: 3,
+            column_count: TEST_VIEWPORT_SIZE.column_count,
+            row_count: 1,
         },
+    );
+    frame.session_snapshot.active_tab_snapshot.stack_headers = vec![StackHeader {
+        pane_id: collapsed_stack_pane_id,
+        header_rect: stack_header_rect,
+        member_index: 1,
+        member_count: 2,
+    }];
+    let placement_snapshot = build_mouse_placement_snapshot(
+        &frame,
+        source_pane_id,
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Vertical,
+            vec![
+                LayoutNode::Pane(source_pane_id),
+                LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+                    vec![expanded_stack_pane_id, collapsed_stack_pane_id],
+                    0,
+                )),
+            ],
+        )),
+    );
+
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![active_tab_id];
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Up,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    let source_point = get_content_cell(&frame, 0);
+    let stack_header_point = Point { column: 2, row: 22 };
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                source_point,
+                ModFlags::SHIFT,
+            ),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Drag(MouseButton::Left),
+            stack_header_point,
+            ModFlags::NONE,
+        ),
+        &frame,
+        Instant::now(),
     );
 
     assert_eq!(
-        viewer.compute_placement_target_point(Point {
-            column: 12,
-            row: 14
-        }),
-        Point {
-            column: 10,
-            row: 11
-        }
+        viewer.find_placement_target_at(stack_header_point, &frame),
+        Some(PanePlacementTarget::Split {
+            destination_tab_id: active_tab_id,
+            anchor: PanePlacementAnchor::Group(vec![
+                expanded_stack_pane_id,
+                collapsed_stack_pane_id,
+            ]),
+            direction: Direction::Down,
+        })
+    );
+
+    viewer.end_placement_drag();
+    viewer.clear_mouse_placement_target();
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Press(MouseButton::Left),
+            source_point,
+            ModFlags::NONE,
+        ),
+        &frame,
+        Instant::now(),
+    );
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Drag(MouseButton::Left),
+            stack_header_point,
+            ModFlags::NONE,
+        ),
+        &frame,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        viewer.find_placement_target_at(stack_header_point, &frame),
+        Some(PanePlacementTarget::Swap {
+            target_pane_id: collapsed_stack_pane_id,
+        })
+    );
+}
+
+#[test]
+fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_the_source() {
+    let plain_pane_id = PaneId::new();
+    let open_stack_pane_id = PaneId::new();
+    let collapsed_stack_pane_id = PaneId::new();
+    let mut frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(plain_pane_id),
+            build_plain_mouse_pane(open_stack_pane_id),
+            build_plain_mouse_pane(collapsed_stack_pane_id),
+        ],
+        Some(plain_pane_id),
+        PaneKind::Terminal,
+    );
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    frame.session_snapshot.active_tab_snapshot.stack_headers = vec![StackHeader {
+        pane_id: collapsed_stack_pane_id,
+        header_rect: Rect::from_origin_and_size(
+            Point { column: 0, row: 21 },
+            Size {
+                column_count: TEST_VIEWPORT_SIZE.column_count,
+                row_count: 1,
+            },
+        ),
+        member_index: 1,
+        member_count: 2,
+    }];
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![active_tab_id];
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id: plain_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    let stack_header_point = Point { column: 2, row: 22 };
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_left_mouse_press(stack_header_point),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: Some(collapsed_stack_pane_id),
+            source_pane_id: collapsed_stack_pane_id,
+            destination_tab_id: active_tab_id,
+        })
+    );
+    viewer.set_placement_revisions(1, 1);
+
+    assert_eq!(
+        viewer.get_placement_source_pane_id(),
+        Some(collapsed_stack_pane_id)
+    );
+    assert!(viewer.has_placement_drag_moved(Point { column: 40, row: 3 }));
+}
+
+#[test]
+fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
+    let source_pane_id = PaneId::new();
+    let group_left_pane_id = PaneId::new();
+    let group_right_pane_id = PaneId::new();
+    let remaining_pane_id = PaneId::new();
+    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Vertical,
+        vec![
+            LayoutNode::Pane(source_pane_id),
+            LayoutNode::Split(SplitNode::with_equal_weights(
+                SplitDirection::Horizontal,
+                vec![
+                    LayoutNode::Pane(group_left_pane_id),
+                    LayoutNode::Pane(group_right_pane_id),
+                ],
+            )),
+            LayoutNode::Pane(remaining_pane_id),
+        ],
+    ));
+    let mut frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(group_left_pane_id),
+            build_plain_mouse_pane(group_right_pane_id),
+            build_plain_mouse_pane(remaining_pane_id),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let pane_sizing = PaneSizing {
+        gap_cell_count: 1,
+        ..PaneSizing::default()
+    };
+    let tab_rect = Rect::from_size_at_origin(
+        frame
+            .session_snapshot
+            .active_tab_snapshot
+            .effective_cell_size,
+    );
+    let layout_solution =
+        solve_layout_with_mode(&layout_tree, LayoutMode::Tiled, tab_rect, pane_sizing);
+    for pane_slot in &mut frame.session_snapshot.active_tab_snapshot.pane_slots {
+        let pane_rect = layout_solution
+            .pane_rects
+            .iter()
+            .find(|(pane_id, _)| *pane_id == pane_slot.pane_id)
+            .map(|(_, pane_rect)| *pane_rect)
+            .expect("the layout solves every test pane");
+        pane_slot.outer_rect = pane_rect;
+        pane_slot.content_rect = Some(Rect::from_origin_and_size(
+            Point {
+                column: pane_rect.origin.column.saturating_add(1),
+                row: pane_rect.origin.row.saturating_add(1),
+            },
+            Size {
+                column_count: pane_rect.cell_size.column_count.saturating_sub(2),
+                row_count: pane_rect.cell_size.row_count.saturating_sub(2),
+            },
+        ));
+    }
+    let mut placement_snapshot =
+        build_mouse_placement_snapshot(&frame, source_pane_id, layout_tree);
+    placement_snapshot.pane_sizing.gap_cell_count = pane_sizing.gap_cell_count;
+    let group_left_rect = layout_solution
+        .pane_rects
+        .iter()
+        .find(|(pane_id, _)| *pane_id == group_left_pane_id)
+        .map(|(_, pane_rect)| *pane_rect)
+        .expect("the left group pane is solved");
+    let group_gap_point = Point {
+        column: group_left_rect
+            .origin
+            .column
+            .saturating_add(group_left_rect.cell_size.column_count),
+        row: group_left_rect.origin.row.saturating_add(1),
+    };
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![active_tab_id];
+    viewer.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        is_placement_submitted: false,
+    });
+    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+
+    let source_point = get_content_cell(&frame, 0);
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                source_point,
+                ModFlags::SHIFT
+            ),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Drag(MouseButton::Left),
+            Point {
+                column: group_gap_point.column,
+                row: group_gap_point.row.saturating_add(1),
+            },
+            ModFlags::NONE,
+        ),
+        &frame,
+        Instant::now(),
+    );
+
+    assert_eq!(
+        viewer.find_placement_target_at(
+            Point {
+                column: group_gap_point.column,
+                row: group_gap_point.row.saturating_add(1),
+            },
+            &frame,
+        ),
+        Some(PanePlacementTarget::Split {
+            destination_tab_id: active_tab_id,
+            anchor: PanePlacementAnchor::Group(vec![group_left_pane_id, group_right_pane_id,]),
+            direction: Direction::Up,
+        })
     );
 }
 
@@ -2543,14 +3264,8 @@ fn a_non_left_placement_release_cancels_mouse_capture_without_submitting() {
         placement_target: None,
         is_placement_submitted: false,
     });
-    viewer.placement_mode_entry = PlacementModeEntry::Keyboard;
-    viewer.begin_placement_drag(
-        Point { column: 4, row: 5 },
-        Size {
-            column_count: 1,
-            row_count: 1,
-        },
-    );
+    viewer.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+    viewer.begin_placement_drag(Point { column: 4, row: 5 }, false);
 
     assert_eq!(
         viewer.handle_placement_mouse(

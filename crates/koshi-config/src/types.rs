@@ -125,8 +125,16 @@ pub struct ClientConfig {
     /// Whether this viewer sends native image protocols to its terminal.
     pub supports_image_protocols: bool,
     /// Whether this viewer skips placement interpolation while retaining its
-    /// placement highlight and confirmation state.
+    /// placement highlight and confirmation state. `true` also draws another
+    /// viewer's accepted placement at its committed rectangles at once.
     pub should_reduce_motion: bool,
+    /// Whether pane placement mode stays on after the session accepts a
+    /// placement confirmed with Enter or a mouse drop. `true` keeps the mode on,
+    /// until Esc, for the next placement. `false` ends the mode once the
+    /// accepted layout arrives. A placement the session rejects leaves the mode
+    /// as it was: a mode that lasts until Esc stays on, and a mode that lasts
+    /// until its pane-handle drag ends is closed.
+    pub should_stay_in_pane_placement_mode_after_placement: bool,
     /// Whether a viewer whose link to a session on another machine drops dials
     /// that machine again by itself. While it dials, the viewer draws
     /// `RECONNECTING` on its tab strip and keeps trying for up to 120 seconds,
@@ -151,6 +159,7 @@ impl Default for ClientConfig {
             update: UpdateConfig::default(),
             supports_image_protocols: true,
             should_reduce_motion: false,
+            should_stay_in_pane_placement_mode_after_placement: true,
             should_reconnect_remote_session: true,
         }
     }
@@ -349,7 +358,7 @@ pub struct ModeBindings {
 
 /// The built-in default binding table: the `normal`-mode set, the reserved
 /// unlock, quit, and mouse-select in `locked` mode, and the placement actions
-/// in the `move-pane` submode.
+/// in the `pane-placement` mode.
 ///
 /// Sequences written with `<leader>` resolve against `leader`, so rebinding
 /// the leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
@@ -365,7 +374,7 @@ pub struct ModeBindings {
 /// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle, directional
 /// splits, and directional focus — live under the `<C-p>` prefix, resize under
 /// `<C-s>`, and tab lifecycle under `<C-t>`. Placement actions live in the
-/// `move-pane` submode. Every binding is argless: an action choice with a fixed set
+/// `pane-placement` mode. Every binding is argless: an action choice with a fixed set
 /// of values is part of the action name (`new-pane-left`,
 /// `select-pane-target-left`), so any key here can be rebound from
 /// `keybinding.kdl`.
@@ -418,10 +427,15 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             parse_default_key_sequence("<leader>p l"),
             build_bound_action("new-pane-right"),
         ),
+        // `s` adds the new pane to the focused pane's stack.
+        (
+            parse_default_key_sequence("<leader>p s"),
+            build_bound_action("new-pane-stacked"),
+        ),
         // Move opens the viewer-owned read-only placement preview.
         (
             parse_default_key_sequence("<leader>p m"),
-            build_bound_action("move-pane"),
+            build_bound_action("begin-pane-placement"),
         ),
         // The close key kills the pane's whole process group.
         (
@@ -495,7 +509,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
 
     // Locked mode intercepts exactly its bound chords and passes every other
     // key to the pane: the reserved unlock (the same chord that locks in
-    // normal mode), the move opener, the quit chord, and the mouse-select
+    // normal mode), the pane placement opener, the quit chord, and the mouse-select
     // chord.
     let locked_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
         (
@@ -504,7 +518,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         ),
         (
             parse_default_key_sequence("<leader>p m"),
-            build_bound_action("move-pane"),
+            build_bound_action("begin-pane-placement"),
         ),
         (
             parse_default_key_sequence("<leader>q"),
@@ -520,7 +534,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
 
     // Placement is a viewer-local submode. Its bindings take priority over
     // the base normal or locked mode while the placement interaction is open.
-    let move_pane_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
+    let pane_placement_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
         (
             parse_default_key_sequence("<Left>"),
             build_bound_action("select-pane-target-left"),
@@ -571,7 +585,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
         ),
         (
             parse_default_key_sequence("<Esc>"),
-            build_bound_action("cancel-pane-move"),
+            build_bound_action("cancel-pane-placement"),
         ),
     ]
     .into_iter()
@@ -593,9 +607,9 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             },
         ),
         (
-            ModeName::from_text("move-pane"),
+            ModeName::from_text("pane-placement"),
             ModeBindings {
-                bound_action_by_key_sequence: move_pane_mode_bindings,
+                bound_action_by_key_sequence: pane_placement_mode_bindings,
                 removed_key_sequences: BTreeSet::new(),
             },
         ),

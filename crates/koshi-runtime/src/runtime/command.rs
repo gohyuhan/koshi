@@ -32,12 +32,12 @@ use koshi_core::{
         CommandSource, CopyArgs, DetachArgs, FocusPaneArgs, FocusTabArgs, FocusTarget,
         LockModeArgs, MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor,
         PanePlacementTarget, PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs,
-        Selection, SelectionKind, SetSelectionArgs, SwapPanesArgs, SwitchSessionArgs, TabTarget,
+        Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
     event::{
-        Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused, PaneProcessExited,
-        PtyResized, RejectReason, SelectionChanged,
+        Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
+        PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason, SelectionChanged,
     },
     geometry::{Direction, PaneArea, Rect, Size},
     ids::{ClientId, CommandId, PaneId, SessionId, TabId},
@@ -127,33 +127,17 @@ fn ensure_client_placement_revision_capacity(
     ))
 }
 
-/// Advance the shared placement generation after a committed session change.
+/// Advance the shared placement generation by one. A generation at its maximum
+/// value stays there. A transaction that must advance it calls
+/// `ensure_session_placement_revision_capacity` before it changes anything.
 fn advance_session_placement_revision(session: &mut Session) {
-    debug_assert!(session.advance_placement_revision());
-}
-
-/// Advance the shared placement generation when it has capacity, leaving a
-/// saturated generation at its maximum value.
-fn advance_session_placement_revision_when_possible(session: &mut Session) {
     let _ = session.advance_placement_revision();
 }
 
-/// Advance each affected client's placement generation after a committed view
-/// or geometry change.
+/// Advance each affected client's placement generation by one. A counter at its
+/// maximum value stays there. A transaction that must advance them calls
+/// `ensure_client_placement_revision_capacity` before it changes anything.
 fn advance_client_placement_revisions(session: &mut Session, client_ids: &[ClientId]) {
-    for client_id in client_ids {
-        if let Some(client) = session.clients.get_client_mut_by_id(*client_id) {
-            debug_assert!(client.advance_placement_revision());
-        }
-    }
-}
-
-/// Advance each affected client's placement generation when its counter has
-/// capacity, leaving a saturated counter at its maximum value.
-fn advance_client_placement_revisions_when_possible(
-    session: &mut Session,
-    client_ids: &[ClientId],
-) {
     for client_id in client_ids {
         if let Some(client) = session.clients.get_client_mut_by_id(*client_id) {
             let _ = client.advance_placement_revision();
@@ -371,9 +355,6 @@ impl Server {
             }
             Command::MovePane(command_args) => {
                 self.handle_move_pane(command_id, &envelope.command_source, &command_args)
-            }
-            Command::SwapPanes(command_args) => {
-                self.handle_swap_panes(command_id, &envelope.command_source, &command_args)
             }
             Command::PlacePane(command_args) => {
                 self.apply_place_pane(command_id, &envelope.command_source, &command_args)

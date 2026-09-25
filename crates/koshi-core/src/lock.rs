@@ -2,7 +2,7 @@
 //!
 //! [`LockMode`] is the interaction mode a single client is in — whether
 //! keystrokes drive the focused pane, are held verbatim for the pane, or are
-//! interpreted by one of Koshi's modal layers (resize, pane, tab, scroll).
+//! interpreted by one of Koshi's modal layers (resize, pane placement, tab, scroll).
 //! It is client-scoped: two clients attached to the same session hold
 //! independent modes. The command layer's `SetLockMode` carries a `bool` and
 //! moves a client only into or out of [`LockMode::Locked`].
@@ -22,9 +22,16 @@ pub enum LockMode {
     /// Resize mode: directional keys resize the focused pane instead of
     /// reaching it.
     Resize,
-    /// Move-pane submode: placement actions own the keyboard and the viewer
-    /// overlays it on Normal or Locked without changing the stored base mode.
-    MovePane,
+    /// Pane placement mode, opened by `core:begin-pane-placement`.
+    ///
+    /// - The placement actions own the keyboard. The viewer overlays the mode
+    ///   on Normal or Locked without changing the stored base mode.
+    /// - Picking a target changes only this viewer's preview. A mouse pickup
+    ///   also sends `FocusPane` for the picked pane.
+    /// - Enter or a mouse drop sends
+    ///   [`Command::PlacePane`](crate::command::Command::PlacePane), the only
+    ///   command that changes the layout. Esc sends nothing.
+    PanePlacement,
     /// Tab mode: keys manage tabs — new, close, focus, and move.
     TabMode,
     /// Scroll mode: keys navigate the focused pane's scrollback.
@@ -34,7 +41,7 @@ pub enum LockMode {
 impl LockMode {
     /// Whether input that binds nothing reaches the pane in this mode.
     /// `Normal` and `Locked` pass what they do not bind; the modal layers
-    /// (`Resize`, `MovePane`, `TabMode`, `ScrollMode`) own the keyboard while
+    /// (`Resize`, `PanePlacement`, `TabMode`, `ScrollMode`) own the keyboard while
     /// they are held and discard it.
     #[must_use]
     pub fn should_pass_unbound_input_to_pane(self) -> bool {
@@ -46,7 +53,7 @@ impl LockMode {
         LockMode::Normal,
         LockMode::Locked,
         LockMode::Resize,
-        LockMode::MovePane,
+        LockMode::PanePlacement,
         LockMode::TabMode,
         LockMode::ScrollMode,
     ];
@@ -59,7 +66,7 @@ impl LockMode {
             LockMode::Normal => "normal",
             LockMode::Locked => "locked",
             LockMode::Resize => "resize",
-            LockMode::MovePane => "move-pane",
+            LockMode::PanePlacement => "pane-placement",
             LockMode::TabMode => "tab",
             LockMode::ScrollMode => "scroll",
         }

@@ -13,8 +13,9 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 the whole app file for that launch.
 
 Settings use blocks. `theme`, `image-support`, `reduced-motion`,
-`allow-beta-features`, `allow-other-users`, `remote-listen`, `remote-reconnect`,
-`shared-sessions-dir` and `auto-close-session` are top-level.
+`stay-in-pane-placement-mode-after-placement`, `allow-beta-features`, `allow-other-users`,
+`remote-listen`, `remote-reconnect`, `shared-sessions-dir` and
+`auto-close-session` are top-level.
 
 **Whose settings they are:** some belong to the session and are shared by every
 terminal looking at it; the rest belong to the terminal you are sitting at,
@@ -379,13 +380,40 @@ A link to a session on this machine ends the terminal either way.
 
 ## `reduced-motion`
 
-Controls placement preview interpolation for this viewer. `#true` shows the
+Controls placement interpolation for this viewer. With `#false`, the pane
+placement preview slides to each new destination, and a pane that another viewer
+places slides to its new place on this screen in 160 ms. `#true` shows the
 selected destination and confirmation state without moving the preview through
-intermediate rectangles.
+intermediate rectangles, and draws another viewer's accepted placement at its
+final place at once.
+
+Example: another viewer swaps panes `A` and `B` in the tab you watch. With
+`reduced-motion #false`, `A` and `B` slide past each other. With
+`reduced-motion #true`, they change places in one frame.
 
 | Setting | Meaning | Default | Since |
 |---|---|---|---|
-| `reduced-motion` | boolean — skip placement preview interpolation | `#false` | ≥ 0.5.0 |
+| `reduced-motion` | boolean — skip placement preview interpolation and the slide after another viewer's accepted placement | `#false` | ≥ 0.5.0 |
+
+## `stay-in-pane-placement-mode-after-placement`
+
+Controls what pane placement mode does after the session accepts a placement.
+Each terminal reads this for itself.
+
+- `#true`: pane placement mode stays on, so you can place the next pane. This
+  holds after Enter and after a mouse drop. For example, `<C-p> m`, Right, Enter
+  swaps the pane with its right neighbor, and the tab bar still shows
+  `PLACE PANE`.
+- `#false`: pane placement mode ends once the new layout arrives. The same keys
+  swap the panes, and the tab bar returns to `BASE`.
+
+A placement the session rejects, such as one built on a layout that changed
+before it arrived, leaves pane placement mode as it was. Pane placement mode
+opened with `<C-p> m` stays on, and a drag started on a pane's grab handle ends.
+
+| Setting | Meaning | Default | Since |
+|---|---|---|---|
+| `stay-in-pane-placement-mode-after-placement` | boolean — keep pane placement mode on after a placement is accepted | `#true` | ≥ 0.5.0 |
 
 ## `auto-close-session`
 
@@ -507,6 +535,7 @@ allow-other-users #false
 auto-close-session #false
 image-support #true
 reduced-motion #false
+stay-in-pane-placement-mode-after-placement #true
 remote-reconnect #true
 
 pane {

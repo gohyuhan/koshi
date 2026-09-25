@@ -992,7 +992,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         .all(|buffer_cell| !buffer_cell.symbol().contains('\u{1b}')));
 
     let mut unavailable_buffer = Buffer::empty(viewport_area);
-    crate::render::render_frame_with_image_availability(
+    crate::render::render_frame_with_placement_target(
         &snapshot,
         &regions(),
         &render_theme,
@@ -1001,6 +1001,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         ViewerChrome::default(),
         ImageRenderMode::Native,
         Some(&[]),
+        None,
         None,
         viewport_area,
         &mut unavailable_buffer,
@@ -1011,7 +1012,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     assert_eq!(unavailable_text, "term");
 
     let mut available_buffer = Buffer::empty(viewport_area);
-    crate::render::render_frame_with_image_availability(
+    crate::render::render_frame_with_placement_target(
         &snapshot,
         &regions(),
         &render_theme,
@@ -1020,6 +1021,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         ViewerChrome::default(),
         ImageRenderMode::Native,
         Some(&[(pane_id, 1)]),
+        None,
         None,
         viewport_area,
         &mut available_buffer,

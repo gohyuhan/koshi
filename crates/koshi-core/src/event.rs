@@ -15,6 +15,7 @@
 //! context and the resulting [`PrivacyTier`] together, and every non-public
 //! variant is unit-shaped with no content field.
 
+use crate::command::PanePlacementTarget;
 use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
 use crate::lock::LockMode;
@@ -49,6 +50,8 @@ pub enum Event {
     PaneOutputUpdated(PaneOutputUpdated),
     /// A tab's layout tree changed.
     LayoutChanged(LayoutChanged),
+    /// A checked pane placement committed in the session.
+    PanePlacementCommitted(PanePlacementCommitted),
     /// A tab was created.
     TabCreated(TabCreated),
     /// A tab was closed.
@@ -151,6 +154,7 @@ impl Event {
             Event::PtyResized(_) => "PtyResized",
             Event::PaneOutputUpdated(_) => "PaneOutputUpdated",
             Event::LayoutChanged(_) => "LayoutChanged",
+            Event::PanePlacementCommitted(_) => "PanePlacementCommitted",
             Event::TabCreated(_) => "TabCreated",
             Event::TabClosed(_) => "TabClosed",
             Event::TabFocused(_) => "TabFocused",
@@ -295,6 +299,21 @@ pub struct PaneOutputUpdated {
 pub struct LayoutChanged {
     /// The tab whose layout tree changed.
     pub tab_id: TabId,
+}
+
+/// Payload for [`Event::PanePlacementCommitted`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanePlacementCommitted {
+    /// The command whose transaction committed this placement.
+    pub command_id: CommandId,
+    /// The pane placed in the destination layout.
+    pub source_pane_id: PaneId,
+    /// The tab that owned the pane before the placement.
+    pub source_tab_id: TabId,
+    /// The tab that owns the pane after the placement.
+    pub destination_tab_id: TabId,
+    /// The checked swap or insertion target used by the committed transaction.
+    pub placement_target: PanePlacementTarget,
 }
 
 /// Payload for [`Event::TabCreated`].
@@ -712,6 +731,7 @@ pub fn classify_event(event: &Event) -> EventClass {
         | Event::PaneFocused(_)
         | Event::PtyResized(_)
         | Event::LayoutChanged(_)
+        | Event::PanePlacementCommitted(_)
         | Event::TabCreated(_)
         | Event::TabClosed(_)
         | Event::TabFocused(_)
