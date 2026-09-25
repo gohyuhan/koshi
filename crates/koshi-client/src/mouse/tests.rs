@@ -13,11 +13,13 @@
 
 use super::*;
 
+use std::sync::Arc;
+
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::event::{Event, MouseSelectChanged};
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
 use koshi_core::key::ModFlags;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseTracking};
@@ -2213,7 +2215,7 @@ fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
     let active_tab_id = frame.client_snapshot.active_tab_id;
     let mut viewer = build_test_client();
     viewer.set_frame_view(active_tab_id, Some(pane_id), vec![active_tab_id]);
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: pane_id,
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
@@ -2221,9 +2223,11 @@ fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
         placement_target: Some(PanePlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
-        is_placement_submitted: true,
+        pending_placement_command: Some(crate::tests::build_pending_placement_command(
+            CommandId::new(),
+        )),
     });
-    viewer.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
+    viewer.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
 
     assert_eq!(
         viewer.handle_placement_mouse(
@@ -2720,15 +2724,15 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
 
     let mut viewer = build_test_client();
     viewer.visible_tab_ids = vec![active_tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
     let source_content_rect = frame.session_snapshot.active_tab_snapshot.pane_slots[0]
         .content_rect
         .expect("the source pane has content");
@@ -2877,15 +2881,15 @@ fn placement_target_uses_fixed_base_geometry_while_the_preview_moves_panes() {
 
     let mut viewer = build_test_client();
     viewer.visible_tab_ids = vec![active_tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
     viewer.begin_placement_drag(target_point, false);
 
     assert_eq!(
@@ -2918,15 +2922,15 @@ fn cross_tab_mouse_target_uses_the_destination_pane_under_the_pointer() {
     let target_point = get_content_cell(&frame, 1);
     let mut viewer = build_test_client();
     viewer.visible_tab_ids = vec![source_tab_id, destination_tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
     viewer.begin_placement_drag(target_point, false);
 
     assert_eq!(
@@ -2982,15 +2986,15 @@ fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
 
     let mut viewer = build_test_client();
     viewer.visible_tab_ids = vec![active_tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Up,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
     let source_point = get_content_cell(&frame, 0);
     let stack_header_point = Point { column: 2, row: 22 };
 
@@ -3085,14 +3089,15 @@ fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_th
         member_count: 2,
     }];
     let mut viewer = build_test_client();
+    viewer.active_tab_id = Some(active_tab_id);
     viewer.visible_tab_ids = vec![active_tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: plain_pane_id,
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
     let stack_header_point = Point { column: 2, row: 22 };
 
@@ -3115,6 +3120,107 @@ fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_th
         Some(collapsed_stack_pane_id)
     );
     assert!(viewer.has_placement_drag_moved(Point { column: 40, row: 3 }));
+}
+
+/// A viewer on tab `active_tab_id` in placement mode that places
+/// `source_pane_id` and previews the tab `frame` shows, with
+/// `placement_target` selected.
+fn build_viewer_previewing_frame_tab(
+    frame: &MouseFrame,
+    active_tab_id: TabId,
+    source_pane_id: PaneId,
+    placement_target: Option<PanePlacementTarget>,
+) -> Client {
+    let previewed_tab_id = frame.client_snapshot.active_tab_id;
+    let mut viewer = build_test_client();
+    viewer.active_tab_id = Some(active_tab_id);
+    viewer.visible_tab_ids = vec![active_tab_id, previewed_tab_id];
+    viewer.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: previewed_tab_id,
+        placement_direction: Direction::Right,
+        placement_target,
+        pending_placement_command: None,
+    });
+    viewer
+}
+
+#[test]
+fn a_pane_press_on_a_previewed_tab_picks_that_pane_without_focusing_it() {
+    let source_pane_id = PaneId::new();
+    let previewed_pane_id = PaneId::new();
+    let frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(previewed_pane_id),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let previewed_tab_id = frame.client_snapshot.active_tab_id;
+    let mut viewer = build_viewer_previewing_frame_tab(&frame, TabId::new(), source_pane_id, None);
+    let previewed_pane_content_point = Point { column: 2, row: 14 };
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_left_mouse_press(previewed_pane_content_point),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: None,
+            source_pane_id: previewed_pane_id,
+            destination_tab_id: previewed_tab_id,
+        })
+    );
+    assert_eq!(
+        viewer
+            .placement_state
+            .placement_mode
+            .as_ref()
+            .map(|placement_mode| placement_mode.source_tab_id),
+        Some(previewed_tab_id)
+    );
+}
+
+#[test]
+fn a_press_on_the_source_pane_in_a_previewed_tab_keeps_its_tab_and_target() {
+    let source_pane_id = PaneId::new();
+    let frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(source_pane_id),
+            build_plain_mouse_pane(PaneId::new()),
+        ],
+        Some(source_pane_id),
+        PaneKind::Terminal,
+    );
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: frame.client_snapshot.active_tab_id,
+        anchor: PanePlacementAnchor::Tab,
+        direction: Direction::Right,
+    };
+    let mut viewer = build_viewer_previewing_frame_tab(
+        &frame,
+        TabId::new(),
+        source_pane_id,
+        Some(placement_target),
+    );
+    let placement_mode_before_press = viewer.placement_state.placement_mode.clone();
+    let source_pane_content_point = Point { column: 2, row: 3 };
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_left_mouse_press(source_pane_content_point),
+            &frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        viewer.placement_state.placement_mode,
+        placement_mode_before_press
+    );
 }
 
 #[test]
@@ -3197,15 +3303,15 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
     };
     let mut viewer = build_test_client();
     viewer.visible_tab_ids = vec![active_tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id: active_tab_id,
         destination_tab_id: active_tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    viewer.placement_snapshot = Some(Box::new(placement_snapshot));
+    viewer.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
 
     let source_point = get_content_cell(&frame, 0);
     assert_eq!(
@@ -3256,15 +3362,15 @@ fn a_non_left_placement_release_cancels_mouse_capture_without_submitting() {
     let tab_id = frame.client_snapshot.active_tab_id;
     let mut viewer = build_test_client();
     viewer.visible_tab_ids = vec![tab_id];
-    viewer.placement_mode = Some(PlacementMode {
+    viewer.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: pane_id,
         source_tab_id: tab_id,
         destination_tab_id: tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    viewer.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+    viewer.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
     viewer.begin_placement_drag(Point { column: 4, row: 5 }, false);
 
     assert_eq!(
@@ -3282,7 +3388,7 @@ fn a_non_left_placement_release_cancels_mouse_capture_without_submitting() {
         ),
         Some(PlacementInputAction::Consumed)
     );
-    assert_eq!(viewer.placement_drag, None);
+    assert_eq!(viewer.placement_state.placement_drag, None);
     assert!(viewer.is_placement_mode_active());
     assert!(!viewer.is_placement_confirmation_pending());
 }

@@ -1205,7 +1205,7 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id;
 
-    super::super::apply_frame_to_client(&mut client, &render_snapshot);
+    client.apply_render_snapshot(&render_snapshot);
 
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert!(client.is_mouse_selection_enabled());

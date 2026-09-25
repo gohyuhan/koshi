@@ -8294,10 +8294,20 @@ fn a_confirmed_same_tab_swap_advances_session_and_client_placement_revisions() {
             }),
         }),
     );
-    assert!(matches!(
-        runtime.dispatch(command_envelope),
-        CommandResult::Ok { .. }
-    ));
+    let command_id = command_envelope.command_id;
+    match runtime.dispatch(command_envelope) {
+        CommandResult::Ok {
+            command_id: applied_command_id,
+            emitted_events,
+        } => {
+            assert_eq!(applied_command_id, command_id);
+            assert_eq!(
+                list_event_names(&emitted_events),
+                ["PanePlacementCommitted", "LayoutChanged"]
+            );
+        }
+        other => panic!("expected Ok, got {other:?}"),
+    }
 
     let session = &runtime.session_by_id[&session_id];
     assert_eq!(

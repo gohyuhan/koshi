@@ -150,8 +150,10 @@ The default `pane-placement` bindings are:
   destination.
 - A left-button drag previews the pane under the pointer and a valid release
   submits the placement. Pressing a pane's content, its grab handle, or a
-  collapsed stack header picks that pane up; a collapsed member opens in its
-  stack as the drag starts.
+  collapsed stack header picks that pane up. On the tab you are on, the pane
+  also takes focus, so a collapsed member opens in its stack as the drag
+  starts. On a tab you only preview, focus stays where it is and a collapsed
+  member stays collapsed.
 - Enter submits the selected placement. Pane placement mode stays active after
   the session accepts it, unless `koshi.kdl` sets
   `stay-in-pane-placement-mode-after-placement #false`.

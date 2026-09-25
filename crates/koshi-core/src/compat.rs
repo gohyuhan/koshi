@@ -62,7 +62,9 @@ pub struct Surface {
 ///   chord, which holds no event kind, no text, and neither lock modifier.
 /// - Version 4 includes direct pane movement, per-client scrolling, and
 ///   checked pane placement: a swap or an insertion in the pane's own tab or
-///   another tab.
+///   another tab. A placement preview is a read the client requests. The
+///   session answers a placement with `PanePlacementCommitted` to every
+///   viewer, or with `PlacementCommandRejected` to the viewer that sent it.
 ///
 /// Four shapes differ between 2 and 3:
 ///

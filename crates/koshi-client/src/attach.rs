@@ -112,7 +112,7 @@ use crate::{compute_core_pane_area, Client};
 use koshi_config::types::BoundAction;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
-    PanePlacementAnchor, PanePlacementTarget, SwitchSessionArgs, VisualCommand,
+    PanePlacementAnchor, PanePlacementTarget, PlacementRevision, SwitchSessionArgs, VisualCommand,
 };
 use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -246,8 +246,9 @@ struct SentBorderMove {
     requested_cell_delta: i32,
 }
 
-/// The viewer state a frame paint uses: its chrome, the mode and mouse-select
-/// state shown by the frame, and the sequence the hint bar displays.
+/// The viewer state a frame paint uses: its chrome, the input mode and
+/// mouse-select state, the sequence the hint bar displays, and the placement
+/// target and status.
 ///
 /// [`Screen`] holds the value the frame on the screen was drawn with, and
 /// compares it against a fresh read at the end of every loop pass.
@@ -334,50 +335,23 @@ fn can_slide_between_tab_snapshots(
 }
 
 impl ViewerPaint {
-    /// Build the viewer state shown by `snapshot` without changing `client`.
-    ///
-    /// A mode change drops an open sequence when the frame is adopted, so the
-    /// sequence is kept only when the frame reports the current mode.
-    pub(crate) fn from_frame(client: &Client, snapshot: &RenderSnapshot) -> Self {
-        let pending_key_sequence = if client.get_lock_mode() == snapshot.client_snapshot.lock_mode {
-            client.get_pending_key_sequence().cloned()
-        } else {
-            None
-        };
-        let active_input_mode = if client.is_placement_mode_active() {
-            LockMode::PanePlacement
-        } else {
-            snapshot.client_snapshot.lock_mode
-        };
+    /// Read what `client` contributes to a paint of `render_snapshot` that
+    /// shows `displayed_active_tab_id`. A tab-strip peek made on any other tab
+    /// does not apply. The placement status names tabs from
+    /// `render_snapshot`'s tab list.
+    pub(crate) fn from_client(
+        client: &Client,
+        displayed_active_tab_id: TabId,
+        render_snapshot: &RenderSnapshot,
+    ) -> Self {
         ViewerPaint {
-            chrome: client.build_viewer_chrome(snapshot.client_snapshot.active_tab_id),
-            lock_mode: active_input_mode,
-            is_mouse_selection_enabled: snapshot.client_snapshot.is_mouse_selection_enabled,
-            pending_key_sequence,
-            placement_target: client.get_placement_target(),
-            placement_status: build_placement_status(client, snapshot),
-        }
-    }
-
-    /// Read what `client` currently contributes to a frame showing `active_tab_id`.
-    ///
-    /// `active_tab_id` is the tab the frame on the screen shows. A tab-strip peek
-    /// made on any other tab does not apply.
-    fn from_client_and_tab(client: &Client, active_tab_id: TabId) -> Self {
-        ViewerPaint {
-            chrome: client.build_viewer_chrome(active_tab_id),
+            chrome: client.build_viewer_chrome(displayed_active_tab_id),
             lock_mode: client.get_active_input_mode(),
             is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             pending_key_sequence: client.get_pending_key_sequence().cloned(),
             placement_target: client.get_placement_target(),
-            placement_status: None,
+            placement_status: build_placement_status(client, render_snapshot),
         }
-    }
-
-    /// Add the placement status built from the latest frame.
-    fn with_placement_status(mut self, client: &Client, snapshot: &RenderSnapshot) -> Self {
-        self.placement_status = build_placement_status(client, snapshot);
-        self
     }
 }
 
@@ -401,7 +375,7 @@ fn build_placement_status(client: &Client, snapshot: &RenderSnapshot) -> Option<
         client.get_placement_snapshot(),
         client.get_placement_target(),
     ) {
-        (None, _) if client.is_placement_read_pending() => (
+        (None, _) if client.is_placement_preview_loading() => (
             PlacementStatusKind::Loading,
             format!("PLACE {source_pane_label} | loading {destination_tab_label}"),
         ),
@@ -478,8 +452,8 @@ fn format_placement_direction_label(direction: Direction) -> &'static str {
 /// mouse view. `refresh` commits a pending frame or redraws when viewer paint or
 /// placement snapshots change, or while another viewer's accepted placement
 /// slides. Enter or mouse release changes the status to
-/// `confirming placement` until a painted frame carries a new placement
-/// revision or the session rejects the command.
+/// `confirming placement` until the session rejects the command, or commits
+/// it and a painted frame carries the new placement revision.
 struct Screen<B: Backend> {
     /// The ratatui terminal the renderer paints into.
     terminal: Terminal<B>,
@@ -577,9 +551,9 @@ impl<B: Backend> Screen<B> {
     /// Draw one frame the session sent, and hand back the frame a mouse event
     /// is placed against. Returns `None` when the terminal rejects the paint.
     ///
-    /// It paints from the incoming frame state, then adopts that state only
-    /// after the terminal accepts the paint. A locked frame therefore draws the
-    /// locked hint bar without changing the viewer when the paint fails.
+    /// It applies the frame to `client` and paints from the result. When the
+    /// terminal rejects the paint, `client` returns to its state before the
+    /// frame: a rejected locked frame leaves the viewer unlocked.
     ///
     /// The returned [`MouseFrame`] holds the committed region solve, where the
     /// surfaces sit, and the per-pane scroll and mouse fields. That is what the
@@ -604,26 +578,15 @@ impl<B: Backend> Screen<B> {
         self.commit_pending_snapshot(client, Instant::now())
     }
 
+    /// Apply the pending frame to `client` and paint it from the result. A
+    /// rejected paint puts `client` back as it was before the frame and keeps
+    /// the frame pending. Before a native image retry is due, it paints nothing
+    /// and changes nothing.
     fn commit_pending_snapshot(
         &mut self,
         client: &mut Client,
         current_time: Instant,
     ) -> Option<MouseFrame> {
-        if client.get_placement_snapshot().is_none() {
-            self.placement_snapshot = None;
-        }
-        let is_placement_snapshot_stale = {
-            let snapshot = self.pending_snapshot.as_ref()?;
-            self.placement_snapshot
-                .as_ref()
-                .is_some_and(|placement_snapshot| {
-                    is_placement_snapshot_outdated(placement_snapshot, snapshot)
-                })
-        };
-        if is_placement_snapshot_stale {
-            self.placement_snapshot = None;
-            self.discard_stale_placement_animation();
-        }
         let is_native_image_output = self.image_output_state.output_kind().is_some();
         if is_native_image_output
             && self
@@ -632,6 +595,12 @@ impl<B: Backend> Screen<B> {
         {
             return None;
         }
+        let viewer_restore_point = client.build_viewer_restore_point();
+        client.apply_render_snapshot(self.pending_snapshot.as_ref()?);
+        self.drop_stale_placement_snapshot(
+            client,
+            get_frame_placement_revision(self.pending_snapshot.as_ref()?),
+        );
         let viewport_size = self
             .pending_snapshot
             .as_ref()?
@@ -660,9 +629,11 @@ impl<B: Backend> Screen<B> {
             committed_placement_tab_snapshot,
         );
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(snapshot);
-        let displayed_active_tab_id = displayed_snapshot.client_snapshot.active_tab_id;
-        let mut frame_paint = ViewerPaint::from_frame(client, snapshot);
-        frame_paint.chrome = client.build_viewer_chrome(displayed_active_tab_id);
+        let frame_paint = ViewerPaint::from_client(
+            client,
+            displayed_snapshot.client_snapshot.active_tab_id,
+            snapshot,
+        );
         match terminal::paint_frame_with_displayed_snapshot(
             &mut self.terminal,
             client,
@@ -683,8 +654,12 @@ impl<B: Backend> Screen<B> {
                     self.native_retry_at = None;
                 }
             }
-            Ok(false) => return None,
+            Ok(false) => {
+                client.restore_viewer(viewer_restore_point);
+                return None;
+            }
             Err(paint_error) => {
+                client.restore_viewer(viewer_restore_point);
                 warn_paint_error(paint_error);
                 if is_native_image_output {
                     self.native_retry_delay = self
@@ -711,7 +686,6 @@ impl<B: Backend> Screen<B> {
                 client.get_viewport_size().row_count,
             ),
         );
-        apply_frame_to_client(client, &snapshot);
         self.committed_regions = committed_regions.clone();
         self.shown_viewer_paint = Some(frame_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
@@ -735,8 +709,8 @@ impl<B: Backend> Screen<B> {
     /// Commit a pending frame or redraw the last frame when viewer paint or a
     /// placement snapshot changes, or while another viewer's accepted placement
     /// slides. Enter or mouse release changes the status to
-    /// `confirming placement` until a painted frame carries a new placement
-    /// revision or the session rejects the command.
+    /// `confirming placement` until the session rejects the command, or commits
+    /// it and a painted frame carries the new placement revision.
     ///
     /// `active_tab_id` is `Some` after the first frame has been drawn. A viewer
     /// with no changed local state draws nothing. A viewer whose viewport no
@@ -760,21 +734,10 @@ impl<B: Backend> Screen<B> {
         if client.get_viewport_size() != self.committed_regions.viewport_size {
             return None;
         }
-        if client.get_placement_snapshot().is_none() {
-            self.placement_snapshot = None;
-        }
-        let is_placement_snapshot_stale = {
-            let snapshot = self.last_snapshot.as_ref()?;
-            self.placement_snapshot
-                .as_ref()
-                .is_some_and(|placement_snapshot| {
-                    is_placement_snapshot_outdated(placement_snapshot, snapshot)
-                })
-        };
-        if is_placement_snapshot_stale {
-            self.placement_snapshot = None;
-            self.discard_stale_placement_animation();
-        }
+        self.drop_stale_placement_snapshot(
+            client,
+            get_frame_placement_revision(self.last_snapshot.as_ref()?),
+        );
         let placement_display_snapshot = self.update_placement_animation(
             client,
             client.get_placement_target().as_ref(),
@@ -796,8 +759,7 @@ impl<B: Backend> Screen<B> {
                 snapshot.client_snapshot.active_tab_id,
                 |displayed_tab_snapshot| displayed_tab_snapshot.tab_snapshot.tab_id,
             );
-        let viewer_paint = ViewerPaint::from_client_and_tab(client, displayed_active_tab_id)
-            .with_placement_status(client, snapshot);
+        let viewer_paint = ViewerPaint::from_client(client, displayed_active_tab_id, snapshot);
         let is_committed_tab_shown = placement_render_snapshot.is_some()
             || self.shown_tab_snapshot.as_ref()
                 == Some(
@@ -1016,11 +978,33 @@ impl<B: Backend> Screen<B> {
         self.committed_placement_tab_ids.extend(tab_ids);
     }
 
-    /// Drop placement geometry that belongs to an older authoritative frame.
-    fn discard_stale_placement_animation(&mut self) {
-        self.placement_animation = None;
-        self.shown_placement_snapshot = None;
-        self.shown_placement_render_snapshot = None;
+    /// Drop the placement preview this screen holds when `client` holds none,
+    /// or when the preview was read at a session or client revision other than
+    /// `frame_placement_revision`. An outdated preview also drops its
+    /// animation and the preview recorded as shown.
+    fn drop_stale_placement_snapshot(
+        &mut self,
+        client: &Client,
+        frame_placement_revision: PlacementRevision,
+    ) {
+        if client.get_placement_snapshot().is_none() {
+            self.placement_snapshot = None;
+        }
+        let is_placement_snapshot_outdated =
+            self.placement_snapshot
+                .as_ref()
+                .is_some_and(|placement_snapshot| {
+                    placement_snapshot.session_placement_revision
+                        != frame_placement_revision.session_revision
+                        || placement_snapshot.client_placement_revision
+                            != frame_placement_revision.client_revision
+                });
+        if is_placement_snapshot_outdated {
+            self.placement_snapshot = None;
+            self.placement_animation = None;
+            self.shown_placement_snapshot = None;
+            self.shown_placement_render_snapshot = None;
+        }
     }
 
     /// Return the next wakeup while native image output has work or needs a retry.
@@ -1118,16 +1102,12 @@ impl<B: Backend> Screen<B> {
     }
 }
 
-/// Return whether `placement_snapshot` was read at a session or client
-/// revision other than the one `frame_snapshot` carries.
-fn is_placement_snapshot_outdated(
-    placement_snapshot: &PlacementSnapshot,
-    frame_snapshot: &RenderSnapshot,
-) -> bool {
-    placement_snapshot.session_placement_revision
-        != frame_snapshot.session_snapshot.session_revision
-        || placement_snapshot.client_placement_revision
-            != frame_snapshot.client_snapshot.client_revision
+/// Return the session and client placement revisions `frame_snapshot` carries.
+fn get_frame_placement_revision(frame_snapshot: &RenderSnapshot) -> PlacementRevision {
+    PlacementRevision {
+        session_revision: frame_snapshot.session_snapshot.session_revision,
+        client_revision: frame_snapshot.client_snapshot.client_revision,
+    }
 }
 
 /// Return the frame painted in place of `snapshot`:
@@ -1301,10 +1281,14 @@ impl Uplink {
         }))
     }
 
-    /// Queue one checked placement command and retain its id for rejection handling.
-    pub(crate) fn submit_placement_command(&mut self, client: &mut Client, command: Command) {
-        let command_id = CommandId::new();
-        client.set_pending_placement_command_id(command_id);
+    /// Queue placement command `command`, which `client` recorded as pending
+    /// under `command_id`.
+    fn submit_placement_command(
+        &mut self,
+        client: &Client,
+        command_id: CommandId,
+        command: Command,
+    ) {
         let envelope = CommandEnvelope::from_parts(
             command_id,
             CommandSource::from_key_binding(client.get_client_id()),
@@ -1333,8 +1317,8 @@ impl Uplink {
     ///
     /// - `ReadPlacement` sends one preview read, then `FocusPane` for
     ///   `pane_id_to_focus` when it is `Some`.
-    /// - `SubmitPlacement` sends the placement command and records its id.
-    /// - `CancelPlacement` and `Consumed` send nothing.
+    /// - `SubmitPlacement` sends the placement command under its `command_id`.
+    /// - `Consumed` sends nothing.
     fn submit_placement_input_action(
         &mut self,
         client: &mut Client,
@@ -1351,10 +1335,13 @@ impl Uplink {
                     self.submit_mouse_focus_pane(client, pane_id_to_focus);
                 }
             }
-            PlacementInputAction::SubmitPlacement(command) => {
-                self.submit_placement_command(client, command);
+            PlacementInputAction::SubmitPlacement {
+                command_id,
+                command,
+            } => {
+                self.submit_placement_command(client, command_id, command);
             }
-            PlacementInputAction::CancelPlacement | PlacementInputAction::Consumed => {}
+            PlacementInputAction::Consumed => {}
         }
     }
 
@@ -2119,7 +2106,7 @@ fn run_attachment<B: Backend>(
                             destination_tab_id,
                             ..
                         }) => {
-                            if !client.is_pending_placement_command(command_id) {
+                            if !client.note_placement_command_committed(command_id) {
                                 screen
                                     .note_committed_placement([source_tab_id, destination_tab_id]);
                             }
@@ -3989,32 +3976,6 @@ fn build_commands(dispatch_plan: DispatchPlan) -> Vec<Command> {
             .collect(),
         DispatchPlan::PluginHostCall { .. } => Vec::new(),
     }
-}
-
-/// Take the three things the session decides about this viewer out of the frame
-/// it is about to draw: the lock mode, the active tab, and whether mouse-select
-/// is on.
-///
-/// The caller runs this after the frame paint succeeds. The hint bar lists the
-/// bindings of the mode this sets.
-fn apply_frame_to_client(client: &mut Client, snapshot: &RenderSnapshot) {
-    client.set_placement_revisions(
-        snapshot.session_snapshot.session_revision,
-        snapshot.client_snapshot.client_revision,
-    );
-    client.set_frame_view(
-        snapshot.client_snapshot.active_tab_id,
-        snapshot.client_snapshot.focused_pane_id,
-        snapshot
-            .session_snapshot
-            .tabs_metadata
-            .iter()
-            .map(|tab_meta| tab_meta.tab_id)
-            .collect(),
-    );
-    client.set_lock_mode(snapshot.client_snapshot.lock_mode);
-    client.note_active_tab(snapshot.client_snapshot.active_tab_id);
-    client.set_mouse_selection_enabled(snapshot.client_snapshot.is_mouse_selection_enabled);
 }
 
 /// Classify one frame read from the event stream. `None` keeps the loop

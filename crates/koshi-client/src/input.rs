@@ -28,7 +28,7 @@ use koshi_core::command::{
     Command, PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, PlacementRevision,
 };
 use koshi_core::geometry::{Direction, Rect};
-use koshi_core::ids::{PaneId, TabId};
+use koshi_core::ids::{CommandId, PaneId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey, PendingKeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::resolve::ActionArgs;
@@ -41,7 +41,7 @@ use koshi_layout::placement::{
 };
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 
-use crate::{Client, PlacementInputAction};
+use crate::{Client, PendingPlacementCommand, PlacementInputAction};
 
 #[cfg(test)]
 mod tests;
@@ -145,11 +145,10 @@ impl Client {
                 .submit_placement_command()
                 .unwrap_or(PlacementInputAction::Consumed),
             ClientActionKind::CancelPanePlacement => {
-                if self.is_placement_confirmation_pending() || !self.is_placement_mode_active() {
-                    return PlacementInputAction::Consumed;
+                if self.is_placement_mode_active() {
+                    self.cancel_placement_mode();
                 }
-                self.cancel_placement_mode();
-                PlacementInputAction::CancelPlacement
+                PlacementInputAction::Consumed
             }
         }
     }
@@ -159,7 +158,7 @@ impl Client {
         if self.is_placement_confirmation_pending() {
             return PlacementInputAction::Consumed;
         }
-        let Some(placement_mode) = self.placement_mode.as_ref() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_ref() else {
             return PlacementInputAction::Consumed;
         };
         let Some(destination_tab_index) = self
@@ -205,10 +204,10 @@ impl Client {
         if self.is_placement_confirmation_pending() {
             return PlacementInputAction::Consumed;
         }
-        let Some(placement_mode) = self.placement_mode.as_ref() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_ref() else {
             return PlacementInputAction::Consumed;
         };
-        let Some(placement_snapshot) = self.placement_snapshot.as_deref() else {
+        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
             return PlacementInputAction::Consumed;
         };
         let destination_tab_id = placement_mode.destination_tab_id;
@@ -275,7 +274,7 @@ impl Client {
             }
             _ => None,
         };
-        let Some(placement_mode) = self.placement_mode.as_mut() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return PlacementInputAction::Consumed;
         };
         placement_mode.placement_direction = direction;
@@ -288,10 +287,10 @@ impl Client {
         if self.is_placement_confirmation_pending() {
             return PlacementInputAction::Consumed;
         }
-        let Some(placement_mode) = self.placement_mode.as_ref() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_ref() else {
             return PlacementInputAction::Consumed;
         };
-        let Some(placement_snapshot) = self.placement_snapshot.as_deref() else {
+        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
             return PlacementInputAction::Consumed;
         };
         let destination_tab_id = placement_mode.destination_tab_id;
@@ -337,7 +336,7 @@ impl Client {
             anchor: insertion_span.anchor.clone(),
             direction: placement_direction,
         };
-        let Some(placement_mode) = self.placement_mode.as_mut() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return PlacementInputAction::Consumed;
         };
         placement_mode.placement_target = Some(placement_target);
@@ -349,13 +348,14 @@ impl Client {
     /// target is selected, and no drag is active. Tab from `[A | B]` onto `[C]`
     /// selects `insert right` of that tab, and Enter gives `[C | A]`.
     pub(crate) fn select_whole_tab_insertion_target(&mut self) {
-        if self.placement_drag.is_some() || self.is_placement_confirmation_pending() {
+        if self.placement_state.placement_drag.is_some() || self.is_placement_confirmation_pending()
+        {
             return;
         }
-        let Some(placement_snapshot) = self.placement_snapshot.as_deref() else {
+        let Some(placement_snapshot) = self.placement_state.placement_snapshot.as_deref() else {
             return;
         };
-        let Some(placement_mode) = self.placement_mode.as_mut() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return;
         };
         if placement_mode.placement_target.is_some()
@@ -371,21 +371,29 @@ impl Client {
         });
     }
 
-    /// Build and mark the one mutation command allowed by placement mode.
+    /// Build the `PlacePane` command for the selected target, record it as the
+    /// pending placement command under a new command id, and return it to
+    /// send.
+    ///
+    /// - Returns `Consumed` while a placement command is pending.
+    /// - Returns `Consumed` and clears the target when the target leaves the
+    ///   layout as it is, such as a swap of `pane-123` with itself.
+    /// - Returns `None` with no placement mode or no target.
     pub(crate) fn submit_placement_command(&mut self) -> Option<PlacementInputAction> {
-        let placement_mode = self.placement_mode.as_ref()?;
-        if placement_mode.is_placement_submitted {
+        let placement_mode = self.placement_state.placement_mode.as_ref()?;
+        if placement_mode.pending_placement_command.is_some() {
             return Some(PlacementInputAction::Consumed);
         }
         let placement_target = placement_mode.placement_target.clone()?;
         if self
+            .placement_state
             .placement_snapshot
             .as_deref()
             .is_some_and(|placement_snapshot| {
                 is_same_tab_placement_noop(placement_snapshot, &placement_target)
             })
         {
-            let placement_mode = self.placement_mode.as_mut()?;
+            let placement_mode = self.placement_state.placement_mode.as_mut()?;
             placement_mode.placement_target = None;
             return Some(PlacementInputAction::Consumed);
         }
@@ -393,13 +401,20 @@ impl Client {
             source_pane_id: placement_mode.source_pane_id,
             placement_target,
             expected_placement_revision: Some(PlacementRevision {
-                session_revision: self.session_placement_revision,
-                client_revision: self.client_placement_revision,
+                session_revision: self.placement_state.session_placement_revision,
+                client_revision: self.placement_state.client_placement_revision,
             }),
         });
-        let placement_mode = self.placement_mode.as_mut()?;
-        placement_mode.is_placement_submitted = true;
-        Some(PlacementInputAction::SubmitPlacement(command))
+        let command_id = CommandId::new();
+        let placement_mode = self.placement_state.placement_mode.as_mut()?;
+        placement_mode.pending_placement_command = Some(PendingPlacementCommand {
+            command_id,
+            is_committed: false,
+        });
+        Some(PlacementInputAction::SubmitPlacement {
+            command_id,
+            command,
+        })
     }
 
     /// Decide what `chord` means in this viewer's current mode.

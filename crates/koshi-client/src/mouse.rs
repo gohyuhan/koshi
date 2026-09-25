@@ -11,8 +11,8 @@
 //!
 //! Mouse-select mode is the one piece of session state read from the viewer's
 //! own copy rather than from the frame passed in: routing reads
-//! [`Client::is_mouse_selection_enabled`]. An attached client moves that copy when it adopts
-//! a painted frame, so a press routes the way the last painted frame said. A
+//! [`Client::is_mouse_selection_enabled`]. An attached client moves that copy when a
+//! frame paints, so a press routes the way the last painted frame said. A
 //! viewer fed by a session subscription moves it from that subscription's
 //! events as well.
 //!
@@ -342,9 +342,11 @@ impl Client {
     ///   returns `None`.
     /// - With placement mode on, a left press on a tab previews that tab. A
     ///   left press on pane content, a placement handle, or a stack header
-    ///   picks that pane as the source, focuses it, and starts a drag. A press
-    ///   on the header of collapsed `pane-123` returns a read that focuses
-    ///   `pane-123`, which expands it in its stack.
+    ///   starts a drag, and picks that pane as the source unless it already is
+    ///   the source. A pane picked in the session's active tab also takes
+    ///   focus: a press on the header of collapsed `pane-123` returns a read
+    ///   that focuses `pane-123`, which expands it in its stack. A pane picked
+    ///   while another tab is previewed keeps focus where it is.
     /// - A left drag selects the target under the pointer: a swap, or an
     ///   insertion while Shift was held at the press. A left release after the
     ///   pointer moved submits the target under it. A release that submits
@@ -407,8 +409,10 @@ impl Client {
                 HitRegion::PlacementHandle { pane_id }
                 | HitRegion::PaneContent { pane_id }
                 | HitRegion::StackHeader { pane_id } => {
-                    let placement_source_selection = self
-                        .select_placement_source_pane(pane_id, frame.client_snapshot.active_tab_id);
+                    let displayed_tab_id = frame.client_snapshot.active_tab_id;
+                    let is_displayed_tab_active = self.active_tab_id == Some(displayed_tab_id);
+                    let placement_source_selection =
+                        self.select_placement_source_pane(pane_id, displayed_tab_id);
                     self.begin_placement_drag(
                         mouse_input.position,
                         mouse_input
@@ -419,7 +423,7 @@ impl Client {
                         PlacementInputAction::Consumed,
                         |(source_pane_id, destination_tab_id)| {
                             PlacementInputAction::ReadPlacement {
-                                pane_id_to_focus: Some(source_pane_id),
+                                pane_id_to_focus: is_displayed_tab_active.then_some(source_pane_id),
                                 source_pane_id,
                                 destination_tab_id,
                             }
@@ -494,7 +498,7 @@ impl Client {
         if self.is_placement_confirmation_pending() {
             return;
         }
-        let Some(placement_mode) = self.placement_mode.as_mut() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return;
         };
         placement_mode.placement_target = None;
@@ -514,7 +518,7 @@ impl Client {
                         is_same_tab_placement_noop(placement_snapshot, placement_target)
                     })
             });
-        let Some(placement_mode) = self.placement_mode.as_mut() else {
+        let Some(placement_mode) = self.placement_state.placement_mode.as_mut() else {
             return;
         };
         let is_target_source_pane = placement_mode.destination_tab_id
@@ -543,7 +547,7 @@ impl Client {
         screen_point: Point,
         frame: &MouseFrame,
     ) -> Option<PanePlacementTarget> {
-        let placement_mode = self.placement_mode.as_ref()?;
+        let placement_mode = self.placement_state.placement_mode.as_ref()?;
         let placement_snapshot = self.get_placement_snapshot()?;
         if placement_snapshot.destination_tab_id != placement_mode.destination_tab_id {
             return None;
@@ -573,7 +577,7 @@ impl Client {
         if hovered_pane_id == Some(placement_mode.source_pane_id) {
             return None;
         }
-        let placement_drag = self.placement_drag?;
+        let placement_drag = self.placement_state.placement_drag?;
         let destination_tab_id = placement_mode.destination_tab_id;
         let placement_destinations = build_placement_destinations(
             tab_snapshot,
@@ -846,11 +850,11 @@ impl Client {
         self.resize_drag = None;
         self.tabline_drag = None;
         self.mouse_capture = None;
-        self.placement_drag = None;
+        self.placement_state.placement_drag = None;
         if self.should_placement_mode_end_with_drag() {
             self.cancel_placement_mode();
         } else if !self.is_placement_confirmation_pending() {
-            if let Some(placement_mode) = self.placement_mode.as_mut() {
+            if let Some(placement_mode) = self.placement_state.placement_mode.as_mut() {
                 placement_mode.placement_target = None;
             }
         }
@@ -1475,18 +1479,6 @@ impl Client {
         self.placement_handle_pane_id = self
             .placement_handle_pane_id
             .filter(|&pane_id| is_pane_drawn(pane_id));
-        let is_source_tab_visible = self.visible_tab_ids.is_empty()
-            || self.placement_mode.as_ref().is_none_or(|placement_mode| {
-                self.visible_tab_ids.contains(&placement_mode.source_tab_id)
-            });
-        let is_source_pane_missing_from_current_tab =
-            self.placement_mode.as_ref().is_some_and(|placement_mode| {
-                placement_mode.source_tab_id == frame.client_snapshot.active_tab_id
-                    && !is_pane_drawn(placement_mode.source_pane_id)
-            });
-        if !is_source_tab_visible || is_source_pane_missing_from_current_tab {
-            self.cancel_placement_mode();
-        }
     }
 
     /// Update the viewer-owned hover state from the region under the pointer.

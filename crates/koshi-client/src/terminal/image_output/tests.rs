@@ -2159,7 +2159,7 @@ fn an_opaque_iterm_or_sixel_image_that_moves_reuses_its_encoded_output() {
             Some(cell_size),
         ) {
             assert!(Instant::now() < deadline, "{output_kind:?} did not settle");
-            std::thread::yield_now();
+            std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
         }
         let first_frame_output_bytes = output_state
             .frame_output(None)
@@ -2495,7 +2495,7 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
         Some(cell_size),
     ) {
         assert!(Instant::now() < deadline, "the first frame did not settle");
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     let first_frame_output_bytes = output_state
         .frame_output(None)

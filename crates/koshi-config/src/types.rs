@@ -432,7 +432,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             parse_default_key_sequence("<leader>p s"),
             build_bound_action("new-pane-stacked"),
         ),
-        // Move opens the viewer-owned read-only placement preview.
+        // `m` opens pane placement mode, a preview only this viewer sees.
         (
             parse_default_key_sequence("<leader>p m"),
             build_bound_action("begin-pane-placement"),

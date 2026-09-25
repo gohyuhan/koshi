@@ -4,6 +4,7 @@
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use koshi_config::conflict::{KeymapLayer, LayerOrigin};
 use koshi_config::hints::KeymapHintCatalog;
@@ -215,13 +216,13 @@ fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
 fn placement_submode_owns_the_locked_keyboard_and_restores_locked_mode() {
     let mut client = build_test_client();
     client.set_lock_mode(LockMode::Locked);
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
 
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
@@ -241,14 +242,15 @@ fn placement_submode_owns_the_locked_keyboard_and_restores_locked_mode() {
     );
     assert_eq!(
         client.apply_client_action(ClientActionKind::CancelPanePlacement),
-        PlacementInputAction::CancelPlacement
+        PlacementInputAction::Consumed
     );
+    assert!(client.placement_state.placement_mode.is_none());
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert_eq!(client.get_active_input_mode(), LockMode::Locked);
 }
 
 #[test]
-fn submitted_placement_consumes_navigation_without_changing_its_target() {
+fn submitted_placement_consumes_placement_keys_and_keeps_its_command() {
     let (mut client, _) = crate::tests::build_test_client_with_event_sender();
     let session_id = SessionId::new();
     let client_id = client.get_client_id();
@@ -266,49 +268,52 @@ fn submitted_placement_consumes_navigation_without_changing_its_target() {
         Some(source_pane_id),
         vec![source_tab_id, destination_tab_id],
     );
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
         placement_target: Some(placement_target.clone()),
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
-    client.placement_snapshot = Some(Box::new(crate::tests::build_test_placement_snapshot(
-        session_id,
-        client_id,
-        source_pane_id,
-        source_tab_id,
-        destination_tab_id,
-        0,
-        0,
-    )));
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            session_id,
+            client_id,
+            source_pane_id,
+            source_tab_id,
+            destination_tab_id,
+            0,
+            0,
+        )));
 
     assert_eq!(
         client.submit_placement_command(),
-        Some(PlacementInputAction::SubmitPlacement(Command::PlacePane(
-            PlacePaneArgs {
+        Some(crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
                 source_pane_id,
                 placement_target: placement_target.clone(),
                 expected_placement_revision: Some(PlacementRevision {
                     session_revision: 0,
                     client_revision: 0,
                 }),
-            }
-        )))
+            })
+        ))
     );
-    let submitted_mode = client.placement_mode.clone();
+    let submitted_mode = client.placement_state.placement_mode.clone();
 
-    for placement_chord in [
+    for placement_action in [
         ClientActionKind::SelectNextPlacementTab,
         ClientActionKind::SelectPaneTarget(Direction::Right),
         ClientActionKind::CyclePanePlacementSpan,
+        ClientActionKind::ConfirmPanePlacement,
     ] {
         assert_eq!(
-            client.apply_client_action(placement_chord),
+            client.apply_client_action(placement_action),
             PlacementInputAction::Consumed
         );
-        assert_eq!(client.placement_mode, submitted_mode);
+        assert_eq!(client.placement_state.placement_mode, submitted_mode);
     }
     assert_eq!(client.get_placement_target(), Some(placement_target));
 }
@@ -317,7 +322,7 @@ fn submitted_placement_consumes_navigation_without_changing_its_target() {
 fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
     let mut client = build_test_client();
     client.set_lock_mode(LockMode::Locked);
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
@@ -325,9 +330,11 @@ fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
         placement_target: Some(PanePlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
-        is_placement_submitted: true,
+        pending_placement_command: Some(crate::tests::build_pending_placement_command(
+            CommandId::new(),
+        )),
     });
-    client.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
+    client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
 
     assert!(!client.is_placement_mode_active());
     assert!(client.is_placement_confirmation_pending());
@@ -343,7 +350,7 @@ fn submitted_mouse_placement_returns_to_the_base_mode_and_ignores_cancel() {
 #[test]
 fn submitted_keyboard_placement_keeps_pane_placement_mode_and_ignores_cancel() {
     let mut client = build_test_client();
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
@@ -351,9 +358,11 @@ fn submitted_keyboard_placement_keeps_pane_placement_mode_and_ignores_cancel() {
         placement_target: Some(PanePlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
-        is_placement_submitted: true,
+        pending_placement_command: Some(crate::tests::build_pending_placement_command(
+            CommandId::new(),
+        )),
     });
-    client.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+    client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
 
     assert!(client.is_placement_mode_active());
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
@@ -368,7 +377,7 @@ fn submitted_keyboard_placement_keeps_pane_placement_mode_and_ignores_cancel() {
 #[test]
 fn changing_input_owner_cancels_an_unconfirmed_placement() {
     let (mut client, _) = crate::tests::build_test_client_with_event_sender();
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
@@ -376,7 +385,7 @@ fn changing_input_owner_cancels_an_unconfirmed_placement() {
         placement_target: Some(PanePlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
 
     client.set_lock_mode(LockMode::Locked);
@@ -384,7 +393,7 @@ fn changing_input_owner_cancels_an_unconfirmed_placement() {
     assert!(!client.is_placement_mode_active());
     assert!(client.get_placement_target().is_none());
 
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
@@ -392,7 +401,7 @@ fn changing_input_owner_cancels_an_unconfirmed_placement() {
         placement_target: Some(PanePlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
     client.set_mouse_selection_enabled(true);
 
@@ -407,13 +416,13 @@ fn placement_accepts_the_dragged_pane_focus_frame_before_cancelling_other_focus(
     let tab_id = TabId::new();
     let mut client = build_test_client();
     client.set_frame_view(tab_id, Some(initial_focused_pane_id), vec![tab_id]);
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: dragged_pane_id,
         source_tab_id: tab_id,
         destination_tab_id: tab_id,
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
 
     client.set_frame_view(tab_id, Some(dragged_pane_id), vec![tab_id]);
@@ -429,7 +438,7 @@ fn a_new_frame_owner_cancels_an_unconfirmed_placement() {
     let source_tab_id = TabId::new();
     let source_pane_id = PaneId::new();
     client.set_frame_view(source_tab_id, Some(source_pane_id), vec![source_tab_id]);
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id,
         destination_tab_id: source_tab_id,
@@ -437,7 +446,7 @@ fn a_new_frame_owner_cancels_an_unconfirmed_placement() {
         placement_target: Some(PanePlacementTarget::Swap {
             target_pane_id: PaneId::new(),
         }),
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
 
     client.set_frame_view(TabId::new(), None, Vec::new());
@@ -546,14 +555,17 @@ fn next_placement_tab_selects_insertion_right_of_that_whole_tab_and_enter_places
     );
     assert_eq!(
         client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
-        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
-            source_pane_id,
-            placement_target: whole_tab_insertion_target,
-            expected_placement_revision: Some(PlacementRevision {
-                session_revision: 0,
-                client_revision: 0,
-            }),
-        }))
+        crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id,
+                placement_target: whole_tab_insertion_target,
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            })
+        )
     );
 }
 
@@ -690,17 +702,22 @@ fn a_rejected_whole_tab_placement_selects_the_whole_tab_target_again_after_the_r
     assert!(client.accept_placement_snapshot(1, placement_snapshot.clone(), Instant::now()));
     assert_eq!(
         client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
-        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
-            source_pane_id,
-            placement_target: whole_tab_insertion_target.clone(),
-            expected_placement_revision: Some(PlacementRevision {
-                session_revision: 0,
-                client_revision: 0,
-            }),
-        }))
+        crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id,
+                placement_target: whole_tab_insertion_target.clone(),
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            })
+        )
     );
-    let command_id = CommandId::new();
-    client.set_pending_placement_command_id(command_id);
+    let command_id = client
+        .get_pending_placement_command()
+        .expect("Enter recorded a pending placement command")
+        .command_id;
 
     assert!(client.reject_placement_command(command_id));
     assert_eq!(client.get_placement_target(), None);
@@ -831,21 +848,22 @@ impl StackBesidePlainPane {
         let tab_id = TabId::new();
         client.set_session_id(session_id);
         client.set_frame_view(tab_id, Some(source_pane_id), vec![tab_id]);
-        client.placement_mode = Some(PlacementMode {
+        client.placement_state.placement_mode = Some(PlacementMode {
             source_pane_id,
             source_tab_id: tab_id,
             destination_tab_id: tab_id,
             placement_direction: Direction::Right,
             placement_target: None,
-            is_placement_submitted: false,
+            pending_placement_command: None,
         });
-        client.placement_snapshot = Some(Box::new(build_solved_placement_snapshot(
-            session_id,
-            client.get_client_id(),
-            source_pane_id,
-            tab_id,
-            self.build_layout_tree(),
-        )));
+        client.placement_state.placement_snapshot =
+            Some(Arc::new(build_solved_placement_snapshot(
+                session_id,
+                client.get_client_id(),
+                source_pane_id,
+                tab_id,
+                self.build_layout_tree(),
+            )));
         client
     }
 }
@@ -887,16 +905,19 @@ fn arrow_right_from_a_stack_member_selects_the_plain_pane_and_enter_swaps_them()
 
     assert_eq!(
         client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
-        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
-            source_pane_id: stack_layout.open_stack_pane_id,
-            placement_target: PanePlacementTarget::Swap {
-                target_pane_id: stack_layout.plain_pane_id,
-            },
-            expected_placement_revision: Some(PlacementRevision {
-                session_revision: 0,
-                client_revision: 0,
-            }),
-        }))
+        crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: stack_layout.open_stack_pane_id,
+                placement_target: PanePlacementTarget::Swap {
+                    target_pane_id: stack_layout.plain_pane_id,
+                },
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            })
+        )
     );
 }
 
@@ -916,16 +937,19 @@ fn a_plain_pane_reaches_a_collapsed_stack_member_and_enter_swaps_them() {
 
     assert_eq!(
         client.apply_client_action(ClientActionKind::ConfirmPanePlacement),
-        PlacementInputAction::SubmitPlacement(Command::PlacePane(PlacePaneArgs {
-            source_pane_id: stack_layout.plain_pane_id,
-            placement_target: PanePlacementTarget::Swap {
-                target_pane_id: stack_layout.second_stack_pane_id,
-            },
-            expected_placement_revision: Some(PlacementRevision {
-                session_revision: 0,
-                client_revision: 0,
-            }),
-        }))
+        crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id: stack_layout.plain_pane_id,
+                placement_target: PanePlacementTarget::Swap {
+                    target_pane_id: stack_layout.second_stack_pane_id,
+                },
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            })
+        )
     );
 }
 
@@ -1103,13 +1127,13 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
         ActionReference::from_core_action_name("quit").expect("valid name")
     );
 
-    client.placement_mode = Some(PlacementMode {
+    client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
         placement_target: None,
-        is_placement_submitted: false,
+        pending_placement_command: None,
     });
 
     assert_eq!(

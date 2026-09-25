@@ -687,7 +687,11 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                         &client,
                         &snapshot,
                         &build_committed_regions(TEST_VIEWPORT_SIZE),
-                        &ViewerPaint::from_frame(&client, &snapshot),
+                        &ViewerPaint::from_client(
+                            &client,
+                            snapshot.client_snapshot.active_tab_id,
+                            &snapshot,
+                        ),
                         graphics.get_image_render_mode(),
                         &mut image_output_state,
                         Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size")),
@@ -707,7 +711,7 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                         Instant::now() < deadline,
                         "{image_protocol:?} -> {graphics:?}, stage {stage_index} did not settle"
                     );
-                    std::thread::yield_now();
+                    std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
                 }
 
                 let contains_marker = |marker: &[u8]| {
@@ -1011,7 +1015,11 @@ fn assert_two_image_trace_output(
                     client,
                     &snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
-                    &ViewerPaint::from_frame(client, &snapshot),
+                    &ViewerPaint::from_client(
+                        client,
+                        snapshot.client_snapshot.active_tab_id,
+                        &snapshot,
+                    ),
                     graphics.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
@@ -1031,7 +1039,7 @@ fn assert_two_image_trace_output(
                     Instant::now() < deadline,
                     "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} did not settle"
                 );
-                std::thread::yield_now();
+                std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
 
             let terminal_text = terminal_engine
@@ -1088,7 +1096,7 @@ fn assert_partial_native_frame_write_recovers(
             Instant::now() < deadline,
             "{graphics_support:?} output did not prepare"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert!(image_output_state.native_commit_pending());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
@@ -1106,7 +1114,7 @@ fn assert_partial_native_frame_write_recovers(
         &client,
         &snapshot,
         &committed,
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         graphics_support.get_image_render_mode(),
         &mut image_output_state,
         Some(cell_size),
@@ -1261,7 +1269,11 @@ fn assert_image_trace_output(
                     client,
                     &snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
-                    &ViewerPaint::from_frame(client, &snapshot),
+                    &ViewerPaint::from_client(
+                        client,
+                        snapshot.client_snapshot.active_tab_id,
+                        &snapshot,
+                    ),
                     graphics.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
@@ -1281,7 +1293,7 @@ fn assert_image_trace_output(
                     Instant::now() < deadline,
                     "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} did not settle"
                 );
-                std::thread::yield_now();
+                std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
             let image_placements = terminal_engine
                 .get_terminal_state()
@@ -1416,9 +1428,10 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     // selection was already on.
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, client_id, _pane_id) = build_test_server_with_pane(&fake);
-    let client = build_test_client(&mut server, client_id);
+    let mut client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
     let snapshot = build_render_snapshot(&server, client_id);
+    client.apply_render_snapshot(&snapshot);
 
     paint_frame(
         &mut terminal,
@@ -1428,7 +1441,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
             column_count: 120,
             row_count: 24,
         }),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -1442,6 +1455,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         Command::ToggleMouseSelect,
     ));
     let snapshot = build_render_snapshot(&server, client_id);
+    client.apply_render_snapshot(&snapshot);
     paint_frame(
         &mut terminal,
         &client,
@@ -1450,7 +1464,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
             column_count: 120,
             row_count: 24,
         }),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -1480,7 +1494,7 @@ fn pty_output_is_painted_to_the_screen() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -1514,7 +1528,7 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut last_cursor,
     )
@@ -1550,7 +1564,7 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut last_cursor,
     )
@@ -1577,7 +1591,7 @@ fn painting_records_the_window_title_it_sent() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut last_title,
         &mut None,
     )
@@ -1606,7 +1620,7 @@ fn a_paint_after_a_title_change_records_the_new_title() {
             &client,
             snapshot,
             &build_committed_regions(TEST_VIEWPORT_SIZE),
-            &ViewerPaint::from_frame(&client, snapshot),
+            &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, snapshot),
             last_title,
             &mut None,
         )
@@ -2650,7 +2664,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         ImageRenderMode::Placeholder,
         &mut image_output,
         None,
@@ -3529,7 +3543,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         column_count: 40,
         row_count: 12,
     };
-    let rect_at = |column: u16, row: u16, size: Size| {
+    let build_rect = |column: u16, row: u16, size: Size| {
         CoreRect::from_origin_and_size(Point { column, row }, size)
     };
     let tab_id = TabId::new();
@@ -3539,18 +3553,18 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         pane_slots: vec![
             build_committed_test_pane_slot(
                 moved_pane_id,
-                rect_at(0, 0, half_width_size),
-                Some(rect_at(0, 0, half_width_size).compute_inner_with_border()),
+                build_rect(0, 0, half_width_size),
+                Some(build_rect(0, 0, half_width_size).compute_inner_with_border()),
             ),
             build_committed_test_pane_slot(
                 leaving_pane_id,
-                rect_at(40, 0, half_width_size),
-                Some(rect_at(40, 0, half_width_size).compute_inner_with_border()),
+                build_rect(40, 0, half_width_size),
+                Some(build_rect(40, 0, half_width_size).compute_inner_with_border()),
             ),
             build_committed_test_pane_slot(
                 collapsing_pane_id,
-                rect_at(40, 12, half_width_size),
-                Some(rect_at(40, 12, half_width_size).compute_inner_with_border()),
+                build_rect(40, 12, half_width_size),
+                Some(build_rect(40, 12, half_width_size).compute_inner_with_border()),
             ),
         ],
         effective_cell_size: Size {
@@ -3562,7 +3576,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         are_all_panes_suppressed: false,
         gap_cell_count: 0,
     };
-    let collapsed_header_rect = rect_at(
+    let collapsed_header_rect = build_rect(
         40,
         12,
         Size {
@@ -3574,13 +3588,13 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     to_tab_snapshot.pane_slots = vec![
         build_committed_test_pane_slot(
             moved_pane_id,
-            rect_at(40, 0, half_width_size),
-            Some(rect_at(40, 0, half_width_size).compute_inner_with_border()),
+            build_rect(40, 0, half_width_size),
+            Some(build_rect(40, 0, half_width_size).compute_inner_with_border()),
         ),
         build_committed_test_pane_slot(
             arriving_pane_id,
-            rect_at(0, 0, half_width_size),
-            Some(rect_at(0, 0, half_width_size).compute_inner_with_border()),
+            build_rect(0, 0, half_width_size),
+            Some(build_rect(0, 0, half_width_size).compute_inner_with_border()),
         ),
         build_committed_test_pane_slot(collapsing_pane_id, collapsed_header_rect, None),
     ];
@@ -3596,8 +3610,8 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     let mut expected_halfway_tab_snapshot = to_tab_snapshot.clone();
     expected_halfway_tab_snapshot.pane_slots[0] = build_committed_test_pane_slot(
         moved_pane_id,
-        rect_at(20, 0, half_width_size),
-        Some(rect_at(20, 0, half_width_size).compute_inner_with_border()),
+        build_rect(20, 0, half_width_size),
+        Some(build_rect(20, 0, half_width_size).compute_inner_with_border()),
     );
     assert_eq!(
         halfway_tab_snapshot, expected_halfway_tab_snapshot,
@@ -3614,7 +3628,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     );
     assert_eq!(
         early_tab_snapshot.pane_slots[0].outer_rect,
-        rect_at(10, 0, half_width_size)
+        build_rect(10, 0, half_width_size)
     );
     assert_eq!(
         interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 1.0),
