@@ -15,7 +15,7 @@ use crate::router::RouterRequestKind;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
 use koshi_core::command::{
     Command, CommandSource, MovePaneArgs, NewPaneArgs, PanePlacementAnchor, PanePlacementTarget,
-    PlacePaneArgs, ScrollPaneArgs, SwapPanesArgs, ToggleLockModeArgs,
+    PlacePaneArgs, ScrollPaneArgs, ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
@@ -1709,11 +1709,6 @@ fn pane_command_requests_round_trip_without_a_protocol_change() {
         Command::MovePane(MovePaneArgs {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
             direction: Direction::Left,
-        }),
-        Command::SwapPanes(SwapPanesArgs {
-            source_pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            target_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
-            expected_placement_revision: None,
         }),
         Command::PlacePane(PlacePaneArgs {
             source_pane_id: PaneId::from_uuid(build_fixed_test_uuid()),

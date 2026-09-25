@@ -637,6 +637,33 @@ fn reduced_motion_defaults_to_disabled_and_accepts_true() {
 }
 
 #[test]
+fn stay_in_pane_placement_mode_after_placement_defaults_to_enabled_and_accepts_false() {
+    assert!(ClientConfig::default().should_stay_in_pane_placement_mode_after_placement);
+    assert_eq!(
+        parse_config("stay-in-pane-placement-mode-after-placement #false")
+            .should_stay_in_pane_placement_mode_after_placement,
+        Some(false)
+    );
+}
+
+#[test]
+fn a_non_boolean_stay_in_pane_placement_mode_after_placement_is_skipped_with_a_warning() {
+    let (layer, warnings) =
+        parse_with_warnings("stay-in-pane-placement-mode-after-placement \"no\"");
+    assert_eq!(
+        layer.should_stay_in_pane_placement_mode_after_placement,
+        None
+    );
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored `stay-in-pane-placement-mode-after-placement`: expected a boolean (#true or #false)"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn a_non_boolean_reduced_motion_is_skipped_with_a_warning() {
     let (layer, warnings) = parse_with_warnings("reduced-motion \"yes\"");
     assert_eq!(layer.should_reduce_motion, None);

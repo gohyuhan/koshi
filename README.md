@@ -271,6 +271,8 @@ The default leader is Ctrl.
 |---|---|
 | `<C-p> n` | Open pane using configured direction |
 | `<C-p> h` / `j` / `k` / `l` | Open pane left / down / up / right |
+| `<C-p> s` | Open pane in the focused pane's stack |
+| `<C-p> m` | Enter pane placement mode: pick a pane and a destination, then Enter |
 | `<C-p> x` | Close pane and its process tree |
 | `<C-p> ←` / `↓` / `↑` / `→` | Focus nearby pane |
 | `<C-s> ←` / `↓` / `↑` / `→` | Move pane border one cell |
@@ -293,7 +295,7 @@ to version 2.
 
 | File | Contents |
 |---|---|
-| `koshi.kdl` | Theme, image, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
+| `koshi.kdl` | Theme, image, reduced-motion, pane placement, pane, scrollback, layout, mouse, copy, terminal, logging, update, beta-feature, session-closing, other-user access, and remote access settings |
 | `themes/<name>.kdl` | Koshi interface colors |
 | `keybinding.kdl` | Keybindings and input modes |
 | `profile/<name>.kdl` | Tabs, pane layouts, commands, directories, environment values, and the starting input mode |

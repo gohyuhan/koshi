@@ -120,6 +120,12 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             tab_id: Some(payload.tab_id),
             ..empty_recent_event
         },
+        Event::PanePlacementCommitted(payload) => RecentEvent {
+            tab_id: Some(payload.destination_tab_id),
+            pane_id: Some(payload.source_pane_id),
+            command_id: Some(payload.command_id),
+            ..empty_recent_event
+        },
         Event::TabCreated(payload) => RecentEvent {
             tab_id: Some(payload.tab_id),
             ..empty_recent_event

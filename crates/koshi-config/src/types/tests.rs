@@ -49,6 +49,7 @@ fn default_loads_with_expected_values() {
     assert!(!server.should_auto_close_session);
     assert!(client_config.supports_image_protocols);
     assert!(!client_config.should_reduce_motion);
+    assert!(client_config.should_stay_in_pane_placement_mode_after_placement);
     assert!(client_config.should_reconnect_remote_session);
 
     assert_eq!(client_config.keybindings.chord_timeout_ms, 500);
@@ -67,8 +68,8 @@ fn default_loads_with_expected_values() {
             .collect::<Vec<_>>(),
         vec![
             &ModeName::from_text("locked"),
-            &ModeName::from_text("move-pane"),
-            &ModeName::from_text("normal")
+            &ModeName::from_text("normal"),
+            &ModeName::from_text("pane-placement")
         ]
     );
 
@@ -371,7 +372,7 @@ fn mode_name_maps_answer_str_lookups() {
 #[test]
 fn the_default_modes_remove_no_sequences() {
     let modes = build_default_mode_bindings(Leader::default());
-    for mode_name in ["normal", "locked", "move-pane"] {
+    for mode_name in ["normal", "locked", "pane-placement"] {
         assert_eq!(
             modes[&ModeName::from_text(mode_name)].removed_key_sequences,
             BTreeSet::new(),
@@ -436,7 +437,7 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
     let modes = build_default_mode_bindings(Leader::Mods(ModFlags::SHIFT));
     let normal = &modes[&ModeName::from_text("normal")];
 
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 23);
+    assert_eq!(normal.bound_action_by_key_sequence.len(), 24);
     assert_eq!(
         normal.bound_action_by_key_sequence
             [&KeySequence::from(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('q')))],
@@ -491,7 +492,7 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
                 KeyChord::from_parts(ModFlags::NONE, Key::Char('m')),
             ],
         )],
-        build_bound_action("move-pane")
+        build_bound_action("begin-pane-placement")
     );
 }
 
@@ -499,12 +500,12 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
     // one-chord sequence and the sequences it opens are separate map keys, so
-    // the table still holds all 23 normal-mode bindings.
+    // the table still holds all 24 normal-mode bindings.
     let fullscreen = KeyChord::from_parts(ModFlags::ALT, Key::Char('f'));
     let modes = build_default_mode_bindings(Leader::Chord(fullscreen));
     let normal = &modes[&ModeName::from_text("normal")];
 
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 23);
+    assert_eq!(normal.bound_action_by_key_sequence.len(), 24);
     assert_eq!(
         normal.bound_action_by_key_sequence[&KeySequence::from(fullscreen)],
         build_bound_action("toggle-pane-fullscreen")
@@ -643,12 +644,27 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             ActionArgs::None,
             Ok(build_new_pane_command(Direction::Right)),
         ),
+        build_expected_binding(
+            "normal",
+            "<C-p> s",
+            "new-pane-stacked",
+            ActionArgs::None,
+            Ok(Command::NewPane(NewPaneArgs {
+                source_pane_id: None,
+                tab_id: None,
+                direction: CLIENT_SPLIT_DIRECTION,
+                should_stack: true,
+                working_directory: None,
+                spawn_spec: None,
+                client_id: None,
+            })),
+        ),
         build_expected_client_binding(
             "normal",
             "<C-p> m",
-            "move-pane",
+            "begin-pane-placement",
             ActionArgs::None,
-            ClientActionKind::BeginPaneMove,
+            ClientActionKind::BeginPanePlacement,
         ),
         build_expected_binding(
             "normal",
@@ -774,9 +790,9 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         build_expected_client_binding(
             "locked",
             "<C-p> m",
-            "move-pane",
+            "begin-pane-placement",
             ActionArgs::None,
-            ClientActionKind::BeginPaneMove,
+            ClientActionKind::BeginPanePlacement,
         ),
         build_expected_binding(
             "locked",
@@ -786,95 +802,95 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             Ok(Command::Quit),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Left>",
             "select-pane-target-left",
             ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Left),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Down>",
             "select-pane-target-down",
             ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Down),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Up>",
             "select-pane-target-up",
             ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Up),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Right>",
             "select-pane-target-right",
             ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Right),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<S-Left>",
             "select-pane-insertion-left",
             ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Left),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<S-Down>",
             "select-pane-insertion-down",
             ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Down),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<S-Up>",
             "select-pane-insertion-up",
             ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Up),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<S-Right>",
             "select-pane-insertion-right",
             ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Right),
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Space>",
             "cycle-pane-placement-span",
             ActionArgs::None,
             ClientActionKind::CyclePanePlacementSpan,
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Tab>",
             "select-next-placement-tab",
             ActionArgs::None,
             ClientActionKind::SelectNextPlacementTab,
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<S-Tab>",
             "select-previous-placement-tab",
             ActionArgs::None,
             ClientActionKind::SelectPreviousPlacementTab,
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<CR>",
             "confirm-pane-placement",
             ActionArgs::None,
             ClientActionKind::ConfirmPanePlacement,
         ),
         build_expected_client_binding(
-            "move-pane",
+            "pane-placement",
             "<Esc>",
-            "cancel-pane-move",
+            "cancel-pane-placement",
             ActionArgs::None,
-            ClientActionKind::CancelPaneMove,
+            ClientActionKind::CancelPanePlacement,
         ),
         build_expected_binding(
             "normal",
@@ -984,7 +1000,7 @@ fn default_bindings_open_non_typeable_and_skip_ambiguous_ctrl_chords() {
         KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
     ];
     for (mode_name, mode_bindings) in &client_config.keybindings.mode_bindings_by_name {
-        if mode_name.get_name() == "move-pane" {
+        if mode_name.get_name() == "pane-placement" {
             continue;
         }
         for key_sequence in mode_bindings.bound_action_by_key_sequence.keys() {
@@ -1016,7 +1032,7 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 
     let locked = &config.keybindings.mode_bindings_by_name[&ModeName::from_text("locked")];
     // The reserved unlock — the same chord normal mode locks with, so one
-    // key flips both ways — plus the move opener, quit, and mouse-select
+    // key flips both ways — plus the pane placement opener, quit, and mouse-select
     // chords.
     assert_eq!(locked.bound_action_by_key_sequence.len(), 4);
     let bound_action = locked

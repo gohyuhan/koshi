@@ -39,8 +39,9 @@ Keys use angle brackets. Spaces join keys into a sequence.
 ## `mode` blocks
 
 A `mode` block holds the bindings for one built-in keymap — `"normal"`,
-`"locked"`, or `"move-pane"`. Normal and locked are base modes. Move-pane is
-a local placement submode that takes priority while a pane move is open.
+`"locked"`, or `"pane-placement"`. Normal and locked are base modes.
+Pane placement is a local mode that takes priority while a pane placement is
+open.
 
 - `bind "<key>" "core:action"` — exactly two strings: the key sequence and the
   **full** action reference (namespaced, e.g. `core:new-tab`; a bare `new-tab`
@@ -77,7 +78,8 @@ mode "normal" {
     bind "<leader>p j" "core:new-pane-down"
     bind "<leader>p k" "core:new-pane-up"
     bind "<leader>p l" "core:new-pane-right"
-    bind "<leader>p m" "core:move-pane"
+    bind "<leader>p s" "core:new-pane-stacked"  // <C-p> s: a new pane in the focused pane's stack
+    bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>p x" "core:close-pane-tree"
     bind "<leader>p <Left>" "core:focus-pane-left"
     bind "<leader>p <Down>" "core:focus-pane-down"
@@ -100,12 +102,12 @@ mode "locked" {
     // locked mode passes every other key straight to the program.
     bind "<C-l>" "core:unlock"
     bind "<leader>q" "core:quit"
-    bind "<leader>p m" "core:move-pane"
+    bind "<leader>p m" "core:begin-pane-placement"
     bind "<leader>g" "core:mouse-select"
 }
 
-mode "move-pane" {
-    // Placement owns these keys while a pane move is open.
+mode "pane-placement" {
+    // Placement owns these keys while a pane placement is open.
     bind "<Left>" "core:select-pane-target-left"
     bind "<Down>" "core:select-pane-target-down"
     bind "<Up>" "core:select-pane-target-up"
@@ -118,44 +120,73 @@ mode "move-pane" {
     bind "<Tab>" "core:select-next-placement-tab"
     bind "<S-Tab>" "core:select-previous-placement-tab"
     bind "<CR>" "core:confirm-pane-placement"
-    bind "<Esc>" "core:cancel-pane-move"
+    bind "<Esc>" "core:cancel-pane-placement"
 }
 ```
 
 ## Pane placement mode
 
-`core:move-pane` opens the local `move-pane` mode. It keeps the current base
-mode: entering from locked mode keeps the client locked after cancellation.
-While it is active, the `move-pane` keymap has priority over the normal or locked
-keymap. An unbound key and every key release are consumed by placement.
+`core:begin-pane-placement` opens the local `pane-placement` mode. It keeps the
+current base mode: entering from locked mode keeps the client locked after
+cancellation. While it is active, the `pane-placement` keymap has priority over
+the normal or locked keymap. An unbound key and every key release are consumed
+by placement.
 
-The default `move-pane` bindings are:
+The default `pane-placement` bindings are:
 
-- Arrow keys choose a destination pane.
-- Shift+Arrow keys choose a split edge.
+- Arrow keys choose a destination pane. A collapsed stack member is a
+  destination at its header strip: in a stack `[A, B, C open]`, Up from `C`
+  picks `B`, and Enter gives `[A, C open, B]`. A swap trades places, so a pane
+  that lands in a stack slot joins that stack and a stack member that lands in
+  a plain slot leaves it.
+- Shift+Arrow keys choose a split edge. Toward a stacked pane, the edge belongs
+  to the whole stack, and the placed pane lands beside the stack as a plain pane.
 - Space cycles the available split spans.
-- Tab and Shift+Tab preview the next or previous visible tab.
+- Tab and Shift+Tab preview the next or previous visible tab with the pane
+  placed at the right edge of that whole tab. Enter places it there: from tab
+  `#1` `[A | B]`, Tab and Enter on `A` give `#1` `[B]` and `#2` `[C | A]`. In
+  that preview, Shift+Arrow picks another edge of the tab and an Arrow picks a
+  pane in that tab to swap with. Returning to the pane's own tab selects no
+  destination.
 - A left-button drag previews the pane under the pointer and a valid release
-  submits the placement.
-- Enter submits the selected placement and keeps placement mode active.
-- Escape runs `core:cancel-pane-move`, discards the unconfirmed placement, and
-  returns to the base normal or locked mode.
+  submits the placement. Pressing a pane's content, its grab handle, or a
+  collapsed stack header picks that pane up. On the tab you are on, the pane
+  also takes focus, so a collapsed member opens in its stack as the drag
+  starts. On a tab you only preview, focus stays where it is and a collapsed
+  member stays collapsed.
+- Enter submits the selected placement. Pane placement mode stays active after
+  the session accepts it, unless `koshi.kdl` sets
+  `stay-in-pane-placement-mode-after-placement #false`.
+- Escape runs `core:cancel-pane-placement`, discards the unconfirmed placement,
+  and returns to the base normal or locked mode.
 
-Every placement action is a normal bindable action in the `move-pane` block. For
-example, this changes the cancel key while keeping Escape available for a
-different placement action:
+Every placement action is a normal bindable action in the `pane-placement`
+block. For example, this changes the cancel key while keeping Escape available
+for a different placement action:
 
 ```kdl
-mode "move-pane" {
+mode "pane-placement" {
     bind "<Esc>" "core:select-pane-target-right"
-    bind "<C-c>" "core:cancel-pane-move"
+    bind "<C-c>" "core:cancel-pane-placement"
 }
 ```
 
-The effective `move-pane` map must keep one live `core:cancel-pane-move`
-binding. Removing Escape without binding that action to another key rejects the
-keymap.
+The effective `pane-placement` map must keep one live
+`core:cancel-pane-placement` binding. Removing Escape without binding that
+action to another key rejects the keymap.
 
 `<leader>p m` opens the mode, then `<Right>` selects a destination instead of
 running `core:focus-pane-right`. A normal-mode binding for `<leader>p
 <Right>` still applies before placement opens.
+
+### Pane placement mode and `koshi move-pane`
+
+- Pane placement mode shows a preview only in the client that opened it.
+  Other clients see nothing until Enter or a mouse drop confirms the
+  placement. Then every client sees the new layout, and the other clients
+  slide to it.
+- `koshi move-pane --direction <direction> [--pane <pane-id>]` swaps a pane
+  with its visible neighbor at once. It has no preview and no confirm step,
+  and every client showing that tab slides to the new layout. Its action,
+  `core:move-pane`, runs only from the command line: a key bound to it loads
+  with an unresolvable-arguments warning and sends nothing when pressed.

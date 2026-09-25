@@ -18,9 +18,11 @@ use ratatui::layout::{Position, Rect};
 
 use koshi_config::layer::{PartialColorPalette, PartialKeybindingsConfig, PartialThemeConfig};
 use koshi_config::types::RgbColor;
-use koshi_core::command::{Command, CommandEnvelope, CommandSource, PanePlacementTarget};
+use koshi_core::command::{
+    Command, CommandEnvelope, CommandSource, PanePlacementAnchor, PanePlacementTarget,
+};
 use koshi_core::geometry::{
-    ImageCellGeometry, PaneArea, Point as CorePoint, Rect as CoreRect, Size, SplitDirection,
+    Direction, PaneArea, Point as CorePoint, Rect as CoreRect, Size, SplitDirection,
 };
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags, ModFlags};
@@ -33,17 +35,14 @@ use koshi_layout::solver::{solve_layout_with_mode, PaneSizing};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, GridView, ImagePlacementSnapshot, PaneKind, PaneSlot,
-    PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    RenderSnapshot, TabSnapshot,
+    ClientSnapshot, CommittedRegions, GridView, PaneKind, PaneSlot, PlacementClientSnapshot,
+    PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabSnapshot,
+    ViewerChrome,
 };
 use koshi_renderer::{build_image_cell_snapshot, build_image_paints};
 use koshi_runtime::runtime::bus::EventFilter;
 use koshi_runtime::server::Server;
 use koshi_terminal::engine::TerminalEngine;
-use koshi_terminal::graphics::{
-    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
-};
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::Style as TerminalStyle;
 use koshi_test_support::fake_pty::FakePtyBackend;
@@ -688,7 +687,11 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                         &client,
                         &snapshot,
                         &build_committed_regions(TEST_VIEWPORT_SIZE),
-                        &ViewerPaint::from_frame(&client, &snapshot),
+                        &ViewerPaint::from_client(
+                            &client,
+                            snapshot.client_snapshot.active_tab_id,
+                            &snapshot,
+                        ),
                         graphics.get_image_render_mode(),
                         &mut image_output_state,
                         Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size")),
@@ -708,7 +711,7 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                         Instant::now() < deadline,
                         "{image_protocol:?} -> {graphics:?}, stage {stage_index} did not settle"
                     );
-                    std::thread::yield_now();
+                    std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
                 }
 
                 let contains_marker = |marker: &[u8]| {
@@ -1012,7 +1015,11 @@ fn assert_two_image_trace_output(
                     client,
                     &snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
-                    &ViewerPaint::from_frame(client, &snapshot),
+                    &ViewerPaint::from_client(
+                        client,
+                        snapshot.client_snapshot.active_tab_id,
+                        &snapshot,
+                    ),
                     graphics.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
@@ -1032,7 +1039,7 @@ fn assert_two_image_trace_output(
                     Instant::now() < deadline,
                     "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} did not settle"
                 );
-                std::thread::yield_now();
+                std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
 
             let terminal_text = terminal_engine
@@ -1089,7 +1096,7 @@ fn assert_partial_native_frame_write_recovers(
             Instant::now() < deadline,
             "{graphics_support:?} output did not prepare"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert!(image_output_state.native_commit_pending());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
@@ -1107,7 +1114,7 @@ fn assert_partial_native_frame_write_recovers(
         &client,
         &snapshot,
         &committed,
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         graphics_support.get_image_render_mode(),
         &mut image_output_state,
         Some(cell_size),
@@ -1262,7 +1269,11 @@ fn assert_image_trace_output(
                     client,
                     &snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
-                    &ViewerPaint::from_frame(client, &snapshot),
+                    &ViewerPaint::from_client(
+                        client,
+                        snapshot.client_snapshot.active_tab_id,
+                        &snapshot,
+                    ),
                     graphics.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
@@ -1282,7 +1293,7 @@ fn assert_image_trace_output(
                     Instant::now() < deadline,
                     "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} did not settle"
                 );
-                std::thread::yield_now();
+                std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
             let image_placements = terminal_engine
                 .get_terminal_state()
@@ -1417,9 +1428,10 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
     // selection was already on.
     let fake = Arc::new(FakePtyBackend::new());
     let (mut server, client_id, _pane_id) = build_test_server_with_pane(&fake);
-    let client = build_test_client(&mut server, client_id);
+    let mut client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
     let snapshot = build_render_snapshot(&server, client_id);
+    client.apply_render_snapshot(&snapshot);
 
     paint_frame(
         &mut terminal,
@@ -1429,7 +1441,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
             column_count: 120,
             row_count: 24,
         }),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -1443,6 +1455,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         Command::ToggleMouseSelect,
     ));
     let snapshot = build_render_snapshot(&server, client_id);
+    client.apply_render_snapshot(&snapshot);
     paint_frame(
         &mut terminal,
         &client,
@@ -1451,7 +1464,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
             column_count: 120,
             row_count: 24,
         }),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -1481,7 +1494,7 @@ fn pty_output_is_painted_to_the_screen() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut None,
     )
@@ -1515,7 +1528,7 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut last_cursor,
     )
@@ -1551,7 +1564,7 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut String::new(),
         &mut last_cursor,
     )
@@ -1578,7 +1591,7 @@ fn painting_records_the_window_title_it_sent() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         &mut last_title,
         &mut None,
     )
@@ -1607,7 +1620,7 @@ fn a_paint_after_a_title_change_records_the_new_title() {
             &client,
             snapshot,
             &build_committed_regions(TEST_VIEWPORT_SIZE),
-            &ViewerPaint::from_frame(&client, snapshot),
+            &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, snapshot),
             last_title,
             &mut None,
         )
@@ -2651,7 +2664,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
         &client,
         &snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_frame(&client, &snapshot),
+        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
         ImageRenderMode::Placeholder,
         &mut image_output,
         None,
@@ -2812,113 +2825,6 @@ fn placement_projection_keeps_scaled_rectangles_inside_the_preview() {
 }
 
 #[test]
-fn placement_image_paints_use_distinct_preview_keys_and_clip_sources() {
-    let source_pane_id = PaneId::new();
-    let tab_id = TabId::new();
-    let image_record = Arc::new(ImageRecord {
-        protocol: GraphicsProtocol::Iterm2,
-        image: Arc::new(DecodedImage {
-            pixel_width: 8,
-            pixel_height: 4,
-            rgba_bytes: vec![255; 8 * 4 * 4],
-        }),
-        animation: None,
-        action: ImageAction::Display,
-        display: ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let mut source_tab_snapshot =
-        build_test_placement_tab_snapshot(tab_id, "work", [source_pane_id, PaneId::new()]);
-    source_tab_snapshot.pane_snapshots[0].image_placement_snapshots = vec![
-        ImagePlacementSnapshot::with_content_id(7, 11, Arc::clone(&image_record), (1, 1), 4, 2)
-            .expect("the complete image placement is valid"),
-        ImagePlacementSnapshot::with_content_id(8, 12, image_record, (0, 0), 1, 2)
-            .expect("the clipped image placement is valid")
-            .with_cell_geometry(ImageCellGeometry {
-                full_size: Size {
-                    column_count: 4,
-                    row_count: 2,
-                },
-                cell_offset: CorePoint { column: 2, row: 0 },
-            })
-            .expect("the clipped image geometry is valid"),
-    ];
-    let placement_snapshot = PlacementSnapshot {
-        session_id: SessionId::new(),
-        source_pane_id,
-        source_tab_id: tab_id,
-        destination_tab_id: tab_id,
-        session_placement_revision: 1,
-        client_placement_revision: 1,
-        source_tab_snapshot,
-        destination_tab_snapshot: None,
-        client_snapshot: PlacementClientSnapshot {
-            client_snapshot: ClientSnapshot {
-                client_id: ClientId::new(),
-                client_revision: 1,
-                viewport_size: Size {
-                    column_count: 80,
-                    row_count: 24,
-                },
-                active_tab_id: tab_id,
-                focused_pane_id: Some(source_pane_id),
-                lock_mode: LockMode::Normal,
-                is_mouse_selection_enabled: false,
-            },
-            reported_pane_area: None,
-        },
-        pane_sizing: PaneSizing::default(),
-    };
-
-    let image_paints = build_placement_image_paints(&placement_snapshot, Rect::new(0, 0, 80, 24));
-
-    assert_eq!(image_paints.len(), 4);
-    for panel_index in [0u8, 1] {
-        let complete_image_paint = image_paints
-            .iter()
-            .find(|image_paint| {
-                image_paint.get_output_key()
-                    == ImageOutputKey::PlacementPreview(PlacementPreviewImageKey {
-                        panel_index,
-                        pane_id: source_pane_id,
-                        placement_id: 7,
-                    })
-            })
-            .expect("the complete image reaches both preview panels");
-        assert_eq!(
-            complete_image_paint.source_rect,
-            ImageSourceRect {
-                pixel_x: 0,
-                pixel_y: 0,
-                pixel_width: 8,
-                pixel_height: 4,
-            }
-        );
-
-        let clipped_image_paint = image_paints
-            .iter()
-            .find(|image_paint| {
-                image_paint.get_output_key()
-                    == ImageOutputKey::PlacementPreview(PlacementPreviewImageKey {
-                        panel_index,
-                        pane_id: source_pane_id,
-                        placement_id: 8,
-                    })
-            })
-            .expect("the clipped image reaches both preview panels");
-        assert_eq!(
-            clipped_image_paint.source_rect,
-            ImageSourceRect {
-                pixel_x: 4,
-                pixel_y: 0,
-                pixel_width: 2,
-                pixel_height: 4,
-            }
-        );
-    }
-}
-
-#[test]
 fn proposed_same_tab_swap_replaces_slots_without_mutating_the_snapshot() {
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
@@ -3073,35 +2979,28 @@ fn placement_interpolation_reaches_the_target_without_overshooting() {
 }
 
 #[test]
-fn placement_overlay_paints_grid_content_and_image_markers() {
-    let source_pane_id = PaneId::new();
-    let tab_id = TabId::new();
+fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let (session_server, client_id, source_pane_id) =
+        build_test_server_with_pane(&fake_pty_backend);
+    let mut render_snapshot = build_render_snapshot(&session_server, client_id);
+    let tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let target_pane_id = PaneId::new();
     let placement_snapshot = PlacementSnapshot {
-        session_id: SessionId::new(),
+        session_id: render_snapshot.session_snapshot.session_id,
         source_pane_id,
         source_tab_id: tab_id,
         destination_tab_id: tab_id,
-        session_placement_revision: 1,
-        client_placement_revision: 1,
+        session_placement_revision: render_snapshot.session_snapshot.session_revision,
+        client_placement_revision: render_snapshot.client_snapshot.client_revision,
         source_tab_snapshot: build_test_placement_tab_snapshot(
             tab_id,
             "work",
-            [source_pane_id, PaneId::new()],
+            [source_pane_id, target_pane_id],
         ),
         destination_tab_snapshot: None,
         client_snapshot: PlacementClientSnapshot {
-            client_snapshot: ClientSnapshot {
-                client_id: ClientId::new(),
-                client_revision: 1,
-                viewport_size: Size {
-                    column_count: 80,
-                    row_count: 24,
-                },
-                active_tab_id: tab_id,
-                focused_pane_id: Some(source_pane_id),
-                lock_mode: LockMode::Normal,
-                is_mouse_selection_enabled: false,
-            },
+            client_snapshot: render_snapshot.client_snapshot.clone(),
             reported_pane_area: Some(PaneArea::Reported(Size {
                 column_count: 80,
                 row_count: 24,
@@ -3109,16 +3008,55 @@ fn placement_overlay_paints_grid_content_and_image_markers() {
         },
         pane_sizing: PaneSizing::default(),
     };
-    let mut render_buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: tab_id,
+        anchor: PanePlacementAnchor::Pane(target_pane_id),
+        direction: Direction::Down,
+    };
+    let placement_display_snapshot =
+        build_placement_preview_snapshot(&placement_snapshot, Some(&placement_target));
+    render_snapshot.session_snapshot.active_tab_snapshot =
+        placement_snapshot.source_tab_snapshot.tab_snapshot.clone();
+    let displayed_render_snapshot =
+        build_placement_render_snapshot(&render_snapshot, &placement_display_snapshot)
+            .expect("the proposed source tab is the displayed tab");
+    let viewport_area = Rect::new(0, 0, 80, 24);
+    let committed_regions = CommittedRegions::core(
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        0,
+    );
+    let theme = Theme::default();
+    let mut render_buffer = Buffer::empty(viewport_area);
 
-    draw_placement_preview(
-        &placement_snapshot,
-        &placement_snapshot,
+    koshi_renderer::render_frame_with_placement_target(
+        &displayed_render_snapshot,
+        &committed_regions,
+        &theme,
+        &koshi_renderer::snapshot::KeymapHints::default(),
         None,
-        &Theme::default(),
+        ViewerChrome {
+            is_pane_placement_visible: true,
+            placement_source_pane_id: Some(source_pane_id),
+            ..ViewerChrome::default()
+        },
         ImageRenderMode::Placeholder,
         None,
-        Rect::new(0, 0, 80, 24),
+        None,
+        Some(&placement_target),
+        viewport_area,
+        &mut render_buffer,
+    );
+    draw_placement_target_outline(
+        &placement_snapshot,
+        &placement_display_snapshot,
+        &displayed_render_snapshot,
+        &placement_target,
+        &theme,
+        &committed_regions,
+        viewport_area,
         &mut render_buffer,
     );
 
@@ -3127,10 +3065,367 @@ fn placement_overlay_paints_grid_content_and_image_markers() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered_text.contains("placement preview"));
-    assert!(rendered_text.contains("SRC"));
-    assert!(rendered_text.contains("A"));
-    assert!(rendered_text.contains('t'));
+    assert!(rendered_text.contains(&format_pane_id_label(source_pane_id)));
+    assert!(rendered_text.contains(&format_pane_id_label(target_pane_id)));
+    assert_eq!(
+        render_displayed_pane_cell(
+            &render_buffer,
+            &committed_regions,
+            viewport_area,
+            &displayed_render_snapshot,
+            source_pane_id,
+        ),
+        "A",
+        "the moving pane keeps its terminal cells in the proposed slot"
+    );
+    assert_eq!(
+        render_displayed_pane_cell(
+            &render_buffer,
+            &committed_regions,
+            viewport_area,
+            &displayed_render_snapshot,
+            target_pane_id,
+        ),
+        "B",
+        "the target pane keeps its terminal cells in the proposed slot"
+    );
+}
+
+fn format_pane_id_label(pane_id: PaneId) -> String {
+    let pane_id_hex = pane_id.get_uuid().simple().to_string();
+    let pane_id_suffix_start_byte_offset = pane_id_hex.len() - 12;
+    format!("pane-…{}", &pane_id_hex[pane_id_suffix_start_byte_offset..])
+}
+
+fn render_displayed_pane_cell(
+    render_buffer: &Buffer,
+    committed_regions: &CommittedRegions,
+    viewport_area: Rect,
+    displayed_render_snapshot: &RenderSnapshot,
+    pane_id: PaneId,
+) -> String {
+    let pane_slot = displayed_render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter()
+        .find(|pane_slot| pane_slot.pane_id == pane_id)
+        .expect("the displayed pane has a proposed slot");
+    let content_rect = pane_slot
+        .content_rect
+        .expect("the displayed pane has a content rect");
+    let layout_rect = koshi_renderer::compute_content_rect(
+        koshi_renderer::compute_pane_area(committed_regions, viewport_area),
+        displayed_render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .effective_cell_size,
+    );
+    render_buffer[(
+        layout_rect.x + content_rect.origin.column,
+        layout_rect.y + content_rect.origin.row,
+    )]
+        .symbol()
+        .to_owned()
+}
+
+#[test]
+fn placement_render_snapshot_replaces_the_active_pane_layout() {
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let (session_server, client_id, source_pane_id) =
+        build_test_server_with_pane(&fake_pty_backend);
+    let mut render_snapshot = build_render_snapshot(&session_server, client_id);
+    let tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let target_pane_id = PaneId::new();
+    let placement_snapshot = PlacementSnapshot {
+        session_id: render_snapshot.session_snapshot.session_id,
+        source_pane_id,
+        source_tab_id: tab_id,
+        destination_tab_id: tab_id,
+        session_placement_revision: render_snapshot.session_snapshot.session_revision,
+        client_placement_revision: render_snapshot.client_snapshot.client_revision,
+        source_tab_snapshot: build_test_placement_tab_snapshot(
+            tab_id,
+            "work",
+            [source_pane_id, target_pane_id],
+        ),
+        destination_tab_snapshot: None,
+        client_snapshot: PlacementClientSnapshot {
+            client_snapshot: render_snapshot.client_snapshot.clone(),
+            reported_pane_area: Some(PaneArea::Reported(Size {
+                column_count: 20,
+                row_count: 8,
+            })),
+        },
+        pane_sizing: PaneSizing::default(),
+    };
+    let proposed_snapshot = build_proposed_placement_snapshot(
+        &placement_snapshot,
+        &PanePlacementTarget::Swap { target_pane_id },
+    )
+    .expect("the test target is in the source tab");
+    render_snapshot.session_snapshot.active_tab_snapshot =
+        placement_snapshot.source_tab_snapshot.tab_snapshot.clone();
+
+    let displayed_snapshot = build_placement_render_snapshot(&render_snapshot, &proposed_snapshot)
+        .expect("the source tab is the active tab");
+
+    assert_eq!(
+        displayed_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .pane_slots,
+        proposed_snapshot
+            .source_tab_snapshot
+            .tab_snapshot
+            .pane_slots
+    );
+    assert_eq!(
+        displayed_snapshot.client_snapshot.focused_pane_id,
+        Some(source_pane_id)
+    );
+    assert_eq!(
+        displayed_snapshot.pane_snapshots[0]
+            .terminal_grid_view
+            .as_ref(),
+        proposed_snapshot
+            .source_tab_snapshot
+            .pane_snapshots
+            .iter()
+            .find(|pane_snapshot| pane_snapshot.pane_id == source_pane_id)
+            .expect("the source content is in the placement snapshot")
+            .terminal_grid_view
+            .as_ref()
+    );
+}
+
+#[test]
+fn placement_render_snapshot_shows_a_cross_tab_destination_in_the_pane_area() {
+    let fake_pty_backend = Arc::new(FakePtyBackend::new());
+    let (session_server, client_id, source_pane_id) =
+        build_test_server_with_pane(&fake_pty_backend);
+    let render_snapshot = build_render_snapshot(&session_server, client_id);
+    let source_tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let destination_tab_id = TabId::new();
+    let destination_pane_ids = [PaneId::new(), PaneId::new()];
+    let placement_snapshot = PlacementSnapshot {
+        session_id: render_snapshot.session_snapshot.session_id,
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id,
+        session_placement_revision: render_snapshot.session_snapshot.session_revision,
+        client_placement_revision: render_snapshot.client_snapshot.client_revision,
+        source_tab_snapshot: build_test_placement_tab_snapshot(
+            source_tab_id,
+            "source",
+            [source_pane_id, PaneId::new()],
+        ),
+        destination_tab_snapshot: Some(build_test_placement_tab_snapshot(
+            destination_tab_id,
+            "destination",
+            destination_pane_ids,
+        )),
+        client_snapshot: PlacementClientSnapshot {
+            client_snapshot: render_snapshot.client_snapshot.clone(),
+            reported_pane_area: Some(PaneArea::Reported(Size {
+                column_count: 20,
+                row_count: 8,
+            })),
+        },
+        pane_sizing: PaneSizing::default(),
+    };
+
+    let displayed_snapshot = build_placement_render_snapshot(&render_snapshot, &placement_snapshot)
+        .expect("the destination tab is carried by the placement snapshot");
+
+    assert_eq!(
+        displayed_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .tab_id,
+        destination_tab_id
+    );
+    assert_eq!(
+        displayed_snapshot.client_snapshot.active_tab_id,
+        destination_tab_id
+    );
+    assert_eq!(displayed_snapshot.client_snapshot.focused_pane_id, None);
+    assert_eq!(
+        displayed_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .pane_slots
+            .iter()
+            .map(|pane_slot| pane_slot.pane_id)
+            .collect::<Vec<_>>(),
+        destination_pane_ids
+    );
+    assert_eq!(
+        displayed_snapshot
+            .pane_snapshots
+            .iter()
+            .map(|pane_snapshot| pane_snapshot.pane_id)
+            .collect::<Vec<_>>(),
+        destination_pane_ids.to_vec()
+    );
+}
+
+#[test]
+fn target_outline_skips_a_group_member_with_an_empty_rect() {
+    let tab_id = TabId::new();
+    let (left_pane_id, right_pane_id, collapsed_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut placement_tab_snapshot =
+        build_test_placement_tab_snapshot(tab_id, "work", [left_pane_id, right_pane_id]);
+    let right_outer_rect = placement_tab_snapshot
+        .tab_snapshot
+        .pane_slots
+        .iter()
+        .find(|pane_slot| pane_slot.pane_id == right_pane_id)
+        .expect("the right pane has a slot")
+        .outer_rect;
+    // The second leaf of a collapsed stack member solves to an empty rect.
+    placement_tab_snapshot
+        .tab_snapshot
+        .pane_slots
+        .push(PaneSlot {
+            pane_id: collapsed_pane_id,
+            outer_rect: CoreRect::empty_at_origin(),
+            content_rect: None,
+            pane_kind: PaneKind::Terminal,
+            is_visible: false,
+            is_suppressed: false,
+            is_dead: false,
+        });
+    let layout_size = placement_tab_snapshot.tab_snapshot.effective_cell_size;
+    let layout_rect = Rect::new(0, 0, layout_size.column_count, layout_size.row_count);
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: tab_id,
+        anchor: PanePlacementAnchor::Group(vec![right_pane_id, collapsed_pane_id]),
+        direction: Direction::Right,
+    };
+
+    assert_eq!(
+        build_target_outline_rect(
+            &placement_tab_snapshot,
+            &placement_target,
+            layout_size,
+            layout_rect,
+        ),
+        Some(Rect::new(
+            right_outer_rect.origin.column,
+            right_outer_rect.origin.row,
+            right_outer_rect.cell_size.column_count,
+            right_outer_rect.cell_size.row_count,
+        ))
+    );
+}
+
+#[test]
+fn placement_tab_interpolation_switches_headers_and_layout_mode_at_halfway() {
+    let tab_id = TabId::new();
+    let (left_pane_id, right_pane_id) = (PaneId::new(), PaneId::new());
+    let from_tab_snapshot =
+        build_test_placement_tab_snapshot(tab_id, "work", [left_pane_id, right_pane_id]);
+    let mut to_tab_snapshot = from_tab_snapshot.clone();
+    to_tab_snapshot.tab_snapshot.stack_headers = vec![koshi_layout::solver::StackHeader {
+        pane_id: left_pane_id,
+        header_rect: CoreRect::from_origin_and_size(
+            CorePoint { column: 0, row: 0 },
+            Size {
+                column_count: 24,
+                row_count: 1,
+            },
+        ),
+        member_index: 0,
+        member_count: 2,
+    }];
+    to_tab_snapshot.tab_snapshot.layout_mode = LayoutMode::Fullscreen {
+        focused_pane_id: right_pane_id,
+    };
+    to_tab_snapshot.tab_snapshot.are_all_panes_suppressed = true;
+
+    let before_halfway_tab_snapshot =
+        interpolate_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.25);
+    let after_halfway_tab_snapshot =
+        interpolate_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.75);
+
+    assert_eq!(
+        before_halfway_tab_snapshot.tab_snapshot.stack_headers,
+        from_tab_snapshot.tab_snapshot.stack_headers
+    );
+    assert_eq!(
+        before_halfway_tab_snapshot.tab_snapshot.layout_mode,
+        LayoutMode::Tiled
+    );
+    assert!(
+        !before_halfway_tab_snapshot
+            .tab_snapshot
+            .are_all_panes_suppressed
+    );
+    assert_eq!(
+        after_halfway_tab_snapshot.tab_snapshot.stack_headers,
+        to_tab_snapshot.tab_snapshot.stack_headers
+    );
+    assert_eq!(
+        after_halfway_tab_snapshot.tab_snapshot.layout_mode,
+        LayoutMode::Fullscreen {
+            focused_pane_id: right_pane_id,
+        }
+    );
+    assert!(
+        after_halfway_tab_snapshot
+            .tab_snapshot
+            .are_all_panes_suppressed
+    );
+}
+
+#[test]
+fn target_outline_leaves_cells_on_the_source_border_unstyled() {
+    let theme = Theme::default();
+    let mut render_buffer = Buffer::empty(Rect::new(0, 0, 10, 4));
+    let target_outline = Rect::new(0, 0, 6, 4);
+    let source_pane_rect = Rect::new(5, 0, 5, 4);
+
+    apply_placement_target_outline_style(
+        target_outline,
+        Some(source_pane_rect),
+        &theme,
+        &mut render_buffer,
+    );
+
+    let is_styled_outline_cell = |column_index: u16, row_index: u16| {
+        let cell = &render_buffer[(column_index, row_index)];
+        cell.fg == theme.accent_color && cell.modifier.contains(Modifier::BOLD)
+    };
+    for column_index in 0..5 {
+        assert!(
+            is_styled_outline_cell(column_index, 0),
+            "top edge {column_index}"
+        );
+        assert!(
+            is_styled_outline_cell(column_index, 3),
+            "bottom edge {column_index}"
+        );
+    }
+    for row_index in 0..4 {
+        assert!(
+            is_styled_outline_cell(0, row_index),
+            "left edge {row_index}"
+        );
+        assert!(
+            !is_styled_outline_cell(5, row_index),
+            "shared source border {row_index}"
+        );
+    }
+    assert!(
+        !is_styled_outline_cell(2, 1),
+        "the outline interior stays unstyled"
+    );
+    assert!(
+        !is_styled_outline_cell(8, 0),
+        "a cell outside the outline stays unstyled"
+    );
 }
 
 fn build_test_placement_tab_snapshot(
@@ -3143,7 +3438,7 @@ fn build_test_placement_tab_snapshot(
         pane_ids.iter().copied().map(LayoutNode::Pane).collect(),
     ));
     let effective_cell_size = Size {
-        column_count: 20,
+        column_count: 48,
         row_count: 8,
     };
     let pane_sizing = PaneSizing::default();
@@ -3218,4 +3513,133 @@ fn build_test_placement_tab_snapshot(
         },
         pane_snapshots,
     }
+}
+
+/// One pane slot at `outer_rect`. A `None` `content_rect` marks a collapsed
+/// stack member.
+fn build_committed_test_pane_slot(
+    pane_id: PaneId,
+    outer_rect: CoreRect,
+    content_rect: Option<CoreRect>,
+) -> PaneSlot {
+    PaneSlot {
+        pane_id,
+        outer_rect,
+        content_rect,
+        pane_kind: PaneKind::Terminal,
+        is_visible: content_rect.is_some(),
+        is_suppressed: false,
+        is_dead: false,
+    }
+}
+
+#[test]
+fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its_new_place() {
+    let moved_pane_id = PaneId::new();
+    let arriving_pane_id = PaneId::new();
+    let leaving_pane_id = PaneId::new();
+    let collapsing_pane_id = PaneId::new();
+    let half_width_size = Size {
+        column_count: 40,
+        row_count: 12,
+    };
+    let build_rect = |column: u16, row: u16, size: Size| {
+        CoreRect::from_origin_and_size(Point { column, row }, size)
+    };
+    let tab_id = TabId::new();
+    let from_tab_snapshot = TabSnapshot {
+        tab_id,
+        tab_name: String::from("work"),
+        pane_slots: vec![
+            build_committed_test_pane_slot(
+                moved_pane_id,
+                build_rect(0, 0, half_width_size),
+                Some(build_rect(0, 0, half_width_size).compute_inner_with_border()),
+            ),
+            build_committed_test_pane_slot(
+                leaving_pane_id,
+                build_rect(40, 0, half_width_size),
+                Some(build_rect(40, 0, half_width_size).compute_inner_with_border()),
+            ),
+            build_committed_test_pane_slot(
+                collapsing_pane_id,
+                build_rect(40, 12, half_width_size),
+                Some(build_rect(40, 12, half_width_size).compute_inner_with_border()),
+            ),
+        ],
+        effective_cell_size: Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        stack_headers: Vec::new(),
+        layout_mode: LayoutMode::Tiled,
+        are_all_panes_suppressed: false,
+        gap_cell_count: 0,
+    };
+    let collapsed_header_rect = build_rect(
+        40,
+        12,
+        Size {
+            column_count: 40,
+            row_count: 1,
+        },
+    );
+    let mut to_tab_snapshot = from_tab_snapshot.clone();
+    to_tab_snapshot.pane_slots = vec![
+        build_committed_test_pane_slot(
+            moved_pane_id,
+            build_rect(40, 0, half_width_size),
+            Some(build_rect(40, 0, half_width_size).compute_inner_with_border()),
+        ),
+        build_committed_test_pane_slot(
+            arriving_pane_id,
+            build_rect(0, 0, half_width_size),
+            Some(build_rect(0, 0, half_width_size).compute_inner_with_border()),
+        ),
+        build_committed_test_pane_slot(collapsing_pane_id, collapsed_header_rect, None),
+    ];
+    to_tab_snapshot.stack_headers = vec![koshi_layout::solver::StackHeader {
+        pane_id: collapsing_pane_id,
+        header_rect: collapsed_header_rect,
+        member_index: 1,
+        member_count: 2,
+    }];
+
+    let halfway_tab_snapshot =
+        interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.5);
+    let mut expected_halfway_tab_snapshot = to_tab_snapshot.clone();
+    expected_halfway_tab_snapshot.pane_slots[0] = build_committed_test_pane_slot(
+        moved_pane_id,
+        build_rect(20, 0, half_width_size),
+        Some(build_rect(20, 0, half_width_size).compute_inner_with_border()),
+    );
+    assert_eq!(
+        halfway_tab_snapshot, expected_halfway_tab_snapshot,
+        "the moved pane is halfway, the arriving and collapsing panes sit at their \
+         committed slots, the leaving pane is gone, and the committed headers show"
+    );
+
+    let early_tab_snapshot =
+        interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 0.25);
+    assert_eq!(
+        early_tab_snapshot.stack_headers,
+        Vec::new(),
+        "the headers on screen stay until the slide is halfway"
+    );
+    assert_eq!(
+        early_tab_snapshot.pane_slots[0].outer_rect,
+        build_rect(10, 0, half_width_size)
+    );
+    assert_eq!(
+        interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, 1.0),
+        to_tab_snapshot
+    );
+    let mut expected_start_tab_snapshot = to_tab_snapshot.clone();
+    expected_start_tab_snapshot.pane_slots[0] = from_tab_snapshot.pane_slots[0].clone();
+    expected_start_tab_snapshot.stack_headers = Vec::new();
+    assert_eq!(
+        interpolate_committed_placement_tab_snapshot(&from_tab_snapshot, &to_tab_snapshot, -1.0),
+        expected_start_tab_snapshot,
+        "a progress below 0.0 draws the start of the slide"
+    );
 }

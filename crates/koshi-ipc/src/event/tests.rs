@@ -3,6 +3,7 @@
 //! this protocol version pins, a field this build does not know is ignored,
 //! and a frame this build has no name for reads as unknown.
 
+use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::geometry::{Direction, Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -157,6 +158,17 @@ fn list_test_events() -> Vec<SessionEvent> {
             previous_pane_id: Some(pane_id),
         },
         SessionEvent::LayoutChanged { tab_id },
+        SessionEvent::PanePlacementCommitted {
+            command_id,
+            source_pane_id: pane_id,
+            source_tab_id: tab_id,
+            destination_tab_id: tab_id,
+            placement_target: PanePlacementTarget::Split {
+                destination_tab_id: tab_id,
+                anchor: PanePlacementAnchor::Pane(pane_id),
+                direction: Direction::Right,
+            },
+        },
         SessionEvent::TabCreated { tab_id },
         SessionEvent::TabClosed { tab_id },
         SessionEvent::TabFocused {
@@ -484,6 +496,19 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
                 "previous_pane_id": wire_identifier
             } }),
             json!({ "LayoutChanged": { "tab_id": wire_identifier } }),
+            json!({ "PanePlacementCommitted": {
+                "command_id": wire_identifier,
+                "source_pane_id": wire_identifier,
+                "source_tab_id": wire_identifier,
+                "destination_tab_id": wire_identifier,
+                "placement_target": {
+                    "Split": {
+                        "destination_tab_id": wire_identifier,
+                        "anchor": { "Pane": wire_identifier },
+                        "direction": "Right"
+                    }
+                }
+            } }),
             json!({ "TabCreated": { "tab_id": wire_identifier } }),
             json!({ "TabClosed": { "tab_id": wire_identifier } }),
             json!({ "TabFocused": { "client_id": wire_identifier, "tab_id": wire_identifier, "previous_tab_id": wire_identifier } }),

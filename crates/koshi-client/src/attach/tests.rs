@@ -17,24 +17,28 @@
 //! keeps and what it drops, and what a viewer that stopped dialing prints and
 //! exits with. It also covers the commands a fired binding's plan flattens
 //! into, and how a typed value reads as a session id or as a display name.
+//! These tests also check that an accepted Enter swap updates the shown pane
+//! rectangles without a resize and that placement status shows pane ids instead
+//! of `/work/koshi` or `nvim`.
 
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
-use ratatui::buffer::Cell;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Size as RatatuiSize};
 
 use koshi_core::action::ActionReference;
 use koshi_core::command::{
-    ClearSelectionArgs, CliExitCode, GridPosition, Selection, SelectionKind, SetSelectionArgs,
-    VisualCommand,
+    ClearSelectionArgs, CliExitCode, GridPosition, PanePlacementTarget, PlacePaneArgs,
+    PlacementRevision, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
 };
-use koshi_core::geometry::{Direction, PaneArea, Point, Rect};
+use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, PluginId, TabId};
 use koshi_core::key::{
-    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags,
+    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags, NamedKey,
     TEXT_ONLY_KEY_CODEPOINT,
 };
 use koshi_core::lock::LockMode;
@@ -42,7 +46,8 @@ use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection
 use koshi_core::resolve::ActionArgs;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
-use koshi_ipc::frame::{FrameClient, FrameSession, FrameTab, PaintedFrame};
+use koshi_ipc::frame::{FrameClient, FrameSession, FrameSlot, FrameTab, PaintedFrame};
+use koshi_ipc::placement::PanePlacementPaneSnapshot;
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcResponse, IpcResult,
     PROTOCOL_VERSION,
@@ -55,6 +60,7 @@ use koshi_ipc::router::{
 use koshi_ipc::transport::{Listener, MAX_FRAME_BYTE_COUNT};
 use koshi_ipc::wire::MaybeKnown;
 use koshi_layout::mode::LayoutMode;
+use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot, MousePane,
     PaneKind, PaneSlot, PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta,
@@ -68,6 +74,7 @@ use koshi_terminal::style::Style;
 
 use super::*;
 use crate::tests::TEST_VIEWPORT_SIZE;
+use crate::{PlacementMode, PlacementModeLifetime};
 use koshi_test_support::fixtures::build_test_runtime_directory;
 
 /// The smallest frame a session can paint: one empty tab, no panes, the client
@@ -3463,33 +3470,60 @@ fn earliest_of_two_absent_durations_is_none() {
 }
 
 /// A backend that can reject the buffer draw while keeping the test terminal
-/// at a fixed size.
+/// at a fixed size. It counts every draw and keeps every cell an accepted draw
+/// wrote.
 struct FailingBackend {
     terminal_size: RatatuiSize,
     should_fail_draw: bool,
+    draw_count: Arc<AtomicUsize>,
+    drawn_buffer: Arc<Mutex<Buffer>>,
 }
 
 impl FailingBackend {
     fn from_terminal_size(terminal_size: Size) -> Self {
+        Self::from_terminal_size_with_draw_count(terminal_size, Arc::new(AtomicUsize::new(0)))
+    }
+
+    fn from_terminal_size_with_draw_count(
+        terminal_size: Size,
+        draw_count: Arc<AtomicUsize>,
+    ) -> Self {
         FailingBackend {
             terminal_size: RatatuiSize {
                 width: terminal_size.column_count,
                 height: terminal_size.row_count,
             },
             should_fail_draw: false,
+            draw_count,
+            drawn_buffer: Arc::new(Mutex::new(Buffer::empty(ratatui::layout::Rect::new(
+                0,
+                0,
+                terminal_size.column_count,
+                terminal_size.row_count,
+            )))),
         }
+    }
+
+    /// Return the cells every accepted draw wrote, shared with this backend.
+    fn share_drawn_buffer(&self) -> Arc<Mutex<Buffer>> {
+        Arc::clone(&self.drawn_buffer)
     }
 }
 
 impl Backend for FailingBackend {
     type Error = io::Error;
 
-    fn draw<'a, I>(&mut self, _content: I) -> Result<(), Self::Error>
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        self.draw_count.fetch_add(1, Ordering::Relaxed);
         if self.should_fail_draw {
             return Err(io::Error::other("the test backend rejected the draw"));
+        }
+        let mut drawn_buffer = self.drawn_buffer.lock().expect("the drawn buffer lock");
+        for (column_index, row_index, cell) in content {
+            drawn_buffer[(column_index, row_index)] = cell.clone();
         }
         Ok(())
     }
@@ -3535,6 +3569,47 @@ impl Backend for FailingBackend {
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
+}
+
+/// Wait up to five seconds for `drawn_buffer` to equal `expected_buffer` once
+/// `draw_count` has reached `minimum_draw_count`, and return whether it did.
+fn wait_for_drawn_buffer(
+    draw_count: &AtomicUsize,
+    minimum_draw_count: usize,
+    drawn_buffer: &Mutex<Buffer>,
+    expected_buffer: &Buffer,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let is_expected_buffer_drawn = || {
+        draw_count.load(Ordering::Relaxed) >= minimum_draw_count
+            && *drawn_buffer.lock().expect("the drawn buffer lock") == *expected_buffer
+    };
+    while !is_expected_buffer_drawn() && Instant::now() < deadline {
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
+    }
+    is_expected_buffer_drawn()
+}
+
+/// Return the cells a fresh viewer draws for `render_snapshot` on a screen of
+/// [`TEST_VIEWPORT_SIZE`].
+fn build_reference_drawn_buffer(render_snapshot: &RenderSnapshot) -> Buffer {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    screen.pending_snapshot = Some(render_snapshot.clone());
+    screen
+        .commit_pending_snapshot(&mut client, Instant::now())
+        .expect("the reference frame paints");
+    screen.terminal.backend().buffer().clone()
+}
+
+/// Wait up to five seconds for `draw_count` to reach `expected_draw_count`,
+/// and return whether it did.
+fn wait_for_draw_count(draw_count: &AtomicUsize, expected_draw_count: usize) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while draw_count.load(Ordering::Relaxed) < expected_draw_count && Instant::now() < deadline {
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
+    }
+    draw_count.load(Ordering::Relaxed) >= expected_draw_count
 }
 
 /// A screen drawing into memory at [`TEST_VIEWPORT_SIZE`], 80 by 24 cells.
@@ -3795,6 +3870,194 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
     assert_eq!(screen.last_window_title, "next");
 }
 
+/// Draw a Normal-mode frame focused on a new pane, open pane placement mode
+/// for that pane until Esc, and draw the placement view. Returns the drawn
+/// frame and the source pane.
+fn draw_pane_placement_mode<TerminalBackend: Backend>(
+    client: &mut Client,
+    screen: &mut Screen<TerminalBackend>,
+) -> (PaintedFrame, PaneId) {
+    let source_pane_id = PaneId::new();
+    let mut painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
+    painted_frame.client_snapshot.focused_pane_id = Some(source_pane_id);
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(client, Box::new(painted_frame.clone()))
+        .expect("the first frame paints");
+    assert_eq!(
+        client.begin_placement_mode(),
+        Some((source_pane_id, active_tab_id))
+    );
+    screen
+        .refresh(client, Some(active_tab_id))
+        .expect("the placement view draws");
+    (painted_frame, source_pane_id)
+}
+
+/// Set the target of the open pane placement mode to a swap with a new pane,
+/// and return that target.
+fn set_placement_swap_target(client: &mut Client) -> PanePlacementTarget {
+    let placement_target = PanePlacementTarget::Swap {
+        target_pane_id: PaneId::new(),
+    };
+    client
+        .placement_state
+        .placement_mode
+        .as_mut()
+        .expect("pane placement mode is on")
+        .placement_target = Some(placement_target.clone());
+    placement_target
+}
+
+#[test]
+fn a_frame_that_ends_pane_placement_mode_draws_once_without_it() {
+    type FrameChange = fn(&mut PaintedFrame);
+    let frame_changes: [(&str, FrameChange); 4] = [
+        ("a new lock mode", |painted_frame| {
+            painted_frame.client_snapshot.lock_mode = LockMode::Locked;
+        }),
+        ("mouse select turning on", |painted_frame| {
+            painted_frame.client_snapshot.is_mouse_selection_enabled = true;
+        }),
+        ("a new active tab", |painted_frame| {
+            let next_tab_id = TabId::new();
+            painted_frame.client_snapshot.active_tab_id = next_tab_id;
+            painted_frame.session_snapshot.active_tab_snapshot.tab_id = next_tab_id;
+        }),
+        ("focus on another pane", |painted_frame| {
+            painted_frame.client_snapshot.focused_pane_id = Some(PaneId::new());
+        }),
+    ];
+    for (frame_change_name, apply_frame_change) in frame_changes {
+        let mut client = build_test_client();
+        let mut screen = build_test_screen();
+        let (mut next_frame, _) = draw_pane_placement_mode(&mut client, &mut screen);
+        apply_frame_change(&mut next_frame);
+        let next_active_tab_id = next_frame.client_snapshot.active_tab_id;
+        let next_lock_mode = next_frame.client_snapshot.lock_mode;
+
+        screen
+            .draw_painted_frame(&mut client, Box::new(next_frame))
+            .expect("the next frame paints");
+
+        assert_eq!(
+            client.placement_state.placement_mode, None,
+            "{frame_change_name}"
+        );
+        let shown_viewer_paint = screen
+            .shown_viewer_paint
+            .clone()
+            .expect("the next frame is shown");
+        assert_eq!(
+            shown_viewer_paint.lock_mode, next_lock_mode,
+            "{frame_change_name}"
+        );
+        assert!(
+            !shown_viewer_paint.chrome.is_pane_placement_visible,
+            "{frame_change_name}"
+        );
+        assert_eq!(
+            shown_viewer_paint.placement_status, None,
+            "{frame_change_name}"
+        );
+        assert!(
+            screen
+                .refresh(&mut client, Some(next_active_tab_id))
+                .is_none(),
+            "{frame_change_name} draws once"
+        );
+    }
+}
+
+#[test]
+fn a_frame_with_new_placement_revisions_draws_once_without_the_unconfirmed_target() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let (mut next_frame, _) = draw_pane_placement_mode(&mut client, &mut screen);
+    let active_tab_id = next_frame.client_snapshot.active_tab_id;
+    set_placement_swap_target(&mut client);
+    screen
+        .refresh(&mut client, Some(active_tab_id))
+        .expect("the target draws");
+    next_frame.session_snapshot.session_revision = 1;
+
+    screen
+        .draw_painted_frame(&mut client, Box::new(next_frame))
+        .expect("the next frame paints");
+
+    assert_eq!(client.get_placement_target(), None);
+    let shown_viewer_paint = screen
+        .shown_viewer_paint
+        .clone()
+        .expect("the next frame is shown");
+    assert_eq!(shown_viewer_paint.placement_target, None);
+    assert!(shown_viewer_paint.chrome.is_pane_placement_visible);
+    assert!(screen.refresh(&mut client, Some(active_tab_id)).is_none());
+}
+
+#[test]
+fn a_frame_showing_this_viewers_committed_placement_draws_once_with_the_loading_status() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let (mut next_frame, source_pane_id) = draw_pane_placement_mode(&mut client, &mut screen);
+    let active_tab_id = next_frame.client_snapshot.active_tab_id;
+    set_placement_swap_target(&mut client);
+    crate::tests::record_committed_placement(&mut client);
+    next_frame.session_snapshot.session_revision = 1;
+
+    screen
+        .draw_painted_frame(&mut client, Box::new(next_frame))
+        .expect("the committed frame paints");
+
+    assert!(!client.is_placement_confirmation_pending());
+    let shown_viewer_paint = screen
+        .shown_viewer_paint
+        .clone()
+        .expect("the committed frame is shown");
+    assert_eq!(shown_viewer_paint.placement_target, None);
+    assert_eq!(
+        shown_viewer_paint
+            .placement_status
+            .map(|placement_status| placement_status.status_text),
+        Some(format!("PLACE {source_pane_id} | loading {active_tab_id}"))
+    );
+    assert!(screen.refresh(&mut client, Some(active_tab_id)).is_none());
+}
+
+#[test]
+fn a_failed_paint_keeps_the_committed_placement_waiting_for_its_frame() {
+    let mut client = build_test_client();
+    let mut screen = build_failing_screen();
+    let (mut next_frame, _) = draw_pane_placement_mode(&mut client, &mut screen);
+    let placement_target = set_placement_swap_target(&mut client);
+    let command_id = CommandId::new();
+    crate::tests::record_pending_placement_command(&mut client, command_id);
+    assert!(client.note_placement_command_committed(command_id));
+    next_frame.session_snapshot.session_revision = 1;
+    screen.terminal.backend_mut().should_fail_draw = true;
+
+    assert_eq!(
+        screen.draw_painted_frame(&mut client, Box::new(next_frame.clone())),
+        None,
+        "the backend rejects the frame"
+    );
+    assert_eq!(
+        client.get_pending_placement_command(),
+        Some(crate::PendingPlacementCommand {
+            command_id,
+            is_committed: true,
+        })
+    );
+    assert_eq!(client.get_placement_target(), Some(placement_target));
+
+    screen.terminal.backend_mut().should_fail_draw = false;
+    screen
+        .draw_painted_frame(&mut client, Box::new(next_frame))
+        .expect("the frame paints on the next attempt");
+    assert_eq!(client.get_pending_placement_command(), None);
+    assert_eq!(client.get_placement_target(), None);
+}
+
 #[test]
 fn an_image_output_failure_keeps_the_committed_text_frame() {
     let error = io::Error::new(io::ErrorKind::BrokenPipe, "image output closed");
@@ -3850,7 +4113,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
             Instant::now() < deadline,
             "native image preparation did not reach the failed commit"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert!(screen.pending_snapshot.is_some());
     assert_eq!(screen.native_retry_delay, Duration::from_millis(2));
@@ -3885,7 +4148,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
             if screen.native_retry_delay > expected_delay {
                 break;
             }
-            std::thread::yield_now();
+            std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
         }
         expected_delay = expected_delay
             .saturating_mul(2)
@@ -3907,7 +4170,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
             Instant::now() < deadline,
             "the capped native image retry did not finish"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert_eq!(
         screen.native_retry_delay,
@@ -3922,7 +4185,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
             Instant::now() < deadline,
             "native image output did not recover after the writer recovered"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert_eq!(screen.native_retry_delay, IMAGE_OUTPUT_STEP_DELAY_DURATION);
 }
@@ -3987,7 +4250,7 @@ fn a_completed_native_image_is_committed_by_refresh() {
             Instant::now() < deadline,
             "native image preparation did not reach refresh"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
 
     assert!(screen.last_snapshot.is_some());
@@ -4082,9 +4345,808 @@ fn wait_for_pending_native_frame(
             Instant::now() < deadline,
             "native image preparation did not reach refresh"
         );
-        std::thread::yield_now();
+        std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     assert_eq!(screen.next_image_wakeup(), None);
+}
+
+#[test]
+fn confirming_keyboard_placement_repaints_without_resize() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let session_id = painted_frame.session_snapshot.session_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint the committed frame");
+
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let placement_snapshot = crate::tests::build_test_placement_snapshot(
+        session_id,
+        client.get_client_id(),
+        source_pane_id,
+        active_tab_id,
+        active_tab_id,
+        0,
+        0,
+    );
+    client.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot.clone()));
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        pending_placement_command: None,
+    });
+    client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+    screen.refresh(&mut client, Some(active_tab_id));
+    let paint_before_confirmation = screen
+        .shown_viewer_paint
+        .clone()
+        .expect("the placement draft is painted");
+
+    assert_eq!(
+        client.submit_placement_command(),
+        Some(crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id,
+                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            })
+        ))
+    );
+    assert!(client.is_placement_confirmation_pending());
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    let paint_after_confirmation = screen
+        .shown_viewer_paint
+        .as_ref()
+        .expect("the confirmation repaint is recorded");
+    let expected_status = format!(
+        "PLACE {source_pane_id} | {active_tab_id}: swap with {target_pane_id} | confirming placement"
+    );
+    assert_ne!(paint_after_confirmation, &paint_before_confirmation);
+    assert_eq!(
+        paint_after_confirmation
+            .placement_status
+            .as_ref()
+            .map(|placement_status| placement_status.status_text.as_str()),
+        Some(expected_status.as_str())
+    );
+
+    crate::tests::record_committed_placement(&mut client);
+    let mut authoritative_frame = build_test_painted_frame();
+    authoritative_frame.session_snapshot.session_revision = 1;
+    authoritative_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_id = active_tab_id;
+    authoritative_frame.client_snapshot.active_tab_id = active_tab_id;
+    authoritative_frame.client_snapshot.client_revision = 1;
+    screen
+        .draw_painted_frame(&mut client, Box::new(authoritative_frame))
+        .expect("paint the authoritative placement result");
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    assert!(!client.is_placement_confirmation_pending());
+    assert_eq!(client.get_placement_target(), None);
+    assert_eq!(
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .and_then(|viewer_paint| viewer_paint.placement_target.as_ref()),
+        None
+    );
+}
+
+#[test]
+fn mouse_placement_confirmation_clears_confirming_status_without_resize() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let session_id = painted_frame.session_snapshot.session_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint the committed frame");
+
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let placement_snapshot = crate::tests::build_test_placement_snapshot(
+        session_id,
+        client.get_client_id(),
+        source_pane_id,
+        active_tab_id,
+        active_tab_id,
+        0,
+        0,
+    );
+    client.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        pending_placement_command: None,
+    });
+    client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
+    client
+        .client_config
+        .should_stay_in_pane_placement_mode_after_placement = false;
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    assert_eq!(
+        client.submit_placement_command(),
+        Some(crate::tests::build_expected_submit_placement(
+            &client,
+            Command::PlacePane(PlacePaneArgs {
+                source_pane_id,
+                placement_target: PanePlacementTarget::Swap { target_pane_id },
+                expected_placement_revision: Some(PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            })
+        ))
+    );
+    assert!(!client.is_placement_mode_active());
+    assert!(client.is_placement_confirmation_pending());
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    let expected_status = format!(
+        "PLACE {source_pane_id} | {active_tab_id}: swap with {target_pane_id} | confirming placement"
+    );
+    assert_eq!(
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .and_then(|viewer_paint| viewer_paint.placement_status.as_ref())
+            .map(|placement_status| placement_status.status_text.as_str()),
+        Some(expected_status.as_str())
+    );
+    assert_eq!(client.get_active_input_mode(), LockMode::Normal);
+
+    crate::tests::record_committed_placement(&mut client);
+    let mut authoritative_frame = build_test_painted_frame();
+    authoritative_frame.session_snapshot.session_id = session_id;
+    authoritative_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_id = active_tab_id;
+    authoritative_frame.client_snapshot.client_id = client.get_client_id();
+    authoritative_frame.client_snapshot.active_tab_id = active_tab_id;
+    authoritative_frame.client_snapshot.client_revision = 1;
+    authoritative_frame.session_snapshot.session_revision = 1;
+    screen
+        .draw_painted_frame(&mut client, Box::new(authoritative_frame))
+        .expect("paint the accepted mouse placement frame");
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    assert!(!client.is_placement_confirmation_pending());
+    assert!(!client.is_pane_placement_visible());
+    assert_eq!(
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .and_then(|viewer_paint| viewer_paint.placement_status.as_ref()),
+        None
+    );
+}
+
+#[test]
+fn enter_submits_keyboard_placement_and_repaints_without_resize() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    let session_id = painted_frame.session_snapshot.session_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint the committed frame");
+
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    client.set_frame_view(active_tab_id, Some(source_pane_id), vec![active_tab_id]);
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            session_id,
+            client.get_client_id(),
+            source_pane_id,
+            active_tab_id,
+            active_tab_id,
+            0,
+            0,
+        )));
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        pending_placement_command: None,
+    });
+    client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    let client_id = client.get_client_id();
+    let mut wire = build_test_wire();
+    process_runtime_input(
+        &mut client,
+        &mut wire.uplink,
+        RuntimeEvent::KeyInput {
+            client_id,
+            key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+                ModFlags::NONE,
+                Key::Named(NamedKey::Enter),
+            )),
+        },
+    );
+    screen.refresh(&mut client, Some(active_tab_id));
+
+    wire.uplink.send_request(IpcRequestKind::Discovery);
+    let placement_request: IpcRequest = wire.session.recv().expect("read the placement command");
+    let IpcRequestKind::SubmitCommand(envelope) = placement_request.request_kind else {
+        panic!("Enter must submit a placement command");
+    };
+    assert_eq!(
+        envelope.command,
+        Command::PlacePane(PlacePaneArgs {
+            source_pane_id,
+            placement_target: PanePlacementTarget::Swap { target_pane_id },
+            expected_placement_revision: Some(PlacementRevision {
+                session_revision: 0,
+                client_revision: 0,
+            }),
+        })
+    );
+    assert!(client.is_placement_confirmation_pending());
+    let expected_status = format!(
+        "PLACE {source_pane_id} | {active_tab_id}: swap with {target_pane_id} | confirming placement"
+    );
+    assert_eq!(
+        screen
+            .shown_viewer_paint
+            .as_ref()
+            .and_then(|viewer_paint| viewer_paint.placement_status.as_ref())
+            .map(|placement_status| placement_status.status_text.as_str()),
+        Some(expected_status.as_str())
+    );
+}
+
+#[test]
+fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
+    let initial_focused_pane_id = PaneId::new();
+    let dragged_pane_id = PaneId::new();
+    let frame = build_mouse_frame(&[
+        build_plain_mouse_pane(initial_focused_pane_id),
+        build_plain_mouse_pane(dragged_pane_id),
+    ]);
+    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let screen_pane_content_rect = koshi_renderer::pane_content_rect(
+        frame.build_frame_layout(koshi_renderer::snapshot::ViewerChrome::default()),
+        dragged_pane_id,
+    )
+    .expect("the dragged pane has visible content");
+    let placement_handle_position = Point {
+        column: screen_pane_content_rect.origin.column,
+        row: screen_pane_content_rect.origin.row - 1,
+    };
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    client.set_frame_view(
+        active_tab_id,
+        Some(initial_focused_pane_id),
+        vec![active_tab_id],
+    );
+    client.handle_mouse(
+        build_mouse_motion(placement_handle_position),
+        &frame,
+        Instant::now(),
+    );
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = Uplink {
+        request_sender,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+
+    assert!(handle_placement_mouse_event(
+        &mut client,
+        &mut uplink,
+        &frame,
+        build_mouse_press(placement_handle_position),
+    ));
+    assert_eq!(client.get_placement_source_pane_id(), Some(dragged_pane_id));
+
+    let placement_read_request = request_receiver
+        .try_recv()
+        .expect("read the dragged pane placement");
+    assert_eq!(
+        placement_read_request,
+        IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::ReadPanePlacement {
+                pane_id: dragged_pane_id,
+                destination_tab_id: active_tab_id,
+            },
+        }
+    );
+
+    let focus_request = request_receiver
+        .try_recv()
+        .expect("read the source focus command");
+    assert_eq!(focus_request.request_id, FIRST_POST_ATTACH_REQUEST_ID + 1);
+    let IpcRequestKind::SubmitCommand(focus_envelope) = focus_request.request_kind else {
+        panic!("the mouse pickup focuses its dragged pane");
+    };
+    assert_eq!(
+        focus_envelope.command_source,
+        CommandSource::Mouse { client_id }
+    );
+    assert_eq!(
+        focus_envelope.command,
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(dragged_pane_id),
+            client_id: Some(client_id),
+        })
+    );
+    let sentinel_request_id = uplink.send_request(IpcRequestKind::Discovery);
+    assert_eq!(
+        request_receiver
+            .try_recv()
+            .expect("read the request after pickup"),
+        IpcRequest {
+            request_id: sentinel_request_id,
+            request_kind: IpcRequestKind::Discovery,
+        }
+    );
+}
+
+#[test]
+fn attachment_commits_entered_pane_swap_without_waiting_for_resize() {
+    assert_attachment_commits_pane_swap_without_waiting_for_resize(
+        PlacementModeLifetime::UntilCancelled,
+        true,
+    );
+}
+
+#[test]
+fn attachment_commits_mouse_released_pane_swap_without_waiting_for_resize() {
+    assert_attachment_commits_pane_swap_without_waiting_for_resize(
+        PlacementModeLifetime::UntilDragEnds,
+        true,
+    );
+}
+
+#[test]
+fn attachment_commits_entered_pane_swap_and_ends_pane_placement_mode_when_staying_is_off() {
+    assert_attachment_commits_pane_swap_without_waiting_for_resize(
+        PlacementModeLifetime::UntilCancelled,
+        false,
+    );
+}
+
+#[test]
+fn attachment_commits_mouse_released_pane_swap_and_ends_pane_placement_mode_when_staying_is_off() {
+    assert_attachment_commits_pane_swap_without_waiting_for_resize(
+        PlacementModeLifetime::UntilDragEnds,
+        false,
+    );
+}
+
+fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
+    placement_mode_lifetime: PlacementModeLifetime,
+    should_stay_in_pane_placement_mode_after_placement: bool,
+) {
+    let mut client = build_test_client();
+    client
+        .client_config
+        .should_stay_in_pane_placement_mode_after_placement =
+        should_stay_in_pane_placement_mode_after_placement;
+    let client_id = client.get_client_id();
+    let session_id = SessionId::new();
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let mut initial_frame = build_test_painted_frame();
+    let active_tab_id = initial_frame.client_snapshot.active_tab_id;
+    let source_outer_rect = Rect::from_origin_and_size(
+        Point { column: 0, row: 0 },
+        Size {
+            column_count: 39,
+            row_count: 22,
+        },
+    );
+    let target_outer_rect = Rect::from_origin_and_size(
+        Point { column: 41, row: 0 },
+        Size {
+            column_count: 39,
+            row_count: 22,
+        },
+    );
+    let build_frame_slot = |pane_id, outer_rect| FrameSlot {
+        pane_id,
+        outer_rect,
+        content_rect: Some(outer_rect.compute_inner_with_border()),
+        pane_kind: PaneKind::Terminal,
+        is_visible: true,
+        is_suppressed: false,
+        is_dead: false,
+    };
+    initial_frame.session_snapshot.session_id = session_id;
+    initial_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots = vec![
+        build_frame_slot(source_pane_id, source_outer_rect),
+        build_frame_slot(target_pane_id, target_outer_rect),
+    ];
+    initial_frame.client_snapshot.client_id = client_id;
+    initial_frame.client_snapshot.focused_pane_id = Some(source_pane_id);
+
+    let mut committed_frame = initial_frame.clone();
+    committed_frame.session_snapshot.session_revision = 1;
+    committed_frame.client_snapshot.client_revision = 1;
+    committed_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .outer_rect = target_outer_rect;
+    committed_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[0]
+        .content_rect = Some(target_outer_rect.compute_inner_with_border());
+    committed_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[1]
+        .outer_rect = source_outer_rect;
+    committed_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots[1]
+        .content_rect = Some(source_outer_rect.compute_inner_with_border());
+
+    let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
+        session_id,
+        client_id,
+        source_pane_id,
+        active_tab_id,
+        active_tab_id,
+        0,
+        0,
+    );
+    placement_snapshot.destination_tab_snapshot = None;
+    placement_snapshot.source_tab_snapshot.layout_tree =
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(source_pane_id),
+                LayoutNode::Pane(target_pane_id),
+            ],
+        ));
+    placement_snapshot.source_tab_snapshot.pane_slots = initial_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .clone();
+    placement_snapshot
+        .source_tab_snapshot
+        .pane_snapshots
+        .push(PanePlacementPaneSnapshot {
+            pane_id: target_pane_id,
+            terminal_window: None,
+            image_placement_snapshots: Vec::new(),
+        });
+
+    client.set_session_id(session_id);
+    client.set_frame_view(active_tab_id, Some(source_pane_id), vec![active_tab_id]);
+    client.set_placement_revisions(0, 0);
+    client.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: (placement_mode_lifetime == PlacementModeLifetime::UntilCancelled)
+            .then_some(PanePlacementTarget::Swap { target_pane_id }),
+        pending_placement_command: None,
+    });
+    client.placement_state.placement_mode_lifetime = placement_mode_lifetime;
+    let source_drag_position = Point {
+        column: source_outer_rect.origin.column + 2,
+        row: source_outer_rect.origin.row + 2,
+    };
+    let target_drag_position = Point {
+        column: target_outer_rect.origin.column + 2,
+        row: target_outer_rect.origin.row + 2,
+    };
+    if placement_mode_lifetime == PlacementModeLifetime::UntilDragEnds {
+        client.begin_placement_drag(source_drag_position, false);
+    }
+    let placement_confirmation_events = match placement_mode_lifetime {
+        PlacementModeLifetime::UntilCancelled => vec![RuntimeEvent::KeyInput {
+            client_id,
+            key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
+                ModFlags::NONE,
+                Key::Named(NamedKey::Enter),
+            )),
+        }],
+        PlacementModeLifetime::UntilDragEnds => vec![
+            RuntimeEvent::MouseInput {
+                client_id,
+                mouse_input: build_mouse_drag(target_drag_position),
+            },
+            RuntimeEvent::MouseInput {
+                client_id,
+                mouse_input: build_mouse_release(target_drag_position),
+            },
+        ],
+    };
+
+    let draw_count = Arc::new(AtomicUsize::new(0));
+    let mut screen = Screen::from_terminal_and_viewport(
+        Terminal::new(FailingBackend::from_terminal_size_with_draw_count(
+            TEST_VIEWPORT_SIZE,
+            Arc::clone(&draw_count),
+        ))
+        .expect("build an in-memory terminal"),
+        TEST_VIEWPORT_SIZE,
+    );
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = Uplink {
+        request_sender,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    let producer_sender = incoming_sender.clone();
+    let producer_draw_count = Arc::clone(&draw_count);
+    let producer_thread = thread::spawn(move || -> Result<bool, String> {
+        producer_sender
+            .send(Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Ok(SessionEvent::Painted {
+                    frame: Box::new(initial_frame),
+                }),
+            })
+            .map_err(|send_error| send_error.to_string())?;
+        if !wait_for_draw_count(&producer_draw_count, 1) {
+            let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+            return Err(String::from("the initial frame was not drawn"));
+        }
+        for (placement_event_index, placement_confirmation_event) in
+            placement_confirmation_events.into_iter().enumerate()
+        {
+            producer_sender
+                .send(Incoming::Input(Box::new(placement_confirmation_event)))
+                .map_err(|send_error| send_error.to_string())?;
+            if placement_mode_lifetime == PlacementModeLifetime::UntilDragEnds
+                && placement_event_index == 0
+                && !wait_for_draw_count(&producer_draw_count, 2)
+            {
+                let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+                return Err(String::from("the dragged target was not painted"));
+            }
+        }
+
+        let placement_request = match request_receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(placement_request) => placement_request,
+            Err(request_error) => {
+                let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+                return Err(request_error.to_string());
+            }
+        };
+        let IpcRequestKind::SubmitCommand(placement_envelope) = placement_request.request_kind
+        else {
+            let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+            return Err(String::from("the placement input submitted no command"));
+        };
+        let is_expected_request = placement_request.request_id == FIRST_POST_ATTACH_REQUEST_ID
+            && placement_envelope.command
+                == Command::PlacePane(PlacePaneArgs {
+                    source_pane_id,
+                    placement_target: PanePlacementTarget::Swap { target_pane_id },
+                    expected_placement_revision: Some(PlacementRevision {
+                        session_revision: 0,
+                        client_revision: 0,
+                    }),
+                });
+        producer_sender
+            .send(Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Ok(SessionEvent::PanePlacementCommitted {
+                    command_id: placement_envelope.command_id,
+                    source_pane_id,
+                    source_tab_id: active_tab_id,
+                    destination_tab_id: active_tab_id,
+                    placement_target: PanePlacementTarget::Swap { target_pane_id },
+                }),
+            })
+            .map_err(|send_error| send_error.to_string())?;
+        producer_sender
+            .send(Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Ok(SessionEvent::Painted {
+                    frame: Box::new(committed_frame),
+                }),
+            })
+            .map_err(|send_error| send_error.to_string())?;
+        let expected_draw_count = match placement_mode_lifetime {
+            PlacementModeLifetime::UntilCancelled => 3,
+            PlacementModeLifetime::UntilDragEnds => 4,
+        };
+        if !wait_for_draw_count(&producer_draw_count, expected_draw_count) {
+            let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+            return Ok(false);
+        }
+        producer_sender
+            .send(Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Ok(SessionEvent::Detached),
+            })
+            .map_err(|send_error| send_error.to_string())?;
+        Ok(is_expected_request)
+    });
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        session_id,
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut cell_size_query,
+        incoming_sender,
+        incoming_receiver,
+    );
+    let is_expected_request = producer_thread
+        .join()
+        .expect("the frame producer finished")
+        .expect("the attachment submitted and painted the placement");
+
+    assert_eq!(attachment_ending, AttachmentEnding::Detached);
+    assert!(
+        is_expected_request,
+        "the placement input submits the checked pane swap"
+    );
+    let expected_draw_count = match placement_mode_lifetime {
+        PlacementModeLifetime::UntilCancelled => 3,
+        PlacementModeLifetime::UntilDragEnds => 4,
+    };
+    assert_eq!(
+        draw_count.load(Ordering::Relaxed),
+        expected_draw_count,
+        "the frame, the submission, and the committed layout with its cleared status each \
+         draw once, without resize"
+    );
+    assert!(!client.is_placement_confirmation_pending());
+    let shown_placement_status = screen
+        .shown_viewer_paint
+        .as_ref()
+        .and_then(|viewer_paint| viewer_paint.placement_status.as_ref())
+        .map(|placement_status| placement_status.status_text.as_str());
+    if should_stay_in_pane_placement_mode_after_placement {
+        let expected_placement_status = format!("PLACE {source_pane_id} | loading {active_tab_id}");
+        assert_eq!(
+            shown_placement_status,
+            Some(expected_placement_status.as_str())
+        );
+        assert!(client.is_placement_mode_active());
+        assert_eq!(
+            client.placement_state.placement_mode_lifetime,
+            PlacementModeLifetime::UntilCancelled
+        );
+    } else {
+        assert_eq!(shown_placement_status, None);
+        assert!(client.placement_state.placement_mode.is_none());
+    }
+    let shown_render_snapshot = screen
+        .last_snapshot
+        .as_ref()
+        .expect("the accepted frame remains on the screen");
+    assert_eq!(shown_render_snapshot.session_snapshot.session_revision, 1);
+    assert_eq!(
+        shown_render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .pane_slots[0]
+            .outer_rect,
+        target_outer_rect
+    );
+    assert_eq!(
+        shown_render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .pane_slots[1]
+            .outer_rect,
+        source_outer_rect
+    );
+}
+
+#[test]
+fn placement_status_uses_pane_ids_instead_of_terminal_titles() {
+    let mut client = build_test_client();
+    let mut render_snapshot = build_render_snapshot(&build_test_painted_frame());
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    render_snapshot.session_snapshot.tabs_metadata = vec![TabMeta {
+        tab_id: active_tab_id,
+        tab_name: String::from("main"),
+        tab_index: 0,
+        is_active: true,
+    }];
+    let build_pane_snapshot = |pane_id, pane_title| PaneSnapshot {
+        pane_id,
+        pane_title: Some(String::from(pane_title)),
+        cursor_snapshot: CursorSnapshot {
+            row_index: 0,
+            column_index: 0,
+            is_visible: false,
+            is_blinking: false,
+            shape: None,
+        },
+        terminal_grid_view: None,
+        image_placement_snapshots: Vec::new(),
+        is_reverse_video: false,
+        mouse_tracking: MouseTracking::Off,
+        is_alternate_scroll_enabled: false,
+        is_on_alternate_screen: false,
+        view_top_row_index: 0,
+        selection_spans: None,
+        has_selection: false,
+        scrollback_meta: ScrollbackMeta {
+            is_truncated: false,
+            retained_line_count: 0,
+        },
+    };
+    render_snapshot.pane_snapshots = vec![
+        build_pane_snapshot(source_pane_id, "/work/koshi"),
+        build_pane_snapshot(target_pane_id, "nvim"),
+    ];
+
+    client.set_frame_view(active_tab_id, Some(source_pane_id), vec![active_tab_id]);
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            render_snapshot.session_snapshot.session_id,
+            client.get_client_id(),
+            source_pane_id,
+            active_tab_id,
+            active_tab_id,
+            0,
+            0,
+        )));
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        pending_placement_command: None,
+    });
+
+    let placement_status = build_placement_status(&client, &render_snapshot)
+        .expect("the pane placement has a visible placement status");
+    assert_eq!(
+        placement_status.status_text,
+        format!(
+            "PLACE {source_pane_id} | main: swap with {target_pane_id} | Enter: place | Esc: cancel"
+        )
+    );
+    assert!(!placement_status.status_text.contains("/work/koshi"));
+    assert!(!placement_status.status_text.contains("nvim"));
 }
 
 #[test]
@@ -4189,10 +5251,9 @@ fn a_frame_moves_the_viewer_to_the_mode_it_reports() {
     let mut client = build_test_client();
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
 
-    apply_frame_to_client(
-        &mut client,
-        &build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Locked)),
-    );
+    client.apply_render_snapshot(&build_render_snapshot(
+        &build_test_painted_frame_with_lock_mode(LockMode::Locked),
+    ));
 
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
 }
@@ -4248,7 +5309,8 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
     screen
         .draw_painted_frame(&mut client, Box::new(painted))
         .expect("paint");
-    let hovered_before = ViewerPaint::from_client_and_tab(&client, active_tab_id)
+    let painted_render_snapshot = screen.last_snapshot.clone().expect("the frame painted");
+    let hovered_before = ViewerPaint::from_client(&client, active_tab_id, &painted_render_snapshot)
         .chrome
         .hovered_pane_id;
 
@@ -4258,7 +5320,7 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
         build_mouse_motion(get_content_cell(&mouse, 1)),
         &mut pending_mouse_actions,
     );
-    let hovered_after = ViewerPaint::from_client_and_tab(&client, active_tab_id)
+    let hovered_after = ViewerPaint::from_client(&client, active_tab_id, &painted_render_snapshot)
         .chrome
         .hovered_pane_id;
     screen.refresh(&mut client, Some(active_tab_id));
@@ -4276,22 +5338,104 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
 }
 
 #[test]
-fn a_pass_that_moved_nothing_draws_nothing() {
+fn a_pass_without_viewer_changes_skips_terminal_draw() {
     let mut client = build_test_client();
-    let mut screen = build_test_screen();
+    let draw_count = Arc::new(AtomicUsize::new(0));
+    let mut screen = Screen::from_terminal_and_viewport(
+        Terminal::new(FailingBackend::from_terminal_size_with_draw_count(
+            TEST_VIEWPORT_SIZE,
+            Arc::clone(&draw_count),
+        ))
+        .expect("build an in-memory terminal"),
+        TEST_VIEWPORT_SIZE,
+    );
     let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
     let active_tab_id = painted_frame.client_snapshot.active_tab_id;
 
     screen
         .draw_painted_frame(&mut client, Box::new(painted_frame))
         .expect("paint");
-    let drawn = screen.terminal.backend().buffer().clone();
+    assert_eq!(draw_count.load(Ordering::Relaxed), 1);
     let shown_viewer_paint = screen.shown_viewer_paint.clone();
 
-    screen.refresh(&mut client, Some(active_tab_id));
+    assert_eq!(screen.refresh(&mut client, Some(active_tab_id)), None);
 
-    assert_eq!(*screen.terminal.backend().buffer(), drawn);
+    assert_eq!(draw_count.load(Ordering::Relaxed), 1);
     assert_eq!(screen.shown_viewer_paint, shown_viewer_paint);
+}
+
+#[test]
+fn attachment_skips_a_redraw_after_paste_when_viewer_paint_is_unchanged() {
+    let draw_count = Arc::new(AtomicUsize::new(0));
+    let mut screen = Screen::from_terminal_and_viewport(
+        Terminal::new(FailingBackend::from_terminal_size_with_draw_count(
+            TEST_VIEWPORT_SIZE,
+            Arc::clone(&draw_count),
+        ))
+        .expect("build an in-memory terminal"),
+        TEST_VIEWPORT_SIZE,
+    );
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = Uplink {
+        request_sender,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    let producer_sender = incoming_sender.clone();
+    let producer_draw_count = Arc::clone(&draw_count);
+    let producer_thread = thread::spawn(move || {
+        producer_sender
+            .send(Incoming::Frame {
+                connection_index: INITIAL_CONNECTION_INDEX,
+                session_event_result: Ok(SessionEvent::Painted {
+                    frame: Box::new(build_test_painted_frame()),
+                }),
+            })
+            .expect("the attachment loop accepts the initial frame");
+        assert!(
+            wait_for_draw_count(&producer_draw_count, 1),
+            "the initial frame reaches the terminal"
+        );
+        producer_sender
+            .send(Incoming::Input(Box::new(RuntimeEvent::HostPaste {
+                client_id,
+                pasted_text: String::from("viewer input"),
+            })))
+            .expect("the attachment loop accepts the paste");
+        let paste_request = request_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the paste reaches the session");
+        assert_eq!(
+            paste_request.request_kind,
+            IpcRequestKind::Paste {
+                pasted_text: String::from("viewer input"),
+            }
+        );
+        producer_sender
+            .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
+            .expect("the attachment loop accepts the terminal end");
+    });
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        SessionId::new(),
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut terminal::CellSizeQuery::from_current_measurement(None, false, false),
+        incoming_sender,
+        incoming_receiver,
+    );
+    producer_thread.join().expect("the producer finished");
+
+    assert_eq!(attachment_ending, AttachmentEnding::TerminalGone);
+    assert_eq!(draw_count.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -4309,13 +5453,16 @@ fn a_screen_with_no_frame_yet_draws_nothing() {
 #[test]
 fn locking_the_client_moves_what_the_viewer_paints() {
     let mut client = build_test_client();
-    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Locked);
-    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
-    let paint_before_lock = ViewerPaint::from_client_and_tab(&client, active_tab_id);
+    let locked_render_snapshot =
+        build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Locked));
+    let active_tab_id = locked_render_snapshot.client_snapshot.active_tab_id;
+    let paint_before_lock =
+        ViewerPaint::from_client(&client, active_tab_id, &locked_render_snapshot);
 
-    apply_frame_to_client(&mut client, &build_render_snapshot(&painted_frame));
+    client.apply_render_snapshot(&locked_render_snapshot);
 
-    let paint_after_lock = ViewerPaint::from_client_and_tab(&client, active_tab_id);
+    let paint_after_lock =
+        ViewerPaint::from_client(&client, active_tab_id, &locked_render_snapshot);
     assert_eq!(paint_before_lock.lock_mode, LockMode::Normal);
     assert_eq!(paint_after_lock.lock_mode, LockMode::Locked);
     assert_ne!(paint_after_lock, paint_before_lock);
@@ -4326,16 +5473,20 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints() {
     // An opened sequence reaches no session, so no frame comes back. The hint
     // bar draws it as a breadcrumb, so `ViewerPaint` carries it.
     let mut client = build_test_client();
-    let active_tab_id = TabId::new();
+    let render_snapshot =
+        build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Normal));
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let opener = get_sequence_opener(&client);
-    let paint_before_key_sequence = ViewerPaint::from_client_and_tab(&client, active_tab_id);
+    let paint_before_key_sequence =
+        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
 
     assert_eq!(
         client.resolve_key(opener, Instant::now()),
         KeyOutcome::Pending
     );
 
-    let paint_after_key_sequence = ViewerPaint::from_client_and_tab(&client, active_tab_id);
+    let paint_after_key_sequence =
+        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
     assert_eq!(paint_before_key_sequence.pending_key_sequence, None);
     assert_eq!(
         paint_after_key_sequence.pending_key_sequence,
@@ -4349,8 +5500,10 @@ fn dialing_again_moves_what_the_viewer_paints() {
     // No frame arrives while the link is down, so the `RECONNECTING` tag is
     // drawn by the repaint a moved `ViewerPaint` fires.
     let mut client = build_test_client();
-    let active_tab_id = TabId::new();
-    let paint_before_reconnect = ViewerPaint::from_client_and_tab(&client, active_tab_id);
+    let render_snapshot =
+        build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Normal));
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
+    let paint_before_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
 
     let dialing = Reconnecting {
         attempt: 1,
@@ -4358,7 +5511,7 @@ fn dialing_again_moves_what_the_viewer_paints() {
     };
     client.set_reconnecting(Some(dialing));
 
-    let paint_after_reconnect = ViewerPaint::from_client_and_tab(&client, active_tab_id);
+    let paint_after_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
     assert_eq!(paint_before_reconnect.chrome.reconnecting, None);
     assert_eq!(paint_after_reconnect.chrome.reconnecting, Some(dialing));
     assert_ne!(paint_after_reconnect, paint_before_reconnect);
@@ -4816,11 +5969,13 @@ fn a_pass_that_moves_nothing_leaves_what_the_viewer_paints_alone() {
     // The repaint fires on a difference, so two reads of one unchanged viewer
     // are equal.
     let client = build_test_client();
-    let active_tab_id = TabId::new();
+    let render_snapshot =
+        build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Normal));
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
 
     assert_eq!(
-        ViewerPaint::from_client_and_tab(&client, active_tab_id),
-        ViewerPaint::from_client_and_tab(&client, active_tab_id)
+        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot),
+        ViewerPaint::from_client(&client, active_tab_id, &render_snapshot)
     );
 }
 
@@ -5089,4 +6244,808 @@ fn spaces_around_the_typed_number_still_pick_that_row() {
         parse_session_selection(&session_rows, "  2  \n").expect("the trimmed line names row 2"),
         1
     );
+}
+
+/// Two frames of one tab. The first has `left_pane_id` at columns `0..39` and
+/// `right_pane_id` at columns `41..80`. The second, at session revision 1, has
+/// the two panes swapped.
+fn build_swapped_pane_frames(
+    left_pane_id: PaneId,
+    right_pane_id: PaneId,
+) -> (PaintedFrame, PaintedFrame) {
+    let left_outer_rect = Rect::from_origin_and_size(
+        Point { column: 0, row: 0 },
+        Size {
+            column_count: 39,
+            row_count: 22,
+        },
+    );
+    let right_outer_rect = Rect::from_origin_and_size(
+        Point { column: 41, row: 0 },
+        Size {
+            column_count: 39,
+            row_count: 22,
+        },
+    );
+    let build_frame_slot = |pane_id, outer_rect: Rect| FrameSlot {
+        pane_id,
+        outer_rect,
+        content_rect: Some(outer_rect.compute_inner_with_border()),
+        pane_kind: PaneKind::Terminal,
+        is_visible: true,
+        is_suppressed: false,
+        is_dead: false,
+    };
+    let mut initial_frame = build_test_painted_frame();
+    initial_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots = vec![
+        build_frame_slot(left_pane_id, left_outer_rect),
+        build_frame_slot(right_pane_id, right_outer_rect),
+    ];
+    let mut committed_frame = initial_frame.clone();
+    committed_frame.session_snapshot.session_revision = 1;
+    committed_frame
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots = vec![
+        build_frame_slot(left_pane_id, right_outer_rect),
+        build_frame_slot(right_pane_id, left_outer_rect),
+    ];
+    (initial_frame, committed_frame)
+}
+
+/// Paint the first of [`build_swapped_pane_frames`] at `started_at`. Returns the
+/// tab id, the first frame's active tab, and the committed frame.
+fn paint_initial_swapped_pane_frame(
+    client: &mut Client,
+    screen: &mut Screen<TestBackend>,
+    started_at: Instant,
+) -> (TabId, TabSnapshot, RenderSnapshot) {
+    let (initial_frame, committed_frame) = build_swapped_pane_frames(PaneId::new(), PaneId::new());
+    let initial_snapshot = build_render_snapshot(&initial_frame);
+    screen.pending_snapshot = Some(initial_snapshot.clone());
+    screen
+        .commit_pending_snapshot(client, started_at)
+        .expect("the first frame paints");
+    (
+        initial_frame.client_snapshot.active_tab_id,
+        initial_snapshot.session_snapshot.active_tab_snapshot,
+        build_render_snapshot(&committed_frame),
+    )
+}
+
+/// Return the outer and content rects of each pane `screen` drew last, in slot order.
+fn list_shown_pane_rects<B: Backend>(screen: &Screen<B>) -> Vec<(Rect, Option<Rect>)> {
+    screen
+        .shown_tab_snapshot
+        .as_ref()
+        .expect("the screen drew a tab")
+        .pane_slots
+        .iter()
+        .map(|pane_slot| (pane_slot.outer_rect, pane_slot.content_rect))
+        .collect()
+}
+
+#[test]
+fn another_viewers_accepted_swap_slides_both_panes_to_their_new_rects() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, initial_tab_snapshot, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    assert_eq!(
+        screen.refresh_at(&mut client, Some(active_tab_id), started_at),
+        None,
+        "the notice waits for the session frame that carries the placement"
+    );
+    screen.pending_snapshot = Some(committed_snapshot);
+    let committed_mouse_frame = screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&initial_tab_snapshot),
+        "the slide starts from the rects already on screen"
+    );
+    assert_eq!(
+        committed_mouse_frame.session_snapshot.active_tab_snapshot, committed_tab_snapshot,
+        "mouse input is placed against the committed rects during the slide"
+    );
+
+    let halfway_time = started_at + Duration::from_millis(80);
+    assert_eq!(
+        screen.next_placement_animation_wakeup_at(halfway_time),
+        Some(PLACEMENT_ANIMATION_FRAME_INTERVAL)
+    );
+    let halfway_mouse_frame = screen
+        .refresh_at(&mut client, Some(active_tab_id), halfway_time)
+        .expect("the slide repaints without a session frame");
+    assert_eq!(
+        halfway_mouse_frame.session_snapshot.active_tab_snapshot,
+        committed_tab_snapshot
+    );
+    let pane_size = Size {
+        column_count: 39,
+        row_count: 22,
+    };
+    let content_size = Size {
+        column_count: 37,
+        row_count: 20,
+    };
+    assert_eq!(
+        list_shown_pane_rects(&screen),
+        vec![
+            (
+                Rect::from_origin_and_size(Point { column: 36, row: 0 }, pane_size),
+                Some(Rect::from_origin_and_size(
+                    Point { column: 37, row: 1 },
+                    content_size
+                )),
+            ),
+            (
+                Rect::from_origin_and_size(Point { column: 5, row: 0 }, pane_size),
+                Some(Rect::from_origin_and_size(
+                    Point { column: 6, row: 1 },
+                    content_size
+                )),
+            ),
+        ],
+        "80 ms into 160 ms the ease-out has covered 0.875 of each 41-column move"
+    );
+
+    let end_time = started_at + PLACEMENT_ANIMATION_DURATION;
+    assert_eq!(
+        screen.next_placement_animation_wakeup_at(end_time),
+        Some(Duration::ZERO)
+    );
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), end_time)
+        .expect("the slide's last repaint draws the committed rects");
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot)
+    );
+    assert_eq!(screen.next_placement_animation_wakeup_at(end_time), None);
+    assert_eq!(
+        screen.refresh_at(
+            &mut client,
+            Some(active_tab_id),
+            end_time + PLACEMENT_ANIMATION_FRAME_INTERVAL
+        ),
+        None,
+        "a finished slide draws nothing more"
+    );
+}
+
+#[test]
+fn a_committed_frame_without_a_placement_notice_draws_the_new_rects_at_once() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (_, _, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot)
+    );
+    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+}
+
+#[test]
+fn a_placement_notice_for_another_tab_draws_the_new_rects_at_once() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (_, _, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+
+    screen.note_committed_placement([TabId::new(), TabId::new()]);
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot)
+    );
+    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+}
+
+#[test]
+fn reduced_motion_draws_another_viewers_accepted_placement_at_once() {
+    let mut client = build_test_client();
+    client.client_config.should_reduce_motion = true;
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, _, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot)
+    );
+    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+}
+
+#[test]
+fn a_frame_for_another_tab_during_a_committed_placement_slide_draws_that_tab_at_once() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, _, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+    let other_tab_snapshot = build_render_snapshot(&build_test_painted_frame());
+    let other_active_tab_snapshot = other_tab_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+
+    let halfway_time = started_at + Duration::from_millis(80);
+    screen.pending_snapshot = Some(other_tab_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, halfway_time)
+        .expect("the other tab's frame paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&other_active_tab_snapshot)
+    );
+    assert_eq!(
+        screen.next_placement_animation_wakeup_at(halfway_time),
+        None
+    );
+}
+
+/// When [`run_attachment_with_committed_swap_notice`] detaches the viewer,
+/// counted from the draw of the committed frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerDetachMoment {
+    /// Once twice [`PLACEMENT_ANIMATION_DURATION`] has passed.
+    AfterTwoSlideDurations,
+    /// Once the viewer has drawn a third frame and its drawn cells equal a
+    /// fresh viewer's draw of the committed frame.
+    AfterCommittedLayoutDrawn,
+}
+
+/// Run an attachment that paints the swapped-pane frames with a commit notice
+/// for `notice_command_id` between them. With `pending_command_id` set, the
+/// client waits for that placement command. The session detaches the viewer at
+/// `viewer_detach_moment`. Returns the draw count, the tab drawn last, and the
+/// committed frame's tab.
+fn run_attachment_with_committed_swap_notice(
+    pending_command_id: Option<CommandId>,
+    notice_command_id: CommandId,
+    viewer_detach_moment: ViewerDetachMoment,
+) -> (usize, Option<TabSnapshot>, TabSnapshot) {
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let session_id = SessionId::new();
+    let left_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
+    let (mut initial_frame, mut committed_frame) =
+        build_swapped_pane_frames(left_pane_id, right_pane_id);
+    let active_tab_id = initial_frame.client_snapshot.active_tab_id;
+    for painted_frame in [&mut initial_frame, &mut committed_frame] {
+        painted_frame.session_snapshot.session_id = session_id;
+        painted_frame.client_snapshot.client_id = client_id;
+    }
+    let committed_render_snapshot = build_render_snapshot(&committed_frame);
+    let committed_layout_buffer = build_reference_drawn_buffer(&committed_render_snapshot);
+    let committed_tab_snapshot = committed_render_snapshot
+        .session_snapshot
+        .active_tab_snapshot;
+    client.set_session_id(session_id);
+    if let Some(pending_command_id) = pending_command_id {
+        client.placement_state.placement_mode = Some(PlacementMode {
+            source_pane_id: left_pane_id,
+            source_tab_id: active_tab_id,
+            destination_tab_id: active_tab_id,
+            placement_direction: Direction::Right,
+            placement_target: Some(PanePlacementTarget::Swap {
+                target_pane_id: right_pane_id,
+            }),
+            pending_placement_command: Some(crate::tests::build_pending_placement_command(
+                pending_command_id,
+            )),
+        });
+    }
+
+    let draw_count = Arc::new(AtomicUsize::new(0));
+    let failing_backend = FailingBackend::from_terminal_size_with_draw_count(
+        TEST_VIEWPORT_SIZE,
+        Arc::clone(&draw_count),
+    );
+    let drawn_buffer = failing_backend.share_drawn_buffer();
+    let mut screen = Screen::from_terminal_and_viewport(
+        Terminal::new(failing_backend).expect("build an in-memory terminal"),
+        TEST_VIEWPORT_SIZE,
+    );
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = Uplink {
+        request_sender,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    let producer_sender = incoming_sender.clone();
+    let producer_draw_count = Arc::clone(&draw_count);
+    let producer_thread = thread::spawn(move || -> Result<(), String> {
+        let send_session_event = |session_event: SessionEvent| {
+            producer_sender
+                .send(Incoming::Frame {
+                    connection_index: INITIAL_CONNECTION_INDEX,
+                    session_event_result: Ok(session_event),
+                })
+                .map_err(|send_error| send_error.to_string())
+        };
+        send_session_event(SessionEvent::Painted {
+            frame: Box::new(initial_frame),
+        })?;
+        if !wait_for_draw_count(&producer_draw_count, 1) {
+            let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+            return Err(String::from("the first frame was not drawn"));
+        }
+        send_session_event(SessionEvent::PanePlacementCommitted {
+            command_id: notice_command_id,
+            source_pane_id: left_pane_id,
+            source_tab_id: active_tab_id,
+            destination_tab_id: active_tab_id,
+            placement_target: PanePlacementTarget::Swap {
+                target_pane_id: right_pane_id,
+            },
+        })?;
+        send_session_event(SessionEvent::Painted {
+            frame: Box::new(committed_frame),
+        })?;
+        if !wait_for_draw_count(&producer_draw_count, 2) {
+            let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+            return Err(String::from("the committed frame was not drawn"));
+        }
+        match viewer_detach_moment {
+            ViewerDetachMoment::AfterTwoSlideDurations => {
+                thread::sleep(PLACEMENT_ANIMATION_DURATION * 2);
+            }
+            ViewerDetachMoment::AfterCommittedLayoutDrawn => {
+                if !wait_for_drawn_buffer(
+                    &producer_draw_count,
+                    3,
+                    &drawn_buffer,
+                    &committed_layout_buffer,
+                ) {
+                    let _ = producer_sender.send(Incoming::Input(Box::new(RuntimeEvent::Quit)));
+                    return Err(String::from(
+                        "the slide did not end on the committed layout",
+                    ));
+                }
+            }
+        }
+        send_session_event(SessionEvent::Detached)
+    });
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let attachment_ending = run_attachment(
+        &build_local_home(),
+        session_id,
+        client_id,
+        ConnectionToken::generate(),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut cell_size_query,
+        incoming_sender,
+        incoming_receiver,
+    );
+    producer_thread
+        .join()
+        .expect("the frame producer finished")
+        .expect("the attachment drew both frames");
+    assert_eq!(attachment_ending, AttachmentEnding::Detached);
+    (
+        draw_count.load(Ordering::Relaxed),
+        screen.shown_tab_snapshot.clone(),
+        committed_tab_snapshot,
+    )
+}
+
+#[test]
+fn an_attached_viewer_slides_a_placement_another_viewer_committed() {
+    let (draw_count, shown_tab_snapshot, committed_tab_snapshot) =
+        run_attachment_with_committed_swap_notice(
+            None,
+            CommandId::new(),
+            ViewerDetachMoment::AfterCommittedLayoutDrawn,
+        );
+
+    assert!(
+        draw_count >= 3,
+        "the first frame, the committed frame at the slide's start, and the slide \
+         frames its timer draws with no new session event; got {draw_count}"
+    );
+    assert_eq!(shown_tab_snapshot, Some(committed_tab_snapshot));
+}
+
+#[test]
+fn an_attached_viewer_draws_its_own_committed_placement_without_a_second_slide() {
+    let command_id = CommandId::new();
+    let (draw_count, shown_tab_snapshot, committed_tab_snapshot) =
+        run_attachment_with_committed_swap_notice(
+            Some(command_id),
+            command_id,
+            ViewerDetachMoment::AfterTwoSlideDurations,
+        );
+
+    assert_eq!(
+        draw_count, 2,
+        "only the first frame and the committed frame draw"
+    );
+    assert_eq!(shown_tab_snapshot, Some(committed_tab_snapshot));
+}
+
+#[test]
+fn a_connection_reset_ends_a_committed_placement_slide_and_drops_waiting_notices() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, _, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+
+    screen.reset_connection();
+
+    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+    screen.pending_snapshot = screen.last_snapshot.clone();
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints again");
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot),
+        "a notice from before the reset starts no slide"
+    );
+    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+}
+
+#[test]
+fn a_placement_notice_whose_frame_keeps_every_rect_starts_no_slide() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, initial_tab_snapshot, _) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.pending_snapshot = screen.last_snapshot.clone();
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the unchanged frame paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&initial_tab_snapshot)
+    );
+    assert_eq!(
+        screen.next_placement_animation_wakeup_at(started_at),
+        None,
+        "a frame with the rects already on screen schedules no slide repaint"
+    );
+}
+
+/// Build the screen's preview of `source_pane_id` placed within the active tab
+/// of `frame_snapshot`. The preview draws `tab_snapshot`, and it was read at
+/// `session_placement_revision` and the client revision of `frame_snapshot`.
+fn build_same_tab_screen_placement_snapshot(
+    frame_snapshot: &RenderSnapshot,
+    source_pane_id: PaneId,
+    tab_snapshot: TabSnapshot,
+    session_placement_revision: u64,
+) -> PlacementSnapshot {
+    let active_tab_id = frame_snapshot.client_snapshot.active_tab_id;
+    PlacementSnapshot {
+        session_id: frame_snapshot.session_snapshot.session_id,
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        session_placement_revision,
+        client_placement_revision: frame_snapshot.client_snapshot.client_revision,
+        source_tab_snapshot: koshi_renderer::snapshot::PlacementTabSnapshot {
+            layout_tree: LayoutNode::Pane(source_pane_id),
+            tab_snapshot,
+            pane_snapshots: Vec::new(),
+        },
+        destination_tab_snapshot: None,
+        client_snapshot: koshi_renderer::snapshot::PlacementClientSnapshot {
+            client_snapshot: frame_snapshot.client_snapshot.clone(),
+            reported_pane_area: Some(PaneArea::Reported(TEST_VIEWPORT_SIZE)),
+        },
+        pane_sizing: koshi_layout::solver::PaneSizing::default(),
+    }
+}
+
+#[test]
+fn a_placement_preview_ends_a_committed_placement_slide() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, _, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+    let source_pane_id = committed_tab_snapshot.pane_slots[0].pane_id;
+    let preview_snapshot = build_same_tab_screen_placement_snapshot(
+        &committed_snapshot,
+        source_pane_id,
+        committed_tab_snapshot.clone(),
+        committed_snapshot.session_snapshot.session_revision,
+    );
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.pending_snapshot = Some(committed_snapshot.clone());
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            committed_snapshot.session_snapshot.session_id,
+            committed_snapshot.client_snapshot.client_id,
+            source_pane_id,
+            active_tab_id,
+            active_tab_id,
+            committed_snapshot.session_snapshot.session_revision,
+            committed_snapshot.client_snapshot.client_revision,
+        )));
+    screen.set_placement_snapshot(Some(preview_snapshot));
+
+    let halfway_time = started_at + Duration::from_millis(80);
+    screen
+        .refresh_at(&mut client, Some(active_tab_id), halfway_time)
+        .expect("the placement preview paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot),
+        "the preview draws its own tab in place of the slide"
+    );
+    assert_eq!(
+        screen.next_placement_animation_wakeup_at(halfway_time),
+        None
+    );
+}
+
+#[test]
+fn a_session_frame_at_newer_revisions_drops_the_placement_preview_before_painting() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, initial_tab_snapshot, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    assert_eq!(committed_snapshot.session_snapshot.session_revision, 1);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+    let source_pane_id = initial_tab_snapshot.pane_slots[0].pane_id;
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            committed_snapshot.session_snapshot.session_id,
+            committed_snapshot.client_snapshot.client_id,
+            source_pane_id,
+            active_tab_id,
+            active_tab_id,
+            0,
+            committed_snapshot.client_snapshot.client_revision,
+        )));
+    screen.set_placement_snapshot(Some(build_same_tab_screen_placement_snapshot(
+        &committed_snapshot,
+        source_pane_id,
+        initial_tab_snapshot,
+        0,
+    )));
+
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+
+    assert_eq!(screen.placement_snapshot, None);
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot),
+        "the committed rects draw in place of the preview read at session revision 0"
+    );
+}
+
+#[test]
+fn a_screen_preview_the_client_no_longer_holds_is_dropped_at_the_next_refresh() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, initial_tab_snapshot, _) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let initial_snapshot = screen
+        .last_snapshot
+        .clone()
+        .expect("the first frame is shown");
+    screen.set_placement_snapshot(Some(build_same_tab_screen_placement_snapshot(
+        &initial_snapshot,
+        initial_tab_snapshot.pane_slots[0].pane_id,
+        initial_tab_snapshot,
+        initial_snapshot.session_snapshot.session_revision,
+    )));
+    assert_eq!(client.get_placement_snapshot(), None);
+
+    screen.refresh_at(&mut client, Some(active_tab_id), started_at);
+
+    assert_eq!(screen.placement_snapshot, None);
+}
+
+#[test]
+fn a_frame_at_newer_revisions_drops_the_preview_and_its_slide_while_the_placement_waits() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, initial_tab_snapshot, committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    let initial_snapshot = screen
+        .last_snapshot
+        .clone()
+        .expect("the first frame is shown");
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+    let source_pane_id = initial_tab_snapshot.pane_slots[0].pane_id;
+    let target_pane_id = initial_tab_snapshot.pane_slots[1].pane_id;
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id: active_tab_id,
+        destination_tab_id: active_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        pending_placement_command: Some(crate::tests::build_pending_placement_command(
+            CommandId::new(),
+        )),
+    });
+    client.placement_state.placement_snapshot =
+        Some(Arc::new(crate::tests::build_test_placement_snapshot(
+            initial_snapshot.session_snapshot.session_id,
+            initial_snapshot.client_snapshot.client_id,
+            source_pane_id,
+            active_tab_id,
+            active_tab_id,
+            initial_snapshot.session_snapshot.session_revision,
+            initial_snapshot.client_snapshot.client_revision,
+        )));
+    let preview_snapshot = build_same_tab_screen_placement_snapshot(
+        &initial_snapshot,
+        source_pane_id,
+        initial_tab_snapshot,
+        initial_snapshot.session_snapshot.session_revision,
+    );
+    let mut swapped_preview_snapshot = preview_snapshot.clone();
+    swapped_preview_snapshot.source_tab_snapshot.tab_snapshot = committed_tab_snapshot.clone();
+    screen.set_placement_snapshot(Some(preview_snapshot.clone()));
+    screen.placement_animation = Some(PlacementAnimation {
+        base_snapshot: preview_snapshot.clone(),
+        from_snapshot: preview_snapshot,
+        to_snapshot: swapped_preview_snapshot,
+        placement_target: Some(PanePlacementTarget::Swap { target_pane_id }),
+        started_at,
+    });
+
+    let frame_time = started_at + Duration::from_millis(10);
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, frame_time)
+        .expect("the frame at newer revisions paints");
+
+    assert!(client.is_placement_confirmation_pending());
+    assert_eq!(screen.placement_snapshot, None);
+    assert_eq!(screen.next_placement_animation_wakeup_at(frame_time), None);
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot)
+    );
+}
+
+/// Paint the swapped-pane frames with a placement notice between them, after
+/// `apply_tab_change` edits the committed frame's tab, and assert that the
+/// committed tab draws at once with no slide scheduled.
+fn assert_committed_tab_change_starts_no_slide(
+    tab_change_name: &str,
+    apply_tab_change: fn(&mut TabSnapshot),
+) {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let started_at = Instant::now();
+    let (active_tab_id, _, mut committed_snapshot) =
+        paint_initial_swapped_pane_frame(&mut client, &mut screen, started_at);
+    apply_tab_change(&mut committed_snapshot.session_snapshot.active_tab_snapshot);
+    let committed_tab_snapshot = committed_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .clone();
+
+    screen.note_committed_placement([active_tab_id, active_tab_id]);
+    screen.pending_snapshot = Some(committed_snapshot);
+    screen
+        .commit_pending_snapshot(&mut client, started_at)
+        .expect("the committed frame paints");
+
+    assert_eq!(
+        screen.shown_tab_snapshot.as_ref(),
+        Some(&committed_tab_snapshot),
+        "a committed frame with a changed {tab_change_name} draws at once"
+    );
+    assert_eq!(
+        screen.next_placement_animation_wakeup_at(started_at),
+        None,
+        "a committed frame with a changed {tab_change_name} schedules no slide"
+    );
+}
+
+#[test]
+fn a_committed_frame_with_another_tab_size_layout_mode_or_no_room_starts_no_slide() {
+    assert_committed_tab_change_starts_no_slide("tab size", |tab_snapshot| {
+        tab_snapshot.effective_cell_size = Size {
+            column_count: 79,
+            row_count: 24,
+        };
+    });
+    assert_committed_tab_change_starts_no_slide("layout mode", |tab_snapshot| {
+        tab_snapshot.layout_mode = LayoutMode::Fullscreen {
+            focused_pane_id: tab_snapshot.pane_slots[0].pane_id,
+        };
+    });
+    assert_committed_tab_change_starts_no_slide("every pane suppressed", |tab_snapshot| {
+        tab_snapshot.are_all_panes_suppressed = true;
+    });
 }

@@ -222,7 +222,9 @@ impl FakeSupervisor {
 }
 
 /// An address for one test's link. On Unix it is a socket file inside
-/// `runtime_directory`; on Windows it is a pipe name of its own.
+/// `runtime_directory`; on Windows it is the pipe name
+/// `koshi-pty-test-<process id>-<clock nanoseconds>-<index>`, whose index
+/// differs for every call in one test process.
 fn build_test_supervisor_address(runtime_directory: &std::path::Path) -> String {
     #[cfg(unix)]
     {
@@ -233,13 +235,17 @@ fn build_test_supervisor_address(runtime_directory: &std::path::Path) -> String 
     }
     #[cfg(windows)]
     {
+        static NEXT_TEST_PIPE_INDEX: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
         let _ = runtime_directory;
         format!(
-            "koshi-pty-test-{}",
+            "koshi-pty-test-{}-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("the clock is past the epoch")
-                .as_nanos()
+                .as_nanos(),
+            NEXT_TEST_PIPE_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         )
     }
 }

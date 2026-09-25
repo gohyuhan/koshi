@@ -14,7 +14,8 @@
 //! replaces the frame when the tab has no room for any pane. A viewport larger
 //! than the effective size centers the layout and letterboxes the margin, with
 //! the cursor shifted to match. Degenerate sizes are safe, including a buffer
-//! shorter than the laid-out frame.
+//! shorter than the laid-out frame. Pane placement mode shows pane id suffixes instead
+//! of `/work/koshi` and `nvim`, then restores those titles.
 
 use super::*;
 
@@ -232,6 +233,34 @@ fn render_test_snapshot_with_theme(
     render_buffer
 }
 
+/// Paint `render_snapshot` with `viewer_chrome` into a fresh buffer.
+fn render_snapshot_with_viewer_chrome(
+    render_snapshot: &RenderSnapshot,
+    viewer_chrome: ViewerChrome,
+    column_count: u16,
+    row_count: u16,
+) -> Buffer {
+    let viewport_area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: column_count,
+        height: row_count,
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    let committed_regions = build_legacy_regions(column_count, row_count);
+    render_frame(
+        render_snapshot,
+        &committed_regions,
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        viewer_chrome,
+        viewport_area,
+        &mut render_buffer,
+    );
+    render_buffer
+}
+
 /// Paint `snapshot` with the viewer's tab strip peeking, for the tests that
 /// check which tabs the strip shows.
 fn render_snapshot_with_peeking(
@@ -289,6 +318,7 @@ fn render_snapshot_with_hover(
             active_input_mode: None,
             tabline_offset: None,
             reconnecting: None,
+            ..ViewerChrome::default()
         },
         viewport_area,
         &mut render_buffer,
@@ -1016,6 +1046,7 @@ fn tabline_peek_offset_ignores_the_active_tab() {
         active_input_mode: None,
         tabline_offset: Some(0),
         reconnecting: None,
+        ..ViewerChrome::default()
     };
     let tabline = format_rendered_row_text(
         &render_snapshot_with_peeking(
@@ -1097,6 +1128,7 @@ fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
             attempt: 3,
             retry_in_seconds: 8,
         }),
+        ..ViewerChrome::default()
     };
     let render_buffer = render_snapshot_with_peeking(&render_snapshot, dialing, column_count, 8);
 
@@ -1133,6 +1165,82 @@ fn focused_pane_border_is_highlighted() {
     // Unfocused pane_id: dim border corner, no modifier at all.
     assert_eq!(render_buffer[(20, 1)].fg, Color::Rgb(0x58, 0x58, 0x58));
     assert_eq!(render_buffer[(20, 1)].modifier, Modifier::empty());
+}
+
+#[test]
+fn placement_preview_keeps_pane_ids_content_and_source_focus_visible() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(0, 1, 40, 6), true),
+            (target_pane_id, build_cell_rect(40, 1, 40, 6), true),
+        ],
+        Some(target_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 80,
+            row_count: 8,
+        },
+    );
+    let mut source_grid = Grid::blank(4, 38, TermStyle::default());
+    *source_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('S', 1, TermStyle::default());
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
+        grid: Arc::new(source_grid),
+        view_row_offset: 0,
+    });
+    let mut target_grid = Grid::blank(4, 38, TermStyle::default());
+    *target_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('T', 1, TermStyle::default());
+    render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
+        grid: Arc::new(target_grid),
+        view_row_offset: 0,
+    });
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
+        anchor: PanePlacementAnchor::Pane(target_pane_id),
+        direction: koshi_core::geometry::Direction::Down,
+    };
+    let viewer_chrome = ViewerChrome {
+        hovered_pane_id: Some(target_pane_id),
+        is_pane_placement_visible: true,
+        placement_source_pane_id: Some(source_pane_id),
+        ..ViewerChrome::default()
+    };
+    let viewport_area = RatatuiRect::new(0, 0, 80, 8);
+    let mut render_buffer = Buffer::empty(viewport_area);
+    let theme = Theme::default();
+
+    render_frame_with_placement_target(
+        &render_snapshot,
+        &build_legacy_regions(80, 8),
+        &theme,
+        &KeymapHints::default(),
+        None,
+        viewer_chrome,
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        Some(&placement_target),
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    let rendered_pane_labels = format_rendered_row_text(&render_buffer, 1);
+    assert!(rendered_pane_labels.contains(&format_pane_id_label(source_pane_id)));
+    assert!(rendered_pane_labels.contains(&format_pane_id_label(target_pane_id)));
+    assert_eq!(render_buffer[(0, 1)].fg, theme.focused_border_color);
+    assert_eq!(render_buffer[(40, 1)].fg, theme.accent_color);
+    assert_ne!(render_buffer[(40, 1)].fg, theme.hover_border_color);
+    assert_eq!(render_buffer[(1, 2)].symbol(), "S");
+    assert_eq!(render_buffer[(41, 2)].symbol(), "T");
+}
+
+fn format_pane_id_label(pane_id: PaneId) -> String {
+    let pane_id_hex = pane_id.get_uuid().simple().to_string();
+    let suffix_start_byte_offset = pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
+    format!("pane-…{}", &pane_id_hex[suffix_start_byte_offset..])
 }
 
 #[test]
@@ -1524,7 +1632,7 @@ fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
 }
 
 #[test]
-fn move_pane_hover_uses_a_bright_border_and_gray_content_tint() {
+fn pane_placement_mode_keeps_focus_color_and_suppresses_hover_tint() {
     let focused_pane_id = PaneId::new();
     let hovered_pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
@@ -1552,17 +1660,22 @@ fn move_pane_hover_uses_a_bright_border_and_gray_content_tint() {
         ViewerChrome {
             hovered_pane_id: Some(hovered_pane_id),
             placement_handle_pane_id: None,
-            active_input_mode: Some(LockMode::MovePane),
+            active_input_mode: Some(LockMode::PanePlacement),
             tabline_offset: None,
             reconnecting: None,
+            is_pane_placement_visible: true,
+            ..ViewerChrome::default()
         },
         viewport_area,
         &mut render_buffer,
     );
 
-    assert_eq!(render_buffer[(20, 1)].fg, Theme::default().accent_color);
-    assert_eq!(render_buffer[(20, 1)].modifier, Modifier::BOLD);
-    assert_eq!(render_buffer[(21, 2)].bg, Color::Rgb(0x3a, 0x3a, 0x3a));
+    assert_eq!(
+        render_buffer[(20, 1)].fg,
+        Theme::default().unfocused_border_color
+    );
+    assert_eq!(render_buffer[(20, 1)].modifier, Modifier::empty());
+    assert_eq!(render_buffer[(21, 2)].bg, Color::Reset);
     assert_eq!(
         render_buffer[(0, 1)].fg,
         Theme::default().focused_border_color
@@ -2116,7 +2229,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
 
 #[test]
 fn cursor_past_content_rect_is_clamped_inside_it() {
-    // A frozen cursor (e.g. a dead pane whose content rect later shrank) beyond
+    // A frozen cursor (e.g. a dead pane whose content rect became smaller) beyond
     // the content area: the returned cell is clamped to the last cell inside the
     // rect, never onto the border or a neighbour. Content rect origin (1,2),
     // 38x4 → last cell (38, 5).
@@ -3029,7 +3142,7 @@ fn a_custom_theme_recolors_the_chrome() {
 fn overlapping_panes_draw_in_layout_order_last_wins() {
     // The layout solver normally tiles panes without overlap; this snapshot
     // forces two visible pane rects to overlap to pin down what the renderer
-    // actually does with that input: later slots in `layout_solved` paint
+    // actually does with that input: following slots in `layout_solved` paint
     // over earlier ones, for both the border and the pane content.
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
@@ -3131,6 +3244,81 @@ fn pane_title_drawn_when_box_is_five_wide() {
     let render_buffer = render_test_snapshot(&render_snapshot, 10, 8);
 
     assert_eq!(render_buffer[(2, 1)].symbol(), " ");
+}
+
+#[test]
+fn pane_placement_mode_shows_pane_id_suffixes_and_restores_titles_after_it_ends() {
+    let active_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active_pane_id, build_cell_rect(0, 3, 40, 4), true),
+            (collapsed_pane_id, build_cell_rect(0, 1, 40, 1), false),
+        ],
+        Some(active_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 60,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[0].pane_title = Some(String::from("/work/koshi"));
+    render_snapshot.pane_snapshots[1].pane_title = Some(String::from("nvim"));
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect: build_cell_rect(0, 1, 40, 1),
+        member_index: 1,
+        member_count: 2,
+    }];
+
+    let normal_buffer =
+        render_snapshot_with_viewer_chrome(&render_snapshot, ViewerChrome::default(), 60, 8);
+    let placement_viewer_chrome = ViewerChrome {
+        is_pane_placement_visible: true,
+        ..ViewerChrome::default()
+    };
+    let placement_buffer =
+        render_snapshot_with_viewer_chrome(&render_snapshot, placement_viewer_chrome, 60, 8);
+    let restored_buffer =
+        render_snapshot_with_viewer_chrome(&render_snapshot, ViewerChrome::default(), 60, 8);
+
+    let normal_pane_border_text = format_rendered_row_text(&normal_buffer, 3);
+    let normal_stack_header_text = format_rendered_row_text(&normal_buffer, 1);
+    assert!(normal_pane_border_text.contains("/work/koshi"));
+    assert!(normal_stack_header_text.contains("nvim"));
+    assert!(!normal_pane_border_text.contains(&active_pane_id.to_string()));
+    assert!(!normal_stack_header_text.contains(&collapsed_pane_id.to_string()));
+
+    let placement_pane_border_text = format_rendered_row_text(&placement_buffer, 3);
+    let placement_stack_header_text = format_rendered_row_text(&placement_buffer, 1);
+    let active_pane_id_hex = active_pane_id.get_uuid().simple().to_string();
+    let active_pane_id_suffix_start_byte_offset =
+        active_pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
+    let active_pane_id_label = format!(
+        "pane-…{}",
+        &active_pane_id_hex[active_pane_id_suffix_start_byte_offset..]
+    );
+    let collapsed_pane_id_hex = collapsed_pane_id.get_uuid().simple().to_string();
+    let collapsed_pane_id_suffix_start_byte_offset =
+        collapsed_pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
+    let collapsed_pane_id_label = format!(
+        "pane-…{}",
+        &collapsed_pane_id_hex[collapsed_pane_id_suffix_start_byte_offset..]
+    );
+    assert!(placement_pane_border_text.contains(&active_pane_id_label));
+    assert!(placement_stack_header_text.contains(&collapsed_pane_id_label));
+    assert!(!placement_pane_border_text.contains("/work/koshi"));
+    assert!(!placement_pane_border_text.contains("nvim"));
+    assert!(!placement_stack_header_text.contains("/work/koshi"));
+    assert!(!placement_stack_header_text.contains("nvim"));
+
+    assert!(format_rendered_row_text(&restored_buffer, 3).contains("/work/koshi"));
+    assert!(format_rendered_row_text(&restored_buffer, 1).contains("nvim"));
 }
 
 #[test]
@@ -3596,8 +3784,8 @@ fn the_mode_indicator_names_every_lock_mode() {
     assert_eq!(build_mode_tags(LockMode::Locked, false, None), "LOCK");
     assert_eq!(build_mode_tags(LockMode::Resize, false, None), "RESIZE");
     assert_eq!(
-        build_mode_tags(LockMode::MovePane, false, None),
-        "MOVE PANE"
+        build_mode_tags(LockMode::PanePlacement, false, None),
+        "PLACE PANE"
     );
     assert_eq!(build_mode_tags(LockMode::TabMode, false, None), "TAB");
     assert_eq!(build_mode_tags(LockMode::ScrollMode, false, None), "SCROLL");
@@ -3608,8 +3796,8 @@ fn the_mode_indicator_names_every_lock_mode() {
         "RESIZE · SELECT"
     );
     assert_eq!(
-        build_mode_tags(LockMode::MovePane, true, None),
-        "MOVE PANE · SELECT"
+        build_mode_tags(LockMode::PanePlacement, true, None),
+        "PLACE PANE · SELECT"
     );
     assert_eq!(
         build_mode_tags(LockMode::TabMode, true, None),

@@ -19,11 +19,11 @@ pub use hit_test::{
 };
 pub use images::{
     build_image_cell_snapshot, build_image_paints, draw_image_placeholders, ImageCellSnapshot,
-    ImageCellState, ImageOutputKey, ImagePaint, ImagePlacementKey, ImageRenderMode,
-    ImageSourceRect, PlacementPreviewImageKey, MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT,
-    TERMINAL_IMAGE_UNAVAILABLE,
+    ImageCellState, ImagePaint, ImagePlacementKey, ImageRenderMode, ImageSourceRect,
+    MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT, TERMINAL_IMAGE_UNAVAILABLE,
 };
 pub use render::{
-    draw_grid_preview, get_cursor_position, get_cursor_style, render_frame,
-    render_frame_with_image_availability, render_frame_with_images,
+    compute_content_rect, compute_pane_area, get_cursor_position, get_cursor_style,
+    is_placement_target_pane, render_frame, render_frame_with_images,
+    render_frame_with_placement_target,
 };

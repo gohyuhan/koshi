@@ -62,11 +62,31 @@ pub enum Command {
     TogglePaneFullscreen,
     /// Move a tab to a new index.
     MoveTab(MoveTabArgs),
-    /// Move a tiled pane into the slot of its visible neighbor.
+    /// Swap a tiled pane with its visible neighbor in one direction, in one
+    /// step.
+    ///
+    /// - `koshi move-pane --direction <direction>` sends it. A key bound to
+    ///   `core:move-pane` resolves to `ResolveError::ArgsMismatch` and sends
+    ///   nothing.
+    /// - It has no preview and no confirm step. Each command changes the
+    ///   shared layout at once.
+    /// - The session emits
+    ///   [`PanePlacementCommitted`](crate::event::PanePlacementCommitted)
+    ///   first, and every viewer showing the tab slides to the new layout.
     MovePane(MovePaneArgs),
-    /// Exchange two tiled pane occupants within one session, including across tabs.
-    SwapPanes(SwapPanesArgs),
-    /// Commit a checked tiled pane placement across tabs.
+    /// Commit one checked pane placement: a swap with another pane, or an
+    /// insertion beside a pane, a group, or a whole tab, in the source tab or
+    /// another tab.
+    ///
+    /// - Pane placement mode sends it when the user confirms with Enter or
+    ///   a mouse drop. `koshi place-pane` also sends it.
+    /// - The preview before the confirm lives only in the client that is
+    ///   placing. This command is the first change the session sees.
+    /// - The session emits
+    ///   [`PanePlacementCommitted`](crate::event::PanePlacementCommitted)
+    ///   first. The client that confirmed in pane placement mode skips the
+    ///   slide. Every other viewer showing the source or destination tab
+    ///   slides to the new layout.
     PlacePane(PlacePaneArgs),
     /// Move one client's view of a pane through its scrollback.
     ScrollPane(ScrollPaneArgs),
@@ -125,8 +145,6 @@ pub enum CommandKind {
     MoveTab,
     /// Discriminant of [`Command::MovePane`].
     MovePane,
-    /// Discriminant of [`Command::SwapPanes`].
-    SwapPanes,
     /// Discriminant of [`Command::PlacePane`].
     PlacePane,
     /// Discriminant of [`Command::ScrollPane`].
@@ -163,7 +181,6 @@ impl Command {
             Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
             Command::MoveTab(_) => CommandKind::MoveTab,
             Command::MovePane(_) => CommandKind::MovePane,
-            Command::SwapPanes(_) => CommandKind::SwapPanes,
             Command::PlacePane(_) => CommandKind::PlacePane,
             Command::ScrollPane(_) => CommandKind::ScrollPane,
             Command::Quit => CommandKind::Quit,
@@ -420,19 +437,6 @@ pub struct MovePaneArgs {
     pub pane_id: Option<PaneId>,
     /// Direction in which to choose the visible neighbor.
     pub direction: Direction,
-}
-
-/// Arguments for [`Command::SwapPanes`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SwapPanesArgs {
-    /// Pane whose occupant moves; `None` uses the focused pane.
-    pub source_pane_id: Option<PaneId>,
-    /// Pane whose slot receives the source occupant.
-    pub target_pane_id: PaneId,
-    /// Revisions captured by an interactive placement preview, or `None` for
-    /// a direct swap planned against the current state in this dispatcher turn.
-    #[serde(default)]
-    pub expected_placement_revision: Option<PlacementRevision>,
 }
 
 /// Arguments for [`Command::PlacePane`].

@@ -9,6 +9,7 @@ use image::ImageEncoder;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -131,12 +132,22 @@ fn build_red_rgba_pixel() -> [u8; 4] {
     [255, 0, 0, 255]
 }
 
+/// Numbers each path [`build_unique_path`] returns within this test process.
+static NEXT_UNIQUE_PATH_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+/// Return a path inside [`std::env::temp_dir`] named `<path_prefix>-<process
+/// id>-<clock nanoseconds>-<index>`. The index differs for every call in one
+/// process, and the clock differs across runs.
 fn build_unique_path(path_prefix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the system clock is after the Unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("{path_prefix}-{}-{nonce}", std::process::id()))
+    let unique_path_index = NEXT_UNIQUE_PATH_INDEX.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{path_prefix}-{}-{nonce}-{unique_path_index}",
+        std::process::id()
+    ))
 }
 
 fn encode_source_path(source_path: &Path) -> String {

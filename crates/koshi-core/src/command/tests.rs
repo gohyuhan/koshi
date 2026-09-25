@@ -68,11 +68,6 @@ fn pane_commands_roundtrip() {
         pane_id: None,
         direction: Direction::Right,
     }));
-    assert_json_roundtrip(&Command::SwapPanes(SwapPanesArgs {
-        source_pane_id: Some(PaneId::new()),
-        target_pane_id: PaneId::new(),
-        expected_placement_revision: None,
-    }));
     let source_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
     let split_place_pane_command = Command::PlacePane(PlacePaneArgs {
@@ -325,14 +320,6 @@ fn command_variant_names_are_canonical() {
             "MovePane",
         ),
         (
-            Command::SwapPanes(SwapPanesArgs {
-                source_pane_id: None,
-                target_pane_id: PaneId::new(),
-                expected_placement_revision: None,
-            }),
-            "SwapPanes",
-        ),
-        (
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
                 scroll_line_count: 1,
@@ -351,7 +338,7 @@ fn command_variant_names_are_canonical() {
             "SwitchSession",
         ),
     ];
-    assert_eq!(command_cases.len(), 23);
+    assert_eq!(command_cases.len(), 22);
     for (command, command_name) in &command_cases {
         assert_eq!(&get_variant_name(command), command_name);
     }
@@ -503,14 +490,6 @@ fn command_kind_mirrors_command() {
             CommandKind::MovePane,
         ),
         (
-            Command::SwapPanes(SwapPanesArgs {
-                source_pane_id: None,
-                target_pane_id: PaneId::new(),
-                expected_placement_revision: None,
-            }),
-            CommandKind::SwapPanes,
-        ),
-        (
             Command::ScrollPane(ScrollPaneArgs {
                 pane_id: None,
                 scroll_line_count: 1,
@@ -528,7 +507,7 @@ fn command_kind_mirrors_command() {
             CommandKind::SwitchSession,
         ),
     ];
-    assert_eq!(command_kind_cases.len(), 23);
+    assert_eq!(command_kind_cases.len(), 22);
     for (command, command_kind) in &command_kind_cases {
         assert_eq!(command.get_command_kind(), *command_kind);
         assert_json_roundtrip(command_kind);
@@ -1230,14 +1209,13 @@ fn command_kind_serializes_as_its_variant_name() {
         CommandKind::TogglePaneFullscreen,
         CommandKind::MoveTab,
         CommandKind::MovePane,
-        CommandKind::SwapPanes,
         CommandKind::ScrollPane,
         CommandKind::Quit,
         CommandKind::Detach,
         CommandKind::DetachAll,
         CommandKind::SwitchSession,
     ];
-    assert_eq!(command_kinds.len(), 23);
+    assert_eq!(command_kinds.len(), 22);
     for command_kind in command_kinds {
         assert_eq!(
             serde_json::to_value(command_kind).expect("serialize"),
@@ -1463,7 +1441,7 @@ fn a_command_with_an_unknown_variant_name_is_rejected() {
 
     assert_eq!(
         parse_error.to_string(),
-        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `Plugin`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `SwapPanes`, `PlacePane`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
+        "unknown variant `Reboot`, expected one of `NewPane`, `ClosePane`, `ResizePane`, `FocusPane`, `NewTab`, `CloseTab`, `FocusTab`, `WriteToPane`, `ToggleLockMode`, `SetLockMode`, `ToggleMouseSelect`, `RunCommandPane`, `Visual`, `Plugin`, `TogglePaneFullscreen`, `MoveTab`, `MovePane`, `PlacePane`, `ScrollPane`, `Quit`, `Detach`, `DetachAll`, `SwitchSession`"
     );
 }
 

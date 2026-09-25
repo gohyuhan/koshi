@@ -88,6 +88,24 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "Dial a session on another machine again when the link drops.",
     ),
     build_config_field_help(
+        "koshi.image-support",
+        "koshi.kdl",
+        "#true",
+        "Send native image output (Kitty, iTerm2, or Sixel) to this terminal.",
+    ),
+    build_config_field_help(
+        "koshi.reduced-motion",
+        "koshi.kdl",
+        "#false",
+        "Draw placement previews and other viewers' placements without sliding.",
+    ),
+    build_config_field_help(
+        "koshi.stay-in-pane-placement-mode-after-placement",
+        "koshi.kdl",
+        "#true",
+        "Keep pane placement mode on after the session accepts a placement.",
+    ),
+    build_config_field_help(
         "koshi.pane.min-cols",
         "koshi.kdl",
         "2",

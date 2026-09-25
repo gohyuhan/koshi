@@ -286,7 +286,10 @@ pub enum Delivery {
 /// The viewer-owned frame state: which pane the pointer is over, which top
 /// border exposes a placement handle, which input mode owns the keymap, where
 /// the tab strip is scrolled, and whether the viewer is dialing the session
-/// again.
+/// again. While pane placement is shown, including while a confirmation waits,
+/// the viewer clears the pointer and handle fields before hit-testing and
+/// painting, and the renderer ignores them: hovering `pane-123` leaves its
+/// border color unchanged.
 ///
 /// These values belong to one viewer. None is stored on the session or carried
 /// in a snapshot; the viewer hands them in when it hit-tests a frame and again
@@ -294,15 +297,19 @@ pub enum Delivery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ViewerChrome {
     /// The pane the viewer's pointer is over, or `None` over koshi's own chrome.
-    /// The renderer draws an *unfocused* pane under the pointer in the hover
-    /// color so the wheel target is visible; the focused pane keeps its focus
-    /// color.
+    /// The renderer draws an unfocused pane under the pointer in the hover color
+    /// outside pane placement mode; the focused pane keeps its focus color.
     pub hovered_pane_id: Option<PaneId>,
     /// The pane whose top border currently exposes the placement handle.
     pub placement_handle_pane_id: Option<PaneId>,
     /// The effective input mode for the viewer's keymap and mode tag. `None`
     /// lets generic frame consumers use the mode carried by the session frame.
     pub active_input_mode: Option<LockMode>,
+    /// Whether pane borders and stack headers show pane ids and suppress hover
+    /// styling for this painted frame.
+    pub is_pane_placement_visible: bool,
+    /// The pane being placed, whose border keeps the focus color.
+    pub placement_source_pane_id: Option<PaneId>,
     /// Where the viewer's tab strip is scrolled: `None` follows the active tab —
     /// the strip always reveals it — while `Some(i)` peeks from tab index `i`
     /// without changing focus. The renderer windows the tab list from this and

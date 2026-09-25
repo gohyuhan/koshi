@@ -60,8 +60,11 @@ pub struct Surface {
 ///   reported: the key, whether it went down, repeated or came up, the shifted
 ///   and base-layout keys, the text, and all eight modifiers. 3 carried one
 ///   chord, which holds no event kind, no text, and neither lock modifier.
-/// - Version 4 includes direct pane movement, pane swaps across tabs,
-///   per-client scrolling, and checked pane placement across tabs.
+/// - Version 4 includes direct pane movement, per-client scrolling, and
+///   checked pane placement: a swap or an insertion in the pane's own tab or
+///   another tab. A placement preview is a read the client requests. The
+///   session answers a placement with `PanePlacementCommitted` to every
+///   viewer, or with `PlacementCommandRejected` to the viewer that sent it.
 ///
 /// Four shapes differ between 2 and 3:
 ///

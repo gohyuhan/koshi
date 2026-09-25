@@ -16,16 +16,16 @@
 //! Then the two wire conversions: the filter an attaching client sent becomes
 //! the bus's own, and one queue item becomes the frame that client is sent.
 
-use koshi_core::command::CopyTarget;
+use koshi_core::command::{CopyTarget, PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{
     CommandRejected, ConfigReloaded, Copied, Event, InputModeChanged, KeybindingMatched,
     LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled, MouseSelectChanged,
     PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
-    PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
-    PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginEvent, PluginInstalled,
-    PluginMouseInput, PtyResized, QuitCause, RejectReason, SelectionChanged, SubmittedLinePayload,
-    TabClosed, TabCreated, TabFocused, TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered,
-    TerminalTooSmallExited, TypedPayload,
+    PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PanePlacementCommitted, PaneProcessExited,
+    PaneRemoved, PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginEvent,
+    PluginInstalled, PluginMouseInput, PtyResized, QuitCause, RejectReason, SelectionChanged,
+    SubmittedLinePayload, TabClosed, TabCreated, TabFocused, TabMoved, TerminalTooSmallCause,
+    TerminalTooSmallEntered, TerminalTooSmallExited, TypedPayload,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
@@ -1286,6 +1286,30 @@ fn every_structure_event_converts_to_its_wire_frame() {
             tab_id,
         }))),
         Some(SessionEvent::LayoutChanged { tab_id })
+    );
+    let placement_command_id = CommandId::new();
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: other_tab_id,
+        anchor: PanePlacementAnchor::Pane(other_pane_id),
+        direction: Direction::Down,
+    };
+    assert_eq!(
+        wire_event(&Delivery::Event(Event::PanePlacementCommitted(
+            PanePlacementCommitted {
+                command_id: placement_command_id,
+                source_pane_id: pane_id,
+                source_tab_id: tab_id,
+                destination_tab_id: other_tab_id,
+                placement_target: placement_target.clone(),
+            }
+        ))),
+        Some(SessionEvent::PanePlacementCommitted {
+            command_id: placement_command_id,
+            source_pane_id: pane_id,
+            source_tab_id: tab_id,
+            destination_tab_id: other_tab_id,
+            placement_target,
+        })
     );
     assert_eq!(
         wire_event(&Delivery::Event(Event::TabCreated(TabCreated { tab_id }))),

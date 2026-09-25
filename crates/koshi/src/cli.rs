@@ -26,7 +26,7 @@ use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClosePaneArgs, CloseTabArgs, Command, FocusPaneArgs, FocusTabArgs, FocusTarget, LockModeArgs,
     MovePaneArgs, MoveTabArgs, NewPaneArgs, NewTabArgs, PanePlacementAnchor, PanePlacementTarget,
-    PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs, SwapPanesArgs, TabTarget,
+    PlacePaneArgs, ResizePaneArgs, RunCommandPaneArgs, ScrollPaneArgs, TabTarget,
     ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::geometry::Direction;
@@ -387,21 +387,13 @@ pub enum CliCommand {
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
     },
-    /// Move a pane into the slot of its visible neighbor.
+    /// Swap a pane with its visible neighbor in one step, with no preview and
+    /// no confirm.
     MovePane {
         /// Direction in which to choose the visible neighbor.
         #[arg(long, value_enum, value_name = "DIRECTION")]
         direction: DirectionArgument,
         /// Pane to move; defaults to the focused pane.
-        #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
-        pane_id: Option<PaneId>,
-    },
-    /// Exchange two pane occupants.
-    SwapPanes {
-        /// Pane whose occupant receives the source pane's slot.
-        #[arg(long = "with", value_parser = parse_pane_id, value_name = "PANE_ID")]
-        target_pane_id: PaneId,
-        /// Pane whose occupant moves; defaults to the focused pane.
         #[arg(long = "pane", value_parser = parse_pane_id, value_name = "PANE_ID")]
         pane_id: Option<PaneId>,
     },
@@ -1122,7 +1114,6 @@ impl CliCommand {
             | CliCommand::ClosePane { .. }
             | CliCommand::ResizePane { .. }
             | CliCommand::MovePane { .. }
-            | CliCommand::SwapPanes { .. }
             | CliCommand::PlacePane { .. }
             | CliCommand::ScrollPane { .. }
             | CliCommand::TogglePaneFullscreen { .. }
@@ -1241,17 +1232,6 @@ impl CliCommand {
                 Command::MovePane(MovePaneArgs {
                     pane_id: *pane_id,
                     direction: Direction::from(*direction),
-                }),
-            ),
-            CliCommand::SwapPanes {
-                target_pane_id,
-                pane_id,
-            } => (
-                "swap-panes",
-                Command::SwapPanes(SwapPanesArgs {
-                    source_pane_id: *pane_id,
-                    target_pane_id: *target_pane_id,
-                    expected_placement_revision: None,
                 }),
             ),
             CliCommand::PlacePane {
@@ -1513,10 +1493,6 @@ impl CliCommand {
             | CliCommand::Input { pane_id, .. } => *pane_id,
             CliCommand::MovePane { pane_id, .. } => *pane_id,
             CliCommand::PlacePane { pane_id, .. } => Some(*pane_id),
-            CliCommand::SwapPanes {
-                pane_id,
-                target_pane_id,
-            } => (*pane_id).or(Some(*target_pane_id)),
             CliCommand::FocusPane { pane_id, .. } => Some(*pane_id),
             _ => None,
         }

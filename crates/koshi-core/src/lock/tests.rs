@@ -15,7 +15,14 @@ fn all_lock_modes_list_each_mode_once_with_its_keymap_name() {
         .collect();
     assert_eq!(
         keymap_names,
-        ["normal", "locked", "resize", "move-pane", "tab", "scroll"]
+        [
+            "normal",
+            "locked",
+            "resize",
+            "pane-placement",
+            "tab",
+            "scroll"
+        ]
     );
 }
 
@@ -25,7 +32,7 @@ fn a_lock_mode_survives_a_serde_round_trip() {
         LockMode::Normal,
         LockMode::Locked,
         LockMode::Resize,
-        LockMode::MovePane,
+        LockMode::PanePlacement,
         LockMode::TabMode,
         LockMode::ScrollMode,
     ] {
@@ -57,7 +64,7 @@ fn only_normal_and_locked_pass_unbound_input_to_the_pane() {
         (LockMode::Normal, true),
         (LockMode::Locked, true),
         (LockMode::Resize, false),
-        (LockMode::MovePane, false),
+        (LockMode::PanePlacement, false),
         (LockMode::TabMode, false),
         (LockMode::ScrollMode, false),
     ];
@@ -76,7 +83,7 @@ fn decoding_the_keymap_name_is_refused() {
         .expect_err("the wire form is the variant name, not the keymap name");
     assert_eq!(
         lock_mode_parse_error.to_string(),
-        "unknown variant `locked`, expected one of `Normal`, `Locked`, `Resize`, `MovePane`, \
+        "unknown variant `locked`, expected one of `Normal`, `Locked`, `Resize`, `PanePlacement`, \
          `TabMode`, `ScrollMode` at line 1 column 8"
     );
 }

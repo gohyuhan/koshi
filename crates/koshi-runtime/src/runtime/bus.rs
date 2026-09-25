@@ -638,6 +638,13 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::LayoutChanged(payload) => Some(SessionEvent::LayoutChanged {
                 tab_id: payload.tab_id,
             }),
+            Event::PanePlacementCommitted(payload) => Some(SessionEvent::PanePlacementCommitted {
+                command_id: payload.command_id,
+                source_pane_id: payload.source_pane_id,
+                source_tab_id: payload.source_tab_id,
+                destination_tab_id: payload.destination_tab_id,
+                placement_target: payload.placement_target.clone(),
+            }),
             Event::TabCreated(payload) => Some(SessionEvent::TabCreated {
                 tab_id: payload.tab_id,
             }),

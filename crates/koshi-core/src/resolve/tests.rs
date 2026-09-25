@@ -43,9 +43,9 @@ fn build_run_spawn_spec() -> SpawnSpec {
     }
 }
 
-/// The `Available` core actions that no binding can invoke: each has a
-/// required value with an open range (a resize amount, a pane id, a tab
-/// index, the text to type, or a swap target), so it is reachable only
+/// The `Available` core actions that no binding can invoke: each takes a
+/// required value that no binding supplies (a resize amount, a move
+/// direction, a pane id, a tab index, or the text to type), so it is reachable only
 /// through a CLI command, which builds its [`Command`] directly.
 /// `resolve_action` refuses every one of them whatever the arguments.
 /// Pinned against the seed table by [`available_action_table_matches_seeds`].
@@ -54,7 +54,7 @@ const CLI_ONLY: [&str; 8] = [
     "focus-pane",
     "focus-tab",
     "move-tab",
-    "swap-panes",
+    "move-pane",
     "place-pane",
     "scroll-pane",
     "write-to-pane",
@@ -63,7 +63,7 @@ const CLI_ONLY: [&str; 8] = [
 /// Available viewer-local actions. They are resolved to [`DispatchPlan::ClientAction`]
 /// and therefore do not belong to the command table below.
 const CLIENT_ACTIONS: [&str; 14] = [
-    "move-pane",
+    "begin-pane-placement",
     "select-pane-target-left",
     "select-pane-target-down",
     "select-pane-target-up",
@@ -76,7 +76,7 @@ const CLIENT_ACTIONS: [&str; 14] = [
     "select-next-placement-tab",
     "select-previous-placement-tab",
     "confirm-pane-placement",
-    "cancel-pane-move",
+    "cancel-pane-placement",
 ];
 
 /// The `layout.new-pane-direction` the resolving client holds throughout this
@@ -255,38 +255,6 @@ fn build_available_action_table() -> Vec<(&'static str, ActionArgs, Command)> {
             Command::FocusPane(FocusPaneArgs {
                 focus_target: FocusTarget::Direction(Direction::Right),
                 client_id: None,
-            }),
-        ),
-        (
-            "move-pane-left",
-            ActionArgs::None,
-            Command::MovePane(MovePaneArgs {
-                pane_id: None,
-                direction: Direction::Left,
-            }),
-        ),
-        (
-            "move-pane-down",
-            ActionArgs::None,
-            Command::MovePane(MovePaneArgs {
-                pane_id: None,
-                direction: Direction::Down,
-            }),
-        ),
-        (
-            "move-pane-up",
-            ActionArgs::None,
-            Command::MovePane(MovePaneArgs {
-                pane_id: None,
-                direction: Direction::Up,
-            }),
-        ),
-        (
-            "move-pane-right",
-            ActionArgs::None,
-            Command::MovePane(MovePaneArgs {
-                pane_id: None,
-                direction: Direction::Right,
             }),
         ),
         (
@@ -496,18 +464,20 @@ fn every_available_action_resolves_to_its_exact_command() {
 }
 
 #[test]
-fn move_pane_resolves_to_the_viewer_local_action() {
+fn begin_pane_placement_resolves_to_the_viewer_local_action() {
     let registry = ActionRegistry::new();
-    let move_pane_action = build_core_action_reference("move-pane");
+    let begin_pane_placement_action = build_core_action_reference("begin-pane-placement");
 
     assert_eq!(
         resolve_action(
-            &move_pane_action,
+            &begin_pane_placement_action,
             &ActionArgs::None,
             &registry,
             CLIENT_SPLIT,
         ),
-        Ok(DispatchPlan::ClientAction(ClientActionKind::BeginPaneMove))
+        Ok(DispatchPlan::ClientAction(
+            ClientActionKind::BeginPanePlacement
+        ))
     );
 }
 
