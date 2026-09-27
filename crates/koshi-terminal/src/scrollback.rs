@@ -25,7 +25,7 @@ const DEFAULT_MAX_BYTE_COUNT: usize = 32 * 1024 * 1024;
 /// A [`RowEnd::Soft`] row keeps every cell. A [`RowEnd::SoftWide`] row keeps
 /// every cell, including the final blank spacer that stands in for the wide
 /// glyph on the next row.
-fn get_retained_cells(row_cells: &[Cell], row_end: RowEnd) -> &[Cell] {
+fn list_retained_line_cells(row_cells: &[Cell], row_end: RowEnd) -> &[Cell] {
     if row_end == RowEnd::Hard {
         &row_cells[..count_row_content_cells(row_cells)]
     } else {
@@ -54,10 +54,10 @@ fn compute_line_byte_count(line_cells: &[Cell]) -> usize {
         .sum()
 }
 
-/// Truncate owned `row_cells` to what [`get_retained_cells`] keeps of it and
+/// Truncate owned `row_cells` to what [`list_retained_line_cells`] keeps of it and
 /// release the spare capacity.
-fn truncate_line_cells(row_cells: &mut Vec<Cell>, row_end: RowEnd) {
-    row_cells.truncate(get_retained_cells(row_cells, row_end).len());
+fn truncate_retained_line_cells(row_cells: &mut Vec<Cell>, row_end: RowEnd) {
+    row_cells.truncate(list_retained_line_cells(row_cells, row_end).len());
     row_cells.shrink_to_fit();
 }
 
@@ -93,7 +93,7 @@ impl Default for ScrollbackLimit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back, each paired
-    /// with its row metadata. A row holds what [`get_retained_cells`] keeps of it: a
+    /// with its row metadata. A row holds what [`list_retained_line_cells`] keeps of it: a
     /// hard-ended row stops at its last content cell and reads as blank right
     /// of that.
     retained_lines: VecDeque<(Vec<Cell>, RowMetadata)>,
@@ -139,15 +139,16 @@ impl Scrollback {
         &mut self,
         row_cells: &[Cell],
         row_metadata: RowMetadata,
-        mut eviction_callback: impl FnMut(&[Cell]),
+        mut evicted_line_cells_callback: impl FnMut(&[Cell]),
     ) {
-        let retained_cells = get_retained_cells(row_cells, row_metadata.row_end).to_vec();
-        let new_line_byte_count = compute_line_byte_count(&retained_cells);
+        let retained_line_cells =
+            list_retained_line_cells(row_cells, row_metadata.row_end).to_vec();
+        let new_line_byte_count = compute_line_byte_count(&retained_line_cells);
         self.retained_lines
-            .push_back((retained_cells, row_metadata));
+            .push_back((retained_line_cells, row_metadata));
         self.retained_byte_count += new_line_byte_count;
         self.total_pushed_line_count += 1;
-        self.evict_oldest_lines_to_limits(&mut eviction_callback);
+        self.evict_oldest_lines_to_limits(&mut evicted_line_cells_callback);
     }
 
     /// Remove and return every retained row with its metadata, oldest at the
@@ -185,12 +186,12 @@ impl Scrollback {
         &mut self,
         retained_lines: Vec<(Vec<Cell>, RowMetadata)>,
         retained_line_count_before: u64,
-        mut eviction_callback: impl FnMut(&[Cell]),
+        mut evicted_line_cells_callback: impl FnMut(&[Cell]),
     ) {
         self.retained_lines = retained_lines
             .into_iter()
             .map(|(mut line_cells, row_metadata)| {
-                truncate_line_cells(&mut line_cells, row_metadata.row_end);
+                truncate_retained_line_cells(&mut line_cells, row_metadata.row_end);
                 (line_cells, row_metadata)
             })
             .collect();
@@ -199,7 +200,7 @@ impl Scrollback {
             .iter()
             .map(|(line_cells, _)| compute_line_byte_count(line_cells))
             .sum();
-        self.evict_oldest_lines_to_limits(&mut eviction_callback);
+        self.evict_oldest_lines_to_limits(&mut evicted_line_cells_callback);
         let retained_line_count_after = self.retained_lines.len() as u64;
         self.total_pushed_line_count +=
             retained_line_count_after.saturating_sub(retained_line_count_before);
@@ -208,13 +209,16 @@ impl Scrollback {
     /// Drop the oldest row, update `retained_byte_count`, and
     /// repeat while the row count exceeds `maximum_line_count`, or while `retained_byte_count`
     /// exceeds `maximum_byte_count` and more than one row remains.
-    fn evict_oldest_lines_to_limits(&mut self, eviction_callback: &mut impl FnMut(&[Cell])) {
+    fn evict_oldest_lines_to_limits(
+        &mut self,
+        evicted_line_cells_callback: &mut impl FnMut(&[Cell]),
+    ) {
         while self.retained_lines.len() > self.maximum_line_count
             || (self.retained_byte_count > self.maximum_byte_count && self.retained_lines.len() > 1)
         {
             let (oldest_line_cells, _) = self.retained_lines.pop_front().unwrap();
             let oldest_line_byte_count = compute_line_byte_count(&oldest_line_cells);
-            eviction_callback(&oldest_line_cells);
+            evicted_line_cells_callback(&oldest_line_cells);
             self.retained_byte_count -= oldest_line_byte_count;
         }
     }

@@ -941,11 +941,19 @@ impl Server {
         let acting_session = self.resolve_acting_session(command_source)?;
         let pane_target =
             self.resolve_scroll_pane_target(command_args, command_source, acting_session)?;
-        let line_count = command_args.scroll_line_count.unsigned_abs() as usize;
+        let scroll_line_count = command_args.scroll_line_count.unsigned_abs() as usize;
         if command_args.scroll_line_count > 0 {
-            self.scroll_up(pane_target.client_id, pane_target.pane_id, line_count);
+            self.scroll_up(
+                pane_target.client_id,
+                pane_target.pane_id,
+                scroll_line_count,
+            );
         } else if command_args.scroll_line_count < 0 {
-            self.scroll_down(pane_target.client_id, pane_target.pane_id, line_count);
+            self.scroll_down(
+                pane_target.client_id,
+                pane_target.pane_id,
+                scroll_line_count,
+            );
         }
         Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))
     }
@@ -1329,7 +1337,7 @@ impl Server {
         }
         if self
             .get_pty_backend()
-            .write_pane_input(pane_target.pane_id, &command_args.input_bytes)
+            .write_pane_input(pane_target.pane_id, &command_args.pane_input_bytes)
             .is_err()
         {
             return Err(Rejection::from_reason_and_help(
@@ -1341,7 +1349,7 @@ impl Server {
         // same as if typed there: the client's highlight drops and its view
         // follows back to live output. An empty payload sent nothing, so it is
         // not input and leaves both alone.
-        if !command_args.input_bytes.is_empty() {
+        if !command_args.pane_input_bytes.is_empty() {
             if let Some(client_id) = command_source.get_client_id() {
                 self.handle_input_reached_pane(client_id, pane_target.pane_id);
             } else {

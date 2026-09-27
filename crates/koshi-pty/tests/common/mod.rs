@@ -46,7 +46,7 @@ pub struct PaneOutputRecorder {
 impl PaneOutputRecorder {
     /// The oldest output chunk `pane_id` delivered and no call took yet, or
     /// `None` while there is none.
-    fn take_output_chunk(&self, pane_id: PaneId) -> Option<Vec<u8>> {
+    fn take_pane_output_chunk(&self, pane_id: PaneId) -> Option<Vec<u8>> {
         self.deliveries_by_pane_id
             .lock()
             .expect("recorder")
@@ -57,7 +57,7 @@ impl PaneOutputRecorder {
 
     /// The exit status `pane_id` delivered, or `None` while it has none. The
     /// status is taken once; the next call answers `None`.
-    fn take_exit_status(&self, pane_id: PaneId) -> Option<ExitStatus> {
+    fn take_pane_exit_status(&self, pane_id: PaneId) -> Option<ExitStatus> {
         self.deliveries_by_pane_id
             .lock()
             .expect("recorder")
@@ -99,7 +99,8 @@ pub fn build_pty_backend() -> (Arc<PortablePtyBackend>, Arc<PaneOutputRecorder>)
     (pty_backend, pane_output_recorder)
 }
 
-/// Build a spawn spec for `program` with `command_arguments`, inheriting cwd and env.
+/// Build a spawn spec for `program` with `command_arguments`, inheriting the current working
+/// directory and environment variables.
 pub fn build_spawn_spec(program: &str, command_arguments: &[&str]) -> SpawnSpec {
     SpawnSpec {
         program: PathBuf::from(program),
@@ -114,21 +115,22 @@ pub fn build_spawn_spec(program: &str, command_arguments: &[&str]) -> SpawnSpec 
 }
 
 /// Read `pane_id`'s output from `pane_output_recorder` until
-/// `expected_output_text` appears or `timeout_duration` runs out, and hand back
+/// `expected_pane_output_text` appears or `timeout_duration` runs out, and hand back
 /// everything read. Writes nothing to the pane.
 pub fn read_pane_output_until(
     pane_output_recorder: &PaneOutputRecorder,
     pane_id: PaneId,
-    expected_output_text: &str,
+    expected_pane_output_text: &str,
     timeout_duration: Duration,
 ) -> String {
     let deadline = Instant::now() + timeout_duration;
     let mut child_output_bytes: Vec<u8> = Vec::new();
     while Instant::now() < deadline {
-        match pane_output_recorder.take_output_chunk(pane_id) {
-            Some(output_chunk) => {
-                child_output_bytes.extend_from_slice(&output_chunk);
-                if String::from_utf8_lossy(&child_output_bytes).contains(expected_output_text) {
+        match pane_output_recorder.take_pane_output_chunk(pane_id) {
+            Some(pane_output_chunk_bytes) => {
+                child_output_bytes.extend_from_slice(&pane_output_chunk_bytes);
+                if String::from_utf8_lossy(&child_output_bytes).contains(expected_pane_output_text)
+                {
                     break;
                 }
             }
@@ -147,7 +149,7 @@ pub fn wait_for_pane_exit(
 ) -> Option<ExitStatus> {
     let deadline = Instant::now() + timeout_duration;
     loop {
-        if let Some(exit_status) = pane_output_recorder.take_exit_status(pane_id) {
+        if let Some(exit_status) = pane_output_recorder.take_pane_exit_status(pane_id) {
             return Some(exit_status);
         }
         if Instant::now() >= deadline {
@@ -170,14 +172,14 @@ impl PendingPaneKill {
     ///
     /// Panics when the call returns an error, or has not returned within
     /// [`KILL_RETURN_DEADLINE_DURATION`].
-    pub fn wait_for_return(self) -> Duration {
+    pub fn wait_for_kill_return(self) -> Duration {
         match self
             .kill_outcome_receiver
             .recv_timeout(KILL_RETURN_DEADLINE_DURATION)
         {
-            Ok((kill_result, kill_elapsed_duration)) => {
+            Ok((pane_kill_result, kill_elapsed_duration)) => {
                 assert_eq!(
-                    kill_result,
+                    pane_kill_result,
                     Ok(()),
                     "kill_pane({:?}) failed",
                     self.kill_policy
@@ -202,8 +204,8 @@ pub fn start_pane_kill(
     let killing_pty_backend = Arc::clone(pty_backend);
     thread::spawn(move || {
         let kill_started_at = Instant::now();
-        let kill_result = killing_pty_backend.kill_pane(pane_id, kill_policy);
-        let _ = kill_outcome_sender.send((kill_result, kill_started_at.elapsed()));
+        let pane_kill_result = killing_pty_backend.kill_pane(pane_id, kill_policy);
+        let _ = kill_outcome_sender.send((pane_kill_result, kill_started_at.elapsed()));
     });
     PendingPaneKill {
         kill_policy,
@@ -221,5 +223,5 @@ pub fn kill_pane_within_deadline(
     pane_id: PaneId,
     kill_policy: KillPolicy,
 ) -> Duration {
-    start_pane_kill(pty_backend, pane_id, kill_policy).wait_for_return()
+    start_pane_kill(pty_backend, pane_id, kill_policy).wait_for_kill_return()
 }

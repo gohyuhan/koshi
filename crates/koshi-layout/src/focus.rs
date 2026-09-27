@@ -32,7 +32,7 @@ pub struct FocusCandidates {
 }
 
 /// Rank the surviving panes as focus targets for a pane that occupied
-/// `removed_rect`.
+/// `removed_pane_rect`.
 ///
 /// `surviving_pane_rects` is the solved placement of the layout after the
 /// removal, in layout order, and `stack_headers` the collapsed members of
@@ -41,7 +41,7 @@ pub struct FocusCandidates {
 /// excluded from every ranking.
 #[must_use]
 pub fn compute_focus_candidates(
-    removed_rect: Rect,
+    removed_pane_rect: Rect,
     surviving_pane_rects: &[(PaneId, Rect)],
     stack_headers: &[StackHeader],
 ) -> FocusCandidates {
@@ -53,24 +53,24 @@ pub fn compute_focus_candidates(
 
     let spatial_neighbor_pane_id = visible_pane_rects
         .iter()
-        .min_by_key(|&&(_, pane_rect)| compute_center_distance(removed_rect, pane_rect))
+        .min_by_key(|&&(_, pane_rect)| compute_center_distance(removed_pane_rect, pane_rect))
         .map(|&(pane_id, _)| pane_id);
 
     // Largest absorbed area wins; on a tie the earlier pane in layout order
     // keeps it.
-    let mut absorbed_pane_area: Option<(PaneId, u64)> = None;
+    let mut largest_absorbed_pane: Option<(PaneId, u64)> = None;
     for &(pane_id, pane_rect) in &visible_pane_rects {
-        let Some(overlap_rect) = pane_rect.compute_intersection(removed_rect) else {
+        let Some(overlap_rect) = pane_rect.compute_intersection(removed_pane_rect) else {
             continue;
         };
-        let overlap_area = compute_cell_area(overlap_rect);
-        if absorbed_pane_area
-            .is_none_or(|(_, largest_overlap_area)| overlap_area > largest_overlap_area)
-        {
-            absorbed_pane_area = Some((pane_id, overlap_area));
+        let absorbed_cell_area = compute_cell_area(overlap_rect);
+        if largest_absorbed_pane.is_none_or(|(_, largest_absorbed_cell_area)| {
+            absorbed_cell_area > largest_absorbed_cell_area
+        }) {
+            largest_absorbed_pane = Some((pane_id, absorbed_cell_area));
         }
     }
-    let absorbed_space_pane_id = absorbed_pane_area.map(|(pane_id, _)| pane_id);
+    let absorbed_space_pane_id = largest_absorbed_pane.map(|(pane_id, _)| pane_id);
 
     let layout_order_pane_ids = visible_pane_rects
         .into_iter()
@@ -86,21 +86,22 @@ pub fn compute_focus_candidates(
 
 /// Squared distance between two rect centers, in the doubled coordinates
 /// [`compute_doubled_center`] returns.
-fn compute_center_distance(first_rect: Rect, second_rect: Rect) -> u64 {
-    let (first_doubled_column, first_doubled_row) = compute_doubled_center(first_rect);
-    let (second_doubled_column, second_doubled_row) = compute_doubled_center(second_rect);
-    let column_distance = i64::from(first_doubled_column) - i64::from(second_doubled_column);
-    let row_distance = i64::from(first_doubled_row) - i64::from(second_doubled_row);
+fn compute_center_distance(removed_pane_rect: Rect, candidate_pane_rect: Rect) -> u64 {
+    let (removed_doubled_column, removed_doubled_row) = compute_doubled_center(removed_pane_rect);
+    let (candidate_doubled_column, candidate_doubled_row) =
+        compute_doubled_center(candidate_pane_rect);
+    let column_distance = i64::from(removed_doubled_column) - i64::from(candidate_doubled_column);
+    let row_distance = i64::from(removed_doubled_row) - i64::from(candidate_doubled_row);
     (column_distance * column_distance + row_distance * row_distance) as u64
 }
 
-/// The center of `rect` with both components doubled: `2·origin + size`
+/// The center of `pane_rect` with both components doubled: `2·origin + size`
 /// on each axis. A rect at column 0 spanning 5 columns yields column 5, an
 /// odd half-cell center held as an exact integer.
-fn compute_doubled_center(rect: Rect) -> (u32, u32) {
+fn compute_doubled_center(pane_rect: Rect) -> (u32, u32) {
     (
-        2 * u32::from(rect.origin.column) + u32::from(rect.size.column_count),
-        2 * u32::from(rect.origin.row) + u32::from(rect.size.row_count),
+        2 * u32::from(pane_rect.origin.column) + u32::from(pane_rect.size.column_count),
+        2 * u32::from(pane_rect.origin.row) + u32::from(pane_rect.size.row_count),
     )
 }
 
@@ -109,23 +110,23 @@ fn compute_doubled_center(rect: Rect) -> (u32, u32) {
 /// subtree.
 ///
 /// Returns `true` when the active member changed. Returns `false`, with
-/// `stack` unchanged, when `stack` is not a stack, when `pane_id` is not in
+/// `stack_node` unchanged, when `stack_node` is not a stack, when `pane_id` is not in
 /// it, or when the member holding `pane_id` is already the active member.
-pub fn activate_stack_member(stack: &mut SplitNode, pane_id: PaneId) -> bool {
-    if stack.direction != SplitDirection::Stacked {
+pub fn activate_stack_member(stack_node: &mut SplitNode, pane_id: PaneId) -> bool {
+    if stack_node.direction != SplitDirection::Stacked {
         return false;
     }
-    let Some(target_child_index) = stack
+    let Some(target_stack_member_index) = stack_node
         .children
         .iter()
         .position(|child| child.has_pane(pane_id))
     else {
         return false;
     };
-    if target_child_index == stack.get_active_child_index() {
+    if target_stack_member_index == stack_node.get_active_child_index() {
         return false;
     }
-    stack.active_child_index = target_child_index;
+    stack_node.active_child_index = target_stack_member_index;
     true
 }
 

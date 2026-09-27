@@ -12,9 +12,9 @@ use super::*;
 /// Returns the parsed `otherwise` rendered back as text, or the error message
 /// a caller sees.
 fn parse_beta_feature_arguments(argument_text: &str) -> Result<String, String> {
-    match parse_str::<BetaFeatureArguments>(argument_text) {
-        Ok(BetaFeatureArguments { otherwise }) => Ok(quote!(#otherwise).to_string()),
-        Err(error) => Err(error.to_string()),
+    match parse_str::<BetaFeatureArgument>(argument_text) {
+        Ok(BetaFeatureArgument { otherwise }) => Ok(quote!(#otherwise).to_string()),
+        Err(parse_error) => Err(parse_error.to_string()),
     }
 }
 
@@ -60,7 +60,7 @@ fn the_literal_unit_parses_as_an_expression() {
 
 /// A block, a control-flow expression, and a `?` are each one whole argument.
 #[test]
-fn a_block_or_control_flow_value_is_kept_whole() {
+fn a_block_or_control_flow_fallback_is_kept_whole() {
     assert_eq!(
         parse_beta_feature_arguments("otherwise = { 1 }"),
         Ok("{ 1 }".to_string())
@@ -70,8 +70,8 @@ fn a_block_or_control_flow_value_is_kept_whole() {
         Ok("if x { 1 } else { 2 }".to_string())
     );
     assert_eq!(
-        parse_beta_feature_arguments("otherwise = Err(e)?"),
-        Ok("Err (e) ?".to_string())
+        parse_beta_feature_arguments("otherwise = Err(parse_error)?"),
+        Ok("Err (parse_error) ?".to_string())
     );
 }
 
@@ -120,7 +120,7 @@ fn a_separator_other_than_equals_is_rejected() {
 }
 
 #[test]
-fn a_value_that_is_not_an_expression_is_rejected() {
+fn a_non_expression_fallback_is_rejected() {
     assert_eq!(
         parse_beta_feature_arguments("otherwise = fn"),
         Err("expected an expression".to_string())
@@ -154,7 +154,7 @@ fn anything_after_the_expression_is_rejected() {
 }
 
 #[test]
-fn a_missing_name_or_value_is_rejected() {
+fn a_missing_argument_name_or_fallback_is_rejected() {
     assert_eq!(
         parse_beta_feature_arguments(""),
         Err("unexpected end of input, expected identifier".to_string())
@@ -173,12 +173,15 @@ fn a_missing_name_or_value_is_rejected() {
 /// is kept, including a call that evaluates to nothing.
 #[test]
 fn only_the_literal_unit_returns_without_an_expression() {
-    let unit = parse_str::<Expr>("()").unwrap();
-    assert!(is_unit_expression(&unit));
+    let unit_expression = parse_str::<Expr>("()").unwrap();
+    assert!(is_unit_expression(&unit_expression));
 
-    for other_expression in ["(1, 2)", "do_nothing()", "0", "Ok(())"] {
-        let expression = parse_str::<Expr>(other_expression).unwrap();
-        assert!(!is_unit_expression(&expression), "{other_expression}");
+    for non_unit_expression_text in ["(1, 2)", "do_nothing()", "0", "Ok(())"] {
+        let non_unit_expression = parse_str::<Expr>(non_unit_expression_text).unwrap();
+        assert!(
+            !is_unit_expression(&non_unit_expression),
+            "{non_unit_expression_text}"
+        );
     }
 }
 
@@ -186,11 +189,14 @@ fn only_the_literal_unit_returns_without_an_expression() {
 /// `{ }` is an empty block: neither is the literal.
 #[test]
 fn a_wrapped_or_block_unit_is_not_the_literal() {
-    let spaced = parse_str::<Expr>("( )").unwrap();
-    assert!(is_unit_expression(&spaced));
+    let whitespace_padded_unit_expression = parse_str::<Expr>("( )").unwrap();
+    assert!(is_unit_expression(&whitespace_padded_unit_expression));
 
-    for other_expression in ["(())", "{ }"] {
-        let expression = parse_str::<Expr>(other_expression).unwrap();
-        assert!(!is_unit_expression(&expression), "{other_expression}");
+    for wrapped_unit_expression_text in ["(())", "{ }"] {
+        let wrapped_unit_expression = parse_str::<Expr>(wrapped_unit_expression_text).unwrap();
+        assert!(
+            !is_unit_expression(&wrapped_unit_expression),
+            "{wrapped_unit_expression_text}"
+        );
     }
 }

@@ -11,18 +11,18 @@ use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use crate::process::PtySize;
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
-fn assert_json_roundtrip<Roundtrippable>(roundtrippable_value: &Roundtrippable)
+fn assert_json_roundtrip<Roundtrippable>(roundtrippable_subject: &Roundtrippable)
 where
     Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let serialized_json = serde_json::to_string(roundtrippable_value).expect("serialize");
-    let decoded_roundtrippable_value: Roundtrippable =
+    let serialized_json = serde_json::to_string(roundtrippable_subject).expect("serialize");
+    let decoded_roundtrippable_subject: Roundtrippable =
         serde_json::from_str(&serialized_json).expect("deserialize");
-    assert_eq!(*roundtrippable_value, decoded_roundtrippable_value);
+    assert_eq!(*roundtrippable_subject, decoded_roundtrippable_subject);
 }
 
 #[test]
-fn lifecycle_events_roundtrip() {
+fn event_lifecycle_variants_round_trip_through_json() {
     assert_json_roundtrip(&Event::PaneCreated(PaneCreated {
         pane_id: PaneId::new(),
         tab_id: TabId::new(),
@@ -61,7 +61,7 @@ fn lifecycle_events_roundtrip() {
 }
 
 #[test]
-fn move_suppression_and_reload_events_roundtrip() {
+fn tab_move_small_viewport_and_reload_events_round_trip_through_json() {
     assert_json_roundtrip(&Event::TabMoved(TabMoved {
         tab_id: TabId::new(),
         previous_tab_index: 0,
@@ -85,7 +85,7 @@ fn move_suppression_and_reload_events_roundtrip() {
 }
 
 #[test]
-fn too_small_causes_roundtrip() {
+fn terminal_too_small_causes_round_trip_through_json() {
     let other_client_id = ClientId::new();
     for cause in [
         TerminalTooSmallCause::Terminal,
@@ -97,29 +97,33 @@ fn too_small_causes_roundtrip() {
 }
 
 #[test]
-fn a_too_small_event_defaults_missing_fields() {
+fn terminal_too_small_event_uses_defaults_for_missing_fields() {
     let client_id = ClientId::new();
-    let partial_event_json = serde_json::json!({
+    let partial_terminal_too_small_event_json = serde_json::json!({
         "client_id": client_id,
         "viewport_size": { "column_count": 80, "row_count": 24 }
     });
 
-    let entered_event: TerminalTooSmallEntered =
-        serde_json::from_value(partial_event_json).expect("missing optional fields use defaults");
-    assert_eq!(entered_event.client_id, client_id);
+    let terminal_too_small_event: TerminalTooSmallEntered =
+        serde_json::from_value(partial_terminal_too_small_event_json)
+            .expect("missing optional fields use defaults");
+    assert_eq!(terminal_too_small_event.client_id, client_id);
     assert_eq!(
-        entered_event.viewport_size,
+        terminal_too_small_event.viewport_size,
         Size {
             column_count: 80,
             row_count: 24,
         }
     );
-    assert_eq!(entered_event.pane_area, None);
-    assert_eq!(entered_event.cause, TerminalTooSmallCause::Terminal);
+    assert_eq!(terminal_too_small_event.pane_area, None);
+    assert_eq!(
+        terminal_too_small_event.cause,
+        TerminalTooSmallCause::Terminal
+    );
 }
 
 #[test]
-fn selection_and_copy_events_roundtrip() {
+fn selection_events_with_and_without_a_selection_round_trip_through_json() {
     assert_json_roundtrip(&Event::SelectionChanged(SelectionChanged {
         client_id: ClientId::new(),
         pane_id: PaneId::new(),
@@ -230,7 +234,7 @@ fn a_pane_exit_without_a_signal_field_decodes_with_no_signal() {
 #[test]
 fn a_pane_exit_is_a_failure_unless_its_code_is_zero_and_no_signal_is_present() {
     let pane_id = PaneId::new();
-    let failure_cases = [
+    let pane_exit_failure_cases = [
         (Some(0), None, false),
         (Some(1), None, true),
         (Some(-1), None, true),
@@ -240,21 +244,27 @@ fn a_pane_exit_is_a_failure_unless_its_code_is_zero_and_no_signal_is_present() {
         (None, None, true),
     ];
 
-    for (exit_code, signal, expected_is_failure) in failure_cases {
-        let pane_exit = PaneProcessExited {
+    for (exit_code, exit_signal_number, expected_is_failure) in pane_exit_failure_cases {
+        let pane_process_exit = PaneProcessExited {
             pane_id,
             exit_code,
-            signal,
+            signal: exit_signal_number,
         };
-        assert_eq!(pane_exit.is_failure(), expected_is_failure, "{pane_exit:?}");
+        assert_eq!(
+            pane_process_exit.is_failure(),
+            expected_is_failure,
+            "{pane_process_exit:?}"
+        );
     }
 }
 
 /// The variant name in a value's `Debug` output: the text before the first
 /// `(`, or the whole string for a unit variant.
 /// `PaneCreated(PaneCreated { .. })` → `"PaneCreated"`; `Quit(_)` → `"Quit"`.
-fn get_variant_name<DebugValue: std::fmt::Debug>(debug_value: &DebugValue) -> String {
-    let debug_text = format!("{debug_value:?}");
+fn format_debug_variant_name<DebugSubject: std::fmt::Debug>(
+    debug_subject: &DebugSubject,
+) -> String {
+    let debug_text = format!("{debug_subject:?}");
     debug_text
         .split('(')
         .next()
@@ -420,12 +430,12 @@ pub(crate) fn list_event_cases() -> [(Event, &'static str); 21] {
 /// Checks 21 distinct top-level event names against `Debug` and
 /// [`Event::get_event_name`].
 #[test]
-fn event_variant_names_are_canonical() {
+fn event_variants_report_their_canonical_names() {
     let event_cases = list_event_cases();
     let mut event_names = std::collections::BTreeSet::new();
     assert_eq!(event_cases.len(), 21);
     for (event, event_name) in event_cases {
-        assert_eq!(get_variant_name(&event), event_name);
+        assert_eq!(format_debug_variant_name(&event), event_name);
         assert_eq!(event.get_event_name(), event_name);
         assert!(
             event_names.insert(event_name),
@@ -483,7 +493,7 @@ fn too_small_cause_defaults_to_terminal() {
 }
 
 #[test]
-fn a_too_small_event_reads_an_explicit_null_pane_area_as_none() {
+fn terminal_too_small_event_with_null_pane_area_decodes_as_none() {
     let client_id = ClientId::new();
     let too_small_event_json = serde_json::json!({
         "client_id": client_id,
@@ -492,16 +502,19 @@ fn a_too_small_event_reads_an_explicit_null_pane_area_as_none() {
         "cause": "Regions"
     });
 
-    let event: TerminalTooSmallEntered =
+    let terminal_too_small_event: TerminalTooSmallEntered =
         serde_json::from_value(too_small_event_json).expect("deserialize");
-    assert_eq!(event.client_id, client_id);
+    assert_eq!(terminal_too_small_event.client_id, client_id);
     assert_eq!(
-        event.viewport_size,
+        terminal_too_small_event.viewport_size,
         Size {
             column_count: 80,
             row_count: 24,
         }
     );
-    assert_eq!(event.pane_area, None);
-    assert_eq!(event.cause, TerminalTooSmallCause::Regions);
+    assert_eq!(terminal_too_small_event.pane_area, None);
+    assert_eq!(
+        terminal_too_small_event.cause,
+        TerminalTooSmallCause::Regions
+    );
 }

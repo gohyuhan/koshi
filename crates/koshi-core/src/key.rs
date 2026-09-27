@@ -92,8 +92,8 @@ impl ModFlags {
 impl std::ops::BitOr for ModFlags {
     type Output = Self;
 
-    fn bitor(self, rhs: Self) -> Self {
-        self.union(rhs)
+    fn bitor(self, right_modifier_flags: Self) -> Self {
+        self.union(right_modifier_flags)
     }
 }
 
@@ -120,7 +120,7 @@ impl fmt::Display for ModFlags {
 /// The modifiers that make a chord something ordinary typing cannot produce.
 /// Shift is absent: Shift plus a key is still typing — it gives the key's
 /// capital or shifted variant.
-const NON_TEXT_MODIFIER_FLAGS: ModFlags =
+const NON_TYPING_MODIFIER_FLAGS: ModFlags =
     ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
 impl ModFlags {
@@ -129,7 +129,7 @@ impl ModFlags {
     /// types — it gives the key's capital or shifted variant.
     #[must_use]
     pub const fn is_typing(self) -> bool {
-        !self.has_shared_modifier(NON_TEXT_MODIFIER_FLAGS)
+        !self.has_shared_modifier(NON_TYPING_MODIFIER_FLAGS)
     }
 }
 
@@ -179,12 +179,12 @@ fn deserialize_function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    let function_key_number_value = u8::deserialize(deserializer)?;
-    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&function_key_number_value) {
-        Ok(function_key_number_value)
+    let function_key_number = u8::deserialize(deserializer)?;
+    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&function_key_number) {
+        Ok(function_key_number)
     } else {
         Err(serde::de::Error::custom(format!(
-            "F{function_key_number_value} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
+            "F{function_key_number} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
         )))
     }
 }
@@ -373,11 +373,11 @@ impl fmt::Display for KeySequence {
 pub struct PendingKeySequence {
     /// Canonical chords pressed so far.
     pub sequence: KeySequence,
-    /// Disambiguation instant, set only when the chords so far are BOTH a
+    /// Ambiguity deadline, set only when the chords so far are BOTH a
     /// complete binding and the prefix of a longer one — reaching it fires the
     /// complete binding. A prefix-only sequence carries `None` and waits for
     /// the next chord indefinitely.
-    pub deadline: Option<Instant>,
+    pub ambiguity_deadline: Option<Instant>,
 }
 
 /// The modifier keys the outer terminal reported with one keyboard event,
@@ -589,26 +589,27 @@ impl KeyInput {
         if self.key_event_kind == KeyEventKind::Release {
             return None;
         }
-        let KeyIdentity::Key(key) = self.key else {
+        let KeyIdentity::Key(binding_key) = self.key else {
             return None;
         };
-        let binding_modifiers = self.modifier_flags.to_binding_modifiers();
-        let is_shift_held = binding_modifiers.has_all_modifiers(ModFlags::SHIFT);
-        let modifiers_without_shift = ModFlags(binding_modifiers.0 & !ModFlags::SHIFT.0);
+        let binding_modifier_flags = self.modifier_flags.to_binding_modifiers();
+        let is_shift_held = binding_modifier_flags.has_all_modifiers(ModFlags::SHIFT);
+        let binding_modifier_flags_without_shift =
+            ModFlags(binding_modifier_flags.0 & !ModFlags::SHIFT.0);
         // A reported shifted character stands for the key itself: Shift plus
         // `1` reports `!`, and `!` is the character a binding names.
         if let (true, Key::Char(_), Some(shifted_character)) =
-            (is_shift_held, key, self.shifted_key)
+            (is_shift_held, binding_key, self.shifted_key)
         {
             return Some(build_canonical_chord(
                 Key::Char(shifted_character),
-                modifiers_without_shift,
+                binding_modifier_flags_without_shift,
                 false,
             ));
         }
         Some(build_canonical_chord(
-            key,
-            modifiers_without_shift,
+            binding_key,
+            binding_modifier_flags_without_shift,
             is_shift_held,
         ))
     }
@@ -622,16 +623,17 @@ impl KeyInput {
 /// character drops it, because a shifted `1` arrives as `!`.
 #[must_use]
 fn build_canonical_chord(
-    input_key: Key,
+    reported_key: Key,
     modifier_flags: ModFlags,
     is_shift_held: bool,
 ) -> KeyChord {
-    let (normalized_key, is_shift_active) = match input_key {
+    let (canonical_key, is_shift_active) = match reported_key {
         Key::Char(' ') => (Key::Named(NamedKey::Space), is_shift_held),
-        Key::Named(_) => (input_key, is_shift_held),
+        Key::Named(_) => (reported_key, is_shift_held),
         Key::Char(character) => {
-            let (folded_character, was_shifted) = fold_uppercase_character(character);
-            let is_shift_active = was_shifted || (folded_character.is_lowercase() && is_shift_held);
+            let (folded_character, is_uppercase_folded) = fold_uppercase_character(character);
+            let is_shift_active =
+                is_uppercase_folded || (folded_character.is_lowercase() && is_shift_held);
             (Key::Char(folded_character), is_shift_active)
         }
     };
@@ -640,7 +642,7 @@ fn build_canonical_chord(
     } else {
         modifier_flags
     };
-    KeyChord::from_parts(modifier_flags, normalized_key)
+    KeyChord::from_parts(modifier_flags, canonical_key)
 }
 
 #[cfg(test)]

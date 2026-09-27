@@ -38,10 +38,10 @@ fn build_test_style() -> Style {
     test_style.set_italic(true);
     test_style.set_reverse(true);
     test_style.set_faint(true);
-    test_style.set_blink(true);
-    test_style.set_conceal(true);
-    test_style.set_strike(true);
-    test_style.set_overline(true);
+    test_style.set_blinking(true);
+    test_style.set_concealed(true);
+    test_style.set_strikethrough(true);
+    test_style.set_overlined(true);
     test_style.set_underline(UnderlineStyle::Curly);
     test_style
 }

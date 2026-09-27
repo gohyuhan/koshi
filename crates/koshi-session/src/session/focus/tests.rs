@@ -17,29 +17,29 @@ use koshi_pane::registry::PaneRegistry;
 use super::{repair_focus, FocusRepairResult};
 use crate::session::state::Tab;
 
-/// A tab whose only leaf is `root`, with no focus history recorded yet.
-fn build_tab_with_root(root: PaneId) -> Tab {
-    Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, root)
+/// A tab whose only leaf is `root_pane_id`, with no focus history recorded yet.
+fn build_tab_with_root(root_pane_id: PaneId) -> Tab {
+    Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, root_pane_id)
 }
 
-/// A terminal-pane pane record in `lifecycle`. Timestamps use `UNIX_EPOCH` so tests
-/// stay deterministic. `lifecycle` is set only through events, so the fresh
+/// A terminal pane record in `pane_lifecycle`. Timestamps use `UNIX_EPOCH` so tests
+/// stay deterministic. `pane_lifecycle` is set only through events, so the fresh
 /// `Spawning` pane record is walked to the requested state along a legal path.
-fn build_pane_record(pane_id: PaneId, lifecycle: PaneLifecycle) -> PaneRecord {
+fn build_pane_record(pane_id: PaneId, pane_lifecycle: PaneLifecycle) -> PaneRecord {
     let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record.close_policy = PaneClosePolicy::Force;
-    walk_lifecycle(&mut pane_record, lifecycle);
+    walk_pane_lifecycle(&mut pane_record, pane_lifecycle);
     pane_record
 }
 
-/// Walk a fresh `Spawning` pane record to `target` through legal lifecycle events.
-fn walk_lifecycle(pane_record: &mut PaneRecord, target_lifecycle: PaneLifecycle) {
-    match target_lifecycle {
+/// Walk a fresh `Spawning` pane record to `target_pane_lifecycle` through legal lifecycle events.
+fn walk_pane_lifecycle(pane_record: &mut PaneRecord, target_pane_lifecycle: PaneLifecycle) {
+    match target_pane_lifecycle {
         PaneLifecycle::Spawning => {}
         PaneLifecycle::Running => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Exited {
             exit_code,
@@ -47,47 +47,47 @@ fn walk_lifecycle(pane_record: &mut PaneRecord, target_lifecycle: PaneLifecycle)
         } => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessExited {
                     exit_code,
                     exited_at,
                 })
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Closing { close_requested_at } => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::CloseRequested { close_requested_at })
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Removed => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::CloseRequested {
                     close_requested_at: SystemTime::UNIX_EPOCH,
                 })
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::Cleaned)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
     }
 }
 
 /// A registry holding exactly `pane_records`.
 fn build_registry_with(pane_records: Vec<PaneRecord>) -> PaneRegistry {
-    let mut registry = PaneRegistry::new();
+    let mut pane_registry = PaneRegistry::new();
     for pane_record in pane_records {
-        registry
+        pane_registry
             .register_pane_record(pane_record)
             .expect("unique pane id");
     }
-    registry
+    pane_registry
 }
 
 /// Construct a [`FocusCandidates`] struct from the given spatial neighbor, absorbed pane,
@@ -106,99 +106,122 @@ fn build_candidates(
 
 #[test]
 fn the_most_recent_history_pane_is_focused_first() {
-    let (older, newer) = (PaneId::new(), PaneId::new());
-    let mut tab = build_tab_with_root(newer);
-    tab.record_focus_mru(older);
-    tab.record_focus_mru(newer); // newest first: [newer, older]
+    let (older_pane_id, newer_pane_id) = (PaneId::new(), PaneId::new());
+    let mut tab = build_tab_with_root(newer_pane_id);
+    tab.record_focus_mru(older_pane_id);
+    tab.record_focus_mru(newer_pane_id); // newest first: [newer, older]
     let registry = build_registry_with(vec![
-        build_pane_record(older, PaneLifecycle::Running),
-        build_pane_record(newer, PaneLifecycle::Running),
+        build_pane_record(older_pane_id, PaneLifecycle::Running),
+        build_pane_record(newer_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, None, vec![newer, older]),
+        build_candidates(None, None, vec![newer_pane_id, older_pane_id]),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(newer));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(newer_pane_id)
+    );
 }
 
 #[test]
 fn history_outranks_the_spatial_neighbor_and_absorbed_pane() {
-    let (history, spatial, absorbed) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let mut tab = build_tab_with_root(history);
-    tab.record_focus_mru(history);
+    let (history_pane_id, spatial_neighbor_pane_id, absorbed_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let mut tab = build_tab_with_root(history_pane_id);
+    tab.record_focus_mru(history_pane_id);
     let registry = build_registry_with(vec![
-        build_pane_record(history, PaneLifecycle::Running),
-        build_pane_record(spatial, PaneLifecycle::Running),
-        build_pane_record(absorbed, PaneLifecycle::Running),
+        build_pane_record(history_pane_id, PaneLifecycle::Running),
+        build_pane_record(spatial_neighbor_pane_id, PaneLifecycle::Running),
+        build_pane_record(absorbed_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
         build_candidates(
-            Some(spatial),
-            Some(absorbed),
-            vec![history, spatial, absorbed],
+            Some(spatial_neighbor_pane_id),
+            Some(absorbed_pane_id),
+            vec![history_pane_id, spatial_neighbor_pane_id, absorbed_pane_id],
         ),
     );
 
     // All three are eligible; the recovery order picks history first.
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(history));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(history_pane_id)
+    );
 }
 
 #[test]
 fn the_spatial_neighbor_wins_when_history_has_no_eligible_pane() {
-    let (spatial, absorbed) = (PaneId::new(), PaneId::new());
-    let tab = build_tab_with_root(spatial); // no focus history recorded
+    let (spatial_neighbor_pane_id, absorbed_pane_id) = (PaneId::new(), PaneId::new());
+    let tab = build_tab_with_root(spatial_neighbor_pane_id); // no focus history recorded
     let registry = build_registry_with(vec![
-        build_pane_record(spatial, PaneLifecycle::Running),
-        build_pane_record(absorbed, PaneLifecycle::Running),
+        build_pane_record(spatial_neighbor_pane_id, PaneLifecycle::Running),
+        build_pane_record(absorbed_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(Some(spatial), Some(absorbed), vec![spatial, absorbed]),
+        build_candidates(
+            Some(spatial_neighbor_pane_id),
+            Some(absorbed_pane_id),
+            vec![spatial_neighbor_pane_id, absorbed_pane_id],
+        ),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(spatial));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(spatial_neighbor_pane_id)
+    );
 }
 
 #[test]
 fn the_absorbed_pane_wins_with_no_history_and_no_spatial_neighbor() {
-    let absorbed = PaneId::new();
-    let tab = build_tab_with_root(absorbed);
-    let registry = build_registry_with(vec![build_pane_record(absorbed, PaneLifecycle::Running)]);
+    let absorbed_pane_id = PaneId::new();
+    let tab = build_tab_with_root(absorbed_pane_id);
+    let registry = build_registry_with(vec![build_pane_record(
+        absorbed_pane_id,
+        PaneLifecycle::Running,
+    )]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, Some(absorbed), vec![absorbed]),
+        build_candidates(None, Some(absorbed_pane_id), vec![absorbed_pane_id]),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(absorbed));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(absorbed_pane_id)
+    );
 }
 
 #[test]
 fn the_first_visible_pane_is_the_last_resort() {
-    let (first, second) = (PaneId::new(), PaneId::new());
-    let tab = build_tab_with_root(first);
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let tab = build_tab_with_root(first_pane_id);
     let registry = build_registry_with(vec![
-        build_pane_record(first, PaneLifecycle::Running),
-        build_pane_record(second, PaneLifecycle::Running),
+        build_pane_record(first_pane_id, PaneLifecycle::Running),
+        build_pane_record(second_pane_id, PaneLifecycle::Running),
     ]);
 
     // No history, no spatial neighbor, no absorbed pane: fall to layout order.
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, None, vec![first, second]),
+        build_candidates(None, None, vec![first_pane_id, second_pane_id]),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(first));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(first_pane_id)
+    );
 }
 
 #[test]
@@ -206,165 +229,211 @@ fn the_last_resort_walks_past_ineligible_panes_to_the_first_live_one() {
     // The visible layout order leads with a Removed pane; the last-resort step
     // must skip it and focus the first live pane, not fall through to a no-pane
     // verdict while an eligible pane is still present.
-    let (removed, live) = (PaneId::new(), PaneId::new());
-    let tab = build_tab_with_root(live); // no focus history recorded
+    let (removed_pane_id, live_pane_id) = (PaneId::new(), PaneId::new());
+    let tab = build_tab_with_root(live_pane_id); // no focus history recorded
     let registry = build_registry_with(vec![
-        build_pane_record(removed, PaneLifecycle::Removed),
-        build_pane_record(live, PaneLifecycle::Running),
+        build_pane_record(removed_pane_id, PaneLifecycle::Removed),
+        build_pane_record(live_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, None, vec![removed, live]),
+        build_candidates(None, None, vec![removed_pane_id, live_pane_id]),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(live));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(live_pane_id)
+    );
 }
 
 #[test]
 fn a_suppressed_pane_is_never_focused() {
     // `suppressed` is alive and sits in history, but it is absent from the
     // visible layout order, so it is not a focus target.
-    let (suppressed, visible) = (PaneId::new(), PaneId::new());
-    let mut tab = build_tab_with_root(visible);
-    tab.record_focus_mru(visible);
-    tab.record_focus_mru(suppressed); // newest, but suppressed
+    let (suppressed_pane_id, visible_pane_id) = (PaneId::new(), PaneId::new());
+    let mut tab = build_tab_with_root(visible_pane_id);
+    tab.record_focus_mru(visible_pane_id);
+    tab.record_focus_mru(suppressed_pane_id); // newest, but suppressed
     let registry = build_registry_with(vec![
-        build_pane_record(suppressed, PaneLifecycle::Running),
-        build_pane_record(visible, PaneLifecycle::Running),
+        build_pane_record(suppressed_pane_id, PaneLifecycle::Running),
+        build_pane_record(visible_pane_id, PaneLifecycle::Running),
     ]);
 
-    let focus_repair_result =
-        repair_focus(&tab, &registry, build_candidates(None, None, vec![visible]));
+    let focus_repair_result = repair_focus(
+        &tab,
+        &registry,
+        build_candidates(None, None, vec![visible_pane_id]),
+    );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(visible));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(visible_pane_id)
+    );
 }
 
 #[test]
 fn a_dead_exited_pane_is_eligible_for_focus() {
     // A dead pane is a visible, focusable placeholder, so focus may land on it.
-    let dead = PaneId::new();
-    let mut tab = build_tab_with_root(dead);
-    tab.record_focus_mru(dead);
+    let dead_pane_id = PaneId::new();
+    let mut tab = build_tab_with_root(dead_pane_id);
+    tab.record_focus_mru(dead_pane_id);
     let registry = build_registry_with(vec![build_pane_record(
-        dead,
+        dead_pane_id,
         PaneLifecycle::Exited {
             exit_code: None,
             exited_at: SystemTime::UNIX_EPOCH,
         },
     )]);
 
-    let focus_repair_result =
-        repair_focus(&tab, &registry, build_candidates(None, None, vec![dead]));
+    let focus_repair_result = repair_focus(
+        &tab,
+        &registry,
+        build_candidates(None, None, vec![dead_pane_id]),
+    );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(dead));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(dead_pane_id)
+    );
 }
 
 #[test]
 fn a_closing_pane_is_eligible_for_focus() {
     // Only `Removed` is skipped; a pane mid-teardown stays focusable until gone.
-    let closing = PaneId::new();
-    let mut tab = build_tab_with_root(closing);
-    tab.record_focus_mru(closing);
+    let closing_pane_id = PaneId::new();
+    let mut tab = build_tab_with_root(closing_pane_id);
+    tab.record_focus_mru(closing_pane_id);
     let registry = build_registry_with(vec![build_pane_record(
-        closing,
+        closing_pane_id,
         PaneLifecycle::Closing {
             close_requested_at: SystemTime::UNIX_EPOCH,
         },
     )]);
 
-    let focus_repair_result =
-        repair_focus(&tab, &registry, build_candidates(None, None, vec![closing]));
+    let focus_repair_result = repair_focus(
+        &tab,
+        &registry,
+        build_candidates(None, None, vec![closing_pane_id]),
+    );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(closing));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(closing_pane_id)
+    );
 }
 
 #[test]
 fn a_removed_pane_in_history_is_skipped() {
-    let (removed, live) = (PaneId::new(), PaneId::new());
-    let mut tab = build_tab_with_root(live);
-    tab.record_focus_mru(live);
-    tab.record_focus_mru(removed); // newest, but Removed
+    let (removed_pane_id, live_pane_id) = (PaneId::new(), PaneId::new());
+    let mut tab = build_tab_with_root(live_pane_id);
+    tab.record_focus_mru(live_pane_id);
+    tab.record_focus_mru(removed_pane_id); // newest, but Removed
     let registry = build_registry_with(vec![
-        build_pane_record(removed, PaneLifecycle::Removed),
-        build_pane_record(live, PaneLifecycle::Running),
+        build_pane_record(removed_pane_id, PaneLifecycle::Removed),
+        build_pane_record(live_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, None, vec![removed, live]),
+        build_candidates(None, None, vec![removed_pane_id, live_pane_id]),
     );
 
     // The Removed pane is skipped even though it is newest and visible.
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(live));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(live_pane_id)
+    );
 }
 
 #[test]
 fn a_history_pane_absent_from_the_registry_is_skipped() {
-    let (ghost, live) = (PaneId::new(), PaneId::new());
-    let mut tab = build_tab_with_root(live);
-    tab.record_focus_mru(live);
-    tab.record_focus_mru(ghost); // newest, but not in the registry
-    let registry = build_registry_with(vec![build_pane_record(live, PaneLifecycle::Running)]);
+    let (ghost_pane_id, live_pane_id) = (PaneId::new(), PaneId::new());
+    let mut tab = build_tab_with_root(live_pane_id);
+    tab.record_focus_mru(live_pane_id);
+    tab.record_focus_mru(ghost_pane_id); // newest, but not in the registry
+    let registry = build_registry_with(vec![build_pane_record(
+        live_pane_id,
+        PaneLifecycle::Running,
+    )]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, None, vec![ghost, live]),
+        build_candidates(None, None, vec![ghost_pane_id, live_pane_id]),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(live));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(live_pane_id)
+    );
 }
 
 #[test]
 fn a_spawning_pane_is_eligible_for_focus() {
     // A pane whose process has not started yet is still a visible placeholder.
-    let spawning = PaneId::new();
-    let mut tab = build_tab_with_root(spawning);
-    tab.record_focus_mru(spawning);
-    let registry = build_registry_with(vec![build_pane_record(spawning, PaneLifecycle::Spawning)]);
+    let spawning_pane_id = PaneId::new();
+    let mut tab = build_tab_with_root(spawning_pane_id);
+    tab.record_focus_mru(spawning_pane_id);
+    let registry = build_registry_with(vec![build_pane_record(
+        spawning_pane_id,
+        PaneLifecycle::Spawning,
+    )]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(None, None, vec![spawning]),
+        build_candidates(None, None, vec![spawning_pane_id]),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(spawning));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(spawning_pane_id)
+    );
 }
 
 #[test]
 fn a_spatial_neighbor_outside_the_visible_layout_order_is_skipped() {
     // The ranked candidates are gated on the visible layout order too, not
     // only the focus history: a live pane the layout order omits is skipped.
-    let (hidden, visible) = (PaneId::new(), PaneId::new());
-    let tab = build_tab_with_root(visible); // no focus history recorded
+    let (hidden_pane_id, visible_pane_id) = (PaneId::new(), PaneId::new());
+    let tab = build_tab_with_root(visible_pane_id); // no focus history recorded
     let registry = build_registry_with(vec![
-        build_pane_record(hidden, PaneLifecycle::Running),
-        build_pane_record(visible, PaneLifecycle::Running),
+        build_pane_record(hidden_pane_id, PaneLifecycle::Running),
+        build_pane_record(visible_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(Some(hidden), Some(hidden), vec![visible]),
+        build_candidates(
+            Some(hidden_pane_id),
+            Some(hidden_pane_id),
+            vec![visible_pane_id],
+        ),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(visible));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(visible_pane_id)
+    );
 }
 
 #[test]
 fn visible_panes_all_missing_from_the_registry_report_terminal_too_small() {
     // The tab's layout still names a pane and the layout order lists it, but
     // no pane record backs it, so nothing is eligible and the tab is not empty.
-    let ghost = PaneId::new();
-    let tab = build_tab_with_root(ghost);
+    let ghost_pane_id = PaneId::new();
+    let tab = build_tab_with_root(ghost_pane_id);
     let registry = PaneRegistry::new();
 
-    let focus_repair_result =
-        repair_focus(&tab, &registry, build_candidates(None, None, vec![ghost]));
+    let focus_repair_result = repair_focus(
+        &tab,
+        &registry,
+        build_candidates(None, None, vec![ghost_pane_id]),
+    );
 
     assert_eq!(focus_repair_result, FocusRepairResult::TerminalTooSmall);
 }
@@ -374,18 +443,22 @@ fn every_visible_pane_removed_reports_terminal_too_small() {
     // Both panes are in the visible layout order and both hold a pane record, but
     // both records are `Removed`, so nothing is eligible while the tab's layout
     // still holds a leaf.
-    let (first, second) = (PaneId::new(), PaneId::new());
-    let mut tab = build_tab_with_root(first);
-    tab.record_focus_mru(second);
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
+    let mut tab = build_tab_with_root(first_pane_id);
+    tab.record_focus_mru(second_pane_id);
     let registry = build_registry_with(vec![
-        build_pane_record(first, PaneLifecycle::Removed),
-        build_pane_record(second, PaneLifecycle::Removed),
+        build_pane_record(first_pane_id, PaneLifecycle::Removed),
+        build_pane_record(second_pane_id, PaneLifecycle::Removed),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(Some(first), Some(second), vec![first, second]),
+        build_candidates(
+            Some(first_pane_id),
+            Some(second_pane_id),
+            vec![first_pane_id, second_pane_id],
+        ),
     );
 
     assert_eq!(focus_repair_result, FocusRepairResult::TerminalTooSmall);
@@ -394,9 +467,12 @@ fn every_visible_pane_removed_reports_terminal_too_small() {
 #[test]
 fn all_panes_suppressed_reports_terminal_too_small() {
     // The tab still has a leaf, but nothing is visible: the window is too small.
-    let only = PaneId::new();
-    let tab = build_tab_with_root(only);
-    let registry = build_registry_with(vec![build_pane_record(only, PaneLifecycle::Running)]);
+    let only_pane_id = PaneId::new();
+    let tab = build_tab_with_root(only_pane_id);
+    let registry = build_registry_with(vec![build_pane_record(
+        only_pane_id,
+        PaneLifecycle::Running,
+    )]);
 
     let focus_repair_result =
         repair_focus(&tab, &registry, build_candidates(None, None, Vec::new()));
@@ -409,20 +485,27 @@ fn an_ineligible_spatial_neighbor_falls_through_to_the_absorbed_pane() {
     // The spatial-neighbor candidate is present but `Removed`, so it must be
     // skipped — the recovery order still has an eligible pane at the next
     // step (`absorbed_space`), and that one must win, not a no-pane verdict.
-    let (spatial, absorbed) = (PaneId::new(), PaneId::new());
-    let tab = build_tab_with_root(spatial); // no focus history recorded
+    let (spatial_neighbor_pane_id, absorbed_pane_id) = (PaneId::new(), PaneId::new());
+    let tab = build_tab_with_root(spatial_neighbor_pane_id); // no focus history recorded
     let registry = build_registry_with(vec![
-        build_pane_record(spatial, PaneLifecycle::Removed),
-        build_pane_record(absorbed, PaneLifecycle::Running),
+        build_pane_record(spatial_neighbor_pane_id, PaneLifecycle::Removed),
+        build_pane_record(absorbed_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(Some(spatial), Some(absorbed), vec![spatial, absorbed]),
+        build_candidates(
+            Some(spatial_neighbor_pane_id),
+            Some(absorbed_pane_id),
+            vec![spatial_neighbor_pane_id, absorbed_pane_id],
+        ),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(absorbed));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(absorbed_pane_id)
+    );
 }
 
 #[test]
@@ -430,19 +513,27 @@ fn ineligible_spatial_and_absorbed_candidates_fall_through_to_layout_order() {
     // Both ranked candidates are ineligible; the last-resort layout-order
     // scan must still find the one live pane rather than reporting
     // `TerminalTooSmall` while a focusable pane is actually present.
-    let (spatial, absorbed, live) = (PaneId::new(), PaneId::new(), PaneId::new());
-    let tab = build_tab_with_root(live);
+    let (spatial_neighbor_pane_id, absorbed_pane_id, live_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let tab = build_tab_with_root(live_pane_id);
     let registry = build_registry_with(vec![
-        build_pane_record(spatial, PaneLifecycle::Removed),
-        build_pane_record(absorbed, PaneLifecycle::Removed),
-        build_pane_record(live, PaneLifecycle::Running),
+        build_pane_record(spatial_neighbor_pane_id, PaneLifecycle::Removed),
+        build_pane_record(absorbed_pane_id, PaneLifecycle::Removed),
+        build_pane_record(live_pane_id, PaneLifecycle::Running),
     ]);
 
     let focus_repair_result = repair_focus(
         &tab,
         &registry,
-        build_candidates(Some(spatial), Some(absorbed), vec![spatial, absorbed, live]),
+        build_candidates(
+            Some(spatial_neighbor_pane_id),
+            Some(absorbed_pane_id),
+            vec![spatial_neighbor_pane_id, absorbed_pane_id, live_pane_id],
+        ),
     );
 
-    assert_eq!(focus_repair_result, FocusRepairResult::Focused(live));
+    assert_eq!(
+        focus_repair_result,
+        FocusRepairResult::Focused(live_pane_id)
+    );
 }

@@ -15,13 +15,14 @@ use rustix::termios::{self, Termios};
 use crate::terminal::reader;
 
 const ESCAPE_SEQUENCE_TIMEOUT_DURATION: Duration = Duration::from_millis(25);
+const TERMINAL_INPUT_BYTE_COUNT: usize = 4_096;
 const OUTPUT_BUFFER_BYTE_COUNT: usize = 4_096;
 
 /// The controlling terminal file and output owner for one Unix terminal.
 #[derive(Debug)]
 pub(crate) struct TerminalDevice {
     terminal_file: File,
-    output_writer: BufWriter<File>,
+    terminal_output_writer: BufWriter<File>,
     original_termios: Termios,
     is_raw_mode: bool,
 }
@@ -29,16 +30,20 @@ pub(crate) struct TerminalDevice {
 impl TerminalDevice {
     /// Open the controlling terminal and its event source.
     pub(crate) fn open_terminal_device() -> io::Result<(Self, EventSource)> {
-        let input_stream = open_terminal_input()?;
-        let output_stream = open_terminal_output()?;
-        let terminal_file = input_stream.try_clone()?;
-        let size_stream = output_stream.try_clone()?;
+        let terminal_input_stream = open_terminal_input()?;
+        let terminal_output_stream = open_terminal_output()?;
+        let terminal_file = terminal_input_stream.try_clone()?;
+        let terminal_size_stream = terminal_output_stream.try_clone()?;
         let original_termios = termios::tcgetattr(&terminal_file)?;
-        let event_source = EventSource::from_terminal_streams(input_stream, size_stream)?;
+        let event_source =
+            EventSource::from_terminal_streams(terminal_input_stream, terminal_size_stream)?;
         Ok((
             Self {
                 terminal_file,
-                output_writer: BufWriter::with_capacity(OUTPUT_BUFFER_BYTE_COUNT, output_stream),
+                terminal_output_writer: BufWriter::with_capacity(
+                    OUTPUT_BUFFER_BYTE_COUNT,
+                    terminal_output_stream,
+                ),
                 original_termios,
                 is_raw_mode: false,
             },
@@ -75,11 +80,11 @@ impl TerminalDevice {
 
 impl Write for TerminalDevice {
     fn write(&mut self, terminal_output_bytes: &[u8]) -> io::Result<usize> {
-        self.output_writer.write(terminal_output_bytes)
+        self.terminal_output_writer.write(terminal_output_bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.output_writer.flush()
+        self.terminal_output_writer.flush()
     }
 }
 
@@ -93,74 +98,81 @@ impl Drop for TerminalDevice {
 /// Parsed input, window changes, and interruption for one Unix terminal.
 #[derive(Debug)]
 pub(crate) struct EventSource {
-    parser: Parser,
-    input_stream: File,
-    size_stream: File,
+    terminal_input_parser: Parser,
+    terminal_input_stream: File,
+    terminal_size_stream: File,
     resize_pipe: UnixStream,
     resize_registration: signal_hook::SigId,
     wake_pipe: UnixStream,
-    wake_write: Arc<UnixStream>,
-    pending_since: Option<Instant>,
+    wake_pipe_writer: Arc<UnixStream>,
+    input_sequence_started_at: Option<Instant>,
 }
 
 impl EventSource {
-    fn from_terminal_streams(input_stream: File, size_stream: File) -> io::Result<Self> {
-        let (resize_pipe, resize_write) = UnixStream::pair()?;
-        let resize_registration =
-            signal_hook::low_level::pipe::register(signal_hook::consts::SIGWINCH, resize_write)?;
+    fn from_terminal_streams(
+        terminal_input_stream: File,
+        terminal_size_stream: File,
+    ) -> io::Result<Self> {
+        let (resize_pipe, resize_pipe_writer) = UnixStream::pair()?;
+        let resize_registration = signal_hook::low_level::pipe::register(
+            signal_hook::consts::SIGWINCH,
+            resize_pipe_writer,
+        )?;
         resize_pipe.set_nonblocking(true)?;
 
-        let (wake_pipe, wake_write) = UnixStream::pair()?;
+        let (wake_pipe, wake_pipe_writer) = UnixStream::pair()?;
         wake_pipe.set_nonblocking(true)?;
-        wake_write.set_nonblocking(true)?;
+        wake_pipe_writer.set_nonblocking(true)?;
 
         Ok(Self {
-            parser: Parser::default(),
-            input_stream,
-            size_stream,
+            terminal_input_parser: Parser::default(),
+            terminal_input_stream,
+            terminal_size_stream,
             resize_pipe,
             resize_registration,
             wake_pipe,
-            wake_write: Arc::new(wake_write),
-            pending_since: None,
+            wake_pipe_writer: Arc::new(wake_pipe_writer),
+            input_sequence_started_at: None,
         })
     }
 
     /// Return a handle that interrupts this source's wait.
     pub(crate) fn create_waker(&self) -> Waker {
         Waker {
-            write: Arc::clone(&self.wake_write),
+            wake_pipe_writer: Arc::clone(&self.wake_pipe_writer),
         }
     }
 
-    fn pop_parsed_event(&mut self) -> Option<Event> {
-        let parsed_event = self.parser.remove_next_pending_event();
-        if !self.parser.needs_input_sequence_timeout() {
-            self.pending_since = None;
+    fn pop_parsed_terminal_event(&mut self) -> Option<Event> {
+        let parsed_terminal_event = self.terminal_input_parser.remove_next_pending_event();
+        if !self.terminal_input_parser.needs_input_sequence_timeout() {
+            self.input_sequence_started_at = None;
         }
-        parsed_event
+        parsed_terminal_event
     }
 
-    fn read_input_bytes(&mut self) -> io::Result<()> {
-        let mut input_bytes = [0_u8; 4_096];
-        let byte_count = read_with_interrupt_retry(&mut self.input_stream, &mut input_bytes)?;
-        if byte_count == 0 {
+    fn process_terminal_input_bytes(&mut self) -> io::Result<()> {
+        let mut terminal_input_bytes = [0_u8; TERMINAL_INPUT_BYTE_COUNT];
+        let terminal_input_byte_count =
+            read_with_interrupt_retry(&mut self.terminal_input_stream, &mut terminal_input_bytes)?;
+        if terminal_input_byte_count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "terminal input reached end-of-file",
             ));
         }
-        self.parser.process_input_bytes(&input_bytes[..byte_count]);
-        self.pending_since = self
-            .parser
+        self.terminal_input_parser
+            .process_input_bytes(&terminal_input_bytes[..terminal_input_byte_count]);
+        self.input_sequence_started_at = self
+            .terminal_input_parser
             .needs_input_sequence_timeout()
             .then(Instant::now);
         Ok(())
     }
 
-    fn read_resize_event(&self) -> io::Result<Event> {
+    fn build_window_resize_event(&self) -> io::Result<Event> {
         Ok(Event::WindowResized(read_terminal_window_size(
-            &self.size_stream,
+            &self.terminal_size_stream,
         )?))
     }
 }
@@ -169,53 +181,64 @@ impl EventSource {
 mod tests;
 
 impl reader::EventSource for EventSource {
-    fn try_read_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>> {
-        let deadline_instant = timeout.map(|timeout_duration| Instant::now() + timeout_duration);
+    fn try_read_event(&mut self, timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
+        let event_wait_deadline_instant =
+            timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
         loop {
-            if let Some(parsed_event) = self.pop_parsed_event() {
-                return Ok(Some(parsed_event));
+            if let Some(parsed_terminal_event) = self.pop_parsed_terminal_event() {
+                return Ok(Some(parsed_terminal_event));
             }
 
-            let sequence_timeout = self
-                .pending_since
-                .map(|start| ESCAPE_SEQUENCE_TIMEOUT_DURATION.saturating_sub(start.elapsed()));
-            let wait_timeout = choose_shorter_duration(
-                deadline_instant.map(|deadline| deadline.saturating_duration_since(Instant::now())),
-                sequence_timeout,
+            let escape_sequence_timeout_duration =
+                self.input_sequence_started_at
+                    .map(|input_sequence_started_at| {
+                        ESCAPE_SEQUENCE_TIMEOUT_DURATION
+                            .saturating_sub(input_sequence_started_at.elapsed())
+                    });
+            let terminal_poll_wait_duration = choose_terminal_poll_wait_duration(
+                event_wait_deadline_instant.map(|event_wait_deadline_instant| {
+                    event_wait_deadline_instant.saturating_duration_since(Instant::now())
+                }),
+                escape_sequence_timeout_duration,
             );
-            let [input_ready, resize_ready, wake_ready] = wait_for_file_descriptors(
-                [
-                    self.input_stream.as_fd(),
-                    self.resize_pipe.as_fd(),
-                    self.wake_pipe.as_fd(),
-                ],
-                wait_timeout,
-            )?;
+            let [is_terminal_input_ready, is_resize_pipe_ready, is_wake_pipe_ready] =
+                wait_for_file_descriptors(
+                    [
+                        self.terminal_input_stream.as_fd(),
+                        self.resize_pipe.as_fd(),
+                        self.wake_pipe.as_fd(),
+                    ],
+                    terminal_poll_wait_duration,
+                )?;
 
-            if wake_ready {
+            if is_wake_pipe_ready {
                 drain_pipe(&self.wake_pipe)?;
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "terminal input was interrupted",
                 ));
             }
-            if resize_ready {
+            if is_resize_pipe_ready {
                 drain_pipe(&self.resize_pipe)?;
-                return self.read_resize_event().map(Some);
+                return self.build_window_resize_event().map(Some);
             }
-            if input_ready {
-                self.read_input_bytes()?;
+            if is_terminal_input_ready {
+                self.process_terminal_input_bytes()?;
                 continue;
             }
             if self
-                .pending_since
-                .is_some_and(|start| start.elapsed() >= ESCAPE_SEQUENCE_TIMEOUT_DURATION)
+                .input_sequence_started_at
+                .is_some_and(|input_sequence_started_at| {
+                    input_sequence_started_at.elapsed() >= ESCAPE_SEQUENCE_TIMEOUT_DURATION
+                })
             {
-                self.parser.finish_pending_input();
-                self.pending_since = None;
+                self.terminal_input_parser.finish_pending_input();
+                self.input_sequence_started_at = None;
                 continue;
             }
-            if deadline_instant.is_some_and(|deadline| Instant::now() >= deadline) {
+            if event_wait_deadline_instant.is_some_and(|event_wait_deadline_instant| {
+                Instant::now() >= event_wait_deadline_instant
+            }) {
                 return Ok(None);
             }
         }
@@ -231,13 +254,13 @@ impl Drop for EventSource {
 /// A cloneable interruption handle for one Unix input source.
 #[derive(Debug, Clone)]
 pub(crate) struct Waker {
-    write: Arc<UnixStream>,
+    wake_pipe_writer: Arc<UnixStream>,
 }
 
 impl Waker {
     /// Interrupt a blocked event read.
     pub(crate) fn wake(&self) -> io::Result<()> {
-        match (&*self.write).write(&[1]) {
+        match (&*self.wake_pipe_writer).write(&[1]) {
             Ok(_) => Ok(()),
             Err(wake_error) if wake_error.kind() == io::ErrorKind::WouldBlock => Ok(()),
             Err(wake_error) => Err(wake_error),
@@ -247,7 +270,7 @@ impl Waker {
 
 fn open_terminal_input() -> io::Result<File> {
     if io::stdin().is_terminal() {
-        duplicate_file(rustix::stdio::stdin())
+        duplicate_file_descriptor(rustix::stdio::stdin())
     } else {
         open_controlling_terminal()
     }
@@ -266,20 +289,20 @@ fn read_terminal_window_size(terminal_file: &File) -> io::Result<WindowSize> {
     Ok(WindowSize {
         column_count: terminal_window_size.ws_col,
         row_count: terminal_window_size.ws_row,
-        pixel_width: get_nonzero_dimension(terminal_window_size.ws_xpixel),
-        pixel_height: get_nonzero_dimension(terminal_window_size.ws_ypixel),
+        pixel_width: filter_nonzero_pixel_dimension(terminal_window_size.ws_xpixel),
+        pixel_height: filter_nonzero_pixel_dimension(terminal_window_size.ws_ypixel),
     })
 }
 
 fn open_terminal_output() -> io::Result<File> {
     if io::stdout().is_terminal() {
-        duplicate_file(rustix::stdio::stdout())
+        duplicate_file_descriptor(rustix::stdio::stdout())
     } else {
         open_controlling_terminal()
     }
 }
 
-fn duplicate_file(file_descriptor: BorrowedFd<'static>) -> io::Result<File> {
+fn duplicate_file_descriptor(file_descriptor: BorrowedFd<'static>) -> io::Result<File> {
     let owned_file_descriptor: OwnedFd = rustix::io::dup(file_descriptor)?;
     Ok(File::from(owned_file_descriptor))
 }
@@ -289,13 +312,13 @@ fn open_controlling_terminal() -> io::Result<File> {
 }
 
 fn read_with_interrupt_retry(
-    mut input_reader: impl Read,
-    input_bytes: &mut [u8],
+    mut terminal_reader: impl Read,
+    terminal_input_bytes: &mut [u8],
 ) -> io::Result<usize> {
     loop {
-        match input_reader.read(input_bytes) {
+        match terminal_reader.read(terminal_input_bytes) {
             Err(io_error) if io_error.kind() == io::ErrorKind::Interrupted => continue,
-            input_read_result => return input_read_result,
+            terminal_input_read_result => return terminal_input_read_result,
         }
     }
 }
@@ -313,44 +336,56 @@ fn drain_pipe(pipe_stream: &UnixStream) -> io::Result<()> {
     }
 }
 
-fn choose_shorter_duration(
-    first_duration: Option<Duration>,
-    second_duration: Option<Duration>,
+fn choose_terminal_poll_wait_duration(
+    event_wait_remaining_duration: Option<Duration>,
+    escape_sequence_timeout_duration: Option<Duration>,
 ) -> Option<Duration> {
-    match (first_duration, second_duration) {
-        (Some(first_duration), Some(second_duration)) => Some(first_duration.min(second_duration)),
-        (Some(timeout_duration), None) | (None, Some(timeout_duration)) => Some(timeout_duration),
+    match (
+        event_wait_remaining_duration,
+        escape_sequence_timeout_duration,
+    ) {
+        (Some(event_wait_remaining_duration), Some(escape_sequence_timeout_duration)) => {
+            Some(event_wait_remaining_duration.min(escape_sequence_timeout_duration))
+        }
+        (Some(terminal_poll_wait_duration), None) | (None, Some(terminal_poll_wait_duration)) => {
+            Some(terminal_poll_wait_duration)
+        }
         (None, None) => None,
     }
 }
 
-fn get_nonzero_dimension(dimension: u16) -> Option<u16> {
-    (dimension != 0).then_some(dimension)
+fn filter_nonzero_pixel_dimension(pixel_dimension: u16) -> Option<u16> {
+    (pixel_dimension != 0).then_some(pixel_dimension)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn wait_for_file_descriptors(
-    file_descriptors: [BorrowedFd<'_>; 3],
-    timeout: Option<Duration>,
+    terminal_event_file_descriptors: [BorrowedFd<'_>; 3],
+    timeout_duration: Option<Duration>,
 ) -> io::Result<[bool; 3]> {
     use rustix::event::{PollFd, PollFlags};
 
-    let deadline_instant = timeout.map(|timeout_duration| Instant::now() + timeout_duration);
+    let poll_deadline_instant =
+        timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
     loop {
-        let mut poll_fds = [
-            PollFd::new(&file_descriptors[0], PollFlags::IN),
-            PollFd::new(&file_descriptors[1], PollFlags::IN),
-            PollFd::new(&file_descriptors[2], PollFlags::IN),
+        let mut terminal_event_poll_set = [
+            PollFd::new(&terminal_event_file_descriptors[0], PollFlags::IN),
+            PollFd::new(&terminal_event_file_descriptors[1], PollFlags::IN),
+            PollFd::new(&terminal_event_file_descriptors[2], PollFlags::IN),
         ];
-        let remaining_timeout =
-            deadline_instant.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let remaining_timespec = remaining_timeout
+        let remaining_timeout_duration = poll_deadline_instant.map(|poll_deadline_instant| {
+            poll_deadline_instant.saturating_duration_since(Instant::now())
+        });
+        let remaining_timeout_timespec = remaining_timeout_duration
             .map(rustix::event::Timespec::try_from)
             .transpose()
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "poll timeout is too large")
             })?;
-        match rustix::event::poll(&mut poll_fds, remaining_timespec.as_ref()) {
+        match rustix::event::poll(
+            &mut terminal_event_poll_set,
+            remaining_timeout_timespec.as_ref(),
+        ) {
             Err(poll_error) if poll_error == rustix::io::Errno::INTR => continue,
             Err(poll_error) => return Err(poll_error.into()),
             Ok(_) => {
@@ -360,9 +395,9 @@ fn wait_for_file_descriptors(
                         .intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR)
                 };
                 return Ok([
-                    is_file_descriptor_ready(&poll_fds[0]),
-                    is_file_descriptor_ready(&poll_fds[1]),
-                    is_file_descriptor_ready(&poll_fds[2]),
+                    is_file_descriptor_ready(&terminal_event_poll_set[0]),
+                    is_file_descriptor_ready(&terminal_event_poll_set[1]),
+                    is_file_descriptor_ready(&terminal_event_poll_set[2]),
                 ]);
             }
         }
@@ -371,13 +406,13 @@ fn wait_for_file_descriptors(
 
 #[cfg(target_os = "macos")]
 fn wait_for_file_descriptors(
-    file_descriptors: [BorrowedFd<'_>; 3],
-    timeout: Option<Duration>,
+    terminal_event_file_descriptors: [BorrowedFd<'_>; 3],
+    timeout_duration: Option<Duration>,
 ) -> io::Result<[bool; 3]> {
     let raw_file_descriptors = [
-        file_descriptors[0].as_raw_fd(),
-        file_descriptors[1].as_raw_fd(),
-        file_descriptors[2].as_raw_fd(),
+        terminal_event_file_descriptors[0].as_raw_fd(),
+        terminal_event_file_descriptors[1].as_raw_fd(),
+        terminal_event_file_descriptors[2].as_raw_fd(),
     ];
     if raw_file_descriptors
         .iter()
@@ -388,7 +423,8 @@ fn wait_for_file_descriptors(
             "terminal file descriptor exceeds select capacity",
         ));
     }
-    let deadline_instant = timeout.map(|timeout_duration| Instant::now() + timeout_duration);
+    let poll_deadline_instant =
+        timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
     loop {
         let mut descriptor_set = unsafe { std::mem::zeroed::<libc::fd_set>() };
         unsafe {
@@ -397,9 +433,10 @@ fn wait_for_file_descriptors(
                 libc::FD_SET(file_descriptor, &mut descriptor_set);
             }
         }
-        let remaining_timeout =
-            deadline_instant.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let mut select_timeout = remaining_timeout.map(|timeout_duration| libc::timeval {
+        let remaining_timeout_duration = poll_deadline_instant.map(|poll_deadline_instant| {
+            poll_deadline_instant.saturating_duration_since(Instant::now())
+        });
+        let mut select_timeout = remaining_timeout_duration.map(|timeout_duration| libc::timeval {
             tv_sec: timeout_duration.as_secs().min(libc::time_t::MAX as u64) as libc::time_t,
             tv_usec: timeout_duration.subsec_micros() as libc::suseconds_t,
         });
@@ -411,7 +448,7 @@ fn wait_for_file_descriptors(
                 std::ptr::null_mut(),
                 select_timeout
                     .as_mut()
-                    .map_or(std::ptr::null_mut(), |timeout| timeout),
+                    .map_or(std::ptr::null_mut(), |select_timeout| select_timeout),
             )
         };
         if select_result >= 0 {

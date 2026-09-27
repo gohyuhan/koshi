@@ -14,16 +14,16 @@ fn build_terminal_state(column_count: u16, row_count: u16) -> TerminalState {
     })
 }
 
-/// Feed `input_bytes` through a fresh parser into `terminal_state`.
-fn advance_vte_parser(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
-    let mut parser = vte::Parser::new();
-    parser.advance(terminal_state, input_bytes);
+/// Feed PTY output bytes through a fresh parser into `terminal_state`.
+fn advance_vte_parser(terminal_state: &mut TerminalState, pty_output_bytes: &[u8]) {
+    let mut vte_parser = vte::Parser::new();
+    vte_parser.advance(terminal_state, pty_output_bytes);
 }
 
-/// Feed `input_bytes` into a fresh 8×4 terminal state and return it.
-fn build_terminal_state_after(input_bytes: &[u8]) -> TerminalState {
+/// Feed PTY output bytes into a fresh 8×4 terminal state and return it.
+fn build_terminal_state_after(pty_output_bytes: &[u8]) -> TerminalState {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(&mut terminal_state, input_bytes);
+    advance_vte_parser(&mut terminal_state, pty_output_bytes);
     terminal_state
 }
 
@@ -58,8 +58,8 @@ fn push_past_the_depth_bound_drops_the_oldest_entry() {
         b"\x1b[>1u\x1b[>2u\x1b[>3u\x1b[>4u\x1b[>5u\x1b[>6u\x1b[>7u\x1b[>8u\x1b[>9u",
     );
 
-    for expected_flags in [9, 8, 7, 6, 5, 4, 3, 2] {
-        assert_eq!(terminal_state.get_keyboard_flags(), expected_flags);
+    for expected_keyboard_flags in [9, 8, 7, 6, 5, 4, 3, 2] {
+        assert_eq!(terminal_state.get_keyboard_flags(), expected_keyboard_flags);
         advance_vte_parser(&mut terminal_state, b"\x1b[<u");
     }
 

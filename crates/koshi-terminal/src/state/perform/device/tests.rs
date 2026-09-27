@@ -14,16 +14,16 @@ fn build_terminal_state(column_count: u16, row_count: u16) -> TerminalState {
     })
 }
 
-/// Feed `input_bytes` through a fresh parser into `terminal_state`.
-fn advance_vte_parser(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
+/// Feed `pty_output_bytes` through a fresh parser into `terminal_state`.
+fn advance_vte_parser(terminal_state: &mut TerminalState, pty_output_bytes: &[u8]) {
     let mut parser = vte::Parser::new();
-    parser.advance(terminal_state, input_bytes);
+    parser.advance(terminal_state, pty_output_bytes);
 }
 
-/// Feed `input_bytes` into a fresh terminal state and return its drained replies.
-fn collect_device_replies_for(input_bytes: &[u8]) -> Vec<u8> {
+/// Feed PTY output bytes into a fresh terminal state and return its drained replies.
+fn collect_device_replies_for(pty_output_bytes: &[u8]) -> Vec<u8> {
     let mut terminal_state = build_terminal_state(8, 4);
-    advance_vte_parser(&mut terminal_state, input_bytes);
+    advance_vte_parser(&mut terminal_state, pty_output_bytes);
     terminal_state.take_device_query_replies()
 }
 
@@ -204,7 +204,7 @@ fn dec_dsr_reports_zero_macro_space() {
 }
 
 #[test]
-fn dec_dsr_reports_a_zero_memory_checksum_echoing_the_request_id() {
+fn dec_dsr_reports_a_zero_memory_checksum_echoing_the_checksum_request_id() {
     assert_eq!(
         collect_device_replies_for(b"\x1b[?63n"),
         b"\x1bP0!~0000\x1b\\"
@@ -295,46 +295,48 @@ fn decrqm_reports_cursor_visibility_per_active_screen() {
 
 #[test]
 fn decrqm_reports_every_alt_screen_mode_from_the_active_screen() {
-    for mode_number_text in ["47", "1047", "1049"] {
-        let mode_query_sequence = format!("\x1b[?{mode_number_text}$p");
-        let primary_reply_bytes = collect_device_replies_for(mode_query_sequence.as_bytes());
+    for dec_private_mode_number_text in ["47", "1047", "1049"] {
+        let dec_private_mode_query_sequence = format!("\x1b[?{dec_private_mode_number_text}$p");
+        let primary_reply_bytes =
+            collect_device_replies_for(dec_private_mode_query_sequence.as_bytes());
         assert_eq!(
             primary_reply_bytes,
-            format!("\x1b[?{mode_number_text};2$y").as_bytes()
+            format!("\x1b[?{dec_private_mode_number_text};2$y").as_bytes()
         );
 
-        let alternate_mode_query_sequence = format!("\x1b[?1049h\x1b[?{mode_number_text}$p");
+        let alternate_mode_query_sequence =
+            format!("\x1b[?1049h\x1b[?{dec_private_mode_number_text}$p");
         let alternate_reply_bytes =
             collect_device_replies_for(alternate_mode_query_sequence.as_bytes());
         assert_eq!(
             alternate_reply_bytes,
-            format!("\x1b[?{mode_number_text};1$y").as_bytes()
+            format!("\x1b[?{dec_private_mode_number_text};1$y").as_bytes()
         );
     }
 }
 
 #[test]
 fn decrqm_reports_the_active_mouse_tracking_level_and_only_it() {
-    let levels = ["9", "1000", "1002", "1003"];
+    let mouse_tracking_level_texts = ["9", "1000", "1002", "1003"];
     // Enable each level in turn and query all four: only the active one is
     // set.
-    for active_mouse_tracking_level_text in levels {
+    for active_mouse_tracking_level_text in mouse_tracking_level_texts {
         let mut terminal_state = build_terminal_state(8, 4);
-        let mut input_sequence = format!("\x1b[?{active_mouse_tracking_level_text}h");
+        let mut terminal_input_sequence = format!("\x1b[?{active_mouse_tracking_level_text}h");
         let mut expected_device_reply_text = String::new();
-        for mouse_tracking_level_text in levels {
-            input_sequence.push_str(&format!("\x1b[?{mouse_tracking_level_text}$p"));
-            let mode_state_value = if mouse_tracking_level_text == active_mouse_tracking_level_text
-            {
-                1
-            } else {
-                2
-            };
+        for mouse_tracking_level_text in mouse_tracking_level_texts {
+            terminal_input_sequence.push_str(&format!("\x1b[?{mouse_tracking_level_text}$p"));
+            let dec_mode_state_number =
+                if mouse_tracking_level_text == active_mouse_tracking_level_text {
+                    1
+                } else {
+                    2
+                };
             expected_device_reply_text.push_str(&format!(
-                "\x1b[?{mouse_tracking_level_text};{mode_state_value}$y"
+                "\x1b[?{mouse_tracking_level_text};{dec_mode_state_number}$y"
             ));
         }
-        advance_vte_parser(&mut terminal_state, input_sequence.as_bytes());
+        advance_vte_parser(&mut terminal_state, terminal_input_sequence.as_bytes());
         assert_eq!(
             terminal_state.take_device_query_replies(),
             expected_device_reply_text.as_bytes()
@@ -344,22 +346,23 @@ fn decrqm_reports_the_active_mouse_tracking_level_and_only_it() {
 
 #[test]
 fn decrqm_reports_the_active_mouse_encoding_and_only_it() {
-    let encodings = ["1005", "1006", "1015"];
-    for active_mouse_encoding_text in encodings {
+    let mouse_encoding_texts = ["1005", "1006", "1015"];
+    for active_mouse_encoding_text in mouse_encoding_texts {
         let mut terminal_state = build_terminal_state(8, 4);
-        let mut input_sequence = format!("\x1b[?{active_mouse_encoding_text}h");
+        let mut terminal_input_sequence = format!("\x1b[?{active_mouse_encoding_text}h");
         let mut expected_device_reply_text = String::new();
-        for mouse_encoding_text in encodings {
-            input_sequence.push_str(&format!("\x1b[?{mouse_encoding_text}$p"));
-            let mode_state_value = if mouse_encoding_text == active_mouse_encoding_text {
+        for mouse_encoding_text in mouse_encoding_texts {
+            terminal_input_sequence.push_str(&format!("\x1b[?{mouse_encoding_text}$p"));
+            let dec_mode_state_number = if mouse_encoding_text == active_mouse_encoding_text {
                 1
             } else {
                 2
             };
-            expected_device_reply_text
-                .push_str(&format!("\x1b[?{mouse_encoding_text};{mode_state_value}$y"));
+            expected_device_reply_text.push_str(&format!(
+                "\x1b[?{mouse_encoding_text};{dec_mode_state_number}$y"
+            ));
         }
-        advance_vte_parser(&mut terminal_state, input_sequence.as_bytes());
+        advance_vte_parser(&mut terminal_state, terminal_input_sequence.as_bytes());
         assert_eq!(
             terminal_state.take_device_query_replies(),
             expected_device_reply_text.as_bytes()
@@ -400,11 +403,11 @@ fn decrqm_reports_the_remaining_stored_flags() {
 fn decrqm_reports_an_unstored_mode_as_not_recognized() {
     // ?2/?3/?8 are traced no-ops, ?1048 keeps no queryable mode state, ?9999 is
     // unknown: all report 0.
-    for mode_number_text in ["2", "3", "8", "1048", "9999"] {
-        let mode_query_sequence = format!("\x1b[?{mode_number_text}$p");
-        let expected_device_reply_text = format!("\x1b[?{mode_number_text};0$y");
+    for dec_private_mode_number_text in ["2", "3", "8", "1048", "9999"] {
+        let dec_private_mode_query_sequence = format!("\x1b[?{dec_private_mode_number_text}$p");
+        let expected_device_reply_text = format!("\x1b[?{dec_private_mode_number_text};0$y");
         assert_eq!(
-            collect_device_replies_for(mode_query_sequence.as_bytes()),
+            collect_device_replies_for(dec_private_mode_query_sequence.as_bytes()),
             expected_device_reply_text.as_bytes()
         );
     }
@@ -433,20 +436,20 @@ fn take_device_query_replies_drains_the_queue() {
 }
 
 #[test]
-fn a_query_flagged_ignore_by_the_parser_gets_no_reply() {
+fn a_parser_ignored_device_query_gets_no_reply() {
     // 40 parameters overflow vte's parameter list, so the sequence arrives
     // with `ignore` set and is dropped before dispatch.
-    let mut ignored_query_sequence = String::from("\x1b[");
-    ignored_query_sequence.push_str(&"5;".repeat(40));
-    ignored_query_sequence.push('n');
+    let mut ignored_device_query_sequence = String::from("\x1b[");
+    ignored_device_query_sequence.push_str(&"5;".repeat(40));
+    ignored_device_query_sequence.push('n');
     assert_eq!(
-        collect_device_replies_for(ignored_query_sequence.as_bytes()),
+        collect_device_replies_for(ignored_device_query_sequence.as_bytes()),
         b""
     );
 }
 
 #[test]
-fn plain_output_produces_no_replies() {
+fn plain_terminal_text_produces_no_device_replies() {
     assert_eq!(
         collect_device_replies_for(b"hello \x1b[31mworld\x1b[0m\r\n"),
         b""
@@ -515,7 +518,7 @@ fn dec_dsr_with_no_parameter_gets_no_reply() {
 }
 
 #[test]
-fn dec_dsr_63_clamps_the_request_id_to_u16() {
+fn dec_dsr_63_clamps_checksum_request_id_to_u16() {
     assert_eq!(
         collect_device_replies_for(b"\x1b[?63;65535n"),
         b"\x1bP65535!~0000\x1b\\"

@@ -9,8 +9,8 @@ impl TerminalState {
     /// The charset selected into GL: the active screen's `G0`–`G3` slot named
     /// by its `gl`. Every printed byte is translated through it.
     fn get_active_charset(&self) -> Charset {
-        let render = self.get_active_render();
-        render.charsets[render.gl]
+        let active_render_state = self.get_active_render();
+        active_render_state.charsets[active_render_state.gl]
     }
 
     /// Translate a printable `character` through the active GL charset. ASCII passes
@@ -26,16 +26,16 @@ impl TerminalState {
     }
 
     /// Designate the `G0`–`G3` slot `charset_slot_index` (`0`–`3`, from the `ESC ( ) * +`
-    /// intermediate) to the charset named by the final `byte`: `0` = DEC line
+    /// intermediate) to the charset named by `charset_final_byte`: `0` = DEC line
     /// drawing, `B` = ASCII, `A` = UK; any other final selects ASCII (a
     /// passthrough). Writes the active screen's render state.
-    pub(super) fn designate_charset(&mut self, charset_slot_index: usize, byte: u8) {
-        let charset = match byte {
+    pub(super) fn designate_charset(&mut self, charset_slot_index: usize, charset_final_byte: u8) {
+        let designated_charset = match charset_final_byte {
             b'0' => Charset::DecLineDrawing,
             b'A' => Charset::Uk,
             _ => Charset::Ascii,
         };
-        self.get_active_render_mut().charsets[charset_slot_index] = charset;
+        self.get_active_render_mut().charsets[charset_slot_index] = designated_charset;
     }
 }
 

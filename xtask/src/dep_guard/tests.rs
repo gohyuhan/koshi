@@ -2,7 +2,9 @@
 
 use super::*;
 
-fn build_dependency_graph(crate_dependency_pairs: &[(&str, &[&str])]) -> Vec<CrateDependencies> {
+fn build_dependency_graph(
+    crate_dependency_pairs: &[(&str, &[&str])],
+) -> Vec<WorkspaceCrateDependencies> {
     crate_dependency_pairs
         .iter()
         .map(|(crate_name, dependency_names)| {
@@ -20,8 +22,11 @@ fn build_dependency_graph(crate_dependency_pairs: &[(&str, &[&str])]) -> Vec<Cra
 /// Builds metadata from workspace member IDs and `(name, dependencies)`
 /// package tuples. Each dependency string is a JSON array in cargo metadata
 /// format, and each package ID equals its package name.
-fn build_metadata(members: &[&str], packages: &[(&str, &str)]) -> Metadata {
-    let package_json_entries: Vec<String> = packages
+fn build_metadata(
+    workspace_member_names: &[&str],
+    package_metadata_entries: &[(&str, &str)],
+) -> Metadata {
+    let package_json_entries: Vec<String> = package_metadata_entries
         .iter()
         .map(|(package_name, dependency_json)| {
             format!(
@@ -31,9 +36,9 @@ fn build_metadata(members: &[&str], packages: &[(&str, &str)]) -> Metadata {
             )
         })
         .collect();
-    let workspace_member_json_entries: Vec<String> = members
+    let workspace_member_json_entries: Vec<String> = workspace_member_names
         .iter()
-        .map(|member_identifier| format!("\"{member_identifier}\""))
+        .map(|workspace_member_name| format!("\"{workspace_member_name}\""))
         .collect();
     let json = format!(
         r#"{{"packages":[{}],"workspace_members":[{}],"workspace_root":"/w",
@@ -207,7 +212,7 @@ fn every_forbidden_dependency_of_one_crate_is_named() {
 }
 
 #[test]
-fn direct_deps_keeps_only_workspace_members_sorted_by_name() {
+fn list_direct_dependencies_keeps_only_workspace_crates_sorted_by_name() {
     let workspace_metadata = build_metadata(
         &["koshi-pty", "koshi-core"],
         &[
@@ -238,7 +243,7 @@ fn direct_deps_keeps_only_workspace_members_sorted_by_name() {
 }
 
 #[test]
-fn direct_deps_uses_package_name_for_renamed_dependencies() {
+fn list_direct_dependencies_uses_package_names_for_renamed_dependencies() {
     let dependency_json = format_dependency_json("portable-pty", "null", false, None, Some("pty"));
     let workspace_metadata = build_metadata(
         &["koshi-runtime"],
@@ -255,15 +260,18 @@ fn direct_deps_uses_package_name_for_renamed_dependencies() {
 }
 
 #[test]
-fn direct_deps_sorts_and_deduplicates_dependencies_of_every_kind() {
-    let deps = [
+fn list_direct_dependencies_sorts_and_deduplicates_every_dependency_kind() {
+    let dependency_metadata_entries = [
         format_dependency_json("tokio", "\"dev\"", false, None, None),
         format_dependency_json("portable-pty", "null", false, None, None),
         format_dependency_json("cc", "\"build\"", true, Some("cfg(windows)"), None),
         format_dependency_json("tokio", "null", false, None, None),
     ]
     .join(",");
-    let workspace_metadata = build_metadata(&["koshi-pty"], &[("koshi-pty", &format!("[{deps}]"))]);
+    let workspace_metadata = build_metadata(
+        &["koshi-pty"],
+        &[("koshi-pty", &format!("[{dependency_metadata_entries}]"))],
+    );
     assert_eq!(
         list_direct_dependencies(&workspace_metadata),
         vec![(

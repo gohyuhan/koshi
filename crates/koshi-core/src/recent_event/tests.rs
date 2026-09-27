@@ -25,21 +25,21 @@ fn every_event_variant_records_the_name_it_reports() {
     }
 }
 
-/// Every UUID `serialized_json_value` holds, anywhere inside it. Every typed id serializes as
+/// Every UUID `serialized_json_node` holds, anywhere inside it. Every typed id serializes as
 /// a bare UUID string, so this finds each one an event or a record names.
-fn collect_ids_from_json(serialized_json_value: &serde_json::Value) -> BTreeSet<String> {
-    match serialized_json_value {
+fn collect_uuid_strings_from_json(serialized_json_node: &serde_json::Value) -> BTreeSet<String> {
+    match serialized_json_node {
         serde_json::Value::String(text) => match uuid::Uuid::parse_str(text) {
             Ok(_) => BTreeSet::from([text.clone()]),
             Err(_) => BTreeSet::new(),
         },
-        serde_json::Value::Array(serialized_json_values) => serialized_json_values
+        serde_json::Value::Array(serialized_json_nodes) => serialized_json_nodes
             .iter()
-            .flat_map(collect_ids_from_json)
+            .flat_map(collect_uuid_strings_from_json)
             .collect(),
         serde_json::Value::Object(serialized_json_fields) => serialized_json_fields
             .values()
-            .flat_map(collect_ids_from_json)
+            .flat_map(collect_uuid_strings_from_json)
             .collect(),
         _ => BTreeSet::new(),
     }
@@ -50,21 +50,22 @@ fn collect_ids_from_json(serialized_json_value: &serde_json::Value) -> BTreeSet<
 /// a client just left have nowhere to go.
 fn list_omitted_event_ids(event: &Event) -> BTreeSet<String> {
     match event {
-        Event::PaneFocused(payload) => payload
+        Event::PaneFocused(pane_focused) => pane_focused
             .previous_pane_id
             .iter()
             .map(ToString::to_string)
             .map(|pane_id_text| pane_id_text.trim_start_matches("pane-").to_string())
             .collect(),
-        Event::TabFocused(payload) => BTreeSet::from([payload
+        Event::TabFocused(tab_focused) => BTreeSet::from([tab_focused
             .previous_tab_id
             .to_string()
             .trim_start_matches("tab-")
             .to_string()]),
         Event::PanePlacementCommitted(_) => {
-            let named_event_ids =
-                collect_ids_from_json(&serde_json::to_value(event).expect("event encodes"));
-            let recorded_event_ids = collect_ids_from_json(
+            let named_event_ids = collect_uuid_strings_from_json(
+                &serde_json::to_value(event).expect("event encodes"),
+            );
+            let recorded_event_ids = collect_uuid_strings_from_json(
                 &serde_json::to_value(record_event(event, build_occurred_at()))
                     .expect("recent event encodes"),
             );
@@ -81,8 +82,9 @@ fn list_omitted_event_ids(event: &Event) -> BTreeSet<String> {
 fn every_id_an_event_names_reaches_its_record_and_no_other_id_does() {
     for (event, event_name) in list_event_cases() {
         let recorded_event = record_event(&event, build_occurred_at());
-        let event_ids = collect_ids_from_json(&serde_json::to_value(&event).unwrap());
-        let recorded_ids = collect_ids_from_json(&serde_json::to_value(&recorded_event).unwrap());
+        let event_ids = collect_uuid_strings_from_json(&serde_json::to_value(&event).unwrap());
+        let recorded_ids =
+            collect_uuid_strings_from_json(&serde_json::to_value(&recorded_event).unwrap());
 
         assert!(
             recorded_ids.is_subset(&event_ids),

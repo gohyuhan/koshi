@@ -160,12 +160,14 @@ impl SpawnSpec {
 /// when present and non-empty, else `fallback_program`. A set-but-empty variable
 /// (`SHELL=`) takes `fallback_program`.
 fn resolve_shell_program(
-    environment_value: Option<std::ffi::OsString>,
+    shell_program_environment_variable: Option<std::ffi::OsString>,
     fallback_program: &str,
 ) -> PathBuf {
     PathBuf::from(
-        environment_value
-            .filter(|environment_value| !environment_value.is_empty())
+        shell_program_environment_variable
+            .filter(|shell_program_environment_variable| {
+                !shell_program_environment_variable.is_empty()
+            })
             .unwrap_or_else(|| fallback_program.into()),
     )
 }
@@ -202,8 +204,8 @@ pub mod duration_seconds {
     where
         D: Deserializer<'de>,
     {
-        let seconds = u64::deserialize(deserializer)?;
-        Ok(Duration::from_secs(seconds))
+        let duration_seconds = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(duration_seconds))
     }
 }
 

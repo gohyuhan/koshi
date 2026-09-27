@@ -9,24 +9,27 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use super::*;
 use crate::types::SCHEMA_VERSION;
 
-/// Parses `keybinding_text` as a keybinding file at a fixed test path.
+/// Parses `keybinding_source_text` as a keybinding file at a fixed test path.
 fn parse_keybinding_text(
-    keybinding_text: &str,
+    keybinding_source_text: &str,
 ) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
-    let keybinding_text_with_version = if keybinding_text
+    let keybinding_source_text_with_version = if keybinding_source_text
         .lines()
-        .any(|line| line.trim_start().starts_with("version "))
+        .any(|keybinding_line_text| keybinding_line_text.trim_start().starts_with("version "))
     {
-        keybinding_text.to_string()
+        keybinding_source_text.to_string()
     } else {
-        format!("version 1\n{keybinding_text}")
+        format!("version 1\n{keybinding_source_text}")
     };
-    parse_keybindings(Path::new("keybinding.kdl"), &keybinding_text_with_version)
+    parse_keybindings(
+        Path::new("keybinding.kdl"),
+        &keybinding_source_text_with_version,
+    )
 }
 
-/// Parses `keybinding_text`, expecting schema violations, and returns their messages.
-fn collect_keybinding_diagnostic_messages(keybinding_text: &str) -> Vec<String> {
-    match parse_keybinding_text(keybinding_text) {
+/// Parses `keybinding_source_text`, expecting schema violations, and returns their messages.
+fn collect_keybinding_diagnostic_messages(keybinding_source_text: &str) -> Vec<String> {
+    match parse_keybinding_text(keybinding_source_text) {
         Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics
             .iter()
             .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())

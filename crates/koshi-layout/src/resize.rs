@@ -46,10 +46,10 @@ pub enum ResizeError {
     },
 }
 
-/// Moves `pane_id`'s border on the `direction` side by `cell_delta`: positive
+/// Moves `pane_id`'s border on the `direction` side by `resize_cell_delta`: positive
 /// moves it outward (the pane grows and the adjacent sibling on that side
 /// donates the cells), negative moves it inward (the pane donates and that
-/// sibling gains them). A `cell_delta` of `0` runs the same lookups and checks
+/// sibling gains them). A `resize_cell_delta` of `0` runs the same lookups and checks
 /// and moves no cells.
 ///
 /// The border that moves belongs to the deepest ancestor split that runs on
@@ -75,7 +75,7 @@ pub fn resize_layout_with_sizing(
     tab_rect: Rect,
     pane_id: PaneId,
     direction: Direction,
-    cell_delta: i16,
+    resize_cell_delta: i16,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, ResizeError> {
     let pane_path = layout_tree
@@ -87,34 +87,34 @@ pub fn resize_layout_with_sizing(
 
     // The deepest ancestor split on the wanted axis with a neighbor on the
     // resize side owns the border being moved.
-    let (ancestor_depth, target_child_index, neighbor_child_index) =
+    let (resize_split_depth, target_pane_child_index, adjacent_child_index) =
         find_resize_border(layout_tree, &pane_path, split_direction, direction)
             .ok_or(ResizeError::NoAdjacentBorder { pane_id, direction })?;
 
     // The sign picks who donates the cells across the border: on a grow the
     // neighbor gives them to the pane, on a shrink the pane gives them to
     // the neighbor.
-    let requested_cell_count = cell_delta.unsigned_abs();
-    let (receiving_child_index, donating_child_index) = if cell_delta < 0 {
-        (neighbor_child_index, target_child_index)
+    let requested_cell_count = resize_cell_delta.unsigned_abs();
+    let (receiving_child_index, donating_child_index) = if resize_cell_delta < 0 {
+        (adjacent_child_index, target_pane_child_index)
     } else {
-        (target_child_index, neighbor_child_index)
+        (target_pane_child_index, adjacent_child_index)
     };
 
     // The donor can give only what its solved size holds above its floor.
-    let split_node = layout_tree.get_split_at_path(&pane_path[..ancestor_depth]);
+    let split_node = layout_tree.get_split_at_path(&pane_path[..resize_split_depth]);
     let split_rect = compute_rect_at_path(
         layout_tree,
         tab_rect,
-        &pane_path[..ancestor_depth],
+        &pane_path[..resize_split_depth],
         pane_sizing,
     );
-    let donating_rect =
+    let donating_pane_rect =
         compute_directional_child_rects(split_node, split_rect, pane_sizing)[donating_child_index];
     let donating_cell_count = if is_horizontal_split {
-        donating_rect.size.column_count
+        donating_pane_rect.size.column_count
     } else {
-        donating_rect.size.row_count
+        donating_pane_rect.size.row_count
     };
     let spare_cell_count = donating_cell_count.saturating_sub(compute_slot_floor(
         split_node,
@@ -130,7 +130,7 @@ pub fn resize_layout_with_sizing(
     }
 
     let mut updated_layout_tree = layout_tree.clone();
-    let split_node = updated_layout_tree.get_split_at_path_mut(&pane_path[..ancestor_depth]);
+    let split_node = updated_layout_tree.get_split_at_path_mut(&pane_path[..resize_split_depth]);
     // Missing weights are padded with the default share up to the child
     // count.
     if split_node.weights.len() < split_node.children.len() {
@@ -181,15 +181,15 @@ fn find_resize_border(
         if split_node.direction != split_direction {
             continue;
         }
-        let target_child_index = pane_path[ancestor_depth];
-        let neighbor_child_index = match direction {
-            Direction::Left | Direction::Up => target_child_index.checked_sub(1),
-            Direction::Right | Direction::Down => (target_child_index + 1
+        let pane_path_child_index = pane_path[ancestor_depth];
+        let adjacent_child_index = match direction {
+            Direction::Left | Direction::Up => pane_path_child_index.checked_sub(1),
+            Direction::Right | Direction::Down => (pane_path_child_index + 1
                 < split_node.children.len())
-            .then_some(target_child_index + 1),
+            .then_some(pane_path_child_index + 1),
         };
-        if let Some(neighbor_child_index) = neighbor_child_index {
-            return Some((ancestor_depth, target_child_index, neighbor_child_index));
+        if let Some(adjacent_child_index) = adjacent_child_index {
+            return Some((ancestor_depth, pane_path_child_index, adjacent_child_index));
         }
     }
     None
@@ -206,22 +206,24 @@ fn compute_rect_at_path(
     pane_sizing: PaneSizing,
 ) -> Rect {
     let mut layout_node = layout_tree;
-    let mut current_rect = tab_rect;
+    let mut current_layout_node_rect = tab_rect;
     for &child_index in pane_path {
         let LayoutNode::Split(split) = layout_node else {
             unreachable!("pane path was built over this tree");
         };
-        current_rect = match split.direction {
+        current_layout_node_rect = match split.direction {
             SplitDirection::Horizontal | SplitDirection::Vertical => {
-                compute_directional_child_rects(split, current_rect, pane_sizing)[child_index]
+                compute_directional_child_rects(split, current_layout_node_rect, pane_sizing)
+                    [child_index]
             }
             SplitDirection::Stacked => {
-                compute_stacked_child_rects(split, current_rect, pane_sizing)[child_index]
+                compute_stacked_child_rects(split, current_layout_node_rect, pane_sizing)
+                    [child_index]
             }
         };
         layout_node = &split.children[child_index];
     }
-    current_rect
+    current_layout_node_rect
 }
 
 #[cfg(test)]

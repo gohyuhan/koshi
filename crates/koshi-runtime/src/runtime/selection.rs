@@ -38,21 +38,19 @@ impl Server {
         let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        for client_record in session.clients.list_attached_clients_mut() {
-            let is_selection_outside_text =
-                client_record
-                    .get_selection(pane_id)
-                    .is_some_and(|selection| {
-                        koshi_terminal::selection::order_selection_positions(
-                            selection.anchor,
-                            selection.cursor,
-                        )
-                        .end_position
-                        .row_index
-                            < first_retained_row_index
-                    });
-            if is_selection_outside_text {
-                client_record.clear_selection(pane_id);
+        for client in session.clients.list_attached_clients_mut() {
+            let is_selection_outside_retained_text =
+                client.get_selection(pane_id).is_some_and(|selection| {
+                    koshi_terminal::selection::order_selection_positions(
+                        selection.anchor,
+                        selection.cursor,
+                    )
+                    .end_position
+                    .row_index
+                        < first_retained_row_index
+                });
+            if is_selection_outside_retained_text {
+                client.clear_selection(pane_id);
             }
         }
     }
@@ -66,10 +64,10 @@ impl Server {
     /// An unknown client, and a client with no highlight in `pane_id`,
     /// dispatch nothing.
     pub(crate) fn clear_selection_on_pane_input(&mut self, client_id: ClientId, pane_id: PaneId) {
-        let has_selection = self
+        let has_client_selection_in_pane = self
             .get_client_mut(client_id)
-            .is_some_and(|client_record| client_record.get_selection(pane_id).is_some());
-        if has_selection {
+            .is_some_and(|client| client.get_selection(pane_id).is_some());
+        if has_client_selection_in_pane {
             self.dispatch_visual(
                 client_id,
                 VisualCommand::ClearSelection(ClearSelectionArgs { pane_id }),
@@ -84,8 +82,8 @@ impl Server {
         let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        for client_record in session.clients.list_attached_clients_mut() {
-            client_record.clear_selection(pane_id);
+        for client in session.clients.list_attached_clients_mut() {
+            client.clear_selection(pane_id);
         }
     }
 }

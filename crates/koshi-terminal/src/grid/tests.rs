@@ -65,14 +65,14 @@ fn partial_line_scroll_moves_cells_without_moving_row_metadata() {
 
 #[test]
 fn cells_differing_only_by_a_combining_mark_are_not_equal() {
-    let plain = Cell::from_character('e', 1, Style::default());
-    let mut accented = Cell::from_character('e', 1, Style::default());
-    accented.push_combining('\u{0301}'); // combining acute accent
-    assert_ne!(plain, accented);
+    let plain_cell = Cell::from_character('e', 1, Style::default());
+    let mut accented_cell = Cell::from_character('e', 1, Style::default());
+    accented_cell.push_combining('\u{0301}'); // combining acute accent
+    assert_ne!(plain_cell, accented_cell);
 
-    let mut same_accent = Cell::from_character('e', 1, Style::default());
-    same_accent.push_combining('\u{0301}');
-    assert_eq!(accented, same_accent);
+    let mut same_accent_cell = Cell::from_character('e', 1, Style::default());
+    same_accent_cell.push_combining('\u{0301}');
+    assert_eq!(accented_cell, same_accent_cell);
 }
 
 #[test]

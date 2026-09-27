@@ -188,8 +188,11 @@ pub fn run_share_command(
                 &runtime_directory,
                 RouterRequestKind::ListTokens { scope: token_scope },
             )? {
-                RouterResult::Tokens(entries) => {
-                    print!("{}", output::render_share_list(&entries, *output_format));
+                RouterResult::Tokens(token_entries) => {
+                    print!(
+                        "{}",
+                        output::render_share_list(&token_entries, *output_format)
+                    );
                     Ok(())
                 }
                 unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
@@ -393,7 +396,7 @@ fn resolve_remote_ready_or_unknown(
 fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, CliError> {
     let remote_status_response =
         router_client::submit_router_request(runtime_directory, RouterRequestKind::RemoteStatus)?;
-    let (remote_address, is_remote_access_enabled, is_remote_listener_active) =
+    let (remote_listen_address, is_remote_access_enabled, is_remote_listener_active) =
         match remote_status_response {
             RouterResult::RemoteStatus {
                 remote_listen_address,
@@ -409,25 +412,25 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
                 return Err(build_router_refusal(&unexpected_router_result))
             }
         };
-    let Some(remote_address) = remote_address else {
+    let Some(remote_listen_address) = remote_listen_address else {
         return Ok(RemoteReady::NoAddress);
     };
     if is_remote_access_enabled && is_remote_listener_active {
         return Ok(RemoteReady::On {
-            remote_listen_address: remote_address,
+            remote_listen_address,
         });
     }
     let prompt_text = if is_remote_access_enabled {
-        println!("remote access is on, and nothing is listening on {remote_address}.");
-        format!("try to open {remote_address} now? [y/N] ")
+        println!("remote access is on, and nothing is listening on {remote_listen_address}.");
+        format!("try to open {remote_listen_address} now? [y/N] ")
     } else {
         println!("remote access is off.");
-        format!("turn it on and open {remote_address}? [y/N] ")
+        format!("turn it on and open {remote_listen_address}? [y/N] ")
     };
     if !prompt::read_yes_answer(&prompt_text) {
         return Ok(if is_remote_access_enabled {
             RemoteReady::Blocked {
-                remote_listen_address: remote_address,
+                remote_listen_address,
             }
         } else {
             RemoteReady::Off
@@ -442,7 +445,7 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
             remote_listen_address,
         }),
         RouterResult::Error(_) => Ok(RemoteReady::Blocked {
-            remote_listen_address: remote_address,
+            remote_listen_address,
         }),
         unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
     }

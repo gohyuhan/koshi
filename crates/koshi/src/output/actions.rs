@@ -52,15 +52,18 @@ struct ActionDetail {
 /// Render a `koshi actions list` answer over every action in the static table.
 #[must_use]
 pub fn render_actions_list(output_format: OutputFormat) -> String {
-    let summaries: Vec<ActionSummary> = build_core_action_seeds()
+    let action_summaries: Vec<ActionSummary> = build_core_action_seeds()
         .iter()
         .map(build_action_summary)
         .collect();
     match output_format {
-        OutputFormat::Json => render_json(&summaries),
+        OutputFormat::Json => render_json(&action_summaries),
         OutputFormat::Table => render_table(
             ACTION_LIST_HEADERS,
-            summaries.iter().map(render_action_summary_cells).collect(),
+            action_summaries
+                .iter()
+                .map(render_action_summary_cells)
+                .collect(),
         ),
     }
 }
@@ -70,10 +73,12 @@ pub fn render_actions_list(output_format: OutputFormat) -> String {
 /// reference).
 #[must_use]
 pub fn render_action_explain(action_name: &str, output_format: OutputFormat) -> Option<String> {
-    let seeds = build_core_action_seeds();
-    let (action_reference, action_metadata) = seeds.iter().find(|(candidate, _)| {
-        candidate.action_name.get_name() == action_name || candidate.to_string() == action_name
-    })?;
+    let action_seeds = build_core_action_seeds();
+    let (action_reference, action_metadata) =
+        action_seeds.iter().find(|(candidate_action, _)| {
+            candidate_action.action_name.get_name() == action_name
+                || candidate_action.to_string() == action_name
+        })?;
     let action_detail = build_action_detail(action_reference, action_metadata);
     Some(match output_format {
         OutputFormat::Json => render_json(&action_detail),
@@ -120,30 +125,30 @@ fn build_action_detail(
             .map(|target_kind| format_target_label(*target_kind).to_string())
             .collect(),
         command: format_command_label(&action_metadata.handler),
-        examples: build_action_examples(action_reference),
+        examples: list_action_examples(action_reference),
     }
 }
 
 /// One [`ActionDetail`] as field cells, in [`ACTION_DETAIL_HEADERS`] order. The
 /// list-valued `targets`/`examples` join with `, ` and print `-` when empty.
-fn render_action_detail_cells(detail: &ActionDetail) -> Vec<String> {
+fn render_action_detail_cells(action_detail: &ActionDetail) -> Vec<String> {
     vec![
-        detail.action.clone(),
-        detail.display_name.clone(),
-        detail.description.clone(),
-        detail.scope.clone(),
-        render_joined_text_cell(&detail.targets),
-        detail.command.clone(),
-        render_joined_text_cell(&detail.examples),
+        action_detail.action.clone(),
+        action_detail.display_name.clone(),
+        action_detail.description.clone(),
+        action_detail.scope.clone(),
+        render_joined_text_cell(&action_detail.targets),
+        action_detail.command.clone(),
+        render_joined_text_cell(&action_detail.examples),
     ]
 }
 
 /// A list of strings as one cell: `-` when empty, else the items joined by `, `.
-pub(super) fn render_joined_text_cell(text_values: &[String]) -> String {
-    if text_values.is_empty() {
+pub(super) fn render_joined_text_cell(cell_text_values: &[String]) -> String {
+    if cell_text_values.is_empty() {
         "-".to_string()
     } else {
-        text_values.join(", ")
+        cell_text_values.join(", ")
     }
 }
 
@@ -177,7 +182,7 @@ pub(super) fn format_command_label(action_handler: &ActionHandlerReference) -> S
 
 /// The usage examples for an action: always its config reference
 /// (`core:new-pane`), plus `koshi <verb>` when that runs the action on its own.
-fn build_action_examples(action_reference: &ActionReference) -> Vec<String> {
+fn list_action_examples(action_reference: &ActionReference) -> Vec<String> {
     let action_name = action_reference.action_name.get_name();
     let mut action_examples = vec![action_reference.to_string()];
     if can_run_cli_verb_without_arguments(action_name) {

@@ -95,7 +95,7 @@ fn a_capital_and_an_explicit_shift_name_the_same_chord() {
 
 #[test]
 fn every_named_key_resolves() {
-    let cases = [
+    let named_key_cases = [
         ("<CR>", NamedKey::Enter),
         ("<Tab>", NamedKey::Tab),
         ("<BS>", NamedKey::Backspace),
@@ -112,10 +112,10 @@ fn every_named_key_resolves() {
         ("<Up>", NamedKey::Up),
         ("<Down>", NamedKey::Down),
     ];
-    for (chord_text, key_value) in cases {
+    for (chord_text, named_key) in named_key_cases {
         assert_eq!(
             parse_chord(chord_text),
-            Ok(build_key_chord(ModFlags::NONE, Key::Named(key_value))),
+            Ok(build_key_chord(ModFlags::NONE, Key::Named(named_key))),
             "parsing {chord_text}"
         );
     }
@@ -889,7 +889,7 @@ fn a_bracketed_leader_carries_the_chord_parsers_rejection_unchanged() {
 
 #[test]
 fn every_error_kind_renders_its_own_message() {
-    let error_cases = [
+    let key_parse_error_cases = [
         (KeyParseErrorKind::Empty, "empty key"),
         (KeyParseErrorKind::UnclosedBracket, "missing closing `>`"),
         (KeyParseErrorKind::MissingKey, "no key after the modifiers"),
@@ -947,7 +947,7 @@ fn every_error_kind_renders_its_own_message() {
             "the sequence has 5 chords; the cap is 4",
         ),
     ];
-    for (error_kind, expected_message) in error_cases {
-        assert_eq!(error_kind.to_string(), expected_message);
+    for (key_parse_error_kind, expected_error_message) in key_parse_error_cases {
+        assert_eq!(key_parse_error_kind.to_string(), expected_error_message);
     }
 }

@@ -23,18 +23,18 @@ fn the_three_charsets_are_distinct() {
 
 #[test]
 fn fresh_render_state_has_default_pen_all_ascii_slots_and_gl_on_g0() {
-    let render = RenderState::new();
-    assert_eq!(render.style, Style::default());
-    assert_eq!(render.charsets, [Charset::Ascii; 4]);
-    assert_eq!(render.gl, 0);
+    let render_state = RenderState::new();
+    assert_eq!(render_state.style, Style::default());
+    assert_eq!(render_state.charsets, [Charset::Ascii; 4]);
+    assert_eq!(render_state.gl, 0);
 }
 
 #[test]
 fn render_states_differing_only_by_the_active_gl_slot_are_not_equal() {
-    let on_g0 = RenderState::new();
-    let mut on_g1 = RenderState::new();
-    on_g1.gl = 1;
-    assert_ne!(on_g0, on_g1);
+    let render_state_on_g0 = RenderState::new();
+    let mut render_state_on_g1 = RenderState::new();
+    render_state_on_g1.gl = 1;
+    assert_ne!(render_state_on_g0, render_state_on_g1);
 }
 
 #[test]
@@ -49,20 +49,21 @@ fn render_states_differing_only_by_a_charset_designation_are_not_equal() {
 fn render_states_differing_only_by_the_pen_are_not_equal() {
     let default_pen = RenderState::new();
     let mut colored_pen = RenderState::new();
-    let mut style = Style::default();
-    style.set_background_color(Color::Indexed(4));
-    colored_pen.style = style;
+    let mut pen_style = Style::default();
+    pen_style.set_background_color(Color::Indexed(4));
+    colored_pen.style = pen_style;
     assert_ne!(default_pen, colored_pen);
 }
 
 #[test]
 fn render_state_serializes_charsets_by_name_and_gl_as_a_number() {
-    let mut render = RenderState::new();
-    render.charsets[1] = Charset::DecLineDrawing;
-    render.charsets[2] = Charset::Uk;
-    render.gl = 1;
+    let mut render_state = RenderState::new();
+    render_state.charsets[1] = Charset::DecLineDrawing;
+    render_state.charsets[2] = Charset::Uk;
+    render_state.gl = 1;
 
-    let serialized_render_state = serde_json::to_value(render).expect("render state serializes");
+    let serialized_render_state =
+        serde_json::to_value(render_state).expect("render state serializes");
     assert_eq!(
         serialized_render_state["charsets"],
         serde_json::json!(["Ascii", "DecLineDrawing", "Uk", "Ascii"])
@@ -73,17 +74,17 @@ fn render_state_serializes_charsets_by_name_and_gl_as_a_number() {
         serde_json::to_value(Style::default()).unwrap()
     );
 
-    let restored: RenderState =
+    let restored_render_state: RenderState =
         serde_json::from_value(serialized_render_state).expect("render state deserializes");
-    assert_eq!(restored, render);
+    assert_eq!(restored_render_state, render_state);
 }
 
 #[test]
 fn an_unknown_charset_name_fails_to_deserialize() {
-    let deserialize_error =
+    let charset_deserialization_error =
         serde_json::from_value::<Charset>(serde_json::json!("Latin1")).unwrap_err();
     assert_eq!(
-        deserialize_error.to_string(),
+        charset_deserialization_error.to_string(),
         "unknown variant `Latin1`, expected one of `Ascii`, `DecLineDrawing`, `Uk`"
     );
 }
@@ -96,10 +97,13 @@ fn a_gl_slot_past_g3_is_refused() {
         serde_json::to_value(RenderState::new()).expect("render state serializes");
     serialized_render_state["gl"] = serde_json::json!(4);
 
-    let deserialize_error =
+    let render_state_deserialization_error =
         serde_json::from_value::<RenderState>(serialized_render_state).unwrap_err();
 
-    assert_eq!(deserialize_error.to_string(), "GL slot must be 0-3");
+    assert_eq!(
+        render_state_deserialization_error.to_string(),
+        "GL slot must be 0-3"
+    );
     assert_eq!(
         serde_json::from_value::<RenderState>(serde_json::json!({
             "style": serde_json::to_value(Style::default()).unwrap(),

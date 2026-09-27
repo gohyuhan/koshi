@@ -22,18 +22,18 @@ fn build_new_pane_args() -> NewPaneArgs {
 }
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
-fn assert_json_roundtrip<Roundtrippable>(roundtrippable_value: &Roundtrippable)
+fn assert_json_roundtrip<Roundtrippable>(roundtrippable_subject: &Roundtrippable)
 where
     Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let serialized_json = serde_json::to_string(roundtrippable_value).expect("serialize");
-    let decoded_roundtrippable_value: Roundtrippable =
+    let serialized_json = serde_json::to_string(roundtrippable_subject).expect("serialize");
+    let decoded_roundtrippable_subject: Roundtrippable =
         serde_json::from_str(&serialized_json).expect("deserialize");
-    assert_eq!(*roundtrippable_value, decoded_roundtrippable_value);
+    assert_eq!(*roundtrippable_subject, decoded_roundtrippable_subject);
 }
 
 #[test]
-fn unit_commands_roundtrip() {
+fn unit_command_variants_round_trip_through_json() {
     assert_json_roundtrip(&Command::ToggleLockMode(ToggleLockModeArgs {
         client_id: Some(ClientId::new()),
     }));
@@ -42,7 +42,7 @@ fn unit_commands_roundtrip() {
 }
 
 #[test]
-fn pane_commands_roundtrip() {
+fn pane_command_variants_round_trip_through_json() {
     assert_json_roundtrip(&Command::NewPane(NewPaneArgs {
         direction: Direction::Left,
         client_id: Some(ClientId::new()),
@@ -155,7 +155,7 @@ fn pane_commands_roundtrip() {
 }
 
 #[test]
-fn tab_and_session_commands_roundtrip() {
+fn tab_and_session_command_variants_round_trip_through_json() {
     assert_json_roundtrip(&Command::FocusTab(FocusTabArgs {
         focus_target: TabTarget::Next,
         client_id: None,
@@ -171,15 +171,15 @@ fn tab_and_session_commands_roundtrip() {
 }
 
 #[test]
-fn write_to_pane_roundtrips() {
+fn write_to_pane_command_round_trips_through_json() {
     assert_json_roundtrip(&Command::WriteToPane(WriteToPaneArgs {
         pane_id: None,
-        input_bytes: b"ls -la\n".to_vec(),
+        pane_input_bytes: b"ls -la\n".to_vec(),
     }));
 }
 
 #[test]
-fn visual_commands_roundtrip() {
+fn visual_command_variants_round_trip_through_json() {
     assert_json_roundtrip(&Command::Visual(VisualCommand::SetSelection(
         SetSelectionArgs {
             pane_id: PaneId::new(),
@@ -209,8 +209,10 @@ fn visual_commands_roundtrip() {
 
 /// The variant name from a value's Debug repr: everything before the first
 /// `(`, `{`, or space, or the whole string for a unit variant.
-fn get_variant_name<T: std::fmt::Debug>(debug_value: &T) -> String {
-    let debug_text = format!("{debug_value:?}");
+fn format_debug_variant_name<DebugSubject: std::fmt::Debug>(
+    debug_subject: &DebugSubject,
+) -> String {
+    let debug_text = format!("{debug_subject:?}");
     let variant_end = debug_text.find(['(', '{', ' ']).unwrap_or(debug_text.len());
     debug_text[..variant_end].to_string()
 }
@@ -330,7 +332,7 @@ fn command_variant_names_are_canonical() {
     ];
     assert_eq!(command_cases.len(), 22);
     for (command, command_name) in &command_cases {
-        assert_eq!(&get_variant_name(command), command_name);
+        assert_eq!(&format_debug_variant_name(command), command_name);
     }
 }
 
@@ -370,12 +372,12 @@ fn visual_variant_names_are_canonical() {
     ];
     assert_eq!(visual_command_cases.len(), 3);
     for (visual_command, command_name) in &visual_command_cases {
-        assert_eq!(&get_variant_name(visual_command), command_name);
+        assert_eq!(&format_debug_variant_name(visual_command), command_name);
     }
 }
 
 #[test]
-fn command_source_variants_roundtrip() {
+fn command_source_variants_round_trip_through_json() {
     assert_json_roundtrip(&CommandSource::KeyBinding {
         client_id: ClientId::new(),
     });
@@ -405,7 +407,7 @@ fn command_source_variants_roundtrip() {
 }
 
 #[test]
-fn command_envelope_roundtrips() {
+fn command_envelope_round_trips_through_json() {
     assert_json_roundtrip(&CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::InSessionCli {
@@ -419,21 +421,21 @@ fn command_envelope_roundtrips() {
 }
 
 #[test]
-fn envelope_client_id_mirrors_source() {
+fn command_envelope_client_id_matches_command_source() {
     let client_id = ClientId::new();
-    let with_client = CommandEnvelope::from_parts(
+    let command_envelope_with_client = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::KeyBinding { client_id },
         Command::TogglePaneFullscreen,
     );
-    assert_eq!(with_client.client_id, Some(client_id));
+    assert_eq!(command_envelope_with_client.client_id, Some(client_id));
 
-    let without_client = CommandEnvelope::from_parts(
+    let command_envelope_without_client = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(None, None),
         Command::TogglePaneFullscreen,
     );
-    assert_eq!(without_client.client_id, None);
+    assert_eq!(command_envelope_without_client.client_id, None);
 }
 
 #[test]
@@ -470,7 +472,7 @@ fn command_source_variant_names_are_canonical() {
     ];
     assert_eq!(command_source_cases.len(), 4);
     for (command_source, source_name) in &command_source_cases {
-        assert_eq!(&get_variant_name(command_source), source_name);
+        assert_eq!(&format_debug_variant_name(command_source), source_name);
     }
 }
 
@@ -536,7 +538,7 @@ fn deserialize_rejects_client_id_mismatch() {
 
 #[test]
 fn validate_command_envelope_rejects_client_id_mismatch() {
-    let forged = CommandEnvelope {
+    let forged_command_envelope = CommandEnvelope {
         command_id: CommandId::new(),
         command_source: CommandSource::KeyBinding {
             client_id: ClientId::new(),
@@ -545,7 +547,7 @@ fn validate_command_envelope_rejects_client_id_mismatch() {
         command: Command::ToggleLockMode(ToggleLockModeArgs::default()),
     };
     assert_eq!(
-        forged.validate_command_envelope(),
+        forged_command_envelope.validate_command_envelope(),
         Err(CommandEnvelopeError::ClientIdMismatch)
     );
 }
@@ -564,7 +566,7 @@ fn validate_command_envelope_accepts_consistent_envelope() {
 }
 
 #[test]
-fn command_envelope_error_message_is_human() {
+fn command_envelope_error_display_describes_client_id_mismatch() {
     assert_eq!(
         CommandEnvelopeError::ClientIdMismatch.to_string(),
         "envelope client_id does not match its source"
@@ -593,7 +595,7 @@ fn deserialize_rejects_a_missing_client_id_when_the_source_names_one() {
 }
 
 #[test]
-fn reject_reason_roundtrips() {
+fn reject_reason_variants_round_trip_through_json() {
     assert_json_roundtrip(&RejectReason::TargetGone);
     assert_json_roundtrip(&RejectReason::TargetAmbiguous);
     assert_json_roundtrip(&RejectReason::TargetNotFound);
@@ -604,7 +606,7 @@ fn reject_reason_roundtrips() {
 }
 
 #[test]
-fn command_result_roundtrips() {
+fn command_result_variants_round_trip_through_json() {
     assert_json_roundtrip(&CommandResult::Ok {
         command_id: CommandId::new(),
         emitted_events: vec![
@@ -684,8 +686,8 @@ fn an_external_cli_source_without_a_client_still_decodes() {
     );
 
     let session_id = SessionId::new();
-    let uuid = session_id.get_uuid();
-    let source_json = format!(r#"{{"ExternalCli":{{"session_id":"{uuid}"}}}}"#);
+    let session_uuid = session_id.get_uuid();
+    let source_json = format!(r#"{{"ExternalCli":{{"session_id":"{session_uuid}"}}}}"#);
     assert_eq!(
         serde_json::from_str::<CommandSource>(&source_json).unwrap(),
         CommandSource::ExternalCli {
@@ -696,10 +698,10 @@ fn an_external_cli_source_without_a_client_still_decodes() {
 }
 
 #[test]
-fn an_older_build_ignores_the_target_client() {
+fn older_external_cli_source_ignores_target_client_id() {
     /// The `ExternalCli` shape 0.3.0 decodes: a session target and nothing else.
     #[derive(Deserialize, PartialEq, Debug)]
-    enum OldSource {
+    enum ExternalCliSessionOnlySource {
         ExternalCli { session_id: Option<SessionId> },
     }
 
@@ -712,8 +714,9 @@ fn an_older_build_ignores_the_target_client() {
     .expect("serialize");
 
     assert_eq!(
-        serde_json::from_str::<OldSource>(&serialized_command_source).expect("deserialize"),
-        OldSource::ExternalCli {
+        serde_json::from_str::<ExternalCliSessionOnlySource>(&serialized_command_source)
+            .expect("deserialize"),
+        ExternalCliSessionOnlySource::ExternalCli {
             session_id: Some(session_id),
         }
     );
@@ -752,19 +755,19 @@ fn the_target_client_is_never_the_acting_client() {
         None
     );
 
-    let envelope = CommandEnvelope::from_parts(
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(Some(session_id), Some(client_id)),
         Command::TogglePaneFullscreen,
     );
-    assert_eq!(envelope.client_id, None);
-    envelope
+    assert_eq!(command_envelope.client_id, None);
+    command_envelope
         .validate_command_envelope()
         .expect("a source naming a target client is a well-formed envelope");
 }
 
 /// The `RunCommandPane` request that spawns `ls` with nothing else chosen.
-fn run_ls_args() -> RunCommandPaneArgs {
+fn build_run_ls_command_args() -> RunCommandPaneArgs {
     RunCommandPaneArgs {
         spawn_spec: SpawnSpec {
             program: std::path::PathBuf::from("ls"),
@@ -856,7 +859,7 @@ fn source_constructors_build_the_matching_variant() {
 }
 
 #[test]
-fn from_parts_derives_the_client_from_every_source() {
+fn command_envelope_from_parts_derives_client_id_from_source() {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
     let pane_id = PaneId::new();
@@ -991,7 +994,7 @@ fn an_envelope_written_without_its_command_is_rejected() {
 }
 
 #[test]
-fn every_payload_free_command_is_a_bare_wire_string() {
+fn every_payload_free_command_round_trips_as_a_bare_wire_string() {
     for (command, expected_wire_text) in [
         (Command::ToggleMouseSelect, "\"ToggleMouseSelect\""),
         (Command::TogglePaneFullscreen, "\"TogglePaneFullscreen\""),
@@ -1010,7 +1013,7 @@ fn every_payload_free_command_is_a_bare_wire_string() {
 }
 
 #[test]
-fn focus_targets_and_tab_targets_roundtrip_every_variant() {
+fn focus_and_tab_target_variants_round_trip_through_json() {
     assert_json_roundtrip(&FocusTarget::Pane(PaneId::new()));
     assert_json_roundtrip(&FocusTarget::Direction(Direction::Down));
     assert_json_roundtrip(&TabTarget::Next);
@@ -1021,7 +1024,7 @@ fn focus_targets_and_tab_targets_roundtrip_every_variant() {
 }
 
 #[test]
-fn selection_kinds_roundtrip_every_variant() {
+fn selection_kind_variants_round_trip_through_json() {
     assert_json_roundtrip(&SelectionKind::Character);
     assert_json_roundtrip(&SelectionKind::Word);
     assert_json_roundtrip(&SelectionKind::Line);
@@ -1029,7 +1032,7 @@ fn selection_kinds_roundtrip_every_variant() {
 }
 
 #[test]
-fn extreme_numeric_fields_roundtrip() {
+fn extreme_numeric_fields_round_trip_through_json() {
     assert_json_roundtrip(&ResizePaneArgs {
         pane_id: None,
         direction: Direction::Left,
@@ -1071,31 +1074,33 @@ fn a_resize_size_past_i16_is_rejected() {
 
 #[test]
 fn write_to_pane_carries_every_byte_value() {
-    let input_bytes: Vec<u8> = (0..=255).collect();
+    let pane_input_bytes: Vec<u8> = (0..=255).collect();
     assert_json_roundtrip(&WriteToPaneArgs {
         pane_id: Some(PaneId::new()),
-        input_bytes: input_bytes.clone(),
+        pane_input_bytes: pane_input_bytes.clone(),
     });
 
     let write_to_pane_json = serde_json::to_value(WriteToPaneArgs {
         pane_id: None,
-        input_bytes,
+        pane_input_bytes,
     })
     .expect("serialize");
-    assert_eq!(write_to_pane_json["input_bytes"][0], json!(0));
-    assert_eq!(write_to_pane_json["input_bytes"][255], json!(255));
+    assert_eq!(write_to_pane_json["pane_input_bytes"][0], json!(0));
+    assert_eq!(write_to_pane_json["pane_input_bytes"][255], json!(255));
     assert_eq!(
-        write_to_pane_json["input_bytes"].as_array().map(Vec::len),
+        write_to_pane_json["pane_input_bytes"]
+            .as_array()
+            .map(Vec::len),
         Some(256)
     );
 }
 
 #[test]
-fn args_written_without_their_defaulted_fields_still_decode() {
+fn command_args_decode_when_defaulted_fields_are_missing() {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
-    let client_json = serde_json::to_value(client_id).expect("serialize");
-    let session_json = serde_json::to_value(session_id).expect("serialize");
+    let client_id_json = serde_json::to_value(client_id).expect("serialize");
+    let session_id_json = serde_json::to_value(session_id).expect("serialize");
 
     assert_eq!(
         serde_json::from_value::<ClosePaneArgs>(
@@ -1148,7 +1153,7 @@ fn args_written_without_their_defaulted_fields_still_decode() {
         DetachArgs { client_id: None }
     );
     assert_eq!(
-        serde_json::from_value::<SwitchSessionArgs>(json!({"session_id": session_json}))
+        serde_json::from_value::<SwitchSessionArgs>(json!({"session_id": session_id_json}))
             .expect("deserialize"),
         SwitchSessionArgs {
             client_id: None,
@@ -1157,7 +1162,7 @@ fn args_written_without_their_defaulted_fields_still_decode() {
     );
     assert_eq!(
         serde_json::from_value::<LockModeArgs>(
-            json!({"is_locked": false, "client_id": client_json})
+            json!({"is_locked": false, "client_id": client_id_json})
         )
         .expect("deserialize"),
         LockModeArgs {
@@ -1169,21 +1174,22 @@ fn args_written_without_their_defaulted_fields_still_decode() {
 
 #[test]
 fn run_command_pane_args_written_without_tab_and_client_still_decode() {
-    let mut command_args_json = serde_json::to_value(run_ls_args()).expect("serialize");
-    let command_fields = command_args_json
+    let mut command_args_json =
+        serde_json::to_value(build_run_ls_command_args()).expect("serialize");
+    let run_command_pane_args_fields = command_args_json
         .as_object_mut()
         .expect("args are a JSON object");
-    command_fields
+    run_command_pane_args_fields
         .remove("tab_id")
         .expect("the args carry a `tab_id` field to remove");
-    command_fields
+    run_command_pane_args_fields
         .remove("client_id")
         .expect("the args carry a `client_id` field to remove");
 
     let decoded_run_command_args: RunCommandPaneArgs =
         serde_json::from_value(command_args_json).expect("deserialize");
 
-    assert_eq!(decoded_run_command_args, run_ls_args());
+    assert_eq!(decoded_run_command_args, build_run_ls_command_args());
 }
 
 #[test]

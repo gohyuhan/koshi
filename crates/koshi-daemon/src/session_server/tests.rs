@@ -304,14 +304,14 @@ fn a_pass_with_no_render_due_pushes_no_frame() {
     // The push rides the render clock. An ungated one would build and queue a
     // frame on every pass, so a session nothing changed in — one woken only by
     // a discovery query — would keep filling its clients' queues.
-    let (mut server, _, _runtime_event_sender) = build_test_server();
+    let (mut server, _, runtime_event_sender) = build_test_server();
     seed_test_session(&mut server);
     let attached_client = attach_test_client(&mut server);
     // Spend the render the seeding and the attach made due, so the pass below
     // starts with nothing pending.
     assert!(server.poll_render(Instant::now()));
 
-    _runtime_event_sender
+    runtime_event_sender
         .send(RuntimeEvent::Quit)
         .expect("the hangup is queued");
 
@@ -652,7 +652,7 @@ fn a_line_a_client_types_as_it_reads_the_restart_frame_reaches_its_pane() {
         client_id,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id),
-            input_bytes: vec![b'\r'],
+            pane_input_bytes: vec![b'\r'],
         }),
     );
 

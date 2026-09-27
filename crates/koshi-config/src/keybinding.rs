@@ -112,7 +112,7 @@ pub fn parse_keybindings(
         diagnostics: Vec::new(),
     };
     let partial_keybindings_config =
-        keybinding_document_walker.parse_document(&keybinding_document);
+        keybinding_document_walker.parse_keybinding_document(&keybinding_document);
     if keybinding_document_walker.diagnostics.is_empty() {
         Ok(partial_keybindings_config)
     } else {
@@ -155,11 +155,14 @@ impl KeybindingDocumentWalker<'_> {
     /// setting nodes, the second parses the `mode` blocks against the leader
     /// the first pass resolved. A `leader` node applies to every `bind`
     /// wherever in the file the node sits.
-    fn parse_document(&mut self, document: &KdlDocument) -> PartialKeybindingsConfig {
+    fn parse_keybinding_document(
+        &mut self,
+        keybinding_document: &KdlDocument,
+    ) -> PartialKeybindingsConfig {
         let mut partial_keybindings_config = PartialKeybindingsConfig::default();
         let mut seen_setting_names: BTreeSet<&str> = BTreeSet::new();
 
-        for kdl_node in document.nodes() {
+        for kdl_node in keybinding_document.nodes() {
             let node_name = kdl_node.name().value();
             match node_name {
                 "version" | "chord-timeout-ms" | "which-key-delay-ms" | "max-chord-depth"
@@ -194,7 +197,10 @@ impl KeybindingDocumentWalker<'_> {
             }
         }
         if !seen_setting_names.contains("version") {
-            self.record_diagnostic(document.span(), "keybinding file must declare `version`");
+            self.record_diagnostic(
+                keybinding_document.span(),
+                "keybinding file must declare `version`",
+            );
         }
 
         // `<leader>` in a bind resolves against this file's own leader when
@@ -202,7 +208,7 @@ impl KeybindingDocumentWalker<'_> {
         let leader = partial_keybindings_config.leader.unwrap_or_default();
 
         let mut mode_bindings_by_name: BTreeMap<ModeName, ModeBindings> = BTreeMap::new();
-        for kdl_node in document.nodes() {
+        for kdl_node in keybinding_document.nodes() {
             if kdl_node.name().value() == "mode" {
                 self.parse_mode_block(kdl_node, &leader, &mut mode_bindings_by_name);
             }
@@ -228,7 +234,9 @@ impl KeybindingDocumentWalker<'_> {
                         self.record_diagnostic(kdl_node.span(), version_error.to_string());
                     }
                 }
-                Err((diagnostic_span, detail)) => self.record_diagnostic(diagnostic_span, detail),
+                Err((diagnostic_span, diagnostic_message)) => {
+                    self.record_diagnostic(diagnostic_span, diagnostic_message)
+                }
             },
             "chord-timeout-ms" => {
                 if let Some(integer_value) =
@@ -315,16 +323,22 @@ impl KeybindingDocumentWalker<'_> {
 
         let mut bound_action_by_key_sequence: BTreeMap<KeySequence, BoundAction> = BTreeMap::new();
         let mut removed_key_sequences: BTreeSet<KeySequence> = BTreeSet::new();
-        if let Some(children) = kdl_node.children() {
-            for child in children.nodes() {
-                match child.name().value() {
-                    "bind" => {
-                        self.parse_binding_node(child, leader, &mut bound_action_by_key_sequence)
-                    }
-                    "remove" => self.parse_removal_node(child, leader, &mut removed_key_sequences),
+        if let Some(mode_block_children) = kdl_node.children() {
+            for mode_block_child in mode_block_children.nodes() {
+                match mode_block_child.name().value() {
+                    "bind" => self.parse_binding_node(
+                        mode_block_child,
+                        leader,
+                        &mut bound_action_by_key_sequence,
+                    ),
+                    "remove" => self.parse_removal_node(
+                        mode_block_child,
+                        leader,
+                        &mut removed_key_sequences,
+                    ),
                     unknown_mode_child_name => {
                         self.record_diagnostic(
-                            child.span(),
+                            mode_block_child.span(),
                             format_unknown_key(unknown_mode_child_name, &["bind", "remove"]),
                         );
                     }

@@ -35,7 +35,7 @@ fn build_image_record(pixel_width: u32, pixel_height: u32, z_index: i32) -> Arc<
             pixel_width,
             pixel_height,
             rgba_bytes: (0..pixel_count * 4)
-                .map(|channel_value| u8::try_from(channel_value % 256).expect("test byte fits"))
+                .map(|rgba_byte_index| u8::try_from(rgba_byte_index % 256).expect("test byte fits"))
                 .collect(),
         })
         .into(),
@@ -179,11 +179,11 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
     let mut second_cell = Cell::from_character('e', 1, Style::default());
     second_cell.push_combining('\u{300}');
     *grid.get_cell_mut(0, 1).unwrap() = second_cell;
-    let image_cells =
+    let image_cell_snapshot =
         build_image_cell_snapshot(&snapshot, &build_regions(), RatatuiRect::new(0, 0, 40, 8))
             .unwrap();
     assert_eq!(
-        image_cells.find_cell(1, 1),
+        image_cell_snapshot.find_cell(1, 1),
         Some(&ImageCellState {
             character: 'e',
             cell_width: 1,
@@ -192,7 +192,7 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
         })
     );
     assert_eq!(
-        image_cells.find_cell(2, 1),
+        image_cell_snapshot.find_cell(2, 1),
         Some(&ImageCellState {
             character: 'e',
             cell_width: 1,
@@ -238,23 +238,23 @@ fn image_cell_snapshot_matches_screen_reverse_and_selection() {
     reversed_without_selection.set_reverse(true);
     *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, reversed_without_selection);
 
-    let image_cells =
+    let image_cell_snapshot =
         build_image_cell_snapshot(&snapshot, &build_regions(), RatatuiRect::new(0, 0, 40, 8))
             .unwrap();
 
-    assert!(image_cells
+    assert!(image_cell_snapshot
         .find_cell(1, 1)
         .unwrap()
         .style
         .get_attributes()
         .is_reverse());
-    assert!(image_cells
+    assert!(image_cell_snapshot
         .find_cell(2, 1)
         .unwrap()
         .style
         .get_attributes()
         .is_reverse());
-    assert!(!image_cells
+    assert!(!image_cell_snapshot
         .find_cell(3, 1)
         .unwrap()
         .style
@@ -319,7 +319,7 @@ fn image_order_is_one_global_sequence_across_panes() {
 #[test]
 fn a_scrolled_crop_keeps_the_full_image_scale() {
     let pane_id = PaneId::new();
-    let placement =
+    let image_placement_snapshot =
         ImagePlacementSnapshot::from_image_record(7, build_image_record(8, 12, 0), (0, 0), 4, 4)
             .expect("valid placement")
             .with_cell_geometry(koshi_core::geometry::ImageCellGeometry {
@@ -339,7 +339,7 @@ fn a_scrolled_crop_keeps_the_full_image_scale() {
                 row_count: 5,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
@@ -366,7 +366,7 @@ fn a_scrolled_crop_keeps_the_full_image_scale() {
 #[test]
 fn image_paint_keeps_geometry_and_rgba_record() {
     let pane_id = PaneId::new();
-    let placement =
+    let image_placement_snapshot =
         ImagePlacementSnapshot::from_image_record(7, build_image_record(6, 4, 0), (1, 2), 3, 2)
             .expect("test image placement is valid");
     let snapshot = build_render_snapshot(
@@ -378,7 +378,7 @@ fn image_paint_keeps_geometry_and_rgba_record() {
                 row_count: 5,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
@@ -505,7 +505,7 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
         requested_row_count: Some(2),
         ..ImageDisplay::default()
     };
-    let placement =
+    let image_placement_snapshot =
         ImagePlacementSnapshot::from_image_record(1, Arc::new(image_record), (0, 0), 3, 2)
             .expect("test image placement is valid");
     let snapshot = build_render_snapshot(
@@ -517,7 +517,7 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
                 row_count: 2,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
@@ -568,8 +568,9 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
         },
         anchor: (0, 0),
     });
-    let placement = ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
-        .expect("test image placement is valid");
+    let image_placement_snapshot =
+        ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
+            .expect("test image placement is valid");
     let snapshot = build_render_snapshot(
         pane_id,
         Rect {
@@ -579,7 +580,7 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
                 row_count: 1,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
@@ -603,10 +604,10 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
 
 #[test]
 fn available_and_unavailable_placements_start_with_full_geometry() {
-    let available =
+    let available_image_placement =
         ImagePlacementSnapshot::from_image_record(1, build_image_record(2, 3, 0), (4, 5), 6, 7)
             .expect("the available placement is valid");
-    let unavailable = ImagePlacementSnapshot::build_unavailable(1, 9, (4, 5), 6, 7)
+    let unavailable_image_placement = ImagePlacementSnapshot::build_unavailable(1, 9, (4, 5), 6, 7)
         .expect("the unavailable placement is valid");
     let expected_image_cell_geometry = koshi_core::geometry::ImageCellGeometry {
         full_size: Size {
@@ -616,9 +617,12 @@ fn available_and_unavailable_placements_start_with_full_geometry() {
         cell_offset: Point { column: 0, row: 0 },
     };
 
-    assert_eq!(available.get_cell_geometry(), expected_image_cell_geometry);
     assert_eq!(
-        unavailable.get_cell_geometry(),
+        available_image_placement.get_cell_geometry(),
+        expected_image_cell_geometry
+    );
+    assert_eq!(
+        unavailable_image_placement.get_cell_geometry(),
         expected_image_cell_geometry
     );
 }

@@ -259,7 +259,7 @@ enum ServeOutcome {
 /// `None`, a name no profile file answers to, and a profile that will not
 /// launch each open one shell instead.
 ///
-/// `allow_other_users_override` is the `--allow-other-users` flag the router
+/// `should_allow_other_users_override` is the `--allow-other-users` flag the router
 /// passes on: `Some(true)` serves the other users of this machine whatever
 /// `koshi.kdl` says, and `None` leaves that answer to the file.
 ///
@@ -276,7 +276,7 @@ pub fn run_session_server(
     session_id: SessionId,
     session_name: String,
     profile_name: Option<&str>,
-    allow_other_users_override: Option<bool>,
+    should_allow_other_users_override: Option<bool>,
     resume_file_path: Option<&Path>,
     supervisor_token: Option<&str>,
     supervisor_process_id: Option<u32>,
@@ -299,7 +299,7 @@ pub fn run_session_server(
         runtime_directory: runtime_directory.to_path_buf(),
         session_id,
         session_name: session_name.clone(),
-        is_other_user_access_allowed: allow_other_users_override == Some(true),
+        is_other_user_access_allowed: should_allow_other_users_override == Some(true),
         executable_path: std::env::current_exe()?,
         supervisor_token: supervisor_token.map(str::to_string),
         supervisor_process_id,

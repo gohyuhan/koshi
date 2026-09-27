@@ -82,16 +82,16 @@ fn diagnostic_preserves_spans_from_kdl() {
     // The KDL crate carries each span as a `related` sub-diagnostic; the raw
     // error for the same input is the source of truth for their count.
     let raw_kdl_error = malformed_config_text.parse::<KdlDocument>().unwrap_err();
-    let raw_related = raw_kdl_error.related().map_or(0, Iterator::count);
+    let raw_related_diagnostic_count = raw_kdl_error.related().map_or(0, Iterator::count);
 
     let parse_diagnostic = parse_kdl(Path::new("bad.kdl"), malformed_config_text).unwrap_err();
     let diagnostic_count = parse_diagnostic.related().map_or(0, Iterator::count);
 
     assert!(
-        raw_related > 0,
+        raw_related_diagnostic_count > 0,
         "kdl should report at least one sub-diagnostic"
     );
-    assert_eq!(diagnostic_count, raw_related);
+    assert_eq!(diagnostic_count, raw_related_diagnostic_count);
 
     let diagnostic_source_text = parse_diagnostic
         .source_code()
@@ -339,48 +339,51 @@ fn parse_u32_kdl_value_rejects_an_out_of_range_value() {
 
 #[test]
 fn set_parsed_field_stores_an_ok_value_and_adds_no_warning() {
-    let mut parsed_value_slot: Option<u16> = None;
-    let mut warnings: Vec<String> = Vec::new();
+    let mut parsed_field_value_slot: Option<u16> = None;
+    let mut parse_warnings: Vec<String> = Vec::new();
     set_parsed_field(
-        &mut parsed_value_slot,
+        &mut parsed_field_value_slot,
         Ok(20),
         "pane",
         "min-cols",
-        &mut warnings,
+        &mut parse_warnings,
     );
-    assert_eq!(parsed_value_slot, Some(20));
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(parsed_field_value_slot, Some(20));
+    assert_eq!(parse_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn set_parsed_field_leaves_the_slot_empty_and_names_the_field_on_error() {
-    let mut parsed_value_slot: Option<u16> = None;
-    let mut warnings: Vec<String> = Vec::new();
+    let mut parsed_field_value_slot: Option<u16> = None;
+    let mut parse_warnings: Vec<String> = Vec::new();
     set_parsed_field(
-        &mut parsed_value_slot,
+        &mut parsed_field_value_slot,
         Err("expected an integer".to_string()),
         "pane",
         "min-cols",
-        &mut warnings,
+        &mut parse_warnings,
     );
-    assert_eq!(parsed_value_slot, None);
-    assert_eq!(warnings, ["ignored `pane.min-cols`: expected an integer"]);
+    assert_eq!(parsed_field_value_slot, None);
+    assert_eq!(
+        parse_warnings,
+        ["ignored `pane.min-cols`: expected an integer"]
+    );
 }
 
 #[test]
 fn set_parsed_field_keeps_an_earlier_value_when_the_next_one_fails() {
-    let mut parsed_value_slot: Option<u16> = Some(20);
-    let mut warnings: Vec<String> = vec!["earlier warning".to_string()];
+    let mut parsed_field_value_slot: Option<u16> = Some(20);
+    let mut parse_warnings: Vec<String> = vec!["earlier warning".to_string()];
     set_parsed_field(
-        &mut parsed_value_slot,
+        &mut parsed_field_value_slot,
         Err("must be between 0 and 65535".to_string()),
         "pane",
         "gap",
-        &mut warnings,
+        &mut parse_warnings,
     );
-    assert_eq!(parsed_value_slot, Some(20));
+    assert_eq!(parsed_field_value_slot, Some(20));
     assert_eq!(
-        warnings,
+        parse_warnings,
         [
             "earlier warning",
             "ignored `pane.gap`: must be between 0 and 65535",
@@ -479,7 +482,9 @@ fn a_block_nested_past_the_limit_is_a_parse_error_not_a_stack_overflow() {
                 format!("blocks nest more than {MAX_BLOCK_DEPTH} levels deep")
             );
         }
-        other_error => panic!("expected a parse error, got {other_error:?}"),
+        unexpected_config_error => {
+            panic!("expected a parse error, got {unexpected_config_error:?}")
+        }
     }
 }
 
@@ -498,21 +503,21 @@ fn a_block_nested_exactly_to_the_limit_still_parses() {
 fn braces_inside_comments_and_strings_open_no_level() {
     // Each source below carries far more `{` than the limit, and not one of
     // them opens a block.
-    let brace_sequence = "{".repeat(MAX_BLOCK_DEPTH + 1);
-    for malformed_kdl_text in [
-        format!("// {brace_sequence}\nkey 1"),
-        format!("/* {brace_sequence} */\nkey 1"),
-        format!("/* /* {brace_sequence} */ */\nkey 1"),
-        format!("key \"{brace_sequence}\""),
-        format!("key \"a\\\"{brace_sequence}\""),
-        format!("key #\"{brace_sequence}\"#"),
-        format!("key ##\"{brace_sequence}\"#\"##"),
-        format!("key #true // {brace_sequence}"),
+    let opening_brace_sequence = "{".repeat(MAX_BLOCK_DEPTH + 1);
+    for brace_context_kdl_text in [
+        format!("// {opening_brace_sequence}\nkey 1"),
+        format!("/* {opening_brace_sequence} */\nkey 1"),
+        format!("/* /* {opening_brace_sequence} */ */\nkey 1"),
+        format!("key \"{opening_brace_sequence}\""),
+        format!("key \"a\\\"{opening_brace_sequence}\""),
+        format!("key #\"{opening_brace_sequence}\"#"),
+        format!("key ##\"{opening_brace_sequence}\"#\"##"),
+        format!("key #true // {opening_brace_sequence}"),
     ] {
         assert_eq!(
-            find_first_brace_past_depth_limit(&malformed_kdl_text),
+            find_first_brace_past_depth_limit(&brace_context_kdl_text),
             None,
-            "kdl text: {malformed_kdl_text:?}"
+            "kdl text: {brace_context_kdl_text:?}"
         );
     }
 }
@@ -619,48 +624,56 @@ fn a_version_node_that_is_wrong_as_a_whole_puts_the_caret_on_the_node() {
     );
 }
 
-/// The first problem `koshi.kdl` reports for `config_text`.
-fn get_app_version_detail(config_text: &str) -> String {
-    match crate::app_config::parse_app_config(Path::new("koshi.kdl"), config_text) {
+/// The first problem `koshi.kdl` reports for `config_source_text`.
+fn get_first_app_validation_detail(config_source_text: &str) -> String {
+    match crate::app_config::parse_app_config(Path::new("koshi.kdl"), config_source_text) {
         Err(ConfigError::Validation {
             validation_detail, ..
         }) => validation_detail,
-        other => panic!("expected a validation error, got {other:?}"),
+        unexpected_app_config_error => {
+            panic!("expected a validation error, got {unexpected_app_config_error:?}")
+        }
     }
 }
 
-/// The first problem a theme file reports for `config_text`.
-fn get_theme_version_detail(config_text: &str) -> String {
-    match crate::theme::parse_theme(Path::new("themes/midnight.kdl"), config_text) {
+/// The first problem a theme file reports for `config_source_text`.
+fn get_first_theme_validation_detail(config_source_text: &str) -> String {
+    match crate::theme::parse_theme(Path::new("themes/midnight.kdl"), config_source_text) {
         Err(ConfigError::Validation {
             validation_detail, ..
         }) => validation_detail,
-        other => panic!("expected a validation error, got {other:?}"),
+        unexpected_theme_parse_error => {
+            panic!("expected a validation error, got {unexpected_theme_parse_error:?}")
+        }
     }
 }
 
-/// The first problem `keybinding.kdl` reports for `config_text`.
-fn get_keybinding_version_detail(config_text: &str) -> String {
-    match crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), config_text) {
+/// The first problem `keybinding.kdl` reports for `config_source_text`.
+fn get_first_keybinding_validation_detail(config_source_text: &str) -> String {
+    match crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), config_source_text) {
         Err(crate::keybinding::KeybindingParseError::Invalid { diagnostics, .. }) => {
             diagnostics[0].get_diagnostic_message().to_string()
         }
-        other => panic!("expected schema diagnostics, got {other:?}"),
+        unexpected_keybinding_parse_error => {
+            panic!("expected schema diagnostics, got {unexpected_keybinding_parse_error:?}")
+        }
     }
 }
 
-/// The first problem a profile file reports for `config_text`.
-fn get_profile_version_detail(config_text: &str) -> String {
-    let profile_text = format!("{config_text}\ntab {{ pane }}");
-    match crate::profile::parse_profile(Path::new("profile/dev.kdl"), &profile_text) {
+/// The first problem a profile file reports for `config_source_text`.
+fn get_first_profile_validation_detail(config_source_text: &str) -> String {
+    let profile_source_text = format!("{config_source_text}\ntab {{ pane }}");
+    match crate::profile::parse_profile(Path::new("profile/dev.kdl"), &profile_source_text) {
         Err(crate::profile::ProfileError::Invalid { diagnostics, .. }) => {
             diagnostics[0].get_diagnostic_message().to_string()
         }
-        other => panic!("expected schema diagnostics, got {other:?}"),
+        unexpected_profile_parse_error => {
+            panic!("expected schema diagnostics, got {unexpected_profile_parse_error:?}")
+        }
     }
 }
 
-/// The problem migration reports for `config_text`.
+/// The problem migration reports for `config_source_text`.
 fn get_migration_version_error_detail(config_source_text: &str) -> String {
     match crate::migration::validate_config(
         crate::migration::ConfigFileKind::App,
@@ -671,12 +684,14 @@ fn get_migration_version_error_detail(config_source_text: &str) -> String {
             version_error_detail,
             ..
         }) => version_error_detail,
-        other => panic!("expected a version error, got {other:?}"),
+        unexpected_migration_error => {
+            panic!("expected a version error, got {unexpected_migration_error:?}")
+        }
     }
 }
 
 #[test]
-fn every_config_file_words_a_bad_version_the_same_way() {
+fn config_files_report_the_same_error_for_bad_version_fields() {
     for (version_text, expected_version_error_detail) in [
         ("version 1 {}", "`version` takes no children"),
         (
@@ -701,22 +716,22 @@ fn every_config_file_words_a_bad_version_the_same_way() {
         ),
     ] {
         assert_eq!(
-            get_app_version_detail(version_text),
+            get_first_app_validation_detail(version_text),
             expected_version_error_detail,
             "koshi.kdl: {version_text}"
         );
         assert_eq!(
-            get_theme_version_detail(version_text),
+            get_first_theme_validation_detail(version_text),
             expected_version_error_detail,
             "theme: {version_text}"
         );
         assert_eq!(
-            get_keybinding_version_detail(version_text),
+            get_first_keybinding_validation_detail(version_text),
             expected_version_error_detail,
             "keybinding.kdl: {version_text}"
         );
         assert_eq!(
-            get_profile_version_detail(version_text),
+            get_first_profile_validation_detail(version_text),
             expected_version_error_detail,
             "profile: {version_text}"
         );

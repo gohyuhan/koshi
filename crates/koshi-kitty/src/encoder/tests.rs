@@ -162,7 +162,7 @@ fn upload_reports_a_writer_failure_at_a_packet_boundary_without_progress() {
 }
 
 #[test]
-fn one_upload_advance_compresses_at_most_256_kibibytes_of_input() {
+fn one_upload_advance_compresses_at_most_256_kibibytes_of_rgba_input() {
     let mut upload =
         KittyUpload::from_decoded_image(build_decoded_image(16_384, 32, vec![0; 2_097_152]), 1)
             .expect("the image is valid");
@@ -173,8 +173,8 @@ fn one_upload_advance_compresses_at_most_256_kibibytes_of_input() {
         .expect("the bounded step writes");
 
     assert_eq!(
-        upload.input_byte_offset,
-        KITTY_COMPRESSION_INPUT_BYTE_COUNT_PER_STEP
+        upload.rgba_input_byte_offset,
+        KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP
     );
     assert!(!upload.is_compression_complete);
 }
@@ -186,10 +186,11 @@ fn one_upload_advance_writes_at_most_sixteen_compressed_chunks() {
         decoded_image,
         image_number: 7,
         compressor: Compress::new(Compression::fast(), true),
-        input_byte_offset: 4,
+        rgba_input_byte_offset: 4,
         compressed_bytes: vec![
             0x5a;
-            KITTY_IMAGE_CHUNK_BYTE_COUNT * (KITTY_IMAGE_CHUNK_COUNT_PER_STEP + 1)
+            KITTY_COMPRESSED_CHUNK_BYTE_COUNT
+                * (KITTY_IMAGE_CHUNK_COUNT_PER_STEP + 1)
         ],
         compressed_byte_offset: 0,
         is_compression_complete: true,
@@ -203,7 +204,7 @@ fn one_upload_advance_writes_at_most_sixteen_compressed_chunks() {
 
     assert_eq!(
         upload.compressed_byte_offset,
-        KITTY_IMAGE_CHUNK_BYTE_COUNT * KITTY_IMAGE_CHUNK_COUNT_PER_STEP
+        KITTY_COMPRESSED_CHUNK_BYTE_COUNT * KITTY_IMAGE_CHUNK_COUNT_PER_STEP
     );
     assert!(upload.has_started_transmission);
     assert!(!upload.is_upload_complete());

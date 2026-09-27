@@ -124,7 +124,7 @@ fn rect_with_zero_width_or_height_is_empty() {
 #[test]
 fn rect_contains_points_only_inside_half_open_bounds() {
     let rect = build_rect(2, 2, 4, 3); // columns in [2,6), rows in [2,5)
-    let cases = [
+    let point_containment_cases = [
         (Point { column: 2, row: 2 }, true),
         (Point { column: 5, row: 4 }, true),
         (Point { column: 6, row: 4 }, false),
@@ -132,10 +132,10 @@ fn rect_contains_points_only_inside_half_open_bounds() {
         (Point { column: 1, row: 3 }, false),
         (Point { column: 3, row: 1 }, false),
     ];
-    for (point, expected_containment) in cases {
+    for (point, expected_is_inside) in point_containment_cases {
         assert_eq!(
             rect.is_point_inside(point),
-            expected_containment,
+            expected_is_inside,
             "contains {point:?}"
         );
     }

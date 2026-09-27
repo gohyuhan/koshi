@@ -33,23 +33,23 @@ pub struct PeerWords {
     pub peer: &'static str,
     /// What this protocol calls one of its version numbers, e.g.
     /// `"protocol version"`, `"control-plane protocol version"`.
-    pub versions: &'static str,
+    pub version_label: &'static str,
     /// The versions this build speaks of that protocol.
-    pub surface: Surface,
+    pub protocol_surface: Surface,
 }
 
 /// The session server, on a session's own control socket.
 pub const SESSION_PEER_WORDS: PeerWords = PeerWords {
     peer: "session",
-    versions: "protocol version",
-    surface: koshi_core::compat::SESSION_PROTOCOL,
+    version_label: "protocol version",
+    protocol_surface: koshi_core::compat::SESSION_PROTOCOL,
 };
 
 /// The router, on the router's socket.
 pub(crate) const ROUTER_PEER_WORDS: PeerWords = PeerWords {
     peer: "router",
-    versions: "control-plane protocol version",
-    surface: koshi_core::compat::CONTROL_PROTOCOL,
+    version_label: "control-plane protocol version",
+    protocol_surface: koshi_core::compat::CONTROL_PROTOCOL,
 };
 
 impl PeerWords {
@@ -63,16 +63,16 @@ impl PeerWords {
     /// fails with `the session settled on protocol version 5, which is outside
     /// the 4 to 4 this koshi asked for`.
     pub fn validate_settled_protocol_version(&self, protocol_version: u32) -> Result<(), CliError> {
-        let minimum_version = self.surface.minimum_version;
-        let maximum_version = self.surface.maximum_version;
-        if (minimum_version..=maximum_version).contains(&protocol_version) {
+        let minimum_protocol_version = self.protocol_surface.minimum_version;
+        let maximum_protocol_version = self.protocol_surface.maximum_version;
+        if (minimum_protocol_version..=maximum_protocol_version).contains(&protocol_version) {
             return Ok(());
         }
         Err(CliError::IpcUnavailable {
             detail: format!(
-                "the {} settled on {} {protocol_version}, which is outside the {minimum_version} to {maximum_version} \
+                "the {} settled on {} {protocol_version}, which is outside the {minimum_protocol_version} to {maximum_protocol_version} \
                  this koshi asked for",
-                self.peer, self.versions
+                self.peer, self.version_label
             ),
         })
     }

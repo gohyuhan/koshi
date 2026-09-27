@@ -36,9 +36,9 @@ fn commit_test_tab(session: &mut Session, tab_name: String) -> Vec<Event> {
     .1
 }
 
-/// A client viewing `active_tab`, with an 80x24 viewport, a fresh session id of
+/// A client viewing `active_tab_id`, with an 80x24 viewport, a fresh session id of
 /// its own, and `UNIX_EPOCH` as its attach time.
-fn build_client_viewing(active_tab: TabId) -> Client {
+fn build_client_viewing(active_tab_id: TabId) -> Client {
     Client::from_attachment(
         ClientId::new(),
         SessionId::new(),
@@ -48,7 +48,7 @@ fn build_client_viewing(active_tab: TabId) -> Client {
             row_count: 24,
         },
         None,
-        active_tab,
+        active_tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
@@ -58,8 +58,8 @@ fn build_client_viewing(active_tab: TabId) -> Client {
 #[test]
 fn tab_cell_size_uses_the_oldest_measured_viewer_and_changes_on_detach() {
     use koshi_core::geometry::PixelCellSize;
-    let tab = TabId::new();
-    let other_tab = TabId::new();
+    let tab_id = TabId::new();
+    let other_tab_id = TabId::new();
     let mut session = Session::from_identity_and_client_registry(
         SessionId::new(),
         "images".to_owned(),
@@ -67,23 +67,23 @@ fn tab_cell_size_uses_the_oldest_measured_viewer_and_changes_on_detach() {
         ClientRegistry::new(),
     );
     let mut clients = [
-        build_client_viewing(tab),
-        build_client_viewing(tab),
-        build_client_viewing(other_tab),
+        build_client_viewing(tab_id),
+        build_client_viewing(tab_id),
+        build_client_viewing(other_tab_id),
     ];
     clients.sort_by_key(Client::get_client_id);
     let first_client_id = clients[0].get_client_id();
     let second_client_id = clients[1].get_client_id();
-    clients[0].update_active_tab_id(tab);
-    clients[1].update_active_tab_id(tab);
-    clients[2].update_active_tab_id(other_tab);
+    clients[0].update_active_tab_id(tab_id);
+    clients[1].update_active_tab_id(tab_id);
+    clients[2].update_active_tab_id(other_tab_id);
     clients[1].replace_cell_size(PixelCellSize::from_pixel_dimensions(12, 24));
     clients[2].replace_cell_size(PixelCellSize::from_pixel_dimensions(8, 16));
     for client in clients {
         session.clients.attach_client(client);
     }
     assert_eq!(
-        session.get_tab_cell_size(tab),
+        session.get_tab_cell_size(tab_id),
         PixelCellSize::from_pixel_dimensions(12, 24)
     );
     session
@@ -92,18 +92,18 @@ fn tab_cell_size_uses_the_oldest_measured_viewer_and_changes_on_detach() {
         .expect("client")
         .replace_cell_size(PixelCellSize::from_pixel_dimensions(10, 20));
     assert_eq!(
-        session.get_tab_cell_size(tab),
+        session.get_tab_cell_size(tab_id),
         PixelCellSize::from_pixel_dimensions(10, 20)
     );
     session.clients.detach_client(first_client_id);
     assert_eq!(
-        session.get_tab_cell_size(tab),
+        session.get_tab_cell_size(tab_id),
         PixelCellSize::from_pixel_dimensions(12, 24)
     );
     session.clients.detach_client(second_client_id);
-    assert_eq!(session.get_tab_cell_size(tab), None);
+    assert_eq!(session.get_tab_cell_size(tab_id), None);
     assert_eq!(
-        session.get_tab_cell_size(other_tab),
+        session.get_tab_cell_size(other_tab_id),
         PixelCellSize::from_pixel_dimensions(8, 16)
     );
 }
@@ -196,19 +196,19 @@ fn re_focusing_moves_to_front_without_duplicating() {
 #[test]
 fn focus_mru_is_capped_dropping_the_oldest() {
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let focus_history_capacity = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
+    let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
 
     // Record one more distinct pane than the cap allows.
-    let panes: Vec<PaneId> = (0..=focus_history_capacity)
+    let pane_ids: Vec<PaneId> = (0..=focus_history_entry_count)
         .map(|_| PaneId::new())
         .collect();
-    for &pane in &panes {
-        tab.record_focus_mru(pane);
+    for &pane_id in &pane_ids {
+        tab.record_focus_mru(pane_id);
     }
 
     // Newest first, with the first-recorded pane evicted: every other pane keeps
     // its place in recording order.
-    let surviving_newest_first: Vec<PaneId> = panes[1..].iter().rev().copied().collect();
+    let surviving_newest_first: Vec<PaneId> = pane_ids[1..].iter().rev().copied().collect();
     assert_eq!(tab.list_focus_mru().to_vec(), surviving_newest_first);
 }
 
@@ -217,15 +217,17 @@ fn focus_mru_at_exactly_the_cap_evicts_nothing() {
     // The boundary just below the eviction case above: recording exactly
     // `MAX_TAB_FOCUS_MRU_ENTRY_COUNT` distinct panes must keep every one of them.
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let focus_history_capacity = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
+    let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
 
-    let panes: Vec<PaneId> = (0..focus_history_capacity).map(|_| PaneId::new()).collect();
-    for &pane in &panes {
-        tab.record_focus_mru(pane);
+    let pane_ids: Vec<PaneId> = (0..focus_history_entry_count)
+        .map(|_| PaneId::new())
+        .collect();
+    for &pane_id in &pane_ids {
+        tab.record_focus_mru(pane_id);
     }
 
-    let newest_first: Vec<PaneId> = panes.iter().rev().copied().collect();
-    assert_eq!(tab.list_focus_mru().to_vec(), newest_first);
+    let newest_first_pane_ids: Vec<PaneId> = pane_ids.iter().rev().copied().collect();
+    assert_eq!(tab.list_focus_mru().to_vec(), newest_first_pane_ids);
 }
 
 #[test]
@@ -233,33 +235,38 @@ fn re_recording_an_existing_pane_at_the_cap_moves_it_front_without_evicting() {
     // Re-recording an entry a full history already holds evicts nothing: the
     // duplicate is dropped before the length is checked.
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let focus_history_capacity = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
-    let panes: Vec<PaneId> = (0..focus_history_capacity).map(|_| PaneId::new()).collect();
-    for &pane in &panes {
-        tab.record_focus_mru(pane);
+    let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
+    let pane_ids: Vec<PaneId> = (0..focus_history_entry_count)
+        .map(|_| PaneId::new())
+        .collect();
+    for &pane_id in &pane_ids {
+        tab.record_focus_mru(pane_id);
     }
     // The re-recorded pane comes from the middle of the history. The back entry
     // is the one the cap evicts on its own.
-    let middle_pane_id = panes[focus_history_capacity / 2];
+    let middle_pane_id = pane_ids[focus_history_entry_count / 2];
 
     tab.record_focus_mru(middle_pane_id);
 
     // `middle_pane_id` moves to the front and every other pane keeps its order behind it.
-    let mut expected_focus_history: Vec<PaneId> = panes.iter().rev().copied().collect();
-    expected_focus_history.retain(|&pane_id| pane_id != middle_pane_id);
-    expected_focus_history.insert(0, middle_pane_id);
-    assert_eq!(tab.list_focus_mru().to_vec(), expected_focus_history);
+    let mut expected_focus_history_pane_ids: Vec<PaneId> = pane_ids.iter().rev().copied().collect();
+    expected_focus_history_pane_ids.retain(|&pane_id| pane_id != middle_pane_id);
+    expected_focus_history_pane_ids.insert(0, middle_pane_id);
+    assert_eq!(
+        tab.list_focus_mru().to_vec(),
+        expected_focus_history_pane_ids
+    );
 }
 
 #[test]
 fn recording_the_same_pane_twice_keeps_one_entry() {
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
 
-    tab.record_focus_mru(pane);
-    tab.record_focus_mru(pane);
+    tab.record_focus_mru(pane_id);
+    tab.record_focus_mru(pane_id);
 
-    assert_eq!(tab.list_focus_mru().to_vec(), vec![pane]);
+    assert_eq!(tab.list_focus_mru().to_vec(), vec![pane_id]);
 }
 
 #[test]
@@ -419,9 +426,9 @@ fn a_stored_session_without_the_lock_key_reads_back_unlocked() {
 
 #[test]
 fn a_tab_survives_a_serde_round_trip() {
-    let root = PaneId::new();
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, root);
-    tab.record_focus_mru(root);
+    let root_pane_id = PaneId::new();
+    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, root_pane_id);
+    tab.record_focus_mru(root_pane_id);
 
     let json = serde_json::to_string(&tab).expect("serialize");
     let restored_tab: Tab = serde_json::from_str(&json).expect("deserialize");

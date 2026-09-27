@@ -133,7 +133,7 @@ pub fn validate_config(
     config_source_text: &str,
 ) -> Result<ValidatedConfig, MigrationError> {
     validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION)?;
-    let schema_version = read_schema_version(config_path, config_source_text)?;
+    let schema_version = parse_config_schema_version(config_path, config_source_text)?;
     if schema_version > SCHEMA_VERSION {
         return Err(MigrationError::Version {
             config_path: config_path.display().to_string(),
@@ -177,7 +177,7 @@ fn migrate_with_registry(
     current_schema_version: u32,
 ) -> Result<MigratedConfig, MigrationError> {
     validate_schema_registry(config_schemas, current_schema_version)?;
-    let source_schema_version = read_schema_version(config_path, config_source_text)?;
+    let source_schema_version = parse_config_schema_version(config_path, config_source_text)?;
     if source_schema_version > current_schema_version {
         return Err(MigrationError::Version {
             config_path: config_path.display().to_string(),
@@ -204,7 +204,7 @@ fn migrate_with_registry(
                     to_schema_version: next_schema_version,
                 })?;
         migrated_source = migrate_to_next_schema(config_path, &migrated_source)?;
-        let declared_schema_version = read_schema_version(config_path, &migrated_source)?;
+        let declared_schema_version = parse_config_schema_version(config_path, &migrated_source)?;
         if declared_schema_version != next_schema_version {
             return Err(MigrationError::Version {
                 config_path: config_path.display().to_string(),
@@ -224,7 +224,7 @@ fn migrate_with_registry(
     })
 }
 
-fn read_schema_version(
+fn parse_config_schema_version(
     config_path: &Path,
     config_source_text: &str,
 ) -> Result<u32, MigrationError> {

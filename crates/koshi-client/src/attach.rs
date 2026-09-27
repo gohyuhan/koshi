@@ -356,14 +356,17 @@ impl ViewerPaint {
 
 /// Build placement status from pane ids and the destination tab name. A swap to
 /// `pane-123` displays that id instead of its terminal title.
-fn build_placement_status(client: &Client, snapshot: &RenderSnapshot) -> Option<PlacementStatus> {
+fn build_placement_status(
+    client: &Client,
+    render_snapshot: &RenderSnapshot,
+) -> Option<PlacementStatus> {
     if !client.is_pane_placement_visible() {
         return None;
     }
     let source_pane_id = client.get_placement_source_pane_id()?;
     let destination_tab_id = client.get_placement_destination_tab_id()?;
     let source_pane_label = source_pane_id.to_string();
-    let destination_tab_label = snapshot
+    let destination_tab_label = render_snapshot
         .session_snapshot
         .tabs_metadata
         .iter()

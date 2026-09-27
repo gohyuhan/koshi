@@ -13,11 +13,11 @@ use super::*;
 
 /// A bare runtime over a fake backend.
 fn build_test_runtime() -> Server {
-    let (event_sender, event_receiver) = mpsc::channel();
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(event_sender),
+        InboxSink::from_event_sender(runtime_event_sender),
     )));
-    Server::from_runtime_parts(pty_backend, event_receiver)
+    Server::from_runtime_parts(pty_backend, runtime_event_receiver)
 }
 
 #[test]

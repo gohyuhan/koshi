@@ -21,11 +21,11 @@ impl TerminalState {
     /// reported cwd, scrollback, both screens' Kitty keyboard flag stacks, and
     /// every other mode stay.
     pub(super) fn apply_soft_reset(&mut self) {
-        let cursor = self.get_active_cursor_mut();
-        cursor.is_visible = true;
-        cursor.is_wrap_pending = false;
-        cursor.is_origin_mode_enabled = false;
-        cursor.saved = None;
+        let active_cursor = self.get_active_cursor_mut();
+        active_cursor.is_visible = true;
+        active_cursor.is_wrap_pending = false;
+        active_cursor.is_origin_mode_enabled = false;
+        active_cursor.saved = None;
 
         *self.get_active_render_mut() = RenderState::new();
         *self.scroll_region_mut() = None;
@@ -52,14 +52,14 @@ impl TerminalState {
             (row_count, column_count)
         );
 
-        let grid = Grid::build_blank(row_count, column_count, Style::default());
-        self.primary = Arc::new(grid.clone());
-        self.alternate = Arc::new(grid);
+        let reset_screen_grid = Grid::build_blank(row_count, column_count, Style::default());
+        self.primary = Arc::new(reset_screen_grid.clone());
+        self.alternate = Arc::new(reset_screen_grid);
         self.active_screen = Screen::Primary;
         self.clear_all_image_placements();
         self.scrollback.clear_scrollback();
 
-        let cursor = Cursor {
+        let reset_cursor = Cursor {
             row: 0,
             column: 0,
             is_visible: true,
@@ -67,8 +67,8 @@ impl TerminalState {
             is_origin_mode_enabled: false,
             saved: None,
         };
-        self.primary_cursor = cursor;
-        self.alternate_cursor = cursor;
+        self.primary_cursor = reset_cursor;
+        self.alternate_cursor = reset_cursor;
         self.primary_render = RenderState::new();
         self.alternate_render = RenderState::new();
         self.modes = TerminalModes::default();

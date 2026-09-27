@@ -851,7 +851,7 @@ fn graceful_tree_stop_request_reaches_a_descendant_in_the_grace_window() {
         "the group-wide stop request must reach the descendant (pid {descendant_process_id})"
     );
 
-    pending_pane_kill.wait_for_return();
+    pending_pane_kill.wait_for_kill_return();
 }
 
 #[test]

@@ -66,7 +66,7 @@ pub struct RecentEvent {
     clippy::match_wildcard_for_single_variants
 )]
 pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
-    let empty_recent_event = RecentEvent {
+    let recent_event_without_entity_ids = RecentEvent {
         occurred_at,
         event_name: Cow::Borrowed(event.get_event_name()),
         session_id: None,
@@ -76,91 +76,91 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
         command_id: None,
     };
     match event {
-        Event::PaneCreated(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::PaneCreated(pane_created) => RecentEvent {
+            pane_id: Some(pane_created.pane_id),
+            tab_id: Some(pane_created.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PaneProcessExited(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::PaneProcessExited(pane_process_exited) => RecentEvent {
+            pane_id: Some(pane_process_exited.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PaneClosing(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::PaneClosing(pane_closing) => RecentEvent {
+            pane_id: Some(pane_closing.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PaneRemoved(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::PaneRemoved(pane_removed) => RecentEvent {
+            pane_id: Some(pane_removed.pane_id),
+            tab_id: Some(pane_removed.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PaneFocused(payload) => RecentEvent {
-            client_id: Some(payload.client_id),
-            tab_id: Some(payload.tab_id),
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::PaneFocused(pane_focused) => RecentEvent {
+            client_id: Some(pane_focused.client_id),
+            tab_id: Some(pane_focused.tab_id),
+            pane_id: Some(pane_focused.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PtyResized(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::PtyResized(pty_resized) => RecentEvent {
+            pane_id: Some(pty_resized.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::LayoutChanged(payload) => RecentEvent {
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::LayoutChanged(layout_changed) => RecentEvent {
+            tab_id: Some(layout_changed.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PanePlacementCommitted(payload) => RecentEvent {
-            tab_id: Some(payload.destination_tab_id),
-            pane_id: Some(payload.source_pane_id),
-            command_id: Some(payload.command_id),
-            ..empty_recent_event
+        Event::PanePlacementCommitted(pane_placement_committed) => RecentEvent {
+            tab_id: Some(pane_placement_committed.destination_tab_id),
+            pane_id: Some(pane_placement_committed.source_pane_id),
+            command_id: Some(pane_placement_committed.command_id),
+            ..recent_event_without_entity_ids
         },
-        Event::TabCreated(payload) => RecentEvent {
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::TabCreated(tab_created) => RecentEvent {
+            tab_id: Some(tab_created.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::TabClosed(payload) => RecentEvent {
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::TabClosed(tab_closed) => RecentEvent {
+            tab_id: Some(tab_closed.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::TabFocused(payload) => RecentEvent {
-            client_id: Some(payload.client_id),
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::TabFocused(tab_focused) => RecentEvent {
+            client_id: Some(tab_focused.client_id),
+            tab_id: Some(tab_focused.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::TabMoved(payload) => RecentEvent {
-            tab_id: Some(payload.tab_id),
-            ..empty_recent_event
+        Event::TabMoved(tab_moved) => RecentEvent {
+            tab_id: Some(tab_moved.tab_id),
+            ..recent_event_without_entity_ids
         },
-        Event::TerminalTooSmallEntered(payload) => RecentEvent {
-            client_id: Some(payload.client_id),
-            ..empty_recent_event
+        Event::TerminalTooSmallEntered(terminal_too_small_entered) => RecentEvent {
+            client_id: Some(terminal_too_small_entered.client_id),
+            ..recent_event_without_entity_ids
         },
-        Event::ConfigReloaded(payload) => RecentEvent {
-            session_id: Some(payload.session_id),
-            ..empty_recent_event
+        Event::ConfigReloaded(config_reloaded) => RecentEvent {
+            session_id: Some(config_reloaded.session_id),
+            ..recent_event_without_entity_ids
         },
-        Event::InputModeChanged(payload) => RecentEvent {
-            client_id: Some(payload.client_id),
-            ..empty_recent_event
+        Event::InputModeChanged(input_mode_changed) => RecentEvent {
+            client_id: Some(input_mode_changed.client_id),
+            ..recent_event_without_entity_ids
         },
-        Event::MouseSelectChanged(payload) => RecentEvent {
-            client_id: Some(payload.client_id),
-            ..empty_recent_event
+        Event::MouseSelectChanged(mouse_select_changed) => RecentEvent {
+            client_id: Some(mouse_select_changed.client_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PaneCommandStarted(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::PaneCommandStarted(pane_command_started) => RecentEvent {
+            pane_id: Some(pane_command_started.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::PaneCommandFinished(payload) => RecentEvent {
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::PaneCommandFinished(pane_command_finished) => RecentEvent {
+            pane_id: Some(pane_command_finished.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::SelectionChanged(payload) => RecentEvent {
-            client_id: Some(payload.client_id),
-            pane_id: Some(payload.pane_id),
-            ..empty_recent_event
+        Event::SelectionChanged(selection_changed) => RecentEvent {
+            client_id: Some(selection_changed.client_id),
+            pane_id: Some(selection_changed.pane_id),
+            ..recent_event_without_entity_ids
         },
-        Event::Quit(_) | Event::Restarting => empty_recent_event,
+        Event::Quit(_) | Event::Restarting => recent_event_without_entity_ids,
     }
 }
 

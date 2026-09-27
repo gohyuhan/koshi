@@ -2433,7 +2433,7 @@ fn compose_sixel_tile(
 ) -> Result<Arc<DecodedImage>, TemplateError> {
     let cell_pixel_width = u32::from(worker_request.pixel_cell_size.get_pixel_width());
     let cell_pixel_height = u32::from(worker_request.pixel_cell_size.get_pixel_height());
-    let mut output_rgba = tile_image.rgba_bytes.clone();
+    let mut output_rgba_bytes = tile_image.rgba_bytes.clone();
     let tile_pixel_width =
         usize::try_from(tile_image.pixel_width).map_err(|_| TemplateError::Failed)?;
     for tile_pixel_row in 0..tile_image.pixel_height {
@@ -2487,7 +2487,7 @@ fn compose_sixel_tile(
                 * tile_pixel_width
                 + usize::try_from(tile_pixel_column).map_err(|_| TemplateError::Failed)?)
                 * 4;
-            let image_pixel: [u8; 4] = output_rgba[rgba_byte_index..rgba_byte_index + 4]
+            let image_pixel: [u8; 4] = output_rgba_bytes[rgba_byte_index..rgba_byte_index + 4]
                 .try_into()
                 .map_err(|_| TemplateError::Failed)?;
             let composited_pixel = apply_current_sixel_layer(
@@ -2496,13 +2496,14 @@ fn compose_sixel_tile(
                 terminal_background_color,
                 underlying_pixel,
             );
-            output_rgba[rgba_byte_index..rgba_byte_index + 4].copy_from_slice(&composited_pixel);
+            output_rgba_bytes[rgba_byte_index..rgba_byte_index + 4]
+                .copy_from_slice(&composited_pixel);
         }
     }
     Ok(Arc::new(DecodedImage {
         pixel_width: tile_image.pixel_width,
         pixel_height: tile_image.pixel_height,
-        rgba_bytes: output_rgba,
+        rgba_bytes: output_rgba_bytes,
     }))
 }
 
@@ -2753,11 +2754,11 @@ fn crop_output_image(
         crop_pixel_height,
     )
     .map_err(|_| ())?;
-    let mut cropped_rgba = Vec::new();
-    cropped_rgba
+    let mut cropped_rgba_bytes = Vec::new();
+    cropped_rgba_bytes
         .try_reserve_exact(crop_rgba_byte_count)
         .map_err(|_| ())?;
-    cropped_rgba.resize(crop_rgba_byte_count, 0);
+    cropped_rgba_bytes.resize(crop_rgba_byte_count, 0);
     for crop_row in 0..crop_pixel_height {
         let source_pixel_row =
             usize::try_from(output_paint.source_rect.pixel_y).map_err(|_| ())? + crop_row;
@@ -2769,7 +2770,7 @@ fn crop_output_image(
             let source_pixel_bytes = &decoded_image.rgba_bytes[source_rgba_byte_index
                 + crop_column * 4
                 ..source_rgba_byte_index + crop_column * 4 + 4];
-            let destination_pixel_bytes = &mut cropped_rgba[destination_rgba_byte_index
+            let destination_pixel_bytes = &mut cropped_rgba_bytes[destination_rgba_byte_index
                 + crop_column * 4
                 ..destination_rgba_byte_index + crop_column * 4 + 4];
             if let Some(background_color) = background_color {
@@ -2786,7 +2787,7 @@ fn crop_output_image(
     Ok(Arc::new(DecodedImage {
         pixel_width: output_paint.source_rect.pixel_width,
         pixel_height: output_paint.source_rect.pixel_height,
-        rgba_bytes: cropped_rgba,
+        rgba_bytes: cropped_rgba_bytes,
     }))
 }
 
@@ -2845,11 +2846,11 @@ fn scale_output_tile(
         tile_pixel_height_usize,
     )
     .map_err(|_| ())?;
-    let mut scaled_rgba = Vec::new();
-    scaled_rgba
+    let mut scaled_rgba_bytes = Vec::new();
+    scaled_rgba_bytes
         .try_reserve_exact(rgba_byte_count)
         .map_err(|_| ())?;
-    scaled_rgba.resize(rgba_byte_count, 0);
+    scaled_rgba_bytes.resize(rgba_byte_count, 0);
     let source_image_pixel_width = usize::try_from(source_image.pixel_width).map_err(|_| ())?;
     for tile_pixel_row in 0..tile_pixel_height {
         let target_pixel_row = u32::from(tile.row_offset)
@@ -2887,8 +2888,8 @@ fn scale_output_tile(
                 * 4;
             let source_pixel_bytes =
                 &source_image.rgba_bytes[source_rgba_byte_index..source_rgba_byte_index + 4];
-            let destination_pixel_bytes =
-                &mut scaled_rgba[destination_rgba_byte_index..destination_rgba_byte_index + 4];
+            let destination_pixel_bytes = &mut scaled_rgba_bytes
+                [destination_rgba_byte_index..destination_rgba_byte_index + 4];
             if let Some(background_color) = background_color {
                 blend_onto_background(
                     source_pixel_bytes,
@@ -2903,7 +2904,7 @@ fn scale_output_tile(
     Ok(Arc::new(DecodedImage {
         pixel_width: tile_pixel_width,
         pixel_height: tile_pixel_height,
-        rgba_bytes: scaled_rgba,
+        rgba_bytes: scaled_rgba_bytes,
     }))
 }
 

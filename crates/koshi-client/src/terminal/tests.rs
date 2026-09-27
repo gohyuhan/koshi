@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 fn paint_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     client: &Client,
-    snapshot: &RenderSnapshot,
+    render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     frame_paint: &ViewerPaint,
     last_window_title: &mut String,
@@ -27,7 +27,7 @@ fn paint_frame<B: Backend>(
     paint_frame_with_images(
         terminal,
         client,
-        snapshot,
+        render_snapshot,
         committed_regions,
         frame_paint,
         ImageRenderMode::Placeholder,
@@ -48,7 +48,7 @@ fn paint_frame<B: Backend>(
 fn paint_frame_with_images<B: Backend>(
     terminal: &mut Terminal<B>,
     client: &Client,
-    snapshot: &RenderSnapshot,
+    render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     frame_paint: &ViewerPaint,
     image_mode: ImageRenderMode,
@@ -63,13 +63,15 @@ fn paint_frame_with_images<B: Backend>(
         placement_display_snapshot
             .or(placement_snapshot)
             .and_then(|placement_display_snapshot| {
-                build_placement_render_snapshot(snapshot, placement_display_snapshot)
+                build_placement_render_snapshot(render_snapshot, placement_display_snapshot)
             });
-    let displayed_snapshot = placement_render_snapshot.as_ref().unwrap_or(snapshot);
+    let displayed_render_snapshot = placement_render_snapshot
+        .as_ref()
+        .unwrap_or(render_snapshot);
     paint_frame_with_displayed_snapshot(
         terminal,
         client,
-        displayed_snapshot,
+        displayed_render_snapshot,
         committed_regions,
         frame_paint,
         image_mode,
@@ -412,10 +414,10 @@ fn build_two_image_input(protocol: koshi_terminal::graphics::GraphicsProtocol) -
     terminal_input_bytes
 }
 
-fn build_source_image_pixel_map(snapshot: &RenderSnapshot) -> BTreeMap<(u16, u16), [u8; 4]> {
+fn build_source_image_pixel_map(render_snapshot: &RenderSnapshot) -> BTreeMap<(u16, u16), [u8; 4]> {
     let mut image_pixel_by_position = BTreeMap::new();
     for image_paint in build_image_paints(
-        snapshot,
+        render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
         Rect::new(0, 0, 80, 24),
     ) {
@@ -3220,11 +3222,12 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
     render_snapshot.session_snapshot.active_tab_snapshot =
         placement_snapshot.source_tab_snapshot.tab_snapshot.clone();
 
-    let displayed_snapshot = build_placement_render_snapshot(&render_snapshot, &proposed_snapshot)
-        .expect("the source tab is the active tab");
+    let displayed_render_snapshot =
+        build_placement_render_snapshot(&render_snapshot, &proposed_snapshot)
+            .expect("the source tab is the active tab");
 
     assert_eq!(
-        displayed_snapshot
+        displayed_render_snapshot
             .session_snapshot
             .active_tab_snapshot
             .pane_slots,
@@ -3234,11 +3237,11 @@ fn placement_render_snapshot_replaces_the_active_pane_layout() {
             .pane_slots
     );
     assert_eq!(
-        displayed_snapshot.client_snapshot.focused_pane_id,
+        displayed_render_snapshot.client_snapshot.focused_pane_id,
         Some(source_pane_id)
     );
     assert_eq!(
-        displayed_snapshot.pane_snapshots[0]
+        displayed_render_snapshot.pane_snapshots[0]
             .terminal_grid_view
             .as_ref(),
         proposed_snapshot
@@ -3286,23 +3289,27 @@ fn placement_render_snapshot_shows_a_cross_tab_destination_in_the_pane_area() {
         pane_sizing: PaneSizing::default(),
     };
 
-    let displayed_snapshot = build_placement_render_snapshot(&render_snapshot, &placement_snapshot)
-        .expect("the destination tab is carried by the placement snapshot");
+    let displayed_render_snapshot =
+        build_placement_render_snapshot(&render_snapshot, &placement_snapshot)
+            .expect("the destination tab is carried by the placement snapshot");
 
     assert_eq!(
-        displayed_snapshot
+        displayed_render_snapshot
             .session_snapshot
             .active_tab_snapshot
             .tab_id,
         destination_tab_id
     );
     assert_eq!(
-        displayed_snapshot.client_snapshot.active_tab_id,
+        displayed_render_snapshot.client_snapshot.active_tab_id,
         destination_tab_id
     );
-    assert_eq!(displayed_snapshot.client_snapshot.focused_pane_id, None);
     assert_eq!(
-        displayed_snapshot
+        displayed_render_snapshot.client_snapshot.focused_pane_id,
+        None
+    );
+    assert_eq!(
+        displayed_render_snapshot
             .session_snapshot
             .active_tab_snapshot
             .pane_slots
@@ -3312,7 +3319,7 @@ fn placement_render_snapshot_shows_a_cross_tab_destination_in_the_pane_area() {
         destination_pane_ids
     );
     assert_eq!(
-        displayed_snapshot
+        displayed_render_snapshot
             .pane_snapshots
             .iter()
             .map(|pane_snapshot| pane_snapshot.pane_id)

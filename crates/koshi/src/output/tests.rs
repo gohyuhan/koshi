@@ -1011,7 +1011,7 @@ fn keys_validate_renders_both_outcome_shapes() {
 
     let clean_keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
     let checked = crate::keymap::KeymapValidationOutcome::Checked {
-        report: clean_keymap_view.report,
+        conflict_report: clean_keymap_view.conflict_report,
         is_applicable: true,
     };
     assert_eq!(
@@ -1181,7 +1181,7 @@ fn keys_validate_checked_carries_the_conflict_findings() {
     let keymap_view = build_test_keymap_view_with_binding("<C-y>", "core:not-a-real-action");
     let is_applicable = !keymap_view.is_reverted_to_defaults;
     let checked = crate::keymap::KeymapValidationOutcome::Checked {
-        report: keymap_view.report,
+        conflict_report: keymap_view.conflict_report,
         is_applicable,
     };
     let json_document: serde_json::Value =

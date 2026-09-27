@@ -19,16 +19,16 @@ use koshi_terminal::grid::state::Cell;
 use koshi_terminal::style::Style;
 
 /// A 24-row × 80-column blank grid, shared for cheap cloning.
-fn build_fixture_grid() -> Arc<Grid> {
+fn build_render_snapshot_fixture_grid() -> Arc<Grid> {
     Arc::new(Grid::build_blank(24, 80, Style::default()))
 }
 
-/// A one-tab, one-terminal-pane, one-client snapshot built around `grid`.
-fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
+/// A one-tab, one-terminal-pane, one-client snapshot built around `terminal_grid`.
+fn build_render_snapshot_fixture(terminal_grid: Arc<Grid>) -> RenderSnapshot {
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
 
-    let slot = PaneSlot {
+    let pane_slot = PaneSlot {
         pane_id,
         outer_rect: Rect {
             origin: Point { column: 0, row: 0 },
@@ -48,10 +48,10 @@ fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
         is_suppressed: false,
     };
 
-    let active_tab = TabSnapshot {
+    let active_tab_snapshot = TabSnapshot {
         tab_id,
         tab_name: "shell".to_string(),
-        pane_slots: vec![slot],
+        pane_slots: vec![pane_slot],
         tab_size: Size {
             column_count: 80,
             row_count: 24,
@@ -66,7 +66,7 @@ fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
         session_id: SessionId::new(),
         session_revision: 0,
         session_name: "sess".to_string(),
-        active_tab_snapshot: active_tab,
+        active_tab_snapshot,
         tabs_metadata: vec![TabMetadata {
             tab_id,
             tab_name: "shell".to_string(),
@@ -86,7 +86,7 @@ fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
             shape: None,
         },
         terminal_grid_view: Some(GridView {
-            grid,
+            grid: terminal_grid,
             view_row_offset: 0,
         }),
         image_placement_snapshots: Vec::new(),
@@ -102,7 +102,7 @@ fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
         },
     };
 
-    let client = ClientSnapshot {
+    let client_snapshot = ClientSnapshot {
         client_id: ClientId::new(),
         client_revision: 0,
         viewport_size: Size {
@@ -119,23 +119,29 @@ fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
         is_recovery_notice_visible: false,
         session_snapshot,
         pane_snapshots: vec![pane_snapshot],
-        client_snapshot: client,
+        client_snapshot,
     }
 }
 
 #[test]
-fn builds_from_fixture_with_exact_values() {
-    let snap = build_fixture(build_fixture_grid());
+fn render_snapshot_fixture_has_exact_field_values() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
 
     // Session.
-    assert_eq!(snap.session_snapshot.session_name, "sess");
-    assert_eq!(snap.session_snapshot.tabs_metadata.len(), 1);
-    assert_eq!(snap.session_snapshot.tabs_metadata[0].tab_name, "shell");
-    assert_eq!(snap.session_snapshot.tabs_metadata[0].tab_index, 0);
-    assert!(snap.session_snapshot.tabs_metadata[0].is_active);
+    assert_eq!(render_snapshot.session_snapshot.session_name, "sess");
+    assert_eq!(render_snapshot.session_snapshot.tabs_metadata.len(), 1);
+    assert_eq!(
+        render_snapshot.session_snapshot.tabs_metadata[0].tab_name,
+        "shell"
+    );
+    assert_eq!(
+        render_snapshot.session_snapshot.tabs_metadata[0].tab_index,
+        0
+    );
+    assert!(render_snapshot.session_snapshot.tabs_metadata[0].is_active);
 
     // Active tab + its one solved slot.
-    let tab_snapshot = &snap.session_snapshot.active_tab_snapshot;
+    let tab_snapshot = &render_snapshot.session_snapshot.active_tab_snapshot;
     assert_eq!(tab_snapshot.tab_name, "shell");
     assert_eq!(tab_snapshot.layout_mode, LayoutMode::Tiled);
     assert_eq!(
@@ -174,8 +180,8 @@ fn builds_from_fixture_with_exact_values() {
     assert!(!pane_slot.is_suppressed);
 
     // Pane content, joined to the slot by id.
-    assert_eq!(snap.pane_snapshots.len(), 1);
-    let pane_snapshot = &snap.pane_snapshots[0];
+    assert_eq!(render_snapshot.pane_snapshots.len(), 1);
+    let pane_snapshot = &render_snapshot.pane_snapshots[0];
     assert_eq!(pane_snapshot.pane_id, pane_slot.pane_id);
     assert_eq!(pane_snapshot.pane_title.as_deref(), Some("bash"));
     assert_eq!(
@@ -196,48 +202,51 @@ fn builds_from_fixture_with_exact_values() {
         }
     );
 
-    let grid_view = pane_snapshot
+    let terminal_grid_view = pane_snapshot
         .terminal_grid_view
         .as_ref()
         .expect("terminal pane has a grid");
-    assert_eq!(grid_view.view_row_offset, 0);
-    assert_eq!(grid_view.grid.get_grid_dimensions(), (24, 80));
+    assert_eq!(terminal_grid_view.view_row_offset, 0);
+    assert_eq!(terminal_grid_view.grid.get_grid_dimensions(), (24, 80));
 
     // Client projection.
     assert_eq!(
-        snap.client_snapshot.viewport_size,
+        render_snapshot.client_snapshot.viewport_size,
         Size {
             column_count: 80,
             row_count: 24,
         }
     );
-    assert_eq!(snap.client_snapshot.lock_mode, LockMode::Normal);
-    assert_eq!(snap.client_snapshot.active_tab_id, tab_snapshot.tab_id);
+    assert_eq!(render_snapshot.client_snapshot.lock_mode, LockMode::Normal);
+    assert_eq!(
+        render_snapshot.client_snapshot.active_tab_id,
+        tab_snapshot.tab_id
+    );
     // Focus is identified by matching this id against each PaneSlot's pane_id.
     assert_eq!(
-        snap.client_snapshot.focused_pane_id,
+        render_snapshot.client_snapshot.focused_pane_id,
         Some(pane_snapshot.pane_id)
     );
 }
 
 #[test]
 fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
-    let mut snap = build_fixture(build_fixture_grid());
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     // Each field takes a value of its own, so a copy that reads the wrong
     // source field lands on the wrong value here.
-    snap.pane_snapshots[0].view_top_row_index = 42;
-    snap.pane_snapshots[0].mouse_tracking = MouseTracking::ButtonMotion;
-    snap.pane_snapshots[0].is_alternate_scroll_enabled = true;
-    snap.pane_snapshots[0].is_on_alternate_screen = false;
-    snap.pane_snapshots[0].has_selection = true;
-    let pane_id = snap.pane_snapshots[0].pane_id;
-    let client_id = snap.client_snapshot.client_id;
-    let tab_id = snap.session_snapshot.active_tab_snapshot.tab_id;
+    render_snapshot.pane_snapshots[0].view_top_row_index = 42;
+    render_snapshot.pane_snapshots[0].mouse_tracking = MouseTracking::ButtonMotion;
+    render_snapshot.pane_snapshots[0].is_alternate_scroll_enabled = true;
+    render_snapshot.pane_snapshots[0].is_on_alternate_screen = false;
+    render_snapshot.pane_snapshots[0].has_selection = true;
+    let pane_id = render_snapshot.pane_snapshots[0].pane_id;
+    let client_id = render_snapshot.client_snapshot.client_id;
+    let tab_id = render_snapshot.session_snapshot.active_tab_snapshot.tab_id;
 
-    let frame = build_mouse_frame(snap);
+    let mouse_frame = build_mouse_frame(render_snapshot);
 
     assert_eq!(
-        frame.mouse_panes,
+        mouse_frame.mouse_panes,
         vec![MousePane {
             pane_id,
             view_top_row_index: 42,
@@ -248,10 +257,13 @@ fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
         }]
     );
     // The session and client parts move across whole.
-    assert_eq!(frame.client_snapshot.client_id, client_id);
-    assert_eq!(frame.session_snapshot.active_tab_snapshot.tab_id, tab_id);
+    assert_eq!(mouse_frame.client_snapshot.client_id, client_id);
     assert_eq!(
-        frame.committed_regions,
+        mouse_frame.session_snapshot.active_tab_snapshot.tab_id,
+        tab_id
+    );
+    assert_eq!(
+        mouse_frame.committed_regions,
         CommittedRegions::build_core(
             Size {
                 column_count: 80,
@@ -264,24 +276,24 @@ fn a_mouse_frame_keeps_every_field_a_mouse_event_is_answered_from() {
 
 #[test]
 fn a_mouse_frame_keeps_one_entry_per_pane_in_frame_order() {
-    let mut snap = build_fixture(build_fixture_grid());
-    let first_pane_snapshot = snap.pane_snapshots[0].clone();
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let first_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     let mut second_pane_snapshot = first_pane_snapshot.clone();
     second_pane_snapshot.pane_id = PaneId::new();
     second_pane_snapshot.view_top_row_index = 7;
     let mut third_pane_snapshot = first_pane_snapshot.clone();
     third_pane_snapshot.pane_id = PaneId::new();
     third_pane_snapshot.view_top_row_index = 9;
-    snap.pane_snapshots = vec![
+    render_snapshot.pane_snapshots = vec![
         first_pane_snapshot.clone(),
         second_pane_snapshot.clone(),
         third_pane_snapshot.clone(),
     ];
 
-    let frame = build_mouse_frame(snap);
+    let mouse_frame = build_mouse_frame(render_snapshot);
 
     assert_eq!(
-        frame
+        mouse_frame
             .mouse_panes
             .iter()
             .map(|mouse_pane| (mouse_pane.pane_id, mouse_pane.view_top_row_index))
@@ -296,25 +308,28 @@ fn a_mouse_frame_keeps_one_entry_per_pane_in_frame_order() {
 
 #[test]
 fn a_mouse_frame_solves_its_regions_from_the_client_viewport() {
-    let mut snap = build_fixture(build_fixture_grid());
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     // The client sees more than the tab was solved for, so a builder reading
     // the tab size instead of the client viewport lands elsewhere.
-    snap.client_snapshot.viewport_size = Size {
+    render_snapshot.client_snapshot.viewport_size = Size {
         column_count: 100,
         row_count: 30,
     };
     assert_eq!(
-        snap.session_snapshot.active_tab_snapshot.tab_size,
+        render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .tab_size,
         Size {
             column_count: 80,
             row_count: 24,
         }
     );
 
-    let frame = build_mouse_frame(snap);
+    let mouse_frame = build_mouse_frame(render_snapshot);
 
     assert_eq!(
-        frame.committed_regions,
+        mouse_frame.committed_regions,
         CommittedRegions::build_core(
             Size {
                 column_count: 100,
@@ -324,7 +339,7 @@ fn a_mouse_frame_solves_its_regions_from_the_client_viewport() {
         )
     );
     assert_eq!(
-        frame.committed_regions.viewport_size,
+        mouse_frame.committed_regions.viewport_size,
         Size {
             column_count: 100,
             row_count: 30,
@@ -333,15 +348,15 @@ fn a_mouse_frame_solves_its_regions_from_the_client_viewport() {
 }
 
 #[test]
-fn a_mouse_frame_from_a_paneless_snapshot_carries_no_pane_entries() {
-    let mut snap = build_fixture(build_fixture_grid());
-    snap.pane_snapshots.clear();
+fn a_mouse_frame_from_a_render_snapshot_without_panes_carries_no_mouse_panes() {
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    render_snapshot.pane_snapshots.clear();
 
-    let frame = build_mouse_frame(snap);
+    let mouse_frame = build_mouse_frame(render_snapshot);
 
-    assert_eq!(frame.mouse_panes, Vec::new());
+    assert_eq!(mouse_frame.mouse_panes, Vec::new());
     assert_eq!(
-        frame.committed_regions,
+        mouse_frame.committed_regions,
         CommittedRegions::build_core(
             Size {
                 column_count: 80,
@@ -353,11 +368,11 @@ fn a_mouse_frame_from_a_paneless_snapshot_carries_no_pane_entries() {
 }
 
 #[test]
-fn from_snapshot_keeps_the_solve_it_is_given() {
-    let snap = build_fixture(build_fixture_grid());
+fn mouse_frame_from_snapshot_keeps_the_supplied_region_solve() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     // A viewport and revision that differ from the client's own, so a builder
     // that re-derived the solve instead of carrying it lands elsewhere.
-    let committed = CommittedRegions::build_core(
+    let committed_regions = CommittedRegions::build_core(
         Size {
             column_count: 40,
             row_count: 10,
@@ -365,17 +380,17 @@ fn from_snapshot_keeps_the_solve_it_is_given() {
         12,
     );
 
-    let frame = MouseFrame::from_snapshot(&snap, committed.clone());
+    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone());
 
-    assert_eq!(frame.committed_regions, committed);
+    assert_eq!(mouse_frame.committed_regions, committed_regions);
     assert_eq!(
-        frame.committed_regions.viewport_size,
+        mouse_frame.committed_regions.viewport_size,
         Size {
             column_count: 40,
             row_count: 10,
         }
     );
-    assert_eq!(frame.committed_regions.region_input_revision, 12);
+    assert_eq!(mouse_frame.committed_regions.region_input_revision, 12);
 }
 
 #[test]
@@ -384,7 +399,7 @@ fn committed_regions_carries_the_exact_solve_it_was_built_from() {
         column_count: 80,
         row_count: 24,
     });
-    let committed = CommittedRegions::from_solved_regions(
+    let committed_regions = CommittedRegions::from_solved_regions(
         Size {
             column_count: 80,
             row_count: 24,
@@ -394,16 +409,16 @@ fn committed_regions_carries_the_exact_solve_it_was_built_from() {
     );
 
     assert_eq!(
-        committed.viewport_size,
+        committed_regions.viewport_size,
         Size {
             column_count: 80,
             row_count: 24,
         }
     );
-    assert_eq!(committed.solved_regions, solved_regions);
-    assert_eq!(committed.region_input_revision, 5);
+    assert_eq!(committed_regions.solved_regions, solved_regions);
+    assert_eq!(committed_regions.region_input_revision, 5);
     assert_eq!(
-        committed,
+        committed_regions,
         CommittedRegions::build_core(
             Size {
                 column_count: 80,
@@ -431,10 +446,10 @@ fn viewer_chrome_defaults_to_no_pointer_no_tab_offset_and_no_reconnect() {
 }
 
 #[test]
-fn a_snapshot_layout_borrows_the_frame_and_holds_no_committed_regions() {
-    let snap = build_fixture(build_fixture_grid());
-    let viewer = ViewerChrome {
-        hovered_pane_id: Some(snap.pane_snapshots[0].pane_id),
+fn render_snapshot_frame_layout_borrows_the_frame_without_committed_regions() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let viewer_chrome = ViewerChrome {
+        hovered_pane_id: Some(render_snapshot.pane_snapshots[0].pane_id),
         placement_handle_pane_id: None,
         active_input_mode: None,
         tabline_offset: Some(3),
@@ -445,17 +460,23 @@ fn a_snapshot_layout_borrows_the_frame_and_holds_no_committed_regions() {
         ..ViewerChrome::default()
     };
 
-    let layout = snap.build_frame_layout(viewer);
+    let frame_layout = render_snapshot.build_frame_layout(viewer_chrome);
 
-    assert_eq!(*layout.session_snapshot, snap.session_snapshot);
-    assert_eq!(*layout.client_snapshot, snap.client_snapshot);
-    assert_eq!(layout.viewer_chrome, viewer);
-    assert_eq!(layout.committed_regions, None);
+    assert_eq!(
+        *frame_layout.session_snapshot,
+        render_snapshot.session_snapshot
+    );
+    assert_eq!(
+        *frame_layout.client_snapshot,
+        render_snapshot.client_snapshot
+    );
+    assert_eq!(frame_layout.viewer_chrome, viewer_chrome);
+    assert_eq!(frame_layout.committed_regions, None);
 }
 
 #[test]
 fn an_active_viewer_mode_replaces_the_frames_base_mode_in_tabline_inputs() {
-    let mut render_snapshot = build_fixture(build_fixture_grid());
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
     render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
     let viewer_chrome = ViewerChrome {
         active_input_mode: Some(LockMode::PanePlacement),
@@ -473,47 +494,53 @@ fn an_active_viewer_mode_replaces_the_frames_base_mode_in_tabline_inputs() {
 
 #[test]
 fn an_owned_frame_layout_borrows_its_session_and_client() {
-    let snap = build_fixture(build_fixture_grid());
-    let owned = OwnedFrameLayout {
-        session_snapshot: snap.session_snapshot.clone(),
-        client_snapshot: snap.client_snapshot.clone(),
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let owned_frame_layout = OwnedFrameLayout {
+        session_snapshot: render_snapshot.session_snapshot.clone(),
+        client_snapshot: render_snapshot.client_snapshot.clone(),
     };
 
-    let layout = owned.build_frame_layout(ViewerChrome::default());
+    let frame_layout = owned_frame_layout.build_frame_layout(ViewerChrome::default());
 
-    assert_eq!(*layout.session_snapshot, snap.session_snapshot);
-    assert_eq!(*layout.client_snapshot, snap.client_snapshot);
-    assert_eq!(layout.viewer_chrome, ViewerChrome::default());
-    assert_eq!(layout.committed_regions, None);
+    assert_eq!(
+        *frame_layout.session_snapshot,
+        render_snapshot.session_snapshot
+    );
+    assert_eq!(
+        *frame_layout.client_snapshot,
+        render_snapshot.client_snapshot
+    );
+    assert_eq!(frame_layout.viewer_chrome, ViewerChrome::default());
+    assert_eq!(frame_layout.committed_regions, None);
 }
 
 #[test]
 fn a_mouse_frame_layout_carries_the_regions_that_were_painted() {
-    let snap = build_fixture(build_fixture_grid());
-    let committed = CommittedRegions::build_core(
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let committed_regions = CommittedRegions::build_core(
         Size {
             column_count: 80,
             row_count: 24,
         },
         3,
     );
-    let frame = MouseFrame::from_snapshot(&snap, committed.clone());
+    let mouse_frame = MouseFrame::from_snapshot(&render_snapshot, committed_regions.clone());
 
-    let layout = frame.build_frame_layout(ViewerChrome::default());
+    let frame_layout = mouse_frame.build_frame_layout(ViewerChrome::default());
 
-    assert_eq!(layout.committed_regions, Some(&committed));
+    assert_eq!(frame_layout.committed_regions, Some(&committed_regions));
 }
 
 #[test]
-fn the_tabline_view_takes_its_fields_from_the_session_client_and_viewer() {
-    let mut snap = build_fixture(build_fixture_grid());
-    snap.client_snapshot.lock_mode = LockMode::Locked;
-    snap.client_snapshot.is_mouse_selection_enabled = true;
+fn tabline_inputs_borrow_session_client_and_viewer_fields() {
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
+    render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
     let reconnecting = Reconnecting {
         attempt: 4,
         retry_in_seconds: 8,
     };
-    let viewer = ViewerChrome {
+    let viewer_chrome = ViewerChrome {
         hovered_pane_id: None,
         placement_handle_pane_id: None,
         active_input_mode: None,
@@ -522,131 +549,145 @@ fn the_tabline_view_takes_its_fields_from_the_session_client_and_viewer() {
         ..ViewerChrome::default()
     };
 
-    let layout = snap.build_frame_layout(viewer);
-    let tabline = layout.get_tabline_inputs();
+    let frame_layout = render_snapshot.build_frame_layout(viewer_chrome);
+    let tabline_inputs = frame_layout.get_tabline_inputs();
 
-    assert_eq!(tabline.session_name, "sess");
+    assert_eq!(tabline_inputs.session_name, "sess");
     assert_eq!(
-        tabline.tabs_metadata,
-        snap.session_snapshot.tabs_metadata.as_slice()
+        tabline_inputs.tabs_metadata,
+        render_snapshot.session_snapshot.tabs_metadata.as_slice()
     );
-    assert_eq!(tabline.lock_mode, LockMode::Locked);
-    assert!(tabline.is_mouse_selection_enabled);
-    assert_eq!(tabline.reconnecting, Some(reconnecting));
-    assert_eq!(tabline.tabline_offset, Some(2));
+    assert_eq!(tabline_inputs.lock_mode, LockMode::Locked);
+    assert!(tabline_inputs.is_mouse_selection_enabled);
+    assert_eq!(tabline_inputs.reconnecting, Some(reconnecting));
+    assert_eq!(tabline_inputs.tabline_offset, Some(2));
 }
 
 #[test]
-fn row_span_returns_the_inclusive_columns_of_a_highlighted_row() {
-    let spans = SelectionSpans {
+fn selection_row_span_returns_inclusive_columns_of_a_highlighted_row() {
+    let selection_spans = SelectionSpans {
         row_spans: vec![(4, 12, 79), (5, 0, 79), (6, 0, 33)],
     };
 
-    assert_eq!(spans.find_row_span(4), Some((12, 79)));
-    assert_eq!(spans.find_row_span(5), Some((0, 79)));
-    assert_eq!(spans.find_row_span(6), Some((0, 33)));
+    assert_eq!(selection_spans.find_row_span(4), Some((12, 79)));
+    assert_eq!(selection_spans.find_row_span(5), Some((0, 79)));
+    assert_eq!(selection_spans.find_row_span(6), Some((0, 33)));
 }
 
 #[test]
-fn row_span_is_none_for_a_row_the_highlight_does_not_touch() {
-    let spans = SelectionSpans {
+fn selection_row_span_is_none_when_the_highlight_does_not_touch_the_row() {
+    let selection_spans = SelectionSpans {
         row_spans: vec![(4, 12, 79), (6, 0, 33)],
     };
 
-    assert_eq!(spans.find_row_span(3), None);
-    assert_eq!(spans.find_row_span(5), None);
-    assert_eq!(spans.find_row_span(7), None);
-    assert_eq!(spans.find_row_span(u16::MAX), None);
+    assert_eq!(selection_spans.find_row_span(3), None);
+    assert_eq!(selection_spans.find_row_span(5), None);
+    assert_eq!(selection_spans.find_row_span(7), None);
+    assert_eq!(selection_spans.find_row_span(u16::MAX), None);
 }
 
 #[test]
-fn row_span_of_an_empty_highlight_is_none() {
-    let spans = SelectionSpans {
+fn empty_selection_spans_have_no_row_span() {
+    let selection_spans = SelectionSpans {
         row_spans: Vec::new(),
     };
 
-    assert_eq!(spans.find_row_span(0), None);
+    assert_eq!(selection_spans.find_row_span(0), None);
 }
 
 #[test]
-fn row_span_answers_a_single_cell_highlight_with_that_one_column() {
-    let spans = SelectionSpans {
+fn selection_row_span_returns_the_single_highlighted_column() {
+    let selection_spans = SelectionSpans {
         row_spans: vec![(0, 7, 7)],
     };
 
-    assert_eq!(spans.find_row_span(0), Some((7, 7)));
+    assert_eq!(selection_spans.find_row_span(0), Some((7, 7)));
 }
 
 #[test]
-fn row_span_takes_the_first_entry_when_a_row_is_listed_twice() {
-    let spans = SelectionSpans {
+fn selection_row_span_uses_the_first_duplicate_row_entry() {
+    let selection_spans = SelectionSpans {
         row_spans: vec![(2, 0, 5), (2, 10, 20)],
     };
 
-    assert_eq!(spans.find_row_span(2), Some((0, 5)));
+    assert_eq!(selection_spans.find_row_span(2), Some((0, 5)));
 }
 
 #[test]
-fn snapshot_is_send_and_sync() {
+fn render_snapshot_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<RenderSnapshot>();
 }
 
 #[test]
-fn cloning_shares_the_grid_by_reference() {
-    let grid = build_fixture_grid();
-    assert_eq!(Arc::strong_count(&grid), 1);
+fn cloning_render_snapshot_shares_the_grid_by_reference() {
+    let terminal_grid = build_render_snapshot_fixture_grid();
+    assert_eq!(Arc::strong_count(&terminal_grid), 1);
 
     // The snapshot holds one shared reference to the grid.
-    let snap = build_fixture(grid.clone());
-    assert_eq!(Arc::strong_count(&grid), 2);
+    let render_snapshot = build_render_snapshot_fixture(terminal_grid.clone());
+    assert_eq!(Arc::strong_count(&terminal_grid), 2);
 
     // Cloning the snapshot bumps the refcount rather than copying the cells.
-    let clone = snap.clone();
-    assert_eq!(Arc::strong_count(&grid), 3);
+    let cloned_render_snapshot = render_snapshot.clone();
+    assert_eq!(Arc::strong_count(&terminal_grid), 3);
 
-    let original = snap.pane_snapshots[0].terminal_grid_view.as_ref().unwrap();
-    let cloned = clone.pane_snapshots[0].terminal_grid_view.as_ref().unwrap();
-    assert!(Arc::ptr_eq(&original.grid, &cloned.grid));
+    let original_grid_view = render_snapshot.pane_snapshots[0]
+        .terminal_grid_view
+        .as_ref()
+        .unwrap();
+    let cloned_grid_view = cloned_render_snapshot.pane_snapshots[0]
+        .terminal_grid_view
+        .as_ref()
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &original_grid_view.grid,
+        &cloned_grid_view.grid
+    ));
 }
 
 #[test]
-fn clone_equals_original() {
-    let snap = build_fixture(build_fixture_grid());
-    assert_eq!(snap, snap.clone());
+fn cloning_render_snapshot_preserves_equality() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    assert_eq!(render_snapshot, render_snapshot.clone());
 }
 
 #[test]
-fn snapshots_differing_by_one_grid_cell_are_not_equal() {
+fn render_snapshots_with_different_grid_cells_are_not_equal() {
     // Derived `PartialEq` recurses into the grid; a single-cell difference
     // deep inside it must still make the two snapshots unequal, not just a
     // difference at the top-level fields.
-    let grid_a = Grid::build_blank(24, 80, Style::default());
-    let snap_a = build_fixture(Arc::new(grid_a));
+    let first_terminal_grid = Grid::build_blank(24, 80, Style::default());
+    let first_render_snapshot = build_render_snapshot_fixture(Arc::new(first_terminal_grid));
 
-    let mut grid_b = Grid::build_blank(24, 80, Style::default());
-    *grid_b.get_cell_mut(0, 0).unwrap() = Cell::from_character('x', 1, Style::default());
-    let snap_b = build_fixture(Arc::new(grid_b));
+    let mut second_terminal_grid = Grid::build_blank(24, 80, Style::default());
+    *second_terminal_grid.get_cell_mut(0, 0).unwrap() =
+        Cell::from_character('x', 1, Style::default());
+    let second_render_snapshot = build_render_snapshot_fixture(Arc::new(second_terminal_grid));
 
-    assert_ne!(snap_a, snap_b);
+    assert_ne!(first_render_snapshot, second_render_snapshot);
 }
 
 #[test]
-fn snapshot_with_no_panes_or_tabs_is_valid_and_equals_its_clone() {
+fn empty_render_snapshot_is_valid_and_equals_its_clone() {
     // An empty snapshot (no panes, no layout slots, no tabs, no focus) must
     // still construct and compare without panicking — the degenerate state
     // right after a session's last pane closes.
-    let mut snap = build_fixture(build_fixture_grid());
-    snap.pane_snapshots.clear();
-    snap.session_snapshot.active_tab_snapshot.pane_slots.clear();
-    snap.session_snapshot.tabs_metadata.clear();
-    snap.client_snapshot.focused_pane_id = None;
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    render_snapshot.pane_snapshots.clear();
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .clear();
+    render_snapshot.session_snapshot.tabs_metadata.clear();
+    render_snapshot.client_snapshot.focused_pane_id = None;
 
-    assert!(snap.pane_snapshots.is_empty());
-    assert!(snap
+    assert!(render_snapshot.pane_snapshots.is_empty());
+    assert!(render_snapshot
         .session_snapshot
         .active_tab_snapshot
         .pane_slots
         .is_empty());
-    assert_eq!(snap, snap.clone());
+    assert_eq!(render_snapshot, render_snapshot.clone());
 }

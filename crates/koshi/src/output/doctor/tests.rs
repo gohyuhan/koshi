@@ -38,10 +38,10 @@ fn build_sample_check_rows() -> Vec<DoctorCheckRow> {
 
 #[test]
 fn the_table_pads_every_column_and_prints_a_dash_for_a_row_with_no_help() {
-    let rendered = render_doctor(&build_sample_check_rows(), OutputFormat::Table);
+    let rendered_output = render_doctor(&build_sample_check_rows(), OutputFormat::Table);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "check     verdict  reason                   help\n\
          config    ok       1 config file validated  -\n\
          terminal  warn     TERM is not set          set TERM before running koshi\n"
@@ -50,10 +50,10 @@ fn the_table_pads_every_column_and_prints_a_dash_for_a_row_with_no_help() {
 
 #[test]
 fn the_json_form_is_one_object_per_row() {
-    let rendered = render_doctor(&build_sample_check_rows(), OutputFormat::Json);
+    let rendered_output = render_doctor(&build_sample_check_rows(), OutputFormat::Json);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "[\n  \
            {\n    \
              \"check_name\": \"config\",\n    \
@@ -98,10 +98,10 @@ fn build_shortened_check_rows() -> Vec<DoctorCheckRow> {
 
 #[test]
 fn the_table_leaves_the_full_text_out() {
-    let rendered = render_doctor(&build_shortened_check_rows(), OutputFormat::Table);
+    let rendered_output = render_doctor(&build_shortened_check_rows(), OutputFormat::Table);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "check   verdict  reason                                    help\n\
          router  fail     a router is listening and did not answer  end every koshi process on this machine and start one again\n"
     );
@@ -109,10 +109,10 @@ fn the_table_leaves_the_full_text_out() {
 
 #[test]
 fn the_json_form_carries_the_full_text() {
-    let rendered = render_doctor(&build_shortened_check_rows(), OutputFormat::Json);
+    let rendered_output = render_doctor(&build_shortened_check_rows(), OutputFormat::Json);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "[\n  \
            {\n    \
              \"check_name\": \"router\",\n    \
@@ -135,10 +135,10 @@ fn a_failed_row_renders_the_fail_verdict() {
         None,
     )];
 
-    let rendered = render_doctor(&check_rows, OutputFormat::Table);
+    let rendered_output = render_doctor(&check_rows, OutputFormat::Table);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "check  verdict  reason                                                        help\n\
          shell  fail     a new pane would run /bin/nope, which is not on this machine  set SHELL to a shell that exists\n"
     );

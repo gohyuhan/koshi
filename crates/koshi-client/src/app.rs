@@ -26,7 +26,7 @@ pub fn run_default_client(profile: Option<&str>) -> Result<(), CliError> {
     // Runs after the subscriber is installed, so its lines reach the log.
     // Creating the directory adds no `koshi.kdl`, so the layer read above sees
     // the same files either way.
-    ensure_koshi_directories();
+    ensure_config_directory();
     crate::attach::attach_session(&runtime_directory, session_id)
 }
 
@@ -36,7 +36,7 @@ pub fn run_default_client(profile: Option<&str>) -> Result<(), CliError> {
 /// The caller installs the tracing subscriber before this runs, so every line
 /// below reaches the log. No home directory, and a create that fails, each
 /// warn; a directory that is ready logs at info.
-fn ensure_koshi_directories() {
+fn ensure_config_directory() {
     let Some(config_directory) = koshi_paths::resolve_config_directory() else {
         tracing::warn!("no home directory found; skipping config directory setup");
         return;

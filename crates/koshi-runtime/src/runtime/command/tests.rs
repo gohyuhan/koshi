@@ -402,7 +402,7 @@ fn build_every_command(tab_id: TabId, pane_id: PaneId) -> Vec<Command> {
         }),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
         Command::SetLockMode(LockModeArgs {
@@ -655,7 +655,7 @@ fn a_command_from_a_client_id_no_session_holds_is_refused_and_changes_nothing() 
         CommandSource::from_key_binding(ClientId::new()),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }),
     );
     let command_id = command_envelope.command_id;
@@ -698,7 +698,7 @@ fn a_command_from_a_client_that_has_detached_is_refused_and_changes_nothing() {
         CommandSource::from_key_binding(client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }),
     );
     let command_id = command_envelope.command_id;
@@ -947,7 +947,7 @@ fn write_to_pane_routes_the_pane_target() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(PaneId::new()),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }));
     let command_id = command_envelope.command_id;
 
@@ -980,7 +980,7 @@ fn write_to_a_running_pane_delivers_the_bytes() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'l', b's', b'\n'],
+            pane_input_bytes: vec![b'l', b's', b'\n'],
         }));
     let command_id = command_envelope.command_id;
     match runtime.dispatch(command_envelope) {
@@ -1003,7 +1003,7 @@ fn write_to_a_running_pane_delivers_the_bytes() {
     let empty_write =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: Vec::new(),
+            pane_input_bytes: Vec::new(),
         }));
     let empty_write_command_id = empty_write.command_id;
     assert_eq!(
@@ -1019,7 +1019,7 @@ fn write_to_a_running_pane_delivers_the_bytes() {
     let failed_write =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }));
     let failed_write_command_id = failed_write.command_id;
     assert_eq!(
@@ -1072,7 +1072,7 @@ fn write_to_a_suppressed_pane_still_reaches_its_shell() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'l', b's'],
+            pane_input_bytes: vec![b'l', b's'],
         }));
     assert!(matches!(
         runtime.dispatch(command_envelope),
@@ -1120,7 +1120,7 @@ fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
         CommandSource::from_key_binding(client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'l', b's', b'\n'],
+            pane_input_bytes: vec![b'l', b's', b'\n'],
         }),
     );
     assert!(matches!(
@@ -1155,7 +1155,7 @@ fn a_client_sourced_write_clears_the_clients_highlight_in_the_pane() {
         CommandSource::from_key_binding(client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'l', b's', b'\n'],
+            pane_input_bytes: vec![b'l', b's', b'\n'],
         }),
     );
     assert!(matches!(
@@ -1196,7 +1196,7 @@ fn an_empty_client_sourced_write_leaves_a_parked_view_alone() {
         CommandSource::from_key_binding(client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: Vec::new(),
+            pane_input_bytes: Vec::new(),
         }),
     );
     assert!(matches!(
@@ -1225,7 +1225,7 @@ fn write_to_pane_defaults_to_the_clients_focused_pane() {
         CommandSource::from_key_binding(client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: vec![b'a'],
+            pane_input_bytes: vec![b'a'],
         }),
     );
     assert!(matches!(
@@ -1263,7 +1263,7 @@ fn write_to_pane_via_in_session_cli_defaults_to_the_issuing_pane() {
         command_source,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: vec![b'b'],
+            pane_input_bytes: vec![b'b'],
         }),
     );
     assert!(matches!(
@@ -1306,7 +1306,7 @@ fn write_to_an_exited_pane_is_rejected() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }));
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -1352,7 +1352,7 @@ fn write_to_a_closing_pane_is_rejected() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }));
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -1394,7 +1394,7 @@ fn write_backend_failure_is_reported() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id),
-            input_bytes: vec![b'x'],
+            pane_input_bytes: vec![b'x'],
         }));
     let command_id = command_envelope.command_id;
     assert_eq!(
@@ -1408,7 +1408,7 @@ fn write_backend_failure_is_reported() {
 }
 
 #[test]
-fn write_with_empty_data_is_a_noop_ok() {
+fn write_with_empty_pane_input_is_a_noop_ok() {
     let (
         mut runtime,
         _fake_pty_backend,
@@ -1424,7 +1424,7 @@ fn write_with_empty_data_is_a_noop_ok() {
     let command_envelope =
         build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id_a),
-            input_bytes: Vec::new(),
+            pane_input_bytes: Vec::new(),
         }));
     let command_id = command_envelope.command_id;
     match runtime.dispatch(command_envelope) {

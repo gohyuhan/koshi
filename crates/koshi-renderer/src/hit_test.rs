@@ -158,7 +158,7 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
             }
         }
         if pane_slot.outer_rect.is_point_inside(layout_point) {
-            let border_side = get_border_side(pane_slot.outer_rect, layout_point);
+            let border_side = resolve_border_side(pane_slot.outer_rect, layout_point);
             if border_side == Direction::Up
                 && frame_layout.viewer_chrome.placement_handle_pane_id == Some(pane_slot.pane_id)
                 && is_placement_handle_cell(pane_slot.outer_rect, layout_point)
@@ -212,26 +212,26 @@ pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
 fn classify_tabline_region(
     frame_layout: FrameLayout<'_>,
     tabline_rect: RatatuiRect,
-    column: u16,
+    screen_column: u16,
 ) -> HitRegion {
     let tabline_geometry = solve_tabline_layout(frame_layout.get_tabline_inputs(), tabline_rect);
     if let Some(left_scroll_arrow) = tabline_geometry.left_scroll_arrow {
-        if column == left_scroll_arrow.start_column {
+        if screen_column == left_scroll_arrow.start_column {
             return HitRegion::TablineScrollLeft {
                 target_tab_index: left_scroll_arrow.target_first_visible_tab_index,
             };
         }
     }
     if let Some(right_scroll_arrow) = tabline_geometry.right_scroll_arrow {
-        if column == right_scroll_arrow.start_column {
+        if screen_column == right_scroll_arrow.start_column {
             return HitRegion::TablineScrollRight {
                 target_tab_index: right_scroll_arrow.target_first_visible_tab_index,
             };
         }
     }
     for visible_tab_span in tabline_geometry.visible_tab_spans {
-        if column >= visible_tab_span.start_column
-            && column < visible_tab_span.start_column + visible_tab_span.column_count
+        if screen_column >= visible_tab_span.start_column
+            && screen_column < visible_tab_span.start_column + visible_tab_span.column_count
         {
             return HitRegion::Tab {
                 tab_id: frame_layout.session_snapshot.tabs_metadata
@@ -435,7 +435,7 @@ fn is_screen_point_inside(screen_rect: RatatuiRect, screen_point: Point) -> bool
 /// `screen_point` must be within `outer_rect` but not within its inner content
 /// area. A corner cell resolves to its vertical side: a border drag on a corner
 /// reads as the left or right edge.
-fn get_border_side(outer_rect: Rect, screen_point: Point) -> Direction {
+fn resolve_border_side(outer_rect: Rect, screen_point: Point) -> Direction {
     let right_column = outer_rect.origin.column + outer_rect.size.column_count - 1;
     let bottom_row = outer_rect.origin.row + outer_rect.size.row_count - 1;
     if screen_point.column == outer_rect.origin.column {

@@ -321,8 +321,8 @@ pub struct FocusTabArgs {
 pub struct WriteToPaneArgs {
     /// Pane to write to; `None` writes to the focused pane.
     pub pane_id: Option<PaneId>,
-    /// Raw bytes to inject into the pane's input.
-    pub input_bytes: Vec<u8>,
+    /// Raw bytes to write to the pane's input.
+    pub pane_input_bytes: Vec<u8>,
 }
 
 /// Arguments for [`Command::SetLockMode`].
@@ -705,12 +705,12 @@ struct CommandEnvelopeWire {
 impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
     type Error = CommandEnvelopeError;
 
-    fn try_from(wire: CommandEnvelopeWire) -> Result<Self, Self::Error> {
+    fn try_from(command_envelope_wire: CommandEnvelopeWire) -> Result<Self, Self::Error> {
         CommandEnvelope {
-            command_id: wire.command_id,
-            command_source: wire.command_source,
-            client_id: wire.client_id,
-            command: wire.command,
+            command_id: command_envelope_wire.command_id,
+            command_source: command_envelope_wire.command_source,
+            client_id: command_envelope_wire.client_id,
+            command: command_envelope_wire.command,
         }
         .validate_command_envelope()
     }

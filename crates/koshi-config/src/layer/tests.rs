@@ -12,7 +12,7 @@ use super::*;
 use crate::types::{ModeBindings, ModeName, RgbColor};
 
 #[test]
-fn empty_layer_changes_nothing() {
+fn default_partial_config_preserves_server_and_client_defaults() {
     let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
     assert_eq!(server, ServerConfig::default());
 
@@ -21,7 +21,7 @@ fn empty_layer_changes_nothing() {
 }
 
 #[test]
-fn no_layers_returns_base() {
+fn no_config_layers_preserve_server_and_client_base_configs() {
     assert_eq!(
         merge_server(ServerConfig::default(), vec![]),
         ServerConfig::default()
@@ -143,7 +143,7 @@ fn a_higher_precedence_layer_wins_on_the_shared_sessions_directory() {
 }
 
 #[test]
-fn a_machine_names_no_listen_address_unless_the_file_names_one() {
+fn remote_listen_is_unset_without_a_configured_address() {
     // The built-in default, so a machine with no `koshi.kdl` names no address
     // and the remote listener has nothing to bind.
     let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
@@ -220,7 +220,7 @@ fn auto_close_session_folds_onto_the_session_side_only() {
 }
 
 #[test]
-fn single_field_override_keeps_sibling() {
+fn scrollback_line_count_override_keeps_byte_count_default() {
     let layer = PartialKoshiConfig {
         scrollback: Some(PartialScrollbackConfig {
             maximum_line_count: Some(5_000),
@@ -229,15 +229,18 @@ fn single_field_override_keeps_sibling() {
         }),
         ..Default::default()
     };
-    let merged = merge_server(ServerConfig::default(), vec![layer]);
+    let merged_server_config = merge_server(ServerConfig::default(), vec![layer]);
 
-    assert_eq!(merged.scrollback.maximum_line_count, 5_000);
+    assert_eq!(merged_server_config.scrollback.maximum_line_count, 5_000);
     // Sibling untouched: keeps the default.
-    assert_eq!(merged.scrollback.maximum_byte_count, 32 * 1024 * 1024);
+    assert_eq!(
+        merged_server_config.scrollback.maximum_byte_count,
+        32 * 1024 * 1024
+    );
 }
 
 #[test]
-fn higher_precedence_layer_wins_on_same_field() {
+fn higher_precedence_layer_sets_scrollback_line_count() {
     let user = PartialKoshiConfig {
         scrollback: Some(PartialScrollbackConfig {
             maximum_line_count: Some(5_000),
@@ -254,19 +257,22 @@ fn higher_precedence_layer_wins_on_same_field() {
         }),
         ..Default::default()
     };
-    let merged = merge_server(ServerConfig::default(), vec![user, session]);
+    let merged_server_config = merge_server(ServerConfig::default(), vec![user, session]);
 
-    assert_eq!(merged.scrollback.maximum_line_count, 20_000);
-    assert_eq!(merged.scrollback.maximum_byte_count, 32 * 1024 * 1024);
+    assert_eq!(merged_server_config.scrollback.maximum_line_count, 20_000);
+    assert_eq!(
+        merged_server_config.scrollback.maximum_byte_count,
+        32 * 1024 * 1024
+    );
 }
 
 #[test]
-fn a_field_a_higher_precedence_layer_leaves_unset_keeps_the_middle_layers_override() {
+fn unset_higher_precedence_layer_keeps_middle_scrollback_line_count() {
     // Three layers: the middle sets scrollback.maximum_line_count, the highest only
     // touches an unrelated section. The field must not fall back to the
     // base default when the highest layer skips it — it keeps the nearest
     // layer that did set it.
-    let middle = PartialKoshiConfig {
+    let middle_precedence_layer = PartialKoshiConfig {
         scrollback: Some(PartialScrollbackConfig {
             maximum_line_count: Some(7_000),
             maximum_byte_count: None,
@@ -274,7 +280,7 @@ fn a_field_a_higher_precedence_layer_leaves_unset_keeps_the_middle_layers_overri
         }),
         ..Default::default()
     };
-    let last_layer = PartialKoshiConfig {
+    let highest_precedence_layer = PartialKoshiConfig {
         pane: Some(PartialPaneConfig {
             minimum_column_count: Some(3),
             minimum_row_count: None,
@@ -282,14 +288,17 @@ fn a_field_a_higher_precedence_layer_leaves_unset_keeps_the_middle_layers_overri
         }),
         ..Default::default()
     };
-    let merged = merge_server(ServerConfig::default(), vec![middle, last_layer]);
+    let merged_server_config = merge_server(
+        ServerConfig::default(),
+        vec![middle_precedence_layer, highest_precedence_layer],
+    );
 
-    assert_eq!(merged.scrollback.maximum_line_count, 7_000);
-    assert_eq!(merged.pane.minimum_column_count, 3);
+    assert_eq!(merged_server_config.scrollback.maximum_line_count, 7_000);
+    assert_eq!(merged_server_config.pane.minimum_column_count, 3);
 }
 
 #[test]
-fn sections_from_different_layers_combine() {
+fn pane_and_mouse_sections_from_separate_layers_combine() {
     let user = PartialKoshiConfig {
         pane: Some(PartialPaneConfig {
             minimum_column_count: Some(10),
@@ -333,7 +342,7 @@ fn a_layer_that_sets_the_pane_gap_overrides_the_default() {
 }
 
 #[test]
-fn copy_and_terminal_scalar_overrides() {
+fn copy_whitespace_and_terminal_type_overrides_keep_siblings() {
     let layer = PartialKoshiConfig {
         copy: Some(PartialCopyConfig {
             should_trim_trailing_whitespace: Some(false),
@@ -355,7 +364,7 @@ fn copy_and_terminal_scalar_overrides() {
 }
 
 #[test]
-fn terminal_default_shell_sets_inner_value() {
+fn terminal_default_shell_override_sets_shell_path() {
     let layer = PartialKoshiConfig {
         terminal: Some(PartialTerminalConfig {
             term: None,
@@ -365,44 +374,59 @@ fn terminal_default_shell_sets_inner_value() {
         }),
         ..Default::default()
     };
-    let merged = merge_server(ServerConfig::default(), vec![layer]);
-    assert_eq!(merged.terminal.default_shell, Some("/bin/zsh".to_string()));
+    let merged_server_config = merge_server(ServerConfig::default(), vec![layer]);
+    assert_eq!(
+        merged_server_config.terminal.default_shell,
+        Some("/bin/zsh".to_string())
+    );
 }
 
 #[test]
-fn layout_direction_override() {
+fn new_pane_direction_layer_overrides_default() {
     let layer = PartialKoshiConfig {
         layout: Some(PartialLayoutDefaults {
             new_pane_direction: Some(Direction::Down),
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert_eq!(merged.layout.new_pane_direction, Direction::Down);
+    assert_eq!(
+        merged_client_config.layout.new_pane_direction,
+        Direction::Down
+    );
 }
 
 #[test]
-fn deep_theme_color_override_keeps_other_roles() {
-    let overridden = RgbColor::from_channels(0xff, 0x00, 0x00);
+fn theme_accent_override_keeps_other_color_roles() {
+    let overridden_accent_color = RgbColor::from_channels(0xff, 0x00, 0x00);
     let layer = PartialKoshiConfig {
         theme: Some(PartialThemeConfig {
             theme_name: None,
             colors: Some(PartialColorPalette {
-                accent: Some(overridden),
+                accent: Some(overridden_accent_color),
                 ..Default::default()
             }),
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
     let default_palette = ClientConfig::default().theme.colors;
 
-    assert_eq!(merged.theme.colors.accent, overridden);
+    assert_eq!(
+        merged_client_config.theme.colors.accent,
+        overridden_accent_color
+    );
     // Every other role keeps its default.
-    assert_eq!(merged.theme.colors.ramp_start, default_palette.ramp_start);
-    assert_eq!(merged.theme.colors.ramp_end, default_palette.ramp_end);
-    assert_eq!(merged.theme.theme_name, "default"); // sibling field kept
+    assert_eq!(
+        merged_client_config.theme.colors.ramp_start,
+        default_palette.ramp_start
+    );
+    assert_eq!(
+        merged_client_config.theme.colors.ramp_end,
+        default_palette.ramp_end
+    );
+    assert_eq!(merged_client_config.theme.theme_name, "default"); // sibling field kept
 }
 
 #[test]
@@ -435,13 +459,16 @@ fn logging_override_sets_enabled_level_and_format() {
 }
 
 #[test]
-fn logging_config_resolves_partial_over_defaults() {
+fn partial_logging_config_keeps_unset_fields_at_defaults() {
     // The startup accessor: an absent section yields the built-in defaults, a
     // present one applies only its set fields and keeps the defaults for the rest.
-    let empty = PartialKoshiConfig::default();
-    assert_eq!(empty.get_logging_config(), LoggingConfig::default());
+    let empty_partial_config = PartialKoshiConfig::default();
+    assert_eq!(
+        empty_partial_config.get_logging_config(),
+        LoggingConfig::default()
+    );
 
-    let partial = PartialKoshiConfig {
+    let partial_logging_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
             is_enabled: Some(true),
             level: Some(LogLevel::Info),
@@ -449,62 +476,69 @@ fn logging_config_resolves_partial_over_defaults() {
         }),
         ..Default::default()
     };
-    let resolved = partial.get_logging_config();
-    assert!(resolved.is_enabled);
-    assert_eq!(resolved.level, LogLevel::Info);
+    let resolved_logging_config = partial_logging_config.get_logging_config();
+    assert!(resolved_logging_config.is_enabled);
+    assert_eq!(resolved_logging_config.level, LogLevel::Info);
     assert_eq!(
-        resolved.log_format,
+        resolved_logging_config.log_format,
         LogFormat::Pretty,
         "unset field keeps the default"
     );
 }
 
 #[test]
-fn modes_replaced_wholesale() {
+fn keybinding_mode_bindings_replace_base_modes_wholesale() {
     let mut client_config = ClientConfig::default();
     client_config
         .keybindings
         .mode_bindings_by_name
         .insert(ModeName::from_text("normal"), ModeBindings::default());
 
-    let mut override_map = BTreeMap::new();
-    override_map.insert(ModeName::from_text("resize"), ModeBindings::default());
+    let mut replacement_mode_bindings = BTreeMap::new();
+    replacement_mode_bindings.insert(ModeName::from_text("resize"), ModeBindings::default());
     let layer = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
-            mode_bindings_by_name: Some(override_map.clone()),
+            mode_bindings_by_name: Some(replacement_mode_bindings.clone()),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let merged = merge_client(client_config, vec![layer]);
+    let merged_client_config = merge_client(client_config, vec![layer]);
 
     // The whole map is replaced: the base's "normal" entry is gone.
-    assert_eq!(merged.keybindings.mode_bindings_by_name, override_map);
+    assert_eq!(
+        merged_client_config.keybindings.mode_bindings_by_name,
+        replacement_mode_bindings
+    );
 }
 
 #[test]
-fn unlock_alternative_layers_as_a_nested_option() {
-    let alternative = KeyChord::from_parts(ModFlags::CTRL, Key::Char('u'));
+fn unlock_alternative_key_chord_can_be_set_and_cleared() {
+    let alternative_unlock_key_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('u'));
     let partial_config = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
-            unlock_alternative: Some(Some(alternative)),
+            unlock_alternative: Some(Some(alternative_unlock_key_chord)),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![partial_config]);
-    assert_eq!(merged.keybindings.unlock_alternative, Some(alternative));
+    let merged_client_config = merge_client(ClientConfig::default(), vec![partial_config]);
+    assert_eq!(
+        merged_client_config.keybindings.unlock_alternative,
+        Some(alternative_unlock_key_chord)
+    );
 
     // A higher-precedence layer can set the value back to "keep the built-in unlock key".
-    let clear = PartialKoshiConfig {
+    let clear_unlock_key_chord_layer = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
             unlock_alternative: Some(None),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let cleared = merge_client(merged, vec![clear]);
-    assert_eq!(cleared.keybindings.unlock_alternative, None);
+    let cleared_client_config =
+        merge_client(merged_client_config, vec![clear_unlock_key_chord_layer]);
+    assert_eq!(cleared_client_config.keybindings.unlock_alternative, None);
 
     // A layer that leaves the field unset keeps the lower layer's value.
     assert_eq!(
@@ -516,7 +550,7 @@ fn unlock_alternative_layers_as_a_nested_option() {
 }
 
 #[test]
-fn keybindings_scalars_keep_untouched_siblings() {
+fn keybinding_leader_override_keeps_timing_defaults() {
     let layer = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
             leader: Some(Leader::Mods(ModFlags::ALT)),
@@ -524,11 +558,14 @@ fn keybindings_scalars_keep_untouched_siblings() {
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert_eq!(merged.keybindings.leader, Leader::Mods(ModFlags::ALT));
-    assert_eq!(merged.keybindings.chord_timeout_ms, 500); // default kept
-    assert_eq!(merged.keybindings.maximum_chord_depth, 4); // default kept
+    assert_eq!(
+        merged_client_config.keybindings.leader,
+        Leader::Mods(ModFlags::ALT)
+    );
+    assert_eq!(merged_client_config.keybindings.chord_timeout_ms, 500); // default kept
+    assert_eq!(merged_client_config.keybindings.maximum_chord_depth, 4); // default kept
 }
 
 #[test]
@@ -587,7 +624,7 @@ fn each_side_folds_only_its_own_sections() {
 #[test]
 fn config_layers_from_no_files_is_the_empty_default() {
     assert_eq!(
-        ConfigLayers::from_files(None, None, None),
+        ConfigLayers::from_config_file_layers(None, None, None),
         ConfigLayers::default()
     );
     assert_eq!(
@@ -602,7 +639,7 @@ fn config_layers_drop_the_app_layers_theme_and_keybinding_sections() {
     // `keybinding.kdl`. With no theme file present, an app layer carrying a
     // theme section must still resolve to the built-in palette rather than
     // slipping its own colors in.
-    let layers = ConfigLayers::from_files(
+    let layers = ConfigLayers::from_config_file_layers(
         Some(PartialKoshiConfig {
             theme: Some(PartialThemeConfig {
                 theme_name: Some("smuggled".to_string()),
@@ -633,7 +670,7 @@ fn config_layers_drop_the_app_layers_theme_and_keybinding_sections() {
 
 #[test]
 fn config_layers_let_the_theme_and_keybinding_files_win_over_the_app_layer() {
-    let layers = ConfigLayers::from_files(
+    let layers = ConfigLayers::from_config_file_layers(
         Some(PartialKoshiConfig {
             layout: Some(PartialLayoutDefaults {
                 new_pane_direction: Some(Direction::Down),
@@ -687,11 +724,11 @@ fn an_update_layer_keeps_the_fields_it_leaves_unset() {
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert_eq!(merged.update.check_interval_days, 1);
-    assert!(merged.update.should_auto_check_for_updates); // default kept
-    assert!(!merged.update.should_allow_prerelease_updates); // default kept
+    assert_eq!(merged_client_config.update.check_interval_days, 1);
+    assert!(merged_client_config.update.should_auto_check_for_updates); // default kept
+    assert!(!merged_client_config.update.should_allow_prerelease_updates); // default kept
 }
 
 #[test]
@@ -796,63 +833,63 @@ fn keybinding_timing_overrides_leave_the_bindings_alone() {
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert_eq!(merged.keybindings.chord_timeout_ms, 1_200);
-    assert_eq!(merged.keybindings.which_key_delay_ms, 50);
-    assert_eq!(merged.keybindings.maximum_chord_depth, 7);
+    assert_eq!(merged_client_config.keybindings.chord_timeout_ms, 1_200);
+    assert_eq!(merged_client_config.keybindings.which_key_delay_ms, 50);
+    assert_eq!(merged_client_config.keybindings.maximum_chord_depth, 7);
     assert_eq!(
-        merged.keybindings.mode_bindings_by_name,
+        merged_client_config.keybindings.mode_bindings_by_name,
         ClientConfig::default().keybindings.mode_bindings_by_name
     );
     assert_eq!(
-        merged.keybindings.leader,
+        merged_client_config.keybindings.leader,
         ClientConfig::default().keybindings.leader
     );
 }
 
 #[test]
 fn every_color_role_can_be_overridden() {
-    let color = RgbColor::from_channels(0x0a, 0x0b, 0x0c);
+    let palette_color = RgbColor::from_channels(0x0a, 0x0b, 0x0c);
     let layer = PartialKoshiConfig {
         theme: Some(PartialThemeConfig {
             theme_name: None,
             colors: Some(PartialColorPalette {
-                ramp_start: Some(color),
-                ramp_end: Some(color),
-                on_ramp: Some(color),
-                on_ramp_dim: Some(color),
-                accent: Some(color),
-                on_accent: Some(color),
-                border_focused: Some(color),
-                border_unfocused: Some(color),
-                border_hover: Some(color),
-                stack_header_fg: Some(color),
-                stack_header_bg: Some(color),
-                letterbox: Some(color),
-                bar_bg: Some(color),
+                ramp_start: Some(palette_color),
+                ramp_end: Some(palette_color),
+                on_ramp: Some(palette_color),
+                on_ramp_dim: Some(palette_color),
+                accent: Some(palette_color),
+                on_accent: Some(palette_color),
+                border_focused: Some(palette_color),
+                border_unfocused: Some(palette_color),
+                border_hover: Some(palette_color),
+                stack_header_fg: Some(palette_color),
+                stack_header_bg: Some(palette_color),
+                letterbox: Some(palette_color),
+                bar_bg: Some(palette_color),
             }),
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![layer]);
+    let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
 
     assert_eq!(
-        merged.theme.colors,
+        merged_client_config.theme.colors,
         ColorPalette {
-            ramp_start: color,
-            ramp_end: color,
-            on_ramp: color,
-            on_ramp_dim: color,
-            accent: color,
-            on_accent: color,
-            border_focused: color,
-            border_unfocused: color,
-            border_hover: color,
-            stack_header_fg: color,
-            stack_header_bg: color,
-            letterbox: color,
-            bar_bg: color,
+            ramp_start: palette_color,
+            ramp_end: palette_color,
+            on_ramp: palette_color,
+            on_ramp_dim: palette_color,
+            accent: palette_color,
+            on_accent: palette_color,
+            border_focused: palette_color,
+            border_unfocused: palette_color,
+            border_hover: palette_color,
+            stack_header_fg: palette_color,
+            stack_header_bg: palette_color,
+            letterbox: palette_color,
+            bar_bg: palette_color,
         }
     );
 }

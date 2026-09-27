@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn support_query_writes_the_exact_non_storing_request() {
+fn kitty_support_query_writes_the_exact_non_storing_request() {
     let mut query_bytes = Vec::new();
 
     write_kitty_support_query(&mut query_bytes).expect("the query writes");

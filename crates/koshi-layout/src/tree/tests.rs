@@ -7,7 +7,7 @@ use serde_json::json;
 use super::*;
 
 /// Wraps a pane id in a leaf node.
-fn build_leaf_node(pane_id: PaneId) -> LayoutNode {
+fn build_pane_leaf_node(pane_id: PaneId) -> LayoutNode {
     LayoutNode::Pane(pane_id)
 }
 
@@ -28,13 +28,13 @@ fn build_nested_layout_tree(
     let right_subtree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![
-            build_leaf_node(upper_right_pane_id),
-            build_leaf_node(lower_right_pane_id),
+            build_pane_leaf_node(upper_right_pane_id),
+            build_pane_leaf_node(lower_right_pane_id),
         ],
     ));
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![build_leaf_node(left_pane_id), right_subtree],
+        vec![build_pane_leaf_node(left_pane_id), right_subtree],
     ))
 }
 
@@ -45,13 +45,13 @@ fn build_stack_beside_pane(
     first_stack_pane_id: PaneId,
     second_stack_pane_id: PaneId,
 ) -> LayoutNode {
-    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let stack_node = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![first_stack_pane_id, second_stack_pane_id],
         0,
     ));
     LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![build_leaf_node(outside_pane_id), stack],
+        vec![build_pane_leaf_node(outside_pane_id), stack_node],
     ))
 }
 
@@ -102,13 +102,13 @@ fn compute_split_direction_maps_each_cardinal_direction_to_its_axis() {
 }
 
 #[test]
-fn three_way_tile_holds_children_in_order() {
+fn three_child_split_preserves_pane_order() {
     let pane_ids = [PaneId::new(), PaneId::new(), PaneId::new()];
     let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         pane_ids
             .iter()
-            .map(|&pane_id| build_leaf_node(pane_id))
+            .map(|&pane_id| build_pane_leaf_node(pane_id))
             .collect(),
     ));
     assert_eq!(layout_tree.list_leaf_pane_ids(), pane_ids);
@@ -139,12 +139,12 @@ fn a_bare_pane_is_its_own_only_leaf() {
 
 #[test]
 fn an_empty_split_has_no_leaves() {
-    let empty_split = LayoutNode::Split(SplitNode::with_equal_weights(
+    let empty_split_node = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         Vec::new(),
     ));
-    assert_eq!(empty_split.list_leaf_pane_ids(), []);
-    assert!(!empty_split.has_pane(PaneId::new()));
+    assert_eq!(empty_split_node.list_leaf_pane_ids(), []);
+    assert!(!empty_split_node.has_pane(PaneId::new()));
 }
 
 #[test]
@@ -225,8 +225,8 @@ fn get_node_at_path_mut_replaces_the_leaf_at_the_path() {
 #[test]
 #[should_panic(expected = "path was built over this tree")]
 fn get_node_at_path_panics_when_the_path_steps_into_a_pane() {
-    let pane_node = LayoutNode::Pane(PaneId::new());
-    let _ = pane_node.get_node_at_path(&[0]);
+    let layout_pane_node = LayoutNode::Pane(PaneId::new());
+    let _ = layout_pane_node.get_node_at_path(&[0]);
 }
 
 #[test]
@@ -238,8 +238,8 @@ fn get_split_at_path_returns_the_split_at_a_path_prefix() {
     let expected_inner_split_node = SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![
-            build_leaf_node(upper_right_pane_id),
-            build_leaf_node(lower_right_pane_id),
+            build_pane_leaf_node(upper_right_pane_id),
+            build_pane_leaf_node(lower_right_pane_id),
         ],
     );
     assert_eq!(
@@ -300,11 +300,11 @@ fn find_containing_stack_mut_finds_a_stack_under_a_directional_split() {
         (PaneId::new(), PaneId::new(), PaneId::new());
     let mut layout_tree =
         build_stack_beside_pane(outside_pane_id, first_stack_pane_id, second_stack_pane_id);
-    let mut expected_stack =
+    let mut expected_stack_node =
         SplitNode::from_stacked_pane_ids(vec![first_stack_pane_id, second_stack_pane_id], 0);
     assert_eq!(
         layout_tree.find_containing_stack_mut(second_stack_pane_id),
-        Some(&mut expected_stack)
+        Some(&mut expected_stack_node)
     );
     assert_eq!(layout_tree.find_containing_stack_mut(outside_pane_id), None);
 }
@@ -317,17 +317,17 @@ fn find_containing_stack_mut_picks_the_innermost_nested_stack() {
         build_nested_stack_layout(outer_pane_id, inner_first_pane_id, inner_second_pane_id);
     let mut layout_tree = LayoutNode::Split(outer_stack.clone());
 
-    let mut expected_inner_stack =
+    let mut expected_inner_stack_node =
         SplitNode::from_stacked_pane_ids(vec![inner_first_pane_id, inner_second_pane_id], 0);
     assert_eq!(
         layout_tree.find_containing_stack_mut(inner_second_pane_id),
-        Some(&mut expected_inner_stack)
+        Some(&mut expected_inner_stack_node)
     );
 
-    let mut expected_outer_stack = outer_stack;
+    let mut expected_outer_stack_node = outer_stack;
     assert_eq!(
         layout_tree.find_containing_stack_mut(outer_pane_id),
-        Some(&mut expected_outer_stack)
+        Some(&mut expected_outer_stack_node)
     );
 }
 
@@ -361,21 +361,24 @@ fn stack_expands_exactly_the_active_child() {
 #[test]
 fn stack_with_one_child_is_representable() {
     let pane_id = PaneId::new();
-    let stack = SplitNode::from_stacked_pane_ids(vec![pane_id], 0);
+    let stack_node = SplitNode::from_stacked_pane_ids(vec![pane_id], 0);
     assert_eq!(
-        stack,
+        stack_node,
         SplitNode {
             direction: SplitDirection::Stacked,
-            children: vec![build_leaf_node(pane_id)],
+            children: vec![build_pane_leaf_node(pane_id)],
             weights: vec![SizeWeight::default()],
             active_child_index: 0,
         }
     );
-    assert_eq!(LayoutNode::Split(stack).list_leaf_pane_ids(), [pane_id]);
+    assert_eq!(
+        LayoutNode::Split(stack_node).list_leaf_pane_ids(),
+        [pane_id]
+    );
 }
 
 #[test]
-fn stack_of_no_panes_is_empty_with_active_zero() {
+fn an_empty_stack_has_active_child_index_zero() {
     let empty_stack = SplitNode {
         direction: SplitDirection::Stacked,
         children: Vec::new(),
@@ -387,18 +390,18 @@ fn stack_of_no_panes_is_empty_with_active_zero() {
 }
 
 #[test]
-fn stack_clamps_out_of_bounds_active() {
+fn stack_constructor_clamps_active_child_index_to_last_child() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let stack = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 9);
-    assert_eq!(stack.active_child_index, 1);
+    let stack_node = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 9);
+    assert_eq!(stack_node.active_child_index, 1);
     assert_eq!(
-        stack,
+        stack_node,
         SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 1)
     );
 }
 
 #[test]
-fn with_equal_weights_of_no_children_has_no_weights() {
+fn an_empty_equal_weight_split_has_no_child_weights() {
     let split_node = SplitNode::with_equal_weights(SplitDirection::Vertical, Vec::new());
     assert_eq!(
         split_node,
@@ -412,13 +415,13 @@ fn with_equal_weights_of_no_children_has_no_weights() {
 }
 
 #[test]
-fn with_equal_weights_activates_the_first_child_and_collapses_the_rest() {
+fn an_equal_weight_stack_expands_the_first_child() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     let split_node = SplitNode::with_equal_weights(
         SplitDirection::Stacked,
         vec![
-            build_leaf_node(first_pane_id),
-            build_leaf_node(second_pane_id),
+            build_pane_leaf_node(first_pane_id),
+            build_pane_leaf_node(second_pane_id),
         ],
     );
     let collapsed_children: Vec<bool> = (0..split_node.children.len())
@@ -435,8 +438,8 @@ fn a_directional_split_collapses_no_child() {
     let split_node = SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
         vec![
-            build_leaf_node(first_pane_id),
-            build_leaf_node(second_pane_id),
+            build_pane_leaf_node(first_pane_id),
+            build_pane_leaf_node(second_pane_id),
         ],
     );
     assert!(!split_node.is_child_collapsed(0));
@@ -444,51 +447,51 @@ fn a_directional_split_collapses_no_child() {
 }
 
 #[test]
-fn an_out_of_range_active_index_collapses_every_child_but_the_last() {
+fn an_out_of_range_active_child_index_expands_the_last_child() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let mut stack = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
-    stack.active_child_index = 9;
-    assert!(stack.is_child_collapsed(0));
-    assert!(!stack.is_child_collapsed(1));
+    let mut stack_node = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
+    stack_node.active_child_index = 9;
+    assert!(stack_node.is_child_collapsed(0));
+    assert!(!stack_node.is_child_collapsed(1));
 }
 
 #[test]
 fn a_child_index_past_the_last_child_is_not_collapsed() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let stack = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
-    assert!(!stack.is_child_collapsed(2));
+    let stack_node = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
+    assert!(!stack_node.is_child_collapsed(2));
 
     let empty_stack = SplitNode::from_stacked_pane_ids(Vec::new(), 0);
     assert!(!empty_stack.is_child_collapsed(0));
 }
 
 #[test]
-fn active_index_clamps_past_the_last_child_and_is_zero_for_an_empty_split() {
-    let mut stack = SplitNode::from_stacked_pane_ids(vec![PaneId::new(), PaneId::new()], 0);
-    assert_eq!(stack.get_active_child_index(), 0);
-    stack.active_child_index = 1;
-    assert_eq!(stack.get_active_child_index(), 1);
-    stack.active_child_index = 2;
-    assert_eq!(stack.get_active_child_index(), 1);
-    stack.active_child_index = usize::MAX;
-    assert_eq!(stack.get_active_child_index(), 1);
+fn active_child_index_clamps_to_last_child_and_empty_split_uses_zero() {
+    let mut stack_node = SplitNode::from_stacked_pane_ids(vec![PaneId::new(), PaneId::new()], 0);
+    assert_eq!(stack_node.get_active_child_index(), 0);
+    stack_node.active_child_index = 1;
+    assert_eq!(stack_node.get_active_child_index(), 1);
+    stack_node.active_child_index = 2;
+    assert_eq!(stack_node.get_active_child_index(), 1);
+    stack_node.active_child_index = usize::MAX;
+    assert_eq!(stack_node.get_active_child_index(), 1);
 
     let empty_stack = SplitNode::from_stacked_pane_ids(Vec::new(), 0);
     assert_eq!(empty_stack.get_active_child_index(), 0);
 }
 
 #[test]
-fn mixed_layout_tree_assert_size_weight_round_trips_through_serde() {
+fn mixed_layout_tree_with_a_stack_round_trips_through_serde() {
     let (left_pane_id, upper_right_pane_id, lower_right_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     // Nested splits with a stack on one side, exercising every node kind.
-    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let stack_node = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![upper_right_pane_id, lower_right_pane_id],
         0,
     ));
     let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![build_leaf_node(left_pane_id), stack],
+        vec![build_pane_leaf_node(left_pane_id), stack_node],
     ));
 
     let serialized_tree_json = serde_json::to_string(&layout_tree).expect("serialize");
@@ -566,7 +569,7 @@ fn a_split_child_wrapped_in_a_node_record_is_refused() {
         "preferred_cell_count": null,
         "resize_delta": 0
     });
-    let decode_error = serde_json::from_value::<SplitNode>(json!({
+    let split_node_deserialization_error = serde_json::from_value::<SplitNode>(json!({
         "direction": "Horizontal",
         "children": [{ "node": { "Pane": "00000000-0000-0000-0000-000000000001" } }],
         "weights": [default_size_weight_json],
@@ -575,13 +578,13 @@ fn a_split_child_wrapped_in_a_node_record_is_refused() {
     .expect_err("a child is the node itself");
 
     assert_eq!(
-        decode_error.to_string(),
+        split_node_deserialization_error.to_string(),
         "unknown variant `node`, expected `Pane` or `Split`"
     );
 }
 
 #[test]
-fn clone_is_independent_of_the_original() {
+fn cloned_layout_tree_does_not_change_when_original_changes() {
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
     let mut layout_tree = build_nested_layout_tree(first_pane_id, second_pane_id, third_pane_id);
@@ -591,7 +594,9 @@ fn clone_is_independent_of_the_original() {
     // another child onto it.
     if let LayoutNode::Split(split_node) = &mut layout_tree {
         split_node.active_child_index = 1;
-        split_node.children.push(build_leaf_node(PaneId::new()));
+        split_node
+            .children
+            .push(build_pane_leaf_node(PaneId::new()));
         split_node.weights.push(SizeWeight::default());
     }
 

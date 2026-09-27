@@ -64,7 +64,7 @@ fn build_keymap_for_modes(
             },
         );
     }
-    KeymapHintCatalog::from_parts(
+    KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &[KeymapLayer {
             origin: LayerOrigin::Defaults,
             mode_bindings_by_name,
@@ -190,7 +190,7 @@ fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
             removed_key_sequences: BTreeSet::new(),
         },
     );
-    client.keymap_catalog = KeymapHintCatalog::from_parts(
+    client.keymap_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &[KeymapLayer {
             origin: LayerOrigin::Defaults,
             mode_bindings_by_name,

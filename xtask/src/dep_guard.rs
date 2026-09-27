@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use cargo_metadata::{Metadata, MetadataCommand};
 
 /// A crate name paired with its direct dependency names.
-type CrateDependencies = (String, Vec<String>);
+type WorkspaceCrateDependencies = (String, Vec<String>);
 
 /// Runs `cargo metadata` in the current directory and checks every workspace
 /// crate against the module's rules.
@@ -41,20 +41,23 @@ pub fn run_dependency_guard() -> ExitCode {
         }
     };
 
-    let crate_dependencies = list_direct_dependencies(&metadata);
-    let violations = validate_dependency_edges(&crate_dependencies);
-    if violations.is_empty() {
+    let workspace_crate_dependencies = list_direct_dependencies(&metadata);
+    let dependency_edge_violations = validate_dependency_edges(&workspace_crate_dependencies);
+    if dependency_edge_violations.is_empty() {
         println!(
             "dep-guard: ok ({} crates checked)",
-            crate_dependencies.len()
+            workspace_crate_dependencies.len()
         );
         return ExitCode::SUCCESS;
     }
 
-    for violation in &violations {
-        eprintln!("dep-guard: {violation}");
+    for dependency_edge_violation in &dependency_edge_violations {
+        eprintln!("dep-guard: {dependency_edge_violation}");
     }
-    eprintln!("dep-guard: {} violation(s)", violations.len());
+    eprintln!(
+        "dep-guard: {} violation(s)",
+        dependency_edge_violations.len()
+    );
     ExitCode::FAILURE
 }
 
@@ -62,8 +65,8 @@ pub fn run_dependency_guard() -> ExitCode {
 /// Dependencies include normal, dev, build, optional, and target-specific
 /// manifest entries. Crates and dependency names are sorted, and duplicate
 /// dependency names occur once.
-fn list_direct_dependencies(metadata: &Metadata) -> Vec<CrateDependencies> {
-    let mut crate_dependencies: Vec<CrateDependencies> = metadata
+fn list_direct_dependencies(metadata: &Metadata) -> Vec<WorkspaceCrateDependencies> {
+    let mut workspace_crate_dependencies: Vec<WorkspaceCrateDependencies> = metadata
         .workspace_packages()
         .iter()
         .map(|workspace_package| {
@@ -77,26 +80,30 @@ fn list_direct_dependencies(metadata: &Metadata) -> Vec<CrateDependencies> {
             (workspace_package.name.to_string(), dependency_names)
         })
         .collect();
-    crate_dependencies.sort_by(|left_crate, right_crate| left_crate.0.cmp(&right_crate.0));
-    crate_dependencies
+    workspace_crate_dependencies.sort_by(|left_crate_entry, right_crate_entry| {
+        left_crate_entry.0.cmp(&right_crate_entry.0)
+    });
+    workspace_crate_dependencies
 }
 
 /// Returns sorted, duplicate-free messages for forbidden edges in the crate dependency graph.
 /// Returns an empty vector when every edge is allowed.
-fn validate_dependency_edges(crate_dependencies: &[CrateDependencies]) -> Vec<String> {
-    let mut violations = BTreeSet::new();
+fn validate_dependency_edges(
+    workspace_crate_dependencies: &[WorkspaceCrateDependencies],
+) -> Vec<String> {
+    let mut dependency_edge_violations = BTreeSet::new();
 
-    for (crate_name, dependency_names) in crate_dependencies {
+    for (crate_name, dependency_names) in workspace_crate_dependencies {
         for dependency_name in dependency_names {
             if crate_name == "koshi-core" && dependency_name.starts_with("koshi-") {
-                violations.insert(format_forbidden_edge(
+                dependency_edge_violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "koshi-core must not depend on internal crates",
                 ));
             }
             if dependency_name == "portable-pty" && crate_name != "koshi-pty" {
-                violations.insert(format_forbidden_edge(
+                dependency_edge_violations.insert(format_forbidden_edge(
                     crate_name,
                     dependency_name,
                     "portable-pty is owned only by koshi-pty",
@@ -105,7 +112,7 @@ fn validate_dependency_edges(crate_dependencies: &[CrateDependencies]) -> Vec<St
         }
     }
 
-    violations.into_iter().collect()
+    dependency_edge_violations.into_iter().collect()
 }
 
 /// Formats one forbidden edge with its source crate, dependency crate, and guard rule.

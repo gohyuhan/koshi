@@ -39,28 +39,28 @@ fn build_rect() -> Rect {
     Rect::from_size_at_origin(TEST_VIEWPORT_SIZE)
 }
 
-/// Creates a pane pane record with the specified lifecycle state and exit policy.
+/// Creates a pane record with the specified lifecycle state and exit policy.
 ///
 /// The pane record starts as a fresh `Spawning` state and is walked to the
 /// requested lifecycle through legal `update_lifecycle` events, the only way
 /// the state changes. Timestamps use `UNIX_EPOCH` to keep tests
 /// deterministic. Close policy is set to `Force`.
-fn build_pane_record(pane_id: PaneId, lifecycle: PaneLifecycle) -> PaneRecord {
+fn build_pane_record(pane_id: PaneId, pane_lifecycle: PaneLifecycle) -> PaneRecord {
     let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record.close_policy = PaneClosePolicy::Force;
-    walk_lifecycle(&mut pane_record, lifecycle);
+    walk_pane_lifecycle(&mut pane_record, pane_lifecycle);
     pane_record
 }
 
-/// Transitions a pane pane record from its current state to the target lifecycle state
+/// Transitions a pane record from its current state to the target lifecycle state
 /// by emitting the legal sequence of intermediate events.
-fn walk_lifecycle(pane_record: &mut PaneRecord, target_lifecycle: PaneLifecycle) {
-    match target_lifecycle {
+fn walk_pane_lifecycle(pane_record: &mut PaneRecord, target_pane_lifecycle: PaneLifecycle) {
+    match target_pane_lifecycle {
         PaneLifecycle::Spawning => {}
         PaneLifecycle::Running => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Exited {
             exit_code,
@@ -68,41 +68,41 @@ fn walk_lifecycle(pane_record: &mut PaneRecord, target_lifecycle: PaneLifecycle)
         } => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessExited {
                     exit_code,
                     exited_at,
                 })
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Closing { close_requested_at } => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::CloseRequested { close_requested_at })
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
         PaneLifecycle::Removed => {
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::CloseRequested {
                     close_requested_at: SystemTime::UNIX_EPOCH,
                 })
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
             pane_record
                 .update_lifecycle(PaneLifecycleEvent::Cleaned)
-                .expect("walk_lifecycle drives only legal transitions");
+                .expect("walk_pane_lifecycle drives only legal transitions");
         }
     }
 }
 
 /// Creates a tab containing a single pane.
-fn build_single_pane_tab(tab_id: TabId, pane: PaneId) -> Tab {
-    Tab::from_root_pane(tab_id, "code".to_owned(), 0, pane)
+fn build_single_pane_tab(tab_id: TabId, pane_id: PaneId) -> Tab {
+    Tab::from_root_pane(tab_id, "code".to_owned(), 0, pane_id)
 }
 
 /// Creates a single-pane tab at the given display position (`tab_index`).
@@ -113,11 +113,14 @@ fn build_tab_at_index(tab_id: TabId, pane_id: PaneId, tab_index: usize) -> Tab {
 }
 
 /// Creates a tab split horizontally (left/right) between two panes with equal widths.
-fn build_two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
-    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), 0, left);
+fn build_two_pane_tab(tab_id: TabId, left_pane_id: PaneId, right_pane_id: PaneId) -> Tab {
+    let mut tab = Tab::from_root_pane(tab_id, "code".to_owned(), 0, left_pane_id);
     tab.update_layout(LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![LayoutNode::Pane(left), LayoutNode::Pane(right)],
+        vec![
+            LayoutNode::Pane(left_pane_id),
+            LayoutNode::Pane(right_pane_id),
+        ],
     )));
     tab
 }
@@ -125,7 +128,7 @@ fn build_two_pane_tab(tab_id: TabId, left: PaneId, right: PaneId) -> Tab {
 /// Creates a client viewing the given tab with the given pane focused.
 /// The client carries `session_id`, which [`Session::validate`] checks against
 /// the session's own id.
-fn build_focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> Client {
+fn build_focused_client(session_id: SessionId, tab_id: TabId, focused_pane_id: PaneId) -> Client {
     let mut client = Client::from_attachment(
         ClientId::new(),
         session_id,
@@ -137,14 +140,14 @@ fn build_focused_client(session_id: SessionId, tab_id: TabId, pane: PaneId) -> C
         "C-test-client".to_string(),
         0,
     );
-    client.update_focused_pane(tab_id, pane);
+    client.update_focused_pane(tab_id, focused_pane_id);
     client
 }
 
 /// Creates a session with the given tabs and pane records, but no attached
 /// clients. [`Session::attach_client`] adds them afterward, each built with
 /// the session's own id.
-fn build_session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
+fn build_session_with(tabs: Vec<Tab>, pane_records: Vec<PaneRecord>) -> Session {
     let mut session = Session::from_identity_and_client_registry(
         SessionId::new(),
         "main".to_owned(),
@@ -154,10 +157,10 @@ fn build_session_with(tabs: Vec<Tab>, records: Vec<PaneRecord>) -> Session {
     for tab in tabs {
         session.tabs.insert(tab.get_tab_id(), tab);
     }
-    for pane in records {
+    for pane_record in pane_records {
         session
             .panes
-            .register_pane_record(pane)
+            .register_pane_record(pane_record)
             .expect("unique pane id");
     }
     session

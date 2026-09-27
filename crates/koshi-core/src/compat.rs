@@ -67,6 +67,9 @@ pub struct Surface {
 ///   viewer, or with `PlacementCommandRejected` to the viewer that sent it.
 /// - Painted frames carry whether the session shows a recovery notice after
 ///   opening a new shell in place of an unrestored session.
+/// - A pane-write command carries its bytes in `pane_input_bytes`. Version 3
+///   called this field `input_bytes`; the two versions cannot decode each
+///   other's pane-write command.
 ///
 /// Four shapes differ between 2 and 3:
 ///

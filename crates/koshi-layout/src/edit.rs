@@ -46,29 +46,31 @@ pub fn split_leaf(
         .find_pane_path(target_pane_id)
         .ok_or(SplitError::PaneNotFound { target_pane_id })?;
     // Select the outermost stacked ancestor, or the target leaf when none exists.
-    let operand_depth = (0..pane_path.len())
-        .find(|&depth| {
+    let split_operand_depth = (0..pane_path.len())
+        .find(|&pane_path_depth| {
             matches!(
-                layout_tree.get_node_at_path(&pane_path[..depth]),
-                LayoutNode::Split(split) if split.direction == SplitDirection::Stacked
+                layout_tree.get_node_at_path(&pane_path[..pane_path_depth]),
+                LayoutNode::Split(split_node) if split_node.direction == SplitDirection::Stacked
             )
         })
         .unwrap_or(pane_path.len());
 
-    let mut edited_tree = layout_tree.clone();
-    let target_node_slot = edited_tree.get_node_at_path_mut(&pane_path[..operand_depth]);
-    let existing_subtree = std::mem::replace(target_node_slot, LayoutNode::Pane(new_pane_id));
+    let mut edited_layout_tree = layout_tree.clone();
+    let split_operand_node_slot =
+        edited_layout_tree.get_node_at_path_mut(&pane_path[..split_operand_depth]);
+    let existing_pane_subtree =
+        std::mem::replace(split_operand_node_slot, LayoutNode::Pane(new_pane_id));
 
     let new_pane_node = LayoutNode::Pane(new_pane_id);
-    let children = match direction {
-        Direction::Right | Direction::Down => vec![existing_subtree, new_pane_node],
-        Direction::Left | Direction::Up => vec![new_pane_node, existing_subtree],
+    let split_children = match direction {
+        Direction::Right | Direction::Down => vec![existing_pane_subtree, new_pane_node],
+        Direction::Left | Direction::Up => vec![new_pane_node, existing_pane_subtree],
     };
-    *target_node_slot = LayoutNode::Split(SplitNode::with_equal_weights(
+    *split_operand_node_slot = LayoutNode::Split(SplitNode::with_equal_weights(
         compute_split_direction(direction),
-        children,
+        split_children,
     ));
-    Ok(edited_tree)
+    Ok(edited_layout_tree)
 }
 
 /// Stack `new_pane_id` onto `anchor_pane_id`'s position.
@@ -94,22 +96,24 @@ pub fn add_pane_to_stack(
         });
     }
 
-    let mut edited_tree = layout_tree.clone();
-    if let Some(stack) = edited_tree.find_containing_stack_mut(anchor_pane_id) {
-        stack.children.push(LayoutNode::Pane(new_pane_id));
-        stack.weights.push(SizeWeight::default());
-        stack.active_child_index = stack.children.len() - 1;
+    let mut edited_layout_tree = layout_tree.clone();
+    if let Some(containing_stack) = edited_layout_tree.find_containing_stack_mut(anchor_pane_id) {
+        containing_stack
+            .children
+            .push(LayoutNode::Pane(new_pane_id));
+        containing_stack.weights.push(SizeWeight::default());
+        containing_stack.active_child_index = containing_stack.children.len() - 1;
     } else {
-        let pane_path = edited_tree
+        let pane_path = edited_layout_tree
             .find_pane_path(anchor_pane_id)
             .expect("presence checked above");
-        let target_node_slot = edited_tree.get_node_at_path_mut(&pane_path);
-        *target_node_slot = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        let anchor_pane_node_slot = edited_layout_tree.get_node_at_path_mut(&pane_path);
+        *anchor_pane_node_slot = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
             vec![anchor_pane_id, new_pane_id],
             1,
         ));
     }
-    Ok(edited_tree)
+    Ok(edited_layout_tree)
 }
 
 /// A rejected removal.
@@ -171,8 +175,8 @@ pub fn remove_pane(
     pane_sizing: PaneSizing,
 ) -> Result<(LayoutNode, PaneRemovalOutcome), RemoveError> {
     // The solve before the edit gives the rect the pane frees.
-    let before_layout = solve_layout_with_sizing(layout_tree, tab_rect, pane_sizing);
-    let Some(&(_, removed_pane_rect)) = before_layout
+    let layout_before_removal = solve_layout_with_sizing(layout_tree, tab_rect, pane_sizing);
+    let Some(&(_, removed_pane_rect)) = layout_before_removal
         .pane_rects
         .iter()
         .find(|&&(before_pane_id, _)| before_pane_id == pane_id)
@@ -180,51 +184,49 @@ pub fn remove_pane(
         return Err(RemoveError::PaneNotFound { pane_id });
     };
 
-    let mut edited_tree = layout_tree.clone();
-    match remove_leaf(&mut edited_tree, pane_id) {
+    let mut edited_layout_tree = layout_tree.clone();
+    match remove_leaf(&mut edited_layout_tree, pane_id) {
         PaneRemovalStatus::PaneNotFound => return Err(RemoveError::PaneNotFound { pane_id }),
         PaneRemovalStatus::SubtreeEmpty => return Err(RemoveError::LastPane { pane_id }),
         PaneRemovalStatus::Removed => {}
     }
     // An empty leaf list means the removed pane was the last leaf, even when
     // empty splits remain.
-    if edited_tree.list_leaf_pane_ids().is_empty() {
+    if edited_layout_tree.list_leaf_pane_ids().is_empty() {
         return Err(RemoveError::LastPane { pane_id });
     }
 
     // Solve again after the edit and collect every surviving, visible pane
     // that either grew into the freed space or simply changed size.
-    let after_layout = solve_layout_with_sizing(&edited_tree, tab_rect, pane_sizing);
-    let mut affected_pane_area_pairs: Vec<(PaneId, u64)> = after_layout
+    let layout_after_removal = solve_layout_with_sizing(&edited_layout_tree, tab_rect, pane_sizing);
+    let mut affected_pane_absorbed_areas: Vec<(PaneId, u64)> = layout_after_removal
         .pane_rects
         .iter()
         .filter(|&&(pane_id, pane_rect)| {
-            is_content_visible(pane_id, pane_rect, &after_layout.stack_headers)
+            is_content_visible(pane_id, pane_rect, &layout_after_removal.stack_headers)
         })
         .filter_map(|&(pane_id, pane_rect)| {
             let absorbed_cell_area = pane_rect
                 .compute_intersection(removed_pane_rect)
                 .map_or(0, compute_cell_area);
-            let is_resized =
-                before_layout
-                    .pane_rects
-                    .iter()
-                    .any(|&(before_pane_id, before_pane_rect)| {
-                        before_pane_id == pane_id && before_pane_rect.size != pane_rect.size
-                    });
+            let is_resized = layout_before_removal.pane_rects.iter().any(
+                |&(before_pane_id, before_pane_rect)| {
+                    before_pane_id == pane_id && before_pane_rect.size != pane_rect.size
+                },
+            );
             (absorbed_cell_area > 0 || is_resized).then_some((pane_id, absorbed_cell_area))
         })
         .collect();
     // Largest absorbed area first; the stable sort keeps layout order among
     // equal areas, including the zero-overlap resizes.
-    affected_pane_area_pairs
+    affected_pane_absorbed_areas
         .sort_by_key(|&(_, absorbed_cell_area)| std::cmp::Reverse(absorbed_cell_area));
 
     Ok((
-        edited_tree,
+        edited_layout_tree,
         PaneRemovalOutcome {
             removed_pane_rect,
-            absorbing_pane_ids: affected_pane_area_pairs
+            absorbing_pane_ids: affected_pane_absorbed_areas
                 .into_iter()
                 .map(|(pane_id, _)| pane_id)
                 .collect(),

@@ -125,12 +125,12 @@ impl TerminalState {
             .saturating_add(1);
         let shifted_row_count = line_count.min(scroll_region_row_count);
         let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
-        let is_full_width =
+        let is_full_grid_width =
             left_column_index == 0 && right_column_index == grid_column_count.saturating_sub(1);
         let previous_scrollback_line_count = self.scrollback.get_total_pushed_line_count();
         let should_feed_scrollback =
-            self.active_screen == Screen::Primary && first_row_index == 0 && is_full_width;
-        let mut has_removed_native_image_source_fragments = false;
+            self.active_screen == Screen::Primary && first_row_index == 0 && is_full_grid_width;
+        let mut has_removed_native_image_fragments = false;
         if should_feed_scrollback {
             if self.native_fragment_count_by_image_source_id.is_empty() {
                 for row_index in 0..shifted_row_count {
@@ -153,7 +153,7 @@ impl TerminalState {
                             scrolled_off_row,
                             row_metadata,
                             |evicted_rows| {
-                                has_removed_native_image_source_fragments |=
+                                has_removed_native_image_fragments |=
                                     super::super::images::discard_native_fragment_references(
                                         native_fragment_count_by_image_source_id,
                                         evicted_rows.iter(),
@@ -164,18 +164,22 @@ impl TerminalState {
                 }
             }
         } else {
-            has_removed_native_image_source_fragments |= self.discard_active_image_fragments(
+            has_removed_native_image_fragments |= self.discard_active_image_fragments(
                 first_row_index,
                 first_row_index.saturating_add(shifted_row_count),
-                if is_full_width { 0 } else { left_column_index },
-                if is_full_width {
+                if is_full_grid_width {
+                    0
+                } else {
+                    left_column_index
+                },
+                if is_full_grid_width {
                     grid_column_count
                 } else {
                     right_column_index.saturating_add(1)
                 },
             );
         }
-        if is_full_width {
+        if is_full_grid_width {
             self.get_active_grid_mut().delete_lines(
                 first_row_index,
                 bottom_row_index,
@@ -192,7 +196,7 @@ impl TerminalState {
                 fill_style,
             );
         }
-        self.finish_native_fragment_removal(has_removed_native_image_source_fragments);
+        self.finish_native_fragment_removal(has_removed_native_image_fragments);
 
         if shifted_row_count == 0 {
             return;
@@ -230,23 +234,27 @@ impl TerminalState {
             .saturating_add(1);
         let shifted_row_count = line_count.min(scroll_region_row_count);
         let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
-        let is_full_width =
+        let is_full_grid_width =
             left_column_index == 0 && right_column_index == grid_column_count.saturating_sub(1);
         let previous_scrollback_line_count = self.scrollback.get_total_pushed_line_count();
         let discarded_first_row_index = bottom_row_index
             .saturating_add(1)
             .saturating_sub(shifted_row_count);
-        let has_removed_native_image_source_fragments = self.discard_active_image_fragments(
+        let has_removed_native_image_fragments = self.discard_active_image_fragments(
             discarded_first_row_index,
             bottom_row_index.saturating_add(1),
-            if is_full_width { 0 } else { left_column_index },
-            if is_full_width {
+            if is_full_grid_width {
+                0
+            } else {
+                left_column_index
+            },
+            if is_full_grid_width {
                 grid_column_count
             } else {
                 right_column_index.saturating_add(1)
             },
         );
-        if is_full_width {
+        if is_full_grid_width {
             self.get_active_grid_mut().insert_lines(
                 first_row_index,
                 bottom_row_index,
@@ -263,7 +271,7 @@ impl TerminalState {
                 fill_style,
             );
         }
-        self.finish_native_fragment_removal(has_removed_native_image_source_fragments);
+        self.finish_native_fragment_removal(has_removed_native_image_fragments);
 
         if shifted_row_count == 0 {
             return;
@@ -350,13 +358,13 @@ impl TerminalState {
     /// Each screen keeps its own snapshot.
     pub(super) fn save_cursor(&mut self) {
         let cursor = *self.get_active_cursor();
-        let render = *self.get_active_render();
+        let active_render_state = *self.get_active_render();
         self.get_active_cursor_mut().saved = Some(SavedCursor {
             row: cursor.row,
             column: cursor.column,
             is_wrap_pending: cursor.is_wrap_pending,
             is_origin_mode_enabled: cursor.is_origin_mode_enabled,
-            render,
+            render: active_render_state,
         });
     }
 
@@ -368,26 +376,31 @@ impl TerminalState {
     pub(super) fn restore_cursor(&mut self) {
         let saved_cursor = self.get_active_cursor().saved;
         let (grid_row_count, grid_column_count) = self.get_active_grid().get_grid_dimensions();
-        if let Some(saved) = saved_cursor {
-            let (minimum_row_index, maximum_row_index) = if saved.is_origin_mode_enabled {
-                self.get_scroll_region_bounds()
-            } else {
-                (0, grid_row_count.saturating_sub(1))
-            };
-            let (minimum_column_index, maximum_column_index) = if saved.is_origin_mode_enabled {
-                self.get_horizontal_margin_bounds()
-            } else {
-                (0, grid_column_count.saturating_sub(1))
-            };
+        if let Some(saved_cursor_snapshot) = saved_cursor {
+            let (minimum_row_index, maximum_row_index) =
+                if saved_cursor_snapshot.is_origin_mode_enabled {
+                    self.get_scroll_region_bounds()
+                } else {
+                    (0, grid_row_count.saturating_sub(1))
+                };
+            let (minimum_column_index, maximum_column_index) =
+                if saved_cursor_snapshot.is_origin_mode_enabled {
+                    self.get_horizontal_margin_bounds()
+                } else {
+                    (0, grid_column_count.saturating_sub(1))
+                };
             let cursor = self.get_active_cursor_mut();
-            cursor.is_origin_mode_enabled = saved.is_origin_mode_enabled;
-            cursor.row = saved.row.max(minimum_row_index).min(maximum_row_index);
-            cursor.column = saved
+            cursor.is_origin_mode_enabled = saved_cursor_snapshot.is_origin_mode_enabled;
+            cursor.row = saved_cursor_snapshot
+                .row
+                .max(minimum_row_index)
+                .min(maximum_row_index);
+            cursor.column = saved_cursor_snapshot
                 .column
                 .max(minimum_column_index)
                 .min(maximum_column_index);
-            cursor.is_wrap_pending = saved.is_wrap_pending;
-            *self.get_active_render_mut() = saved.render;
+            cursor.is_wrap_pending = saved_cursor_snapshot.is_wrap_pending;
+            *self.get_active_render_mut() = saved_cursor_snapshot.render;
         } else {
             let cursor = self.get_active_cursor_mut();
             cursor.row = 0;

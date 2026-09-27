@@ -89,7 +89,8 @@ pub fn remove_pane_cascade(
     // canonicalizes shape only and drops nothing.
     // `Some` carries the rect the pane vacated, which ranks the spatial focus
     // candidates; `None` means the tab is now empty.
-    let removal = match remove_pane(tab.get_layout_tree(), tab_rect, pane_id, pane_sizing) {
+    let removed_pane_rect = match remove_pane(tab.get_layout_tree(), tab_rect, pane_id, pane_sizing)
+    {
         Ok((new_tree, pane_removal)) => {
             let live_pane_ids: HashSet<PaneId> =
                 new_tree.list_leaf_pane_ids().into_iter().collect();
@@ -115,7 +116,7 @@ pub fn remove_pane_cascade(
         client.clear_zoom_of_pane(pane_id);
     }
 
-    match removal {
+    match removed_pane_rect {
         // The tab still has panes: repair focus for every client that was
         // looking at the removed pane.
         Some(removed_pane_rect) => {
@@ -149,18 +150,18 @@ pub fn remove_pane_cascade(
 
             for (client_id, verdict) in verdicts {
                 match verdict {
-                    FocusRepairResult::Focused(new_pane) => {
+                    FocusRepairResult::Focused(new_pane_id) => {
                         let previous_pane_id = session
                             .clients
                             .get_client_mut_by_id(client_id)
-                            .and_then(|client| client.update_focused_pane(tab_id, new_pane));
+                            .and_then(|client| client.update_focused_pane(tab_id, new_pane_id));
                         if let Some(tab) = session.tabs.get_mut(&tab_id) {
-                            tab.record_focus_mru(new_pane);
+                            tab.record_focus_mru(new_pane_id);
                         }
                         events.push(Event::PaneFocused(PaneFocused {
                             client_id,
                             tab_id,
-                            pane_id: new_pane,
+                            pane_id: new_pane_id,
                             previous_pane_id,
                         }));
                     }
@@ -243,11 +244,11 @@ fn resolve_terminal_too_small_cause(
             let Some(other_pane_area) = other_viewer.get_pane_area() else {
                 return false;
             };
-            let sets_columns = tab_size.column_count < own_pane_area.column_count
+            let is_column_constraint = tab_size.column_count < own_pane_area.column_count
                 && other_pane_area.column_count == tab_size.column_count;
-            let sets_rows = tab_size.row_count < own_pane_area.row_count
+            let is_row_constraint = tab_size.row_count < own_pane_area.row_count
                 && other_pane_area.row_count == tab_size.row_count;
-            sets_columns || sets_rows
+            is_column_constraint || is_row_constraint
         })
     {
         return TerminalTooSmallCause::OtherClient(other_client.get_client_id());

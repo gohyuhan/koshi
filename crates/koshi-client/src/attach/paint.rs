@@ -982,9 +982,9 @@ fn convert_frame_image_action(frame_image_action: FrameImageAction) -> ImageActi
 /// One wire dimension restored as terminal image metadata.
 fn convert_frame_image_dimension(frame_image_dimension: FrameImageDimension) -> ImageDimension {
     match frame_image_dimension {
-        FrameImageDimension::Cells(dimension_value) => ImageDimension::Cells(dimension_value),
-        FrameImageDimension::Pixels(dimension_value) => ImageDimension::Pixels(dimension_value),
-        FrameImageDimension::Percent(dimension_value) => ImageDimension::Percent(dimension_value),
+        FrameImageDimension::Cells(dimension_amount) => ImageDimension::Cells(dimension_amount),
+        FrameImageDimension::Pixels(dimension_amount) => ImageDimension::Pixels(dimension_amount),
+        FrameImageDimension::Percent(dimension_amount) => ImageDimension::Percent(dimension_amount),
         FrameImageDimension::Auto => ImageDimension::Auto,
     }
 }
@@ -1118,10 +1118,10 @@ fn build_terminal_style(frame_style: &FrameStyle) -> Style {
     ));
     terminal_style.set_reverse(frame_style.text_attributes.is_reverse);
     terminal_style.set_faint(frame_style.text_attributes.is_faint);
-    terminal_style.set_blink(frame_style.text_attributes.is_blinking);
-    terminal_style.set_conceal(frame_style.text_attributes.is_concealed);
-    terminal_style.set_strike(frame_style.text_attributes.is_struck_through);
-    terminal_style.set_overline(frame_style.text_attributes.is_overlined);
+    terminal_style.set_blinking(frame_style.text_attributes.is_blinking);
+    terminal_style.set_concealed(frame_style.text_attributes.is_concealed);
+    terminal_style.set_strikethrough(frame_style.text_attributes.is_struck_through);
+    terminal_style.set_overlined(frame_style.text_attributes.is_overlined);
     terminal_style
 }
 

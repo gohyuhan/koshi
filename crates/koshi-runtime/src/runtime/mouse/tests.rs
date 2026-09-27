@@ -149,9 +149,10 @@ fn apply_mouse_actions(
                 pane_id,
                 mouse_input,
             } => {
-                let was_written = runtime.forward_mouse_to_pane(client_id, pane_id, mouse_input);
+                let is_report_written =
+                    runtime.forward_mouse_to_pane(client_id, pane_id, mouse_input);
                 if let (true, MouseKind::Press(mouse_button)) =
-                    (was_written, mouse_input.mouse_kind)
+                    (is_report_written, mouse_input.mouse_kind)
                 {
                     viewer.note_press_forwarded(pane_id, mouse_button);
                 }
@@ -209,11 +210,11 @@ fn build_runtime_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>, Client
 /// [`build_runtime_with_fake_pty_backend`] on a viewport of `viewport_size`, for a case that needs
 /// room for more panes than the stock 80 by 24 holds.
 fn build_sized_runtime(viewport_size: Size) -> (Server, Arc<FakePtyBackend>, ClientId) {
-    let (sender, receiver) = mpsc::channel();
+    let (inbox_event_sender, runtime_event_receiver) = mpsc::channel();
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(sender),
+        InboxSink::from_event_sender(inbox_event_sender),
     )));
-    let mut runtime = Server::from_runtime_parts(fake_pty_backend.clone(), receiver);
+    let mut runtime = Server::from_runtime_parts(fake_pty_backend.clone(), runtime_event_receiver);
     let client_id = runtime
         .bootstrap_local(SessionId::new(), viewport_size, SystemTime::UNIX_EPOCH)
         .expect("bootstrap client");

@@ -1014,7 +1014,7 @@ fn build_client_with_submitted_placement(
             KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
             Vec::new(),
         ),
-        deadline: None,
+        ambiguity_deadline: None,
     });
     client
 }

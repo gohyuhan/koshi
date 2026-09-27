@@ -44,15 +44,15 @@ fn build_hint_catalog_with_user(
     bound_action_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
     removed_key_sequences: BTreeSet<KeySequence>,
 ) -> KeymapHintCatalog {
-    let modes = BTreeMap::from([(
+    let mode_bindings_by_name = BTreeMap::from([(
         ModeName::from_text(mode_name),
         ModeBindings {
             bound_action_by_key_sequence,
             removed_key_sequences,
         },
     )]);
-    KeymapHintCatalog::from_parts(
-        &build_keymap_layers(Some(modes), Leader::default()),
+    KeymapHintCatalog::from_keymap_layers_config_and_registry(
+        &build_keymap_layers(Some(mode_bindings_by_name), Leader::default()),
         &KeybindingsConfig::default(),
         &ActionRegistry::new(),
     )
@@ -60,10 +60,10 @@ fn build_hint_catalog_with_user(
 
 /// The catalog for the built-in defaults under `config`, with the defaults
 /// layer built against the config's own leader.
-fn build_hint_catalog_with_config(config: &KeybindingsConfig) -> KeymapHintCatalog {
-    KeymapHintCatalog::from_parts(
-        &build_keymap_layers(None, config.leader),
-        config,
+fn build_hint_catalog_with_config(keybindings_config: &KeybindingsConfig) -> KeymapHintCatalog {
+    KeymapHintCatalog::from_keymap_layers_config_and_registry(
+        &build_keymap_layers(None, keybindings_config.leader),
+        keybindings_config,
         &ActionRegistry::new(),
     )
 }
@@ -92,13 +92,13 @@ fn normal_mode_joins_defaults_to_display_names() {
 #[test]
 fn quit_binding_surfaces_in_both_modes() {
     let hint_catalog = build_default_hint_catalog();
-    let quit = KeySequence::from(build_control_chord('q'));
+    let quit_key_sequence = KeySequence::from(build_control_chord('q'));
     for lock_mode in [LockMode::Normal, LockMode::Locked] {
         let hints = hint_catalog.build_hints_for_mode(lock_mode);
         let hint_binding = hints
             .hint_bindings
             .iter()
-            .find(|hint_binding| hint_binding.key_sequence == quit)
+            .find(|hint_binding| hint_binding.key_sequence == quit_key_sequence)
             .unwrap_or_else(|| panic!("{lock_mode:?} binds the quit chord"));
         assert_eq!(hint_binding.action_display_name, "Quit");
     }
@@ -137,7 +137,7 @@ fn modes_without_defaults_are_empty() {
 #[test]
 fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
     let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::PanePlacement);
-    let expected_bindings = [
+    let expected_hint_bindings = [
         (
             KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Left)),
             "Select Pane Target Left",
@@ -193,7 +193,7 @@ fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
     ];
 
     assert_eq!(hints.hint_bindings.len(), 13);
-    for (key_chord, action_display_name) in expected_bindings {
+    for (key_chord, action_display_name) in expected_hint_bindings {
         let key_sequence = KeySequence::from(key_chord);
         let hint_binding = hints
             .hint_bindings
@@ -285,15 +285,15 @@ fn an_unbound_sequence_matches_nothing() {
 #[test]
 fn the_configured_unlock_alternative_becomes_the_escape_chord() {
     let alternative_unlock_chord = KeyChord::from_parts(ModFlags::ALT, Key::Char('u'));
-    let config = KeybindingsConfig {
+    let keybindings_config = KeybindingsConfig {
         chord_timeout_ms: 1234,
         unlock_alternative: Some(alternative_unlock_chord),
         ..KeybindingsConfig::default()
     };
 
-    let hint_catalog = KeymapHintCatalog::from_parts(
+    let hint_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &build_keymap_layers(None, Leader::default()),
-        &config,
+        &keybindings_config,
         &ActionRegistry::new(),
     );
 
@@ -318,14 +318,14 @@ fn the_unlock_chord_is_the_reserved_one_when_the_config_names_no_alternative() {
 
 #[test]
 fn a_rebound_leader_moves_the_prefix_labels() {
-    let config = KeybindingsConfig {
+    let keybindings_config = KeybindingsConfig {
         leader: Leader::Mods(ModFlags::ALT),
         ..KeybindingsConfig::default()
     };
 
-    let hints = KeymapHintCatalog::from_parts(
+    let hints = KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &build_keymap_layers(None, Leader::Mods(ModFlags::ALT)),
-        &config,
+        &keybindings_config,
         &ActionRegistry::new(),
     )
     .build_hints_for_mode(LockMode::Normal);
@@ -341,7 +341,7 @@ fn a_rebound_leader_moves_the_prefix_labels() {
 }
 
 #[test]
-fn reverted_defaults_to_false() {
+fn default_hint_catalog_is_not_marked_reverted_to_defaults() {
     assert!(
         !build_default_hint_catalog()
             .build_hints_for_mode(LockMode::Normal)
@@ -557,9 +557,9 @@ fn a_chord_depth_cap_of_one_drops_every_multi_chord_default() {
 fn a_chord_leader_collapses_the_groups_and_drops_every_prefix_label() {
     // All three groups open at the leader chord itself, so no label names one
     // group and none is offered.
-    let space = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space));
+    let space_leader_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space));
     let hints = build_hint_catalog_with_config(&KeybindingsConfig {
-        leader: Leader::Chord(space),
+        leader: Leader::Chord(space_leader_chord),
         ..KeybindingsConfig::default()
     })
     .build_hints_for_mode(LockMode::Normal);
@@ -614,10 +614,10 @@ fn mark_reverted_to_defaults_changes_only_the_flag() {
         reverted_hint_catalog.get_chord_timeout(),
         base_hint_catalog.get_chord_timeout()
     );
-    let quit = KeySequence::from(build_control_chord('q'));
+    let quit_key_sequence = KeySequence::from(build_control_chord('q'));
     assert_eq!(
-        reverted_hint_catalog.match_sequence(LockMode::Normal, &quit),
-        base_hint_catalog.match_sequence(LockMode::Normal, &quit)
+        reverted_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence),
+        base_hint_catalog.match_sequence(LockMode::Normal, &quit_key_sequence)
     );
 }
 
@@ -686,18 +686,21 @@ fn a_chord_depth_cap_of_zero_drops_every_binding_and_keeps_the_escape_chord() {
 
 #[test]
 fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
-    let unbound = KeySequence::from(build_alt_chord('z'));
-    let hint_catalog =
-        build_hint_catalog_with_user("normal", BTreeMap::new(), BTreeSet::from([unbound.clone()]));
+    let unbound_key_sequence = KeySequence::from(build_alt_chord('z'));
+    let hint_catalog = build_hint_catalog_with_user(
+        "normal",
+        BTreeMap::new(),
+        BTreeSet::from([unbound_key_sequence.clone()]),
+    );
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
 
     assert_eq!(hints.hint_bindings.len(), 24);
     assert_eq!(
         *hints.removed_key_sequences,
-        BTreeSet::from([unbound.clone()])
+        BTreeSet::from([unbound_key_sequence.clone()])
     );
     assert_eq!(
-        hint_catalog.match_sequence(LockMode::Normal, &unbound),
+        hint_catalog.match_sequence(LockMode::Normal, &unbound_key_sequence),
         KeyMatch::default()
     );
 }

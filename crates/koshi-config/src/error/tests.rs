@@ -50,33 +50,33 @@ fn version_diagnostic_message_and_code() {
             SCHEMA_VERSION
         )
     );
-    let code = version_error
+    let diagnostic_code = version_error
         .code()
         .expect("diagnostic has a code")
         .to_string();
-    assert_eq!(code, "koshi::config::version");
+    assert_eq!(diagnostic_code, "koshi::config::version");
 }
 
 #[test]
 fn too_old_diagnostic_carries_the_version_code() {
     let version_error = validate_config_schema_version(0).expect_err("zero version must fail");
-    let code = version_error
+    let diagnostic_code = version_error
         .code()
         .expect("diagnostic has a code")
         .to_string();
-    assert_eq!(code, "koshi::config::version");
+    assert_eq!(diagnostic_code, "koshi::config::version");
 }
 
 #[test]
 fn version_diagnostic_offers_an_upgrade_hint() {
     let version_error =
         validate_config_schema_version(SCHEMA_VERSION + 1).expect_err("newer version must fail");
-    let help = version_error
+    let upgrade_help = version_error
         .help()
         .expect("diagnostic has a help line")
         .to_string();
     assert_eq!(
-        help,
+        upgrade_help,
         "upgrade koshi to a build that understands this config"
     );
 }

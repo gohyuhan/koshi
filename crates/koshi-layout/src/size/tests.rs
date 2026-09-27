@@ -19,7 +19,7 @@ fn default_weight_is_one_flex_share() {
 }
 
 #[test]
-fn every_constraint_kind_assert_size_weight_round_trips() {
+fn each_size_constraint_round_trips_as_a_size_weight() {
     let size_constraints = [
         SizeConstraint::Flex(3),
         SizeConstraint::Percent(40),
@@ -38,7 +38,7 @@ fn every_constraint_kind_assert_size_weight_round_trips() {
 }
 
 #[test]
-fn combined_flex_with_overlays_assert_size_weight_round_trips() {
+fn a_size_weight_with_flex_and_overlays_round_trips() {
     assert_size_weight_round_trip(&SizeWeight {
         primary_constraint: SizeConstraint::Flex(2),
         minimum_cell_count: Some(20),
@@ -48,7 +48,7 @@ fn combined_flex_with_overlays_assert_size_weight_round_trips() {
 }
 
 #[test]
-fn constructors_accept_valid_values() {
+fn size_constraint_constructors_accept_valid_values() {
     assert_eq!(
         SizeConstraint::from_flex_weight(1),
         Ok(SizeConstraint::Flex(1))
@@ -68,7 +68,7 @@ fn constructors_accept_valid_values() {
 }
 
 #[test]
-fn constructors_reject_invalid_values() {
+fn size_constraint_constructors_reject_invalid_values() {
     assert_eq!(
         SizeConstraint::from_flex_weight(0),
         Err(ConstraintError::ZeroFlexWeight)
@@ -92,7 +92,7 @@ fn constructors_reject_invalid_values() {
 }
 
 #[test]
-fn constructors_accept_their_maximum_values() {
+fn size_constraint_constructors_accept_their_maximum_values() {
     assert_eq!(
         SizeConstraint::from_flex_weight(u32::MAX),
         Ok(SizeConstraint::Flex(u32::MAX))
@@ -165,7 +165,7 @@ fn a_weight_serializes_to_its_exact_json_shape() {
 }
 
 #[test]
-fn every_constraint_kind_serializes_as_a_tagged_object() {
+fn each_size_constraint_serializes_as_a_tagged_object() {
     assert_eq!(
         serde_json::to_string(&SizeConstraint::Flex(3)).unwrap(),
         r#"{"Flex":3}"#

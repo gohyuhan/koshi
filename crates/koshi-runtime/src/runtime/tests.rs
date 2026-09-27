@@ -34,12 +34,12 @@ const SERVER_TEST_DEADLINE_DURATION: Duration = Duration::from_secs(5);
 
 #[test]
 fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutdown() {
-    let (event_sender, inbox_receiver) = mpsc::channel();
+    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(event_sender),
+        InboxSink::from_event_sender(runtime_event_sender),
     )));
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
 
     assert!(!server.has_active_panes(), "a fresh server parks no pane");
 
@@ -67,7 +67,7 @@ fn a_spawned_pane_forwards_output_reports_active_and_is_killed_on_graceful_shutd
             assert_eq!(reported_pane_id, pane_id);
             assert_eq!(output_bytes, b"hi");
         }
-        other => panic!("expected PtyOutput, got {other:?}"),
+        received_event => panic!("expected PtyOutput, got {received_event:?}"),
     }
 
     assert!(server.has_active_panes());

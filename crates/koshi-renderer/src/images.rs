@@ -159,8 +159,9 @@ pub fn build_image_cell_snapshot(
                     .selection_spans
                     .as_ref()
                     .and_then(|selection_spans| selection_spans.find_row_span(grid_row_index))
-                    .is_some_and(|(start_column, end_column)| {
-                        grid_column_index >= start_column && grid_column_index <= end_column
+                    .is_some_and(|(start_grid_column, end_grid_column)| {
+                        grid_column_index >= start_grid_column
+                            && grid_column_index <= end_grid_column
                     });
                 let mut cell_style = cell.get_style();
                 cell_style.set_reverse(
@@ -459,11 +460,11 @@ pub fn draw_image_placeholders(placeholder_rects: &[RatatuiRect], screen_buffer:
         clear_screen_rect(target_area, screen_buffer);
         let mut message_characters = TERMINAL_IMAGE_UNAVAILABLE.chars();
         'paint: for row_offset in 0..target_area.height {
-            for column in 0..target_area.width {
+            for column_offset in 0..target_area.width {
                 let Some(message_character) = message_characters.next() else {
                     break 'paint;
                 };
-                screen_buffer[(target_area.x + column, target_area.y + row_offset)]
+                screen_buffer[(target_area.x + column_offset, target_area.y + row_offset)]
                     .set_char(message_character);
             }
         }
@@ -486,20 +487,21 @@ fn compute_image_placement_rect(
     image_placement_snapshot: &ImagePlacementSnapshot,
 ) -> Option<RatatuiRect> {
     let (anchor_row, anchor_column) = image_placement_snapshot.get_anchor_cell();
-    let (row_count, column_count) = image_placement_snapshot.get_cell_dimensions();
+    let (row_cell_count, column_cell_count) = image_placement_snapshot.get_cell_dimensions();
     let screen_column = u32::from(content_rect.x).checked_add(u32::from(anchor_column))?;
     let screen_row = u32::from(content_rect.y).checked_add(u32::from(anchor_row))?;
     let maximum_coordinate = u32::from(u16::MAX) + 1;
     if screen_column >= maximum_coordinate || screen_row >= maximum_coordinate {
         return None;
     }
-    let clipped_column_count = u32::from(column_count).min(maximum_coordinate - screen_column);
-    let clipped_row_count = u32::from(row_count).min(maximum_coordinate - screen_row);
-    (clipped_column_count > 0 && clipped_row_count > 0).then_some(RatatuiRect {
+    let clipped_column_cell_count =
+        u32::from(column_cell_count).min(maximum_coordinate - screen_column);
+    let clipped_row_cell_count = u32::from(row_cell_count).min(maximum_coordinate - screen_row);
+    (clipped_column_cell_count > 0 && clipped_row_cell_count > 0).then_some(RatatuiRect {
         x: u16::try_from(screen_column).ok()?,
         y: u16::try_from(screen_row).ok()?,
-        width: u16::try_from(clipped_column_count).ok()?,
-        height: u16::try_from(clipped_row_count).ok()?,
+        width: u16::try_from(clipped_column_cell_count).ok()?,
+        height: u16::try_from(clipped_row_cell_count).ok()?,
     })
 }
 
@@ -510,58 +512,68 @@ fn compute_image_source_rect(
     image_placement_snapshot: &ImagePlacementSnapshot,
     image_record: &ImageRecord,
 ) -> Option<ImageSourceRect> {
-    let (source_origin_x, source_origin_y, source_pixel_width, source_pixel_height) =
-        image_record.compute_source_rect().ok()?;
+    let (
+        source_pixel_origin_x,
+        source_pixel_origin_y,
+        image_source_pixel_width,
+        image_source_pixel_height,
+    ) = image_record.compute_source_rect().ok()?;
     let cell_geometry = image_placement_snapshot.get_cell_geometry();
-    let source_left = u32::from(target_area.x) - u32::from(image_rect.x)
+    let source_left_cell_column = u32::from(target_area.x) - u32::from(image_rect.x)
         + u32::from(cell_geometry.cell_offset.column);
-    let source_top = u32::from(target_area.y) - u32::from(image_rect.y)
+    let source_top_cell_row = u32::from(target_area.y) - u32::from(image_rect.y)
         + u32::from(cell_geometry.cell_offset.row);
-    let source_right = source_left + u32::from(target_area.width);
-    let source_bottom = source_top + u32::from(target_area.height);
-    let row_count = cell_geometry.full_size.row_count;
-    let column_count = cell_geometry.full_size.column_count;
-    let (pixel_x_offset, pixel_width) = compute_source_span(
-        source_left,
-        source_right,
-        u32::from(column_count),
-        source_pixel_width,
+    let source_right_cell_column = source_left_cell_column + u32::from(target_area.width);
+    let source_bottom_cell_row = source_top_cell_row + u32::from(target_area.height);
+    let source_row_cell_count = cell_geometry.full_size.row_count;
+    let source_column_cell_count = cell_geometry.full_size.column_count;
+    let (source_pixel_x_offset, clipped_source_pixel_width) = compute_source_pixel_span(
+        source_left_cell_column,
+        source_right_cell_column,
+        u32::from(source_column_cell_count),
+        image_source_pixel_width,
     );
-    let (pixel_y_offset, pixel_height) = compute_source_span(
-        source_top,
-        source_bottom,
-        u32::from(row_count),
-        source_pixel_height,
+    let (source_pixel_y_offset, clipped_source_pixel_height) = compute_source_pixel_span(
+        source_top_cell_row,
+        source_bottom_cell_row,
+        u32::from(source_row_cell_count),
+        image_source_pixel_height,
     );
     Some(ImageSourceRect {
-        pixel_x: source_origin_x.checked_add(pixel_x_offset)?,
-        pixel_y: source_origin_y.checked_add(pixel_y_offset)?,
-        pixel_width,
-        pixel_height,
+        pixel_x: source_pixel_origin_x.checked_add(source_pixel_x_offset)?,
+        pixel_y: source_pixel_origin_y.checked_add(source_pixel_y_offset)?,
+        pixel_width: clipped_source_pixel_width,
+        pixel_height: clipped_source_pixel_height,
     })
 }
 
 /// Map one half-open cell span to a half-open source-pixel span.
-fn compute_source_span(
-    source_start: u32,
-    source_end: u32,
-    cell_count: u32,
-    pixel_count: u32,
+fn compute_source_pixel_span(
+    source_start_cell_offset: u32,
+    source_end_cell_offset: u32,
+    source_cell_count: u32,
+    source_pixel_count: u32,
 ) -> (u32, u32) {
-    if cell_count == 0 || pixel_count == 0 || source_start >= source_end {
+    if source_cell_count == 0
+        || source_pixel_count == 0
+        || source_start_cell_offset >= source_end_cell_offset
+    {
         return (0, 0);
     }
-    let pixel_start = u64::from(source_start) * u64::from(pixel_count) / u64::from(cell_count);
-    let pixel_end =
-        (u64::from(source_end) * u64::from(pixel_count)).div_ceil(u64::from(cell_count));
-    let pixel_start = u32::try_from(pixel_start.min(u64::from(pixel_count))).unwrap_or(pixel_count);
-    let pixel_end = u32::try_from(pixel_end.min(u64::from(pixel_count))).unwrap_or(pixel_count);
-    if pixel_end > pixel_start {
-        (pixel_start, pixel_end - pixel_start)
-    } else if pixel_start < pixel_count {
-        (pixel_start, 1)
+    let source_pixel_start = u64::from(source_start_cell_offset) * u64::from(source_pixel_count)
+        / u64::from(source_cell_count);
+    let source_pixel_end = (u64::from(source_end_cell_offset) * u64::from(source_pixel_count))
+        .div_ceil(u64::from(source_cell_count));
+    let source_pixel_start = u32::try_from(source_pixel_start.min(u64::from(source_pixel_count)))
+        .unwrap_or(source_pixel_count);
+    let source_pixel_end = u32::try_from(source_pixel_end.min(u64::from(source_pixel_count)))
+        .unwrap_or(source_pixel_count);
+    if source_pixel_end > source_pixel_start {
+        (source_pixel_start, source_pixel_end - source_pixel_start)
+    } else if source_pixel_start < source_pixel_count {
+        (source_pixel_start, 1)
     } else {
-        (pixel_start, 0)
+        (source_pixel_start, 0)
     }
 }
 

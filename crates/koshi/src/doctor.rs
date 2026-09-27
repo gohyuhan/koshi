@@ -192,7 +192,7 @@ pub struct DoctorContext {
     /// The machine-wide directory the shared session sockets live in:
     /// `koshi.kdl`'s `shared-sessions-dir` when it names one, else this
     /// platform's own. `None` when neither names one.
-    pub shared_directory: Option<PathBuf>,
+    pub shared_sessions_directory: Option<PathBuf>,
     /// The program a new pane runs.
     pub shell: PathBuf,
     /// Where [`DoctorContext::shell`] was read from.
@@ -228,7 +228,7 @@ impl DoctorContext {
             koshi_paths::resolve_runtime_directory_with_rule().unzip();
         let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
         let server_config = koshi_link::config::load_current_server_config();
-        let shared_directory = server_config
+        let shared_sessions_directory = server_config
             .shared_sessions_directory
             .clone()
             .or_else(koshi_paths::resolve_shared_sessions_directory);
@@ -260,7 +260,7 @@ impl DoctorContext {
                     })
                 })
                 .map_err(|in_session_error| in_session_error.to_string()),
-            shared_directory,
+            shared_sessions_directory,
             shell: match &server_config.terminal.default_shell {
                 Some(program) => PathBuf::from(program),
                 None => SpawnSpec::build_default_shell(None, BTreeMap::new()).program,
@@ -348,13 +348,13 @@ fn check_config(doctor_context: &DoctorContext) -> DoctorOutcome {
         return build_no_home_directory_outcome("config");
     };
     let config_report = crate::config_command::validate_config_directory(config_directory);
-    if !config_report.validation_errors.is_empty() {
+    if !config_report.config_file_errors.is_empty() {
         return DoctorOutcome::build_failure_outcome(
-            config_report.validation_errors.join("; "),
+            config_report.config_file_errors.join("; "),
             "run koshi config check to see each file",
         );
     }
-    if config_report.report_lines.is_empty() {
+    if config_report.config_report_lines.is_empty() {
         return DoctorOutcome::build_success_outcome(format!(
             "no config file is present in {}",
             config_directory.display()
@@ -362,7 +362,7 @@ fn check_config(doctor_context: &DoctorContext) -> DoctorOutcome {
     }
     DoctorOutcome::build_success_outcome(format!(
         "{} validated",
-        format_counted_noun(config_report.report_lines.len(), "config file")
+        format_counted_noun(config_report.config_report_lines.len(), "config file")
     ))
 }
 
@@ -530,10 +530,10 @@ fn check_session_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
             "sessions are advertised in {runtime_directory_description}, which only you may reach"
         ));
     }
-    match doctor_context.shared_directory.as_deref() {
-        Some(shared_directory) => DoctorOutcome::build_success_outcome(format!(
+    match doctor_context.shared_sessions_directory.as_deref() {
+        Some(shared_sessions_directory) => DoctorOutcome::build_success_outcome(format!(
             "allow-other-users is on: sessions are also advertised in {}, which every user of this machine may reach",
-            shared_directory.display()
+            shared_sessions_directory.display()
         )),
         None => DoctorOutcome::build_success_outcome(
             "allow-other-users is on, and this machine names no shared session directory, so no other user reaches your sessions"

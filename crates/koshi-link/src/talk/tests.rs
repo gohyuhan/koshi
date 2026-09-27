@@ -237,11 +237,11 @@ fn peer_text_reaches_the_message_filtered() {
 #[test]
 fn each_peer_reads_its_range_from_the_versioned_surface_table() {
     assert_eq!(
-        SESSION_PEER_WORDS.surface,
+        SESSION_PEER_WORDS.protocol_surface,
         koshi_core::compat::SESSION_PROTOCOL
     );
     assert_eq!(
-        ROUTER_PEER_WORDS.surface,
+        ROUTER_PEER_WORDS.protocol_surface,
         koshi_core::compat::CONTROL_PROTOCOL
     );
 }

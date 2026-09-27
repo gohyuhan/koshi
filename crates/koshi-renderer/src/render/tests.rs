@@ -2083,9 +2083,9 @@ fn every_cell_attribute_maps_to_its_own_modifier() {
     every.set_faint(true);
     every.set_italic(true);
     every.set_underline(UnderlineStyle::Single);
-    every.set_blink(true);
-    every.set_conceal(true);
-    every.set_strike(true);
+    every.set_blinking(true);
+    every.set_concealed(true);
+    every.set_strikethrough(true);
     every.set_reverse(true);
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, every);
 
@@ -2097,7 +2097,7 @@ fn every_cell_attribute_maps_to_its_own_modifier() {
 
     // Overline and underline color have no ratatui modifier and draw nothing.
     let mut lines = TermStyle::default();
-    lines.set_overline(true);
+    lines.set_overlined(true);
     lines.set_underline_color(Some(TermColor::Indexed(9)));
     *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, lines);
 

@@ -1,6 +1,6 @@
 //! Directional neighbour selection over solved pane rectangles.
 //!
-//! Given the rectangle a move starts from and the rectangles it may land on,
+//! Given the pane rectangle a move starts from and the pane rectangles it may land on,
 //! this module picks the one the user sees in a cardinal direction. It reads
 //! screen geometry only: the layout tree, its nesting, and the order its
 //! leaves are listed in play no part.
@@ -31,10 +31,10 @@ fn compute_span_overlap(
         .saturating_sub(overlap_start)
 }
 
-/// The pane in `direction` from `source_rect`, chosen among
+/// The pane in `direction` from `source_pane_rect`, chosen among
 /// `candidate_pane_rects`.
 ///
-/// A candidate qualifies when its whole rectangle lies beyond `source_rect`'s
+/// A candidate qualifies when its whole rectangle lies beyond `source_pane_rect`'s
 /// edge in `direction` and the two rectangles overlap on the perpendicular
 /// axis by at least one cell. An empty rectangle never qualifies. The caller
 /// leaves the source pane itself out of `candidate_pane_rects`.
@@ -51,100 +51,106 @@ fn compute_span_overlap(
 /// 5, 5)`: `Right` picks `X`, whose origin row `0` is smaller than `Y`'s `5`.
 #[must_use]
 pub fn select_directional_neighbor(
-    source_rect: Rect,
+    source_pane_rect: Rect,
     candidate_pane_rects: &[(PaneId, Rect)],
     direction: Direction,
 ) -> Option<PaneId> {
     candidate_pane_rects
         .iter()
-        .filter(|(_, candidate_rect)| !candidate_rect.is_empty())
-        .filter_map(|&(pane_id, candidate_rect)| {
+        .filter(|(_, candidate_pane_rect)| !candidate_pane_rect.is_empty())
+        .filter_map(|&(pane_id, candidate_pane_rect)| {
             let edge_distance =
-                compute_facing_edge_distance(source_rect, candidate_rect, direction)?;
+                compute_facing_edge_distance(source_pane_rect, candidate_pane_rect, direction)?;
             let perpendicular_overlap =
-                compute_perpendicular_overlap(source_rect, candidate_rect, direction);
+                compute_perpendicular_overlap(source_pane_rect, candidate_pane_rect, direction);
             if perpendicular_overlap == 0 {
                 return None;
             }
             let perpendicular_origin = match direction {
-                Direction::Left | Direction::Right => candidate_rect.origin.row,
-                Direction::Up | Direction::Down => candidate_rect.origin.column,
+                Direction::Left | Direction::Right => candidate_pane_rect.origin.row,
+                Direction::Up | Direction::Down => candidate_pane_rect.origin.column,
             };
             Some((
                 (
                     edge_distance,
                     Reverse(perpendicular_overlap),
                     perpendicular_origin,
-                    candidate_rect.origin.row,
-                    candidate_rect.origin.column,
+                    candidate_pane_rect.origin.row,
+                    candidate_pane_rect.origin.column,
                     pane_id,
                 ),
                 pane_id,
             ))
         })
-        .min_by_key(|(ranking_key, _)| *ranking_key)
+        .min_by_key(|(candidate_rank, _)| *candidate_rank)
         .map(|(_, pane_id)| pane_id)
 }
 
-/// The exclusive right edge of `rect`: `origin.column + column_count`,
+/// The exclusive right edge of `pane_rect`: `origin.column + column_count`,
 /// saturating at `u16::MAX`. `(40, 0, 80, 20)` gives `120`.
-pub(crate) fn compute_right_edge(rect: Rect) -> u16 {
-    rect.origin.column.saturating_add(rect.size.column_count)
+pub(crate) fn compute_right_edge(pane_rect: Rect) -> u16 {
+    pane_rect
+        .origin
+        .column
+        .saturating_add(pane_rect.size.column_count)
 }
 
-/// The exclusive bottom edge of `rect`: `origin.row + row_count`, saturating
+/// The exclusive bottom edge of `pane_rect`: `origin.row + row_count`, saturating
 /// at `u16::MAX`. `(40, 0, 80, 20)` gives `20`.
-pub(crate) fn compute_bottom_edge(rect: Rect) -> u16 {
-    rect.origin.row.saturating_add(rect.size.row_count)
+pub(crate) fn compute_bottom_edge(pane_rect: Rect) -> u16 {
+    pane_rect
+        .origin
+        .row
+        .saturating_add(pane_rect.size.row_count)
 }
 
-/// The cells between `source_rect`'s edge in `direction` and
-/// `candidate_rect`'s facing edge, or `None` when `candidate_rect` is not
+/// The cells between `source_pane_rect`'s edge in `direction` and
+/// `candidate_pane_rect`'s facing edge, or `None` when `candidate_pane_rect` is not
 /// wholly beyond that edge.
 ///
-/// Source `(0, 0, 10, 10)` and candidate `(12, 0, 5, 10)`: `Right` gives
+/// Source pane `(0, 0, 10, 10)` and candidate pane `(12, 0, 5, 10)`: `Right` gives
 /// `Some(2)`, `Left` gives `None`.
 fn compute_facing_edge_distance(
-    source_rect: Rect,
-    candidate_rect: Rect,
+    source_pane_rect: Rect,
+    candidate_pane_rect: Rect,
     direction: Direction,
 ) -> Option<u16> {
-    let source_right_edge = compute_right_edge(source_rect);
-    let source_bottom_edge = compute_bottom_edge(source_rect);
-    let candidate_right_edge = compute_right_edge(candidate_rect);
-    let candidate_bottom_edge = compute_bottom_edge(candidate_rect);
+    let source_right_edge = compute_right_edge(source_pane_rect);
+    let source_bottom_edge = compute_bottom_edge(source_pane_rect);
+    let candidate_right_edge = compute_right_edge(candidate_pane_rect);
+    let candidate_bottom_edge = compute_bottom_edge(candidate_pane_rect);
     match direction {
-        Direction::Left => (candidate_right_edge <= source_rect.origin.column)
-            .then(|| source_rect.origin.column - candidate_right_edge),
-        Direction::Right => (candidate_rect.origin.column >= source_right_edge)
-            .then(|| candidate_rect.origin.column - source_right_edge),
-        Direction::Up => (candidate_bottom_edge <= source_rect.origin.row)
-            .then(|| source_rect.origin.row - candidate_bottom_edge),
-        Direction::Down => (candidate_rect.origin.row >= source_bottom_edge)
-            .then(|| candidate_rect.origin.row - source_bottom_edge),
+        Direction::Left => (candidate_right_edge <= source_pane_rect.origin.column)
+            .then(|| source_pane_rect.origin.column - candidate_right_edge),
+        Direction::Right => (candidate_pane_rect.origin.column >= source_right_edge)
+            .then(|| candidate_pane_rect.origin.column - source_right_edge),
+        Direction::Up => (candidate_bottom_edge <= source_pane_rect.origin.row)
+            .then(|| source_pane_rect.origin.row - candidate_bottom_edge),
+        Direction::Down => (candidate_pane_rect.origin.row >= source_bottom_edge)
+            .then(|| candidate_pane_rect.origin.row - source_bottom_edge),
     }
 }
 
-/// The cells `source_rect` and `candidate_rect` share on the axis
+/// The cells `source_pane_rect` and `candidate_pane_rect` share on the axis
 /// perpendicular to `direction`: rows for `Left`/`Right`, columns for
 /// `Up`/`Down`.
 fn compute_perpendicular_overlap(
-    source_rect: Rect,
-    candidate_rect: Rect,
+    source_pane_rect: Rect,
+    candidate_pane_rect: Rect,
     direction: Direction,
 ) -> u16 {
     match direction {
         Direction::Left | Direction::Right => compute_span_overlap(
-            source_rect.origin.row,
-            source_rect.size.row_count,
-            candidate_rect.origin.row,
-            candidate_rect.size.row_count,
+            source_pane_rect.origin.row,
+            source_pane_rect.size.row_count,
+            candidate_pane_rect.origin.row,
+            candidate_pane_rect.size.row_count,
         ),
         Direction::Up | Direction::Down => compute_span_overlap(
-            source_rect.origin.column,
-            source_rect.size.column_count,
-            candidate_rect.origin.column,
-            candidate_rect.size.column_count,
+            source_pane_rect.origin.column,
+            source_pane_rect.size.column_count,
+            candidate_pane_rect.origin.column,
+            candidate_pane_rect.size.column_count,
         ),
     }
 }

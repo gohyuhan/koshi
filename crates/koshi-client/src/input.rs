@@ -153,7 +153,7 @@ impl Client {
     }
 
     /// Select the next or previous visible tab for placement mode.
-    fn select_placement_tab_by_offset(&mut self, tab_offset: isize) -> PlacementInputAction {
+    fn select_placement_tab_by_offset(&mut self, tab_index_offset: isize) -> PlacementInputAction {
         if self.is_placement_confirmation_pending() {
             return PlacementInputAction::Consumed;
         }
@@ -167,7 +167,7 @@ impl Client {
         else {
             return PlacementInputAction::Consumed;
         };
-        let target_tab_index = destination_tab_index as isize + tab_offset;
+        let target_tab_index = destination_tab_index as isize + tab_index_offset;
         let Ok(target_tab_index) = usize::try_from(target_tab_index) else {
             return PlacementInputAction::Consumed;
         };
@@ -321,7 +321,7 @@ impl Client {
         let current_span_index = placement_mode
             .placement_target
             .as_ref()
-            .and_then(get_placement_target_anchor)
+            .and_then(resolve_placement_target_anchor)
             .and_then(|anchor| {
                 insertion_spans
                     .iter()
@@ -465,12 +465,12 @@ impl Client {
                 // A prefix-only sequence waits for its next chord with no
                 // deadline; only exact-plus-longer ambiguity arms one, and
                 // reaching it fires the exact binding.
-                let deadline = exact_bound_action
+                let ambiguity_deadline = exact_bound_action
                     .is_some()
                     .then(|| current_time + self.keymap_catalog.get_chord_timeout());
                 self.pending_key_sequence = Some(PendingKeySequence {
                     sequence: key_sequence,
-                    deadline,
+                    ambiguity_deadline,
                 });
                 KeyOutcome::Pending
             }
@@ -502,8 +502,8 @@ impl Client {
     pub fn compute_next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
         self.pending_key_sequence
             .as_ref()
-            .and_then(|pending_key_sequence| pending_key_sequence.deadline)
-            .map(|deadline| deadline.saturating_duration_since(current_time))
+            .and_then(|pending_key_sequence| pending_key_sequence.ambiguity_deadline)
+            .map(|ambiguity_deadline| ambiguity_deadline.saturating_duration_since(current_time))
     }
 
     /// Fire the open sequence's complete binding if its ambiguity deadline has
@@ -514,12 +514,12 @@ impl Client {
     /// binding while the sequence waits; the held chords then resolve to
     /// nothing and are dropped, never typed at the pane.
     pub fn expire_key_sequence(&mut self, current_time: Instant) -> Option<BoundAction> {
-        let is_deadline_due = self
+        let is_ambiguity_deadline_due = self
             .pending_key_sequence
             .as_ref()
-            .and_then(|pending_key_sequence| pending_key_sequence.deadline)
-            .is_some_and(|deadline| deadline <= current_time);
-        if !is_deadline_due {
+            .and_then(|pending_key_sequence| pending_key_sequence.ambiguity_deadline)
+            .is_some_and(|ambiguity_deadline| ambiguity_deadline <= current_time);
+        if !is_ambiguity_deadline_due {
             return None;
         }
         let pending_key_sequence = self.pending_key_sequence.take()?;
@@ -553,7 +553,7 @@ impl Client {
                 sequence_chords[0],
                 sequence_chords[1..sequence_chords.len() - 1].to_vec(),
             ),
-            deadline: None,
+            ambiguity_deadline: None,
         });
     }
 }
@@ -617,7 +617,7 @@ pub(crate) fn build_placement_destinations(
         gap_cell_count: pane_sizing.gap_cell_count,
     };
     let tab_rect = Rect::from_size_at_origin(destination_tab_snapshot.tab_size);
-    let layout_solve = solve_layout_with_mode(
+    let layout_solution = solve_layout_with_mode(
         &destination_tab_snapshot.layout_tree,
         LayoutMode::Tiled,
         tab_rect,
@@ -625,7 +625,7 @@ pub(crate) fn build_placement_destinations(
     );
     list_placement_destinations(
         &destination_tab_snapshot.layout_tree,
-        &layout_solve,
+        &layout_solution,
         tab_rect,
         source_pane_id,
     )
@@ -700,7 +700,7 @@ fn find_directional_target_pane_id(
     if let Some(source_pane_slot) = source_pane_slot {
         candidate_pane_rects.push((source_pane_id, source_pane_slot.outer_rect));
     }
-    let first_candidate = candidate_pane_rects.first().copied();
+    let first_candidate_pane_and_rect = candidate_pane_rects.first().copied();
     let current_pane_rect = current_placement_target
         .and_then(|placement_target| {
             find_placement_target_rect(
@@ -710,11 +710,11 @@ fn find_directional_target_pane_id(
             )
         })
         .or_else(|| source_pane_slot.map(|source_pane_slot| source_pane_slot.outer_rect))
-        .or_else(|| first_candidate.map(|(_, pane_rect)| pane_rect))?;
+        .or_else(|| first_candidate_pane_and_rect.map(|(_, pane_rect)| pane_rect))?;
     let neighbor_pane_id =
         select_directional_neighbor(current_pane_rect, &candidate_pane_rects, direction);
     if neighbor_pane_id.is_none() && current_placement_target.is_none() {
-        return first_candidate.map(|(pane_id, _)| pane_id);
+        return first_candidate_pane_and_rect.map(|(pane_id, _)| pane_id);
     }
     neighbor_pane_id
 }
@@ -743,7 +743,7 @@ fn compute_span_cell_count(insertion_span: &InsertionSpan) -> u32 {
 }
 
 /// Return the insertion anchor named by a placement target.
-fn get_placement_target_anchor(
+fn resolve_placement_target_anchor(
     placement_target: &PanePlacementTarget,
 ) -> Option<PanePlacementAnchor> {
     match placement_target {

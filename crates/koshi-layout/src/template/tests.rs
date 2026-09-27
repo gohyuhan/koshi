@@ -17,7 +17,7 @@ fn build_command_template(program: &str) -> TerminalTemplate {
 }
 
 /// A terminal leaf running the default shell.
-fn build_shell_leaf() -> TemplateNode {
+fn build_default_shell_template_leaf() -> TemplateNode {
     TemplateNode::Leaf(TerminalTemplate::default())
 }
 
@@ -28,28 +28,31 @@ fn build_command_template_node(program: &str) -> TemplateNode {
 /// A split of `direction` with one default weight per child.
 fn build_template_split(
     direction: SplitDirection,
-    children: Vec<TemplateNode>,
+    template_children: Vec<TemplateNode>,
     active_child_index: usize,
 ) -> TemplateNode {
     TemplateNode::Split(TemplateSplit {
         direction,
-        weights: vec![SizeWeight::default(); children.len()],
-        children,
+        weights: vec![SizeWeight::default(); template_children.len()],
+        children: template_children,
         active_child_index,
     })
 }
 
 /// A horizontal split with no children.
-fn build_empty_split() -> TemplateNode {
+fn build_empty_template_split() -> TemplateNode {
     build_template_split(SplitDirection::Horizontal, Vec::new(), 0)
 }
 
 /// A horizontal split with a nested vertical split:
 /// `horizontal(nvim, vertical(shell, top))`, weighted 60/40.
-fn build_nested_template() -> TemplateNode {
+fn build_nested_layout_template() -> TemplateNode {
     let nested_vertical_template = build_template_split(
         SplitDirection::Vertical,
-        vec![build_shell_leaf(), build_command_template_node("top")],
+        vec![
+            build_default_shell_template_leaf(),
+            build_command_template_node("top"),
+        ],
         0,
     );
     TemplateNode::Split(TemplateSplit {
@@ -68,38 +71,41 @@ fn build_nested_template() -> TemplateNode {
 
 #[test]
 fn leaves_are_depth_first_in_layout_order() {
-    let template = build_nested_template();
+    let layout_template = build_nested_layout_template();
     let (nvim_template, default_shell_template, top_template) = (
         build_command_template("nvim"),
         TerminalTemplate::default(),
         build_command_template("top"),
     );
     assert_eq!(
-        template.list_leaf_templates(),
+        layout_template.list_leaf_templates(),
         [&nvim_template, &default_shell_template, &top_template]
     );
 }
 
 #[test]
 fn leaves_of_a_bare_leaf_is_that_leaf() {
-    let default_shell = TerminalTemplate::default();
-    assert_eq!(build_shell_leaf().list_leaf_templates(), [&default_shell]);
+    let default_shell_template = TerminalTemplate::default();
+    assert_eq!(
+        build_default_shell_template_leaf().list_leaf_templates(),
+        [&default_shell_template]
+    );
 }
 
 #[test]
 fn leaves_of_an_empty_split_is_empty() {
     assert_eq!(
-        build_empty_split().list_leaf_templates(),
+        build_empty_template_split().list_leaf_templates(),
         Vec::<&TerminalTemplate>::new()
     );
 }
 
 #[test]
 fn build_layout_node_mirrors_structure_weights_and_direction() {
-    let template = build_nested_template();
+    let layout_template = build_nested_layout_template();
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = template
+    let layout_tree = layout_template
         .build_layout_node(&[first_pane_id, second_pane_id, third_pane_id])
         .unwrap();
 
@@ -128,10 +134,10 @@ fn build_layout_node_mirrors_structure_weights_and_direction() {
 
 #[test]
 fn build_layout_node_assigns_ids_in_leaf_order() {
-    let template = build_nested_template();
+    let layout_template = build_nested_layout_template();
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree = template
+    let layout_tree = layout_template
         .build_layout_node(&[first_pane_id, second_pane_id, third_pane_id])
         .unwrap();
     assert_eq!(
@@ -142,13 +148,16 @@ fn build_layout_node_assigns_ids_in_leaf_order() {
 
 #[test]
 fn stacked_template_preserves_its_active_member() {
-    let template = build_template_split(
+    let layout_template = build_template_split(
         SplitDirection::Stacked,
-        vec![build_command_template_node("htop"), build_shell_leaf()],
+        vec![
+            build_command_template_node("htop"),
+            build_default_shell_template_leaf(),
+        ],
         1,
     );
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let layout_tree = template
+    let layout_tree = layout_template
         .build_layout_node(&[first_pane_id, second_pane_id])
         .unwrap();
     let expected_layout_tree = LayoutNode::Split(SplitNode {
@@ -165,13 +174,16 @@ fn stacked_template_preserves_its_active_member() {
 
 #[test]
 fn build_layout_node_copies_an_out_of_range_active_unchanged() {
-    let template = build_template_split(
+    let layout_template = build_template_split(
         SplitDirection::Stacked,
-        vec![build_shell_leaf(), build_command_template_node("htop")],
+        vec![
+            build_default_shell_template_leaf(),
+            build_command_template_node("htop"),
+        ],
         9,
     );
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let layout_tree = template
+    let layout_tree = layout_template
         .build_layout_node(&[first_pane_id, second_pane_id])
         .unwrap();
     let expected_layout_tree = LayoutNode::Split(SplitNode {
@@ -188,30 +200,39 @@ fn build_layout_node_copies_an_out_of_range_active_unchanged() {
 
 #[test]
 fn single_leaf_template_instantiates_to_bare_pane() {
-    let template = build_shell_leaf();
+    let layout_template = build_default_shell_template_leaf();
     let pane_id = PaneId::new();
-    let tree = template.build_layout_node(&[pane_id]).unwrap();
-    assert_eq!(tree, LayoutNode::Pane(pane_id));
+    let layout_tree = layout_template.build_layout_node(&[pane_id]).unwrap();
+    assert_eq!(layout_tree, LayoutNode::Pane(pane_id));
 }
 
 #[test]
 fn first_visible_leaf_of_a_leaf_is_zero() {
-    assert_eq!(build_shell_leaf().find_first_visible_leaf_index(), 0);
+    assert_eq!(
+        build_default_shell_template_leaf().find_first_visible_leaf_index(),
+        0
+    );
 }
 
 #[test]
 fn first_visible_leaf_of_a_directional_split_is_its_first_leaf() {
-    assert_eq!(build_nested_template().find_first_visible_leaf_index(), 0);
+    assert_eq!(
+        build_nested_layout_template().find_first_visible_leaf_index(),
+        0
+    );
 }
 
 #[test]
 fn first_visible_leaf_ignores_active_on_a_directional_split() {
-    let root = build_template_split(
+    let root_template = build_template_split(
         SplitDirection::Horizontal,
-        vec![build_shell_leaf(), build_command_template_node("htop")],
+        vec![
+            build_default_shell_template_leaf(),
+            build_command_template_node("htop"),
+        ],
         1,
     );
-    assert_eq!(root.find_first_visible_leaf_index(), 0);
+    assert_eq!(root_template.find_first_visible_leaf_index(), 0);
 }
 
 #[test]
@@ -221,12 +242,15 @@ fn first_visible_leaf_skips_collapsed_stack_members() {
     // and the first VISIBLE one is the expanded member at index 1.
     let stack_template = build_template_split(
         SplitDirection::Stacked,
-        vec![build_shell_leaf(), build_command_template_node("htop")],
+        vec![
+            build_default_shell_template_leaf(),
+            build_command_template_node("htop"),
+        ],
         1,
     );
     let root_template = build_template_split(
         SplitDirection::Horizontal,
-        vec![stack_template, build_shell_leaf()],
+        vec![stack_template, build_default_shell_template_leaf()],
         0,
     );
     assert_eq!(root_template.find_first_visible_leaf_index(), 1);
@@ -238,7 +262,10 @@ fn first_visible_leaf_counts_every_leaf_of_earlier_stack_members() {
     // member comes after the two leaves of the collapsed member.
     let collapsed_member_template = build_template_split(
         SplitDirection::Vertical,
-        vec![build_shell_leaf(), build_command_template_node("htop")],
+        vec![
+            build_default_shell_template_leaf(),
+            build_command_template_node("htop"),
+        ],
         0,
     );
     let stack_template = build_template_split(
@@ -266,7 +293,7 @@ fn first_visible_leaf_descends_into_a_nested_stack() {
     );
     let outer_stack_template = build_template_split(
         SplitDirection::Stacked,
-        vec![build_shell_leaf(), inner_stack_template],
+        vec![build_default_shell_template_leaf(), inner_stack_template],
         1,
     );
     assert_eq!(outer_stack_template.find_first_visible_leaf_index(), 2);
@@ -274,7 +301,10 @@ fn first_visible_leaf_descends_into_a_nested_stack() {
 
 #[test]
 fn first_visible_leaf_of_an_empty_split_is_zero() {
-    assert_eq!(build_empty_split().find_first_visible_leaf_index(), 0);
+    assert_eq!(
+        build_empty_template_split().find_first_visible_leaf_index(),
+        0
+    );
 }
 
 #[test]
@@ -284,7 +314,10 @@ fn first_visible_leaf_with_out_of_range_active_names_the_last_member() {
     // template is instantiated.
     let stack_template = build_template_split(
         SplitDirection::Stacked,
-        vec![build_shell_leaf(), build_command_template_node("htop")],
+        vec![
+            build_default_shell_template_leaf(),
+            build_command_template_node("htop"),
+        ],
         9,
     );
     assert_eq!(stack_template.find_first_visible_leaf_index(), 1);
@@ -292,7 +325,7 @@ fn first_visible_leaf_with_out_of_range_active_names_the_last_member() {
 
 #[test]
 fn empty_split_template_instantiates_with_no_ids() {
-    let layout_tree = build_empty_split().build_layout_node(&[]).unwrap();
+    let layout_tree = build_empty_template_split().build_layout_node(&[]).unwrap();
     assert_eq!(
         layout_tree,
         LayoutNode::Split(SplitNode {
@@ -306,17 +339,17 @@ fn empty_split_template_instantiates_with_no_ids() {
 
 #[test]
 fn an_empty_split_child_consumes_no_ids() {
-    let template = build_template_split(
+    let layout_template = build_template_split(
         SplitDirection::Horizontal,
         vec![
-            build_shell_leaf(),
-            build_empty_split(),
+            build_default_shell_template_leaf(),
+            build_empty_template_split(),
             build_command_template_node("top"),
         ],
         0,
     );
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let layout_tree = template
+    let layout_tree = layout_template
         .build_layout_node(&[first_pane_id, second_pane_id])
         .unwrap();
     let expected_layout_tree = LayoutNode::Split(SplitNode {
@@ -339,10 +372,12 @@ fn an_empty_split_child_consumes_no_ids() {
 
 #[test]
 fn too_few_ids_is_a_count_mismatch() {
-    let template = build_nested_template();
-    let template_count_error = template.build_layout_node(&[PaneId::new()]).unwrap_err();
+    let layout_template = build_nested_layout_template();
+    let template_pane_count_error = layout_template
+        .build_layout_node(&[PaneId::new()])
+        .unwrap_err();
     assert_eq!(
-        template_count_error,
+        template_pane_count_error,
         TemplateError::PaneCountMismatch {
             expected_leaf_count: 3,
             provided_pane_id_count: 1
@@ -352,9 +387,11 @@ fn too_few_ids_is_a_count_mismatch() {
 
 #[test]
 fn no_ids_for_a_leaf_is_a_count_mismatch() {
-    let template_count_error = build_shell_leaf().build_layout_node(&[]).unwrap_err();
+    let template_pane_count_error = build_default_shell_template_leaf()
+        .build_layout_node(&[])
+        .unwrap_err();
     assert_eq!(
-        template_count_error,
+        template_pane_count_error,
         TemplateError::PaneCountMismatch {
             expected_leaf_count: 1,
             provided_pane_id_count: 0
@@ -364,12 +401,12 @@ fn no_ids_for_a_leaf_is_a_count_mismatch() {
 
 #[test]
 fn too_many_ids_is_a_count_mismatch() {
-    let template = build_shell_leaf();
-    let template_count_error = template
+    let layout_template = build_default_shell_template_leaf();
+    let template_pane_count_error = layout_template
         .build_layout_node(&[PaneId::new(), PaneId::new()])
         .unwrap_err();
     assert_eq!(
-        template_count_error,
+        template_pane_count_error,
         TemplateError::PaneCountMismatch {
             expected_leaf_count: 1,
             provided_pane_id_count: 2
@@ -379,11 +416,11 @@ fn too_many_ids_is_a_count_mismatch() {
 
 #[test]
 fn a_count_mismatch_names_both_counts() {
-    let template_count_error = build_nested_template()
+    let template_pane_count_error = build_nested_layout_template()
         .build_layout_node(&[PaneId::new()])
         .unwrap_err();
     assert_eq!(
-        template_count_error.to_string(),
+        template_pane_count_error.to_string(),
         "template has 3 pane slots but 1 pane ids were supplied"
     );
 }

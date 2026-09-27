@@ -102,13 +102,13 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
 
     // The action verb is classified before routing. The command that travels
     // the socket is built after routing resolves the targets.
-    let is_action = cli.command.as_ref().is_some_and(CliCommand::is_action_verb);
+    let is_action_verb = cli.command.as_ref().is_some_and(CliCommand::is_action_verb);
 
     // `--remote` runs with `attach`, with `list-sessions`, and with an action
     // verb. Every other verb, `--headless`, and a bare `koshi --remote
     // <server>` are refused.
     if cli.remote_server_reference.is_some()
-        && !is_action
+        && !is_action_verb
         && !matches!(
             cli.command,
             Some(CliCommand::Attach { .. }) | Some(CliCommand::ListSessions { .. })
@@ -474,8 +474,10 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// left out; only a session on this machine that could not answer fails the
 /// listing.
 fn run_discovery(command: &CliCommand, remote_server: Option<&str>) -> Result<(), CliError> {
-    if let (CliCommand::ListSessions { output_format }, Some(server)) = (command, remote_server) {
-        let saved_server_argument = remote_client::resolve_server(server)?;
+    if let (CliCommand::ListSessions { output_format }, Some(remote_server)) =
+        (command, remote_server)
+    {
+        let saved_server_argument = remote_client::resolve_server(remote_server)?;
         let (mut remote_link, _) = remote_client::connect_saved_server(
             &saved_server_argument,
             None,
@@ -606,9 +608,9 @@ fn run_discovery(command: &CliCommand, remote_server: Option<&str>) -> Result<()
     print!("{rendered_output}");
 
     // Every discovery query other than an `inspect` is a listing.
-    let is_listing = !matches!(command, CliCommand::Inspect { .. });
+    let is_listing_query = !matches!(command, CliCommand::Inspect { .. });
     match discovered_sessions.find_incomplete_listing_error() {
-        Some(incomplete_listing_error) if is_listing => Err(incomplete_listing_error),
+        Some(incomplete_listing_error) if is_listing_query => Err(incomplete_listing_error),
         _ => Ok(()),
     }
 }
@@ -665,7 +667,7 @@ fn run_dump_layout(
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let discovered_sessions = targeting::resolve_session_scope(&runtime_directory, None)?;
 
-    let layouts = match tab_reference {
+    let tab_layouts = match tab_reference {
         Some(tab_reference) => {
             let tab_id = targeting::resolve_tab_reference(&discovered_sessions, tab_reference)?;
             let session_id = discovery::find_tab(&discovered_sessions, tab_id)?.session_id;
@@ -687,7 +689,7 @@ fn run_dump_layout(
             })
             .collect::<Result<Vec<_>, CliError>>()?,
     };
-    print!("{}", output::render_layouts(&layouts, output_format));
+    print!("{}", output::render_layouts(&tab_layouts, output_format));
 
     match discovered_sessions.find_incomplete_listing_error() {
         Some(incomplete_listing_error) => Err(incomplete_listing_error),
@@ -852,7 +854,7 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
 /// admitted, so the defaults-only answer on stdout is not mistaken for the
 /// file's contents.
 fn warn_keymap_reverted(keymap_view: &KeymapView) {
-    if let Some(keymap_error) = &keymap_view.file_error_message {
+    if let Some(keymap_error) = &keymap_view.keybinding_file_error_message {
         eprintln!("koshi: keybinding file ignored: {keymap_error}");
     } else if keymap_view.is_reverted_to_defaults {
         eprintln!(

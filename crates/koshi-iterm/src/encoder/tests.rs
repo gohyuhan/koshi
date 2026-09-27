@@ -11,8 +11,6 @@ const EXPECTED_RED_PNG_BASE64: &[u8] =
     b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
 const ITERM_OSC_PREFIX_BYTE_COUNT: usize = b"\x1b]1337;".len();
 const ITERM_OSC_TERMINATOR_BYTE_COUNT: usize = 2;
-const MAX_PACKET_BYTE_COUNT: usize = 64 * 1024;
-
 fn build_red_image() -> DecodedImage {
     DecodedImage {
         pixel_width: 1,
@@ -121,7 +119,7 @@ fn multipart_packets_have_exact_framing_and_independent_png_round_trip() {
     assert!(encoded_packets.len() > 3);
     assert!(encoded_packets
         .iter()
-        .all(|encoded_packet_bytes| encoded_packet_bytes.len() <= MAX_PACKET_BYTE_COUNT));
+        .all(|encoded_packet_bytes| { encoded_packet_bytes.len() <= MAX_ITERM_PACKET_BYTE_COUNT }));
 
     let independently_encoded_png_bytes = {
         let mut independently_encoded_png_bytes = Vec::new();
@@ -165,10 +163,9 @@ fn multipart_packets_have_exact_framing_and_independent_png_round_trip() {
             assert_eq!(encoded_part_base64.len() % 4, 0);
             joined_base64.extend_from_slice(encoded_part_base64);
         }
-        let decoded_graphics_option =
-            crate::parse_iterm_command(command_body, &mut multipart_transfer)
-                .expect("each packet parses");
-        if let Some(decoded_graphics) = decoded_graphics_option {
+        let completed_graphics = crate::parse_iterm_command(command_body, &mut multipart_transfer)
+            .expect("each packet parses");
+        if let Some(decoded_graphics) = completed_graphics {
             assert!(parsed_graphics.is_none());
             parsed_graphics = Some(decoded_graphics);
         }

@@ -211,10 +211,10 @@ fn build_test_style() -> Style {
     terminal_style.set_italic(true);
     terminal_style.set_reverse(true);
     terminal_style.set_faint(true);
-    terminal_style.set_blink(true);
-    terminal_style.set_conceal(true);
-    terminal_style.set_strike(true);
-    terminal_style.set_overline(true);
+    terminal_style.set_blinking(true);
+    terminal_style.set_concealed(true);
+    terminal_style.set_strikethrough(true);
+    terminal_style.set_overlined(true);
     terminal_style.set_underline(UnderlineStyle::Curly);
     terminal_style
 }

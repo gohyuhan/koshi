@@ -416,10 +416,10 @@ fn commit_new_tab_with_a_stale_focus_client_moves_no_view() {
 }
 
 #[test]
-fn commit_new_tab_records_the_spec_on_the_root_pane() {
+fn commit_new_tab_records_the_new_pane_spec_on_the_root_pane() {
     let mut session = build_session_with(vec![], vec![]);
     let new_pane_id = PaneId::new();
-    let spec = NewPaneSpec {
+    let new_pane_spec = NewPaneSpec {
         working_directory: Some(PathBuf::from("/srv")),
         spawn_spec: None,
     };
@@ -430,7 +430,7 @@ fn commit_new_tab_records_the_spec_on_the_root_pane() {
         new_pane_id,
         "logs".to_owned(),
         None,
-        spec,
+        new_pane_spec,
     );
 
     let pane_record = session.panes.get_pane_record_by_id(new_pane_id).unwrap();
@@ -2097,15 +2097,22 @@ fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
     let mut session = build_session_with(vec![], vec![]);
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let layout = build_two_leaf_layout(first_pane_id, second_pane_id);
-    let profile = ProfileTab {
+    let layout_tree = build_two_leaf_layout(first_pane_id, second_pane_id);
+    let profile_tab = ProfileTab {
         pane_ids: vec![first_pane_id, second_pane_id],
-        layout: layout.clone(),
-        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        layout_tree: layout_tree.clone(),
+        new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
         focused_leaf_index: 0,
     };
 
-    let events = commit_profile_tab(&mut session, tab_id, profile, "dev".to_owned(), None, true);
+    let events = commit_profile_tab(
+        &mut session,
+        tab_id,
+        profile_tab,
+        "dev".to_owned(),
+        None,
+        true,
+    );
 
     // The first tab moves the session from Starting to Running.
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
@@ -2129,7 +2136,7 @@ fn commit_profile_tab_registers_every_pane_running_and_emits_created_events() {
     );
     assert_eq!(session.panes.count_pane_records(), 2);
     // The tab carries the whole profile tree, not just its single root leaf.
-    assert_eq!(*session.tabs[&tab_id].get_layout_tree(), layout);
+    assert_eq!(*session.tabs[&tab_id].get_layout_tree(), layout_tree);
     assert_eq!(session.tabs[&tab_id].get_tab_index(), 0);
 
     // No focus client, so only creation events: one TabCreated then one
@@ -2155,14 +2162,21 @@ fn commit_profile_tab_without_a_client_still_records_the_focus_leaf() {
     let mut session = build_session_with(vec![], vec![]);
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let profile = ProfileTab {
+    let profile_tab = ProfileTab {
         pane_ids: vec![first_pane_id, second_pane_id],
-        layout: build_two_leaf_layout(first_pane_id, second_pane_id),
-        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        layout_tree: build_two_leaf_layout(first_pane_id, second_pane_id),
+        new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
         focused_leaf_index: 1,
     };
 
-    let _ = commit_profile_tab(&mut session, tab_id, profile, "dev".to_owned(), None, true);
+    let _ = commit_profile_tab(
+        &mut session,
+        tab_id,
+        profile_tab,
+        "dev".to_owned(),
+        None,
+        true,
+    );
 
     assert_eq!(session.tabs[&tab_id].list_focus_mru(), &[second_pane_id]);
 }
@@ -2183,17 +2197,17 @@ fn commit_profile_tab_focuses_the_focus_leaf_and_switches_the_client() {
 
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let profile = ProfileTab {
+    let profile_tab = ProfileTab {
         pane_ids: vec![first_pane_id, second_pane_id],
-        layout: build_two_leaf_layout(first_pane_id, second_pane_id),
-        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        layout_tree: build_two_leaf_layout(first_pane_id, second_pane_id),
+        new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
         focused_leaf_index: 1, // focus the second leaf, not the root
     };
 
     let events = commit_profile_tab(
         &mut session,
         tab_id,
-        profile,
+        profile_tab,
         "dev".to_owned(),
         Some(client_id),
         true,
@@ -2252,17 +2266,17 @@ fn commit_profile_tab_out_of_range_focus_leaf_focuses_the_root_pane() {
 
     let tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let profile = ProfileTab {
+    let profile_tab = ProfileTab {
         pane_ids: vec![first_pane_id, second_pane_id],
-        layout: build_two_leaf_layout(first_pane_id, second_pane_id),
-        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        layout_tree: build_two_leaf_layout(first_pane_id, second_pane_id),
+        new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
         focused_leaf_index: 9, // out of range
     };
 
     let _ = commit_profile_tab(
         &mut session,
         tab_id,
-        profile,
+        profile_tab,
         "dev".to_owned(),
         Some(client_id),
         true,
@@ -2292,17 +2306,17 @@ fn commit_profile_tab_inactive_records_focus_without_switching_the_view() {
 
     let second_tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let profile = ProfileTab {
+    let profile_tab = ProfileTab {
         pane_ids: vec![first_pane_id, second_pane_id],
-        layout: build_two_leaf_layout(first_pane_id, second_pane_id),
-        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        layout_tree: build_two_leaf_layout(first_pane_id, second_pane_id),
+        new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
         focused_leaf_index: 0,
     };
 
     let events = commit_profile_tab(
         &mut session,
         second_tab_id,
-        profile,
+        profile_tab,
         "dev".to_owned(),
         Some(client_id),
         false,
@@ -2359,17 +2373,17 @@ fn commit_profile_tab_with_a_stale_focus_client_emits_only_creation_events() {
 
     let second_tab_id = TabId::new();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let profile = ProfileTab {
+    let profile_tab = ProfileTab {
         pane_ids: vec![first_pane_id, second_pane_id],
-        layout: build_two_leaf_layout(first_pane_id, second_pane_id),
-        specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
+        layout_tree: build_two_leaf_layout(first_pane_id, second_pane_id),
+        new_pane_specs: vec![NewPaneSpec::default(), NewPaneSpec::default()],
         focused_leaf_index: 1,
     };
 
     let events = commit_profile_tab(
         &mut session,
         second_tab_id,
-        profile,
+        profile_tab,
         "dev".to_owned(),
         Some(ClientId::new()),
         true,
@@ -2410,17 +2424,17 @@ fn commit_profile_tab_with_no_panes_panics() {
     // The tab's root pane is `pane_ids[0]`, so an empty `pane_ids` panics
     // there — the panic the function documents.
     let mut session = build_session_with(vec![], vec![]);
-    let profile = ProfileTab {
+    let profile_tab = ProfileTab {
         pane_ids: vec![],
-        layout: LayoutNode::Pane(PaneId::new()),
-        specs: vec![],
+        layout_tree: LayoutNode::Pane(PaneId::new()),
+        new_pane_specs: vec![],
         focused_leaf_index: 0,
     };
 
     let _ = commit_profile_tab(
         &mut session,
         TabId::new(),
-        profile,
+        profile_tab,
         "dev".to_owned(),
         None,
         true,

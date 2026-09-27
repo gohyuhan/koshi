@@ -255,12 +255,12 @@ pub fn update_saved_server_store<T>(
     )?;
     let mut saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
-    let updated_store_value = update_store(&mut saved_server_store)?;
+    let store_update_response = update_store(&mut saved_server_store)?;
     saved_server_store
         .write_server_store_to_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
     drop(store_lock_file);
-    Ok(updated_store_value)
+    Ok(store_update_response)
 }
 
 /// Take the advisory lock on the file at `lock_file_path`, creating the file and the
@@ -271,7 +271,7 @@ pub fn update_saved_server_store<T>(
 /// file this call creates. On Windows both take the data directory's
 /// owner-scoped ACLs.
 ///
-/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up to `lock_wait`.
+/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up to `lock_wait_duration`.
 /// Dropping the returned file releases the lock, and so does the operating
 /// system when the process holding it dies.
 ///
@@ -279,7 +279,10 @@ pub fn update_saved_server_store<T>(
 /// [`CliError::IpcUnavailable`] when the directory or the file could not be
 /// made, when the lock could not be attempted, and when another koshi still
 /// held it at the deadline.
-fn acquire_store_lock(lock_file_path: &Path, lock_wait: Duration) -> Result<File, CliError> {
+fn acquire_store_lock(
+    lock_file_path: &Path,
+    lock_wait_duration: Duration,
+) -> Result<File, CliError> {
     let build_unavailable_error = |error_detail: String| CliError::IpcUnavailable {
         detail: error_detail,
     };
@@ -319,7 +322,7 @@ fn acquire_store_lock(lock_file_path: &Path, lock_wait: Duration) -> Result<File
             lock_file_path.display()
         ))
     })?;
-    let deadline = Instant::now() + lock_wait;
+    let deadline = Instant::now() + lock_wait_duration;
     loop {
         match FileExt::try_lock(&lock_file) {
             Ok(()) => return Ok(lock_file),
@@ -1081,11 +1084,11 @@ pub fn reach_all_saved_servers(timeout: Duration) -> Vec<Reach> {
 
     let mut received_reaches = Vec::with_capacity(requested_server_count);
     while received_reaches.len() < requested_server_count {
-        let remaining_wait = deadline.saturating_duration_since(Instant::now());
-        if remaining_wait.is_zero() {
+        let remaining_wait_duration = deadline.saturating_duration_since(Instant::now());
+        if remaining_wait_duration.is_zero() {
             break;
         }
-        match reach_receiver.recv_timeout(remaining_wait) {
+        match reach_receiver.recv_timeout(remaining_wait_duration) {
             Ok(reach_result) => received_reaches.push(reach_result),
             Err(_) => break,
         }

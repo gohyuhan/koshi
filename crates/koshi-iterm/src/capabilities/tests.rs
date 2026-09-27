@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn feature_parser_matches_whole_tokens_and_ignores_extensions() {
+fn iterm_file_feature_matches_whole_tokens_and_ignores_extensions() {
     assert!(supports_iterm_file_feature(b"F"));
     assert!(supports_iterm_file_feature(b"SxF"));
     assert!(supports_iterm_file_feature(b"F;unknown"));
@@ -15,7 +15,7 @@ fn feature_parser_matches_whole_tokens_and_ignores_extensions() {
 }
 
 #[test]
-fn feature_parser_matches_the_sixel_token_without_matching_prefixes() {
+fn iterm_sixel_feature_matches_the_whole_token_not_prefixes() {
     assert!(supports_iterm_sixel_feature(b"Sx"));
     assert!(supports_iterm_sixel_feature(b"FSx"));
     assert!(supports_iterm_sixel_feature(b"Sx;unknown"));
@@ -27,6 +27,6 @@ fn feature_parser_matches_the_sixel_token_without_matching_prefixes() {
 }
 
 #[test]
-fn feature_query_has_exact_osc_terminator() {
+fn iterm_capabilities_query_has_the_exact_osc_terminator() {
     assert_eq!(ITERM_CAPABILITIES_QUERY, b"\x1b]1337;Capabilities\x1b\\");
 }

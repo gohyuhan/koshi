@@ -95,7 +95,7 @@ impl Server {
         if pasted_text.is_empty() {
             return;
         }
-        let can_pass_input_to_pane = self
+        let can_pass_unbound_input_to_pane = self
             .get_session_for_client(client_id)
             .and_then(|session| session.clients.get_client_by_id(client_id))
             .is_some_and(|attached_client| {
@@ -103,7 +103,7 @@ impl Server {
                     .get_lock_mode()
                     .should_pass_unbound_input_to_pane()
             });
-        if !can_pass_input_to_pane {
+        if !can_pass_unbound_input_to_pane {
             return;
         }
         let Some(pane_id) = self.find_typed_pane(client_id) else {
@@ -194,18 +194,18 @@ impl Server {
                     terminal_state.is_application_cursor_keys_enabled(),
                 )
             });
-        let key_bytes = encode_key_input(
+        let encoded_key_input_bytes = encode_key_input(
             key_input,
             keyboard_flags,
             is_application_cursor_keys_enabled,
             self.config.terminal.extended_keys_mode,
         );
-        if key_bytes.is_empty() {
+        if encoded_key_input_bytes.is_empty() {
             return;
         }
         if self
             .get_pty_backend()
-            .write_pane_input(pane_id, &key_bytes)
+            .write_pane_input(pane_id, &encoded_key_input_bytes)
             .is_ok()
         {
             self.handle_input_reached_pane(client_id, pane_id);

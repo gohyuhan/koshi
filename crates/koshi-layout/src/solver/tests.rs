@@ -10,11 +10,11 @@ use crate::test_trees::build_deep_alternating_layout;
 use crate::tree::LayoutNode;
 
 /// Constructs a cell rectangle with the given origin and dimensions.
-fn build_cell_rect(column_index: u16, row_index: u16, column_count: u16, row_count: u16) -> Rect {
+fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
     Rect::from_origin_and_size(
         Point {
-            column: column_index,
-            row: row_index,
+            column: origin_column,
+            row: origin_row,
         },
         Size {
             column_count,
@@ -51,16 +51,16 @@ fn build_equal_split_node(direction: SplitDirection, pane_ids: &[PaneId]) -> Lay
 /// A split whose children carry explicit primary constraints.
 fn build_split_node_with_weights(
     direction: SplitDirection,
-    children: Vec<(PaneId, SizeWeight)>,
+    pane_weights: Vec<(PaneId, SizeWeight)>,
 ) -> LayoutNode {
     let mut split_node = SplitNode::with_equal_weights(
         direction,
-        children
+        pane_weights
             .iter()
             .map(|&(pane_id, _)| build_leaf_node(pane_id))
             .collect(),
     );
-    split_node.weights = children
+    split_node.weights = pane_weights
         .into_iter()
         .map(|(_, size_weight)| size_weight)
         .collect();
@@ -154,7 +154,7 @@ fn three_way_split_sums_to_the_full_width() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.size.column_count)
+        .map(|(_, pane_rect)| pane_rect.size.column_count)
         .collect();
     assert_eq!(column_widths, [26, 27, 27]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -223,7 +223,7 @@ fn fixed_then_percent_then_flex_distribution() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.size.column_count)
+        .map(|(_, pane_rect)| pane_rect.size.column_count)
         .collect();
     assert_eq!(column_widths, [10, 50, 40]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -251,7 +251,7 @@ fn flex_weights_share_proportionally() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.size.column_count)
+        .map(|(_, pane_rect)| pane_rect.size.column_count)
         .collect();
     assert_eq!(column_widths, [60, 30]);
 }
@@ -276,7 +276,7 @@ fn missing_weights_fall_back_to_the_default_share() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.size.column_count)
+        .map(|(_, pane_rect)| pane_rect.size.column_count)
         .collect();
     assert_eq!(column_widths, [40, 40]);
     assert_tiles_exactly(&layout_result, layout_area);

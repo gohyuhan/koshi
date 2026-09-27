@@ -43,8 +43,11 @@ impl TerminalState {
     pub(super) fn is_character_continuing_cluster(&mut self, character: char) -> bool {
         let cluster_byte_length = self.cluster.len();
         self.cluster.push(character);
-        let mut cursor = GraphemeCursor::new(cluster_byte_length, self.cluster.len(), true);
-        let is_cluster_continuation = !cursor.is_boundary(&self.cluster, 0).unwrap_or(true);
+        let mut grapheme_cursor =
+            GraphemeCursor::new(cluster_byte_length, self.cluster.len(), true);
+        let is_cluster_continuation = !grapheme_cursor
+            .is_boundary(&self.cluster, 0)
+            .unwrap_or(true);
         self.cluster.truncate(cluster_byte_length);
         is_cluster_continuation
     }
@@ -69,9 +72,9 @@ impl TerminalState {
         {
             return;
         }
-        let old_display_width = UnicodeWidthStr::width(self.cluster.as_str());
+        let old_cluster_display_width = UnicodeWidthStr::width(self.cluster.as_str());
         self.cluster.push(character);
-        let new_display_width = UnicodeWidthStr::width(self.cluster.as_str());
+        let new_cluster_display_width = UnicodeWidthStr::width(self.cluster.as_str());
 
         if let Some(cell) = self
             .get_active_grid_mut()
@@ -83,9 +86,9 @@ impl TerminalState {
                 cell.push_combining(character);
             }
         }
-        if old_display_width == 1 && new_display_width == 2 {
+        if old_cluster_display_width == 1 && new_cluster_display_width == 2 {
             self.promote_cluster_to_wide(row_index, column_index);
-        } else if old_display_width == 2 && new_display_width == 1 {
+        } else if old_cluster_display_width == 2 && new_cluster_display_width == 1 {
             self.demote_cluster_to_narrow(row_index, column_index);
         }
     }
@@ -100,18 +103,18 @@ impl TerminalState {
     /// cursor stays parked on it, with the wrap latch armed under autowrap.
     fn demote_cluster_to_narrow(&mut self, row_index: u16, column_index: u16) {
         self.clear_images_at_cells(row_index, column_index, 2);
-        if let Some(slot) = self
+        if let Some(cluster_base_cell) = self
             .get_active_grid_mut()
             .get_cell_mut(row_index, column_index)
         {
-            *slot = rebuild_cell_with_width(slot, 1);
+            *cluster_base_cell = rebuild_cell_with_width(cluster_base_cell, 1);
         }
         let background_style = self.get_active_render().style.get_background_fill_style();
-        if let Some(slot) = self
+        if let Some(vacated_cell) = self
             .get_active_grid_mut()
             .get_cell_mut(row_index, column_index + 1)
         {
-            *slot = Cell::build_blank_with_style(background_style);
+            *vacated_cell = Cell::build_blank_with_style(background_style);
         }
         // The glyph occupies one column; the cursor sits just past the base.
         let (_, last_column_index) = self.get_horizontal_wrap_bounds_for_column(column_index);
@@ -139,14 +142,14 @@ impl TerminalState {
 
         if column_index < last_column_index {
             // Room to the right: widen the base in place and claim column + 1.
-            let Some(widened) = self
+            let Some(widened_base_cell) = self
                 .get_active_grid()
                 .get_cell(row_index, column_index)
                 .map(|cell| rebuild_cell_with_width(cell, 2))
             else {
                 return;
             };
-            self.place_glyph(row_index, column_index, widened);
+            self.place_glyph(row_index, column_index, widened_base_cell);
             // The glyph ends at column + 1: park there when that is the
             // effective right bound, else step past it.
             if column_index + 1 >= last_column_index {
@@ -178,11 +181,11 @@ impl TerminalState {
             };
             let background_style = self.get_active_render().style.get_background_fill_style();
             self.clear_images_at_cells(row_index, column_index, 1);
-            if let Some(slot) = self
+            if let Some(vacated_cell) = self
                 .get_active_grid_mut()
                 .get_cell_mut(row_index, column_index)
             {
-                *slot = Cell::build_blank_with_style(background_style);
+                *vacated_cell = Cell::build_blank_with_style(background_style);
             }
             // The vacated right bound is a wide-glyph spacer; `SoftWide` marks
             // the row so a reflow re-joins the rows and drops the spacer.
@@ -190,15 +193,15 @@ impl TerminalState {
             self.get_active_cursor_mut().column = first_column_index;
             self.clear_wrap_latch();
 
-            let new_row_index = self.get_active_cursor().row;
-            let mut widened = Cell::from_character(base_character, 2, cell_style);
+            let new_base_row_index = self.get_active_cursor().row;
+            let mut widened_base_cell = Cell::from_character(base_character, 2, cell_style);
             for combining_character in &combining_characters {
-                widened.push_combining(*combining_character);
+                widened_base_cell.push_combining(*combining_character);
             }
             // `place_glyph` clears any wide pair at the new left bound that
             // this write would split.
-            self.place_glyph(new_row_index, first_column_index, widened);
-            self.cluster_base = Some((new_row_index, first_column_index));
+            self.place_glyph(new_base_row_index, first_column_index, widened_base_cell);
+            self.cluster_base = Some((new_base_row_index, first_column_index));
             if first_column_index.saturating_add(1) >= last_column_index {
                 self.arm_wrap_latch();
             } else {
@@ -216,11 +219,11 @@ impl TerminalState {
     /// narrow cell, an out-of-bounds cell, or a continuation at column 0 is
     /// left as it is.
     pub(super) fn clear_wide_glyph_at(&mut self, row_index: u16, column_index: u16) {
-        let cell_width = self
+        let cell_display_width = self
             .get_active_grid()
             .get_cell(row_index, column_index)
             .map_or(1, Cell::get_display_width);
-        match cell_width {
+        match cell_display_width {
             0 if column_index > 0 => self.clear_images_at_cells(row_index, column_index - 1, 2),
             2 => self.clear_images_at_cells(row_index, column_index, 2),
             _ => self.clear_images_at_cells(row_index, column_index, 1),
@@ -242,25 +245,25 @@ impl TerminalState {
     /// Cursor and cluster bookkeeping stay with the caller.
     pub(super) fn place_glyph(&mut self, row_index: u16, column_index: u16, base_cell: Cell) {
         let (_, column_count) = self.get_active_grid().get_grid_dimensions();
-        let old_display_width = self
+        let old_cell_display_width = self
             .get_active_grid()
             .get_cell(row_index, column_index)
             .map_or(1, Cell::get_display_width);
         // A width-2 base is stored only with its continuation column in bounds;
         // in a 1-column pane it is stored narrow.
-        let is_wide = base_cell.get_display_width() == 2 && column_index + 1 < column_count;
-        let base_cell = if base_cell.get_display_width() == 2 && !is_wide {
+        let is_wide_glyph = base_cell.get_display_width() == 2 && column_index + 1 < column_count;
+        let base_cell = if base_cell.get_display_width() == 2 && !is_wide_glyph {
             rebuild_cell_with_width(&base_cell, 1)
         } else {
             base_cell
         };
-        if old_display_width == 0 && column_index > 0 {
+        if old_cell_display_width == 0 && column_index > 0 {
             self.clear_images_at_cells(row_index, column_index - 1, 1);
         }
         self.clear_images_at_cells(
             row_index,
             column_index,
-            if is_wide || old_display_width == 2 {
+            if is_wide_glyph || old_cell_display_width == 2 {
                 2
             } else {
                 1
@@ -270,28 +273,28 @@ impl TerminalState {
         // Clear any wide pair this write would split, on every column it lands
         // on.
         self.clear_wide_glyph_at(row_index, column_index);
-        if is_wide {
+        if is_wide_glyph {
             self.clear_wide_glyph_at(row_index, column_index + 1);
         }
-        if let Some(slot) = self
+        if let Some(target_cell) = self
             .get_active_grid_mut()
             .get_cell_mut(row_index, column_index)
         {
-            *slot = base_cell;
+            *target_cell = base_cell;
         }
         // A wide glyph's second column is a width-0 continuation placeholder,
         // covered by the glyph's left half; the renderer skips it.
-        if is_wide {
-            if let Some(slot) = self
+        if is_wide_glyph {
+            if let Some(continuation_cell) = self
                 .get_active_grid_mut()
                 .get_cell_mut(row_index, column_index + 1)
             {
-                *slot = Cell::from_character(' ', 0, cell_style);
+                *continuation_cell = Cell::from_character(' ', 0, cell_style);
             }
         }
         // A write reaching the row's last column resets the row end to `Hard`;
         // a wrap on the next glyph records `Soft` again.
-        let end_column_index = if is_wide {
+        let end_column_index = if is_wide_glyph {
             column_index + 1
         } else {
             column_index
@@ -314,7 +317,7 @@ impl TerminalState {
         let (_, column_count) = self.get_active_grid().get_grid_dimensions();
         let background_style = self.get_active_render().style.get_background_fill_style();
         for column_index in 0..column_count {
-            let is_orphaned = match self
+            let is_wide_pair_cell_orphaned = match self
                 .get_active_grid()
                 .get_cell(row_index, column_index)
                 .map_or(1, Cell::get_display_width)
@@ -334,7 +337,7 @@ impl TerminalState {
                 }
                 _ => false,
             };
-            if is_orphaned {
+            if is_wide_pair_cell_orphaned {
                 self.clear_images_at_cells(row_index, column_index, 1);
                 if let Some(cell) = self
                     .get_active_grid_mut()

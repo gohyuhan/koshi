@@ -95,7 +95,7 @@ fn each_resolver_routes_to_its_own_platform_dir() {
 }
 
 #[test]
-fn koshi_dir_env_vars_are_ignored() {
+fn unrecognized_koshi_directory_environment_variables_are_ignored() {
     // Setting `KOSHI_CONFIG_DIR`, `KOSHI_DATA_DIR` and `KOSHI_STATE_DIR`
     // leaves every resolved directory at its platform default.
     let mut environment_guard = EnvGuard::new();
@@ -307,7 +307,7 @@ fn the_runtime_directory_is_run_under_the_data_directory() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_paths_land_under_library() {
+fn macos_project_directories_resolve_under_library_application_support() {
     let _environment_guard = EnvGuard::new();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
     let home_directory_path = platform_directories.home_dir();
@@ -328,7 +328,7 @@ fn macos_paths_land_under_library() {
 
 #[cfg(windows)]
 #[test]
-fn windows_config_dir_lands_under_appdata_config() {
+fn windows_config_directory_resolves_under_appdata_config() {
     let _environment_guard = EnvGuard::new();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
 
@@ -340,7 +340,7 @@ fn windows_config_dir_lands_under_appdata_config() {
 
 #[cfg(windows)]
 #[test]
-fn windows_state_dir_lands_under_local_appdata_data() {
+fn windows_state_directory_resolves_under_local_appdata_data() {
     let _environment_guard = EnvGuard::new();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
 
@@ -452,7 +452,7 @@ fn ensure_private_directory_creates_every_missing_parent() {
 }
 
 #[test]
-fn the_runtime_directory_the_variable_names_is_created_private() {
+fn runtime_directory_override_is_created_with_private_permissions() {
     // The startup path every consumer runs: `KOSHI_RUNTIME_DIR` names the
     // directory, `resolve_runtime_directory` answers it, `ensure_private_directory` creates it and
     // every missing parent below it.

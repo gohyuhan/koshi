@@ -253,9 +253,9 @@ impl Session {
     /// `Stopped` it is rejected and the lifecycle stays as it was. The client
     /// is registered either way.
     pub fn attach_client(&mut self, client: Client) -> Option<Client> {
-        let displaced = self.clients.attach_client(client);
+        let displaced_client = self.clients.attach_client(client);
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
-        displaced
+        displaced_client
     }
 
     /// Detach the client `client_id`, returning the removed record (`None` if it
@@ -263,14 +263,14 @@ impl Session {
     /// drops to `Detaching` — its tabs and panes stay alive; detaching one of
     /// several clients leaves the session `Running`.
     pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
-        let removed = self.clients.detach_client(client_id);
+        let detached_client = self.clients.detach_client(client_id);
         if !self.clients.has_clients() {
             // Only a `Running` session moves to `Detaching`. `Starting`,
             // `Detaching`, `Stopping` and `Stopped` reject the event and keep
             // the state they had.
             let _ = self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
         }
-        removed
+        detached_client
     }
 
     /// The pane region to size tab `tab_id` against: each viewing client's own

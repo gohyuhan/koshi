@@ -3,15 +3,16 @@
 use super::*;
 use std::collections::BTreeSet;
 
-/// Roundtrip a value through JSON and assert it survives unchanged.
-fn assert_json_roundtrip<Roundtrippable>(roundtrippable_value: &Roundtrippable)
+/// Roundtrip an action representation through JSON and assert it survives unchanged.
+fn assert_json_roundtrip<ActionRepresentation>(action_representation: &ActionRepresentation)
 where
-    Roundtrippable: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    ActionRepresentation:
+        serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let serialized_json = serde_json::to_string(roundtrippable_value).expect("serialize");
-    let decoded_roundtrippable: Roundtrippable =
+    let serialized_json = serde_json::to_string(action_representation).expect("serialize");
+    let decoded_action_representation: ActionRepresentation =
         serde_json::from_str(&serialized_json).expect("deserialize");
-    assert_eq!(*roundtrippable_value, decoded_roundtrippable);
+    assert_eq!(*action_representation, decoded_action_representation);
 }
 
 #[test]
@@ -32,11 +33,15 @@ fn action_name_parser_accepts_valid_grammar() {
         );
     }
     // Exactly the maximum length (1 + 30) is allowed.
-    let maximum_action_name = format!("a{}", "b".repeat(MAX_ACTION_NAME_CHARACTER_COUNT - 1));
-    assert_eq!(maximum_action_name.len(), MAX_ACTION_NAME_CHARACTER_COUNT);
+    let maximum_length_action_name =
+        format!("a{}", "b".repeat(MAX_ACTION_NAME_CHARACTER_COUNT - 1));
     assert_eq!(
-        ActionName::parse_action_name(&maximum_action_name).map(String::from),
-        Ok(maximum_action_name.clone())
+        maximum_length_action_name.len(),
+        MAX_ACTION_NAME_CHARACTER_COUNT
+    );
+    assert_eq!(
+        ActionName::parse_action_name(&maximum_length_action_name).map(String::from),
+        Ok(maximum_length_action_name.clone())
     );
 }
 
@@ -261,7 +266,7 @@ fn action_reference_parser_refuses_user_and_plugin_prefixes() {
 
 #[test]
 fn action_reference_parser_reports_first_failing_rule() {
-    let parse_error_cases: &[(&str, ActionReferenceParseError)] = &[
+    let action_reference_parse_error_cases: &[(&str, ActionReferenceParseError)] = &[
         ("", ActionReferenceParseError::MissingNamespace),
         ("core", ActionReferenceParseError::MissingNamespace),
         (
@@ -293,10 +298,12 @@ fn action_reference_parser_reports_first_failing_rule() {
             }),
         ),
     ];
-    for (action_reference_text, expected_parse_error) in parse_error_cases {
+    for (action_reference_text, expected_action_reference_parse_error) in
+        action_reference_parse_error_cases
+    {
         assert_eq!(
             action_reference_text.parse::<ActionReference>(),
-            Err(expected_parse_error.clone()),
+            Err(expected_action_reference_parse_error.clone()),
             "for {action_reference_text:?}"
         );
     }
@@ -325,21 +332,23 @@ fn action_reference_parse_error_display_uses_stable_messages() {
 fn action_reference_parse_error_source_exposes_only_name_error() {
     use std::error::Error;
 
-    let name_error = ActionReferenceParseError::InvalidActionName(ActionNameError::Empty);
+    let action_name_error = ActionReferenceParseError::InvalidActionName(ActionNameError::Empty);
     assert_eq!(
-        name_error.source().map(ToString::to_string),
+        action_name_error.source().map(ToString::to_string),
         Some("action name is empty".to_string())
     );
-    for action_parse_error in [
+    for action_reference_parse_error in [
         ActionReferenceParseError::MissingNamespace,
         ActionReferenceParseError::UnknownNamespace {
             unknown_namespace: "shell".to_string(),
         },
     ] {
         assert_eq!(
-            action_parse_error.source().map(ToString::to_string),
+            action_reference_parse_error
+                .source()
+                .map(ToString::to_string),
             None,
-            "for {action_parse_error:?}"
+            "for {action_reference_parse_error:?}"
         );
     }
 }
@@ -361,14 +370,14 @@ fn core_action_seed_panics_on_invalid_action_name() {
 fn mouse_select_seed_uses_hint_label_as_display_name() {
     assert_eq!(MOUSE_SELECT_HINT, "Mouse Select");
     assert_eq!(MOUSE_UNSELECT_HINT, "Mouse Unselect");
-    let seeds = build_core_action_seeds();
+    let core_action_seeds = build_core_action_seeds();
     let mouse_select_action_reference =
         ActionReference::from_core_action_name("mouse-select").expect("valid");
-    let (_, mouse_select_metadata) = seeds
+    let (_, mouse_select_action_metadata) = core_action_seeds
         .iter()
         .find(|(action_reference, _)| *action_reference == mouse_select_action_reference)
         .expect("mouse-select is seeded");
-    assert_eq!(mouse_select_metadata.display_name, MOUSE_SELECT_HINT);
+    assert_eq!(mouse_select_action_metadata.display_name, MOUSE_SELECT_HINT);
 }
 
 /// Pins every seed's position, command kind, scope, and targets, in table
@@ -378,22 +387,28 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
     use ActionScope::{Client, PaneSession, Tab};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
-    let seeds = build_core_action_seeds();
-    let actual_seed_metadata: Vec<(String, ActionHandlerReference, ActionScope, Vec<TargetKind>)> =
-        seeds
-            .into_iter()
-            .filter_map(|(action, metadata)| match metadata.handler {
+    let core_action_seeds = build_core_action_seeds();
+    let actual_command_backed_action_metadata: Vec<(
+        String,
+        ActionHandlerReference,
+        ActionScope,
+        Vec<TargetKind>,
+    )> = core_action_seeds
+        .into_iter()
+        .filter_map(
+            |(action_reference, action_metadata)| match action_metadata.handler {
                 ActionHandlerReference::CoreClient(_) => None,
-                handler => Some((
-                    action.to_string(),
-                    handler,
-                    metadata.scope,
-                    metadata.target_kinds,
+                action_handler => Some((
+                    action_reference.to_string(),
+                    action_handler,
+                    action_metadata.scope,
+                    action_metadata.target_kinds,
                 )),
-            })
-            .collect();
+            },
+        )
+        .collect();
 
-    let expected_seed_metadata: Vec<(
+    let expected_command_backed_action_metadata: Vec<(
         String,
         ActionHandlerReference,
         ActionScope,
@@ -623,22 +638,31 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
     })
     .collect();
 
-    assert_eq!(actual_seed_metadata, expected_seed_metadata);
+    assert_eq!(
+        actual_command_backed_action_metadata,
+        expected_command_backed_action_metadata
+    );
 
-    let actual_client_seed_metadata: Vec<(String, ClientActionKind, ActionScope, Vec<TargetKind>)> =
-        build_core_action_seeds()
-            .into_iter()
-            .filter_map(|(action, metadata)| match metadata.handler {
+    let actual_client_action_metadata: Vec<(
+        String,
+        ClientActionKind,
+        ActionScope,
+        Vec<TargetKind>,
+    )> = build_core_action_seeds()
+        .into_iter()
+        .filter_map(
+            |(action_reference, action_metadata)| match action_metadata.handler {
                 ActionHandlerReference::CoreClient(client_action_kind) => Some((
-                    action.to_string(),
+                    action_reference.to_string(),
                     client_action_kind,
-                    metadata.scope,
-                    metadata.target_kinds,
+                    action_metadata.scope,
+                    action_metadata.target_kinds,
                 )),
                 _ => None,
-            })
-            .collect();
-    let expected_client_seed_metadata = vec![
+            },
+        )
+        .collect();
+    let expected_client_action_metadata = vec![
         (
             "core:begin-pane-placement".to_string(),
             ClientActionKind::BeginPanePlacement,
@@ -724,26 +748,29 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             vec![ClientTarget],
         ),
     ];
-    assert_eq!(actual_client_seed_metadata, expected_client_seed_metadata);
+    assert_eq!(
+        actual_client_action_metadata,
+        expected_client_action_metadata
+    );
 }
 
 #[test]
 fn core_action_seeds_are_unique_and_roundtrip_through_serde() {
-    let seeds = build_core_action_seeds();
+    let core_action_seeds = build_core_action_seeds();
 
     // No duplicate action references.
-    let unique_action_references: BTreeSet<String> = seeds
+    let unique_action_references: BTreeSet<String> = core_action_seeds
         .iter()
         .map(|(action_reference, _)| action_reference.to_string())
         .collect();
     assert_eq!(
         unique_action_references.len(),
-        seeds.len(),
+        core_action_seeds.len(),
         "seed action names must be unique"
     );
 
     // Every seeded reference roundtrips through serde.
-    for (action_reference, _) in &seeds {
+    for (action_reference, _) in &core_action_seeds {
         assert_json_roundtrip(action_reference);
     }
 }
@@ -752,11 +779,11 @@ fn core_action_seeds_are_unique_and_roundtrip_through_serde() {
 /// state, so their actions carry the `Client` scope and accept a client target.
 #[test]
 fn lock_and_focus_seeds_use_client_scope_and_targets() {
-    let seeds = build_core_action_seeds();
-    let get_action_metadata = |action_name: &str| {
+    let core_action_seeds = build_core_action_seeds();
+    let find_action_metadata = |action_name: &str| {
         let action_reference =
             ActionReference::from_core_action_name(action_name).expect("valid seed name");
-        seeds
+        core_action_seeds
             .iter()
             .find(|(seeded_action_reference, _)| *seeded_action_reference == action_reference)
             .unwrap_or_else(|| panic!("{action_name} must be seeded"))
@@ -790,7 +817,7 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
         ("cancel-pane-placement", vec![TargetKind::Client]),
     ];
     for (action_name, target_kinds) in client_scoped_action_cases {
-        let action_metadata = get_action_metadata(action_name);
+        let action_metadata = find_action_metadata(action_name);
         assert_eq!(
             action_metadata.scope,
             ActionScope::Client,
@@ -809,12 +836,12 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
 /// fails the assert.
 #[test]
 fn continuous_action_seeds_are_stable() {
-    let mut continuous: Vec<String> = build_core_action_seeds()
+    let mut continuous_action_names: Vec<String> = build_core_action_seeds()
         .iter()
         .filter(|(_, action_metadata)| action_metadata.is_continuous)
         .map(|(action_reference, _)| action_reference.to_string())
         .collect();
-    continuous.sort();
+    continuous_action_names.sort();
 
     let mut expected_continuous_action_names = [
         "core:resize-pane",
@@ -834,20 +861,20 @@ fn continuous_action_seeds_are_stable() {
     .to_vec();
     expected_continuous_action_names.sort();
 
-    assert_eq!(continuous, expected_continuous_action_names);
+    assert_eq!(continuous_action_names, expected_continuous_action_names);
 }
 
 /// Pins the exact set of built-in actions. Adding, removing, or renaming a seed
 /// changes this list and fails the assert.
 #[test]
 fn core_action_seed_name_snapshot_is_stable() {
-    let mut action_names: Vec<String> = build_core_action_seeds()
+    let mut core_action_names: Vec<String> = build_core_action_seeds()
         .iter()
         .map(|(action_reference, _)| action_reference.to_string())
         .collect();
-    action_names.sort();
+    core_action_names.sort();
 
-    let expected_action_names = vec![
+    let expected_core_action_names = vec![
         "core:begin-pane-placement",
         "core:cancel-pane-placement",
         "core:close-pane",
@@ -900,5 +927,5 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:unlock",
         "core:write-to-pane",
     ];
-    assert_eq!(action_names, expected_action_names);
+    assert_eq!(core_action_names, expected_core_action_names);
 }

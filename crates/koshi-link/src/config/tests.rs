@@ -622,16 +622,16 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     };
 
     apply_beta_gate(Some(enabled_config.clone()));
-    assert!(koshi_beta::are_beta_features_allowed());
+    assert!(koshi_beta::should_allow_beta_features());
 
     apply_beta_gate(Some(disabled_config));
-    assert!(!koshi_beta::are_beta_features_allowed());
+    assert!(!koshi_beta::should_allow_beta_features());
 
     // No `koshi.kdl` at all closes an open gate.
     apply_beta_gate(Some(enabled_config));
-    assert!(koshi_beta::are_beta_features_allowed());
+    assert!(koshi_beta::should_allow_beta_features());
     apply_beta_gate(None);
-    assert!(!koshi_beta::are_beta_features_allowed());
+    assert!(!koshi_beta::should_allow_beta_features());
 
     // The whole chain from text on disk: the reader `load_app_layer` uses, onto
     // the gate, into a function carrying the attribute. `load_app_layer` takes
@@ -748,24 +748,23 @@ fn a_layout_section_naming_no_direction_still_opens_rightward() {
 
 // --- Who may reach a session's control socket ---
 
-/// A `koshi.kdl` layer setting `allow-other-users` to `is_allowed` and naming no
-/// shared directory.
-fn build_access_layer(is_allowed: bool) -> PartialKoshiConfig {
+/// A `koshi.kdl` layer with `should_allow_other_users` and no shared directory.
+fn build_other_user_access_config_layer(should_allow_other_users: bool) -> PartialKoshiConfig {
     PartialKoshiConfig {
-        should_allow_other_users: Some(is_allowed),
+        should_allow_other_users: Some(should_allow_other_users),
         ..Default::default()
     }
 }
 
-/// A `koshi.kdl` layer setting `allow-other-users` to `is_allowed` and naming
-/// `shared_directory` as the shared sessions directory.
-fn build_access_layer_with_shared_directory(
-    is_allowed: bool,
-    shared_directory: &str,
+/// A `koshi.kdl` layer with `should_allow_other_users` and
+/// `shared_sessions_directory`.
+fn build_other_user_access_config_layer_with_shared_sessions_directory(
+    should_allow_other_users: bool,
+    shared_sessions_directory: &str,
 ) -> PartialKoshiConfig {
     PartialKoshiConfig {
-        should_allow_other_users: Some(is_allowed),
-        shared_sessions_directory: Some(Some(PathBuf::from(shared_directory))),
+        should_allow_other_users: Some(should_allow_other_users),
+        shared_sessions_directory: Some(Some(PathBuf::from(shared_sessions_directory))),
         ..Default::default()
     }
 }
@@ -773,8 +772,8 @@ fn build_access_layer_with_shared_directory(
 /// The directory a policy shares through, or `None` when the session serves
 /// only the user who started it. `OtherUsers` carries a closure, so the
 /// directory is what a test compares.
-fn get_shared_sessions_directory(policy: Option<OtherUsers>) -> Option<PathBuf> {
-    policy.map(|policy| policy.shared_directory)
+fn get_shared_sessions_directory(other_users_policy: Option<OtherUsers>) -> Option<PathBuf> {
+    other_users_policy.map(|other_users_access_policy| other_users_access_policy.shared_directory)
 }
 
 #[test]
@@ -789,7 +788,7 @@ fn a_fresh_install_serves_only_the_user_who_started_the_session() {
 fn a_config_turning_the_switch_off_serves_only_that_user() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer(false)),
+            Some(&build_other_user_access_config_layer(false)),
             None,
         )),
         None
@@ -800,7 +799,7 @@ fn a_config_turning_the_switch_off_serves_only_that_user() {
 fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer(true)),
+            Some(&build_other_user_access_config_layer(true)),
             None,
         )),
         koshi_paths::resolve_shared_sessions_directory()
@@ -811,10 +810,12 @@ fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
 fn a_config_naming_a_shared_directory_shares_through_that_one() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer_with_shared_directory(
-                true,
-                "/var/run/koshi"
-            )),
+            Some(
+                &build_other_user_access_config_layer_with_shared_sessions_directory(
+                    true,
+                    "/var/run/koshi"
+                )
+            ),
             None
         )),
         Some(PathBuf::from("/var/run/koshi"))
@@ -826,10 +827,12 @@ fn naming_a_shared_directory_alone_serves_only_this_user() {
     // The directory says where the sockets would go, never who may reach them.
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer_with_shared_directory(
-                false,
-                "/var/run/koshi"
-            )),
+            Some(
+                &build_other_user_access_config_layer_with_shared_sessions_directory(
+                    false,
+                    "/var/run/koshi"
+                )
+            ),
             None
         )),
         None
@@ -838,20 +841,25 @@ fn naming_a_shared_directory_alone_serves_only_this_user() {
 
 #[test]
 fn the_flag_shares_a_session_whose_config_says_no() {
-    let policy = resolve_other_users_policy(
-        Some(&build_access_layer_with_shared_directory(
-            false,
-            "/var/run/koshi",
-        )),
+    let other_users_policy = resolve_other_users_policy(
+        Some(
+            &build_other_user_access_config_layer_with_shared_sessions_directory(
+                false,
+                "/var/run/koshi",
+            ),
+        ),
         Some(true),
     )
     .expect("the flag turns the switch on");
 
-    assert_eq!(policy.shared_directory, PathBuf::from("/var/run/koshi"));
+    assert_eq!(
+        other_users_policy.shared_directory,
+        PathBuf::from("/var/run/koshi")
+    );
     // A service unit started under the flag keeps serving whatever the app file
     // says afterwards, so the live read answers the same every time.
-    assert!((policy.is_enabled)());
-    assert!((policy.is_enabled)());
+    assert!((other_users_policy.is_enabled)());
+    assert!((other_users_policy.is_enabled)());
 }
 
 #[test]
@@ -868,10 +876,12 @@ fn a_flag_naming_no_other_users_serves_only_this_user() {
     // spells this today. An explicit answer beats the app file either way.
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer_with_shared_directory(
-                true,
-                "/var/run/koshi"
-            )),
+            Some(
+                &build_other_user_access_config_layer_with_shared_sessions_directory(
+                    true,
+                    "/var/run/koshi"
+                )
+            ),
             Some(false)
         )),
         None

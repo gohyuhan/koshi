@@ -311,17 +311,17 @@ fn compute_bounded_base64_encoded_byte_count(raw_byte_count: usize) -> usize {
 }
 
 fn encode_png(decoded_image: &DecodedImage) -> Result<Vec<u8>, ItermEncodeError> {
-    let column_count =
+    let pixel_width =
         usize::try_from(decoded_image.pixel_width).map_err(|_| GraphicsError::ImageTooLarge {
             protocol: ITERM2_PROTOCOL,
         })?;
-    let row_count =
+    let pixel_height =
         usize::try_from(decoded_image.pixel_height).map_err(|_| GraphicsError::ImageTooLarge {
             protocol: ITERM2_PROTOCOL,
         })?;
-    validate_image_dimensions(ITERM2_PROTOCOL, column_count, row_count)?;
+    validate_image_dimensions(ITERM2_PROTOCOL, pixel_width, pixel_height)?;
     let expected_rgba_byte_count =
-        compute_rgba_byte_count(ITERM2_PROTOCOL, column_count, row_count)?;
+        compute_rgba_byte_count(ITERM2_PROTOCOL, pixel_width, pixel_height)?;
     if decoded_image.rgba_bytes.len() != expected_rgba_byte_count {
         return Err(GraphicsError::DeclaredSizeMismatch {
             protocol: ITERM2_PROTOCOL,

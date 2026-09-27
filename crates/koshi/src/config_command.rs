@@ -32,14 +32,14 @@ struct ConfigFile {
 
 struct LoadedConfigFiles {
     config_files: Vec<ConfigFile>,
-    read_errors: Vec<String>,
+    config_file_read_errors: Vec<String>,
 }
 
 struct ConfigFieldHelp {
     config_key: &'static str,
     config_file_name: &'static str,
-    default_value: &'static str,
-    description: &'static str,
+    default_config_value: &'static str,
+    config_field_description: &'static str,
 }
 
 const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
@@ -356,14 +356,14 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
 const fn build_config_field_help(
     config_key: &'static str,
     config_file_name: &'static str,
-    default_value: &'static str,
-    description: &'static str,
+    default_config_value: &'static str,
+    config_field_description: &'static str,
 ) -> ConfigFieldHelp {
     ConfigFieldHelp {
         config_key,
         config_file_name,
-        default_value,
-        description,
+        default_config_value,
+        config_field_description,
     }
 }
 
@@ -377,8 +377,8 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
         koshi_paths::resolve_config_directory().ok_or_else(|| CliError::Config {
             detail: "platform config directory is unavailable".to_string(),
         })?;
-    let command_output = run_config_command_in_directory(command, &config_directory)?;
-    print!("{command_output}");
+    let config_command_output = run_config_command_in_directory(command, &config_directory)?;
+    print!("{config_command_output}");
     Ok(())
 }
 
@@ -405,8 +405,8 @@ fn explain_config_key(config_key: &str) -> Result<String, CliError> {
             "{}\nfile: {}\ndefault: {}\n{}\n",
             config_field_help.config_key,
             config_field_help.config_file_name,
-            config_field_help.default_value,
-            config_field_help.description
+            config_field_help.default_config_value,
+            config_field_help.config_field_description
         ));
     }
     let config_keys: Vec<_> = CONFIG_FIELD_HELP
@@ -425,60 +425,60 @@ pub(crate) struct ConfigReport {
     /// this build's schema, and
     /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1; migrate to version 2)"`
     /// for one on an older schema.
-    pub(crate) report_lines: Vec<String>,
+    pub(crate) config_report_lines: Vec<String>,
     /// One message per file that could not be read or did not validate.
-    pub(crate) validation_errors: Vec<String>,
+    pub(crate) config_file_errors: Vec<String>,
 }
 
 /// Read and validate every known config file under `config_directory`.
 ///
 /// Reads the filesystem and writes nothing. A directory with no config file
-/// gives empty `report_lines` and empty `validation_errors`.
+/// gives empty `config_report_lines` and empty `config_file_errors`.
 pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport {
     let loaded_config_files = load_config_files(config_directory);
-    let mut report_lines = Vec::with_capacity(loaded_config_files.config_files.len());
-    let mut validation_errors = loaded_config_files.read_errors;
+    let mut config_report_lines = Vec::with_capacity(loaded_config_files.config_files.len());
+    let mut config_file_errors = loaded_config_files.config_file_read_errors;
     for config_file in &loaded_config_files.config_files {
         match validate_config(
             config_file.config_file_kind,
             &config_file.config_path,
             &config_file.config_source_text,
         ) {
-            Ok(validated) if validated.is_current => report_lines.push(format!(
+            Ok(validated) if validated.is_current => config_report_lines.push(format!(
                 "{}: valid (version {})",
                 config_file.config_path.display(),
                 validated.schema_version
             )),
-            Ok(validated) => report_lines.push(format!(
+            Ok(validated) => config_report_lines.push(format!(
                 "{}: valid (version {}; migrate to version {})",
                 config_file.config_path.display(),
                 validated.schema_version,
                 koshi_config::types::SCHEMA_VERSION
             )),
-            Err(config_error) => validation_errors.push(config_error.to_string()),
+            Err(config_error) => config_file_errors.push(config_error.to_string()),
         }
     }
     ConfigReport {
-        report_lines,
-        validation_errors,
+        config_report_lines,
+        config_file_errors,
     }
 }
 
 fn check_config_directory(config_directory: &Path) -> Result<String, CliError> {
     let config_report = validate_config_directory(config_directory);
-    if !config_report.validation_errors.is_empty() {
+    if !config_report.config_file_errors.is_empty() {
         return Err(CliError::Config {
-            detail: config_report.validation_errors.join("\n"),
+            detail: config_report.config_file_errors.join("\n"),
         });
     }
-    let mut report_lines = config_report.report_lines;
-    if report_lines.is_empty() {
-        report_lines.push(format!(
+    let mut config_report_lines = config_report.config_report_lines;
+    if config_report_lines.is_empty() {
+        config_report_lines.push(format!(
             "no config files found in {}",
             config_directory.display()
         ));
     }
-    Ok(report_lines.join("\n") + "\n")
+    Ok(config_report_lines.join("\n") + "\n")
 }
 
 type ConfigMigrationFunction =
@@ -491,7 +491,7 @@ fn migrate_config_directory_with(
 ) -> Result<String, CliError> {
     let loaded_config_files = load_config_files(config_directory);
     let mut migration_plan = Vec::with_capacity(loaded_config_files.config_files.len());
-    let mut migration_errors = loaded_config_files.read_errors;
+    let mut migration_errors = loaded_config_files.config_file_read_errors;
     for config_file in loaded_config_files.config_files {
         match migrate_config_function(
             config_file.config_file_kind,
@@ -515,7 +515,7 @@ fn migrate_config_directory_with(
         });
     }
 
-    let mut report_lines = Vec::with_capacity(migration_plan.len());
+    let mut config_report_lines = Vec::with_capacity(migration_plan.len());
     let mut completed_migration_lines = Vec::new();
     for (config_path, config_write_path, migrated_config) in migration_plan {
         let migration_report_line = if migrated_config.is_changed {
@@ -549,15 +549,15 @@ fn migrate_config_directory_with(
                 migrated_config.target_schema_version
             )
         };
-        report_lines.push(migration_report_line);
+        config_report_lines.push(migration_report_line);
     }
-    if report_lines.is_empty() {
-        report_lines.push(format!(
+    if config_report_lines.is_empty() {
+        config_report_lines.push(format!(
             "no config files found in {}",
             config_directory.display()
         ));
     }
-    Ok(report_lines.join("\n") + "\n")
+    Ok(config_report_lines.join("\n") + "\n")
 }
 
 fn load_config_files(config_directory: &Path) -> LoadedConfigFiles {
@@ -568,32 +568,34 @@ fn load_config_files(config_directory: &Path) -> LoadedConfigFiles {
             config_directory.join("keybinding.kdl"),
         ),
     ];
-    let mut read_errors = Vec::new();
+    let mut config_file_read_errors = Vec::new();
     append_kdl_file_paths(
         &mut config_file_paths,
         ConfigFileKind::Theme,
         &config_directory.join("themes"),
-        &mut read_errors,
+        &mut config_file_read_errors,
     );
     append_kdl_file_paths(
         &mut config_file_paths,
         ConfigFileKind::Profile,
         &config_directory.join("profile"),
-        &mut read_errors,
+        &mut config_file_read_errors,
     );
-    config_file_paths.sort_by(|left, right| left.1.cmp(&right.1));
+    config_file_paths.sort_by(|left_config_file, right_config_file| {
+        left_config_file.1.cmp(&right_config_file.1)
+    });
 
     let mut config_files = Vec::with_capacity(config_file_paths.len());
     for (config_file_kind, config_path) in config_file_paths {
         match load_config_file(config_file_kind, config_path) {
             Ok(Some(config_file)) => config_files.push(config_file),
             Ok(None) => {}
-            Err(read_error) => read_errors.push(read_error),
+            Err(read_error) => config_file_read_errors.push(read_error),
         }
     }
     LoadedConfigFiles {
         config_files,
-        read_errors,
+        config_file_read_errors,
     }
 }
 
@@ -635,13 +637,14 @@ fn append_kdl_file_paths(
     config_file_paths: &mut Vec<(ConfigFileKind, PathBuf)>,
     config_file_kind: ConfigFileKind,
     config_directory: &Path,
-    read_errors: &mut Vec<String>,
+    config_file_read_errors: &mut Vec<String>,
 ) {
     let directory_entries = match fs::read_dir(config_directory) {
         Ok(directory_entries) => directory_entries,
         Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => return,
         Err(io_error) => {
-            read_errors.push(format!("read {}: {io_error}", config_directory.display()));
+            config_file_read_errors
+                .push(format!("read {}: {io_error}", config_directory.display()));
             return;
         }
     };
@@ -649,7 +652,8 @@ fn append_kdl_file_paths(
         let directory_entry = match directory_entry_result {
             Ok(directory_entry) => directory_entry,
             Err(io_error) => {
-                read_errors.push(format!("read {}: {io_error}", config_directory.display()));
+                config_file_read_errors
+                    .push(format!("read {}: {io_error}", config_directory.display()));
                 continue;
             }
         };

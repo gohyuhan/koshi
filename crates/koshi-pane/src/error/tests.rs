@@ -11,10 +11,10 @@ use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 #[test]
 fn a_duplicate_pane_id_error_names_the_pane_in_its_message() {
     let pane_id = PaneId::new();
-    let registry_error = PaneRegistryError::DuplicateId { pane_id };
+    let pane_registry_error = PaneRegistryError::DuplicateId { pane_id };
 
     assert_eq!(
-        registry_error.to_string(),
+        pane_registry_error.to_string(),
         format!("pane-{} is already registered", pane_id.get_uuid())
     );
 }
@@ -22,14 +22,14 @@ fn a_duplicate_pane_id_error_names_the_pane_in_its_message() {
 #[test]
 fn two_duplicate_pane_id_errors_are_equal_only_when_the_id_matches() {
     let pane_id = PaneId::new();
-    let duplicate_id_error = PaneRegistryError::DuplicateId { pane_id };
+    let duplicate_pane_id_error = PaneRegistryError::DuplicateId { pane_id };
 
     assert_eq!(
-        duplicate_id_error,
+        duplicate_pane_id_error,
         PaneRegistryError::DuplicateId { pane_id }
     );
     assert_ne!(
-        duplicate_id_error,
+        duplicate_pane_id_error,
         PaneRegistryError::DuplicateId {
             pane_id: PaneId::new(),
         }
@@ -39,7 +39,7 @@ fn two_duplicate_pane_id_errors_are_equal_only_when_the_id_matches() {
 #[test]
 fn two_invalid_transitions_are_equal_only_when_state_and_event_match() {
     let exited_at = SystemTime::UNIX_EPOCH;
-    let base_error = InvalidTransitionError {
+    let base_transition_error = InvalidTransitionError {
         previous_lifecycle: PaneLifecycle::Running,
         lifecycle_event: PaneLifecycleEvent::ProcessExited {
             exit_code: Some(1),
@@ -48,7 +48,7 @@ fn two_invalid_transitions_are_equal_only_when_state_and_event_match() {
     };
 
     assert_eq!(
-        base_error,
+        base_transition_error,
         InvalidTransitionError {
             previous_lifecycle: PaneLifecycle::Running,
             lifecycle_event: PaneLifecycleEvent::ProcessExited {
@@ -58,33 +58,33 @@ fn two_invalid_transitions_are_equal_only_when_state_and_event_match() {
         }
     );
     assert_ne!(
-        base_error,
+        base_transition_error,
         InvalidTransitionError {
             previous_lifecycle: PaneLifecycle::Spawning,
-            ..base_error
+            ..base_transition_error
         }
     );
     assert_ne!(
-        base_error,
+        base_transition_error,
         InvalidTransitionError {
             lifecycle_event: PaneLifecycleEvent::ProcessExited {
                 exit_code: Some(2),
                 exited_at
             },
-            ..base_error
+            ..base_transition_error
         }
     );
 }
 
 #[test]
 fn an_invalid_transition_names_the_state_and_event_in_its_message() {
-    let transition_error = InvalidTransitionError {
+    let pane_lifecycle_transition_error = InvalidTransitionError {
         previous_lifecycle: PaneLifecycle::Spawning,
         lifecycle_event: PaneLifecycleEvent::Cleaned,
     };
 
     assert_eq!(
-        transition_error.to_string(),
+        pane_lifecycle_transition_error.to_string(),
         "illegal pane lifecycle transition from Spawning on Cleaned"
     );
 }
@@ -92,7 +92,7 @@ fn an_invalid_transition_names_the_state_and_event_in_its_message() {
 #[test]
 fn an_invalid_transition_carries_its_payload_in_the_message() {
     let exited_at = SystemTime::UNIX_EPOCH;
-    let transition_error = InvalidTransitionError {
+    let pane_lifecycle_transition_error = InvalidTransitionError {
         previous_lifecycle: PaneLifecycle::Running,
         lifecycle_event: PaneLifecycleEvent::ProcessExited {
             exit_code: Some(3),
@@ -101,7 +101,7 @@ fn an_invalid_transition_carries_its_payload_in_the_message() {
     };
 
     assert_eq!(
-        transition_error.to_string(),
+        pane_lifecycle_transition_error.to_string(),
         format!(
             "illegal pane lifecycle transition from Running on {:?}",
             PaneLifecycleEvent::ProcessExited {

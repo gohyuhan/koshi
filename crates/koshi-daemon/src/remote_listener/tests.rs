@@ -4,7 +4,7 @@
 //! on its own, and that the table cannot grow past the count it is bounded at.
 //!
 //! Also [`WarningRateLimiter`], which writes a repeated warning once per window,
-//! [`EndReport`], which reports a bridged connection ended once, the two
+//! [`RemoteConnectionEndReport`], which reports a bridged connection ended once, the two
 //! functions that read and write one frame, the frames an admitted connection
 //! sends, and what [`bind_remote_listener`] refuses.
 //!
@@ -44,14 +44,15 @@ fn add_seconds_to_instant(start_time: Instant, offset_seconds: u64) -> Instant {
 
 #[test]
 fn an_address_inside_its_limit_is_served_every_time() {
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
     for attempt_index in 1..=MAX_ATTEMPT_COUNT {
         assert!(
             matches!(
-                table.decide_attempt(build_test_caller_ip_address(1), current_time),
-                Attempt::Serve
+                peer_address_rate_table
+                    .decide_attempt(build_test_caller_ip_address(1), current_time),
+                PeerAddressAttemptDecision::Serve
             ),
             "attempt {attempt_index} of {MAX_ATTEMPT_COUNT} is inside the limit"
         );
@@ -61,28 +62,29 @@ fn an_address_inside_its_limit_is_served_every_time() {
 #[test]
 fn crossing_the_limit_is_logged_once_and_then_dropped_in_silence() {
     // One log line per address per window, not one per attempt.
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
     for _ in 1..=MAX_ATTEMPT_COUNT {
         assert!(matches!(
-            table.decide_attempt(build_test_caller_ip_address(1), current_time),
-            Attempt::Serve
+            peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+            PeerAddressAttemptDecision::Serve
         ));
     }
 
     assert!(
         matches!(
-            table.decide_attempt(build_test_caller_ip_address(1), current_time),
-            Attempt::DropAndSay
+            peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+            PeerAddressAttemptDecision::DropAndSay
         ),
         "the attempt that crosses the limit is the one that says so"
     );
     for refusal_index in 0..50 {
         assert!(
             matches!(
-                table.decide_attempt(build_test_caller_ip_address(1), current_time),
-                Attempt::DropInSilence
+                peer_address_rate_table
+                    .decide_attempt(build_test_caller_ip_address(1), current_time),
+                PeerAddressAttemptDecision::DropInSilence
             ),
             "attempt {refusal_index} past the limit is dropped without a log line"
         );
@@ -91,85 +93,86 @@ fn crossing_the_limit_is_logged_once_and_then_dropped_in_silence() {
 
 #[test]
 fn a_window_that_has_passed_lets_the_same_address_back_in() {
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let window_started_at = Instant::now();
 
     for _ in 1..=MAX_ATTEMPT_COUNT {
         assert!(matches!(
-            table.decide_attempt(build_test_caller_ip_address(1), window_started_at),
-            Attempt::Serve
+            peer_address_rate_table
+                .decide_attempt(build_test_caller_ip_address(1), window_started_at),
+            PeerAddressAttemptDecision::Serve
         ));
     }
     assert!(matches!(
-        table.decide_attempt(build_test_caller_ip_address(1), window_started_at),
-        Attempt::DropAndSay
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), window_started_at),
+        PeerAddressAttemptDecision::DropAndSay
     ));
 
     // One second before the window ends the address is still shut out.
     let before_window_end =
         add_seconds_to_instant(window_started_at, RATE_WINDOW_DURATION.as_secs() - 1);
     assert!(matches!(
-        table.decide_attempt(build_test_caller_ip_address(1), before_window_end),
-        Attempt::DropInSilence
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), before_window_end),
+        PeerAddressAttemptDecision::DropInSilence
     ));
 
     // Once the window has passed the address starts a fresh one.
     let after_window_end =
         add_seconds_to_instant(window_started_at, RATE_WINDOW_DURATION.as_secs() + 1);
     assert!(matches!(
-        table.decide_attempt(build_test_caller_ip_address(1), after_window_end),
-        Attempt::Serve
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), after_window_end),
+        PeerAddressAttemptDecision::Serve
     ));
 }
 
 #[test]
 fn each_address_is_counted_on_its_own() {
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
     for _ in 1..=MAX_ATTEMPT_COUNT {
         assert!(matches!(
-            table.decide_attempt(build_test_caller_ip_address(1), current_time),
-            Attempt::Serve
+            peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+            PeerAddressAttemptDecision::Serve
         ));
     }
     assert!(matches!(
-        table.decide_attempt(build_test_caller_ip_address(1), current_time),
-        Attempt::DropAndSay
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), current_time),
+        PeerAddressAttemptDecision::DropAndSay
     ));
 
     // A second address has opened nothing, so its first attempt is served.
     assert!(matches!(
-        table.decide_attempt(build_test_caller_ip_address(2), current_time),
-        Attempt::Serve
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(2), current_time),
+        PeerAddressAttemptDecision::Serve
     ));
 }
 
 #[test]
-fn the_table_never_holds_more_addresses_than_it_is_bounded_at() {
+fn peer_address_rate_table_never_exceeds_its_entry_limit() {
     // Every address gets one attempt, so only the bound keeps the table down.
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let current_time = Instant::now();
 
     for address_index in 0..u32::try_from(MAX_RATE_TABLE_ENTRY_COUNT).expect("the bound fits") + 500
     {
         let peer_ip_address = IpAddr::V4(Ipv4Addr::from(address_index));
-        table.decide_attempt(peer_ip_address, current_time);
+        peer_address_rate_table.decide_attempt(peer_ip_address, current_time);
         assert!(
-            table.window_by_peer_ip_address.len() <= MAX_RATE_TABLE_ENTRY_COUNT,
+            peer_address_rate_table.window_by_peer_ip_address.len() <= MAX_RATE_TABLE_ENTRY_COUNT,
             "the table holds {} addresses after {address_index} of them, past the {MAX_RATE_TABLE_ENTRY_COUNT} bound",
-            table.window_by_peer_ip_address.len()
+            peer_address_rate_table.window_by_peer_ip_address.len()
         );
     }
     assert_eq!(
-        table.window_by_peer_ip_address.len(),
+        peer_address_rate_table.window_by_peer_ip_address.len(),
         MAX_RATE_TABLE_ENTRY_COUNT
     );
 }
 
 #[test]
 fn a_full_table_drops_the_address_whose_window_opened_first() {
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let window_started_at = Instant::now();
 
     // Fill the table, each address one second after the one before it, so the
@@ -179,35 +182,36 @@ fn a_full_table_drops_the_address_whose_window_opened_first() {
             window_started_at,
             u64::from(address_index) % (RATE_WINDOW_DURATION.as_secs() - 1),
         );
-        table.decide_attempt(IpAddr::V4(Ipv4Addr::from(address_index)), attempt_time);
+        peer_address_rate_table
+            .decide_attempt(IpAddr::V4(Ipv4Addr::from(address_index)), attempt_time);
     }
     assert_eq!(
-        table.window_by_peer_ip_address.len(),
+        peer_address_rate_table.window_by_peer_ip_address.len(),
         MAX_RATE_TABLE_ENTRY_COUNT
     );
-    let oldest_peer_ip_address = table
+    let oldest_peer_ip_address = peer_address_rate_table
         .window_by_peer_ip_address
         .iter()
-        .min_by_key(|(_, peer_window)| peer_window.window_started_at)
+        .min_by_key(|(_, peer_address_rate_window)| peer_address_rate_window.window_started_at)
         .map(|(peer_ip_address, _)| *peer_ip_address)
         .expect("a full table holds an oldest address");
 
-    table.decide_attempt(build_test_caller_ip_address(200), window_started_at);
+    peer_address_rate_table.decide_attempt(build_test_caller_ip_address(200), window_started_at);
 
     assert!(
-        !table
+        !peer_address_rate_table
             .window_by_peer_ip_address
             .contains_key(&oldest_peer_ip_address),
         "the address whose window opened first left to make room"
     );
     assert!(
-        table
+        peer_address_rate_table
             .window_by_peer_ip_address
             .contains_key(&build_test_caller_ip_address(200)),
         "the address that arrived took the room it made"
     );
     assert_eq!(
-        table.window_by_peer_ip_address.len(),
+        peer_address_rate_table.window_by_peer_ip_address.len(),
         MAX_RATE_TABLE_ENTRY_COUNT
     );
 }
@@ -247,19 +251,20 @@ fn a_repeated_warning_is_written_once_per_window() {
 #[test]
 fn a_warning_that_has_never_been_written_is_due_at_once() {
     // No line has been written, so there is no window to be inside of.
-    let mut warning = WarningRateLimiter::new();
-    assert!(warning.is_due(Instant::now()));
+    let mut warning_rate_limiter = WarningRateLimiter::new();
+    assert!(warning_rate_limiter.is_due(Instant::now()));
 }
 
 #[test]
 fn a_bridged_connection_is_reported_ended_once_however_many_directions_get_there() {
     // Both directions end the connection and either may end first.
     let (events_sender, events_receiver) = mpsc::channel();
-    let end_report = EndReport::from_sender_and_connection_id(events_sender, 7);
+    let remote_connection_end_report =
+        RemoteConnectionEndReport::from_sender_and_connection_id(events_sender, 7);
 
-    end_report.report_once();
-    end_report.report_once();
-    end_report.report_once();
+    remote_connection_end_report.report_once();
+    remote_connection_end_report.report_once();
+    remote_connection_end_report.report_once();
 
     let end_report_event = events_receiver
         .try_recv()
@@ -281,9 +286,11 @@ fn a_bridged_connection_is_reported_ended_once_however_many_directions_get_there
 fn a_connection_reported_ended_by_the_direction_that_finished_first_needs_no_second() {
     // One direction reporting is enough; the other may still be blocked.
     let (events_sender, events_receiver) = mpsc::channel();
-    let end_report = Arc::new(EndReport::from_sender_and_connection_id(events_sender, 3));
+    let remote_connection_end_report = Arc::new(
+        RemoteConnectionEndReport::from_sender_and_connection_id(events_sender, 3),
+    );
 
-    let inbound_end_report = Arc::clone(&end_report);
+    let inbound_end_report = Arc::clone(&remote_connection_end_report);
     std::thread::spawn(move || inbound_end_report.report_once())
         .join()
         .expect("the direction that finished first reports");
@@ -304,12 +311,16 @@ fn a_connection_reported_ended_by_the_direction_that_finished_first_needs_no_sec
 #[test]
 fn concurrent_end_reports_send_one_admission() {
     let (events_sender, events_receiver) = mpsc::channel();
-    let end_report = Arc::new(EndReport::from_sender_and_connection_id(events_sender, 8));
+    let remote_connection_end_report = Arc::new(
+        RemoteConnectionEndReport::from_sender_and_connection_id(events_sender, 8),
+    );
     let mut reporters = Vec::new();
 
     for _ in 0..8 {
-        let end_report = Arc::clone(&end_report);
-        reporters.push(std::thread::spawn(move || end_report.report_once()));
+        let remote_connection_end_report = Arc::clone(&remote_connection_end_report);
+        reporters.push(std::thread::spawn(move || {
+            remote_connection_end_report.report_once()
+        }));
     }
     for reporter in reporters {
         reporter.join().expect("the report thread ends");
@@ -388,36 +399,37 @@ fn a_place_in_the_admission_window_is_given_back_however_the_caller_left() {
 fn an_address_whose_window_is_exactly_over_starts_a_fresh_one() {
     // The window ends at RATE_WINDOW_DURATION, not one moment after it: an attempt
     // arriving at exactly that reading opens a new window and is served.
-    let mut table = RateTable::new();
+    let mut peer_address_rate_table = PeerAddressRateTable::new();
     let window_started_at = Instant::now();
     for _ in 1..=MAX_ATTEMPT_COUNT {
         assert!(matches!(
-            table.decide_attempt(build_test_caller_ip_address(1), window_started_at),
-            Attempt::Serve
+            peer_address_rate_table
+                .decide_attempt(build_test_caller_ip_address(1), window_started_at),
+            PeerAddressAttemptDecision::Serve
         ));
     }
     assert!(matches!(
-        table.decide_attempt(build_test_caller_ip_address(1), window_started_at),
-        Attempt::DropAndSay
+        peer_address_rate_table.decide_attempt(build_test_caller_ip_address(1), window_started_at),
+        PeerAddressAttemptDecision::DropAndSay
     ));
 
     assert!(
         matches!(
-            table.decide_attempt(
+            peer_address_rate_table.decide_attempt(
                 build_test_caller_ip_address(1),
                 window_started_at + RATE_WINDOW_DURATION - Duration::from_millis(1),
             ),
-            Attempt::DropInSilence
+            PeerAddressAttemptDecision::DropInSilence
         ),
         "one millisecond before the window ends the address is still shut out"
     );
     assert!(
         matches!(
-            table.decide_attempt(
+            peer_address_rate_table.decide_attempt(
                 build_test_caller_ip_address(1),
                 window_started_at + RATE_WINDOW_DURATION,
             ),
-            Attempt::Serve
+            PeerAddressAttemptDecision::Serve
         ),
         "at exactly {RATE_WINDOW_DURATION:?} the window is over"
     );
@@ -456,69 +468,75 @@ fn build_remote_client_frame_bytes(remote_client_frame: &RemoteClientFrame) -> V
 }
 
 #[test]
-fn a_frame_the_length_of_the_cap_is_read_and_one_byte_over_it_is_not() {
+fn remote_client_frame_at_the_cap_is_read_and_one_byte_over_is_closed() {
     // The cap is what keeps a caller from naming a payload larger than this
     // machine will hold. A frame exactly at it is a caller inside the rule.
-    let sent = RemoteClientFrame::Attach {
+    let sent_remote_client_frame = RemoteClientFrame::Attach {
         session_selector: SessionSelector::SessionName("S-quiet-lake".to_string()),
     };
-    let frame_bytes = build_remote_client_frame_bytes(&sent);
-    let payload_byte_count = u32::try_from(frame_bytes.len() - 4).expect("the payload fits");
+    let remote_client_frame_bytes = build_remote_client_frame_bytes(&sent_remote_client_frame);
+    let payload_byte_count =
+        u32::try_from(remote_client_frame_bytes.len() - 4).expect("the payload fits");
 
-    let mut exact = Cursor::new(frame_bytes.clone());
-    let Opening::Frame(received_frame) = read_client_frame(&mut exact, payload_byte_count) else {
+    let mut exact_limit_frame_stream = Cursor::new(remote_client_frame_bytes.clone());
+    let RemoteClientFrameRead::Frame(received_frame) =
+        read_client_frame(&mut exact_limit_frame_stream, payload_byte_count)
+    else {
         panic!("a frame the length of the cap is read");
     };
-    assert_eq!(received_frame, sent);
+    assert_eq!(received_frame, sent_remote_client_frame);
     assert_eq!(
-        exact.position(),
-        u64::try_from(frame_bytes.len()).expect("the frame fits"),
+        exact_limit_frame_stream.position(),
+        u64::try_from(remote_client_frame_bytes.len()).expect("the frame fits"),
         "and the whole frame was taken off the stream"
     );
 
-    let mut over_cap_stream = Cursor::new(frame_bytes);
+    let mut over_cap_frame_stream = Cursor::new(remote_client_frame_bytes);
     assert!(
         matches!(
-            read_client_frame(&mut over_cap_stream, payload_byte_count - 1),
-            Opening::Closed
+            read_client_frame(&mut over_cap_frame_stream, payload_byte_count - 1),
+            RemoteClientFrameRead::Closed
         ),
         "a length one byte over the cap closes the connection"
     );
     assert_eq!(
-        over_cap_stream.position(),
+        over_cap_frame_stream.position(),
         4,
         "and its payload is never read"
     );
 }
 
 #[test]
-fn json_this_build_cannot_read_is_refused_and_a_stream_that_ends_early_is_not() {
+fn unreadable_remote_client_json_is_refused_and_truncated_frame_is_closed() {
     // The two answers are not the same: unreadable bytes get a refusal written
     // back, and a stream that ended has nobody left to write to.
-    let junk = br#"{"Nonsense":1}"#.to_vec();
-    let mut readable_frame = u32::try_from(junk.len())
-        .expect("the junk fits")
+    let unrecognized_remote_client_json = br#"{"Nonsense":1}"#.to_vec();
+    let mut unreadable_json_frame_bytes = u32::try_from(unrecognized_remote_client_json.len())
+        .expect("the unrecognized JSON fits")
         .to_be_bytes()
         .to_vec();
-    readable_frame.extend_from_slice(&junk);
+    unreadable_json_frame_bytes.extend_from_slice(&unrecognized_remote_client_json);
     assert!(
         matches!(
             read_client_frame(
-                &mut Cursor::new(readable_frame),
+                &mut Cursor::new(unreadable_json_frame_bytes),
                 REMOTE_HELLO_MAX_BYTE_COUNT
             ),
-            Opening::Unreadable
+            RemoteClientFrameRead::Unreadable
         ),
         "a whole frame carrying JSON this build has no frame for is refused"
     );
 
     // The length says ten bytes and three follow.
-    let mut cut_payload = 10u32.to_be_bytes().to_vec();
-    cut_payload.extend_from_slice(b"abc");
+    let mut truncated_remote_client_frame_bytes = 10u32.to_be_bytes().to_vec();
+    truncated_remote_client_frame_bytes.extend_from_slice(b"abc");
     assert!(
         matches!(
-            read_client_frame(&mut Cursor::new(cut_payload), REMOTE_HELLO_MAX_BYTE_COUNT),
-            Opening::Closed
+            read_client_frame(
+                &mut Cursor::new(truncated_remote_client_frame_bytes),
+                REMOTE_HELLO_MAX_BYTE_COUNT,
+            ),
+            RemoteClientFrameRead::Closed
         ),
         "a payload that ends early closes the connection"
     );
@@ -529,47 +547,48 @@ fn json_this_build_cannot_read_is_refused_and_a_stream_that_ends_early_is_not() 
                 &mut Cursor::new(vec![0u8, 0, 1]),
                 REMOTE_HELLO_MAX_BYTE_COUNT
             ),
-            Opening::Closed
+            RemoteClientFrameRead::Closed
         ),
         "and so does a length prefix that ends early"
     );
 }
 
 #[test]
-fn a_frame_naming_no_payload_carries_no_frame_this_build_reads() {
+fn empty_remote_client_payload_is_unreadable() {
     // A length of zero is inside every cap. The four length bytes come off the
     // stream and the empty payload is what fails to decode.
-    let mut empty_frame = Cursor::new(0u32.to_be_bytes().to_vec());
+    let mut empty_payload_frame_stream = Cursor::new(0u32.to_be_bytes().to_vec());
 
     assert!(
         matches!(
-            read_client_frame(&mut empty_frame, REMOTE_HELLO_MAX_BYTE_COUNT),
-            Opening::Unreadable
+            read_client_frame(&mut empty_payload_frame_stream, REMOTE_HELLO_MAX_BYTE_COUNT),
+            RemoteClientFrameRead::Unreadable
         ),
         "a frame naming no payload is refused rather than read"
     );
     assert_eq!(
-        empty_frame.position(),
+        empty_payload_frame_stream.position(),
         4,
         "and its four length bytes were taken"
     );
 }
 
 #[test]
-fn one_answer_goes_out_as_a_big_endian_length_and_then_its_json() {
+fn remote_server_frame_uses_a_big_endian_length_prefix() {
     // The caller reads the length the same way round. A length written the
     // other way round names another number, and the caller waits for bytes
     // that never come.
-    let frame = RemoteServerFrame::Refused {
+    let remote_server_frame = RemoteServerFrame::Refused {
         message: REMOTE_REFUSED.to_string(),
     };
-    let payload_bytes = serde_json::to_vec(&frame).expect("the frame encodes");
+    let payload_bytes = serde_json::to_vec(&remote_server_frame).expect("the frame encodes");
     let frame_byte_count = u32::try_from(payload_bytes.len()).expect("the answer fits");
     let mut expected_frame_bytes = frame_byte_count.to_be_bytes().to_vec();
     expected_frame_bytes.extend_from_slice(&payload_bytes);
 
     let mut written_frame_bytes = Vec::new();
-    send_remote_frame(&mut written_frame_bytes, &frame).expect("the answer is written");
+    send_remote_frame(&mut written_frame_bytes, &remote_server_frame)
+        .expect("the answer is written");
 
     assert_eq!(written_frame_bytes, expected_frame_bytes);
     assert_ne!(
@@ -641,13 +660,13 @@ impl Write for BrokenWriter {
 }
 
 #[test]
-fn one_answer_reaches_a_writer_that_takes_one_byte_at_a_time_whole() {
+fn send_remote_frame_writes_every_byte_to_a_one_byte_writer() {
     // Every byte of the frame goes out, however little the socket takes per
     // call.
-    let frame = RemoteServerFrame::Welcome {
+    let remote_server_frame = RemoteServerFrame::Welcome {
         remote_protocol_version: REMOTE_PROTOCOL_VERSION,
     };
-    let payload_bytes = serde_json::to_vec(&frame).expect("the frame encodes");
+    let payload_bytes = serde_json::to_vec(&remote_server_frame).expect("the frame encodes");
     let frame_byte_count = u32::try_from(payload_bytes.len()).expect("the answer fits");
     let mut expected_frame_bytes = frame_byte_count.to_be_bytes().to_vec();
     expected_frame_bytes.extend_from_slice(&payload_bytes);
@@ -655,7 +674,8 @@ fn one_answer_reaches_a_writer_that_takes_one_byte_at_a_time_whole() {
     let mut written_frame_bytes = OneByteWriter {
         written_frame_bytes: Vec::new(),
     };
-    send_remote_frame(&mut written_frame_bytes, &frame).expect("the answer is written");
+    send_remote_frame(&mut written_frame_bytes, &remote_server_frame)
+        .expect("the answer is written");
 
     assert_eq!(
         written_frame_bytes.written_frame_bytes,
@@ -664,16 +684,16 @@ fn one_answer_reaches_a_writer_that_takes_one_byte_at_a_time_whole() {
 }
 
 #[test]
-fn an_answer_the_writer_refuses_reports_that_writers_failure() {
-    let frame = RemoteServerFrame::Refused {
+fn send_remote_frame_returns_a_broken_pipe_error() {
+    let remote_server_frame = RemoteServerFrame::Refused {
         message: REMOTE_REFUSED.to_string(),
     };
 
-    let write_error =
-        send_remote_frame(&mut BrokenWriter, &frame).expect_err("a refused write is reported");
+    let frame_write_error = send_remote_frame(&mut BrokenWriter, &remote_server_frame)
+        .expect_err("a refused write is reported");
 
-    assert_eq!(write_error.kind(), io::ErrorKind::BrokenPipe);
-    assert_eq!(write_error.to_string(), "the caller hung up");
+    assert_eq!(frame_write_error.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(frame_write_error.to_string(), "the caller hung up");
 }
 
 /// The server frames `frame_bytes` holds, each read as a 4-byte big-endian length
@@ -738,7 +758,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
-    let admitted_connection = Admitted {
+    let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
         remote_connection_id: 7,
     };
@@ -782,7 +802,7 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
-    let admitted_connection = Admitted {
+    let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
         remote_connection_id: 3,
     };
@@ -830,7 +850,7 @@ fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
-    let admitted_connection = Admitted {
+    let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
         remote_connection_id: 11,
     };
@@ -869,7 +889,7 @@ fn bytes_an_admitted_connection_sends_that_are_not_a_frame_are_refused() {
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
-    let admitted_connection = Admitted {
+    let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
         remote_connection_id: 5,
     };
@@ -897,7 +917,7 @@ fn an_admitted_connection_that_hangs_up_is_answered_with_nothing() {
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
-    let admitted_connection = Admitted {
+    let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
         remote_connection_id: 9,
     };
@@ -927,7 +947,7 @@ fn an_admitted_connection_ends_unanswered_when_the_dispatcher_is_gone() {
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
-    let admitted_connection = Admitted {
+    let admitted_connection = RemoteConnectionAdmission {
         scope: TokenScope::HostWide,
         remote_connection_id: 4,
     };
@@ -1012,7 +1032,8 @@ mod doorway {
     /// Returns the address the client dials.
     fn start_test_remote_doorway(should_admit_connection: bool) -> String {
         let tls_config = Arc::new(
-            build_server_config(&build_test_certificate()).expect("the TLS config builds"),
+            build_remote_server_tls_config(&build_test_certificate())
+                .expect("the TLS config builds"),
         );
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
         let remote_listen_address = listener
@@ -1029,10 +1050,12 @@ mod doorway {
                     AdmissionAsk::Admit {
                         response_sender, ..
                     } => {
-                        let _ = response_sender.send(should_admit_connection.then_some(Admitted {
-                            scope: TokenScope::HostWide,
-                            remote_connection_id: 7,
-                        }));
+                        let _ = response_sender.send(should_admit_connection.then_some(
+                            RemoteConnectionAdmission {
+                                scope: TokenScope::HostWide,
+                                remote_connection_id: 7,
+                            },
+                        ));
                     }
                     AdmissionAsk::Rows {
                         response_sender, ..
@@ -1289,7 +1312,7 @@ mod bridge_round_trip {
             running_session
         }
 
-        fn get_endpoint_path(&self) -> PathBuf {
+        fn get_session_endpoint_path(&self) -> PathBuf {
             EndpointFile::resolve_endpoint_file_path(self.runtime_directory.path(), self.session_id)
         }
 
@@ -1409,7 +1432,8 @@ mod bridge_round_trip {
     /// Returns the address the client dials.
     fn start_test_remote_listener(session_endpoint_path: PathBuf) -> String {
         let tls_config = Arc::new(
-            build_server_config(&build_test_certificate()).expect("the TLS config builds"),
+            build_remote_server_tls_config(&build_test_certificate())
+                .expect("the TLS config builds"),
         );
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
@@ -1428,7 +1452,7 @@ mod bridge_round_trip {
                     AdmissionAsk::Admit {
                         response_sender, ..
                     } => {
-                        let _ = response_sender.send(Some(Admitted {
+                        let _ = response_sender.send(Some(RemoteConnectionAdmission {
                             scope: TokenScope::HostWide,
                             remote_connection_id: 7,
                         }));
@@ -1466,8 +1490,9 @@ mod bridge_round_trip {
     /// Submit `command` to the session over its own control connection, the
     /// way `koshi <verb>` does from outside every pane.
     fn submit_session_command(running_session: &RunningSession, command: Command) -> CommandResult {
-        let session_endpoint = EndpointFile::load_from_path(&running_session.get_endpoint_path())
-            .expect("the session server advertises its socket");
+        let session_endpoint =
+            EndpointFile::load_from_path(&running_session.get_session_endpoint_path())
+                .expect("the session server advertises its socket");
         let mut connection = Connection::connect(&session_endpoint.socket_address)
             .expect("the control socket answers");
         connection
@@ -1524,7 +1549,8 @@ mod bridge_round_trip {
     #[test]
     fn a_bridged_keyboard_request_reaches_the_pane_with_the_field_that_decides_its_byte() {
         let running_session = RunningSession::start_running_session();
-        let remote_listen_address = start_test_remote_listener(running_session.get_endpoint_path());
+        let remote_listen_address =
+            start_test_remote_listener(running_session.get_session_endpoint_path());
 
         let link = remote_client::connect_remote_server(
             &remote_listen_address,
@@ -1615,7 +1641,8 @@ mod bridge_round_trip {
     #[test]
     fn a_bridged_client_keeps_receiving_events_while_the_link_is_held_open() {
         let running_session = RunningSession::start_running_session();
-        let remote_listen_address = start_test_remote_listener(running_session.get_endpoint_path());
+        let remote_listen_address =
+            start_test_remote_listener(running_session.get_session_endpoint_path());
 
         // Dial through the real TLS doorway and attach, the way
         // `koshi attach --remote` does.
@@ -1665,11 +1692,11 @@ mod bridge_round_trip {
 
         // A second tab, so each focus change below moves focus and emits a
         // critical event.
-        let new_tab_command_result =
+        let new_tab_command_response =
             submit_session_command(&running_session, Command::NewTab(NewTabArgs::default()));
         assert!(
-            matches!(new_tab_command_result, CommandResult::Ok { .. }),
-            "the second tab was refused: {new_tab_command_result:?}"
+            matches!(new_tab_command_response, CommandResult::Ok { .. }),
+            "the second tab was refused: {new_tab_command_response:?}"
         );
 
         // Drive the session for the whole hold, one focus change at a time,
@@ -1677,22 +1704,22 @@ mod bridge_round_trip {
         let hold_end_time = Instant::now() + LINK_HOLD_DURATION;
         let mut focus_round_count: u32 = 0;
         while Instant::now() < hold_end_time {
-            let focus_command_result = submit_session_command(
+            let focus_command_response = submit_session_command(
                 &running_session,
                 Command::FocusTab(FocusTabArgs {
                     focus_target: TabTarget::Next,
                     client_id: Some(client_id),
                 }),
             );
-            let focused_tab_id = match &focus_command_result {
+            let focused_tab_id = match &focus_command_response {
                 CommandResult::Ok { emitted_events, .. } => match emitted_events.as_slice() {
                     [Event::TabFocused(tab_focused_event), ..] => tab_focused_event.tab_id,
                     unexpected_events => {
                         panic!("expected a focus event, got {unexpected_events:?}")
                     }
                 },
-                unexpected_command_result => {
-                    panic!("the focus change was refused: {unexpected_command_result:?}")
+                refused_focus_command_response => {
+                    panic!("the focus change was refused: {refused_focus_command_response:?}")
                 }
             };
 

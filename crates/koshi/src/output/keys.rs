@@ -108,14 +108,16 @@ struct KeysValidation {
 #[must_use]
 pub fn render_keys_list(
     keymap_view: &crate::keymap::KeymapView,
-    requested_mode: Option<&str>,
+    requested_input_mode_name: Option<&str>,
     scope_filter: Option<KeymapScope>,
     output_format: OutputFormat,
 ) -> String {
     let scope_filter_label = scope_filter.map(format_scope_argument_label);
     let mut key_bindings: Vec<KeyBindingSummary> = Vec::new();
     for (mode_name, merged_mode_map) in &keymap_view.merged_keymap.mode_map_by_name {
-        if requested_mode.is_some_and(|requested_mode| requested_mode != mode_name.get_name()) {
+        if requested_input_mode_name.is_some_and(|requested_input_mode_name| {
+            requested_input_mode_name != mode_name.get_name()
+        }) {
             continue;
         }
         for (key_sequence, merged_binding) in &merged_mode_map.user_bindings_by_key_sequence {
@@ -177,8 +179,8 @@ pub fn render_keys_describe(
 ) -> Result<Option<String>, String> {
     let parsed_key_sequence = koshi_config::key_sequence::parse_sequence(
         key_sequence_text,
-        keymap_view.config.leader,
-        keymap_view.config.maximum_chord_depth,
+        keymap_view.keybindings_config.leader,
+        keymap_view.keybindings_config.maximum_chord_depth,
     )
     .map_err(|parse_error| parse_error.to_string())?;
 
@@ -201,7 +203,7 @@ pub fn render_keys_describe(
             continue;
         };
         let action_metadata = keymap_view
-            .registry
+            .action_registry
             .find_action_metadata(&matched_binding.action_reference);
         key_binding_details.push(KeyBindingDetail {
             key_sequence: parsed_key_sequence.to_string(),
@@ -253,10 +255,10 @@ pub fn render_keys_conflicts(
     keymap_view: &crate::keymap::KeymapView,
     output_format: OutputFormat,
 ) -> String {
-    let conflict_findings = build_conflict_findings(&keymap_view.report);
+    let conflict_findings = build_conflict_findings(&keymap_view.conflict_report);
     let conflicts_answer = KeysConflicts {
-        verdict: format_keymap_verdict_label(keymap_view.report.get_verdict()).to_string(),
-        file_error: keymap_view.file_error_message.clone(),
+        verdict: format_keymap_verdict_label(keymap_view.conflict_report.get_verdict()).to_string(),
+        file_error: keymap_view.keybinding_file_error_message.clone(),
         conflict_findings,
     };
     match output_format {
@@ -289,13 +291,13 @@ pub fn render_keys_validate(
             conflict_findings: Vec::new(),
         },
         crate::keymap::KeymapValidationOutcome::Checked {
-            report,
+            conflict_report,
             is_applicable,
         } => KeysValidation {
             is_valid: true,
             is_applicable: *is_applicable,
             parse_errors: Vec::new(),
-            conflict_findings: build_conflict_findings(report),
+            conflict_findings: build_conflict_findings(conflict_report),
         },
     };
     match output_format {
@@ -381,9 +383,9 @@ fn render_conflict_finding_cells(conflict_finding: &ConflictFinding) -> Vec<Stri
 
 /// Every report finding as a [`ConflictFinding`], in report order.
 fn build_conflict_findings(
-    report: &koshi_config::conflict::ConflictReport,
+    conflict_report: &koshi_config::conflict::ConflictReport,
 ) -> Vec<ConflictFinding> {
-    report
+    conflict_report
         .diagnostics
         .iter()
         .map(|diagnostic| ConflictFinding {

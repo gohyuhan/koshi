@@ -22,7 +22,7 @@ fn build_terminal_pane_record(pane_id: PaneId) -> PaneRecord {
 }
 
 #[test]
-fn a_new_registry_is_empty() {
+fn new_pane_registry_starts_with_no_records() {
     let registry = PaneRegistry::new();
 
     assert_eq!(registry.count_pane_records(), 0);
@@ -30,12 +30,12 @@ fn a_new_registry_is_empty() {
 }
 
 #[test]
-fn new_and_default_build_the_same_empty_registry() {
+fn pane_registry_new_matches_the_default_empty_registry() {
     assert_eq!(PaneRegistry::new(), PaneRegistry::default());
 }
 
 #[test]
-fn an_inserted_record_can_be_looked_up() {
+fn registered_pane_record_is_found_by_pane_id() {
     let mut registry = PaneRegistry::new();
     let pane_id = PaneId::new();
 
@@ -83,7 +83,7 @@ fn inserting_a_duplicate_pane_id_is_rejected_and_keeps_the_original() {
 }
 
 #[test]
-fn removing_a_record_deletes_it() {
+fn remove_pane_record_returns_and_deletes_the_record() {
     let mut registry = PaneRegistry::new();
     let pane_id = PaneId::new();
     registry
@@ -100,7 +100,7 @@ fn removing_a_record_deletes_it() {
 }
 
 #[test]
-fn removing_one_record_leaves_the_others_in_place() {
+fn remove_pane_record_keeps_other_records() {
     let mut registry = PaneRegistry::new();
     let retained_pane_id = PaneId::new();
     let removed_pane_id = PaneId::new();
@@ -125,7 +125,7 @@ fn removing_one_record_leaves_the_others_in_place() {
 }
 
 #[test]
-fn mutable_lookup_edits_a_record_in_place() {
+fn mutable_pane_record_lookup_updates_the_registered_record() {
     let mut registry = PaneRegistry::new();
     let pane_id = PaneId::new();
     registry
@@ -149,7 +149,7 @@ fn mutable_lookup_edits_a_record_in_place() {
 }
 
 #[test]
-fn a_lifecycle_step_through_get_mut_is_visible_through_get_and_remove() {
+fn mutable_pane_record_lookup_updates_lifecycle_for_get_and_remove() {
     let mut registry = PaneRegistry::new();
     let pane_id = PaneId::new();
     registry
@@ -179,7 +179,7 @@ fn a_lifecycle_step_through_get_mut_is_visible_through_get_and_remove() {
 }
 
 #[test]
-fn list_yields_every_record_in_pane_id_order() {
+fn list_pane_records_returns_records_in_pane_id_order() {
     let mut registry = PaneRegistry::new();
     let mut pane_ids: Vec<PaneId> = (0..3).map(|_| PaneId::new()).collect();
     pane_ids.sort_unstable();
@@ -202,7 +202,7 @@ fn list_yields_every_record_in_pane_id_order() {
 }
 
 #[test]
-fn a_removed_pane_id_can_be_registered_again() {
+fn pane_registry_allows_registering_a_removed_pane_id_again() {
     let mut registry = PaneRegistry::new();
     let pane_id = PaneId::new();
     registry
@@ -256,7 +256,7 @@ fn a_pane_record_survives_a_serde_round_trip() {
 }
 
 #[test]
-fn an_empty_registry_serializes_as_an_empty_records_map() {
+fn empty_pane_registry_serializes_with_no_records() {
     assert_eq!(
         serde_json::to_string(&PaneRegistry::new()).expect("serialize"),
         r#"{"pane_record_by_id":{}}"#
@@ -264,7 +264,7 @@ fn an_empty_registry_serializes_as_an_empty_records_map() {
 }
 
 #[test]
-fn a_registry_survives_a_serde_round_trip() {
+fn pane_registry_round_trip_preserves_registered_records() {
     let mut registry = PaneRegistry::new();
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();

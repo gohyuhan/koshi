@@ -26,8 +26,8 @@ fn build_tab_closed_event() -> Event {
 }
 
 /// Extract the string panic message from a caught panic.
-fn extract_panic_message(panic_result: std::thread::Result<()>) -> String {
-    let panic_payload = panic_result.expect_err("expected a panic");
+fn extract_panic_message(panic_capture_result: std::thread::Result<()>) -> String {
+    let panic_payload = panic_capture_result.expect_err("expected a panic");
     panic_payload
         .downcast_ref::<String>()
         .cloned()
@@ -177,7 +177,7 @@ fn format_event_sequence_diff_renders_ok_mismatch_and_missing_rows_exactly() {
     let focused_event = build_tab_focused_event();
     let closed_event = build_tab_closed_event();
     let unexpected_event = build_tab_closed_event();
-    let formatted_diff = format_event_sequence_diff(
+    let formatted_event_sequence_diff = format_event_sequence_diff(
         &[
             created_event.clone(),
             focused_event.clone(),
@@ -186,7 +186,7 @@ fn format_event_sequence_diff_renders_ok_mismatch_and_missing_rows_exactly() {
         &[created_event.clone(), unexpected_event.clone()],
     );
     assert_eq!(
-        formatted_diff,
+        formatted_event_sequence_diff,
         format!(
             "  [0] ok       {created_event:?}\n\
              \x20 [1] MISMATCH expected {focused_event:?}\n\
@@ -201,12 +201,12 @@ fn format_event_sequence_diff_renders_ok_mismatch_and_missing_rows_exactly() {
 fn format_event_sequence_diff_renders_extra_rows_exactly() {
     let created_event = build_tab_created_event();
     let focused_event = build_tab_focused_event();
-    let formatted_diff = format_event_sequence_diff(
+    let formatted_event_sequence_diff = format_event_sequence_diff(
         std::slice::from_ref(&created_event),
         &[created_event.clone(), focused_event.clone()],
     );
     assert_eq!(
-        formatted_diff,
+        formatted_event_sequence_diff,
         format!(
             "  [0] ok       {created_event:?}\n\
              \x20 [1] EXTRA    actual   {focused_event:?}\n\

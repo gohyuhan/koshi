@@ -80,10 +80,10 @@ impl TemplateNode {
     fn count_leaf_templates(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
-            Self::Split(split) => split
+            Self::Split(template_split) => template_split
                 .children
                 .iter()
-                .map(|child| child.count_leaf_templates())
+                .map(|template_child| template_child.count_leaf_templates())
                 .sum(),
         }
     }
@@ -92,10 +92,10 @@ impl TemplateNode {
     /// order.
     fn append_leaf_templates<'a>(&'a self, leaf_templates: &mut Vec<&'a TerminalTemplate>) {
         match self {
-            Self::Leaf(leaf) => leaf_templates.push(leaf),
-            Self::Split(split) => {
-                for child in &split.children {
-                    child.append_leaf_templates(leaf_templates);
+            Self::Leaf(terminal_template) => leaf_templates.push(terminal_template),
+            Self::Split(template_split) => {
+                for template_child in &template_split.children {
+                    template_child.append_leaf_templates(leaf_templates);
                 }
             }
         }
@@ -117,21 +117,22 @@ impl TemplateNode {
     pub fn find_first_visible_leaf_index(&self) -> usize {
         match self {
             Self::Leaf(_) => 0,
-            Self::Split(split) => {
-                let active_child_index = match split.direction {
-                    SplitDirection::Stacked => split
+            Self::Split(template_split) => {
+                let active_child_index = match template_split.direction {
+                    SplitDirection::Stacked => template_split
                         .active_child_index
-                        .min(split.children.len().saturating_sub(1)),
+                        .min(template_split.children.len().saturating_sub(1)),
                     SplitDirection::Horizontal | SplitDirection::Vertical => 0,
                 };
-                let Some(child) = split.children.get(active_child_index) else {
+                let Some(active_template_child) = template_split.children.get(active_child_index)
+                else {
                     return 0;
                 };
-                let skipped_leaf_count: usize = split.children[..active_child_index]
+                let skipped_leaf_count: usize = template_split.children[..active_child_index]
                     .iter()
-                    .map(|earlier| earlier.count_leaf_templates())
+                    .map(|earlier_template_child| earlier_template_child.count_leaf_templates())
                     .sum();
-                skipped_leaf_count + child.find_first_visible_leaf_index()
+                skipped_leaf_count + active_template_child.find_first_visible_leaf_index()
             }
         }
     }
@@ -169,17 +170,19 @@ impl TemplateNode {
                 *next_pane_id_index += 1;
                 LayoutNode::Pane(pane_id)
             }
-            Self::Split(split) => {
-                let layout_children = split
+            Self::Split(template_split) => {
+                let layout_child_nodes = template_split
                     .children
                     .iter()
-                    .map(|child| child.build_layout_subtree(pane_ids, next_pane_id_index))
+                    .map(|template_child| {
+                        template_child.build_layout_subtree(pane_ids, next_pane_id_index)
+                    })
                     .collect();
                 LayoutNode::Split(SplitNode {
-                    direction: split.direction,
-                    children: layout_children,
-                    weights: split.weights.clone(),
-                    active_child_index: split.active_child_index,
+                    direction: template_split.direction,
+                    children: layout_child_nodes,
+                    weights: template_split.weights.clone(),
+                    active_child_index: template_split.active_child_index,
                 })
             }
         }

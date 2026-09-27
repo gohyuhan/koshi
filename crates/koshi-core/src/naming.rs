@@ -32,7 +32,7 @@ pub enum NameKind {
 impl NameKind {
     /// The one-letter tag a generated name of this kind starts with.
     #[must_use]
-    const fn get_type_tag(self) -> &'static str {
+    const fn get_name_kind_tag(self) -> &'static str {
         match self {
             NameKind::Session => "S",
             NameKind::Tab => "T",
@@ -253,20 +253,20 @@ const TOTAL_NAME_COMBINATIONS: usize = LANGUAGES.len() * WORDS_PER_LIST * WORDS_
 /// once. `73 % 3 == 1`: every step moves the walk to the next language.
 const NAME_COMBINATION_STRIDE: usize = 73;
 
-/// Generate a random default name of `name_kind` that `is_taken` does not already
+/// Generate a random default name of `name_kind` that `is_name_taken` does not already
 /// claim.
 ///
 /// The random start lands on a random language as well as a random word pair;
 /// consecutive calls yield a mix of English, Japanese, and Traditional Chinese
 /// names. The walk from that start skips taken names and appends a wrap
 /// number once every combination is claimed. The call always returns a name
-/// `is_taken` reports free.
+/// `is_name_taken` reports free.
 #[must_use]
-pub fn generate_name(name_kind: NameKind, is_taken: impl Fn(&str) -> bool) -> String {
+pub fn generate_name(name_kind: NameKind, is_name_taken: impl Fn(&str) -> bool) -> String {
     generate_name_from_start(
         name_kind,
-        is_taken,
-        generate_random_index(TOTAL_NAME_COMBINATIONS),
+        is_name_taken,
+        generate_random_name_combination_index(TOTAL_NAME_COMBINATIONS),
     )
 }
 
@@ -277,38 +277,38 @@ pub fn generate_name(name_kind: NameKind, is_taken: impl Fn(&str) -> bool) -> St
 /// [`NAME_COMBINATION_STRIDE`] steps, returning the first `<TYPE>-<adjective>-<noun>` the
 /// caller reports free. When a full round finds every combination taken,
 /// subsequent rounds append a wrap number starting at `2`
-/// (`T-swift-otter-2`). Returns only when `is_taken` reports a candidate
+/// (`T-swift-otter-2`). Returns only when `is_name_taken` reports a candidate
 /// free. `starting_combination_index` is taken modulo [`TOTAL_NAME_COMBINATIONS`]. The same
 /// starting index and taken-set
 /// always yield the same name.
 fn generate_name_from_start(
     name_kind: NameKind,
-    is_taken: impl Fn(&str) -> bool,
+    is_name_taken: impl Fn(&str) -> bool,
     starting_combination_index: usize,
 ) -> String {
     let mut wrap_round: usize = 0;
     loop {
         for candidate_step in 0..TOTAL_NAME_COMBINATIONS {
-            let candidate_index = (starting_combination_index
+            let candidate_combination_index = (starting_combination_index
                 + candidate_step * NAME_COMBINATION_STRIDE)
                 % TOTAL_NAME_COMBINATIONS;
-            // The language is `candidate_index % 3`; each stride step moves to the next.
-            let (adjectives, nouns) = LANGUAGES[candidate_index % LANGUAGES.len()];
-            let word_pair_index = candidate_index / LANGUAGES.len();
+            // The language is `candidate_combination_index % 3`; each stride step moves to the next.
+            let (adjectives, nouns) = LANGUAGES[candidate_combination_index % LANGUAGES.len()];
+            let word_pair_index = candidate_combination_index / LANGUAGES.len();
             let adjective = adjectives[word_pair_index / WORDS_PER_LIST];
             let noun = nouns[word_pair_index % WORDS_PER_LIST];
             // Round 0 tries the plain name; round 1 appends "-2", round 2
             // appends "-3", and so on.
             let candidate_name = if wrap_round == 0 {
-                format!("{}-{adjective}-{noun}", name_kind.get_type_tag())
+                format!("{}-{adjective}-{noun}", name_kind.get_name_kind_tag())
             } else {
                 format!(
                     "{}-{adjective}-{noun}-{}",
-                    name_kind.get_type_tag(),
+                    name_kind.get_name_kind_tag(),
                     wrap_round + 1
                 )
             };
-            if !is_taken(&candidate_name) {
+            if !is_name_taken(&candidate_name) {
                 return candidate_name;
             }
         }
@@ -318,11 +318,11 @@ fn generate_name_from_start(
     }
 }
 
-/// A random index in `0..exclusive_upper_bound`. Each call builds a fresh [`RandomState`] and
+/// A random combination index below `exclusive_combination_index_bound`. Each call builds a fresh [`RandomState`] and
 /// uses its hash output as the entropy source.
-fn generate_random_index(exclusive_upper_bound: usize) -> usize {
+fn generate_random_name_combination_index(exclusive_combination_index_bound: usize) -> usize {
     let entropy = RandomState::new().build_hasher().finish();
-    (entropy % exclusive_upper_bound as u64) as usize
+    (entropy % exclusive_combination_index_bound as u64) as usize
 }
 
 #[cfg(test)]

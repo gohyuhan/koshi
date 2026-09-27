@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::*;
 
-/// A plain cell style with `fg` as its foreground: no underline color, no
+/// A plain cell style with the given foreground color: no underline color, no
 /// attributes set.
 fn build_frame_style(foreground_color: FrameColor) -> FrameStyle {
     FrameStyle {
@@ -30,7 +30,7 @@ fn build_frame_style(foreground_color: FrameColor) -> FrameStyle {
     }
 }
 
-/// A one-column cell holding `ch` in `fg`.
+/// A one-column cell holding the given character and foreground color.
 fn build_frame_cell(character: char, foreground_color: FrameColor) -> FrameCell {
     FrameCell {
         character,
@@ -49,8 +49,8 @@ fn build_blank_frame_cell() -> FrameCell {
 /// reports button-event mouse tracking, which travels as
 /// [`MouseTracking::ButtonMotion`].
 fn build_painted_frame() -> PaintedFrame {
-    let tab = TabId::from_uuid(Uuid::from_u128(2));
-    let pane = PaneId::from_uuid(Uuid::from_u128(4));
+    let tab_id = TabId::from_uuid(Uuid::from_u128(2));
+    let pane_id = PaneId::from_uuid(Uuid::from_u128(4));
 
     PaintedFrame {
         is_recovery_notice_visible: false,
@@ -59,10 +59,10 @@ fn build_painted_frame() -> PaintedFrame {
             session_revision: 17,
             session_name: "quiet-lake".to_string(),
             active_tab_snapshot: FrameTab {
-                tab_id: tab,
+                tab_id,
                 tab_name: "edit".to_string(),
                 pane_slots: vec![FrameSlot {
-                    pane_id: pane,
+                    pane_id,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
                         size: Size {
@@ -90,14 +90,14 @@ fn build_painted_frame() -> PaintedFrame {
                 gap_cell_count: 0,
             },
             tab_snapshots: vec![FrameTabMetadata {
-                tab_id: tab,
+                tab_id,
                 tab_name: "edit".to_string(),
                 tab_index: 0,
                 is_active: true,
             }],
         },
         pane_snapshots: vec![FramePane {
-            pane_id: pane,
+            pane_id,
             pane_title: Some("vim".to_string()),
             cursor_snapshot: FrameCursor {
                 row_index: 0,
@@ -147,8 +147,8 @@ fn build_painted_frame() -> PaintedFrame {
                 column_count: 4,
                 row_count: 3,
             },
-            active_tab_id: tab,
-            focused_pane_id: Some(pane),
+            active_tab_id: tab_id,
+            focused_pane_id: Some(pane_id),
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
@@ -157,9 +157,9 @@ fn build_painted_frame() -> PaintedFrame {
 
 #[test]
 fn an_eighty_column_blank_row_travels_as_one_run() {
-    let cells: Vec<FrameCell> = std::iter::repeat_n(build_blank_frame_cell(), 80).collect();
+    let frame_cells: Vec<FrameCell> = std::iter::repeat_n(build_blank_frame_cell(), 80).collect();
 
-    let frame_row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
+    let frame_row = FrameRow::from_cells(frame_cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         frame_row.cell_runs,
@@ -168,49 +168,50 @@ fn an_eighty_column_blank_row_travels_as_one_run() {
             cell: build_blank_frame_cell()
         }]
     );
-    assert_eq!(frame_row.expand_cells(), cells);
+    assert_eq!(frame_row.expand_cells(), frame_cells);
 }
 
 #[test]
 fn stretches_of_two_styles_fold_into_one_run_each() {
-    let red = build_frame_cell('x', FrameColor::Indexed(1));
-    let blue = build_frame_cell('x', FrameColor::Rgb(0, 0, 255));
-    let cells = vec![
-        red.clone(),
-        red.clone(),
-        blue.clone(),
-        blue.clone(),
-        red.clone(),
-        red.clone(),
+    let red_frame_cell = build_frame_cell('x', FrameColor::Indexed(1));
+    let blue_frame_cell = build_frame_cell('x', FrameColor::Rgb(0, 0, 255));
+    let frame_cells = vec![
+        red_frame_cell.clone(),
+        red_frame_cell.clone(),
+        blue_frame_cell.clone(),
+        blue_frame_cell.clone(),
+        red_frame_cell.clone(),
+        red_frame_cell.clone(),
     ];
 
-    let frame_row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
+    let frame_row = FrameRow::from_cells(frame_cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         frame_row.cell_runs,
         vec![
             FrameRun {
                 repeat_count: 2,
-                cell: red.clone()
+                cell: red_frame_cell.clone()
             },
             FrameRun {
                 repeat_count: 2,
-                cell: blue
+                cell: blue_frame_cell
             },
             FrameRun {
                 repeat_count: 2,
-                cell: red
+                cell: red_frame_cell
             },
         ]
     );
-    assert_eq!(frame_row.expand_cells(), cells);
+    assert_eq!(frame_row.expand_cells(), frame_cells);
 }
 
 #[test]
 fn a_run_longer_than_a_count_can_hold_splits_at_the_cap() {
-    let cells: Vec<FrameCell> = std::iter::repeat_n(build_blank_frame_cell(), 70_000).collect();
+    let frame_cells: Vec<FrameCell> =
+        std::iter::repeat_n(build_blank_frame_cell(), 70_000).collect();
 
-    let frame_row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
+    let frame_row = FrameRow::from_cells(frame_cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         frame_row.cell_runs,
@@ -225,7 +226,7 @@ fn a_run_longer_than_a_count_can_hold_splits_at_the_cap() {
             },
         ]
     );
-    assert_eq!(frame_row.expand_cells(), cells);
+    assert_eq!(frame_row.expand_cells(), frame_cells);
 }
 
 #[test]
@@ -238,14 +239,14 @@ fn an_empty_row_folds_to_no_runs_and_expands_to_no_cells() {
 
 #[test]
 fn a_frame_survives_a_round_trip_field_for_field() {
-    let sent = build_painted_frame();
+    let sent_frame = build_painted_frame();
 
-    let encoded_json = serde_json::to_string(&sent).expect("encodes");
-    let received: PaintedFrame = serde_json::from_str(&encoded_json).expect("decodes");
+    let encoded_frame_json = serde_json::to_string(&sent_frame).expect("encodes");
+    let received_frame: PaintedFrame = serde_json::from_str(&encoded_frame_json).expect("decodes");
 
-    assert_eq!(received, sent);
+    assert_eq!(received_frame, sent_frame);
     assert_eq!(
-        received.pane_snapshots[0].mouse_tracking,
+        received_frame.pane_snapshots[0].mouse_tracking,
         MouseTracking::ButtonMotion
     );
 }
@@ -768,24 +769,24 @@ fn a_frame_whose_gap_is_not_a_count_reads_as_zero() {
 
 #[test]
 fn a_run_of_exactly_the_cap_stays_one_run_and_one_more_cell_opens_a_second() {
-    let at_cap = FrameRow::from_cells(
+    let row_at_repeat_count_cap = FrameRow::from_cells(
         std::iter::repeat_n(build_blank_frame_cell(), usize::from(u16::MAX)),
         FrameRowEnd::Hard,
     );
-    let past_cap = FrameRow::from_cells(
+    let row_one_cell_past_repeat_count_cap = FrameRow::from_cells(
         std::iter::repeat_n(build_blank_frame_cell(), usize::from(u16::MAX) + 1),
         FrameRowEnd::Hard,
     );
 
     assert_eq!(
-        at_cap.cell_runs,
+        row_at_repeat_count_cap.cell_runs,
         vec![FrameRun {
             repeat_count: u16::MAX,
             cell: build_blank_frame_cell()
         }]
     );
     assert_eq!(
-        past_cap.cell_runs,
+        row_one_cell_past_repeat_count_cap.cell_runs,
         vec![
             FrameRun {
                 repeat_count: u16::MAX,
@@ -797,44 +798,51 @@ fn a_run_of_exactly_the_cap_stays_one_run_and_one_more_cell_opens_a_second() {
             },
         ]
     );
-    assert_eq!(past_cap.expand_cells().len(), usize::from(u16::MAX) + 1);
+    assert_eq!(
+        row_one_cell_past_repeat_count_cap.expand_cells().len(),
+        usize::from(u16::MAX) + 1
+    );
 }
 
 /// Two cells fold only when every field is equal: the same character with a
 /// different grapheme cluster or a different width opens its own run.
 #[test]
 fn cells_equal_in_character_but_not_in_cluster_or_width_do_not_fold() {
-    let plain = build_frame_cell('e', FrameColor::Default);
-    let accented = FrameCell {
+    let plain_frame_cell = build_frame_cell('e', FrameColor::Default);
+    let accented_frame_cell = FrameCell {
         combining_characters: vec!['\u{301}'],
         ..build_frame_cell('e', FrameColor::Default)
     };
-    let wide = FrameCell {
+    let wide_frame_cell = FrameCell {
         cell_width: 2,
         ..build_frame_cell('e', FrameColor::Default)
     };
-    let cells = vec![plain.clone(), accented.clone(), wide.clone()];
+    let frame_cells = vec![
+        plain_frame_cell.clone(),
+        accented_frame_cell.clone(),
+        wide_frame_cell.clone(),
+    ];
 
-    let frame_row = FrameRow::from_cells(cells.iter().cloned(), FrameRowEnd::Hard);
+    let frame_row = FrameRow::from_cells(frame_cells.iter().cloned(), FrameRowEnd::Hard);
 
     assert_eq!(
         frame_row.cell_runs,
         vec![
             FrameRun {
                 repeat_count: 1,
-                cell: plain
+                cell: plain_frame_cell
             },
             FrameRun {
                 repeat_count: 1,
-                cell: accented
+                cell: accented_frame_cell
             },
             FrameRun {
                 repeat_count: 1,
-                cell: wide
+                cell: wide_frame_cell
             },
         ]
     );
-    assert_eq!(frame_row.expand_cells(), cells);
+    assert_eq!(frame_row.expand_cells(), frame_cells);
 }
 
 #[test]
@@ -848,7 +856,7 @@ fn hard_is_the_only_ending_that_is_hard() {
 /// carry one. It expands to no cells and leaves the other runs intact.
 #[test]
 fn a_run_whose_count_is_zero_expands_to_no_cells() {
-    let encoded_json = json!({
+    let encoded_frame_row_json = json!({
         "cell_runs": [
             { "repeat_count": 0, "cell": build_frame_cell('x', FrameColor::Default) },
             { "repeat_count": 2, "cell": build_blank_frame_cell() }
@@ -856,7 +864,7 @@ fn a_run_whose_count_is_zero_expands_to_no_cells() {
     });
 
     // Decoded from text, the way the transport does it.
-    let frame_row: FrameRow = serde_json::from_str(&encoded_json.to_string())
+    let frame_row: FrameRow = serde_json::from_str(&encoded_frame_row_json.to_string())
         .expect("a frame row with a zero-count run decodes");
 
     assert_eq!(
@@ -871,7 +879,7 @@ fn a_run_whose_count_is_zero_expands_to_no_cells() {
 /// not set is absent.
 #[test]
 fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
-    let dressed = FrameCell {
+    let dressed_cell = FrameCell {
         character: 'e',
         combining_characters: vec!['\u{301}'],
         cell_width: 2,
@@ -893,10 +901,10 @@ fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
         },
     };
 
-    let encoded_json = serde_json::to_value(&dressed).expect("a cell encodes");
+    let encoded_cell_json = serde_json::to_value(&dressed_cell).expect("a cell encodes");
 
     assert_eq!(
-        encoded_json,
+        encoded_cell_json,
         json!({
             "character": "e",
             "combining_characters": ["\u{301}"],
@@ -914,9 +922,9 @@ fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
             }
         })
     );
-    let decoded: FrameCell =
-        serde_json::from_str(&encoded_json.to_string()).expect("a dressed cell decodes");
-    assert_eq!(decoded, dressed);
+    let decoded_cell: FrameCell =
+        serde_json::from_str(&encoded_cell_json.to_string()).expect("a dressed cell decodes");
+    assert_eq!(decoded_cell, dressed_cell);
 }
 
 /// An optional value that is `None` travels as `null`, never as an absent
@@ -924,58 +932,60 @@ fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
 /// content rect, a cursor with no shape, and a client with no focused pane.
 #[test]
 fn absent_optional_values_encode_as_null() {
-    let mut bare = build_painted_frame();
-    bare.session_snapshot.active_tab_snapshot.pane_slots[0].content_rect = None;
-    bare.pane_snapshots[0].pane_title = None;
-    bare.pane_snapshots[0].cursor_snapshot.shape = None;
-    bare.pane_snapshots[0].terminal_window = None;
-    bare.pane_snapshots[0].selection_spans = None;
-    bare.client_snapshot.focused_pane_id = None;
+    let mut bare_frame = build_painted_frame();
+    bare_frame.session_snapshot.active_tab_snapshot.pane_slots[0].content_rect = None;
+    bare_frame.pane_snapshots[0].pane_title = None;
+    bare_frame.pane_snapshots[0].cursor_snapshot.shape = None;
+    bare_frame.pane_snapshots[0].terminal_window = None;
+    bare_frame.pane_snapshots[0].selection_spans = None;
+    bare_frame.client_snapshot.focused_pane_id = None;
 
-    let encoded_json = serde_json::to_value(&bare).expect("frame encodes");
+    let encoded_frame_json = serde_json::to_value(&bare_frame).expect("frame encodes");
 
     assert_eq!(
-        encoded_json["session_snapshot"]["active_tab_snapshot"]["pane_slots"][0]["content_rect"],
+        encoded_frame_json["session_snapshot"]["active_tab_snapshot"]["pane_slots"][0]
+            ["content_rect"],
         serde_json::Value::Null
     );
     assert_eq!(
-        encoded_json["pane_snapshots"][0]["pane_title"],
+        encoded_frame_json["pane_snapshots"][0]["pane_title"],
         serde_json::Value::Null
     );
     assert_eq!(
-        encoded_json["pane_snapshots"][0]["cursor_snapshot"]["shape"],
+        encoded_frame_json["pane_snapshots"][0]["cursor_snapshot"]["shape"],
         serde_json::Value::Null
     );
     assert_eq!(
-        encoded_json["pane_snapshots"][0]["terminal_window"],
+        encoded_frame_json["pane_snapshots"][0]["terminal_window"],
         serde_json::Value::Null
     );
     assert_eq!(
-        encoded_json["pane_snapshots"][0]["selection_spans"],
+        encoded_frame_json["pane_snapshots"][0]["selection_spans"],
         serde_json::Value::Null
     );
     assert_eq!(
-        encoded_json["client_snapshot"]["focused_pane_id"],
+        encoded_frame_json["client_snapshot"]["focused_pane_id"],
         serde_json::Value::Null
     );
-    let decoded: PaintedFrame =
-        serde_json::from_str(&encoded_json.to_string()).expect("a bare frame decodes");
-    assert_eq!(decoded, bare);
+    let decoded_frame: PaintedFrame =
+        serde_json::from_str(&encoded_frame_json.to_string()).expect("a bare frame decodes");
+    assert_eq!(decoded_frame, bare_frame);
 }
 
 /// A cursor from a server that sends no `shape` at all reads as `None`, the
 /// same as one that sends `null`.
 #[test]
 fn a_cursor_without_a_shape_key_reads_as_no_shape() {
-    let mut encoded_json = serde_json::to_value(build_painted_frame()).expect("frame encodes");
-    encoded_json["pane_snapshots"][0]["cursor_snapshot"]
+    let mut encoded_frame_json =
+        serde_json::to_value(build_painted_frame()).expect("frame encodes");
+    encoded_frame_json["pane_snapshots"][0]["cursor_snapshot"]
         .as_object_mut()
         .expect("a cursor encodes as an object")
         .remove("shape")
         .expect("the cursor encodes a shape");
 
-    let decoded: PaintedFrame = serde_json::from_str(&encoded_json.to_string())
+    let decoded_frame: PaintedFrame = serde_json::from_str(&encoded_frame_json.to_string())
         .expect("a cursor with no shape key decodes");
 
-    assert_eq!(decoded.pane_snapshots[0].cursor_snapshot.shape, None);
+    assert_eq!(decoded_frame.pane_snapshots[0].cursor_snapshot.shape, None);
 }

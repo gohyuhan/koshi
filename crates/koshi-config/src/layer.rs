@@ -106,7 +106,7 @@ impl ConfigLayers {
     /// [`parse_app_config`](crate::app_config::parse_app_config) never fills
     /// either one, and only a hand-built `app_config_layer` can carry them.
     #[must_use]
-    pub fn from_files(
+    pub fn from_config_file_layers(
         app_config_layer: Option<PartialKoshiConfig>,
         theme_config_layer: Option<PartialThemeConfig>,
         keybindings_config_layer: Option<PartialKeybindingsConfig>,

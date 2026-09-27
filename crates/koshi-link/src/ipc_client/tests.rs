@@ -21,13 +21,13 @@ use koshi_ipc::protocol::{IpcErrorPayload, PROTOCOL_VERSION};
 
 /// A fresh directory to stand in for the runtime directory, under a short base so
 /// the Unix socket path stays inside the OS path-length cap.
-fn build_test_runtime_directory(tag: &str) -> PathBuf {
+fn build_test_runtime_directory(test_case_name: &str) -> PathBuf {
     #[cfg(unix)]
     let runtime_base_directory = PathBuf::from("/tmp");
     #[cfg(windows)]
     let runtime_base_directory = std::env::temp_dir();
     let runtime_directory =
-        runtime_base_directory.join(format!("koshi-cli-{}-{tag}", std::process::id()));
+        runtime_base_directory.join(format!("koshi-cli-{}-{test_case_name}", std::process::id()));
     std::fs::create_dir_all(&runtime_directory).expect("create runtime directory");
     runtime_directory
 }
@@ -1601,26 +1601,32 @@ fn a_shared_advert_nothing_listens_behind_reports_the_session_not_running() {
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
-// --- Send-time working-directory capture ------------------------------------
+// --- Applying the working directory at send time ---------------------------
 
 #[test]
 fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
-    let captured_command =
-        capture_current_working_directory(Command::NewPane(build_default_new_pane_args()));
-    let Command::NewPane(command_args) = captured_command else {
+    let command_with_current_directory =
+        apply_current_working_directory_to_command(Command::NewPane(build_default_new_pane_args()));
+    let Command::NewPane(new_pane_arguments) = command_with_current_directory else {
         panic!("the variant must not change");
     };
-    assert_eq!(command_args.working_directory, std::env::current_dir().ok());
+    assert_eq!(
+        new_pane_arguments.working_directory,
+        std::env::current_dir().ok()
+    );
 
-    let captured_command =
-        capture_current_working_directory(Command::NewTab(NewTabArgs::default()));
-    let Command::NewTab(command_args) = captured_command else {
+    let command_with_current_directory =
+        apply_current_working_directory_to_command(Command::NewTab(NewTabArgs::default()));
+    let Command::NewTab(new_tab_arguments) = command_with_current_directory else {
         panic!("the variant must not change");
     };
-    assert_eq!(command_args.working_directory, std::env::current_dir().ok());
+    assert_eq!(
+        new_tab_arguments.working_directory,
+        std::env::current_dir().ok()
+    );
 
-    let captured_command =
-        capture_current_working_directory(Command::RunCommandPane(RunCommandPaneArgs {
+    let command_with_current_directory =
+        apply_current_working_directory_to_command(Command::RunCommandPane(RunCommandPaneArgs {
             spawn_spec: SpawnSpec::build_default_shell(None, BTreeMap::new()),
             working_directory: None,
             source_pane_id: None,
@@ -1629,23 +1635,27 @@ fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
             should_stack: false,
             client_id: None,
         }));
-    let Command::RunCommandPane(command_args) = captured_command else {
+    let Command::RunCommandPane(run_command_pane_arguments) = command_with_current_directory else {
         panic!("the variant must not change");
     };
-    assert_eq!(command_args.working_directory, std::env::current_dir().ok());
+    assert_eq!(
+        run_command_pane_arguments.working_directory,
+        std::env::current_dir().ok()
+    );
 }
 
 #[test]
-fn an_explicit_directory_survives_the_capture() {
+fn an_explicit_working_directory_survives_command_preparation() {
     let command = Command::NewPane(NewPaneArgs {
         working_directory: Some(PathBuf::from("/explicit")),
         ..build_default_new_pane_args()
     });
-    let Command::NewPane(command_args) = capture_current_working_directory(command) else {
+    let command_with_current_directory = apply_current_working_directory_to_command(command);
+    let Command::NewPane(new_pane_arguments) = command_with_current_directory else {
         panic!("the variant must not change");
     };
     assert_eq!(
-        command_args.working_directory,
+        new_pane_arguments.working_directory,
         Some(PathBuf::from("/explicit"))
     );
 }
@@ -1653,11 +1663,13 @@ fn an_explicit_directory_survives_the_capture() {
 #[test]
 fn a_command_without_a_directory_field_is_untouched() {
     assert_eq!(
-        capture_current_working_directory(Command::Quit),
+        apply_current_working_directory_to_command(Command::Quit),
         Command::Quit
     );
     assert_eq!(
-        capture_current_working_directory(Command::ToggleLockMode(ToggleLockModeArgs::default())),
+        apply_current_working_directory_to_command(Command::ToggleLockMode(
+            ToggleLockModeArgs::default(),
+        )),
         Command::ToggleLockMode(ToggleLockModeArgs::default())
     );
 }

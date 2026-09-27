@@ -34,8 +34,8 @@ impl Server {
                 pane_id,
                 exit_status,
             } => {
-                let events = self.handle_child_exit(pane_id, exit_status);
-                self.publish_events(&events);
+                let child_exit_events = self.handle_child_exit(pane_id, exit_status);
+                self.publish_events(&child_exit_events);
             }
             // A raw chord is the viewer's to read: it holds the keymap, the
             // input mode and any open sequence, and hands the session either a
@@ -92,8 +92,8 @@ impl Server {
                 } else {
                     self.saved_view_store.forget_client_resume_token(client_id);
                 }
-                let events = self.handle_client_detach(client_id);
-                self.publish_events(&events);
+                let client_detach_events = self.handle_client_detach(client_id);
+                self.publish_events(&client_detach_events);
             }
             RuntimeEvent::Resize {
                 client_id,
@@ -182,8 +182,9 @@ impl Server {
             RuntimeEvent::DropUnclaimedClients {
                 unclaimed_client_deadline,
             } => {
-                let events = self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
-                self.publish_events(&events);
+                let unclaimed_client_drop_events =
+                    self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
+                self.publish_events(&unclaimed_client_drop_events);
             }
         }
         ControlFlow::Continue(())
@@ -224,9 +225,10 @@ impl Server {
         let expired_pane_ids: Vec<PaneId> = self
             .terminal_engine_by_pane_id
             .iter()
-            .filter_map(|(pane_id, engine)| {
-                (engine.get_next_synchronized_output_delay(current_time) == Some(Duration::ZERO))
-                    .then_some(*pane_id)
+            .filter_map(|(pane_id, terminal_engine)| {
+                (terminal_engine.get_next_synchronized_output_delay(current_time)
+                    == Some(Duration::ZERO))
+                .then_some(*pane_id)
             })
             .collect();
         for pane_id in expired_pane_ids {
@@ -254,9 +256,9 @@ impl Server {
     /// panic path — no grace window while unwinding; the normal quit path takes
     /// the staged [`Server::shutdown`].
     pub fn kill_all_panes(&mut self) {
-        let backend = Arc::clone(self.get_pty_backend());
+        let pty_backend = Arc::clone(self.get_pty_backend());
         for pane_id in self.live_pane_ids.iter().copied() {
-            let _ = backend.kill_pane(pane_id, KillPolicy::Tree);
+            let _ = pty_backend.kill_pane(pane_id, KillPolicy::Tree);
         }
     }
 }

@@ -30,23 +30,23 @@ fn decode_sixel_output_unit(sixel_output_bytes: &[u8]) -> DecodedImage {
 }
 
 fn decode_iterm_output_units(template_units: &[TemplateUnit]) -> DecodedImage {
-    let mut transfer_state = None;
+    let mut image_transfer_state = None;
     let mut decoded_image = None;
     for template_unit in template_units {
-        let command_body = template_unit
+        let iterm_command_bytes = template_unit
             .output_bytes
             .strip_prefix(b"\x1b]1337;")
             .expect("iTerm2 packet prefix")
             .strip_suffix(b"\x1b\\")
             .expect("iTerm2 packet terminator");
         if let Some(iterm_graphics) =
-            koshi_iterm::parse_iterm_command(command_body, &mut transfer_state)
+            koshi_iterm::parse_iterm_command(iterm_command_bytes, &mut image_transfer_state)
                 .expect("generated iTerm2 packet parses")
         {
             decoded_image = Some(iterm_graphics.image);
         }
     }
-    assert_eq!(transfer_state, None);
+    assert_eq!(image_transfer_state, None);
     decoded_image.expect("generated iTerm2 packets contain one image")
 }
 
@@ -54,10 +54,10 @@ fn classify_image_plans<'a>(
     output_kind: ImageOutputKind,
     cell_snapshot: &ImageCellSnapshot,
     output_paints: &'a [OutputPaint],
-    measured_cell_size: Option<PixelCellSize>,
+    measured_pixel_cell_size: Option<PixelCellSize>,
 ) -> Vec<Plan<'a>> {
-    let output_cell_size = if output_kind.is_sixel() {
-        measured_cell_size.expect("Sixel test cell size")
+    let output_pixel_cell_size = if output_kind.is_sixel() {
+        measured_pixel_cell_size.expect("Sixel test cell size")
     } else {
         PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell")
     };
@@ -70,28 +70,28 @@ fn classify_image_plans<'a>(
                 cell_snapshot,
                 &covered_cell_positions,
                 output_paint,
-                build_output_encode_key(output_kind, output_cell_size, output_paint),
+                build_output_encode_key(output_kind, output_pixel_cell_size, output_paint),
             )
             .expect("valid test image");
             add_target_area_cells(output_paint.target_area, &mut covered_cell_positions);
             image_plan
         })
         .collect::<Vec<_>>();
-    resolve_image_compatibility(output_kind, measured_cell_size, &mut image_plans);
+    resolve_image_compatibility(output_kind, measured_pixel_cell_size, &mut image_plans);
     image_plans
 }
 
 fn build_iterm_worker_request(
     cell_snapshot: Arc<ImageCellSnapshot>,
     output_paints: &[OutputPaint],
-    measured_cell_size: Option<PixelCellSize>,
+    measured_pixel_cell_size: Option<PixelCellSize>,
 ) -> WorkerRequest {
     let pixel_cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell");
     WorkerRequest {
         frame_generation: 1,
         output_kind: ImageOutputKind::Iterm,
         pixel_cell_size,
-        measured_pixel_cell_size: measured_cell_size,
+        measured_pixel_cell_size,
         cell_snapshot: Some(cell_snapshot),
         output_paints: output_paints.to_vec(),
         encode_keys: output_paints
@@ -108,37 +108,33 @@ fn build_iterm_worker_request(
 #[test]
 fn oversized_sixel_tiles_cover_every_target_pixel_exactly_once() {
     let (image_pixel_width, image_pixel_height) = (256, 128);
-    let mut random_value = 0x12345678u32;
-    let mut pixel_bytes = Vec::new();
+    let mut random_bits = 0x12345678u32;
+    let mut rgba_bytes = Vec::new();
     for _ in 0..image_pixel_width * image_pixel_height {
-        random_value ^= random_value << 13;
-        random_value ^= random_value >> 17;
-        random_value ^= random_value << 5;
-        pixel_bytes.extend_from_slice(&[
-            if random_value & 1 == 0 { 0 } else { 255 },
-            if random_value & 2 == 0 { 0 } else { 255 },
-            if random_value & 4 == 0 { 0 } else { 255 },
+        random_bits ^= random_bits << 13;
+        random_bits ^= random_bits >> 17;
+        random_bits ^= random_bits << 5;
+        rgba_bytes.extend_from_slice(&[
+            if random_bits & 1 == 0 { 0 } else { 255 },
+            if random_bits & 2 == 0 { 0 } else { 255 },
+            if random_bits & 4 == 0 { 0 } else { 255 },
             255,
         ]);
     }
-    let output_paint = build_output_paint(
-        pixel_bytes.clone(),
-        image_pixel_width,
-        image_pixel_height,
-        0,
-    );
+    let output_paint =
+        build_output_paint(rgba_bytes.clone(), image_pixel_width, image_pixel_height, 0);
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 256,
         maximum_pixel_width: Some(128),
         maximum_pixel_height: Some(128),
     };
-    let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).unwrap();
-    let encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
+    let pixel_cell_size = PixelCellSize::from_pixel_dimensions(1, 1).unwrap();
+    let encode_key = build_output_encode_key(output_kind, pixel_cell_size, &output_paint);
     let worker_request = WorkerRequest {
         frame_generation: 1,
         output_kind,
-        pixel_cell_size: cell_size,
-        measured_pixel_cell_size: Some(cell_size),
+        pixel_cell_size,
+        measured_pixel_cell_size: Some(pixel_cell_size),
         cell_snapshot: Some(Arc::new(build_blank_snapshot(output_paint.target_area))),
         output_paints: vec![output_paint.clone()],
         encode_keys: vec![encode_key],
@@ -192,7 +188,7 @@ fn oversized_sixel_tiles_cover_every_target_pixel_exactly_once() {
     }
     assert_eq!(
         actual_pixel_values,
-        pixel_bytes
+        rgba_bytes
             .chunks_exact(4)
             .map(|pixel| Some(<[u8; 4]>::try_from(pixel).unwrap()))
             .collect::<Vec<_>>()
@@ -345,15 +341,15 @@ use koshi_terminal::graphics::{ImageAction, ImageDisplay};
 use koshi_terminal::style::{Color, Style};
 
 fn build_output_paint(
-    pixel_bytes: Vec<u8>,
+    rgba_bytes: Vec<u8>,
     image_pixel_width: u32,
     image_pixel_height: u32,
-    layer_index: i32,
+    z_index: i32,
 ) -> OutputPaint {
     let decoded_image = DecodedImage {
         pixel_width: image_pixel_width,
         pixel_height: image_pixel_height,
-        rgba_bytes: pixel_bytes,
+        rgba_bytes,
     };
     let image_source_rect = ImageSourceRect {
         pixel_x: 0,
@@ -368,7 +364,7 @@ fn build_output_paint(
         animation: None,
         action: ImageAction::Display,
         display: ImageDisplay {
-            z_index: layer_index,
+            z_index,
             ..ImageDisplay::default()
         },
         anchor: (0, 0),
@@ -382,7 +378,7 @@ fn build_output_paint(
         source_rect: image_source_rect,
         cell_pixel_offset_x: None,
         cell_pixel_offset_y: None,
-        z_index: layer_index,
+        z_index,
         alpha_stats: image_alpha_stats,
     }
 }

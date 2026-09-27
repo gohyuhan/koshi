@@ -34,13 +34,13 @@ impl TerminalState {
     /// Writes `self.alternate` directly, whichever screen is active. Called by
     /// the `?1049 h` entry and the `?1047 l`/`?1049 l` clearing exits.
     pub(super) fn reset_alternate_buffer(&mut self) {
-        let fill = self.get_active_render().style.get_background_fill_style();
+        let alternate_fill_style = self.get_active_render().style.get_background_fill_style();
         self.clear_alternate_image_placements();
-        let alternate = Arc::make_mut(&mut self.alternate);
-        let (row_count, column_count) = alternate.get_grid_dimensions();
+        let alternate_grid = Arc::make_mut(&mut self.alternate);
+        let (row_count, column_count) = alternate_grid.get_grid_dimensions();
         for row_index in 0..row_count {
-            alternate.clear_line(row_index, 0, column_count, fill);
-            alternate.set_prompt_mark(row_index, false);
+            alternate_grid.clear_line(row_index, 0, column_count, alternate_fill_style);
+            alternate_grid.set_prompt_mark(row_index, false);
         }
         self.alternate_scroll_region = None;
         self.alternate_horizontal_margins = None;

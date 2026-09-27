@@ -3,47 +3,51 @@
 use super::*;
 use koshi_input::host::{KeyCode, KeyEvent, Modifiers};
 
-impl<S: EventSource> InputReader<S> {
+impl<Source: EventSource> InputReader<Source> {
     /// A reader over `event_source` with nothing buffered.
-    pub(in crate::terminal) fn from_event_source_for_tests(event_source: S) -> Self {
+    pub(in crate::terminal) fn from_event_source_for_tests(event_source: Source) -> Self {
         Self {
             event_source,
-            buffered_events: VecDeque::with_capacity(32),
+            buffered_terminal_events: VecDeque::with_capacity(32),
         }
     }
 }
 
 #[derive(Debug)]
 struct ProbeEventSource {
-    events: VecDeque<io::Result<Option<Event>>>,
+    terminal_event_read_results: VecDeque<io::Result<Option<Event>>>,
 }
 
 impl EventSource for ProbeEventSource {
-    fn try_read_event(&mut self, _timeout: Option<Duration>) -> io::Result<Option<Event>> {
-        self.events.pop_front().unwrap_or(Ok(None))
+    fn try_read_event(&mut self, _timeout_duration: Option<Duration>) -> io::Result<Option<Event>> {
+        self.terminal_event_read_results
+            .pop_front()
+            .unwrap_or(Ok(None))
     }
 }
 
-fn build_key_event(character: char) -> Event {
+fn build_terminal_key_event(character: char) -> Event {
     Event::Key(KeyEvent::from_key_code_and_modifiers(
         KeyCode::Char(character),
         Modifiers::NONE,
     ))
 }
 
-fn build_input_reader(events: Vec<io::Result<Option<Event>>>) -> InputReader<ProbeEventSource> {
+fn build_terminal_event_reader(
+    terminal_event_read_results: Vec<io::Result<Option<Event>>>,
+) -> InputReader<ProbeEventSource> {
     InputReader {
         event_source: ProbeEventSource {
-            events: events.into(),
+            terminal_event_read_results: terminal_event_read_results.into(),
         },
-        buffered_events: VecDeque::new(),
+        buffered_terminal_events: VecDeque::new(),
     }
 }
 
 #[test]
-fn poll_keeps_rejected_events_in_source_order() {
-    let mut input_reader = build_input_reader(vec![
-        Ok(Some(build_key_event('a'))),
+fn wait_for_event_keeps_rejected_events_in_source_order() {
+    let mut input_reader = build_terminal_event_reader(vec![
+        Ok(Some(build_terminal_key_event('a'))),
         Ok(Some(Event::FocusIn)),
     ]);
     assert!(input_reader
@@ -55,7 +59,7 @@ fn poll_keeps_rejected_events_in_source_order() {
         input_reader
             .read_matching_event(|_| true)
             .expect("first event"),
-        build_key_event('a')
+        build_terminal_key_event('a')
     );
     assert_eq!(
         input_reader
@@ -66,8 +70,9 @@ fn poll_keeps_rejected_events_in_source_order() {
 }
 
 #[test]
-fn a_timeout_keeps_every_rejected_event() {
-    let mut input_reader = build_input_reader(vec![Ok(Some(build_key_event('a'))), Ok(None)]);
+fn wait_for_event_timeout_keeps_rejected_events() {
+    let mut input_reader =
+        build_terminal_event_reader(vec![Ok(Some(build_terminal_key_event('a'))), Ok(None)]);
     assert!(!input_reader
         .wait_for_event(Some(Duration::ZERO), |event| *event == Event::FocusIn)
         .expect("event wait succeeds"));
@@ -75,14 +80,14 @@ fn a_timeout_keeps_every_rejected_event() {
         input_reader
             .read_matching_event(|_| true)
             .expect("buffered key"),
-        build_key_event('a')
+        build_terminal_key_event('a')
     );
 }
 
 #[test]
-fn a_source_error_keeps_every_rejected_event() {
-    let mut input_reader = build_input_reader(vec![
-        Ok(Some(build_key_event('a'))),
+fn wait_for_event_source_error_keeps_rejected_events() {
+    let mut input_reader = build_terminal_event_reader(vec![
+        Ok(Some(build_terminal_key_event('a'))),
         Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
     ]);
     let io_error = input_reader
@@ -93,14 +98,14 @@ fn a_source_error_keeps_every_rejected_event() {
         input_reader
             .read_matching_event(|_| true)
             .expect("buffered key"),
-        build_key_event('a')
+        build_terminal_key_event('a')
     );
 }
 
 #[test]
-fn read_can_select_an_event_after_a_rejected_event() {
-    let mut input_reader = build_input_reader(vec![
-        Ok(Some(build_key_event('a'))),
+fn read_matching_event_selects_after_a_rejected_event() {
+    let mut input_reader = build_terminal_event_reader(vec![
+        Ok(Some(build_terminal_key_event('a'))),
         Ok(Some(Event::FocusOut)),
     ]);
     assert_eq!(
@@ -113,6 +118,6 @@ fn read_can_select_an_event_after_a_rejected_event() {
         input_reader
             .read_matching_event(|_| true)
             .expect("buffered key"),
-        build_key_event('a')
+        build_terminal_key_event('a')
     );
 }

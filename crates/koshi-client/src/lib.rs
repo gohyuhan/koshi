@@ -424,7 +424,8 @@ impl Client {
         theme: Option<PartialThemeConfig>,
         keybindings: Option<PartialKeybindingsConfig>,
     ) -> Option<ConflictReport> {
-        self.config_layers = ConfigLayers::from_files(app.clone(), theme.clone(), None);
+        self.config_layers =
+            ConfigLayers::from_config_file_layers(app.clone(), theme.clone(), None);
         self.client_config = self.config_layers.resolve_effective_client_config();
         self.theme = theme::resolve_theme(&self.client_config.theme);
 
@@ -434,7 +435,7 @@ impl Client {
             return None;
         };
         let user_mode_bindings_by_name = candidate.mode_bindings_by_name.clone();
-        let tentative_layers = ConfigLayers::from_files(app, theme, Some(candidate));
+        let tentative_layers = ConfigLayers::from_config_file_layers(app, theme, Some(candidate));
         let tentative = tentative_layers.resolve_effective_client_config();
         let key_layers =
             build_keymap_layers(user_mode_bindings_by_name, tentative.keybindings.leader);
@@ -458,7 +459,7 @@ impl Client {
         }
         self.config_layers = tentative_layers;
         self.client_config = tentative;
-        self.keymap_catalog = KeymapHintCatalog::from_parts(
+        self.keymap_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
             &key_layers,
             &self.client_config.keybindings,
             &self.registry,

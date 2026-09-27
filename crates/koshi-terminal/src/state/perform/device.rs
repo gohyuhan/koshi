@@ -35,7 +35,7 @@ fn compute_mode_state_number(is_set: bool) -> u16 {
 /// `"1.16.2"` → `11602`; `"0.2.0-pr.1"` → `200`.
 fn compute_version_number(version_text: &str) -> u32 {
     let version_core_text = match version_text.find(['-', '+']) {
-        Some(suffix_index) => &version_text[..suffix_index],
+        Some(version_suffix_byte_index) => &version_text[..version_suffix_byte_index],
         None => version_text,
     };
     let mut packed_version_number: u32 = 0;
@@ -113,8 +113,12 @@ impl TerminalState {
         if !self.get_active_cursor().is_origin_mode_enabled {
             return (cursor_row_index, cursor_column_index);
         }
-        let top_row_index = self.get_scroll_region().map_or(0, |(top, _)| top);
-        let left_column_index = self.get_horizontal_margins().map_or(0, |(left, _)| left);
+        let top_row_index = self
+            .get_scroll_region()
+            .map_or(0, |(top_margin_row_index, _)| top_margin_row_index);
+        let left_column_index = self
+            .get_horizontal_margins()
+            .map_or(0, |(left_margin_column_index, _)| left_margin_column_index);
         (
             cursor_row_index.saturating_sub(top_row_index),
             cursor_column_index.saturating_sub(left_column_index),
@@ -188,8 +192,8 @@ impl TerminalState {
             56 => self.device_query_replies.extend_from_slice(b"\x1b[?57;0n"),
             62 => self.device_query_replies.extend_from_slice(b"\x1b[0*{"),
             63 => {
-                let request_id = get_parameter_number_at(csi_parameters, 1).unwrap_or(0);
-                let device_reply_bytes = format!("\x1bP{request_id}!~0000\x1b\\");
+                let checksum_request_id = get_parameter_number_at(csi_parameters, 1).unwrap_or(0);
+                let device_reply_bytes = format!("\x1bP{checksum_request_id}!~0000\x1b\\");
                 self.device_query_replies
                     .extend_from_slice(device_reply_bytes.as_bytes());
             }
@@ -203,9 +207,10 @@ impl TerminalState {
     /// DECRPM report `CSI ? Ps ; Pm $ y`, where `Pm` is the mode's state from
     /// [`get_dec_mode_state_number`](Self::get_dec_mode_state_number).
     pub(super) fn report_dec_mode(&mut self, csi_parameters: &vte::Params) {
-        let mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
-        let mode_state_value = self.get_dec_mode_state_number(mode_number);
-        let device_reply_bytes = format!("\x1b[?{mode_number};{mode_state_value}$y");
+        let dec_private_mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
+        let dec_mode_state_number = self.get_dec_mode_state_number(dec_private_mode_number);
+        let device_reply_bytes =
+            format!("\x1b[?{dec_private_mode_number};{dec_mode_state_number}$y");
         self.device_query_replies
             .extend_from_slice(device_reply_bytes.as_bytes());
     }
@@ -214,13 +219,13 @@ impl TerminalState {
     /// `CSI Ps ; 0 $ y`. No ANSI (non-`?`) mode is stored, so every query
     /// reports `0`, "not recognized".
     pub(super) fn report_ansi_mode(&mut self, csi_parameters: &vte::Params) {
-        let mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
-        let device_reply_bytes = format!("\x1b[{mode_number};0$y");
+        let ansi_mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
+        let device_reply_bytes = format!("\x1b[{ansi_mode_number};0$y");
         self.device_query_replies
             .extend_from_slice(device_reply_bytes.as_bytes());
     }
 
-    /// The DECRPM value for DEC private mode `mode_number`: `1` (set) or `2` (reset)
+    /// The DECRPM value for DEC private mode `dec_private_mode_number`: `1` (set) or `2` (reset)
     /// read from the stored mode state, and `0` ("not recognized") for every
     /// mode that is not stored — including the ignored `?2`/`?3`/`?8` and the
     /// save/restore action `?1048`, which keeps no queryable state.
@@ -231,8 +236,8 @@ impl TerminalState {
     /// screen modes (`?47`/`?1047`/`?1049`) are set exactly while the
     /// alternate screen is active. `?25` reports the active screen's cursor
     /// visibility.
-    fn get_dec_mode_state_number(&self, mode_number: u16) -> u16 {
-        match mode_number {
+    fn get_dec_mode_state_number(&self, dec_private_mode_number: u16) -> u16 {
+        match dec_private_mode_number {
             1 => compute_mode_state_number(self.modes.is_application_cursor_keys_enabled),
             5 => compute_mode_state_number(self.modes.is_reverse_video_enabled),
             6 => compute_mode_state_number(self.get_active_cursor().is_origin_mode_enabled),

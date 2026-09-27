@@ -13,9 +13,10 @@ use crate::style::Style;
 fn build_grid(row_texts: &[&str], column_count: u16) -> Grid {
     let cells: Vec<Vec<Cell>> = row_texts
         .iter()
-        .map(|line| {
-            line.chars()
-                .map(|character| Cell::from_character(character, 1, Style::default()))
+        .map(|row_text| {
+            row_text
+                .chars()
+                .map(|row_character| Cell::from_character(row_character, 1, Style::default()))
                 .collect()
         })
         .collect();
@@ -23,9 +24,10 @@ fn build_grid(row_texts: &[&str], column_count: u16) -> Grid {
 }
 
 /// One text line as grid cells.
-fn build_cells(line: &str) -> Vec<Cell> {
-    line.chars()
-        .map(|character| Cell::from_character(character, 1, Style::default()))
+fn build_cells(line_text: &str) -> Vec<Cell> {
+    line_text
+        .chars()
+        .map(|line_character| Cell::from_character(line_character, 1, Style::default()))
         .collect()
 }
 
@@ -34,16 +36,16 @@ fn build_scrollback(lines: &[&str], maximum_line_count: usize) -> Scrollback {
     let mut scrollback = Scrollback::from_scrollback_limit(
         ScrollbackLimit::from_line_and_byte_limits(maximum_line_count, usize::MAX),
     );
-    for line in lines {
-        scrollback.push_row(&build_cells(line), RowMetadata::default());
+    for line_text in lines {
+        scrollback.push_row(&build_cells(line_text), RowMetadata::default());
     }
     scrollback
 }
 
 /// Read a row back as a trimmed string, for asserting which line a number names.
 fn get_row_text(view: &TextView<'_>, row_index: u64) -> String {
-    let (cells, _) = view.get_row(row_index).expect("row is readable");
-    cells
+    let (row_cells, _) = view.get_row(row_index).expect("row is readable");
+    row_cells
         .iter()
         .map(Cell::get_character)
         .collect::<String>()
@@ -298,12 +300,12 @@ fn a_word_crosses_a_soft_wrap_out_of_history_onto_the_screen() {
 
 #[test]
 fn a_live_autowrap_keeps_one_word_across_history_and_screen() {
-    let mut engine = TerminalEngine::from_pty_size(PtySize {
+    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 3,
         row_count: 2,
     });
-    let _ = engine.process_pty_output(b"abcdefg");
-    let view = engine.get_terminal_state().get_text_view();
+    let _ = terminal_engine.process_pty_output(b"abcdefg");
+    let view = terminal_engine.get_terminal_state().get_text_view();
 
     assert_eq!(get_row_text(&view, 0), "abc");
     assert_eq!(get_row_text(&view, 1), "def");
@@ -314,12 +316,12 @@ fn a_live_autowrap_keeps_one_word_across_history_and_screen() {
 
 #[test]
 fn a_wide_wrap_spacer_is_neither_a_word_break_nor_copied_text() {
-    let mut engine = TerminalEngine::from_pty_size(PtySize {
+    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 3,
         row_count: 2,
     });
-    let _ = engine.process_pty_output("abcde世".as_bytes());
-    let view = engine.get_terminal_state().get_text_view();
+    let _ = terminal_engine.process_pty_output("abcde世".as_bytes());
+    let view = terminal_engine.get_terminal_state().get_text_view();
 
     assert!(view.is_wide_wrap_spacer(1, 2));
     assert_eq!(view.get_word_start_position(2, 0), (0, 0));
@@ -389,13 +391,13 @@ fn a_logical_line_reaching_the_oldest_row_stops_there() {
 fn a_wide_glyphs_blank_half_is_skipped_when_growing_a_word() {
     let scrollback = build_scrollback(&[], 100);
     // `世界` — each glyph is two cells wide, its right half a width-0 blank.
-    let cells = vec![vec![
+    let grid_row_cells = vec![vec![
         Cell::from_character('世', 2, Style::default()),
         Cell::from_character(' ', 0, Style::default()),
         Cell::from_character('界', 2, Style::default()),
         Cell::from_character(' ', 0, Style::default()),
     ]];
-    let grid = Grid::from_rows(cells, 4, Style::default());
+    let grid = Grid::from_rows(grid_row_cells, 4, Style::default());
     let view = TextView::from_scrollback_and_grid(&scrollback, &grid);
 
     // Growing from the first glyph lands on the second glyph's own cell (2),
@@ -416,30 +418,30 @@ fn ordering_puts_the_earlier_end_first() {
     };
 
     // Dragging down: already in order.
-    let ordered = order_selection_positions(earlier_position, following_position);
-    assert_eq!(ordered.start_position, earlier_position);
-    assert_eq!(ordered.end_position, following_position);
+    let ordered_selection = order_selection_positions(earlier_position, following_position);
+    assert_eq!(ordered_selection.start_position, earlier_position);
+    assert_eq!(ordered_selection.end_position, following_position);
 
     // Dragging up: the anchor is the following end, so the pair is swapped.
-    let ordered = order_selection_positions(following_position, earlier_position);
-    assert_eq!(ordered.start_position, earlier_position);
-    assert_eq!(ordered.end_position, following_position);
+    let ordered_selection = order_selection_positions(following_position, earlier_position);
+    assert_eq!(ordered_selection.start_position, earlier_position);
+    assert_eq!(ordered_selection.end_position, following_position);
 }
 
 #[test]
 fn ordering_within_one_row_compares_columns() {
-    let left = GridPosition {
+    let left_position = GridPosition {
         row_index: 4,
         column_index: 1,
     };
-    let right = GridPosition {
+    let right_position = GridPosition {
         row_index: 4,
         column_index: 9,
     };
 
-    let ordered = order_selection_positions(right, left);
-    assert_eq!(ordered.start_position, left);
-    assert_eq!(ordered.end_position, right);
+    let ordered_selection = order_selection_positions(right_position, left_position);
+    assert_eq!(ordered_selection.start_position, left_position);
+    assert_eq!(ordered_selection.end_position, right_position);
 }
 
 #[test]

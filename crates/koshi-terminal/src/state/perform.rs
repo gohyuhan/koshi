@@ -359,9 +359,9 @@ impl vte::Perform for TerminalState {
             // same list already swapped. A repeated `?1049 h` in one list
             // re-runs the entry with the same result.
             let screen_at_start = self.active_screen;
-            for parameter_numbers in csi_parameters.iter() {
-                let dec_private_mode = parameter_numbers.first().copied().unwrap_or(0);
-                self.apply_dec_private_mode(action, dec_private_mode, screen_at_start);
+            for csi_parameter_numbers in csi_parameters.iter() {
+                let dec_private_mode_number = csi_parameter_numbers.first().copied().unwrap_or(0);
+                self.apply_dec_private_mode(action, dec_private_mode_number, screen_at_start);
             }
             return;
         }

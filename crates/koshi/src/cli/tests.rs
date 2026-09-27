@@ -1927,7 +1927,7 @@ fn input_appends_enter_unless_no_enter_is_given() {
         command,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(PaneId::from_uuid(build_fixed_test_uuid())),
-            input_bytes: b"ls\r".to_vec(),
+            pane_input_bytes: b"ls\r".to_vec(),
         })
     );
 
@@ -1936,7 +1936,7 @@ fn input_appends_enter_unless_no_enter_is_given() {
         command,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: b"ls".to_vec(),
+            pane_input_bytes: b"ls".to_vec(),
         })
     );
 }
@@ -3157,7 +3157,7 @@ fn input_sends_the_text_bytes_as_typed() {
         mapped,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: b"\r".to_vec(),
+            pane_input_bytes: b"\r".to_vec(),
         })
     );
 
@@ -3166,7 +3166,7 @@ fn input_sends_the_text_bytes_as_typed() {
         mapped,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: Vec::new(),
+            pane_input_bytes: Vec::new(),
         })
     );
 
@@ -3175,7 +3175,7 @@ fn input_sends_the_text_bytes_as_typed() {
         mapped,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: "echo ☕\r".as_bytes().to_vec(),
+            pane_input_bytes: "echo ☕\r".as_bytes().to_vec(),
         })
     );
 
@@ -3185,7 +3185,7 @@ fn input_sends_the_text_bytes_as_typed() {
         mapped,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: None,
-            input_bytes: b"a\nb\r".to_vec(),
+            pane_input_bytes: b"a\nb\r".to_vec(),
         })
     );
 }
@@ -3251,7 +3251,7 @@ fn resize_pane_size_rejects_i16_overflow() {
 }
 
 #[test]
-fn format_value_is_case_sensitive() {
+fn output_format_name_is_case_sensitive() {
     let cli_error = parse_cli_error(&["koshi", "list-sessions", "--format", "Table"]);
     assert_eq!(cli_error.kind(), ErrorKind::InvalidValue);
 }
@@ -3684,10 +3684,10 @@ fn a_discovery_query_names_its_session_scope() {
 /// Every action name `build_action_command` builds is a registered core action, and the
 /// Twenty action verbs name twenty different actions.
 #[test]
-fn every_to_action_name_is_a_registered_core_action() {
+fn every_cli_action_name_is_a_registered_core_action() {
     use std::collections::BTreeSet;
 
-    let registered: BTreeSet<String> = build_core_action_seeds()
+    let registered_core_action_names: BTreeSet<String> = build_core_action_seeds()
         .iter()
         .map(|(action, _)| action.to_string())
         .collect();
@@ -3725,7 +3725,7 @@ fn every_to_action_name_is_a_registered_core_action() {
         vec!["koshi", "run", "--", "htop"],
     ];
 
-    let mut named = BTreeSet::new();
+    let mut cli_action_names = BTreeSet::new();
     for argv in &action_verbs {
         let parsed_command = parse_cli_command(argv);
         assert!(
@@ -3736,10 +3736,10 @@ fn every_to_action_name_is_a_registered_core_action() {
             .build_action_command(&ResolvedTargets::default(), Direction::Right)
             .unwrap_or_else(|| panic!("{argv:?} maps to an action"));
         assert!(
-            registered.contains(&action.to_string()),
+            registered_core_action_names.contains(&action.to_string()),
             "{argv:?} names {action}, which build_core_action_seeds does not register"
         );
-        named.insert(action.to_string());
+        cli_action_names.insert(action.to_string());
     }
     let expected_registered_action_names: BTreeSet<String> = [
         "core:close-pane",
@@ -3765,5 +3765,5 @@ fn every_to_action_name_is_a_registered_core_action() {
     .map(String::from)
     .into_iter()
     .collect();
-    assert_eq!(named, expected_registered_action_names);
+    assert_eq!(cli_action_names, expected_registered_action_names);
 }

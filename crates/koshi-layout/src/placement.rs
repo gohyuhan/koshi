@@ -130,7 +130,7 @@ pub fn place_pane_within_tab(
     tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, PlacementError> {
-    let source_path =
+    let source_pane_path =
         layout_tree
             .find_pane_path(source_pane_id)
             .ok_or(PlacementError::SourcePaneNotFound {
@@ -141,27 +141,36 @@ pub fn place_pane_within_tab(
             if *target_pane_id == source_pane_id {
                 return Ok(layout_tree.clone());
             }
-            let target_path = layout_tree.find_pane_path(*target_pane_id).ok_or(
+            let target_pane_path = layout_tree.find_pane_path(*target_pane_id).ok_or(
                 PlacementError::TargetPaneNotFound {
                     pane_id: *target_pane_id,
                 },
             )?;
-            let mut swapped_tree = layout_tree.clone();
-            *swapped_tree.get_node_at_path_mut(&source_path) = LayoutNode::Pane(*target_pane_id);
-            *swapped_tree.get_node_at_path_mut(&target_path) = LayoutNode::Pane(source_pane_id);
-            expand_stacks_and_check_fit(swapped_tree, source_pane_id, tab_rect, pane_sizing)
+            let mut swapped_layout_tree = layout_tree.clone();
+            *swapped_layout_tree.get_node_at_path_mut(&source_pane_path) =
+                LayoutNode::Pane(*target_pane_id);
+            *swapped_layout_tree.get_node_at_path_mut(&target_pane_path) =
+                LayoutNode::Pane(source_pane_id);
+            expand_stacks_and_check_fit(swapped_layout_tree, source_pane_id, tab_rect, pane_sizing)
         }
-        PlacementTarget::Insert { anchor, direction } => {
-            validate_anchor(layout_tree, source_pane_id, anchor)?;
-            let mut removed_tree = layout_tree.clone();
-            let destination_tree = match remove_leaf(&mut removed_tree, source_pane_id) {
-                PaneRemovalStatus::Removed => removed_tree,
+        PlacementTarget::Insert {
+            anchor: placement_anchor,
+            direction,
+        } => {
+            validate_placement_anchor(layout_tree, source_pane_id, placement_anchor)?;
+            let mut removed_layout_tree = layout_tree.clone();
+            let destination_tree = match remove_leaf(&mut removed_layout_tree, source_pane_id) {
+                PaneRemovalStatus::Removed => removed_layout_tree,
                 PaneRemovalStatus::SubtreeEmpty => return Ok(LayoutNode::Pane(source_pane_id)),
                 PaneRemovalStatus::PaneNotFound => unreachable!("presence checked above"),
             };
-            let inserted_tree =
-                insert_beside_anchor(destination_tree, source_pane_id, anchor, *direction);
-            expand_stacks_and_check_fit(inserted_tree, source_pane_id, tab_rect, pane_sizing)
+            let inserted_layout_tree = insert_pane_beside_anchor(
+                destination_tree,
+                source_pane_id,
+                placement_anchor,
+                *direction,
+            );
+            expand_stacks_and_check_fit(inserted_layout_tree, source_pane_id, tab_rect, pane_sizing)
         }
     }
 }
@@ -216,7 +225,7 @@ pub fn place_pane_across_tabs(
             pane_id: source_pane_id,
         });
     }
-    let source_path =
+    let source_pane_path =
         source_tree
             .find_pane_path(source_pane_id)
             .ok_or(PlacementError::SourcePaneNotFound {
@@ -229,16 +238,16 @@ pub fn place_pane_across_tabs(
                     pane_id: *target_pane_id,
                 });
             }
-            let target_path = destination_tree.find_pane_path(*target_pane_id).ok_or(
+            let target_pane_path = destination_tree.find_pane_path(*target_pane_id).ok_or(
                 PlacementError::TargetPaneNotFound {
                     pane_id: *target_pane_id,
                 },
             )?;
             let mut swapped_source_tree = source_tree.clone();
-            *swapped_source_tree.get_node_at_path_mut(&source_path) =
+            *swapped_source_tree.get_node_at_path_mut(&source_pane_path) =
                 LayoutNode::Pane(*target_pane_id);
             let mut swapped_destination_tree = destination_tree.clone();
-            *swapped_destination_tree.get_node_at_path_mut(&target_path) =
+            *swapped_destination_tree.get_node_at_path_mut(&target_pane_path) =
                 LayoutNode::Pane(source_pane_id);
             let destination_tree = expand_stacks_and_check_fit(
                 swapped_destination_tree,
@@ -251,8 +260,11 @@ pub fn place_pane_across_tabs(
                 destination_tree,
             })
         }
-        PlacementTarget::Insert { anchor, direction } => {
-            validate_anchor(destination_tree, source_pane_id, anchor)?;
+        PlacementTarget::Insert {
+            anchor: placement_anchor,
+            direction,
+        } => {
+            validate_placement_anchor(destination_tree, source_pane_id, placement_anchor)?;
             let mut removed_source_tree = source_tree.clone();
             let remaining_source_tree = match remove_leaf(&mut removed_source_tree, source_pane_id)
             {
@@ -260,10 +272,14 @@ pub fn place_pane_across_tabs(
                 PaneRemovalStatus::SubtreeEmpty => None,
                 PaneRemovalStatus::PaneNotFound => unreachable!("presence checked above"),
             };
-            let inserted_tree =
-                insert_beside_anchor(destination_tree.clone(), source_pane_id, anchor, *direction);
+            let inserted_layout_tree = insert_pane_beside_anchor(
+                destination_tree.clone(),
+                source_pane_id,
+                placement_anchor,
+                *direction,
+            );
             let destination_tree = expand_stacks_and_check_fit(
-                inserted_tree,
+                inserted_layout_tree,
                 source_pane_id,
                 destination_tab_rect,
                 pane_sizing,
@@ -289,12 +305,12 @@ pub fn place_pane_across_tabs(
 ///   `Group`'s leaf set.
 /// - [`PlacementError::AnchorInsideStack`]: the anchor node has a stacked
 ///   ancestor.
-fn validate_anchor(
+fn validate_placement_anchor(
     destination_tree: &LayoutNode,
     source_pane_id: PaneId,
-    anchor: &PanePlacementAnchor,
+    placement_anchor: &PanePlacementAnchor,
 ) -> Result<(), PlacementError> {
-    let anchor_path = match anchor {
+    let placement_anchor_path = match placement_anchor {
         PanePlacementAnchor::Tab => return Ok(()),
         PanePlacementAnchor::Pane(anchor_pane_id) => {
             if *anchor_pane_id == source_pane_id {
@@ -312,7 +328,7 @@ fn validate_anchor(
             find_group_anchor_path(destination_tree, source_pane_id, group_pane_ids)?
         }
     };
-    match find_outermost_stack_above(destination_tree, &anchor_path) {
+    match find_outermost_stack_above(destination_tree, &placement_anchor_path) {
         Some(stack_pane_ids) => Err(PlacementError::AnchorInsideStack { stack_pane_ids }),
         None => Ok(()),
     }
@@ -370,16 +386,16 @@ fn find_group_anchor_path(
 /// leaf has already been removed from — so `source_pane_id` sits on its
 /// `direction` side, then normalize the whole tree once.
 ///
-/// `anchor` was validated by [`validate_anchor`] against the tree before the
+/// `anchor` was validated by [`validate_placement_anchor`] against the tree before the
 /// removal. A `Group` resolves to the shallowest node whose leaf set is the
 /// group minus the source pane.
-fn insert_beside_anchor(
+fn insert_pane_beside_anchor(
     mut destination_tree: LayoutNode,
     source_pane_id: PaneId,
-    anchor: &PanePlacementAnchor,
+    placement_anchor: &PanePlacementAnchor,
     direction: Direction,
 ) -> LayoutNode {
-    let anchor_path = match anchor {
+    let placement_anchor_path = match placement_anchor {
         PanePlacementAnchor::Tab => Vec::new(),
         PanePlacementAnchor::Pane(anchor_pane_id) => destination_tree
             .find_pane_path(*anchor_pane_id)
@@ -394,16 +410,17 @@ fn insert_beside_anchor(
                 .expect("anchor group validated before the source leaf was removed")
         }
     };
-    let anchor_node_slot = destination_tree.get_node_at_path_mut(&anchor_path);
-    let anchor_subtree = std::mem::replace(anchor_node_slot, LayoutNode::Pane(source_pane_id));
-    let source_leaf = LayoutNode::Pane(source_pane_id);
-    let children = match direction {
-        Direction::Right | Direction::Down => vec![anchor_subtree, source_leaf],
-        Direction::Left | Direction::Up => vec![source_leaf, anchor_subtree],
+    let placement_anchor_node_slot = destination_tree.get_node_at_path_mut(&placement_anchor_path);
+    let placement_anchor_subtree =
+        std::mem::replace(placement_anchor_node_slot, LayoutNode::Pane(source_pane_id));
+    let source_pane_leaf = LayoutNode::Pane(source_pane_id);
+    let split_children = match direction {
+        Direction::Right | Direction::Down => vec![placement_anchor_subtree, source_pane_leaf],
+        Direction::Left | Direction::Up => vec![source_pane_leaf, placement_anchor_subtree],
     };
-    *anchor_node_slot = LayoutNode::Split(SplitNode::with_equal_weights(
+    *placement_anchor_node_slot = LayoutNode::Split(SplitNode::with_equal_weights(
         compute_split_direction(direction),
-        children,
+        split_children,
     ));
 
     normalize_all_leaves(&destination_tree)

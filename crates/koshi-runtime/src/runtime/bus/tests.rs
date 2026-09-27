@@ -795,7 +795,7 @@ fn an_answer_lands_on_a_live_subscribers_queue() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
 
-    assert!(bus.try_send_answer(
+    assert!(bus.try_send_mouse_answer(
         subscriber_id,
         9,
         vec![
@@ -838,7 +838,7 @@ fn a_round_with_nothing_to_report_lands_as_an_empty_list() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
 
-    assert!(bus.try_send_answer(subscriber_id, 1, Vec::new()));
+    assert!(bus.try_send_mouse_answer(subscriber_id, 1, Vec::new()));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -851,11 +851,11 @@ fn a_round_with_nothing_to_report_lands_as_an_empty_list() {
 }
 
 #[test]
-fn an_answer_for_an_unknown_subscriber_is_refused() {
+fn a_mouse_answer_for_an_unknown_subscriber_is_refused() {
     let mut bus = EventBus::new();
     let (_subscriber_id, subscriber_receiver) = bus.subscribe();
 
-    assert!(!bus.try_send_answer(SubscriberId::new(), 4, Vec::new()));
+    assert!(!bus.try_send_mouse_answer(SubscriberId::new(), 4, Vec::new()));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -865,7 +865,7 @@ fn an_answer_for_an_unknown_subscriber_is_refused() {
 }
 
 #[test]
-fn an_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
+fn a_mouse_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
     let tab_id = TabId::new();
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
@@ -878,7 +878,7 @@ fn an_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
         SUBSCRIBER_QUEUE_CAPACITY
     );
 
-    assert!(!bus.try_send_answer(subscriber_id, 5, Vec::new()));
+    assert!(!bus.try_send_mouse_answer(subscriber_id, 5, Vec::new()));
 
     assert_eq!(
         subscriber_receiver.try_iter().collect::<Vec<_>>(),
@@ -889,7 +889,7 @@ fn an_answer_for_a_desynced_subscriber_is_refused_and_queues_nothing() {
 }
 
 #[test]
-fn an_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows() {
+fn a_mouse_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows() {
     // A lost answer leaves the viewer's drag anchor where it was, so it may not
     // pass silently: the desync it causes is what puts a fresh frame on the
     // queue.
@@ -899,7 +899,7 @@ fn an_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows() {
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
     fill_to_capacity(&mut bus, tab_id);
 
-    assert!(!bus.try_send_answer(
+    assert!(!bus.try_send_mouse_answer(
         subscriber_id,
         7,
         vec![MouseAnswer::Scrolled {
@@ -942,12 +942,12 @@ fn an_answer_that_does_not_fit_desyncs_the_subscriber_and_a_resync_follows() {
 }
 
 #[test]
-fn a_subscriber_whose_receiver_is_gone_is_removed_by_the_answer() {
+fn a_subscriber_whose_receiver_is_gone_is_removed_by_its_mouse_answer() {
     let mut bus = EventBus::new();
     let (subscriber_id, subscriber_receiver) = bus.subscribe();
     drop(subscriber_receiver);
 
-    assert!(!bus.try_send_answer(subscriber_id, 2, Vec::new()));
+    assert!(!bus.try_send_mouse_answer(subscriber_id, 2, Vec::new()));
 
     assert!(!bus.has_subscriber(subscriber_id));
     assert_eq!(bus.count_subscribers(), 0);

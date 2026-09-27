@@ -31,7 +31,7 @@ fn kill_session_in_runtime_directory(
     runtime_directory: &Path,
     session_reference: Option<&SessionReference>,
 ) -> Result<CommandResult, CliError> {
-    let session_id = resolve_session_target(runtime_directory, session_reference)?;
+    let session_id = resolve_session_id_from_reference(runtime_directory, session_reference)?;
     ipc_client::submit_external_command_via_runtime_directory(
         runtime_directory,
         session_id,
@@ -42,8 +42,8 @@ fn kill_session_in_runtime_directory(
 
 /// Resolve the session a `kill-session` or `detach --all` argument names: an id is
 /// taken as it stands, and a name or an absent argument is resolved against
-/// every running session by [`select_session_to_kill`].
-fn resolve_session_target(
+/// every running session by [`resolve_discovered_session_id`].
+fn resolve_session_id_from_reference(
     runtime_directory: &Path,
     session_reference: Option<&SessionReference>,
 ) -> Result<SessionId, CliError> {
@@ -52,14 +52,14 @@ fn resolve_session_target(
         Some(SessionReference::SessionName(session_name)) => Some(session_name.as_str()),
         None => None,
     };
-    select_session_to_kill(
+    resolve_discovered_session_id(
         &discovery::fetch_all_session_overviews(runtime_directory),
         session_name,
     )
 }
 
 /// Pick the named session, or apply the sole-running-session rule.
-fn select_session_to_kill(
+fn resolve_discovered_session_id(
     discovered_sessions: &Discovered,
     session_name: Option<&str>,
 ) -> Result<SessionId, CliError> {
@@ -81,19 +81,19 @@ fn select_session_to_kill(
 /// that names a session rather than a client leaves the choice to that
 /// session, which detaches its only attached client and lists the attached ids
 /// when there are several.
-pub fn detach_client_or_session(target_text: &str) -> Result<CommandResult, CliError> {
+pub fn detach_client_or_session(detach_target_text: &str) -> Result<CommandResult, CliError> {
     detach_client_or_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
-        target_text,
+        detach_target_text,
     )
 }
 
 /// [`detach_client_or_session`] against an explicit runtime directory.
 fn detach_client_or_session_in_runtime_directory(
     runtime_directory: &Path,
-    target_text: &str,
+    detach_target_text: &str,
 ) -> Result<CommandResult, CliError> {
-    let (session_id, client_id) = select_detach_target(runtime_directory, target_text)?;
+    let (session_id, client_id) = resolve_detach_target(runtime_directory, detach_target_text)?;
     ipc_client::submit_external_command_via_runtime_directory(
         runtime_directory,
         session_id,
@@ -113,41 +113,44 @@ fn detach_client_or_session_in_runtime_directory(
 /// target text is a session display name, resolved the way `kill-session` resolves
 /// one. A resolved session with no named client is returned as `None`, so the
 /// session itself picks the client.
-fn select_detach_target(
+fn resolve_detach_target(
     runtime_directory: &Path,
-    target_text: &str,
+    detach_target_text: &str,
 ) -> Result<(SessionId, Option<ClientId>), CliError> {
-    if target_text.starts_with("session-") {
-        let parsed_uuid = parse_prefixed_uuid(target_text, "session").map_err(|parse_detail| {
-            CliError::InvalidArgs {
-                detail: parse_detail,
-            }
-        })?;
-        return Ok((SessionId::from_uuid(parsed_uuid), None));
+    if detach_target_text.starts_with("session-") {
+        let target_uuid =
+            parse_prefixed_uuid(detach_target_text, "session").map_err(|parse_error_detail| {
+                CliError::InvalidArgs {
+                    detail: parse_error_detail,
+                }
+            })?;
+        return Ok((SessionId::from_uuid(target_uuid), None));
     }
 
     let discovered_sessions = discovery::fetch_all_session_overviews(runtime_directory);
-    let Ok(parsed_uuid) = parse_prefixed_uuid(target_text, "client") else {
+    let Ok(target_uuid) = parse_prefixed_uuid(detach_target_text, "client") else {
         return Ok((
-            select_session_to_kill(&discovered_sessions, Some(target_text))?,
+            resolve_discovered_session_id(&discovered_sessions, Some(detach_target_text))?,
             None,
         ));
     };
-    let client_id = ClientId::from_uuid(parsed_uuid);
+    let client_id = ClientId::from_uuid(target_uuid);
     match find_session_for_client(&discovered_sessions, client_id) {
         Ok(session_id) => Ok((session_id, Some(client_id))),
         // A `client-` id is a client and nothing else.
-        Err(selection_error) if target_text.starts_with("client-") => Err(selection_error),
-        Err(selection_error) => {
-            let session_id = SessionId::from_uuid(parsed_uuid);
-            let has_session_record = discovered_sessions
+        Err(client_target_error) if detach_target_text.starts_with("client-") => {
+            Err(client_target_error)
+        }
+        Err(client_target_error) => {
+            let session_id = SessionId::from_uuid(target_uuid);
+            let has_session = discovered_sessions
                 .sessions
                 .iter()
                 .any(|session_overview| session_overview.session.session_id == session_id);
-            if has_session_record || discovered_sessions.is_complete() {
+            if has_session || discovered_sessions.is_complete() {
                 Ok((session_id, None))
             } else {
-                Err(selection_error)
+                Err(client_target_error)
             }
         }
     }
@@ -193,7 +196,7 @@ fn detach_all_session_in_runtime_directory(
     runtime_directory: &Path,
     session_reference: Option<&SessionReference>,
 ) -> Result<CommandResult, CliError> {
-    let session_id = resolve_session_target(runtime_directory, session_reference)?;
+    let session_id = resolve_session_id_from_reference(runtime_directory, session_reference)?;
     ipc_client::submit_external_command_via_runtime_directory(
         runtime_directory,
         session_id,

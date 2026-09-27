@@ -15,13 +15,16 @@ fn parse_sixel_payload(sixel_payload_bytes: &[u8]) -> SixelGraphic {
 
 fn parse_sixel_result(sixel_payload_bytes: &[u8]) -> Result<SixelGraphic, GraphicsError> {
     let mut sixel_parser = SixelParser::new();
-    for &payload_byte in sixel_payload_bytes {
-        sixel_parser.feed_input_byte(payload_byte)?;
+    for &sixel_payload_byte in sixel_payload_bytes {
+        sixel_parser.feed_input_byte(sixel_payload_byte)?;
     }
     sixel_parser.finish_payload()
 }
 
-fn resolve_sixel_payload(sixel_payload_bytes: &[u8], background: [u8; 3]) -> DecodedImage {
+fn resolve_sixel_payload(
+    sixel_payload_bytes: &[u8],
+    terminal_background_rgb: [u8; 3],
+) -> DecodedImage {
     let sixel_graphic = parse_sixel_payload(sixel_payload_bytes);
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -29,30 +32,34 @@ fn resolve_sixel_payload(sixel_payload_bytes: &[u8], background: [u8; 3]) -> Dec
     let mut sixel_palette = SixelPalette::default();
     sixel_palette.apply_palette_changes(sixel_graphic.get_palette_changes());
     indexed_image
-        .resolve_indexed_image(&sixel_palette, background)
+        .resolve_indexed_image(&sixel_palette, terminal_background_rgb)
         .expect("image resolves")
 }
 
-fn assert_invalid_command(graphics_error: GraphicsError) {
-    match graphics_error {
+fn assert_sixel_invalid_command_error(sixel_graphics_error: GraphicsError) {
+    match sixel_graphics_error {
         GraphicsError::InvalidCommand { protocol } => {
             assert_eq!(protocol, GraphicsProtocol::Sixel);
         }
-        unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
+        unexpected_sixel_graphics_error => {
+            panic!("unexpected error: {unexpected_sixel_graphics_error:?}")
+        }
     }
 }
 
-fn assert_image_too_large(graphics_error: GraphicsError) {
-    match graphics_error {
+fn assert_sixel_image_too_large_error(sixel_graphics_error: GraphicsError) {
+    match sixel_graphics_error {
         GraphicsError::ImageTooLarge { protocol } => {
             assert_eq!(protocol, GraphicsProtocol::Sixel);
         }
-        unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
+        unexpected_sixel_graphics_error => {
+            panic!("unexpected error: {unexpected_sixel_graphics_error:?}")
+        }
     }
 }
 
 #[test]
-fn preserves_register_indices_and_terminal_background_rows() {
+fn sixel_parser_preserves_register_indices_and_terminal_background_rows() {
     let sixel_graphic = parse_sixel_payload(b"q#1;2;100;0;0#1@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -91,7 +98,7 @@ fn preserves_register_indices_and_terminal_background_rows() {
 }
 
 #[test]
-fn preserve_mode_uses_set_bit_extent_and_keeps_gaps_transparent() {
+fn sixel_preserve_mode_uses_set_bit_extent_and_keeps_gaps_transparent() {
     let sixel_graphic = parse_sixel_payload(b"1;1q@-@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -120,7 +127,7 @@ fn preserve_mode_uses_set_bit_extent_and_keeps_gaps_transparent() {
 }
 
 #[test]
-fn preserve_zero_bits_with_declared_extent_do_not_paint_or_overrun() {
+fn sixel_preserve_mode_keeps_declared_zero_bits_unpainted() {
     let sixel_graphic = parse_sixel_payload(b"7;1q\"1;1;2;2?");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -137,7 +144,7 @@ fn preserve_zero_bits_with_declared_extent_do_not_paint_or_overrun() {
 }
 
 #[test]
-fn macro_aspects_match_the_dec_table() {
+fn sixel_macro_aspects_match_the_dec_table() {
     let expected_macro_aspects = [
         (0, (2, 1)),
         (1, (2, 1)),
@@ -150,20 +157,20 @@ fn macro_aspects_match_the_dec_table() {
         (8, (1, 1)),
         (9, (1, 1)),
     ];
-    for (macro_parameter, expected_aspect_ratio) in expected_macro_aspects {
-        let sixel_payload = format!("{macro_parameter};1q@");
-        let sixel_graphic = parse_sixel_payload(sixel_payload.as_bytes());
+    for (macro_parameter_value, expected_pixel_aspect_ratio) in expected_macro_aspects {
+        let sixel_payload_text = format!("{macro_parameter_value};1q@");
+        let sixel_graphic = parse_sixel_payload(sixel_payload_text.as_bytes());
         assert_eq!(
             sixel_graphic
                 .get_indexed_image()
                 .expect("set bit has an extent")
                 .get_pixel_aspect_ratio(),
-            expected_aspect_ratio
+            expected_pixel_aspect_ratio
         );
     }
-    let omitted = parse_sixel_payload(b"q@");
+    let omitted_macro_parameter_graphic = parse_sixel_payload(b"q@");
     assert_eq!(
-        omitted
+        omitted_macro_parameter_graphic
             .get_indexed_image()
             .expect("set bit has an extent")
             .get_pixel_aspect_ratio(),
@@ -172,7 +179,7 @@ fn macro_aspects_match_the_dec_table() {
 }
 
 #[test]
-fn raster_aspect_is_reduced_and_overrides_macro_aspect() {
+fn sixel_raster_aspect_is_reduced_and_overrides_macro_aspect() {
     let sixel_graphic = parse_sixel_payload(b"2;1q\"6;4;1;1@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -187,7 +194,7 @@ fn raster_aspect_is_reduced_and_overrides_macro_aspect() {
 }
 
 #[test]
-fn raster_declarations_never_clip_data_and_repeat_pre_data_wins() {
+fn sixel_raster_declarations_keep_data_and_first_pre_data_declaration() {
     let sixel_graphic = parse_sixel_payload(b"1;1q\"1;1;1;1\"1;1;2;2@@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -247,7 +254,7 @@ fn raster_declarations_never_clip_data_and_repeat_pre_data_wins() {
 }
 
 #[test]
-fn terminal_data_beyond_declared_rectangle_stays_in_the_image() {
+fn sixel_terminal_data_beyond_declared_rectangle_stays_in_the_image() {
     let sixel_graphic = parse_sixel_payload(b"1;0q\"1;1;1;1~~");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -264,7 +271,7 @@ fn terminal_data_beyond_declared_rectangle_stays_in_the_image() {
 }
 
 #[test]
-fn resize_preserves_a_wide_first_band_before_a_narrow_band() {
+fn sixel_canvas_resize_preserves_a_wide_first_band_before_a_narrow_band() {
     let sixel_graphic = parse_sixel_payload(b"1;1q#1;2;100;0;0!9000@#2;2;0;100;0-@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -282,7 +289,7 @@ fn resize_preserves_a_wide_first_band_before_a_narrow_band() {
 }
 
 #[test]
-fn resize_preserves_a_tall_first_band_before_a_wide_band() {
+fn sixel_canvas_resize_preserves_a_tall_first_band_before_a_wide_band() {
     let mut sixel_payload_bytes = b"7;1q#1;2;100;0;0".to_vec();
     sixel_payload_bytes.extend(std::iter::repeat_n(b'-', 1365));
     sixel_payload_bytes.extend_from_slice(b"~$#2;2;0;100;0!2000@");
@@ -303,7 +310,7 @@ fn resize_preserves_a_tall_first_band_before_a_wide_band() {
 }
 
 #[test]
-fn preserve_mode_checks_the_highest_set_bit_at_the_side_limit() {
+fn sixel_preserve_mode_checks_the_highest_set_bit_at_the_side_limit() {
     let mut within_limit_payload_bytes = b"7;1q".to_vec();
     within_limit_payload_bytes.extend(std::iter::repeat_n(b'-', 2730));
     within_limit_payload_bytes.push(b'@');
@@ -323,16 +330,16 @@ fn preserve_mode_checks_the_highest_set_bit_at_the_side_limit() {
     let mut beyond_limit_payload_bytes = b"7;1q".to_vec();
     beyond_limit_payload_bytes.extend(std::iter::repeat_n(b'-', 2730));
     beyond_limit_payload_bytes.push(b'~');
-    assert_image_too_large(
+    assert_sixel_image_too_large_error(
         parse_sixel_result(&beyond_limit_payload_bytes)
             .expect_err("the sixel reaches beyond the side limit"),
     );
 
-    let mut transparent = b"7;1q".to_vec();
-    transparent.extend(std::iter::repeat_n(b'-', 2730));
-    transparent.push(b'?');
+    let mut zero_bit_payload_bytes = b"7;1q".to_vec();
+    zero_bit_payload_bytes.extend(std::iter::repeat_n(b'-', 2730));
+    zero_bit_payload_bytes.push(b'?');
     assert!(
-        parse_sixel_payload(&transparent)
+        parse_sixel_payload(&zero_bit_payload_bytes)
             .get_indexed_image()
             .is_none(),
         "zero bits do not create a preserve-mode extent"
@@ -340,7 +347,7 @@ fn preserve_mode_checks_the_highest_set_bit_at_the_side_limit() {
 }
 
 #[test]
-fn declared_background_fills_only_its_rectangle() {
+fn sixel_declared_terminal_background_fills_only_its_rectangle() {
     let sixel_graphic = parse_sixel_payload(b"1;0q\"1;1;3;2@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -368,7 +375,7 @@ fn declared_background_fills_only_its_rectangle() {
 }
 
 #[test]
-fn unvisited_gaps_after_a_narrower_band_remain_untouched() {
+fn sixel_terminal_background_keeps_unvisited_narrow_band_gaps_untouched() {
     let sixel_graphic = parse_sixel_payload(b"1;0q????-?");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -394,9 +401,10 @@ fn unvisited_gaps_after_a_narrower_band_remain_untouched() {
             SIXEL_UNTOUCHED
         ]
     );
-    for row_index in 7..12 {
+    for indexed_pixel_row_index in 7..12 {
         assert_eq!(
-            &indexed_image.pixel_register_indices[row_index * 4..row_index * 4 + 4],
+            &indexed_image.pixel_register_indices
+                [indexed_pixel_row_index * 4..indexed_pixel_row_index * 4 + 4],
             [
                 SIXEL_TERMINAL_BACKGROUND,
                 SIXEL_UNTOUCHED,
@@ -408,7 +416,7 @@ fn unvisited_gaps_after_a_narrower_band_remain_untouched() {
 }
 
 #[test]
-fn redefined_register_resolves_prior_pixels_with_final_color() {
+fn sixel_redefined_register_resolves_prior_pixels_with_final_color() {
     let sixel_graphic = parse_sixel_payload(b"7;1q#1;2;100;0;0#1@#1;2;0;0;100");
     assert_eq!(
         sixel_graphic
@@ -417,16 +425,16 @@ fn redefined_register_resolves_prior_pixels_with_final_color() {
             .len(),
         1
     );
-    let palette_change = sixel_graphic.get_palette_changes().list_palette_changes()[0];
-    assert_eq!(palette_change.register_number, 1);
-    assert_eq!(palette_change.rgb_color, [0, 0, 255]);
+    let sixel_palette_change = sixel_graphic.get_palette_changes().list_palette_changes()[0];
+    assert_eq!(sixel_palette_change.register_number, 1);
+    assert_eq!(sixel_palette_change.rgb_color, [0, 0, 255]);
 
     let resolved_image = resolve_sixel_payload(b"7;1q#1;2;100;0;0#1@#1;2;0;0;100", [0, 0, 0]);
     assert_eq!(resolved_image.rgba_bytes, [0, 0, 255, 255]);
 }
 
 #[test]
-fn terminal_zero_bits_do_not_repaint_an_existing_foreground() {
+fn sixel_terminal_zero_bits_do_not_repaint_an_existing_foreground() {
     let sixel_graphic = parse_sixel_payload(b"7;0q#1;2;100;0;0#1@$?");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -442,7 +450,7 @@ fn terminal_zero_bits_do_not_repaint_an_existing_foreground() {
 }
 
 #[test]
-fn hls_color_definitions_convert_to_rgb() {
+fn sixel_hls_color_definitions_convert_to_rgb() {
     let sixel_graphic = parse_sixel_payload(b"q#1;1;0;50;100#1@");
 
     assert_eq!(
@@ -452,7 +460,7 @@ fn hls_color_definitions_convert_to_rgb() {
 }
 
 #[test]
-fn palette_only_and_blank_payloads_return_metadata_without_an_image() {
+fn sixel_palette_only_and_blank_payloads_return_metadata_without_an_image() {
     let palette_only_graphic = parse_sixel_payload(b"q#3;2;100;50;0");
     assert!(palette_only_graphic.get_indexed_image().is_none());
     assert_eq!(
@@ -476,13 +484,13 @@ fn palette_only_and_blank_payloads_return_metadata_without_an_image() {
 }
 
 #[test]
-fn split_streams_preserve_header_commands_and_data() {
+fn sixel_split_streams_preserve_header_commands_and_pixel_data() {
     let sixel_payload_bytes = b"1;1q\"6;4;1;1#1;2;100;0;0#1@";
     let mut sixel_parser = SixelParser::new();
     for sixel_payload_chunk in sixel_payload_bytes.chunks(3) {
-        for &payload_byte in sixel_payload_chunk {
+        for &sixel_payload_byte in sixel_payload_chunk {
             sixel_parser
-                .feed_input_byte(payload_byte)
+                .feed_input_byte(sixel_payload_byte)
                 .expect("split Sixel payload is valid");
         }
     }
@@ -503,7 +511,7 @@ fn split_streams_preserve_header_commands_and_data() {
 }
 
 #[test]
-fn whitespace_and_repeat_defaults_follow_xterm_behavior() {
+fn sixel_whitespace_and_repeat_defaults_follow_xterm_behavior() {
     let spaced_payload_graphic = parse_sixel_payload(b"1;0q!1 0~");
     assert_eq!(
         spaced_payload_graphic
@@ -532,7 +540,7 @@ fn whitespace_and_repeat_defaults_follow_xterm_behavior() {
 }
 
 #[test]
-fn zero_raster_aspects_default_independently() {
+fn sixel_zero_raster_aspects_default_independently() {
     let sixel_graphic = parse_sixel_payload(b"7;1q\"0;2;0;0@");
     let indexed_image = sixel_graphic
         .get_indexed_image()
@@ -541,30 +549,36 @@ fn zero_raster_aspects_default_independently() {
 }
 
 #[test]
-fn malformed_commands_and_limits_return_typed_errors() {
-    assert_invalid_command(parse_sixel_result(b"10q").expect_err("macro parameter is invalid"));
-    assert_invalid_command(parse_sixel_result(b"1;1q!").expect_err("repeat has no data"));
-    assert_invalid_command(parse_sixel_result(b"1;1q!2#").expect_err("repeat has no data"));
-    assert_invalid_command(
+fn sixel_parser_rejects_malformed_commands_and_limits_with_typed_errors() {
+    assert_sixel_invalid_command_error(
+        parse_sixel_result(b"10q").expect_err("macro parameter is invalid"),
+    );
+    assert_sixel_invalid_command_error(
+        parse_sixel_result(b"1;1q!").expect_err("repeat has no data"),
+    );
+    assert_sixel_invalid_command_error(
+        parse_sixel_result(b"1;1q!2#").expect_err("repeat has no data"),
+    );
+    assert_sixel_invalid_command_error(
         parse_sixel_result(b"1;1q@\"1;1;1;1@").expect_err("late raster is invalid"),
     );
-    assert_invalid_command(
+    assert_sixel_invalid_command_error(
         parse_sixel_result(b"1;1q\x01@").expect_err("unhandled control is invalid"),
     );
-    assert_invalid_command(
+    assert_sixel_invalid_command_error(
         parse_sixel_result(b"1;1q#1;2;3;4;5;6@").expect_err("too many color parameters"),
     );
-    assert_image_too_large(
+    assert_sixel_image_too_large_error(
         parse_sixel_result(b"1;1q!20000@").expect_err("repeat exceeds the image side bound"),
     );
-    assert_image_too_large(
+    assert_sixel_image_too_large_error(
         parse_sixel_result(b"1;1q\"1;1;16385;0@").expect_err("declared width exceeds the bound"),
     );
 }
 
 #[test]
-fn numeric_overflow_and_control_size_fail_without_panics() {
-    assert_invalid_command(
+fn sixel_numeric_overflow_and_control_size_fail_without_panics() {
+    assert_sixel_invalid_command_error(
         parse_sixel_result(b"999999999999999999999999q").expect_err("header number overflows"),
     );
     let mut sixel_payload_bytes = b"1;1q!".to_vec();
@@ -577,7 +591,9 @@ fn numeric_overflow_and_control_size_fail_without_panics() {
         GraphicsError::TransferTooLarge { protocol } => {
             assert_eq!(protocol, GraphicsProtocol::Sixel);
         }
-        unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
+        unexpected_sixel_graphics_error => {
+            panic!("unexpected error: {unexpected_sixel_graphics_error:?}")
+        }
     }
 
     let mut sixel_parser = SixelParser::new();
@@ -589,64 +605,72 @@ fn numeric_overflow_and_control_size_fail_without_panics() {
         GraphicsError::TransferTooLarge { protocol } => {
             assert_eq!(protocol, GraphicsProtocol::Sixel);
         }
-        unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
+        unexpected_sixel_graphics_error => {
+            panic!("unexpected error: {unexpected_sixel_graphics_error:?}")
+        }
     }
 }
 
 #[test]
-fn serde_round_trip_preserves_indexed_graphic() {
+fn sixel_serde_round_trip_preserves_indexed_graphic_and_palette() {
     let original_graphic = parse_sixel_payload(b"1;0q\"6;4;3;2#1;2;100;0;0#1@");
     let serialized_graphic = serde_json::to_string(&original_graphic).expect("graphic serializes");
     let deserialized_graphic: SixelGraphic =
         serde_json::from_str(&serialized_graphic).expect("graphic deserializes");
     assert_eq!(deserialized_graphic, original_graphic);
 
-    let default_palette = SixelPalette::default();
-    let serialized_palette = serde_json::to_string(&default_palette).expect("palette serializes");
+    let default_sixel_palette = SixelPalette::default();
+    let serialized_sixel_palette =
+        serde_json::to_string(&default_sixel_palette).expect("palette serializes");
     let deserialized_palette: SixelPalette =
-        serde_json::from_str(&serialized_palette).expect("palette deserializes");
-    assert_eq!(deserialized_palette, default_palette);
+        serde_json::from_str(&serialized_sixel_palette).expect("palette deserializes");
+    assert_eq!(deserialized_palette, default_sixel_palette);
 }
 
 #[test]
-fn bounded_index_deserialization_grows_only_when_full() {
-    let serialized_indices = serde_json::to_string(&vec![0u16; 1024]).expect("indices serialize");
-    let bounded_indices: BoundedIndices =
-        serde_json::from_str(&serialized_indices).expect("indices deserialize");
+fn sixel_index_deserialization_grows_only_when_capacity_is_full() {
+    let serialized_pixel_register_indices =
+        serde_json::to_string(&vec![0u16; 1024]).expect("indices serialize");
+    let bounded_pixel_register_indices: BoundedPixelRegisterIndices =
+        serde_json::from_str(&serialized_pixel_register_indices).expect("indices deserialize");
 
-    assert_eq!(bounded_indices.0.len(), 1024);
-    assert!(bounded_indices.0.capacity() <= 2048);
+    assert_eq!(bounded_pixel_register_indices.0.len(), 1024);
+    assert!(bounded_pixel_register_indices.0.capacity() <= 2048);
 }
 
 #[test]
-fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
-    let duplicate_change_error = serde_json::from_str::<SixelPaletteChanges>(
+fn sixel_serde_rejects_duplicate_palette_changes_invalid_indices_and_wrong_lengths() {
+    let duplicate_palette_change_error = serde_json::from_str::<SixelPaletteChanges>(
         "[{\"register_number\":1,\"rgb_color\":[1,2,3]},{\"register_number\":1,\"rgb_color\":[4,5,6]}]",
     )
     .expect_err("duplicate palette edits are invalid");
-    assert!(duplicate_change_error
+    assert!(duplicate_palette_change_error
         .to_string()
         .contains("duplicate register"));
 
-    let too_many_colors_json =
+    let serialized_too_many_palette_colors =
         serde_json::to_string(&vec![[0u8, 0, 0]; 257]).expect("colors serialize");
-    let too_many_color_error = serde_json::from_str::<SixelPalette>(&too_many_colors_json)
-        .expect_err("palette must have exactly 256 colors");
-    assert!(too_many_color_error.to_string().contains("more than 256"));
+    let too_many_palette_color_error =
+        serde_json::from_str::<SixelPalette>(&serialized_too_many_palette_colors)
+            .expect_err("palette must have exactly 256 colors");
+    assert!(too_many_palette_color_error
+        .to_string()
+        .contains("more than 256"));
 
-    let mut too_many_changes = String::from("[");
+    let mut serialized_too_many_palette_changes = String::from("[");
     for register_number in 0..=u8::MAX {
         if register_number != 0 {
-            too_many_changes.push(',');
+            serialized_too_many_palette_changes.push(',');
         }
-        too_many_changes.push_str(&format!(
+        serialized_too_many_palette_changes.push_str(&format!(
             "{{\"register_number\":{register_number},\"rgb_color\":[0,0,0]}}"
         ));
     }
-    too_many_changes.push_str(",{\"register_number\":0,\"rgb_color\":[0,0,0]}]");
-    let too_many_change_error = serde_json::from_str::<SixelPaletteChanges>(&too_many_changes)
-        .expect_err("palette changes must stay within the register bound");
-    assert!(too_many_change_error
+    serialized_too_many_palette_changes.push_str(",{\"register_number\":0,\"rgb_color\":[0,0,0]}]");
+    let too_many_palette_change_error =
+        serde_json::from_str::<SixelPaletteChanges>(&serialized_too_many_palette_changes)
+            .expect_err("palette changes must stay within the register bound");
+    assert!(too_many_palette_change_error
         .to_string()
         .contains("exceed 256 registers"));
 
@@ -666,10 +690,14 @@ fn serde_rejects_duplicate_changes_bad_indices_and_wrong_lengths() {
         .to_string()
         .contains("dimensions are invalid"));
 
-    let too_few_colors = serde_json::to_string(&vec![[0u8, 0, 0]; 255]).expect("colors serialize");
-    let too_few_color_error = serde_json::from_str::<SixelPalette>(&too_few_colors)
-        .expect_err("palette must have exactly 256 colors");
-    assert!(too_few_color_error.to_string().contains("fewer than 256"));
+    let serialized_too_few_palette_colors =
+        serde_json::to_string(&vec![[0u8, 0, 0]; 255]).expect("colors serialize");
+    let too_few_palette_color_error =
+        serde_json::from_str::<SixelPalette>(&serialized_too_few_palette_colors)
+            .expect_err("palette must have exactly 256 colors");
+    assert!(too_few_palette_color_error
+        .to_string()
+        .contains("fewer than 256"));
 
     let unnormalized_aspect_error = serde_json::from_str::<IndexedImage>(
         "{\"width_pixels\":1,\"height_pixels\":1,\"pixel_register_indices\":[0],\"pixel_aspect_vertical\":2,\"pixel_aspect_horizontal\":2}",

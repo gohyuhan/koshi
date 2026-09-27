@@ -87,7 +87,7 @@ impl Server {
         });
         match self.dispatch_mouse_command(client_id, resize_command) {
             (CommandResult::Ok { .. }, _) => Ok(()),
-            (_, available_cell_count) => Err(available_cell_count.unwrap_or(0)),
+            (_, available_donor_cell_count) => Err(available_donor_cell_count.unwrap_or(0)),
         }
     }
 
@@ -133,10 +133,12 @@ impl Server {
                     requested_round_cell_count =
                         requested_cell_count.saturating_sub(applied_cell_count);
                 }
-                // `available_cell_count` is what the donating pane has left above its minimum
+                // `available_donor_cell_count` is what the donating pane has left above its minimum
                 // size, always short of what this round asked for.
-                Err(available_cell_count) if available_cell_count < requested_round_cell_count => {
-                    requested_round_cell_count = available_cell_count;
+                Err(available_donor_cell_count)
+                    if available_donor_cell_count < requested_round_cell_count =>
+                {
+                    requested_round_cell_count = available_donor_cell_count;
                 }
                 Err(_) => break,
             }
@@ -231,20 +233,20 @@ impl Server {
         pane_id: PaneId,
         mouse_input: MouseInput,
     ) -> bool {
-        let Some((tracking, encoding)) =
-            self.terminal_engine_by_pane_id
-                .get(&pane_id)
-                .map(|terminal_engine| {
-                    let terminal_state = terminal_engine.get_terminal_state();
-                    (
-                        terminal_state.get_mouse_tracking(),
-                        terminal_state.get_mouse_encoding(),
-                    )
-                })
+        let Some((mouse_tracking, mouse_encoding)) = self
+            .terminal_engine_by_pane_id
+            .get(&pane_id)
+            .map(|terminal_engine| {
+                let terminal_state = terminal_engine.get_terminal_state();
+                (
+                    terminal_state.get_mouse_tracking(),
+                    terminal_state.get_mouse_encoding(),
+                )
+            })
         else {
             return false;
         };
-        if !is_mouse_kind_reported(tracking, mouse_input.mouse_kind) {
+        if !is_mouse_kind_reported(mouse_tracking, mouse_input.mouse_kind) {
             return false;
         }
         let Some(owned_frame_layout) = self.build_frame_layout(client_id) else {
@@ -265,8 +267,8 @@ impl Server {
             mouse_input.modifier_flags,
             column_index,
             row_index,
-            tracking,
-            encoding,
+            mouse_tracking,
+            mouse_encoding,
         ) else {
             return false;
         };
@@ -437,7 +439,7 @@ impl Server {
             return;
         };
         self.event_bus
-            .try_send_answer(subscriber_id, request_id, mouse_answers);
+            .try_send_mouse_answer(subscriber_id, request_id, mouse_answers);
     }
 }
 

@@ -6,6 +6,6 @@
 
 /// Beta features are off in a process that never enables them.
 #[test]
-fn the_gate_starts_closed() {
-    assert!(!koshi_beta::are_beta_features_allowed());
+fn beta_feature_gate_starts_disabled_without_setting() {
+    assert!(!koshi_beta::should_allow_beta_features());
 }

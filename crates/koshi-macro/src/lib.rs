@@ -11,11 +11,11 @@ use syn::parse::{Parse, ParseStream};
 use syn::{parse_macro_input, Expr, Ident, ItemFn, Token};
 
 /// The attribute's one argument: what a blocked call returns instead.
-struct BetaFeatureArguments {
+struct BetaFeatureArgument {
     otherwise: Expr,
 }
 
-impl Parse for BetaFeatureArguments {
+impl Parse for BetaFeatureArgument {
     fn parse(argument_stream: ParseStream) -> syn::Result<Self> {
         let argument_name: Ident = argument_stream.parse()?;
         if argument_name != "otherwise" {
@@ -29,7 +29,7 @@ impl Parse for BetaFeatureArguments {
         if !argument_stream.is_empty() {
             return Err(argument_stream.error("expected only `otherwise = <expression>`"));
         }
-        Ok(BetaFeatureArguments { otherwise })
+        Ok(BetaFeatureArgument { otherwise })
     }
 }
 
@@ -79,7 +79,7 @@ fn is_unit_expression(otherwise: &Expr) -> bool {
 /// ```
 #[proc_macro_attribute]
 pub fn beta_feature(attribute_arguments: TokenStream, function_item: TokenStream) -> TokenStream {
-    let otherwise = parse_macro_input!(attribute_arguments as BetaFeatureArguments).otherwise;
+    let otherwise = parse_macro_input!(attribute_arguments as BetaFeatureArgument).otherwise;
     let mut gated_function = parse_macro_input!(function_item as ItemFn);
 
     let function_name = gated_function.sig.ident.to_string();
@@ -95,7 +95,7 @@ pub fn beta_feature(attribute_arguments: TokenStream, function_item: TokenStream
     // Each original statement is interpolated separately, so the final
     // expression remains the function's tail expression.
     *gated_function.block = syn::parse_quote!({
-        if !::koshi_beta::are_beta_features_allowed() {
+        if !::koshi_beta::should_allow_beta_features() {
             static BETA_WARNED: ::std::sync::Once = ::std::sync::Once::new();
             BETA_WARNED.call_once(|| ::koshi_beta::log_blocked_feature_warning(#warning_path));
             #blocked_return

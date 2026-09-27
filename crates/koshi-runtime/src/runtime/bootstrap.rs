@@ -44,11 +44,11 @@ impl Server {
         &mut self,
         session_id: SessionId,
         viewport_size: Size,
-        now: SystemTime,
+        session_started_at: SystemTime,
     ) -> Result<ClientId, PtyError> {
         // This is the first session, so no existing name can collide.
         let session_name = generate_name(NameKind::Session, |_| false);
-        self.bootstrap_local_named(session_id, session_name, viewport_size, now)
+        self.bootstrap_local_named(session_id, session_name, viewport_size, session_started_at)
     }
 
     /// Seed the first session/tab/root-pane/client under a caller-chosen id and
@@ -56,7 +56,7 @@ impl Server {
     /// under `session_id` (the caller mints it so the log file can be named for
     /// the session before genesis) and carries `session_name`. The root pane
     /// runs the default shell, sized to the middle pane region of `viewport_size`;
-    /// `now` stamps attach/create.
+    /// `session_started_at` stamps the session and its first client.
     ///
     /// The child is spawned before any state is committed, so a failed launch
     /// leaves no session behind and surfaces as `Err`.
@@ -65,14 +65,14 @@ impl Server {
         session_id: SessionId,
         session_name: String,
         viewport_size: Size,
-        now: SystemTime,
+        session_started_at: SystemTime,
     ) -> Result<ClientId, PtyError> {
         let client_id = ClientId::new();
         self.bootstrap_session(
             session_id,
             session_name,
             viewport_size,
-            now,
+            session_started_at,
             Some(client_id),
         )?;
         Ok(client_id)
@@ -92,22 +92,22 @@ impl Server {
         session_id: SessionId,
         session_name: String,
         viewport_size: Size,
-        now: SystemTime,
+        session_started_at: SystemTime,
         client_id: Option<ClientId>,
     ) -> Result<(), PtyError> {
-        let backend = Arc::clone(self.get_pty_backend());
+        let pty_backend = Arc::clone(self.get_pty_backend());
 
         let tab_id = TabId::new();
         let pane_id = PaneId::new();
 
         // Chrome owns one row above and below the pane region.
-        let spawn_size = compute_root_pane_pty_size(
+        let root_pane_pty_size = compute_root_pane_pty_size(
             pane_id,
             compute_default_pane_area_size(viewport_size),
             self.get_pane_sizing(),
         );
 
-        // Launch the shell first: on failure nothing is registered. The spec
+        // Launch the shell first: on failure nothing is registered. The spawn spec
         // carries the pane's in-session identity vars in its env overlay.
         let mut spawn_spec = self.build_default_shell_spec(None, BTreeMap::new());
         spawn_spec
@@ -118,7 +118,7 @@ impl Server {
                 pane_id,
                 koshi_paths::resolve_runtime_directory().as_deref(),
             ));
-        backend.spawn_pane(pane_id, spawn_spec, spawn_size)?;
+        pty_backend.spawn_pane(pane_id, spawn_spec, root_pane_pty_size)?;
 
         // Assemble the session with its client, if any, viewing the tab we are
         // about to create, then commit the tab + root pane and focus the client
@@ -126,10 +126,16 @@ impl Server {
         let mut session = Session::from_identity_and_client_registry(
             session_id,
             session_name,
-            now,
+            session_started_at,
             ClientRegistry::new(),
         );
-        attach_first_client(&mut session, client_id, viewport_size, tab_id, now);
+        attach_first_client(
+            &mut session,
+            client_id,
+            viewport_size,
+            tab_id,
+            session_started_at,
+        );
 
         let tab_name = generate_name(NameKind::Tab, |candidate| {
             session
@@ -137,14 +143,21 @@ impl Server {
                 .values()
                 .any(|tab| tab.get_tab_name() == candidate)
         });
-        let spec = NewPaneSpec {
+        let new_pane_spec = NewPaneSpec {
             working_directory: None,
             spawn_spec: None,
         };
-        let _ = tab_ops::commit_new_tab(&mut session, tab_id, pane_id, tab_name, client_id, spec);
+        let _ = tab_ops::commit_new_tab(
+            &mut session,
+            tab_id,
+            pane_id,
+            tab_name,
+            client_id,
+            new_pane_spec,
+        );
 
         self.session_by_id.insert(session_id, session);
-        self.park_pane_pty(pane_id, spawn_size);
+        self.park_pane_pty(pane_id, root_pane_pty_size);
         self.render_scheduler.invalidate();
 
         Ok(())
@@ -167,12 +180,12 @@ impl Server {
         session_id: SessionId,
         session_name: String,
         carried_pane_sizes: &[(PaneId, PtySize)],
-        now: SystemTime,
+        session_started_at: SystemTime,
     ) {
         let mut session = Session::from_identity_and_client_registry(
             session_id,
             session_name,
-            now,
+            session_started_at,
             ClientRegistry::new(),
         );
         for (pane_id, pty_size) in carried_pane_sizes {
@@ -182,12 +195,18 @@ impl Server {
                     .values()
                     .any(|tab| tab.get_tab_name() == candidate)
             });
-            let spec = NewPaneSpec {
+            let new_pane_spec = NewPaneSpec {
                 working_directory: None,
                 spawn_spec: None,
             };
-            let _ =
-                tab_ops::commit_new_tab(&mut session, TabId::new(), *pane_id, tab_name, None, spec);
+            let _ = tab_ops::commit_new_tab(
+                &mut session,
+                TabId::new(),
+                *pane_id,
+                tab_name,
+                None,
+                new_pane_spec,
+            );
             self.park_pane_pty(*pane_id, *pty_size);
         }
         self.session_by_id.insert(session_id, session);
@@ -221,7 +240,7 @@ impl Server {
         session_id: SessionId,
         template: ProfileTemplate,
         viewport_size: Size,
-        now: SystemTime,
+        session_started_at: SystemTime,
         client_id: Option<ClientId>,
     ) -> Result<(), ProfileLaunchError> {
         // This is the first session, so no existing name can collide.
@@ -231,7 +250,7 @@ impl Server {
             session_name,
             template,
             viewport_size,
-            now,
+            session_started_at,
             client_id,
         )
     }
@@ -251,11 +270,11 @@ impl Server {
         session_name: String,
         template: ProfileTemplate,
         viewport_size: Size,
-        now: SystemTime,
+        session_started_at: SystemTime,
         client_id: Option<ClientId>,
     ) -> Result<(), ProfileLaunchError> {
-        let backend = Arc::clone(self.get_pty_backend());
-        let tab_size = compute_default_pane_area_size(viewport_size);
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        let tab_pane_area_size = compute_default_pane_area_size(viewport_size);
 
         // Plan every tab: a pane id per leaf, the spawn spec and the record
         // spec for each, and the live tree the ids fill.
@@ -264,12 +283,12 @@ impl Server {
             let leaf_templates = tab_template.root.list_leaf_templates();
             let mut pane_ids = Vec::with_capacity(leaf_templates.len());
             let mut spawn_specs = Vec::with_capacity(leaf_templates.len());
-            let mut pane_specs = Vec::with_capacity(leaf_templates.len());
+            let mut new_pane_specs = Vec::with_capacity(leaf_templates.len());
             for terminal_template in leaf_templates {
-                let (spawn_spec, pane_spec) = self.build_profile_pane_specs(terminal_template);
+                let (spawn_spec, new_pane_spec) = self.build_profile_pane_specs(terminal_template);
                 pane_ids.push(PaneId::new());
                 spawn_specs.push(spawn_spec);
-                pane_specs.push(pane_spec);
+                new_pane_specs.push(new_pane_spec);
             }
             let layout_tree = tab_template
                 .root
@@ -280,26 +299,26 @@ impl Server {
                 pane_ids,
                 layout_tree,
                 spawn_specs,
-                pane_specs,
+                new_pane_specs,
                 focused_leaf_index: tab_template.focused_leaf_index,
             });
         }
 
         // Spawn every pane before committing anything. On any failure, kill
         // what was already spawned so no orphan child outlives the launch.
-        let runtime_directory = koshi_paths::resolve_runtime_directory();
-        let mut spawned_pane_sizes: Vec<(PaneId, PtySize)> = Vec::new();
+        let runtime_directory_path = koshi_paths::resolve_runtime_directory();
+        let mut spawned_pane_pty_sizes: Vec<(PaneId, PtySize)> = Vec::new();
         let pane_sizing = self.get_pane_sizing();
         for tab_plan in &profile_tab_plans {
             // Size every pane against the tab's whole tree, so a multi-pane tab
             // spawns each child at its tiled slice rather than the full tab.
-            let pane_spawn_sizes =
-                compute_pane_spawn_sizes(&tab_plan.layout_tree, tab_size, pane_sizing);
+            let pane_spawn_pty_sizes =
+                compute_pane_spawn_sizes(&tab_plan.layout_tree, tab_pane_area_size, pane_sizing);
             for (pane_id, spawn_spec) in tab_plan.pane_ids.iter().zip(&tab_plan.spawn_specs) {
-                let pane_size = pane_spawn_sizes
+                let pane_pty_size = pane_spawn_pty_sizes
                     .iter()
                     .find(|(candidate_pane_id, _)| candidate_pane_id == pane_id)
-                    .map(|(_, size)| *size)
+                    .map(|(_, pane_pty_size)| *pane_pty_size)
                     .expect("every planned pane id is a leaf of its own tab tree");
                 let mut pane_spawn_spec = spawn_spec.clone();
                 pane_spawn_spec
@@ -308,16 +327,16 @@ impl Server {
                         session_id,
                         client_id,
                         *pane_id,
-                        runtime_directory.as_deref(),
+                        runtime_directory_path.as_deref(),
                     ));
-                match backend.spawn_pane(*pane_id, pane_spawn_spec, pane_size) {
-                    Ok(()) => spawned_pane_sizes.push((*pane_id, pane_size)),
+                match pty_backend.spawn_pane(*pane_id, pane_spawn_spec, pane_pty_size) {
+                    Ok(()) => spawned_pane_pty_sizes.push((*pane_id, pane_pty_size)),
                     Err(spawn_error) => {
                         // Group-kill each already-spawned pane so a profile
                         // command that forked or backgrounded a child leaves no
                         // orphaned grandchild behind when the launch aborts.
-                        for (spawned_pane_id, _) in &spawned_pane_sizes {
-                            let _ = backend.kill_pane(*spawned_pane_id, KillPolicy::Tree);
+                        for (spawned_pane_id, _) in &spawned_pane_pty_sizes {
+                            let _ = pty_backend.kill_pane(*spawned_pane_id, KillPolicy::Tree);
                         }
                         return Err(ProfileLaunchError::Spawn(spawn_error));
                     }
@@ -334,11 +353,17 @@ impl Server {
         let mut session = Session::from_identity_and_client_registry(
             session_id,
             session_name,
-            now,
+            session_started_at,
             ClientRegistry::new(),
         );
         session.should_start_locked = template.is_locked;
-        attach_first_client(&mut session, client_id, viewport_size, focused_tab_id, now);
+        attach_first_client(
+            &mut session,
+            client_id,
+            viewport_size,
+            focused_tab_id,
+            session_started_at,
+        );
 
         // Commit each tab; only the focused one moves the client onto it.
         for (tab_index, tab_plan) in profile_tab_plans.into_iter().enumerate() {
@@ -353,8 +378,8 @@ impl Server {
                 tab_plan.tab_id,
                 tab_ops::ProfileTab {
                     pane_ids: tab_plan.pane_ids,
-                    layout: tab_plan.layout_tree,
-                    specs: tab_plan.pane_specs,
+                    layout_tree: tab_plan.layout_tree,
+                    new_pane_specs: tab_plan.new_pane_specs,
                     focused_leaf_index: tab_plan.focused_leaf_index,
                 },
                 tab_name,
@@ -364,15 +389,20 @@ impl Server {
         }
 
         self.session_by_id.insert(session_id, session);
-        for (pane_id, pane_size) in spawned_pane_sizes {
-            self.park_pane_pty(pane_id, pane_size);
+        for (pane_id, pane_pty_size) in spawned_pane_pty_sizes {
+            self.park_pane_pty(pane_id, pane_pty_size);
         }
 
         // Resize the focused tab's panes to the rects a client viewing it
         // solves; a tab no client views keeps the sizes its panes spawned at.
         // The resize events are dropped.
-        let mut events = Vec::new();
-        self.reflow_tab_if_viewed(backend.as_ref(), session_id, focused_tab_id, &mut events);
+        let mut reflow_events = Vec::new();
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            session_id,
+            focused_tab_id,
+            &mut reflow_events,
+        );
         self.render_scheduler.invalidate();
 
         Ok(())
@@ -380,7 +410,7 @@ impl Server {
 }
 
 /// Attach `client_id` to a freshly seeded `session` as its only client,
-/// viewing `tab_id`, sized to `viewport_size`, stamped `now`, with a generated
+/// viewing `tab_id`, sized to `viewport_size`, stamped `session_started_at`, with a generated
 /// client label, colour `0`, and origin [`ClientOrigin::Local`]. A `None`
 /// `client_id` attaches nobody and leaves `session` untouched.
 ///
@@ -397,7 +427,7 @@ fn attach_first_client(
     client_id: Option<ClientId>,
     viewport_size: Size,
     tab_id: TabId,
-    now: SystemTime,
+    session_started_at: SystemTime,
 ) {
     let Some(client_id) = client_id else {
         return;
@@ -407,7 +437,7 @@ fn attach_first_client(
     let mut client = Client::from_attachment(
         client_id,
         session.session_id,
-        now,
+        session_started_at,
         viewport_size,
         None,
         tab_id,
@@ -421,7 +451,7 @@ fn attach_first_client(
     session.attach_client(client);
 }
 
-/// One tab's fully-planned genesis: the ids, tree, and specs its panes need.
+/// One profile tab's pane ids, layout tree, spawn requests, pane records, and focus.
 struct ProfileTabPlan {
     /// The tab's id.
     tab_id: TabId,
@@ -432,7 +462,7 @@ struct ProfileTabPlan {
     /// The spawn request for each pane, parallel to `pane_ids`.
     spawn_specs: Vec<SpawnSpec>,
     /// The record spec for each pane, parallel to `pane_ids`.
-    pane_specs: Vec<NewPaneSpec>,
+    new_pane_specs: Vec<NewPaneSpec>,
     /// Index into `pane_ids` of the pane that starts focused.
     focused_leaf_index: usize,
 }
@@ -459,20 +489,20 @@ impl Server {
                     environment_variables,
                     shell_kind: ShellKind::from_program(&command_template.program),
                 };
-                let pane_spec = NewPaneSpec {
+                let new_pane_spec = NewPaneSpec {
                     working_directory,
                     spawn_spec: Some(spawn_spec.clone()),
                 };
-                (spawn_spec, pane_spec)
+                (spawn_spec, new_pane_spec)
             }
             None => {
                 let spawn_spec =
                     self.build_default_shell_spec(working_directory.clone(), environment_variables);
-                let pane_spec = NewPaneSpec {
+                let new_pane_spec = NewPaneSpec {
                     working_directory,
                     spawn_spec: None,
                 };
-                (spawn_spec, pane_spec)
+                (spawn_spec, new_pane_spec)
             }
         }
     }

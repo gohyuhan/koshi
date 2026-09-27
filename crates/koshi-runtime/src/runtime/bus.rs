@@ -4,7 +4,7 @@
 //! the receiving end of that subscriber's own bounded queue.
 //! `EventBus::publish` clones each event into every subscriber's queue, `EventBus::try_send_frame` puts the frame the session composed
 //! for one subscriber's client on that subscriber's own queue,
-//! `EventBus::try_send_answer` puts one round of mouse answers on it,
+//! `EventBus::try_send_mouse_answer` puts one round of mouse answers on it,
 //! `EventBus::try_send_host_write` puts bytes aimed at that subscriber's own
 //! terminal on it, and `EventBus::try_send_switch` puts the session that
 //! subscriber's client moves to on it. Delivery
@@ -418,7 +418,7 @@ impl EventBus {
         }
     }
 
-    pub(crate) fn try_send_answer(
+    pub(crate) fn try_send_mouse_answer(
         &mut self,
         subscriber_id: SubscriberId,
         request_id: u64,
@@ -555,53 +555,55 @@ impl EventBus {
 pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
     match delivery {
         Delivery::Event(event) => match event {
-            Event::PaneCreated(payload) => Some(SessionEvent::PaneCreated {
-                pane_id: payload.pane_id,
-                tab_id: payload.tab_id,
+            Event::PaneCreated(pane_created) => Some(SessionEvent::PaneCreated {
+                pane_id: pane_created.pane_id,
+                tab_id: pane_created.tab_id,
             }),
-            Event::PaneProcessExited(payload) => Some(SessionEvent::PaneProcessExited {
-                pane_id: payload.pane_id,
-                exit_code: payload.exit_code,
-                signal: payload.signal,
+            Event::PaneProcessExited(pane_process_exit) => Some(SessionEvent::PaneProcessExited {
+                pane_id: pane_process_exit.pane_id,
+                exit_code: pane_process_exit.exit_code,
+                signal: pane_process_exit.signal,
             }),
-            Event::PaneClosing(payload) => Some(SessionEvent::PaneClosing {
-                pane_id: payload.pane_id,
+            Event::PaneClosing(pane_closing) => Some(SessionEvent::PaneClosing {
+                pane_id: pane_closing.pane_id,
             }),
-            Event::PaneRemoved(payload) => Some(SessionEvent::PaneRemoved {
-                pane_id: payload.pane_id,
-                tab_id: payload.tab_id,
+            Event::PaneRemoved(pane_removed) => Some(SessionEvent::PaneRemoved {
+                pane_id: pane_removed.pane_id,
+                tab_id: pane_removed.tab_id,
             }),
-            Event::PaneFocused(payload) => Some(SessionEvent::PaneFocused {
-                client_id: payload.client_id,
-                tab_id: payload.tab_id,
-                pane_id: payload.pane_id,
-                previous_pane_id: payload.previous_pane_id,
+            Event::PaneFocused(pane_focused) => Some(SessionEvent::PaneFocused {
+                client_id: pane_focused.client_id,
+                tab_id: pane_focused.tab_id,
+                pane_id: pane_focused.pane_id,
+                previous_pane_id: pane_focused.previous_pane_id,
             }),
-            Event::LayoutChanged(payload) => Some(SessionEvent::LayoutChanged {
-                tab_id: payload.tab_id,
+            Event::LayoutChanged(layout_changed) => Some(SessionEvent::LayoutChanged {
+                tab_id: layout_changed.tab_id,
             }),
-            Event::PanePlacementCommitted(payload) => Some(SessionEvent::PanePlacementCommitted {
-                command_id: payload.command_id,
-                source_pane_id: payload.source_pane_id,
-                source_tab_id: payload.source_tab_id,
-                destination_tab_id: payload.destination_tab_id,
-                placement_target: payload.placement_target.clone(),
+            Event::PanePlacementCommitted(pane_placement_committed) => {
+                Some(SessionEvent::PanePlacementCommitted {
+                    command_id: pane_placement_committed.command_id,
+                    source_pane_id: pane_placement_committed.source_pane_id,
+                    source_tab_id: pane_placement_committed.source_tab_id,
+                    destination_tab_id: pane_placement_committed.destination_tab_id,
+                    placement_target: pane_placement_committed.placement_target.clone(),
+                })
+            }
+            Event::TabCreated(tab_created) => Some(SessionEvent::TabCreated {
+                tab_id: tab_created.tab_id,
             }),
-            Event::TabCreated(payload) => Some(SessionEvent::TabCreated {
-                tab_id: payload.tab_id,
+            Event::TabClosed(tab_closed) => Some(SessionEvent::TabClosed {
+                tab_id: tab_closed.tab_id,
             }),
-            Event::TabClosed(payload) => Some(SessionEvent::TabClosed {
-                tab_id: payload.tab_id,
+            Event::TabFocused(tab_focused) => Some(SessionEvent::TabFocused {
+                client_id: tab_focused.client_id,
+                tab_id: tab_focused.tab_id,
+                previous_tab_id: tab_focused.previous_tab_id,
             }),
-            Event::TabFocused(payload) => Some(SessionEvent::TabFocused {
-                client_id: payload.client_id,
-                tab_id: payload.tab_id,
-                previous_tab_id: payload.previous_tab_id,
-            }),
-            Event::TabMoved(payload) => Some(SessionEvent::TabMoved {
-                tab_id: payload.tab_id,
-                previous_tab_index: payload.previous_tab_index,
-                new_tab_index: payload.new_tab_index,
+            Event::TabMoved(tab_moved) => Some(SessionEvent::TabMoved {
+                tab_id: tab_moved.tab_id,
+                previous_tab_index: tab_moved.previous_tab_index,
+                new_tab_index: tab_moved.new_tab_index,
             }),
             Event::Quit(_) => Some(SessionEvent::Quit),
             Event::Restarting => Some(SessionEvent::Restarting),

@@ -83,7 +83,7 @@ use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIRECTORY_FLAG};
 use koshi_runtime::server::is_binary_runnable;
 
 use crate::process;
-use crate::remote_listener::{self, AdmissionAsk, Admitted, WarningRateLimiter};
+use crate::remote_listener::{self, AdmissionAsk, RemoteConnectionAdmission, WarningRateLimiter};
 use crate::session_server::{ALLOW_OTHER_USERS_FLAG, SESSION_SERVER_SUBCOMMAND};
 
 #[cfg(test)]
@@ -856,7 +856,7 @@ fn admit_remote_token(
     remote_state: &mut RemoteState,
     connection_token: &ConnectionToken,
     remote_connection_stream: TcpStream,
-) -> Option<Admitted> {
+) -> Option<RemoteConnectionAdmission> {
     if remote_state.admitted_remote_connections.len() >= MAX_LIVE_REMOTE_CONNECTION_COUNT {
         if remote_state.full_capacity_warning.is_due(Instant::now()) {
             tracing::warn!(
@@ -882,7 +882,7 @@ fn admit_remote_token(
             tcp_stream: remote_connection_stream,
             remote_connection_id,
         });
-    Some(Admitted {
+    Some(RemoteConnectionAdmission {
         scope,
         remote_connection_id,
     })

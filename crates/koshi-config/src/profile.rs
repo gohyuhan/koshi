@@ -104,7 +104,7 @@ pub fn parse_profile(
         tab_leaf_count: 0,
         focused_tab_leaf_spans: Vec::new(),
     };
-    let profile_template = profile_walker.parse_document(&profile_document);
+    let profile_template = profile_walker.parse_profile_document(&profile_document);
     match profile_template {
         Some(profile_template) if profile_walker.profile_diagnostics.is_empty() => {
             Ok(profile_template)
@@ -214,7 +214,10 @@ impl ProfileDocumentWalker<'_> {
     /// Parses the whole document: a `version` node, one or more `tab` nodes,
     /// and an optional bare `lock` marker. Returns `None` when the file has no
     /// usable tab list.
-    fn parse_document(&mut self, profile_document: &KdlDocument) -> Option<ProfileTemplate> {
+    fn parse_profile_document(
+        &mut self,
+        profile_document: &KdlDocument,
+    ) -> Option<ProfileTemplate> {
         let mut has_version_node = false;
         let mut tab_templates = Vec::new();
         let mut focused_tab_index: Option<usize> = None;
@@ -248,7 +251,7 @@ impl ProfileDocumentWalker<'_> {
                     }
                 }
                 "lock" => {
-                    let is_bare_marker = self.validate_marker(kdl_node, "lock");
+                    let is_bare_marker = self.is_marker_valid(kdl_node, "lock");
                     if has_lock_node {
                         self.record_diagnostic(
                             kdl_node.span(),
@@ -322,7 +325,7 @@ impl ProfileDocumentWalker<'_> {
             for child_node in tab_children.nodes() {
                 match child_node.name().value() {
                     "focus" => {
-                        if self.validate_marker(child_node, "focus") {
+                        if self.is_marker_valid(child_node, "focus") {
                             if is_tab_focused {
                                 self.record_diagnostic(
                                     child_node.span(),
@@ -468,7 +471,7 @@ impl ProfileDocumentWalker<'_> {
                     }
                     "env" => self.parse_environment_node(child_node, &mut environment_variables),
                     _ => {
-                        if !self.parse_leaf_config_node(
+                        if !self.is_leaf_config_node_handled(
                             child_node,
                             parent_context,
                             &mut leaf_config,
@@ -532,7 +535,7 @@ impl ProfileDocumentWalker<'_> {
                     child_slots.push(
                         self.parse_structural_node(child_node, ProfileNodeContext::Directional),
                     );
-                } else if !self.parse_sizing_node(child_node, &mut split_sizing) {
+                } else if !self.is_sizing_node_handled(child_node, &mut split_sizing) {
                     let setting_key = format!("{split_name}.{child_node_name}");
                     self.record_diagnostic(
                         child_node.span(),
@@ -621,7 +624,7 @@ impl ProfileDocumentWalker<'_> {
                         self.parse_structural_node(child_node, ProfileNodeContext::Directional),
                     );
                     member_leaf_indices.push(None);
-                } else if !self.parse_sizing_node(child_node, &mut stack_sizing) {
+                } else if !self.is_sizing_node_handled(child_node, &mut stack_sizing) {
                     self.record_diagnostic(
                         child_node.span(),
                         format_unknown_key(
@@ -693,7 +696,7 @@ impl ProfileDocumentWalker<'_> {
     /// Handles a `pane` config child: sizing, `focus`, `expanded`. Sizing
     /// outside a `Directional` slot is reported and
     /// discarded. Returns `false` when the node is none of the three.
-    fn parse_leaf_config_node(
+    fn is_leaf_config_node_handled(
         &mut self,
         config_node: &KdlNode,
         parent_context: ProfileNodeContext,
@@ -701,7 +704,7 @@ impl ProfileDocumentWalker<'_> {
     ) -> bool {
         match config_node.name().value() {
             "focus" => {
-                if self.validate_marker(config_node, "focus") {
+                if self.is_marker_valid(config_node, "focus") {
                     match leaf_config.focus_span {
                         None => leaf_config.focus_span = Some(config_node.span()),
                         Some(_) => self.record_diagnostic(
@@ -713,7 +716,7 @@ impl ProfileDocumentWalker<'_> {
                 true
             }
             "expanded" => {
-                if self.validate_marker(config_node, "expanded") {
+                if self.is_marker_valid(config_node, "expanded") {
                     if parent_context != ProfileNodeContext::Stack {
                         self.record_diagnostic(
                             config_node.span(),
@@ -732,7 +735,7 @@ impl ProfileDocumentWalker<'_> {
                 true
             }
             _ => {
-                if self.parse_sizing_node(config_node, &mut leaf_config.leaf_sizing) {
+                if self.is_sizing_node_handled(config_node, &mut leaf_config.leaf_sizing) {
                     if parent_context != ProfileNodeContext::Directional {
                         self.validate_sizing_context(&leaf_config.leaf_sizing, parent_context);
                         leaf_config.leaf_sizing = ProfileSizing::default();
@@ -776,7 +779,11 @@ impl ProfileDocumentWalker<'_> {
 
     /// Handles one sizing node (`size`, `weight`, `min`, `preferred`) into
     /// `sizing`. Returns `false` when the node is not a sizing node.
-    fn parse_sizing_node(&mut self, sizing_node: &KdlNode, sizing: &mut ProfileSizing) -> bool {
+    fn is_sizing_node_handled(
+        &mut self,
+        sizing_node: &KdlNode,
+        sizing: &mut ProfileSizing,
+    ) -> bool {
         match sizing_node.name().value() {
             "size" => {
                 if sizing.primary_constraint.is_some() {
@@ -795,10 +802,10 @@ impl ProfileDocumentWalker<'_> {
                         sizing_node.span(),
                         "this node already has `size` or `weight`; give one of the two, once",
                     );
-                } else if let Some(weight_value) =
+                } else if let Some(flex_weight) =
                     self.parse_cell_count_in_range(sizing_node, "weight", u32::MAX)
                 {
-                    match SizeConstraint::from_flex_weight(weight_value) {
+                    match SizeConstraint::from_flex_weight(flex_weight) {
                         Ok(size_constraint) => {
                             sizing.primary_constraint = Some((size_constraint, sizing_node.span()));
                         }
@@ -840,8 +847,8 @@ impl ProfileDocumentWalker<'_> {
     /// like `"60%"` is a percentage of the parent's axis.
     fn parse_size_constraint(&mut self, size_node: &KdlNode) -> Option<SizeConstraint> {
         let size_argument = self.find_single_argument(size_node, "size")?;
-        if let Some(cell_count_value) = size_argument.value().as_integer() {
-            let Ok(cell_count) = u16::try_from(cell_count_value) else {
+        if let Some(cell_count_integer) = size_argument.value().as_integer() {
+            let Ok(cell_count) = u16::try_from(cell_count_integer) else {
                 self.record_diagnostic(
                     size_argument.span(),
                     format!("`size` cells must fit 1-{}", u16::MAX),
@@ -859,7 +866,7 @@ impl ProfileDocumentWalker<'_> {
         if let Some(percentage_text) = size_argument.value().as_string() {
             let Some(percentage) = percentage_text
                 .strip_suffix('%')
-                .and_then(|digits| digits.parse::<u8>().ok())
+                .and_then(|percentage_digits| percentage_digits.parse::<u8>().ok())
             else {
                 self.record_diagnostic(
                     size_argument.span(),
@@ -994,15 +1001,15 @@ impl ProfileDocumentWalker<'_> {
             self.record_diagnostic(environment_node.span(), "`env` takes no children");
             return;
         }
-        let environment_values: Vec<&str> = environment_node
+        let environment_arguments: Vec<&str> = environment_node
             .entries()
             .iter()
             .filter(|environment_entry| environment_entry.name().is_none())
             .filter_map(|environment_entry| environment_entry.value().as_string())
             .collect();
         let ([environment_variable_name, environment_variable_value], true) = (
-            environment_values.as_slice(),
-            environment_values.len() == environment_node.entries().len(),
+            environment_arguments.as_slice(),
+            environment_arguments.len() == environment_node.entries().len(),
         ) else {
             self.record_diagnostic(
                 environment_node.span(),
@@ -1055,8 +1062,8 @@ impl ProfileDocumentWalker<'_> {
         setting_name: &str,
     ) -> Option<String> {
         let string_argument = self.find_single_argument(setting_node, setting_name)?;
-        let string_value = match string_argument.value().as_string() {
-            Some(string_value) if !string_value.is_empty() => string_value,
+        let setting_text = match string_argument.value().as_string() {
+            Some(setting_text) if !setting_text.is_empty() => setting_text,
             _ => {
                 self.record_diagnostic(
                     string_argument.span(),
@@ -1065,14 +1072,14 @@ impl ProfileDocumentWalker<'_> {
                 return None;
             }
         };
-        if string_value.contains('\0') {
+        if setting_text.contains('\0') {
             self.record_diagnostic(
                 string_argument.span(),
                 format!("`{setting_name}` must not contain a NUL character"),
             );
             return None;
         }
-        Some(string_value.to_string())
+        Some(setting_text.to_string())
     }
 
     /// Validates a node down to exactly one positional argument and no
@@ -1103,7 +1110,7 @@ impl ProfileDocumentWalker<'_> {
 
     /// Validates a bare marker node (`focus`, `expanded`): no arguments,
     /// no properties, no children. Returns whether the marker is usable.
-    fn validate_marker(&mut self, marker_node: &KdlNode, marker_name: &str) -> bool {
+    fn is_marker_valid(&mut self, marker_node: &KdlNode, marker_name: &str) -> bool {
         if marker_node.entries().is_empty() && marker_node.children().is_none() {
             true
         } else {

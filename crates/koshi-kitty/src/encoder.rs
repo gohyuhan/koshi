@@ -15,13 +15,13 @@ use thiserror::Error;
 const KITTY_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Kitty;
 
 /// The largest compressed byte slice in one Kitty graphics chunk.
-const KITTY_IMAGE_CHUNK_BYTE_COUNT: usize = 3_072;
+const KITTY_COMPRESSED_CHUNK_BYTE_COUNT: usize = 3_072;
 
 /// The largest number of Kitty graphics chunks emitted by one advance.
 const KITTY_IMAGE_CHUNK_COUNT_PER_STEP: usize = 16;
 
 /// The largest number of raw RGBA bytes compressed by one advance.
-const KITTY_COMPRESSION_INPUT_BYTE_COUNT_PER_STEP: usize = 262_144;
+const KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP: usize = 262_144;
 
 /// The scratch output capacity used by one compression pass.
 const KITTY_COMPRESSION_OUTPUT_BYTE_COUNT: usize = 65_536;
@@ -130,7 +130,7 @@ pub struct KittyUpload {
     decoded_image: Arc<DecodedImage>,
     image_number: u32,
     compressor: Compress,
-    input_byte_offset: usize,
+    rgba_input_byte_offset: usize,
     compressed_bytes: Vec<u8>,
     compressed_byte_offset: usize,
     is_compression_complete: bool,
@@ -144,7 +144,7 @@ impl fmt::Debug for KittyUpload {
             .field("image_width_pixels", &self.decoded_image.pixel_width)
             .field("image_height_pixels", &self.decoded_image.pixel_height)
             .field("image_number", &self.image_number)
-            .field("input_byte_offset", &self.input_byte_offset)
+            .field("rgba_input_byte_offset", &self.rgba_input_byte_offset)
             .field("compressed_byte_count", &self.compressed_bytes.len())
             .field("compressed_byte_offset", &self.compressed_byte_offset)
             .field("is_compression_complete", &self.is_compression_complete)
@@ -171,7 +171,7 @@ impl KittyUpload {
             decoded_image,
             image_number,
             compressor: Compress::new(Compression::fast(), true),
-            input_byte_offset: 0,
+            rgba_input_byte_offset: 0,
             compressed_bytes,
             compressed_byte_offset: 0,
             is_compression_complete: false,
@@ -194,7 +194,7 @@ impl KittyUpload {
                 .compressed_bytes
                 .len()
                 .saturating_sub(self.compressed_byte_offset)
-                <= KITTY_IMAGE_CHUNK_BYTE_COUNT
+                <= KITTY_COMPRESSED_CHUNK_BYTE_COUNT
         {
             self.compress_next_input_step()?;
         }
@@ -209,60 +209,62 @@ impl KittyUpload {
                 .truncate(self.compressed_bytes.len() - self.compressed_byte_offset);
             self.compressed_byte_offset = 0;
         }
-        let input_end_byte_offset = self
-            .input_byte_offset
-            .saturating_add(KITTY_COMPRESSION_INPUT_BYTE_COUNT_PER_STEP)
+        let rgba_input_end_byte_offset = self
+            .rgba_input_byte_offset
+            .saturating_add(KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP)
             .min(self.decoded_image.rgba_bytes.len());
-        let flush_mode = if input_end_byte_offset == self.decoded_image.rgba_bytes.len() {
-            FlushCompress::Finish
-        } else {
-            FlushCompress::None
-        };
+        let compression_flush_mode =
+            if rgba_input_end_byte_offset == self.decoded_image.rgba_bytes.len() {
+                FlushCompress::Finish
+            } else {
+                FlushCompress::None
+            };
         let mut compression_output_bytes = [0u8; KITTY_COMPRESSION_OUTPUT_BYTE_COUNT];
         loop {
-            let input_byte_count_before = self.compressor.total_in();
-            let output_byte_count_before = self.compressor.total_out();
+            let rgba_input_byte_count_before = self.compressor.total_in();
+            let compressed_output_byte_count_before = self.compressor.total_out();
             let compression_status = self
                 .compressor
                 .compress(
-                    &self.decoded_image.rgba_bytes[self.input_byte_offset..input_end_byte_offset],
+                    &self.decoded_image.rgba_bytes
+                        [self.rgba_input_byte_offset..rgba_input_end_byte_offset],
                     &mut compression_output_bytes,
-                    flush_mode,
+                    compression_flush_mode,
                 )
                 .map_err(|compression_error| KittyOutputError::Compression {
                     compression_message: compression_error.to_string(),
                 })?;
-            let consumed_byte_count = usize::try_from(
+            let consumed_rgba_byte_count = usize::try_from(
                 self.compressor
                     .total_in()
-                    .saturating_sub(input_byte_count_before),
+                    .saturating_sub(rgba_input_byte_count_before),
             )
             .map_err(|_| KittyOutputError::CompressionNoProgress)?;
-            let produced_byte_count = usize::try_from(
+            let produced_compressed_byte_count = usize::try_from(
                 self.compressor
                     .total_out()
-                    .saturating_sub(output_byte_count_before),
+                    .saturating_sub(compressed_output_byte_count_before),
             )
             .map_err(|_| KittyOutputError::CompressionNoProgress)?;
-            self.input_byte_offset = self
-                .input_byte_offset
-                .checked_add(consumed_byte_count)
+            self.rgba_input_byte_offset = self
+                .rgba_input_byte_offset
+                .checked_add(consumed_rgba_byte_count)
                 .ok_or(KittyOutputError::CompressionNoProgress)?;
             self.compressed_bytes
-                .try_reserve(produced_byte_count)
+                .try_reserve(produced_compressed_byte_count)
                 .map_err(|_| KittyOutputError::AllocationFailed)?;
             self.compressed_bytes
-                .extend_from_slice(&compression_output_bytes[..produced_byte_count]);
+                .extend_from_slice(&compression_output_bytes[..produced_compressed_byte_count]);
             if compression_status == Status::StreamEnd {
                 self.is_compression_complete = true;
                 return Ok(());
             }
-            if self.input_byte_offset == input_end_byte_offset
-                && input_end_byte_offset < self.decoded_image.rgba_bytes.len()
+            if self.rgba_input_byte_offset == rgba_input_end_byte_offset
+                && rgba_input_end_byte_offset < self.decoded_image.rgba_bytes.len()
             {
                 return Ok(());
             }
-            if consumed_byte_count == 0 && produced_byte_count == 0 {
+            if consumed_rgba_byte_count == 0 && produced_compressed_byte_count == 0 {
                 return Err(KittyOutputError::CompressionNoProgress);
             }
         }
@@ -277,30 +279,33 @@ impl KittyUpload {
         let mut is_first_chunk = !self.has_started_transmission;
         let mut written_chunk_count = 0usize;
         while written_chunk_count < KITTY_IMAGE_CHUNK_COUNT_PER_STEP {
-            let available_byte_count = self
+            let available_compressed_byte_count = self
                 .compressed_bytes
                 .len()
                 .saturating_sub(next_compressed_byte_offset);
-            if available_byte_count == 0
+            if available_compressed_byte_count == 0
                 || (!self.is_compression_complete
-                    && available_byte_count <= KITTY_IMAGE_CHUNK_BYTE_COUNT)
+                    && available_compressed_byte_count <= KITTY_COMPRESSED_CHUNK_BYTE_COUNT)
             {
                 break;
             }
-            let chunk_byte_count = available_byte_count.min(KITTY_IMAGE_CHUNK_BYTE_COUNT);
-            let chunk_end_byte_offset = next_compressed_byte_offset + chunk_byte_count;
+            let compressed_chunk_byte_count =
+                available_compressed_byte_count.min(KITTY_COMPRESSED_CHUNK_BYTE_COUNT);
+            let compressed_chunk_end_byte_offset =
+                next_compressed_byte_offset + compressed_chunk_byte_count;
             let has_more_chunks = !self.is_compression_complete
-                || chunk_end_byte_offset < self.compressed_bytes.len();
+                || compressed_chunk_end_byte_offset < self.compressed_bytes.len();
             write_upload_chunk(
                 &mut kitty_output_bytes,
                 &self.decoded_image,
                 self.image_number,
                 is_first_chunk,
                 has_more_chunks,
-                &self.compressed_bytes[next_compressed_byte_offset..chunk_end_byte_offset],
+                &self.compressed_bytes
+                    [next_compressed_byte_offset..compressed_chunk_end_byte_offset],
             )?;
             is_first_chunk = false;
-            next_compressed_byte_offset = chunk_end_byte_offset;
+            next_compressed_byte_offset = compressed_chunk_end_byte_offset;
             written_chunk_count += 1;
         }
         if kitty_output_bytes.is_empty() {

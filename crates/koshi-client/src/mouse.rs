@@ -1862,10 +1862,10 @@ fn advance_resize_anchor(
     }
 }
 
-/// `coordinate_value` moved `cell_delta` cells, saturating at both ends of the cell range, so a
+/// `cell_coordinate` moved `cell_delta` cells, saturating at both ends of the cell range, so a
 /// border at a viewport edge cannot wrap.
-fn shift_cell_coordinate(coordinate_value: u16, cell_delta: i32) -> u16 {
-    (i32::from(coordinate_value) + cell_delta).clamp(0, i32::from(u16::MAX)) as u16
+fn shift_cell_coordinate(cell_coordinate: u16, cell_delta: i32) -> u16 {
+    (i32::from(cell_coordinate) + cell_delta).clamp(0, i32::from(u16::MAX)) as u16
 }
 
 /// `mouse_kind` with its button replaced by `mouse_button`. Only a drag or release carries a
@@ -1874,6 +1874,6 @@ fn replace_mouse_button(mouse_kind: MouseKind, mouse_button: MouseButton) -> Mou
     match mouse_kind {
         MouseKind::Drag(_) => MouseKind::Drag(mouse_button),
         MouseKind::Release(_) => MouseKind::Release(mouse_button),
-        other => other,
+        unchanged_mouse_kind => unchanged_mouse_kind,
     }
 }

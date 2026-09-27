@@ -20,7 +20,7 @@ pub fn compute_oldest_event_time(
     current_time: SystemTime,
     since_duration: Option<Duration>,
 ) -> Option<SystemTime> {
-    since_duration.and_then(|window| current_time.checked_sub(window))
+    since_duration.and_then(|event_age_duration| current_time.checked_sub(event_age_duration))
 }
 
 /// Keep the events recorded at or after `oldest_event_time` whose name contains
@@ -38,14 +38,18 @@ pub fn filter_recent_events(
     let event_name_filter_lowercase = event_name_filter.map(str::to_lowercase);
     recent_events
         .into_iter()
-        .filter(|event| {
-            oldest_event_time.is_none_or(|oldest_event_time| event.occurred_at >= oldest_event_time)
+        .filter(|recent_event| {
+            oldest_event_time
+                .is_none_or(|oldest_event_time| recent_event.occurred_at >= oldest_event_time)
         })
-        .filter(|event| {
+        .filter(|recent_event| {
             event_name_filter_lowercase
                 .as_ref()
                 .is_none_or(|event_name_filter| {
-                    event.event_name.to_lowercase().contains(event_name_filter)
+                    recent_event
+                        .event_name
+                        .to_lowercase()
+                        .contains(event_name_filter)
                 })
         })
         .collect()

@@ -1265,15 +1265,15 @@ impl CliCommand {
             } => {
                 // The text alone sits at the shell prompt; the text plus `\r`,
                 // the byte the Enter key sends, runs as a line.
-                let mut input_bytes = input_text.clone().into_bytes();
+                let mut pane_input_bytes = input_text.clone().into_bytes();
                 if !should_leave_input_at_prompt {
-                    input_bytes.push(b'\r');
+                    pane_input_bytes.push(b'\r');
                 }
                 (
                     "write-to-pane",
                     Command::WriteToPane(WriteToPaneArgs {
                         pane_id: *pane_id,
-                        input_bytes,
+                        pane_input_bytes,
                     }),
                 )
             }

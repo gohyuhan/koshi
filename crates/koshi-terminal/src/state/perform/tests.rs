@@ -111,7 +111,7 @@ fn print_at_the_last_column_parks_without_moving() {
 }
 
 #[test]
-fn exact_width_line_does_not_scroll_until_the_next_get_terminal_glyph() {
+fn exact_width_line_does_not_scroll_until_the_next_glyph_is_printed() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // row 0 full, parked
     terminal_state.print('d'); // forces the deferred wrap
@@ -1092,14 +1092,14 @@ fn sgr_blink_slow_and_rapid_both_set_one_flag() {
     process_terminal_bytes(&mut slow, b"\x1b[5m"); // 5: slow blink
     assert_eq!(
         slow.get_active_render().style,
-        build_style_with_mutator(|style| style.set_blink(true))
+        build_style_with_mutator(|style| style.set_blinking(true))
     );
 
     let mut rapid = build_terminal_state(5, 2);
     process_terminal_bytes(&mut rapid, b"\x1b[6m"); // 6: rapid blink — same flag
     assert_eq!(
         rapid.get_active_render().style,
-        build_style_with_mutator(|style| style.set_blink(true))
+        build_style_with_mutator(|style| style.set_blinking(true))
     );
 }
 
@@ -1109,7 +1109,7 @@ fn sgr_conceal_sets_the_conceal_attribute() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[8m");
     assert_eq!(
         terminal_state.get_active_render().style,
-        build_style_with_mutator(|style| style.set_conceal(true))
+        build_style_with_mutator(|style| style.set_concealed(true))
     );
 }
 
@@ -1119,7 +1119,7 @@ fn sgr_strike_sets_the_strike_attribute() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[9m");
     assert_eq!(
         terminal_state.get_active_render().style,
-        build_style_with_mutator(|style| style.set_strike(true))
+        build_style_with_mutator(|style| style.set_strikethrough(true))
     );
 }
 
@@ -1139,7 +1139,7 @@ fn sgr_overline_sets_the_attribute() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[53m");
     assert_eq!(
         terminal_state.get_active_render().style,
-        build_style_with_mutator(|style| style.set_overline(true))
+        build_style_with_mutator(|style| style.set_overlined(true))
     );
 }
 
@@ -1304,8 +1304,8 @@ fn sgr_new_attributes_stamp_onto_printed_glyphs() {
         cell.get_style(),
         build_style_with_mutator(|style| {
             style.set_faint(true);
-            style.set_strike(true);
-            style.set_blink(true);
+            style.set_strikethrough(true);
+            style.set_blinking(true);
             style.set_underline(UnderlineStyle::Double);
         })
     );
@@ -7048,10 +7048,10 @@ fn a_dcs_payload_prints_nothing() {
 #[test]
 fn an_overlong_sgr_is_dropped_without_touching_the_pen() {
     let mut terminal_state = build_terminal_state(5, 2);
-    let mut seq = Vec::from(&b"\x1b["[..]);
-    seq.extend(std::iter::repeat_n(&b"1;"[..], 40).flatten().copied());
-    seq.push(b'm'); // 40 bold codes: past vte's 32-parameter cap, flagged ignore
-    process_terminal_bytes(&mut terminal_state, &seq);
+    let mut sequence_bytes = Vec::from(&b"\x1b["[..]);
+    sequence_bytes.extend(std::iter::repeat_n(&b"1;"[..], 40).flatten().copied());
+    sequence_bytes.push(b'm'); // 40 bold codes: past vte's 32-parameter cap, flagged ignore
+    process_terminal_bytes(&mut terminal_state, &sequence_bytes);
     assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
@@ -7137,18 +7137,18 @@ fn ed_one_clears_the_prompt_marks_above_the_cursor_and_keeps_the_cursor_row() {
 
 #[test]
 fn el_two_clears_the_row_prompt_mark_and_the_partial_erases_keep_it() {
-    for (sequence, kept) in [
+    for (erase_sequence_bytes, should_keep_prompt_mark) in [
         (b"\x1b[2K".as_slice(), false),
         (b"\x1b[0K".as_slice(), true),
         (b"\x1b[1K".as_slice(), true),
     ] {
         let mut terminal_state = build_terminal_state(5, 3);
         process_terminal_bytes(&mut terminal_state, b"\x1b[2;3H\x1b]133;A\x07");
-        process_terminal_bytes(&mut terminal_state, sequence);
+        process_terminal_bytes(&mut terminal_state, erase_sequence_bytes);
         assert_eq!(
             terminal_state.get_active_grid().has_prompt_mark(1),
-            kept,
-            "{sequence:?}"
+            should_keep_prompt_mark,
+            "{erase_sequence_bytes:?}"
         );
     }
 }

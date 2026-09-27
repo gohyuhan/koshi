@@ -21,8 +21,8 @@ use crate::size::SizeWeight;
 
 /// The split axis a cardinal direction runs on: [`SplitDirection::Horizontal`]
 /// for `Left` and `Right`, [`SplitDirection::Vertical`] for `Up` and `Down`.
-pub(crate) fn compute_split_direction(direction: Direction) -> SplitDirection {
-    match direction {
+pub(crate) fn compute_split_direction(cardinal_direction: Direction) -> SplitDirection {
+    match cardinal_direction {
         Direction::Left | Direction::Right => SplitDirection::Horizontal,
         Direction::Up | Direction::Down => SplitDirection::Vertical,
     }
@@ -52,8 +52,8 @@ impl LayoutNode {
     fn collect_leaf_pane_ids(&self, leaf_pane_ids: &mut Vec<PaneId>) {
         match self {
             Self::Pane(pane_id) => leaf_pane_ids.push(*pane_id),
-            Self::Split(split) => {
-                for child_node in &split.children {
+            Self::Split(split_node) => {
+                for child_node in &split_node.children {
                     child_node.collect_leaf_pane_ids(leaf_pane_ids);
                 }
             }
@@ -65,7 +65,7 @@ impl LayoutNode {
     pub fn has_pane(&self, pane_id: PaneId) -> bool {
         match self {
             Self::Pane(candidate_pane_id) => *candidate_pane_id == pane_id,
-            Self::Split(split) => split
+            Self::Split(split_node) => split_node
                 .children
                 .iter()
                 .any(|child_node| child_node.has_pane(pane_id)),
@@ -76,13 +76,13 @@ impl LayoutNode {
     /// `None` when the pane is not inside any stack.
     pub fn find_containing_stack_mut(&mut self, pane_id: PaneId) -> Option<&mut SplitNode> {
         let pane_path = self.find_pane_path(pane_id)?;
-        let deepest_stack_depth = (0..pane_path.len()).rev().find(|&stack_depth| {
+        let deepest_stack_path_depth = (0..pane_path.len()).rev().find(|&pane_path_depth| {
             matches!(
-                self.get_node_at_path(&pane_path[..stack_depth]),
-                LayoutNode::Split(split) if split.direction == SplitDirection::Stacked
+                self.get_node_at_path(&pane_path[..pane_path_depth]),
+                LayoutNode::Split(split_node) if split_node.direction == SplitDirection::Stacked
             )
         })?;
-        Some(self.get_split_at_path_mut(&pane_path[..deepest_stack_depth]))
+        Some(self.get_split_at_path_mut(&pane_path[..deepest_stack_path_depth]))
     }
 
     /// The child index taken at each split from this node down to the leaf
@@ -98,9 +98,9 @@ impl LayoutNode {
         ) -> bool {
             match layout_node {
                 LayoutNode::Pane(layout_pane_id) => *layout_pane_id == pane_id,
-                LayoutNode::Split(split) => {
-                    for (child_index, child_node) in split.children.iter().enumerate() {
-                        pane_path.push(child_index);
+                LayoutNode::Split(split_node) => {
+                    for (split_child_index, child_node) in split_node.children.iter().enumerate() {
+                        pane_path.push(split_child_index);
                         if find_pane_in_subtree(child_node, pane_id, pane_path) {
                             return true;
                         }
@@ -120,11 +120,11 @@ impl LayoutNode {
     /// Panics when `layout_path` steps into a pane or past a split's last child.
     pub(crate) fn get_node_at_path(&self, layout_path: &[usize]) -> &LayoutNode {
         let mut layout_node = self;
-        for &child_index in layout_path {
-            let LayoutNode::Split(split) = layout_node else {
+        for &split_child_index in layout_path {
+            let LayoutNode::Split(split_node) = layout_node else {
                 unreachable!("layout path was built over this tree");
             };
-            layout_node = &split.children[child_index];
+            layout_node = &split_node.children[split_child_index];
         }
         layout_node
     }
@@ -132,11 +132,11 @@ impl LayoutNode {
     /// Mutable variant of [`LayoutNode::get_node_at_path`].
     pub(crate) fn get_node_at_path_mut(&mut self, layout_path: &[usize]) -> &mut LayoutNode {
         let mut layout_node = self;
-        for &child_index in layout_path {
-            let LayoutNode::Split(split) = layout_node else {
+        for &split_child_index in layout_path {
+            let LayoutNode::Split(split_node) = layout_node else {
                 unreachable!("layout path was built over this tree");
             };
-            layout_node = &mut split.children[child_index];
+            layout_node = &mut split_node.children[split_child_index];
         }
         layout_node
     }
@@ -145,7 +145,7 @@ impl LayoutNode {
     /// Panics when the node at `layout_path` is a pane.
     pub(crate) fn get_split_at_path(&self, layout_path: &[usize]) -> &SplitNode {
         match self.get_node_at_path(layout_path) {
-            LayoutNode::Split(split) => split,
+            LayoutNode::Split(split_node) => split_node,
             LayoutNode::Pane(_) => unreachable!("layout path was built over this tree"),
         }
     }
@@ -153,7 +153,7 @@ impl LayoutNode {
     /// Mutable variant of [`LayoutNode::get_split_at_path`].
     pub(crate) fn get_split_at_path_mut(&mut self, layout_path: &[usize]) -> &mut SplitNode {
         match self.get_node_at_path_mut(layout_path) {
-            LayoutNode::Split(split) => split,
+            LayoutNode::Split(split_node) => split_node,
             LayoutNode::Pane(_) => unreachable!("layout path was built over this tree"),
         }
     }
@@ -216,15 +216,15 @@ impl SplitNode {
             .min(self.children.len().saturating_sub(1))
     }
 
-    /// `true` when the child at `child_index` is collapsed to its one-row header:
-    /// this split is `Stacked` and `child_index` is not
+    /// `true` when the child at `split_child_index` is collapsed to its one-row header:
+    /// this split is `Stacked` and `split_child_index` is not
     /// [`SplitNode::get_active_child_index`]. Always `false` for a directional
-    /// split, and `false` for a `child_index` past the last child.
+    /// split, and `false` for a `split_child_index` past the last child.
     #[must_use]
-    pub fn is_child_collapsed(&self, child_index: usize) -> bool {
+    pub fn is_child_collapsed(&self, split_child_index: usize) -> bool {
         self.direction == SplitDirection::Stacked
-            && child_index < self.children.len()
-            && child_index != self.get_active_child_index()
+            && split_child_index < self.children.len()
+            && split_child_index != self.get_active_child_index()
     }
 }
 

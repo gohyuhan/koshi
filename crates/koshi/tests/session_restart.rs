@@ -432,15 +432,15 @@ fn send_terminal_line(
     pane_id: PaneId,
     terminal_line: &str,
 ) {
-    let mut input_bytes = terminal_line.as_bytes().to_vec();
-    input_bytes.push(b'\r');
+    let mut pane_input_bytes = terminal_line.as_bytes().to_vec();
+    pane_input_bytes.push(b'\r');
     submit_session_command(
         connection,
         session_id,
         client_id,
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(pane_id),
-            input_bytes,
+            pane_input_bytes,
         }),
     );
 }
@@ -1247,7 +1247,7 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
         CommandSource::from_key_binding(attached_client_stream.client_id),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(input_pane_id),
-            input_bytes: b"typed\r".to_vec(),
+            pane_input_bytes: b"typed\r".to_vec(),
         }),
     );
     attached_client_stream

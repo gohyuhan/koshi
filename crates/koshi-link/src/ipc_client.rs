@@ -124,11 +124,13 @@ pub fn submit_external_command_via_runtime_directory(
 /// process's own, read here at send time, so the new pane opens where the
 /// command was run. A command that already names a directory is left alone,
 /// and every other command carries none.
-fn capture_current_working_directory(mut command: Command) -> Command {
+fn apply_current_working_directory_to_command(mut command: Command) -> Command {
     let working_directory = match &mut command {
-        Command::NewPane(command_args) => &mut command_args.working_directory,
-        Command::NewTab(command_args) => &mut command_args.working_directory,
-        Command::RunCommandPane(command_args) => &mut command_args.working_directory,
+        Command::NewPane(new_pane_arguments) => &mut new_pane_arguments.working_directory,
+        Command::NewTab(new_tab_arguments) => &mut new_tab_arguments.working_directory,
+        Command::RunCommandPane(run_command_pane_arguments) => {
+            &mut run_command_pane_arguments.working_directory
+        }
         _ => return command,
     };
     if working_directory.is_none() {
@@ -148,7 +150,7 @@ fn submit_command_envelope(
     command_source: CommandSource,
     command: Command,
 ) -> Result<CommandResult, CliError> {
-    let prepared_command = capture_current_working_directory(command);
+    let prepared_command = apply_current_working_directory_to_command(command);
     let command_envelope =
         CommandEnvelope::from_parts(CommandId::new(), command_source, prepared_command);
     let ipc_request = IpcRequest {

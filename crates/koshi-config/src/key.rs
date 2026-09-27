@@ -284,7 +284,7 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
     }
 
     // No leading `<`: a single bare printable character.
-    let Some(bracketed_body) = chord_text.strip_prefix('<') else {
+    let Some(key_text_after_opening_bracket) = chord_text.strip_prefix('<') else {
         let mut chord_characters = chord_text.chars();
         let key_character = chord_characters.next().expect("chord_text is not empty");
         if chord_characters.next().is_some() {
@@ -297,7 +297,7 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
     };
 
     // Bracketed form: must close with `>`.
-    let Some(bracketed_key_text) = bracketed_body.strip_suffix('>') else {
+    let Some(bracketed_key_text) = key_text_after_opening_bracket.strip_suffix('>') else {
         return Err(create_key_parse_error(
             chord_text,
             KeyParseErrorKind::UnclosedBracket,

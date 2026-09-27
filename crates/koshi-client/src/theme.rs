@@ -37,19 +37,11 @@ pub fn resolve_theme(theme_config: &ThemeConfig) -> Theme {
 }
 
 /// A config color's `(r, g, b)` channels, for the theme's ramp endpoints.
-fn extract_rgb_channels(rgb_color_value: RgbColor) -> (u8, u8, u8) {
-    (
-        rgb_color_value.red,
-        rgb_color_value.green,
-        rgb_color_value.blue,
-    )
+fn extract_rgb_channels(rgb_color: RgbColor) -> (u8, u8, u8) {
+    (rgb_color.red, rgb_color.green, rgb_color.blue)
 }
 
 /// A config color as a ratatui truecolor.
-fn convert_rgb_color(rgb_color_value: RgbColor) -> Color {
-    Color::Rgb(
-        rgb_color_value.red,
-        rgb_color_value.green,
-        rgb_color_value.blue,
-    )
+fn convert_rgb_color(rgb_color: RgbColor) -> Color {
+    Color::Rgb(rgb_color.red, rgb_color.green, rgb_color.blue)
 }

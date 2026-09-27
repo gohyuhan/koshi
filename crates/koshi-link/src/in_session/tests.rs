@@ -15,10 +15,10 @@ fn build_environment_lookup(
 ) -> impl Fn(&str) -> Option<String> {
     let environment_variable_by_name: BTreeMap<String, String> = environment_variables
         .iter()
-        .map(|(environment_variable_name, environment_variable_value)| {
+        .map(|(environment_variable_name, environment_variable_text)| {
             (
                 environment_variable_name.to_string(),
-                environment_variable_value.to_string(),
+                environment_variable_text.to_string(),
             )
         })
         .collect();
@@ -32,19 +32,20 @@ fn build_environment_lookup(
 /// The full injected environment yields the full identity.
 #[test]
 fn full_environment_builds_the_full_identity() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[
-        ("KOSHI", "1"),
-        (
-            "KOSHI_SESSION_ID",
-            "session-0192f0c1-0000-7000-8000-000000000001",
-        ),
-        (
-            "KOSHI_CLIENT_ID",
-            "client-0192f0c1-0000-7000-8000-000000000002",
-        ),
-        ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
-    ]))
-    .expect("full environment parses");
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[
+            ("KOSHI", "1"),
+            (
+                "KOSHI_SESSION_ID",
+                "session-0192f0c1-0000-7000-8000-000000000001",
+            ),
+            (
+                "KOSHI_CLIENT_ID",
+                "client-0192f0c1-0000-7000-8000-000000000002",
+            ),
+            ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
+        ]))
+        .expect("full environment parses");
     assert_eq!(
         in_session_context,
         Some(InSessionContext {
@@ -59,11 +60,12 @@ fn full_environment_builds_the_full_identity() {
 /// linger in the environment.
 #[test]
 fn absent_marker_is_external_mode() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[(
-        "KOSHI_SESSION_ID",
-        "session-0192f0c1-0000-7000-8000-000000000001",
-    )]))
-    .expect("no marker parses");
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[(
+            "KOSHI_SESSION_ID",
+            "session-0192f0c1-0000-7000-8000-000000000001",
+        )]))
+        .expect("no marker parses");
     assert_eq!(in_session_context, None);
 }
 
@@ -72,7 +74,7 @@ fn absent_marker_is_external_mode() {
 #[test]
 fn empty_marker_still_claims_in_session_identity() {
     let in_session_error =
-        InSessionContext::from_lookup(build_environment_lookup(&[("KOSHI", "")]))
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[("KOSHI", "")]))
             .expect_err("marker without identity is rejected");
     assert_eq!(
         in_session_error.to_string(),
@@ -83,7 +85,7 @@ fn empty_marker_still_claims_in_session_identity() {
 /// A missing required session id is rejected, not treated as external mode.
 #[test]
 fn missing_session_id_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
     ]))
@@ -97,7 +99,7 @@ fn missing_session_id_is_rejected() {
 /// A missing required pane id is rejected.
 #[test]
 fn missing_pane_id_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         (
             "KOSHI_SESSION_ID",
@@ -114,7 +116,7 @@ fn missing_pane_id_is_rejected() {
 /// A malformed session id names the variable and the offending value.
 #[test]
 fn malformed_session_id_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", "garbage"),
         ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
@@ -130,7 +132,7 @@ fn malformed_session_id_is_rejected() {
 /// An id carrying the wrong entity prefix does not strip, so it is rejected.
 #[test]
 fn wrong_prefix_on_pane_id_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         (
             "KOSHI_SESSION_ID",
@@ -153,23 +155,24 @@ fn wrong_prefix_on_pane_id_is_rejected() {
 /// The optional client id may be absent; the identity still builds.
 #[test]
 fn absent_client_id_is_allowed() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[
-        ("KOSHI", "1"),
-        (
-            "KOSHI_SESSION_ID",
-            "session-0192f0c1-0000-7000-8000-000000000001",
-        ),
-        ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
-    ]))
-    .expect("absent client id parses")
-    .expect("in-session");
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[
+            ("KOSHI", "1"),
+            (
+                "KOSHI_SESSION_ID",
+                "session-0192f0c1-0000-7000-8000-000000000001",
+            ),
+            ("KOSHI_PANE_ID", "pane-0192f0c1-0000-7000-8000-000000000003"),
+        ]))
+        .expect("absent client id parses")
+        .expect("in-session");
     assert_eq!(in_session_context.client_id, None);
 }
 
 /// A client id that is present but malformed is rejected, never dropped.
 #[test]
 fn malformed_client_id_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         (
             "KOSHI_SESSION_ID",
@@ -188,14 +191,15 @@ fn malformed_client_id_is_rejected() {
 
 /// Bare UUID values without the entity prefix are accepted.
 #[test]
-fn bare_uuid_values_are_accepted() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[
-        ("KOSHI", "1"),
-        ("KOSHI_SESSION_ID", SESSION_UUID),
-        ("KOSHI_PANE_ID", PANE_UUID),
-    ]))
-    .expect("bare uuids parse")
-    .expect("in-session");
+fn bare_uuid_identifiers_are_accepted() {
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[
+            ("KOSHI", "1"),
+            ("KOSHI_SESSION_ID", SESSION_UUID),
+            ("KOSHI_PANE_ID", PANE_UUID),
+        ]))
+        .expect("bare uuids parse")
+        .expect("in-session");
     assert_eq!(
         in_session_context.session_id,
         SessionId::from_uuid(SESSION_UUID.parse().expect("uuid"))
@@ -209,14 +213,15 @@ fn bare_uuid_values_are_accepted() {
 /// A bare UUID in the optional client id is accepted, same as a prefixed one.
 #[test]
 fn a_bare_uuid_client_id_is_accepted() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[
-        ("KOSHI", "1"),
-        ("KOSHI_SESSION_ID", SESSION_UUID),
-        ("KOSHI_CLIENT_ID", CLIENT_UUID),
-        ("KOSHI_PANE_ID", PANE_UUID),
-    ]))
-    .expect("bare uuids parse")
-    .expect("in-session");
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[
+            ("KOSHI", "1"),
+            ("KOSHI_SESSION_ID", SESSION_UUID),
+            ("KOSHI_CLIENT_ID", CLIENT_UUID),
+            ("KOSHI_PANE_ID", PANE_UUID),
+        ]))
+        .expect("bare uuids parse")
+        .expect("in-session");
     assert_eq!(
         in_session_context.client_id,
         Some(ClientId::from_uuid(CLIENT_UUID.parse().expect("uuid")))
@@ -227,7 +232,7 @@ fn a_bare_uuid_client_id_is_accepted() {
 /// the message names the value, not the absence.
 #[test]
 fn an_empty_session_id_is_rejected_as_malformed() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", ""),
         ("KOSHI_PANE_ID", PANE_UUID),
@@ -243,7 +248,7 @@ fn an_empty_session_id_is_rejected_as_malformed() {
 /// An empty client id is present-but-malformed, never read as absent.
 #[test]
 fn an_empty_client_id_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", SESSION_UUID),
         ("KOSHI_CLIENT_ID", ""),
@@ -261,7 +266,7 @@ fn an_empty_client_id_is_rejected() {
 /// is the one reported.
 #[test]
 fn the_session_id_is_reported_before_the_missing_pane_id() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", "garbage"),
     ]))
@@ -277,7 +282,7 @@ fn the_session_id_is_reported_before_the_missing_pane_id() {
 /// the one reported.
 #[test]
 fn the_client_id_is_reported_before_the_missing_pane_id() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", SESSION_UUID),
         ("KOSHI_CLIENT_ID", "garbage"),
@@ -294,16 +299,17 @@ fn the_client_id_is_reported_before_the_missing_pane_id() {
 /// same id.
 #[test]
 fn upper_case_and_unhyphenated_uuids_are_accepted() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[
-        ("KOSHI", "1"),
-        (
-            "KOSHI_SESSION_ID",
-            "session-0192F0C1-0000-7000-8000-000000000001",
-        ),
-        ("KOSHI_PANE_ID", "pane-0192f0c1000070008000000000000003"),
-    ]))
-    .expect("upper-case and unhyphenated uuids parse")
-    .expect("in-session");
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[
+            ("KOSHI", "1"),
+            (
+                "KOSHI_SESSION_ID",
+                "session-0192F0C1-0000-7000-8000-000000000001",
+            ),
+            ("KOSHI_PANE_ID", "pane-0192f0c1000070008000000000000003"),
+        ]))
+        .expect("upper-case and unhyphenated uuids parse")
+        .expect("in-session");
     assert_eq!(
         in_session_context.session_id,
         SessionId::from_uuid(SESSION_UUID.parse().expect("uuid"))
@@ -314,11 +320,11 @@ fn upper_case_and_unhyphenated_uuids_are_accepted() {
     );
 }
 
-/// A value with a leading space is not trimmed, so it is rejected and echoed
+/// A pane id with a leading space is not trimmed, so it is rejected and echoed
 /// with the space.
 #[test]
-fn a_value_with_a_leading_space_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+fn a_pane_id_with_a_leading_space_is_rejected() {
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", SESSION_UUID),
         (
@@ -335,11 +341,11 @@ fn a_value_with_a_leading_space_is_rejected() {
     );
 }
 
-/// The entity prefix only strips with its `-` separator, so a value that runs
+/// The entity prefix only strips with its `-` separator, so an id that runs
 /// the prefix into the UUID is rejected.
 #[test]
 fn a_prefix_without_its_separator_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         (
             "KOSHI_SESSION_ID",
@@ -359,7 +365,7 @@ fn a_prefix_without_its_separator_is_rejected() {
 /// The entity prefix strips once, so a value carrying it twice is rejected.
 #[test]
 fn a_doubled_entity_prefix_is_rejected() {
-    let in_session_error = InSessionContext::from_lookup(build_environment_lookup(&[
+    let in_session_error = InSessionContext::from_environment_lookup(build_environment_lookup(&[
         ("KOSHI", "1"),
         ("KOSHI_SESSION_ID", SESSION_UUID),
         (
@@ -387,7 +393,7 @@ fn each_variable_is_read_once_and_in_order() {
         ("KOSHI_PANE_ID", PANE_UUID),
     ]);
     let environment_variable_reads = RefCell::new(Vec::new());
-    InSessionContext::from_lookup(|environment_variable_name| {
+    InSessionContext::from_environment_lookup(|environment_variable_name| {
         environment_variable_reads
             .borrow_mut()
             .push(environment_variable_name.to_string());
@@ -413,7 +419,7 @@ fn a_malformed_session_id_stops_before_the_client_and_pane_are_read() {
     let environment_variables =
         build_environment_lookup(&[("KOSHI", "1"), ("KOSHI_SESSION_ID", "garbage")]);
     let environment_variable_reads = RefCell::new(Vec::new());
-    let in_session_error = InSessionContext::from_lookup(|environment_variable_name| {
+    let in_session_error = InSessionContext::from_environment_lookup(|environment_variable_name| {
         environment_variable_reads
             .borrow_mut()
             .push(environment_variable_name.to_string());
@@ -435,12 +441,13 @@ fn a_malformed_session_id_stops_before_the_client_and_pane_are_read() {
 /// exactly as `KOSHI=1` does.
 #[test]
 fn a_marker_holding_zero_still_claims_in_session_identity() {
-    let in_session_context = InSessionContext::from_lookup(build_environment_lookup(&[
-        ("KOSHI", "0"),
-        ("KOSHI_SESSION_ID", SESSION_UUID),
-        ("KOSHI_PANE_ID", PANE_UUID),
-    ]))
-    .expect("the marker's value is not inspected");
+    let in_session_context =
+        InSessionContext::from_environment_lookup(build_environment_lookup(&[
+            ("KOSHI", "0"),
+            ("KOSHI_SESSION_ID", SESSION_UUID),
+            ("KOSHI_PANE_ID", PANE_UUID),
+        ]))
+        .expect("the marker's value is not inspected");
     assert_eq!(
         in_session_context,
         Some(InSessionContext {

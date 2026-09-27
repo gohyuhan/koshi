@@ -109,9 +109,9 @@ impl<'de> Deserialize<'de> for SixelPaletteChanges {
     where
         D: Deserializer<'de>,
     {
-        struct ChangesVisitor;
+        struct SixelPaletteChangesVisitor;
 
-        impl<'de> Visitor<'de> for ChangesVisitor {
+        impl<'de> Visitor<'de> for SixelPaletteChangesVisitor {
             type Value = SixelPaletteChanges;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -145,7 +145,7 @@ impl<'de> Deserialize<'de> for SixelPaletteChanges {
             }
         }
 
-        deserializer.deserialize_seq(ChangesVisitor)
+        deserializer.deserialize_seq(SixelPaletteChangesVisitor)
     }
 }
 
@@ -229,9 +229,9 @@ impl<'de> Deserialize<'de> for SixelPalette {
     where
         D: Deserializer<'de>,
     {
-        struct PaletteVisitor;
+        struct SixelPaletteVisitor;
 
-        impl<'de> Visitor<'de> for PaletteVisitor {
+        impl<'de> Visitor<'de> for SixelPaletteVisitor {
             type Value = SixelPalette;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -255,7 +255,7 @@ impl<'de> Deserialize<'de> for SixelPalette {
             }
         }
 
-        deserializer.deserialize_seq(PaletteVisitor)
+        deserializer.deserialize_seq(SixelPaletteVisitor)
     }
 }
 
@@ -284,14 +284,14 @@ impl IndexedImage {
 
     /// Resolve register indices and background cells into RGBA pixels.
     ///
-    /// Uses `background` for terminal-background cells and expands each raw
+    /// Uses `terminal_background_rgb` for terminal-background cells and expands each raw
     /// pixel by the normalized pixel aspect. Returns a graphics error for
     /// invalid or oversized dimensions, an invalid stored index, or an RGBA
     /// allocation failure.
     pub fn resolve_indexed_image(
         &self,
         palette: &SixelPalette,
-        terminal_background_color: [u8; 3],
+        terminal_background_rgb: [u8; 3],
     ) -> Result<DecodedImage, GraphicsError> {
         let indexed_width_pixels =
             usize::try_from(self.width_pixels).map_err(|_| build_image_too_large_error())?;
@@ -319,10 +319,10 @@ impl IndexedImage {
             .map_err(|_| build_decode_failure_error())?;
         rgba_bytes.resize(resolved_rgba_byte_count, 0);
 
-        for indexed_row in 0..indexed_height_pixels {
-            for indexed_column in 0..indexed_width_pixels {
+        for indexed_pixel_row_index in 0..indexed_height_pixels {
+            for indexed_pixel_column_index in 0..indexed_width_pixels {
                 let pixel_register_index = self.pixel_register_indices
-                    [indexed_row * indexed_width_pixels + indexed_column];
+                    [indexed_pixel_row_index * indexed_width_pixels + indexed_pixel_column_index];
                 let pixel_rgba_bytes = match pixel_register_index {
                     0..=255 => {
                         let [red, green, blue] =
@@ -331,24 +331,27 @@ impl IndexedImage {
                     }
                     SIXEL_UNTOUCHED => [0, 0, 0, 0],
                     SIXEL_TERMINAL_BACKGROUND => [
-                        terminal_background_color[0],
-                        terminal_background_color[1],
-                        terminal_background_color[2],
+                        terminal_background_rgb[0],
+                        terminal_background_rgb[1],
+                        terminal_background_rgb[2],
                         255,
                     ],
                     _ => return Err(build_decode_failure_error()),
                 };
-                let first_resolved_row = indexed_row * resolved_pixel_aspect_vertical;
-                let first_resolved_column = indexed_column * resolved_pixel_aspect_horizontal;
-                for resolved_row in
-                    first_resolved_row..first_resolved_row + resolved_pixel_aspect_vertical
+                let first_resolved_pixel_row_index =
+                    indexed_pixel_row_index * resolved_pixel_aspect_vertical;
+                let first_resolved_pixel_column_index =
+                    indexed_pixel_column_index * resolved_pixel_aspect_horizontal;
+                for resolved_row in first_resolved_pixel_row_index
+                    ..first_resolved_pixel_row_index + resolved_pixel_aspect_vertical
                 {
-                    let resolved_row_byte_offset =
-                        (resolved_row * resolved_width_pixels + first_resolved_column) * 4;
+                    let resolved_pixel_row_byte_offset = (resolved_row * resolved_width_pixels
+                        + first_resolved_pixel_column_index)
+                        * 4;
                     for resolved_column_offset in 0..resolved_pixel_aspect_horizontal {
-                        let resolved_byte_offset =
-                            resolved_row_byte_offset + resolved_column_offset * 4;
-                        rgba_bytes[resolved_byte_offset..resolved_byte_offset + 4]
+                        let resolved_rgba_byte_offset =
+                            resolved_pixel_row_byte_offset + resolved_column_offset * 4;
+                        rgba_bytes[resolved_rgba_byte_offset..resolved_rgba_byte_offset + 4]
                             .copy_from_slice(&pixel_rgba_bytes);
                     }
                 }
@@ -393,7 +396,7 @@ impl IndexedImage {
             || pixel_register_indices
                 .iter()
                 .copied()
-                .any(|register_index| register_index > SIXEL_MAX_INDEX)
+                .any(|pixel_register_index| pixel_register_index > SIXEL_MAX_INDEX)
         {
             return Err(build_invalid_dimensions_error());
         }
@@ -422,7 +425,7 @@ impl<'de> Deserialize<'de> for IndexedImage {
         struct IndexedImageFields {
             width_pixels: u32,
             height_pixels: u32,
-            pixel_register_indices: BoundedIndices,
+            pixel_register_indices: BoundedPixelRegisterIndices,
             pixel_aspect_vertical: u32,
             pixel_aspect_horizontal: u32,
         }
@@ -439,17 +442,17 @@ impl<'de> Deserialize<'de> for IndexedImage {
     }
 }
 
-struct BoundedIndices(Vec<u16>);
+struct BoundedPixelRegisterIndices(Vec<u16>);
 
-impl<'de> Deserialize<'de> for BoundedIndices {
+impl<'de> Deserialize<'de> for BoundedPixelRegisterIndices {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct IndicesVisitor;
+        struct PixelRegisterIndicesVisitor;
 
-        impl<'de> Visitor<'de> for IndicesVisitor {
-            type Value = BoundedIndices;
+        impl<'de> Visitor<'de> for PixelRegisterIndicesVisitor {
+            type Value = BoundedPixelRegisterIndices;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a bounded Sixel index sequence")
@@ -460,8 +463,8 @@ impl<'de> Deserialize<'de> for BoundedIndices {
                 A: SeqAccess<'de>,
             {
                 let mut pixel_register_indices = Vec::new();
-                while let Some(register_index) = sequence.next_element::<u16>()? {
-                    if register_index > SIXEL_MAX_INDEX {
+                while let Some(pixel_register_index) = sequence.next_element::<u16>()? {
+                    if pixel_register_index > SIXEL_MAX_INDEX {
                         return Err(de::Error::custom(
                             "Sixel indexed pixels contain an invalid register or sentinel",
                         ));
@@ -487,13 +490,13 @@ impl<'de> Deserialize<'de> for BoundedIndices {
                                 de::Error::custom("Sixel indexed pixels cannot be allocated")
                             })?;
                     }
-                    pixel_register_indices.push(register_index);
+                    pixel_register_indices.push(pixel_register_index);
                 }
-                Ok(BoundedIndices(pixel_register_indices))
+                Ok(BoundedPixelRegisterIndices(pixel_register_indices))
             }
         }
 
-        deserializer.deserialize_seq(IndicesVisitor)
+        deserializer.deserialize_seq(PixelRegisterIndicesVisitor)
     }
 }
 
@@ -1041,14 +1044,16 @@ fn parse_sixel_parameters(
     sixel_parameter_values
         .try_reserve(maximum_sixel_parameter_count)
         .map_err(|_| build_decode_failure_error())?;
-    for parameter_slice in sixel_parameter_bytes.split(|parameter_byte| *parameter_byte == b';') {
+    for sixel_parameter_slice in
+        sixel_parameter_bytes.split(|sixel_parameter_byte| *sixel_parameter_byte == b';')
+    {
         if sixel_parameter_values.len() == maximum_sixel_parameter_count {
             return Err(excess_parameter_error);
         }
-        sixel_parameter_values.push(if parameter_slice.is_empty() {
+        sixel_parameter_values.push(if sixel_parameter_slice.is_empty() {
             0
         } else {
-            parse_decimal_number(parameter_slice)?
+            parse_decimal_number(sixel_parameter_slice)?
         });
     }
     Ok(sixel_parameter_values)
@@ -1119,21 +1124,21 @@ fn can_image_dimensions_fit_limits(image_width_pixels: usize, image_height_pixel
 fn expand_indexed_dimensions(
     indexed_width_pixels: usize,
     indexed_height_pixels: usize,
-    aspect_vertical: u32,
-    aspect_horizontal: u32,
+    pixel_aspect_vertical: u32,
+    pixel_aspect_horizontal: u32,
 ) -> Result<(usize, usize, usize, usize), GraphicsError> {
-    let aspect_vertical =
-        usize::try_from(aspect_vertical).map_err(|_| build_image_too_large_error())?;
-    let aspect_horizontal =
-        usize::try_from(aspect_horizontal).map_err(|_| build_image_too_large_error())?;
-    if aspect_vertical == 0 || aspect_horizontal == 0 {
+    let pixel_aspect_vertical =
+        usize::try_from(pixel_aspect_vertical).map_err(|_| build_image_too_large_error())?;
+    let pixel_aspect_horizontal =
+        usize::try_from(pixel_aspect_horizontal).map_err(|_| build_image_too_large_error())?;
+    if pixel_aspect_vertical == 0 || pixel_aspect_horizontal == 0 {
         return Err(build_invalid_dimensions_error());
     }
     let resolved_width_pixels = indexed_width_pixels
-        .checked_mul(aspect_horizontal)
+        .checked_mul(pixel_aspect_horizontal)
         .ok_or_else(build_invalid_dimensions_error)?;
     let resolved_height_pixels = indexed_height_pixels
-        .checked_mul(aspect_vertical)
+        .checked_mul(pixel_aspect_vertical)
         .ok_or_else(build_invalid_dimensions_error)?;
     compute_rgba_byte_count(
         GraphicsProtocol::Sixel,
@@ -1143,18 +1148,18 @@ fn expand_indexed_dimensions(
     Ok((
         resolved_width_pixels,
         resolved_height_pixels,
-        aspect_vertical,
-        aspect_horizontal,
+        pixel_aspect_vertical,
+        pixel_aspect_horizontal,
     ))
 }
 
-fn compute_greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
-    while right != 0 {
-        let remainder = left % right;
-        left = right;
-        right = remainder;
+fn compute_greatest_common_divisor(mut left_factor: u32, mut right_factor: u32) -> u32 {
+    while right_factor != 0 {
+        let remainder = left_factor % right_factor;
+        left_factor = right_factor;
+        right_factor = remainder;
     }
-    left
+    left_factor
 }
 
 fn convert_hls_to_rgb(

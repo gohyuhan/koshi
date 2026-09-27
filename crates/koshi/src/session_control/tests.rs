@@ -459,7 +459,8 @@ fn a_name_selects_its_session() {
     ]);
 
     assert_eq!(
-        select_session_to_kill(&discovered_sessions, Some("quiet-lake")).expect("name matches"),
+        resolve_discovered_session_id(&discovered_sessions, Some("quiet-lake"))
+            .expect("name matches"),
         quiet_session_id
     );
 }
@@ -470,7 +471,7 @@ fn no_name_selects_the_only_running_session() {
     let quiet_session_id = quiet_session_overview.session.session_id;
 
     assert_eq!(
-        select_session_to_kill(
+        resolve_discovered_session_id(
             &build_complete_discovery(vec![quiet_session_overview]),
             None,
         )
@@ -481,30 +482,31 @@ fn no_name_selects_the_only_running_session() {
 
 #[test]
 fn an_unknown_name_uses_the_session_not_found_exit_code() {
-    let selection_error = select_session_to_kill(
+    let session_resolution_error = resolve_discovered_session_id(
         &build_complete_discovery(vec![build_session_overview("quiet-lake")]),
         Some("missing"),
     )
     .expect_err("name is absent");
 
     assert!(matches!(
-        &selection_error,
+        &session_resolution_error,
         CliError::SessionNotFound { session_name } if session_name == "missing"
     ));
     assert_eq!(
-        CliExitCode::from(&selection_error),
+        CliExitCode::from(&session_resolution_error),
         CliExitCode::SessionNotFound
     );
 }
 
 #[test]
 fn no_running_session_uses_the_session_not_found_exit_code() {
-    let selection_error = select_session_to_kill(&build_complete_discovery(Vec::new()), None)
-        .expect_err("nothing to kill");
+    let session_resolution_error =
+        resolve_discovered_session_id(&build_complete_discovery(Vec::new()), None)
+            .expect_err("nothing to kill");
 
-    assert!(matches!(selection_error, CliError::NoSessions));
+    assert!(matches!(session_resolution_error, CliError::NoSessions));
     assert_eq!(
-        CliExitCode::from(&selection_error),
+        CliExitCode::from(&session_resolution_error),
         CliExitCode::SessionNotFound
     );
 }
@@ -513,7 +515,7 @@ fn no_running_session_uses_the_session_not_found_exit_code() {
 fn duplicate_names_list_every_session_id() {
     let first_session_id = SessionId::from_uuid(Uuid::from_u128(1));
     let second_session_id = SessionId::from_uuid(Uuid::from_u128(2));
-    let selection_error = select_session_to_kill(
+    let session_resolution_error = resolve_discovered_session_id(
         &build_complete_discovery(vec![
             build_named_session_overview(first_session_id, "quiet-lake"),
             build_named_session_overview(second_session_id, "quiet-lake"),
@@ -522,7 +524,7 @@ fn duplicate_names_list_every_session_id() {
     )
     .expect_err("two sessions share the name");
 
-    let CliError::CommandRejected { reason, help } = selection_error else {
+    let CliError::CommandRejected { reason, help } = session_resolution_error else {
         panic!("expected a rejected command");
     };
     assert_eq!(reason, RejectReason::TargetAmbiguous);
@@ -536,7 +538,7 @@ fn duplicate_names_list_every_session_id() {
 
 #[test]
 fn several_sessions_need_a_name() {
-    let selection_error = select_session_to_kill(
+    let session_resolution_error = resolve_discovered_session_id(
         &build_complete_discovery(vec![
             build_session_overview("quiet-lake"),
             build_session_overview("amber-fox"),
@@ -545,7 +547,7 @@ fn several_sessions_need_a_name() {
     )
     .expect_err("several sessions need a name");
 
-    let CliError::CommandRejected { reason, help } = selection_error else {
+    let CliError::CommandRejected { reason, help } = session_resolution_error else {
         panic!("expected a rejected command");
     };
     assert_eq!(reason, RejectReason::TargetAmbiguous);
@@ -557,14 +559,14 @@ fn several_sessions_need_a_name() {
 
 #[test]
 fn an_incomplete_census_cannot_prove_a_name_is_unique() {
-    let selection_error = select_session_to_kill(
+    let session_resolution_error = resolve_discovered_session_id(
         &build_incomplete_discovery(vec![build_session_overview("quiet-lake")]),
         Some("quiet-lake"),
     )
     .expect_err("another session may share the name");
 
-    let CliError::IpcUnavailable { detail } = selection_error else {
-        panic!("expected IpcUnavailable, got {selection_error:?}");
+    let CliError::IpcUnavailable { detail } = session_resolution_error else {
+        panic!("expected IpcUnavailable, got {session_resolution_error:?}");
     };
     assert_eq!(
         detail,
@@ -574,14 +576,14 @@ fn an_incomplete_census_cannot_prove_a_name_is_unique() {
 
 #[test]
 fn an_incomplete_census_cannot_apply_the_count_rule() {
-    let selection_error = select_session_to_kill(
+    let session_resolution_error = resolve_discovered_session_id(
         &build_incomplete_discovery(vec![build_session_overview("quiet-lake")]),
         None,
     )
     .expect_err("another session may be running");
 
-    let CliError::IpcUnavailable { detail } = selection_error else {
-        panic!("expected IpcUnavailable, got {selection_error:?}");
+    let CliError::IpcUnavailable { detail } = session_resolution_error else {
+        panic!("expected IpcUnavailable, got {session_resolution_error:?}");
     };
     assert_eq!(
         detail,
