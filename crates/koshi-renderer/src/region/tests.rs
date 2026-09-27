@@ -24,6 +24,7 @@ fn build_render_snapshot() -> RenderSnapshot {
     let tab_id = TabId::new();
 
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -229,11 +230,13 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
         placement_status: None,
+        is_recovery_notice_visible: false,
     };
     let second_statusline_inputs = StatuslineInputs {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
         placement_status: None,
+        is_recovery_notice_visible: false,
     };
 
     assert!(

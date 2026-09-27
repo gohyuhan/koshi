@@ -318,6 +318,7 @@ fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
     let active_tab_id = TabId::new();
     let secondary_tab_id = TabId::new();
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -403,10 +404,11 @@ fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
 
 #[test]
 fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let mut expected_render_snapshot = build_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
+    expected_render_snapshot.is_recovery_notice_visible = true;
     assert_eq!(
         super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot)),
         expected_render_snapshot

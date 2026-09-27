@@ -28,7 +28,7 @@ pub fn solve_core_regions(viewport_size: Size) -> SolvedRegions {
 }
 
 /// The statusline facts needed to paint it: keybinding hints, the open key
-/// sequence, and viewer-local placement status.
+/// sequence, viewer-local placement status, and session recovery notice.
 ///
 /// This value excludes colors. [`crate::statusline_hints::draw_statusline`]
 /// takes the theme as its own argument.
@@ -42,6 +42,8 @@ pub(crate) struct StatuslineInputs<'a> {
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
     /// The viewer-local placement status, shown at the row's right edge.
     pub(crate) placement_status: Option<&'a PlacementStatus>,
+    /// Whether the session recovery notice takes the hint area.
+    pub(crate) is_recovery_notice_visible: bool,
 }
 
 /// The tabline facts needed to solve its geometry and paint it.

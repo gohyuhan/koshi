@@ -967,12 +967,13 @@ fn write_to_a_running_pane_delivers_the_bytes() {
         mut runtime,
         fake_pty_backend,
         _runtime_event_sender,
-        _session_id,
+        session_id,
         _client_id,
         _root_pane_id,
         pane_id_a,
         _size_a,
     ) = build_resize_fixture();
+    runtime.show_session_recovery_notice(session_id);
 
     // An explicit target on a live pane injects the bytes into its child and
     // completes with no events — the write is a side effect, not a state change.
@@ -996,6 +997,40 @@ fn write_to_a_running_pane_delivers_the_bytes() {
         fake_pty_backend.list_pane_write_bytes(pane_id_a).unwrap(),
         vec![vec![b'l', b's', b'\n']]
     );
+    assert!(!runtime.list_sessions()[&session_id].is_recovery_notice_visible);
+
+    runtime.show_session_recovery_notice(session_id);
+    let empty_write =
+        build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
+            pane_id: Some(pane_id_a),
+            input_bytes: Vec::new(),
+        }));
+    let empty_write_command_id = empty_write.command_id;
+    assert_eq!(
+        runtime.dispatch(empty_write),
+        CommandResult::Ok {
+            command_id: empty_write_command_id,
+            emitted_events: Vec::new(),
+        }
+    );
+    assert!(runtime.list_sessions()[&session_id].is_recovery_notice_visible);
+
+    fake_pty_backend.fail_writes_on(pane_id_a, PtyError::UnknownPane { pane_id: pane_id_a });
+    let failed_write =
+        build_sessionless_cli_command_envelope(Command::WriteToPane(WriteToPaneArgs {
+            pane_id: Some(pane_id_a),
+            input_bytes: vec![b'x'],
+        }));
+    let failed_write_command_id = failed_write.command_id;
+    assert_eq!(
+        runtime.dispatch(failed_write),
+        CommandResult::Rejected {
+            command_id: failed_write_command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane is not accepting input".to_string()),
+        }
+    );
+    assert!(runtime.list_sessions()[&session_id].is_recovery_notice_visible);
 }
 
 /// A commanded write has no visibility guard: the bytes reach the pane's child

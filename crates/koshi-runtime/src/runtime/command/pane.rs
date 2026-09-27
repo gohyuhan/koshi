@@ -1344,6 +1344,8 @@ impl Server {
         if !command_args.input_bytes.is_empty() {
             if let Some(client_id) = command_source.get_client_id() {
                 self.handle_input_reached_pane(client_id, pane_target.pane_id);
+            } else {
+                self.clear_session_recovery_notice_after_pane_input(pane_target.pane_id);
             }
         }
         Ok(TransactionScope::new().commit(command_id, &mut self.event_bus))

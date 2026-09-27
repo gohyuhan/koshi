@@ -18,7 +18,9 @@ use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{Command, CommandSource, NewPaneArgs, ToggleLockModeArgs};
-use koshi_core::event::{InputModeChanged, PaneFocused, PtyResized, SubscriberLagged};
+use koshi_core::event::{
+    InputModeChanged, PaneFocused, PaneProcessExited, PtyResized, SubscriberLagged,
+};
 use koshi_core::geometry::{Direction, PaneArea};
 use koshi_core::ids::{CommandId, TabId};
 use koshi_core::lock::LockMode;
@@ -76,6 +78,33 @@ fn boot_server() -> (Server, ClientId) {
         .bootstrap_local(SessionId::new(), TEST_VIEWPORT_SIZE, SystemTime::now())
         .expect("bootstrap");
     (server, client_id)
+}
+
+#[test]
+fn close_undriven_panes_uses_reported_exit_status_and_unobserved_fallback() {
+    for (reported_exit_status, expected_exit_code) in
+        [(Some(ExitStatus::ExitCode(7)), 7), (None, -1)]
+    {
+        let (mut server, _) = boot_server();
+        let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
+        server.live_pane_ids.remove(&pane_id);
+        let exit_status_by_pane_id = reported_exit_status
+            .map(|exit_status| HashMap::from([(pane_id, exit_status)]))
+            .unwrap_or_default();
+
+        let exit_events =
+            server.close_undriven_panes(HashSet::from([pane_id]), exit_status_by_pane_id);
+
+        assert_eq!(
+            exit_events.first(),
+            Some(&Event::PaneProcessExited(PaneProcessExited {
+                pane_id,
+                exit_code: Some(expected_exit_code),
+                signal: None,
+            }))
+        );
+        assert!(server.get_session_for_pane(pane_id).is_none());
+    }
 }
 
 /// Publish critical events until every subscriber's queue overflows and pauses
@@ -2026,6 +2055,7 @@ fn a_resumed_server_starts_with_every_carried_client_awaiting_its_own_attach() {
         None,
         carried_session_bytes,
         HashMap::new(),
+        HashMap::new(),
     );
 
     assert_eq!(
@@ -2124,6 +2154,7 @@ fn a_quit_applied_before_the_swap_is_carried_to_the_next_image() {
         None,
         body,
         HashMap::new(),
+        HashMap::new(),
     );
     assert!(resumed.is_quit_requested());
     assert!(
@@ -2152,6 +2183,7 @@ fn a_zero_grace_quit_is_still_zero_grace_after_the_swap() {
         receiver,
         None,
         body,
+        HashMap::new(),
         HashMap::new(),
     );
     assert!(resumed.is_quit_requested());
@@ -2197,6 +2229,7 @@ fn a_swap_with_no_quit_behind_it_comes_back_serving() {
         receiver,
         None,
         body,
+        HashMap::new(),
         HashMap::new(),
     );
     assert!(!resumed.is_quit_requested());
@@ -2735,6 +2768,7 @@ fn a_resumed_server_puts_every_carried_engine_back_with_its_undecoded_bytes() {
         None,
         body,
         HashMap::from([(root, carried_size)]),
+        HashMap::new(),
     );
 
     assert_eq!(resumed.terminal_engine_by_pane_id.len(), 1);
@@ -2782,6 +2816,7 @@ fn a_resumed_server_keeps_queued_graphics_events() {
                 row_count: 20,
             },
         )]),
+        HashMap::new(),
     );
 
     let engine = resumed
@@ -2850,6 +2885,7 @@ fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
                 row_count: 20,
             },
         )]),
+        HashMap::new(),
     );
     let events = resumed
         .terminal_engine_by_pane_id
@@ -2908,6 +2944,7 @@ fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
                 row_count: 20,
             },
         )]),
+        HashMap::new(),
     );
     resumed.handle_pty_output(
         root,

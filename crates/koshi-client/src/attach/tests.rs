@@ -137,6 +137,7 @@ fn build_test_painted_frame_with_viewport_size(viewport_size: Size) -> PaintedFr
 fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame {
     let active_tab_id = TabId::new();
     PaintedFrame {
+        is_recovery_notice_visible: false,
         session_snapshot: FrameSession {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -3749,6 +3750,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
         .expect("the test image placement is valid");
 
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,

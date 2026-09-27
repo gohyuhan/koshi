@@ -223,6 +223,7 @@ fn build_render_snapshot(content_pane_id: PaneId, empty_pane_id: PaneId) -> Rend
     let other_tab_id = TabId::new();
     let client_id = ClientId::new();
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 17,
@@ -732,6 +733,19 @@ fn an_image_placement_and_its_record_travel_in_separate_values() {
     );
     assert!(!image_transfer.image_record.display.should_move_cursor);
     assert_eq!(image_transfer.image_record.anchor_cell, (0, 2));
+}
+
+#[test]
+fn recovery_notice_visibility_travels_with_the_frame() {
+    let mut render_snapshot = build_render_snapshot(PaneId::new(), PaneId::new());
+    render_snapshot.is_recovery_notice_visible = true;
+
+    let visible_frame = build_wire_frame(&render_snapshot);
+    assert!(visible_frame.is_recovery_notice_visible);
+
+    render_snapshot.is_recovery_notice_visible = false;
+    let cleared_frame = build_wire_frame(&render_snapshot);
+    assert!(!cleared_frame.is_recovery_notice_visible);
 }
 
 #[test]

@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use koshi_client::input::KeyOutcome;
 use koshi_client::Client as ViewerClient;
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_pty::error::PtyError;
 
 use crate::server::Server;
 
@@ -38,6 +39,99 @@ use koshi_core::ids::CommandId;
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, DispatchPlan};
 use std::time::SystemTime;
+
+#[test]
+fn recovery_notice_clears_only_after_pane_input_succeeds() {
+    let (mut runtime, fake_pty_backend, client_id, _) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible
+    );
+
+    fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
+    runtime.handle_key_input(
+        client_id,
+        &build_key_input_for_chord(build_key_chord(ModFlags::NONE, 'x')),
+    );
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible
+    );
+
+    let (mut runtime, _, client_id, _) = build_test_runtime();
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+    runtime.handle_key_input(
+        client_id,
+        &build_key_input_for_chord(build_key_chord(ModFlags::NONE, 'x')),
+    );
+    assert!(
+        !runtime
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible
+    );
+}
+
+#[test]
+fn recovery_notice_stays_for_empty_or_failed_paste_and_clears_for_written_paste() {
+    let (mut runtime, fake_pty_backend, client_id, _) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+
+    runtime.handle_host_paste(client_id, "");
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("frame")
+            .is_recovery_notice_visible
+    );
+
+    fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
+    runtime.handle_host_paste(client_id, "failed");
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("frame")
+            .is_recovery_notice_visible
+    );
+
+    let (mut runtime, fake_pty_backend, client_id, _) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+    runtime.handle_host_paste(client_id, "ready");
+    assert_eq!(
+        fake_pty_backend.list_pane_write_bytes(pane_id),
+        Ok(vec![b"ready".to_vec()])
+    );
+    assert!(
+        !runtime
+            .build_snapshot(client_id)
+            .expect("frame")
+            .is_recovery_notice_visible
+    );
+}
 
 impl Server {
     /// Run the action a viewer's keypress resolved to, the way an attached

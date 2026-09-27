@@ -78,6 +78,7 @@ fn build_render_snapshot_with_images(
 ) -> RenderSnapshot {
     let active_tab_snapshot = &painted_frame.session_snapshot.active_tab_snapshot;
     RenderSnapshot {
+        is_recovery_notice_visible: painted_frame.is_recovery_notice_visible,
         session_snapshot: SessionSnapshot {
             session_id: painted_frame.session_snapshot.session_id,
             session_revision: painted_frame.session_snapshot.session_revision,

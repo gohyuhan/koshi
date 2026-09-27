@@ -41,8 +41,19 @@ impl Server {
     /// A forwarded mouse report drops the highlight itself and does not call
     /// this.
     pub(crate) fn handle_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
+        self.clear_session_recovery_notice_after_pane_input(pane_id);
         self.clear_selection_on_pane_input(client_id, pane_id);
         self.snap_view_to_bottom_on_input(client_id, pane_id);
+    }
+
+    /// Hide the recovery notice after a successful user write to a pane in its session.
+    pub(crate) fn clear_session_recovery_notice_after_pane_input(&mut self, pane_id: PaneId) {
+        if let Some(session) = self.get_session_for_pane_mut(pane_id) {
+            if session.is_recovery_notice_visible {
+                session.is_recovery_notice_visible = false;
+                self.render_scheduler.invalidate();
+            }
+        }
     }
 
     /// Return this client's scrollback view of `pane_id` to the newest line.
@@ -108,10 +119,13 @@ impl Server {
                 });
         let paste_output_bytes =
             crate::runtime::clipboard::build_paste_bytes(pasted_text, is_bracketed_paste_enabled);
-        let _ = self
+        if self
             .get_pty_backend()
-            .write_pane_input(pane_id, &paste_output_bytes);
-        self.handle_input_reached_pane(client_id, pane_id);
+            .write_pane_input(pane_id, &paste_output_bytes)
+            .is_ok()
+        {
+            self.handle_input_reached_pane(client_id, pane_id);
+        }
     }
 
     /// The pane a keystroke from `client_id` types into: the pane it has focused
@@ -189,8 +203,13 @@ impl Server {
         if key_bytes.is_empty() {
             return;
         }
-        let _ = self.get_pty_backend().write_pane_input(pane_id, &key_bytes);
-        self.handle_input_reached_pane(client_id, pane_id);
+        if self
+            .get_pty_backend()
+            .write_pane_input(pane_id, &key_bytes)
+            .is_ok()
+        {
+            self.handle_input_reached_pane(client_id, pane_id);
+        }
     }
 }
 

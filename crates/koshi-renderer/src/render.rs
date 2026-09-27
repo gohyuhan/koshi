@@ -202,6 +202,7 @@ pub fn render_frame(
                 keymap_hints: hints,
                 pending_key_sequence,
                 placement_status,
+                is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
             },
             theme,
             statusline_rect,

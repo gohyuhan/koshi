@@ -274,9 +274,12 @@ impl Server {
             .get_pty_backend()
             .write_pane_input(pane_id, &mouse_report_bytes)
             .is_ok();
+        if is_report_written {
+            self.clear_session_recovery_notice_after_pane_input(pane_id);
+        }
         // A wheel tick leaves the highlight standing; every other forwarded
         // report — click, drag, motion, release — drops it.
-        if !matches!(mouse_input.mouse_kind, MouseKind::Scroll(_)) {
+        if is_report_written && !matches!(mouse_input.mouse_kind, MouseKind::Scroll(_)) {
             self.clear_selection_on_pane_input(client_id, pane_id);
         }
         is_report_written
@@ -326,10 +329,13 @@ impl Server {
         for _ in 0..arrow_count {
             arrow_key_bytes_to_write.extend_from_slice(&arrow_key_bytes);
         }
-        if !arrow_key_bytes_to_write.is_empty() {
-            let _ = self
+        if !arrow_key_bytes_to_write.is_empty()
+            && self
                 .get_pty_backend()
-                .write_pane_input(pane_id, &arrow_key_bytes_to_write);
+                .write_pane_input(pane_id, &arrow_key_bytes_to_write)
+                .is_ok()
+        {
+            self.clear_session_recovery_notice_after_pane_input(pane_id);
         }
     }
 

@@ -23,6 +23,8 @@ use koshi_core::process::ExitStatus;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_renderer::snapshot::Delivery;
 use koshi_runtime::runtime::event::AttachAccepted;
+#[cfg(unix)]
+use koshi_runtime::runtime::event::SessionEnding;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use tempfile::TempDir;
@@ -745,6 +747,7 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
         None,
         decoded_resume_body,
         build_carried_pty_sizes(&read_resume_header),
+        HashMap::new(),
     );
 
     assert_eq!(
@@ -837,7 +840,7 @@ fn a_carried_descriptor_that_is_no_terminal_master_is_refused_and_left_open() {
 
     let take_back_error = take_one_pane_back(&pty_backend, &resume_header.carried_panes[0])
         .expect_err("a descriptor that is no terminal master must be refused");
-    let (_, pty_size_by_pane_id) = take_panes_back(
+    let (_, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -919,7 +922,7 @@ fn carried_panes_in_conflict_are_ended_and_reaped_and_their_shared_terminal_clos
         ],
     };
 
-    let (pty_backend, pty_size_by_pane_id) = take_panes_back(
+    let (pty_backend, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -1361,7 +1364,7 @@ fn a_pane_the_header_names_no_descriptor_for_refuses_to_be_taken_back() {
 
     let take_back_error = take_one_pane_back(&pty_backend, &carried_pane)
         .expect_err("a pane with no descriptor cannot be taken back");
-    let (_, pty_size_by_pane_id) = take_panes_back(
+    let (_, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -1405,7 +1408,7 @@ fn the_children_of_panes_not_taken_back_are_ended_and_reaped() {
         ],
     };
 
-    let (_, pty_size_by_pane_id) = take_panes_back(
+    let (_, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -1432,7 +1435,7 @@ fn a_header_naming_no_pane_is_taken_back_as_a_session_holding_none() {
         carried_panes: Vec::new(),
     };
 
-    let (pty_backend, pty_size_by_pane_id) = take_panes_back(
+    let (pty_backend, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -1787,7 +1790,7 @@ fn a_pane_naming_a_descriptor_this_process_does_not_hold_is_refused() {
 
     let take_back_error = take_one_pane_back(&pty_backend, &carried_pane)
         .expect_err("a descriptor this process does not hold cannot be taken back");
-    let (_, pty_size_by_pane_id) = take_panes_back(
+    let (_, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -2200,7 +2203,7 @@ fn carried_panes_in_conflict_leave_a_descriptor_that_is_no_terminal_master_open(
         carried_panes: vec![build_carried_pane_record(), build_carried_pane_record()],
     };
 
-    let (_, pty_size_by_pane_id) = take_panes_back(
+    let (_, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -2268,7 +2271,7 @@ fn a_pane_that_cannot_be_taken_back_leaves_every_other_pane_taken_back() {
         ],
     };
 
-    let (pty_backend, pty_size_by_pane_id) = take_panes_back(
+    let (pty_backend, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -2305,7 +2308,7 @@ fn a_pane_that_cannot_be_taken_back_leaves_every_other_pane_taken_back() {
 
 #[cfg(unix)]
 #[test]
-fn a_pane_whose_terminal_is_not_the_one_the_header_recorded_is_refused() {
+fn a_pane_whose_terminal_name_changed_is_refused_and_its_master_closes() {
     // A number can name a live pseudoterminal master that belongs to another
     // pane, which the kind check alone accepts. The recorded name is what tells
     // this pane's own master from any other.
@@ -2344,14 +2347,13 @@ fn a_pane_whose_terminal_is_not_the_one_the_header_recorded_is_refused() {
         )
     );
     assert_eq!(
-        find_terminal_master_name(terminal_master_file_descriptor),
-        Some(carried_terminal_name),
-        "the refused descriptor must be left open"
+        unsafe { libc::fcntl(terminal_master_file_descriptor, libc::F_GETFD) },
+        -1,
+        "the refused terminal master is closed"
     );
     assert_eq!(
-        unsafe { libc::close(terminal_master_file_descriptor) },
-        0,
-        "the test still owns the master it opened"
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EBADF)
     );
 }
 
@@ -2441,7 +2443,7 @@ fn two_carried_panes_naming_one_descriptor_are_neither_taken_back_and_it_is_clos
         ],
     };
 
-    let (pty_backend, pty_size_by_pane_id) = take_panes_back(
+    let (pty_backend, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -2580,7 +2582,7 @@ fn two_carried_records_naming_one_pane_are_neither_taken_back_and_both_terminals
         ],
     };
 
-    let (pty_backend, pty_size_by_pane_id) = take_panes_back(
+    let (pty_backend, pty_size_by_pane_id, _) = take_panes_back(
         &resume_header,
         Arc::new(InboxSink::from_event_sender(mpsc::channel().0)),
         &session_start,
@@ -3055,9 +3057,82 @@ fn a_carried_state_that_brings_no_pane_back_comes_back_as_one_fresh_shell_showin
     assert_eq!(fresh_pane_ids.len(), 1, "one fresh shell");
     assert_eq!(session.session_name, session_start.session_name);
     let screen_text = get_joined_screen_text(&session_server, fresh_pane_ids[0]);
+    session_server.handle_pty_output(fresh_pane_ids[0], b"\x1b[2J\x1b[H");
+    let attached_client = attach_test_client(&mut session_server);
+    assert!(
+        session_server
+            .build_snapshot(attached_client.client_id)
+            .expect("the new shell has a frame")
+            .is_recovery_notice_visible
+    );
+    assert_eq!(
+        get_joined_screen_text(&session_server, fresh_pane_ids[0]),
+        ""
+    );
     session_server.kill_all_panes();
     assert_eq!(
         screen_text,
-        "[koshi] The session could not be restored after the restart. Its panes were closed, and this is a new shell."
+        "[koshi] The session could not be restored after the restart. This is a new shell; the previous panes are unavailable."
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_last_carried_pane_exit_keeps_a_new_stream_live_and_a_carried_quit_ending() {
+    for (carried_quit, expected_ending) in [
+        (None, None),
+        (
+            Some(koshi_runtime::resume::CarriedQuit::Graceful),
+            Some(SessionEnding::Quit),
+        ),
+    ] {
+        let runtime_directory_fixture = build_short_runtime_directory();
+        let mut session_start = build_test_session_start(runtime_directory_fixture.path(), false);
+        let (mut previous_server, _, _) = build_test_server();
+        previous_server
+            .bootstrap_session(
+                session_start.session_id,
+                session_start.session_name.clone(),
+                STARTING_VIEWPORT,
+                SystemTime::now(),
+                None,
+            )
+            .expect("the previous session has one pane");
+        let previous_client_id = attach_test_client(&mut previous_server).client_id;
+        let (_, mut resume_body) = previous_server
+            .carry_out(&[])
+            .expect("the previous session can be carried");
+        resume_body.carried_quit = carried_quit;
+        let (resume_header, _) = build_empty_carried_state(&session_start);
+        let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+
+        let (mut session_server, _pty_owner, _ipc_server) = build_from_carried_state(
+            &resume_header,
+            Ok(resume_body),
+            &mut session_start,
+            Some(build_plain_shell_config()),
+            Arc::new(InboxSink::from_event_sender(runtime_event_sender.clone())),
+            runtime_event_receiver,
+            &runtime_event_sender,
+        )
+        .expect("the session opens a new shell");
+
+        let attached_client = attach_test_client(&mut session_server);
+        assert_eq!(attached_client.session_id, session_start.session_id);
+        assert_ne!(attached_client.client_id, previous_client_id);
+        assert_eq!(
+            attached_client.ending_notice.get_session_ending(),
+            expected_ending
+        );
+        assert_eq!(session_server.is_quit_requested(), carried_quit.is_some());
+        assert_eq!(session_server.is_awaiting_client(), carried_quit.is_some());
+        assert_eq!(
+            session_server.list_sessions()[&session_start.session_id]
+                .panes
+                .list_pane_records()
+                .count(),
+            1
+        );
+        session_server.kill_all_panes();
+    }
 }

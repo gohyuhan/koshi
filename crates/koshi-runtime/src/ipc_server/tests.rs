@@ -120,6 +120,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id,
             session_revision: 0,

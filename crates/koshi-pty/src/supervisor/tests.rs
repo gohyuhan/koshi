@@ -350,6 +350,74 @@ fn carried_pane_the_supervisor_does_not_hold_is_reported_as_ended() {
 }
 
 #[test]
+fn exits_before_the_pane_list_answer_leave_only_running_panes_claimed() {
+    let ended_listed_pane_id = PaneId::new();
+    let ended_missing_pane_id = PaneId::new();
+    let running_pane_id = PaneId::new();
+    let peer = FakeSupervisor::start_with_supervisor_results(
+        build_opening_supervisor_results(vec![
+            SupervisorPane {
+                pane_id: ended_listed_pane_id,
+                process_id: 4241,
+                pty_size: STANDARD_PTY_SIZE,
+            },
+            SupervisorPane {
+                pane_id: running_pane_id,
+                process_id: 4242,
+                pty_size: STANDARD_PTY_SIZE,
+            },
+        ]),
+        vec![
+            SupervisorEvent::Exited {
+                pane_id: ended_listed_pane_id,
+                exit_status: ExitStatus::ExitCode(7),
+            },
+            SupervisorEvent::Exited {
+                pane_id: ended_missing_pane_id,
+                exit_status: ExitStatus::ExitCode(3),
+            },
+        ],
+    );
+    let sink = RecordingSink::new();
+
+    let backend = SupervisorPtyBackend::connect(
+        &peer.supervisor_address,
+        ConnectionToken::from_secret("k7QxSecret"),
+        Arc::clone(&sink) as Arc<dyn PtySink>,
+        &[ended_listed_pane_id, ended_missing_pane_id, running_pane_id],
+    )
+    .expect("the backend opens the link");
+
+    assert_eq!(
+        sink.list_exit_statuses(),
+        vec![
+            (ended_listed_pane_id, ExitStatus::ExitCode(7)),
+            (ended_missing_pane_id, ExitStatus::ExitCode(3)),
+        ],
+        "each exit keeps its real status and is delivered once"
+    );
+    assert_eq!(
+        backend.list_carried_panes(),
+        vec![CarriedPtyPane {
+            pane_id: running_pane_id,
+            #[cfg(unix)]
+            terminal_fd: None,
+            process_id: 4242,
+            pty_size: STANDARD_PTY_SIZE,
+            exit_status: None,
+        }]
+    );
+    assert_eq!(
+        backend.take_pane_exit_statuses_at_connect(),
+        HashMap::from([
+            (ended_listed_pane_id, ExitStatus::ExitCode(7)),
+            (ended_missing_pane_id, ExitStatus::ExitCode(3)),
+        ])
+    );
+    assert_eq!(backend.take_pane_exit_statuses_at_connect(), HashMap::new());
+}
+
+#[test]
 fn opening_the_link_keeps_ends_and_kills_each_pane_difference() {
     // The image swap settles every difference at once: panes both sides agree
     // on are kept, panes only this side carried are reported ended, and panes

@@ -28,6 +28,8 @@ use crate::snapshot::{KeymapHints, PlacementStatus, PlacementStatusKind};
 use crate::theme::Theme;
 
 const REVERT_MARKER: &str = " keys! ";
+const RECOVERY_NOTICE: &str =
+    "Restore failed: new shell; previous panes unavailable. Input clears notice. ";
 
 /// Paint the statusline from [`StatuslineInputs`] in `theme`'s colors.
 /// `statusline_area` is the row to paint into `screen_buffer`.
@@ -35,17 +37,18 @@ const REVERT_MARKER: &str = " keys! ";
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
 /// 1. Blanks the row, then fills it with the theme's bar background.
-/// 2. Draws the placement status at the right edge when placement owns the
+/// 2. Draws the session recovery notice across the row and stops when visible.
+/// 3. Draws the placement status at the right edge when placement owns the
 ///    viewer. The status holds that edge, and every item below stops short of it.
-/// 3. Draws the ` keys! ` marker before the placement status when the user
+/// 4. Draws the ` keys! ` marker before the placement status when the user
 ///    keymap was reverted. The marker holds its edge, and every hint below
 ///    stops short of it.
-/// 4. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
+/// 5. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
 ///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
 ///    chord's prefix label, and only when bindings sit under it.
-/// 5. Draws each modifier group left to right: its ` Ctrl + ` header, then one
+/// 6. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
-/// 6. Draws a `…` marker where the row ran out of room, and stops there.
+/// 7. Draws a `…` marker where the row ran out of room, and stops there.
 pub(crate) fn draw_statusline(
     statusline_inputs: StatuslineInputs<'_>,
     theme: &Theme,
@@ -59,12 +62,26 @@ pub(crate) fn draw_statusline(
         keymap_hints,
         pending_key_sequence,
         placement_status,
+        is_recovery_notice_visible,
     } = statusline_inputs;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
     // a `Ctrl +` header sets only a foreground and keeps this fill.
     Clear.render(statusline_area, screen_buffer);
     screen_buffer.set_style(statusline_area, compute_bar_style(theme));
+
+    if is_recovery_notice_visible {
+        let recovery_notice_line =
+            Line::from(Span::styled(RECOVERY_NOTICE, compute_warning_style()));
+        set_line_clipped(
+            screen_buffer,
+            statusline_area.x,
+            statusline_area.y,
+            &recovery_notice_line,
+            statusline_area.width,
+        );
+        return;
+    }
 
     let pending_chords = pending_key_sequence.map_or(&[][..], KeySequence::list_chords);
     let mut right_edge_column = statusline_area.right();
@@ -84,8 +101,7 @@ pub(crate) fn draw_statusline(
         right_edge_column = placement_status_start_column;
     }
     if keymap_hints.is_reverted_to_defaults {
-        let revert_marker_line =
-            Line::from(Span::styled(REVERT_MARKER, compute_revert_marker_style()));
+        let revert_marker_line = Line::from(Span::styled(REVERT_MARKER, compute_warning_style()));
         let revert_marker_width = get_line_width(&revert_marker_line);
         let revert_marker_start_column = right_edge_column
             .saturating_sub(revert_marker_width)
@@ -642,7 +658,8 @@ fn compute_overflow_style(theme: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn compute_revert_marker_style() -> Style {
+/// The warning colors used for a reverted keymap or a failed session restore.
+fn compute_warning_style() -> Style {
     Style::default()
         .fg(Color::White)
         .bg(Color::Red)

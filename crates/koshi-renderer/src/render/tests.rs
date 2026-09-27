@@ -116,6 +116,7 @@ fn build_render_snapshot(
         .collect();
 
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -2620,6 +2621,39 @@ fn too_small_overlay_clips_on_narrow_screen() {
     // Centered on row 2; the message saturates to col 0 and shows its 10-cell
     // clipped prefix.
     assert_eq!(format_rendered_row_text(&render_buffer, 2), "Terminal t");
+}
+
+#[test]
+fn recovery_notice_returns_after_a_too_small_viewport_gains_a_statusline() {
+    let mut too_small_snapshot = build_too_small_render_snapshot(Size {
+        column_count: 100,
+        row_count: 1,
+    });
+    too_small_snapshot.is_recovery_notice_visible = true;
+    let too_small_screen = render_test_snapshot(&too_small_snapshot, 100, 1);
+    assert_eq!(
+        format_rendered_row_text(&too_small_screen, 0).trim(),
+        "Terminal too small — enlarge window"
+    );
+
+    let pane_id = PaneId::new();
+    let mut resized_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[(pane_id, build_cell_rect(0, 1, 100, 38), true)],
+        Some(pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 100,
+            row_count: 40,
+        },
+    );
+    resized_snapshot.is_recovery_notice_visible = true;
+    let resized_screen = render_test_snapshot(&resized_snapshot, 100, 40);
+    assert_eq!(
+        format_rendered_row_text(&resized_screen, 39).trim(),
+        "Restore failed: new shell; previous panes unavailable. Input clears notice."
+    );
 }
 
 #[test]

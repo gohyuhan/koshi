@@ -346,6 +346,34 @@ fn the_starting_lock_survives_a_serde_round_trip() {
 }
 
 #[test]
+fn recovery_notice_survives_serialization_and_absent_field_reads_as_hidden() {
+    let mut session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.is_recovery_notice_visible = true;
+    let serialized_session = serde_json::to_value(&session).expect("serialize session");
+    assert_eq!(
+        serialized_session["is_recovery_notice_visible"],
+        serde_json::Value::Bool(true)
+    );
+    let restored_session: Session =
+        serde_json::from_value(serialized_session.clone()).expect("restore session");
+    assert!(restored_session.is_recovery_notice_visible);
+
+    let mut session_without_notice_field = serialized_session;
+    session_without_notice_field
+        .as_object_mut()
+        .expect("session object")
+        .remove("is_recovery_notice_visible");
+    let restored_session: Session =
+        serde_json::from_value(session_without_notice_field).expect("restore older session");
+    assert!(!restored_session.is_recovery_notice_visible);
+}
+
+#[test]
 fn the_starting_lock_is_stored_as_a_plain_json_bool() {
     // Pins the stored shape: the member is named `should_start_locked` and holds a
     // JSON boolean.

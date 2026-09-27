@@ -32,6 +32,7 @@ fn build_test_painted_frame() -> PaintedFrame {
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
 
     PaintedFrame {
+        is_recovery_notice_visible: false,
         session_snapshot: FrameSession {
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
             session_revision: 0,

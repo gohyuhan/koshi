@@ -65,6 +65,8 @@ pub struct Surface {
 ///   another tab. A placement preview is a read the client requests. The
 ///   session answers a placement with `PanePlacementCommitted` to every
 ///   viewer, or with `PlacementCommandRejected` to the viewer that sent it.
+/// - Painted frames carry whether the session shows a recovery notice after
+///   opening a new shell in place of an unrestored session.
 ///
 /// Four shapes differ between 2 and 3:
 ///

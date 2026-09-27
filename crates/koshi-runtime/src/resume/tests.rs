@@ -20,7 +20,8 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
-use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
+use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_observability::logging::recent_events;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend};
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_terminal::engine::GraphicsEvent;
@@ -347,6 +348,15 @@ fn build_resumed_server(
     header: &ResumeHeader,
     body: ResumeBody,
 ) -> (Server, mpsc::Sender<RuntimeEvent>) {
+    build_resumed_server_with_exit_statuses(header, body, HashMap::new())
+}
+
+/// Build a resumed server with the exits received during the supervisor link.
+fn build_resumed_server_with_exit_statuses(
+    header: &ResumeHeader,
+    body: ResumeBody,
+    exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
+) -> (Server, mpsc::Sender<RuntimeEvent>) {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender.clone()),
@@ -364,7 +374,14 @@ fn build_resumed_server(
             )
         })
         .collect();
-    let server = Server::resume(pty_backend, inbox_receiver, None, body, pty_size_by_pane_id);
+    let server = Server::resume(
+        pty_backend,
+        inbox_receiver,
+        None,
+        body,
+        pty_size_by_pane_id,
+        exit_status_by_pane_id,
+    );
     (server, inbox_sender)
 }
 
@@ -1464,6 +1481,7 @@ fn a_blank_screen_after_a_restart_keeps_the_scrollback_limit_the_startup_config_
         Some(startup_app_config),
         body,
         pty_size_by_pane_id,
+        HashMap::new(),
     );
     let scrolled_output_bytes: Vec<u8> = (0..60)
         .flat_map(|line_index| format!("line {line_index}\r\n").into_bytes())
@@ -1506,6 +1524,7 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
         None,
         build_resume_body_with_quit(None),
         HashMap::from([(stray_pane_id, stray_pty_size)]),
+        HashMap::new(),
     );
 
     assert_eq!(
@@ -1539,7 +1558,11 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
         ..header.clone()
     };
 
-    let (resumed, _inbox_sender) = build_resumed_server(&driven_header, body);
+    let (mut resumed, _inbox_sender) = build_resumed_server_with_exit_statuses(
+        &driven_header,
+        body,
+        HashMap::from([(undriven_pane_id, ExitStatus::ExitCode(7))]),
+    );
 
     let session = &resumed.session_by_id[&session_id];
     assert_eq!(
@@ -1569,6 +1592,32 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
     assert_eq!(
         resumed_live_pane_ids, driven_pane_ids,
         "the other panes stay"
+    );
+    assert_eq!(
+        recent_events::list_recent_events()
+            .iter()
+            .filter(|event_record| {
+                event_record.pane_id == Some(undriven_pane_id)
+                    && event_record.event_name == "PaneProcessExited"
+            })
+            .count(),
+        1,
+        "the carried exit is published once"
+    );
+    let _ = resumed.handle_runtime_event(RuntimeEvent::ChildExit {
+        pane_id: undriven_pane_id,
+        exit_status: ExitStatus::ExitCode(7),
+    });
+    assert_eq!(
+        recent_events::list_recent_events()
+            .iter()
+            .filter(|event_record| {
+                event_record.pane_id == Some(undriven_pane_id)
+                    && event_record.event_name == "PaneProcessExited"
+            })
+            .count(),
+        1,
+        "the queued copy of the exit does not publish again"
     );
 }
 

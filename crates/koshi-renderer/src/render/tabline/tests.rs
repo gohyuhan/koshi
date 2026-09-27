@@ -41,6 +41,7 @@ fn build_tabline_frame(
         row_count: 1,
     };
     let render_snapshot = RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,

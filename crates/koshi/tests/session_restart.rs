@@ -40,6 +40,7 @@ use koshi_core::discovery::{PaneLifecycle, SessionOverview};
 use koshi_core::event::Event;
 use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
+use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags};
 use koshi_core::process::{ShellKind, SpawnSpec};
 use koshi_ipc::endpoint::{resolve_resume_file_path, EndpointFile};
 use koshi_ipc::error::IpcError;
@@ -92,10 +93,6 @@ const SESSION_SERVER_NAME: &str = "workspace";
 /// The bytes of a resume file cut off inside its header: no build reads a
 /// header out of them.
 const UNREADABLE_RESUME_FILE_BYTES: &[u8] = b"{\"header\":{\"resume_format\":1}";
-
-/// The line the one fresh shell of a session that did not come back shows.
-const SESSION_NOT_RESTORED_NOTICE_TEXT: &str =
-    "[koshi] The session could not be restored after the restart. Its panes were closed, and this is a new shell.";
 
 /// The descriptor number a session server started by a test inherits a
 /// pseudoterminal master under.
@@ -2269,14 +2266,6 @@ fn send_router_request(
     router_response.answer_result
 }
 
-/// `pane_id`'s rows in `painted_frame` joined into one line with every space
-/// dropped, so a line that wrapped across rows reads back whole.
-fn get_pane_text_without_spaces(painted_frame: &PaintedFrame, pane_id: PaneId) -> String {
-    get_pane_rows(painted_frame, pane_id)
-        .concat()
-        .replace(' ', "")
-}
-
 /// Open a pipe whose two ends close on exec, and hand back `[read end, write
 /// end]`. A test's session server writes a child's process id into the write
 /// end before its own exec.
@@ -2363,22 +2352,46 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
     );
 
     let fresh_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
+    let (mut attached_client_stream, _) = AttachedClientStream::attach_test_client(
         runtime_directory.path(),
         session_id,
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
     );
-    let notice_text_without_spaces = SESSION_NOT_RESTORED_NOTICE_TEXT.replace(' ', "");
     let painted_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
-        get_pane_text_without_spaces(painted_frame, fresh_pane_id)
-            .starts_with(&notice_text_without_spaces)
+        painted_frame.is_recovery_notice_visible
+            && painted_frame
+                .pane_snapshots
+                .iter()
+                .any(|pane_snapshot| pane_snapshot.pane_id == fresh_pane_id)
     });
     assert!(
-        get_pane_text_without_spaces(&painted_frame, fresh_pane_id)
-            .starts_with(&notice_text_without_spaces),
+        painted_frame.is_recovery_notice_visible,
         "{}",
         describe_painted_frame(&painted_frame)
+    );
+    attached_client_stream.send_session_request(
+        3,
+        IpcRequestKind::Keyboard {
+            key_input: KeyInput {
+                key: KeyIdentity::Key(Key::Char('x')),
+                key_event_kind: KeyEventKind::Press,
+                shifted_key: None,
+                base_layout_key: None,
+                associated_text: String::new(),
+                modifier_flags: KeyModifierFlags::NONE,
+            },
+        },
+    );
+    let cleared_frame = attached_client_stream
+        .receive_painted_frame_when(|painted_frame| !painted_frame.is_recovery_notice_visible);
+    assert!(
+        cleared_frame
+            .pane_snapshots
+            .iter()
+            .any(|pane_snapshot| pane_snapshot.pane_id == fresh_pane_id),
+        "{}",
+        describe_painted_frame(&cleared_frame)
     );
     assert!(
         !resume_file_path.exists(),

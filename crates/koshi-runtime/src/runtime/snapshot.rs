@@ -161,6 +161,7 @@ impl Server {
             .collect();
 
         Some(RenderSnapshot {
+            is_recovery_notice_visible: session.is_recovery_notice_visible,
             session_snapshot: owned_frame_layout.session_snapshot,
             pane_snapshots,
             client_snapshot: owned_frame_layout.client_snapshot,

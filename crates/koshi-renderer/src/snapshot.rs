@@ -58,6 +58,9 @@ pub use koshi_config::hints::{HintBinding, KeymapHints};
 /// what is inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderSnapshot {
+    /// Whether a failed session restore opened a new shell whose recovery
+    /// notice remains visible on the statusline.
+    pub is_recovery_notice_visible: bool,
     /// The session being viewed: its identity, active tab, and tab list.
     pub session_snapshot: SessionSnapshot,
     /// Per-pane content (grid, cursor, title), one entry per live pane in the

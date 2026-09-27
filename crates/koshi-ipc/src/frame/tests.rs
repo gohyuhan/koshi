@@ -53,6 +53,7 @@ fn build_painted_frame() -> PaintedFrame {
     let pane = PaneId::from_uuid(Uuid::from_u128(4));
 
     PaintedFrame {
+        is_recovery_notice_visible: false,
         session_snapshot: FrameSession {
             session_id: SessionId::from_uuid(Uuid::from_u128(1)),
             session_revision: 17,
@@ -247,6 +248,22 @@ fn a_frame_survives_a_round_trip_field_for_field() {
         received.pane_snapshots[0].mouse_tracking,
         MouseTracking::ButtonMotion
     );
+}
+
+#[test]
+fn recovery_notice_reads_from_painted_frame_and_absent_field_means_hidden() {
+    let mut painted_frame = build_painted_frame();
+    painted_frame.is_recovery_notice_visible = true;
+    let encoded_frame = serde_json::to_string(&painted_frame).expect("serialize frame");
+    assert!(encoded_frame.starts_with("{\"is_recovery_notice_visible\":true,"));
+    let decoded_frame: PaintedFrame = serde_json::from_str(&encoded_frame).expect("decode frame");
+    assert!(decoded_frame.is_recovery_notice_visible);
+
+    let frame_without_notice_field =
+        encoded_frame.replacen("\"is_recovery_notice_visible\":true,", "", 1);
+    let decoded_frame: PaintedFrame =
+        serde_json::from_str(&frame_without_notice_field).expect("decode frame without notice");
+    assert!(!decoded_frame.is_recovery_notice_visible);
 }
 
 #[test]

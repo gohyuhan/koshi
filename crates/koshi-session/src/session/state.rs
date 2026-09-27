@@ -155,6 +155,11 @@ pub struct Session {
     #[serde(default)]
     pub should_start_locked: bool,
 
+    /// A restart seeded a new shell after the carried session could not be
+    /// restored. The statusline shows the notice until input reaches a pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_recovery_notice_visible: bool,
+
     /// Generation of committed layout, membership, and shared sizing inputs.
     #[serde(default)]
     placement_revision: u64,
@@ -182,6 +187,7 @@ impl Session {
             panes: PaneRegistry::new(),
             clients: client_registry,
             should_start_locked: false,
+            is_recovery_notice_visible: false,
             placement_revision: 0,
             lifecycle: SessionLifecycle::Starting,
         }

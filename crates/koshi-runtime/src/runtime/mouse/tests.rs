@@ -1400,6 +1400,11 @@ fn the_forward_door_reports_whether_the_pane_was_written_to() {
     // so it must be false for exactly the events the pane never saw.
     let (mut runtime, fake_pty_backend, client) = build_runtime_with_fake_pty_backend();
     let pane = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_pane(pane)
+        .expect("session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&runtime, client, pane);
 
     // The program asked for no mouse: nothing is written, and the door says so.
@@ -1415,6 +1420,7 @@ fn the_forward_door_reports_whether_the_pane_was_written_to() {
         Vec::<Vec<u8>>::new(),
         "a pane in no mouse mode receives nothing"
     );
+    assert!(runtime.list_sessions()[&session_id].is_recovery_notice_visible);
 
     // Normal tracking with SGR encoding: the press is written, and reported.
     runtime.handle_pty_output(pane, b"\x1b[?1000h\x1b[?1006h");
@@ -1430,9 +1436,11 @@ fn the_forward_door_reports_whether_the_pane_was_written_to() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the press reached the program"
     );
+    assert!(!runtime.list_sessions()[&session_id].is_recovery_notice_visible);
 
     // The pane refuses the bytes: the door says so, and no gesture is captured
     // on the strength of a press that never landed.
+    runtime.show_session_recovery_notice(session_id);
     fake_pty_backend.fail_writes_on(pane, PtyError::UnknownPane { pane_id: pane });
     assert!(!runtime.forward_mouse_to_pane(
         client,
@@ -1446,6 +1454,7 @@ fn the_forward_door_reports_whether_the_pane_was_written_to() {
         vec![format!("\x1b[<0;{pane_column};{pane_row}M").into_bytes()],
         "the refused press left no record"
     );
+    assert!(runtime.list_sessions()[&session_id].is_recovery_notice_visible);
 }
 
 /// A tab whose only viewer reports [`PaneArea::Starving`] has no effective
@@ -1900,6 +1909,11 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
 fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
     let (mut runtime, fake_pty_backend, client) = build_runtime_with_fake_pty_backend();
     let pane = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_pane(pane)
+        .expect("session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&runtime, client, pane);
@@ -1917,6 +1931,7 @@ fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
         vec![b"\x1b[A\x1b[A\x1b[A".to_vec()],
         "wheel up becomes three up-arrows under default cursor keys"
     );
+    assert!(!runtime.list_sessions()[&session_id].is_recovery_notice_visible);
 
     dispatch_mouse_input(
         &mut runtime,

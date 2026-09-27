@@ -116,6 +116,7 @@ fn build_fixture(grid: Arc<Grid>) -> RenderSnapshot {
     };
 
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot,
         pane_snapshots: vec![pane_snapshot],
         client_snapshot: client,

@@ -89,6 +89,7 @@ fn build_render_snapshot(
         },
     };
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,

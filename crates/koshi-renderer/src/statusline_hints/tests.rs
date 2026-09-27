@@ -85,11 +85,51 @@ fn paint_statusline(
             keymap_hints,
             pending_key_sequence,
             placement_status: None,
+            is_recovery_notice_visible: false,
         },
         theme,
         render_area,
         render_buffer,
     );
+}
+
+#[test]
+fn recovery_notice_replaces_other_statusline_content_at_full_and_narrow_widths() {
+    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new(), false);
+    let placement_status = PlacementStatus {
+        placement_status_kind: PlacementStatusKind::Valid,
+        status_text: "PLACE shell".to_string(),
+    };
+    for (column_count, expected_text) in [
+        (
+            80,
+            "Restore failed: new shell; previous panes unavailable. Input clears notice.",
+        ),
+        (15, "Restore failed:"),
+        (1, "R"),
+    ] {
+        let statusline_area = RatatuiRect {
+            x: 0,
+            y: 0,
+            width: column_count,
+            height: 1,
+        };
+        let mut screen_buffer = Buffer::empty(statusline_area);
+        draw_statusline(
+            StatuslineInputs {
+                keymap_hints: &keymap_hints,
+                pending_key_sequence: None,
+                placement_status: Some(&placement_status),
+                is_recovery_notice_visible: true,
+            },
+            &Theme::default(),
+            statusline_area,
+            &mut screen_buffer,
+        );
+        assert_eq!(format_rendered_row(&screen_buffer), expected_text);
+        assert_eq!(screen_buffer[(0, 0)].fg, Color::White);
+        assert_eq!(screen_buffer[(0, 0)].bg, Color::Red);
+    }
 }
 
 /// Draw in `theme`'s colors with an open sequence.
@@ -1322,6 +1362,7 @@ fn placement_statusline_reserves_the_right_edge_and_styles_each_status_kind() {
                 keymap_hints: &keymap_hints,
                 pending_key_sequence: None,
                 placement_status: Some(placement_status),
+                is_recovery_notice_visible: false,
             },
             &Theme::default(),
             render_area,

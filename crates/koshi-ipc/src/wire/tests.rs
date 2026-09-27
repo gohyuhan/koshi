@@ -1144,6 +1144,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
     use koshi_core::ids::{ClientId, SessionId, TabId};
 
     crate::frame::PaintedFrame {
+        is_recovery_notice_visible: false,
         session_snapshot: crate::frame::FrameSession {
             session_id: SessionId::new(),
             session_revision: 17,

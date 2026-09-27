@@ -65,7 +65,7 @@ pub const LAYOUT_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session's layo
 
 /// The line the one fresh shell shows when none of the session's panes came
 /// back.
-pub const SESSION_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session could not be restored after the restart. Its panes were closed, and this is a new shell.\r\n";
+pub const SESSION_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session could not be restored after the restart. This is a new shell; the previous panes are unavailable.\r\n";
 
 /// One live pane, as the header names it: what the next image needs to take
 /// the pane back, or to shut it down when the body is unreadable.

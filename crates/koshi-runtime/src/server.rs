@@ -22,7 +22,7 @@ use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
-use koshi_core::process::{KillPolicy, PtySize};
+use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events;
@@ -268,6 +268,19 @@ impl Server {
         }
     }
 
+    /// Show the session's recovery notice on each viewer's statusline until
+    /// input reaches one of its panes.
+    ///
+    /// # Panics
+    /// Panics when `session_id` does not name a session this server holds.
+    pub fn show_session_recovery_notice(&mut self, session_id: SessionId) {
+        self.session_by_id
+            .get_mut(&session_id)
+            .expect("the recovered session was seeded")
+            .is_recovery_notice_visible = true;
+        self.render_scheduler.invalidate();
+    }
+
     /// Rebuild a server from the state a previous process image carried out,
     /// over panes that are already running.
     ///
@@ -286,6 +299,9 @@ impl Server {
     /// terminal holds. Two callers reach this: the new image after a successful swap passes the
     /// panes it took back, and the old image after a swap that failed to start passes every pane
     /// it still holds.
+    /// `exit_status_by_pane_id` carries exits received while the Windows helper
+    /// was answering its pane list. A pane absent from the backend that has no
+    /// such status closes with [`UNOBSERVED_EXIT`].
     ///
     /// Each pane is matched against the carried sessions:
     ///
@@ -295,8 +311,8 @@ impl Server {
     ///    blank screen showing [`SCREEN_NOT_RESTORED_NOTICE_BYTES`]. Its child keeps running.
     /// 3. A driven pane that no session holds has its child ended with [`KillPolicy::Tree`] and
     ///    is not recorded.
-    /// 4. A pane a session holds that the backend does not drive is closed as if its child had
-    ///    ended with [`UNOBSERVED_EXIT`].
+    /// 4. A pane a session holds that the backend does not drive is closed with
+    ///    its carried exit status, or [`UNOBSERVED_EXIT`] when none was received.
     ///
     /// No connection survives the swap, so every client the carried sessions
     /// hold starts out awaiting its own re-attach. Each one that attaches again
@@ -308,6 +324,7 @@ impl Server {
         startup_app_config: Option<PartialKoshiConfig>,
         body: ResumeBody,
         pty_size_by_pane_id: HashMap<PaneId, PtySize>,
+        exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
     ) -> Self {
         let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
         server.load_startup_config(startup_app_config);
@@ -361,14 +378,30 @@ impl Server {
                 ),
             );
         }
+        let exit_events = server.close_undriven_panes(session_pane_ids, exit_status_by_pane_id);
+        server.publish_events(&exit_events);
+        server
+    }
+
+    /// Close carried panes the backend does not drive, using a status received
+    /// during the supervisor link when one exists.
+    fn close_undriven_panes(
+        &mut self,
+        session_pane_ids: HashSet<PaneId>,
+        mut exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
+    ) -> Vec<Event> {
+        let mut exit_events = Vec::new();
         for pane_id in session_pane_ids {
-            if server.live_pane_ids.contains(&pane_id) {
+            if self.live_pane_ids.contains(&pane_id) {
                 continue;
             }
             tracing::warn!(%pane_id, "a carried pane has no running child; it closes");
-            let _ = server.handle_child_exit(pane_id, UNOBSERVED_EXIT);
+            let exit_status = exit_status_by_pane_id
+                .remove(&pane_id)
+                .unwrap_or(UNOBSERVED_EXIT);
+            exit_events.extend(self.handle_child_exit(pane_id, exit_status));
         }
-        server
+        exit_events
     }
 
     /// Drain this server into the two halves of its resume file: the header

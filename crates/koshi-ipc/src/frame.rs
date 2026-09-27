@@ -78,6 +78,10 @@ where
 /// *what* is inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaintedFrame {
+    /// Whether the statusline shows that the session restarted with a new
+    /// shell. An older peer that sends no field means no notice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_recovery_notice_visible: bool,
     /// The session being viewed: its identity, its solved active tab, and its
     /// tab list.
     pub session_snapshot: FrameSession,
