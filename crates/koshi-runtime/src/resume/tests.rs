@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
 use crate::runtime::pty_inbox::InboxSink;
+use koshi_config::layer::{PartialKoshiConfig, PartialScrollbackConfig};
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
     GridPosition, NewPaneArgs, NewTabArgs, Selection, SelectionKind,
@@ -363,7 +364,7 @@ fn build_resumed_server(
             )
         })
         .collect();
-    let server = Server::resume(pty_backend, inbox_receiver, body, pty_size_by_pane_id);
+    let server = Server::resume(pty_backend, inbox_receiver, None, body, pty_size_by_pane_id);
     (server, inbox_sender)
 }
 
@@ -1429,6 +1430,57 @@ fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_showing_the_notice()
 }
 
 #[test]
+fn a_blank_screen_after_a_restart_keeps_the_scrollback_limit_the_startup_config_names() {
+    let mut populated = build_populated_server();
+    let session_id = populated.session_id;
+    let panes = build_carried_pty_panes(&populated.server, session_id);
+    let (header, mut body) = populated
+        .server
+        .carry_out(&panes)
+        .expect("a session to carry");
+    let blank_pane_id = panes[1].pane_id;
+    body.carried_pane_state_by_pane_id.remove(&blank_pane_id);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(inbox_sender),
+    )));
+    let pty_size_by_pane_id: HashMap<PaneId, PtySize> = header
+        .carried_panes
+        .iter()
+        .map(|carried_pane| (carried_pane.pane_id, carried_pane.get_pty_size()))
+        .collect();
+    let startup_app_config = PartialKoshiConfig {
+        scrollback: Some(PartialScrollbackConfig {
+            maximum_line_count: Some(3),
+            maximum_byte_count: None,
+            should_scroll_to_input: None,
+        }),
+        ..PartialKoshiConfig::default()
+    };
+
+    let mut resumed = Server::resume(
+        pty_backend,
+        inbox_receiver,
+        Some(startup_app_config),
+        body,
+        pty_size_by_pane_id,
+    );
+    let scrolled_output_bytes: Vec<u8> = (0..60)
+        .flat_map(|line_index| format!("line {line_index}\r\n").into_bytes())
+        .collect();
+    resumed.handle_pty_output(blank_pane_id, &scrolled_output_bytes);
+
+    assert_eq!(
+        resumed.terminal_engine_by_pane_id[&blank_pane_id]
+            .get_terminal_state()
+            .get_scrollback()
+            .get_retained_line_count(),
+        3,
+        "the blank screen keeps `scrollback {{ max-lines 3 }}`, not the built-in 10000"
+    );
+}
+
+#[test]
 fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
@@ -1451,6 +1503,7 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
     let resumed = Server::resume(
         pty_backend,
         inbox_receiver,
+        None,
         build_resume_body_with_quit(None),
         HashMap::from([(stray_pane_id, stray_pty_size)]),
     );

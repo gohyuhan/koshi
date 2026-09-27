@@ -226,23 +226,40 @@ fn build_koshi_command(binary_path: &Path, test_home_directory: &Path) -> std::p
     process_command
 }
 
+/// The command that starts the binary at `binary_path` as `session_id`'s server,
+/// serving `runtime_directory`, under the identity the router would have handed
+/// it: `serve-session <session_id> workspace --runtime-dir <runtime_directory>`.
+fn build_session_server_command(
+    binary_path: &Path,
+    test_home_directory: &Path,
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> std::process::Command {
+    let mut process_command = build_koshi_command(binary_path, test_home_directory);
+    process_command
+        .arg("serve-session")
+        .arg(session_id.to_string())
+        .arg(SESSION_SERVER_NAME)
+        .arg("--runtime-dir")
+        .arg(runtime_directory);
+    process_command
+}
+
 /// Start the binary at `binary_path` as one session's server, under the identity the
 /// router would have handed it, and wait for the ready line it prints once its
-/// control_connection socket is bound.
+/// control socket is bound.
 fn start_session_server(
     binary_path: &Path,
     test_home_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    start_session_server_with_command(
-        build_koshi_command(binary_path, test_home_directory)
-            .arg("serve-session")
-            .arg(session_id.to_string())
-            .arg(SESSION_SERVER_NAME)
-            .arg("--runtime-dir")
-            .arg(runtime_directory),
-    )
+    start_session_server_with_command(&mut build_session_server_command(
+        binary_path,
+        test_home_directory,
+        runtime_directory,
+        session_id,
+    ))
 }
 
 /// Start `process_command`, a session server's whole command line, with its
@@ -284,7 +301,7 @@ fn start_router_process(test_home_directory: &Path, runtime_directory: &Path) ->
     RunningRouter { child_process }
 }
 
-/// Open a connection to `session_id`'s control_connection socket with its handshake
+/// Open a connection to `session_id`'s control socket with its handshake
 /// already done, retrying until the session answers, and hand back the endpoint
 /// file the socket was advertised in.
 fn open_session_connection(
@@ -354,7 +371,7 @@ fn send_session_request(
     ipc_response.answer_result
 }
 
-/// Submit `command` on a control_connection connection to `session_id`, targeting
+/// Submit `command` on a control connection to `session_id`, targeting
 /// `client_id`, and hand back the events it emitted. A rejected command fails
 /// the test.
 fn submit_session_command(
@@ -2125,15 +2142,15 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
     );
 
     let mut resuming_process = start_koshi_process(
-        build_koshi_command(&binary_path, test_home_directory.path())
-            .arg("serve-session")
-            .arg(session_id.to_string())
-            .arg(SESSION_SERVER_NAME)
-            .arg("--runtime-dir")
-            .arg(runtime_directory.path())
-            .arg("--resume")
-            .arg(&resume_file_path)
-            .stdout(Stdio::null()),
+        build_session_server_command(
+            &binary_path,
+            test_home_directory.path(),
+            runtime_directory.path(),
+            session_id,
+        )
+        .arg("--resume")
+        .arg(&resume_file_path)
+        .stdout(Stdio::null()),
     );
     let exit_status = wait_for_process_exit(&mut resuming_process);
 
@@ -2260,6 +2277,70 @@ fn get_pane_text_without_spaces(painted_frame: &PaintedFrame, pane_id: PaneId) -
         .replace(' ', "")
 }
 
+/// Open a pipe whose two ends close on exec, and hand back `[read end, write
+/// end]`. A test's session server writes a child's process id into the write
+/// end before its own exec.
+#[cfg(unix)]
+fn open_process_id_pipe() -> [libc::c_int; 2] {
+    let mut process_id_pipe_file_descriptors: [libc::c_int; 2] = [0; 2];
+    assert_eq!(
+        unsafe { libc::pipe(process_id_pipe_file_descriptors.as_mut_ptr()) },
+        0
+    );
+    for pipe_file_descriptor in process_id_pipe_file_descriptors {
+        assert_eq!(
+            unsafe { libc::fcntl(pipe_file_descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+    }
+    process_id_pipe_file_descriptors
+}
+
+/// Read the one process id written into the pipe whose read end is
+/// `process_id_read_file_descriptor`.
+///
+/// # Panics
+/// Panics when the pipe holds fewer bytes than one process id.
+#[cfg(unix)]
+fn read_process_id_from_pipe(process_id_read_file_descriptor: libc::c_int) -> libc::pid_t {
+    let mut process_id: libc::pid_t = 0;
+    assert_eq!(
+        unsafe {
+            libc::read(
+                process_id_read_file_descriptor,
+                (&mut process_id as *mut libc::pid_t).cast(),
+                std::mem::size_of::<libc::pid_t>(),
+            )
+        },
+        std::mem::size_of::<libc::pid_t>() as isize,
+        "the child's process id arrives"
+    );
+    process_id
+}
+
+/// Wait until `process_id` is reaped: `kill(process_id, 0)` answers `ESRCH`,
+/// where a zombie still answers `0`.
+///
+/// # Panics
+/// Panics when [`WAIT_DURATION`] runs out first, and when the check fails with
+/// an error other than `ESRCH`.
+#[cfg(unix)]
+fn wait_until_process_is_reaped(process_id: libc::pid_t) {
+    let reap_deadline = Instant::now() + WAIT_DURATION;
+    while unsafe { libc::kill(process_id, 0) } == 0 {
+        assert!(
+            Instant::now() < reap_deadline,
+            "process {process_id} was never reaped"
+        );
+        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    }
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "process {process_id} is gone, not merely unreachable"
+    );
+}
+
 #[test]
 fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showing_the_notice() {
     let test_home_directory = build_short_test_directory();
@@ -2271,14 +2352,14 @@ fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showin
         .expect("the cut-off resume file is placed");
 
     let _session_server_process = start_session_server_with_command(
-        build_koshi_command(&binary_path, test_home_directory.path())
-            .arg("serve-session")
-            .arg(session_id.to_string())
-            .arg(SESSION_SERVER_NAME)
-            .arg("--runtime-dir")
-            .arg(runtime_directory.path())
-            .arg("--resume")
-            .arg(&resume_file_path),
+        build_session_server_command(
+            &binary_path,
+            test_home_directory.path(),
+            runtime_directory.path(),
+            session_id,
+        )
+        .arg("--resume")
+        .arg(&resume_file_path),
     );
 
     let fresh_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
@@ -2347,28 +2428,15 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
         terminal_follower_file_descriptor >= 0,
         "the other end of the pseudoterminal opens"
     );
-    let mut process_id_pipe_file_descriptors: [libc::c_int; 2] = [0; 2];
-    assert_eq!(
-        unsafe { libc::pipe(process_id_pipe_file_descriptors.as_mut_ptr()) },
-        0
-    );
     let [process_id_read_file_descriptor, process_id_write_file_descriptor] =
-        process_id_pipe_file_descriptors;
-    for pipe_file_descriptor in process_id_pipe_file_descriptors {
-        assert_eq!(
-            unsafe { libc::fcntl(pipe_file_descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
-            0
-        );
-    }
-    let mut process_command = build_koshi_command(&binary_path, test_home_directory.path());
-    process_command
-        .arg("serve-session")
-        .arg(session_id.to_string())
-        .arg(SESSION_SERVER_NAME)
-        .arg("--runtime-dir")
-        .arg(runtime_directory.path())
-        .arg("--resume")
-        .arg(&resume_file_path);
+        open_process_id_pipe();
+    let mut process_command = build_session_server_command(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+        session_id,
+    );
+    process_command.arg("--resume").arg(&resume_file_path);
     // The session server starts as the parent of a child that ends half a
     // second later, and holds the master under
     // `INHERITED_TERMINAL_FILE_DESCRIPTOR`. The child's process id goes down
@@ -2405,18 +2473,7 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
         libc::close(terminal_master_file_descriptor);
         libc::close(process_id_write_file_descriptor);
     }
-    let mut ended_child_process_id: libc::pid_t = 0;
-    assert_eq!(
-        unsafe {
-            libc::read(
-                process_id_read_file_descriptor,
-                (&mut ended_child_process_id as *mut libc::pid_t).cast(),
-                std::mem::size_of::<libc::pid_t>(),
-            )
-        },
-        std::mem::size_of::<libc::pid_t>() as isize,
-        "the ended child's process id arrives"
-    );
+    let ended_child_process_id = read_process_id_from_pipe(process_id_read_file_descriptor);
 
     let release_deadline = Instant::now() + WAIT_DURATION;
     loop {
@@ -2441,20 +2498,67 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
         );
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
-    while unsafe { libc::kill(ended_child_process_id, 0) } == 0 {
-        assert!(
-            Instant::now() < release_deadline,
-            "the ended child {ended_child_process_id} was never reaped"
-        );
-        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
-    }
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH),
-        "the ended child is gone, not merely unreachable"
-    );
+    wait_until_process_is_reaped(ended_child_process_id);
     unsafe {
         libc::close(terminal_follower_file_descriptor);
+        libc::close(process_id_read_file_descriptor);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_file_whose_header_does_not_read_ends_and_reaps_a_child_that_ignores_the_hangup() {
+    use std::os::unix::process::CommandExt;
+
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let binary_path = copy_koshi_binary(test_home_directory.path());
+    let session_id = SessionId::new();
+    let resume_file_path = resolve_resume_file_path(runtime_directory.path(), session_id);
+    std::fs::write(&resume_file_path, UNREADABLE_RESUME_FILE_BYTES)
+        .expect("the cut-off resume file is placed");
+    let [process_id_read_file_descriptor, process_id_write_file_descriptor] =
+        open_process_id_pipe();
+    let mut process_command = build_session_server_command(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+        session_id,
+    );
+    process_command.arg("--resume").arg(&resume_file_path);
+    // The session server starts as the parent of a child that leads its own
+    // session, as a pane child does, ignores `SIGHUP`, as `nohup` makes it, and
+    // sleeps for 30 seconds. The child's process id goes down the pipe.
+    unsafe {
+        process_command.pre_exec(move || {
+            let hangup_ignoring_child_process_id = libc::fork();
+            if hangup_ignoring_child_process_id == 0 {
+                libc::setsid();
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                libc::sleep(30);
+                libc::_exit(0);
+            }
+            if hangup_ignoring_child_process_id < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::write(
+                process_id_write_file_descriptor,
+                (&hangup_ignoring_child_process_id as *const libc::pid_t).cast(),
+                std::mem::size_of::<libc::pid_t>(),
+            );
+            Ok(())
+        });
+    }
+
+    let _session_server_process = start_session_server_with_command(&mut process_command);
+    unsafe {
+        libc::close(process_id_write_file_descriptor);
+    }
+    let hangup_ignoring_child_process_id =
+        read_process_id_from_pipe(process_id_read_file_descriptor);
+
+    wait_until_process_is_reaped(hangup_ignoring_child_process_id);
+    unsafe {
         libc::close(process_id_read_file_descriptor);
     }
 }

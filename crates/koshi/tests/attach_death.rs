@@ -49,6 +49,9 @@ use tempfile::TempDir;
 
 mod common;
 
+#[cfg(unix)]
+use common::build_koshi_command_under_home;
+
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
 const WAIT_DURATION: Duration = Duration::from_secs(20);
@@ -216,7 +219,7 @@ fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcEr
 ///
 /// The name is one letter and six random characters, so the home is
 /// `/tmp/k` plus six characters — 12 bytes — and the directory a `koshi`
-/// started under it serves is `<home>/run`, 16 bytes. The longest name these
+/// started under it serves is `<home_directory>/run`, 16 bytes. The longest name these
 /// tests bind in that directory is the session socket, `session-<uuid>.sock`
 /// at 49 bytes, which makes the bound path 66 bytes against the 103 bytes a
 /// Unix socket address holds.
@@ -228,45 +231,45 @@ fn build_test_home_directory() -> TempDir {
         .expect("a temporary home directory")
 }
 
-/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
+/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
 /// serves: `run/` inside the home directory.
 #[cfg(unix)]
-fn build_runtime_directory_under(home: &Path) -> PathBuf {
-    home.join("run")
+fn build_runtime_directory_under(home_directory: &Path) -> PathBuf {
+    home_directory.join("run")
 }
 
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
+/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
 /// reads: macOS derives it from the home directory alone.
 #[cfg(target_os = "macos")]
-fn resolve_config_directory_under(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/koshi")
+fn resolve_config_directory_under(home_directory: &Path) -> PathBuf {
+    home_directory.join("Library/Application Support/koshi")
 }
 
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
+/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
 /// reads: `.config/koshi` inside the home directory.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_config_directory_under(home: &Path) -> PathBuf {
-    home.join(".config/koshi")
+fn resolve_config_directory_under(home_directory: &Path) -> PathBuf {
+    home_directory.join(".config/koshi")
 }
 
-/// Write `body` as the `koshi.kdl` a process started under `home` reads.
+/// Write `config_text` as the `koshi.kdl` a process started under `home_directory` reads.
 #[cfg(unix)]
-fn write_test_config(home: &Path, config_text: &str) {
-    let config_directory = resolve_config_directory_under(home);
+fn write_test_config(home_directory: &Path, config_text: &str) {
+    let config_directory = resolve_config_directory_under(home_directory);
     std::fs::create_dir_all(&config_directory).expect("a config directory under the test home");
     std::fs::write(config_directory.join("koshi.kdl"), config_text)
         .expect("the config file is written");
 }
 
-/// Start one session's server under `home`, so it reads the `koshi.kdl` written
+/// Start one session's server under `home_directory`, so it reads the `koshi.kdl` written
 /// there rather than the developer's own.
 #[cfg(unix)]
 fn start_session_server_under(
-    home: &Path,
+    home_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    let child_process = build_koshi_command_under_home(home)
+    let child_process = build_koshi_command_under_home(home_directory)
         .arg("serve-session")
         .arg(session_id.to_string())
         .arg(SESSION_SERVER_NAME)
@@ -292,36 +295,6 @@ fn wait_for_session_server_exit(session_process: &mut RunningSession) -> bool {
         }
         std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
     }
-}
-
-/// The `koshi` binary, set to keep its files under `home` rather than in the
-/// developer's own directories, and stripped of the pane identity so it runs
-/// as a CLI outside any session. Standard input is closed, and both output
-/// streams are pipes the test reads. The runtime directory the child serves is
-/// `<home>/run`.
-#[cfg(unix)]
-fn build_koshi_command_under_home(home: &Path) -> std::process::Command {
-    let mut process_command = std::process::Command::new(env!("CARGO_BIN_EXE_koshi"));
-    process_command
-        .env("HOME", home)
-        .env("KOSHI_RUNTIME_DIR", home.join("run"))
-        // The five variables the runtime injects at pane spawn; `KOSHI` is the
-        // marker `InSessionContext::from_env` reads, and a test run from
-        // inside a koshi pane would hand every one of them to this child.
-        .env_remove("KOSHI")
-        .env_remove("KOSHI_SESSION_ID")
-        .env_remove("KOSHI_CLIENT_ID")
-        .env_remove("KOSHI_PANE_ID")
-        .env_remove("KOSHI_SOCKET")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // On Linux `XDG_CONFIG_HOME` beats `$HOME/.config`, so a machine that sets
-    // it would send this child outside the test home for its `koshi.kdl`, past
-    // the one the test wrote. macOS never reads this.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    process_command.env("XDG_CONFIG_HOME", home.join(".config"));
-    process_command
 }
 
 /// The router serving the runtime directory it names, which the attaching
@@ -362,8 +335,8 @@ impl Drop for RunningClient {
 /// Start the `koshi` binary as a client attaching to `session_id`, the way a
 /// user types `koshi attach <id>`.
 #[cfg(unix)]
-fn start_attaching_client(home: &Path, session_id: SessionId) -> RunningClient {
-    let child_process = build_koshi_command_under_home(home)
+fn start_attaching_client(home_directory: &Path, session_id: SessionId) -> RunningClient {
+    let child_process = build_koshi_command_under_home(home_directory)
         .arg("attach")
         .arg(session_id.to_string())
         .spawn()
@@ -481,8 +454,8 @@ fn a_killed_session_server_ends_the_stream_with_a_read_failure() {
 #[cfg(unix)]
 #[test]
 fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
-    let home = build_test_home_directory();
-    let runtime_directory = build_runtime_directory_under(home.path());
+    let home_directory = build_test_home_directory();
+    let runtime_directory = build_runtime_directory_under(home_directory.path());
     let session_id = SessionId::new();
     let mut session_process = start_session_server(&runtime_directory, session_id);
     let _router = RunningRouter {
@@ -490,7 +463,7 @@ fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
     };
 
     wait_for_session_server(&runtime_directory, session_id);
-    let mut client = start_attaching_client(home.path(), session_id);
+    let mut client = start_attaching_client(home_directory.path(), session_id);
     wait_for_attached_client(&runtime_directory, session_id, &mut client);
 
     session_process.terminate_session_server();
@@ -517,8 +490,8 @@ fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
 #[cfg(unix)]
 #[test]
 fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
-    let home = build_test_home_directory();
-    let runtime_directory = build_runtime_directory_under(home.path());
+    let home_directory = build_test_home_directory();
+    let runtime_directory = build_runtime_directory_under(home_directory.path());
     let session_id = SessionId::new();
     let _session = start_session_server(&runtime_directory, session_id);
     let _router = RunningRouter {
@@ -526,7 +499,7 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
     };
 
     wait_for_session_server(&runtime_directory, session_id);
-    let mut client = start_attaching_client(home.path(), session_id);
+    let mut client = start_attaching_client(home_directory.path(), session_id);
     wait_for_attached_client(&runtime_directory, session_id, &mut client);
 
     let endpoint_before_restart = EndpointFile::load_from_path(
@@ -577,7 +550,7 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
         .expect("the client's state can be read")
         .is_none()
     {
-        let detach_output = build_koshi_command_under_home(home.path())
+        let detach_output = build_koshi_command_under_home(home_directory.path())
             .arg("detach")
             .arg("--all")
             .arg(session_id.to_string())
@@ -611,8 +584,8 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
 #[cfg(unix)]
 #[test]
 fn a_detach_ends_the_attaching_client_with_a_success() {
-    let home = build_test_home_directory();
-    let runtime_directory = build_runtime_directory_under(home.path());
+    let home_directory = build_test_home_directory();
+    let runtime_directory = build_runtime_directory_under(home_directory.path());
     let session_id = SessionId::new();
     let _session = start_session_server(&runtime_directory, session_id);
     let _router = RunningRouter {
@@ -620,12 +593,12 @@ fn a_detach_ends_the_attaching_client_with_a_success() {
     };
 
     wait_for_session_server(&runtime_directory, session_id);
-    let mut client = start_attaching_client(home.path(), session_id);
+    let mut client = start_attaching_client(home_directory.path(), session_id);
     wait_for_attached_client(&runtime_directory, session_id, &mut client);
 
     // The session keeps running, so the goodbye frame the server writes as it
     // closes the client's queue is the whole ending the client reads.
-    let detach_output = build_koshi_command_under_home(home.path())
+    let detach_output = build_koshi_command_under_home(home_directory.path())
         .arg("detach")
         .arg("--all")
         .arg(session_id.to_string())
@@ -657,13 +630,16 @@ fn a_detach_ends_the_attaching_client_with_a_success() {
 #[cfg(unix)]
 #[test]
 fn auto_close_ends_the_session_server_process_when_the_last_client_leaves() {
-    let home = build_test_home_directory();
-    write_test_config(home.path(), "version 1\nauto-close-session #true\n");
-    let runtime_directory = build_runtime_directory_under(home.path());
+    let home_directory = build_test_home_directory();
+    write_test_config(
+        home_directory.path(),
+        "version 1\nauto-close-session #true\n",
+    );
+    let runtime_directory = build_runtime_directory_under(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home.path(), &runtime_directory, session_id);
+        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
 
     let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
     attach_test_client(&mut viewer_connection, session_id);
@@ -682,20 +658,20 @@ fn auto_close_ends_the_session_server_process_when_the_last_client_leaves() {
 #[cfg(unix)]
 #[test]
 fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
-    let home = build_test_home_directory();
-    write_test_config(home.path(), "version 1\n");
-    let runtime_directory = build_runtime_directory_under(home.path());
+    let home_directory = build_test_home_directory();
+    write_test_config(home_directory.path(), "version 1\n");
+    let runtime_directory = build_runtime_directory_under(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home.path(), &runtime_directory, session_id);
+        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
 
     let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
     attach_test_client(&mut viewer_connection, session_id);
 
     // `kill-session` names no client, so the session ends rather than one
     // client leaving it.
-    let kill_output = build_koshi_command_under_home(home.path())
+    let kill_output = build_koshi_command_under_home(home_directory.path())
         .arg("kill-session")
         .arg(session_id.to_string())
         .output()
@@ -718,13 +694,13 @@ fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
 #[cfg(unix)]
 #[test]
 fn a_session_server_outlives_its_last_client_by_default() {
-    let home = build_test_home_directory();
-    write_test_config(home.path(), "version 1\n");
-    let runtime_directory = build_runtime_directory_under(home.path());
+    let home_directory = build_test_home_directory();
+    write_test_config(home_directory.path(), "version 1\n");
+    let runtime_directory = build_runtime_directory_under(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home.path(), &runtime_directory, session_id);
+        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
 
     let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
     attach_test_client(&mut viewer_connection, session_id);

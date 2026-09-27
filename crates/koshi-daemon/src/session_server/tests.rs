@@ -742,6 +742,7 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
     let resumed_server = Server::resume(
         Arc::clone(&fake_pty_backend) as Arc<dyn PtyBackend>,
         resumed_event_receiver,
+        None,
         decoded_resume_body,
         build_carried_pty_sizes(&read_resume_header),
     );
@@ -925,22 +926,7 @@ fn carried_panes_in_conflict_are_ended_and_reaped_and_their_shared_terminal_clos
     )
     .expect("every path returns Ok");
 
-    let mut wait_status: libc::c_int = 0;
-    let waited_process_id = unsafe {
-        libc::waitpid(
-            libc::pid_t::try_from(child_process_id).expect("a child id fits a pid"),
-            &mut wait_status,
-            libc::WNOHANG,
-        )
-    };
-    assert_eq!(
-        (
-            waited_process_id,
-            std::io::Error::last_os_error().raw_os_error()
-        ),
-        (-1, Some(libc::ECHILD)),
-        "the `sleep 30` child was ended and already reaped"
-    );
+    wait_until_child_is_reaped(child_process_id);
     assert_eq!(
         pty_size_by_pane_id,
         HashMap::new(),
@@ -1392,19 +1378,10 @@ fn a_pane_the_header_names_no_descriptor_for_refuses_to_be_taken_back() {
 #[cfg(unix)]
 #[test]
 fn the_children_of_panes_not_taken_back_are_ended_and_reaped() {
-    use std::os::unix::process::CommandExt;
-
     let runtime_directory_fixture = TempDir::new().expect("create runtime directory fixture");
     let session_start = build_test_session_start(runtime_directory_fixture.path(), false);
     let child_process_ids: Vec<u32> = (0..3)
-        .map(|_| {
-            std::process::Command::new("sleep")
-                .arg("100")
-                .process_group(0)
-                .spawn()
-                .expect("start a child leading its own process group")
-                .id()
-        })
+        .map(|_| start_group_leading_child("sleep", &["100"]))
         .collect();
     let conflicting_pane_id = PaneId::new();
     let build_carried_pane =
@@ -1437,22 +1414,7 @@ fn the_children_of_panes_not_taken_back_are_ended_and_reaped() {
 
     assert_eq!(pty_size_by_pane_id, HashMap::new());
     for child_process_id in child_process_ids {
-        let mut wait_status: libc::c_int = 0;
-        let waited_process_id = unsafe {
-            libc::waitpid(
-                libc::pid_t::try_from(child_process_id).expect("a child id fits a pid"),
-                &mut wait_status,
-                libc::WNOHANG,
-            )
-        };
-        assert_eq!(
-            (
-                waited_process_id,
-                std::io::Error::last_os_error().raw_os_error()
-            ),
-            (-1, Some(libc::ECHILD)),
-            "child {child_process_id} was already reaped"
-        );
+        wait_until_child_is_reaped(child_process_id);
     }
 }
 
@@ -1617,6 +1579,87 @@ const BUSY_WAIT_DURATION: Duration = Duration::from_secs(20);
 #[cfg(unix)]
 const BUSY_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
 
+/// How long a test waits for a child of this process to exit, or to be reaped.
+#[cfg(unix)]
+const CHILD_WAIT_DURATION: Duration = Duration::from_secs(10);
+
+/// How long that wait pauses between two checks.
+#[cfg(unix)]
+const CHILD_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
+
+/// Start `program` with `arguments` as a child of this test process that leads
+/// its own process group, as a pane's child does, and hand back its process id.
+/// The child is never waited for here.
+#[cfg(unix)]
+fn start_group_leading_child(program: &str, arguments: &[&str]) -> u32 {
+    use std::os::unix::process::CommandExt;
+
+    std::process::Command::new(program)
+        .args(arguments)
+        .process_group(0)
+        .spawn()
+        .expect("start a child leading its own process group")
+        .id()
+}
+
+/// Wait until `child_process_id` is reaped: `kill(child_process_id, 0)` answers
+/// `ESRCH`, where a zombie still answers `0`.
+///
+/// # Panics
+/// Panics when [`CHILD_WAIT_DURATION`] runs out first, and when the check
+/// fails with an error other than `ESRCH`.
+#[cfg(unix)]
+fn wait_until_child_is_reaped(child_process_id: u32) {
+    let child_process_id = libc::pid_t::try_from(child_process_id).expect("a child id fits a pid");
+    let reap_deadline = Instant::now() + CHILD_WAIT_DURATION;
+    while unsafe { libc::kill(child_process_id, 0) } == 0 {
+        assert!(
+            Instant::now() < reap_deadline,
+            "child {child_process_id} was never reaped"
+        );
+        std::thread::sleep(CHILD_POLL_INTERVAL_DURATION);
+    }
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "child {child_process_id} is gone, not merely unreachable"
+    );
+}
+
+/// Wait until `child_process_id` has exited, and leave it unreaped: a `waitid`
+/// with `WNOWAIT` names it once it has exited, and collects nothing.
+///
+/// # Panics
+/// Panics when [`CHILD_WAIT_DURATION`] runs out first, and when
+/// `child_process_id` names no child of this process.
+#[cfg(unix)]
+fn wait_until_child_has_exited(child_process_id: u32) {
+    let exit_deadline = Instant::now() + CHILD_WAIT_DURATION;
+    loop {
+        let mut child_signal_information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let waitid_return_code = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child_process_id,
+                &mut child_signal_information,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(
+            waitid_return_code, 0,
+            "child {child_process_id} is still this process's to wait for"
+        );
+        if u32::try_from(unsafe { child_signal_information.si_pid() }) == Ok(child_process_id) {
+            return;
+        }
+        assert!(
+            Instant::now() < exit_deadline,
+            "child {child_process_id} never exited"
+        );
+        std::thread::sleep(CHILD_POLL_INTERVAL_DURATION);
+    }
+}
+
 #[test]
 fn a_child_that_ends_after_the_header_is_built_still_carries_its_real_status() {
     // The panes are read once to build the header and again just before it is
@@ -1766,25 +1809,108 @@ fn a_pane_naming_a_descriptor_this_process_does_not_hold_is_refused() {
 
 #[cfg(unix)]
 #[test]
-fn a_carried_header_naming_no_real_pane_child_ends_nothing() {
-    // `killpg` reads its argument signed: 0 names this process's own group, and
-    // anything past `i32::MAX` becomes -1, which names every process this one
-    // may signal. Both are refused before the signal is sent.
-    assert!(
-        !end_carried_child(0),
-        "process id 0 names this process's own group"
+fn ending_a_carried_child_signals_only_a_running_child_of_this_process() {
+    // Process id 0 and every process id past `i32::MAX` are refused before any
+    // signal is sent.
+    assert_eq!(end_carried_child(0), None, "process id 0 is refused");
+    assert_eq!(
+        end_carried_child(u32::MAX),
+        None,
+        "process id 4294967295 is refused"
     );
-    assert!(
-        !end_carried_child(u32::MAX),
-        "a process id past i32::MAX becomes -1"
+    assert_eq!(
+        end_carried_child(3_000_000_000),
+        None,
+        "process id 3000000000 is refused"
     );
-    assert!(
-        !end_carried_child(3_000_000_000),
-        "and so does any other process id that does not fit"
-    );
-    assert!(
+    assert_eq!(
         end_carried_child(NO_SUCH_PROCESS),
-        "a process id that could name a pane child is signalled"
+        None,
+        "a process id that names no child of this process is left alone"
+    );
+
+    let exited_child_process_id = start_group_leading_child("true", &[]);
+    wait_until_child_has_exited(exited_child_process_id);
+    assert_eq!(
+        end_carried_child(exited_child_process_id),
+        None,
+        "a child that already exited is not signalled"
+    );
+    assert_eq!(
+        unsafe {
+            libc::kill(
+                libc::pid_t::try_from(exited_child_process_id).expect("a child id fits a pid"),
+                0,
+            )
+        },
+        -1,
+        "the check itself reaped the exited child"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+
+    let running_child_process_id = start_group_leading_child("sleep", &["100"]);
+    let ended_child_process_id =
+        end_carried_child(running_child_process_id).expect("the running child is ended");
+    assert_eq!(
+        u32::try_from(ended_child_process_id),
+        Ok(running_child_process_id)
+    );
+    let mut wait_status: libc::c_int = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(ended_child_process_id, &mut wait_status, 0) },
+        ended_child_process_id
+    );
+    assert_eq!(
+        (libc::WIFSIGNALED(wait_status), libc::WTERMSIG(wait_status)),
+        (true, libc::SIGKILL),
+        "the running child's group was ended with SIGKILL"
+    );
+}
+
+/// How many running children the child-listing test starts: more than the 64
+/// ids the first read on macOS makes room for.
+#[cfg(unix)]
+const LISTED_RUNNING_CHILD_COUNT: usize = 65;
+
+#[cfg(unix)]
+#[test]
+fn listing_the_child_processes_names_every_child_running_or_exited() {
+    let running_child_process_ids: Vec<u32> = (0..LISTED_RUNNING_CHILD_COUNT)
+        .map(|_| start_group_leading_child("sleep", &["100"]))
+        .collect();
+    let exited_child_process_id = start_group_leading_child("true", &[]);
+    wait_until_child_has_exited(exited_child_process_id);
+
+    let child_process_ids = list_child_process_ids();
+
+    let unlisted_running_child_process_ids: Vec<u32> = running_child_process_ids
+        .iter()
+        .copied()
+        .filter(|running_child_process_id| !child_process_ids.contains(running_child_process_id))
+        .collect();
+    let is_exited_child_listed = child_process_ids.contains(&exited_child_process_id);
+    let is_parent_listed = child_process_ids.contains(&std::os::unix::process::parent_id());
+    assert_eq!(end_carried_child(exited_child_process_id), None);
+    for running_child_process_id in running_child_process_ids {
+        let ended_child_process_id =
+            end_carried_child(running_child_process_id).expect("the running child is ended");
+        let mut wait_status: libc::c_int = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(ended_child_process_id, &mut wait_status, 0) },
+            ended_child_process_id
+        );
+    }
+    assert_eq!(
+        (
+            unlisted_running_child_process_ids,
+            is_exited_child_listed,
+            is_parent_listed
+        ),
+        (Vec::new(), true, false),
+        "every child is listed, and the process that started this one is not"
     );
 }
 

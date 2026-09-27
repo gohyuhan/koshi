@@ -147,15 +147,10 @@ const CLIENTS_LEFT_WAIT_DURATION: Duration = Duration::from_secs(1);
 /// runtime inbox.
 const CLIENTS_LEFT_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
 
-/// How long a resuming session server waits for the children it inherited to
-/// end: the children of the panes it did not take back, and every child once
-/// the terminals are closed when the resume header does not read.
-#[cfg(unix)]
-const INHERITED_CHILD_REAP_WAIT_DURATION: Duration = Duration::from_secs(1);
-
-/// How long that wait pauses between two checks for an ended child.
-#[cfg(unix)]
-const INHERITED_CHILD_REAP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
+/// How many process ids the first read of this process's children makes room
+/// for. A read that fills that room is made again with twice the room.
+#[cfg(target_os = "macos")]
+const FIRST_CHILD_PROCESS_ID_BUFFER_COUNT: usize = 64;
 
 /// The directory listing every descriptor this process holds open, one entry
 /// per descriptor number.
@@ -553,16 +548,13 @@ fn build_from_carried_state(
         Ok((pty_owner, pty_size_by_pane_id)) => {
             let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
             let mut session_server = match resume_body {
-                Ok(resume_body) => {
-                    let mut session_server = Server::resume(
-                        pty_backend,
-                        runtime_event_receiver,
-                        resume_body,
-                        pty_size_by_pane_id,
-                    );
-                    session_server.load_startup_config(app_config);
-                    session_server
-                }
+                Ok(resume_body) => Server::resume(
+                    pty_backend,
+                    runtime_event_receiver,
+                    app_config,
+                    resume_body,
+                    pty_size_by_pane_id,
+                ),
                 Err(resume_read_error) => {
                     tracing::error!(
                         %resume_read_error,
@@ -728,15 +720,15 @@ type TakenBackPtyState = (Arc<PtyOwner>, HashMap<PaneId, PtySize>);
 ///
 /// A pane's terminal descriptor crossed the swap open, so each pane is taken
 /// back on its own from that descriptor and its child's process id by
-/// [`take_one_pane_back`]. A pane that cannot be taken back has its child's
-/// process group ended, and every other pane is still taken back.
+/// [`take_one_pane_back`]. A pane that cannot be taken back has its child ended
+/// by [`end_carried_child`], and every other pane is still taken back.
 ///
 /// The panes [`find_conflicting_carried_pane_indexes`] names are none of them
 /// taken back: each one's child is ended, and each descriptor they name is
 /// closed once when it names a pseudoterminal master.
 ///
-/// Every child this ends is reaped once it has exited, inside one
-/// [`INHERITED_CHILD_REAP_WAIT_DURATION`] shared by all of them.
+/// Every child this ends is reaped once it has exited, by
+/// [`reap_ended_children`].
 ///
 /// Before → after: a header naming `A(fd 7)`, `B(fd 9)`, `C(fd 7)` → `B` is
 /// taken back, `A`'s and `C`'s children are ended and reaped, and descriptor 7
@@ -753,15 +745,15 @@ fn take_panes_back(
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(pty_sink));
     let mut pty_size_by_pane_id = HashMap::new();
     let mut closed_terminal_file_descriptors: HashSet<i32> = HashSet::new();
-    let mut ended_process_ids: Vec<u32> = Vec::new();
+    let mut ended_process_ids: Vec<libc::pid_t> = Vec::new();
     for (pane_index, carried_pane) in resume_header.carried_panes.iter().enumerate() {
         if conflicting_pane_indexes.contains(&pane_index) {
             tracing::warn!(
                 pane_id = %carried_pane.pane_id,
                 "the carried state names this pane in conflict with another; it is not taken back"
             );
-            if end_carried_child(carried_pane.process_id) {
-                ended_process_ids.push(carried_pane.process_id);
+            if let Some(ended_process_id) = end_carried_child(carried_pane.process_id) {
+                ended_process_ids.push(ended_process_id);
             }
             if carried_pane
                 .terminal_fd
@@ -783,18 +775,13 @@ fn take_panes_back(
                     %take_back_error,
                     "a carried pane could not be taken back; it closes and the other panes come back"
                 );
-                if end_carried_child(carried_pane.process_id) {
-                    ended_process_ids.push(carried_pane.process_id);
+                if let Some(ended_process_id) = end_carried_child(carried_pane.process_id) {
+                    ended_process_ids.push(ended_process_id);
                 }
             }
         }
     }
-    let reap_deadline = Instant::now() + INHERITED_CHILD_REAP_WAIT_DURATION;
-    for ended_process_id in ended_process_ids {
-        if let Ok(waited_process_id) = libc::pid_t::try_from(ended_process_id) {
-            reap_ended_children(waited_process_id, reap_deadline);
-        }
-    }
+    reap_ended_children(ended_process_ids);
     Ok((pty_owner, pty_size_by_pane_id))
 }
 
@@ -1001,17 +988,21 @@ fn take_panes_back(
     Ok((pty_owner, pty_size_by_pane_id))
 }
 
-/// Release every terminal this process inherited across the swap, when the
-/// resume header does not read.
+/// Release every terminal and every child process this process inherited across
+/// the swap, when the resume header does not read.
 ///
-/// Every open descriptor above standard error that names a pseudoterminal
-/// master is closed, which hangs up the program running in that terminal.
-/// Every child process of this one that has ended is then reaped, until none is
-/// left or [`INHERITED_CHILD_REAP_WAIT_DURATION`] runs out. A child still
-/// running when the wait runs out keeps running.
+/// 1. Every open descriptor above standard error that names a pseudoterminal
+///    master is closed, which hangs up the program running in that terminal.
+/// 2. Every child [`list_child_process_ids`] names is ended by
+///    [`end_carried_child`].
+/// 3. Every child ended there is reaped once it has exited, by
+///    [`reap_ended_children`].
 ///
-/// The caller holds no pane of its own: every pseudoterminal master this
-/// process holds is closed.
+/// The caller holds no pane and no child of its own: every pseudoterminal
+/// master this process holds is closed, and every child it has is ended.
+///
+/// Before → after: a pane child that ignores the hangup, such as
+/// `nohup sleep 30` → its process group is ended, and it is reaped.
 #[cfg(unix)]
 fn release_panes_without_header(_session_start: &SessionStart, _pty_sink: Arc<dyn PtySink>) {
     use std::os::fd::{FromRawFd, OwnedFd};
@@ -1028,7 +1019,90 @@ fn release_panes_without_header(_session_start: &SessionStart, _pty_sink: Arc<dy
         );
         drop(unsafe { OwnedFd::from_raw_fd(open_file_descriptor) });
     }
-    reap_ended_children(-1, Instant::now() + INHERITED_CHILD_REAP_WAIT_DURATION);
+    let ended_process_ids: Vec<libc::pid_t> = list_child_process_ids()
+        .into_iter()
+        .filter_map(end_carried_child)
+        .collect();
+    reap_ended_children(ended_process_ids);
+}
+
+/// Every child process of this one, running or exited and not yet reaped: each
+/// process under `/proc` whose `stat` line names this process as its parent. A
+/// `/proc` that cannot be read gives an empty list.
+///
+/// The `stat` line holds the process id, the command name between `(` and the
+/// last `)`, the state, and then the parent's process id. Before → after:
+/// `4821 (sleep 30) S 4700 …` → `4821` is listed when this process is `4700`.
+#[cfg(target_os = "linux")]
+fn list_child_process_ids() -> Vec<u32> {
+    let this_process_id = std::process::id();
+    let Ok(process_entries) = std::fs::read_dir("/proc") else {
+        tracing::warn!("the child processes could not be listed; none is ended");
+        return Vec::new();
+    };
+    process_entries
+        .filter_map(Result::ok)
+        .filter_map(|process_entry| process_entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|process_id| {
+            let Ok(process_stat_line) = std::fs::read_to_string(format!("/proc/{process_id}/stat"))
+            else {
+                return false;
+            };
+            let Some((_, fields_after_command_name)) = process_stat_line.rsplit_once(')') else {
+                return false;
+            };
+            let parent_process_id = fields_after_command_name
+                .split_whitespace()
+                .nth(1)
+                .and_then(|parent_process_id_text| parent_process_id_text.parse::<u32>().ok());
+            parent_process_id == Some(this_process_id)
+        })
+        .collect()
+}
+
+/// Every child process of this one, running or exited and not yet reaped, as
+/// `proc_listchildpids` names them. A read that fills its buffer is made again
+/// with twice the room. A read the OS refuses gives an empty list.
+#[cfg(target_os = "macos")]
+fn list_child_process_ids() -> Vec<u32> {
+    let this_process_id = unsafe { libc::getpid() };
+    let mut child_process_ids: Vec<libc::pid_t> = vec![0; FIRST_CHILD_PROCESS_ID_BUFFER_COUNT];
+    loop {
+        let Ok(buffer_byte_count) =
+            libc::c_int::try_from(std::mem::size_of_val(child_process_ids.as_slice()))
+        else {
+            tracing::warn!("the child processes could not be listed; none is ended");
+            return Vec::new();
+        };
+        // SAFETY: the pointer and the byte count describe `child_process_ids`,
+        // which the kernel fills with process ids.
+        let listed_child_count = unsafe {
+            libc::proc_listchildpids(
+                this_process_id,
+                child_process_ids.as_mut_ptr().cast(),
+                buffer_byte_count,
+            )
+        };
+        let Ok(listed_child_count) = usize::try_from(listed_child_count) else {
+            tracing::warn!("the child processes could not be listed; none is ended");
+            return Vec::new();
+        };
+        if listed_child_count < child_process_ids.len() {
+            return child_process_ids[..listed_child_count]
+                .iter()
+                .filter_map(|child_process_id| u32::try_from(*child_process_id).ok())
+                .collect();
+        }
+        child_process_ids.resize(child_process_ids.len() * 2, 0);
+    }
+}
+
+/// Every child process of this one. This platform offers no way to list them,
+/// so the list is empty.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn list_child_process_ids() -> Vec<u32> {
+    tracing::warn!("the child processes cannot be listed on this platform; none is ended");
+    Vec::new()
 }
 
 /// Every descriptor number this process holds open, read from
@@ -1050,36 +1124,43 @@ fn list_open_file_descriptors() -> Vec<i32> {
         .collect()
 }
 
-/// Reap the ended children `waited_process_id` names, checking every
-/// [`INHERITED_CHILD_REAP_POLL_INTERVAL_DURATION`], until none is left or
-/// `reap_deadline` passes.
+/// Reap every child `ended_process_ids` names once it has exited, one after
+/// another, on a thread of its own. An empty list starts no thread.
 ///
-/// `waited_process_id` is a `waitpid` target: `-1` names every child of this
-/// process, and a positive id names that one child. An id that names no child
-/// of this process returns at once.
+/// Each `waitpid` names one child and blocks until that child has exited,
+/// however long that takes. A child this process starts for a pane of its own
+/// is never waited for here. An id that names no child of this process returns
+/// at once.
 ///
-/// Before → after: `waited_process_id = 4821`, a child killed by `SIGKILL` →
+/// Before → after: `ended_process_ids = [4821]`, a child killed by `SIGKILL` →
 /// its exit status is collected and it is no longer a zombie.
 #[cfg(unix)]
-fn reap_ended_children(waited_process_id: libc::pid_t, reap_deadline: Instant) {
-    loop {
-        let mut wait_status: libc::c_int = 0;
-        let reaped_process_id =
-            unsafe { libc::waitpid(waited_process_id, &mut wait_status, libc::WNOHANG) };
-        if reaped_process_id > 0 {
-            continue;
-        }
-        if reaped_process_id < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                continue;
+fn reap_ended_children(ended_process_ids: Vec<libc::pid_t>) {
+    if ended_process_ids.is_empty() {
+        return;
+    }
+    let reaper_spawn_result = std::thread::Builder::new()
+        .name("koshi-inherited-child-reaper".to_string())
+        .spawn(move || {
+            for ended_process_id in ended_process_ids {
+                loop {
+                    let mut wait_status: libc::c_int = 0;
+                    let waited_process_id =
+                        unsafe { libc::waitpid(ended_process_id, &mut wait_status, 0) };
+                    let is_wait_interrupted = waited_process_id < 0
+                        && std::io::Error::last_os_error().kind()
+                            == std::io::ErrorKind::Interrupted;
+                    if !is_wait_interrupted {
+                        break;
+                    }
+                }
             }
-            return;
-        }
-        if Instant::now() >= reap_deadline {
-            tracing::warn!("a child the previous image started is still running; it keeps running");
-            return;
-        }
-        std::thread::sleep(INHERITED_CHILD_REAP_POLL_INTERVAL_DURATION);
+        });
+    if let Err(thread_spawn_error) = reaper_spawn_result {
+        tracing::warn!(
+            %thread_spawn_error,
+            "the ended children could not be reaped; each stays a zombie until this process exits"
+        );
     }
 }
 
@@ -1108,27 +1189,46 @@ fn refresh_carried_exits(resume_header: &mut ResumeHeader, carried_pty_panes: &[
     }
 }
 
-/// End the process group of one pane child a carried header names.
+/// End the process group of one pane child the previous image left, and hand
+/// back its process id for [`reap_ended_children`].
 ///
-/// The process group is ended by `killpg`, whose argument is signed: `0` names
-/// this process's own group, and a process id that does not fit a positive
-/// `i32` wraps to a negative number naming another group. Both are refused.
+/// The process group is ended by `killpg` with `SIGKILL`. `process_id` is read
+/// first, with a `waitpid` that does not wait:
 ///
-/// Before → after: `process_id = 4821` → that pane child's group is ended and
-/// `true` comes back. `process_id = 0` or `process_id = 3_000_000_000` → nothing
-/// is signalled and `false` comes back.
+/// 1. `0`, and an id that does not fit a positive `i32`, are refused.
+/// 2. An id that names no child of this process is refused.
+/// 3. A child that has already exited is reaped by that `waitpid`.
+/// 4. A running child has its process group ended, and its id comes back.
 ///
-/// Hands back whether `killpg` was called on `process_id`. A `killpg` that failed —
-/// the group is already gone, or a member may not be signalled — still hands
-/// back `true`.
+/// `None` comes back in cases 1 to 3, with nothing signalled.
+///
+/// Before → after: `process_id = 4821`, a running child of this process →
+/// `Some(4821)`, and its group is ended. `process_id = 4821`, a process this
+/// one did not start → `None`, and nothing is signalled.
 #[cfg(unix)]
-fn end_carried_child(process_id: u32) -> bool {
-    if process_id == 0 || i32::try_from(process_id).is_err() {
-        tracing::warn!(process_id, "the carried state named no pane child to end");
-        return false;
+fn end_carried_child(process_id: u32) -> Option<libc::pid_t> {
+    let child_process_id = match libc::pid_t::try_from(process_id) {
+        Ok(child_process_id) if child_process_id > 0 => child_process_id,
+        _ => {
+            tracing::warn!(process_id, "the carried state named no pane child to end");
+            return None;
+        }
+    };
+    let mut wait_status: libc::c_int = 0;
+    let waited_process_id =
+        unsafe { libc::waitpid(child_process_id, &mut wait_status, libc::WNOHANG) };
+    if waited_process_id < 0 {
+        tracing::warn!(
+            process_id,
+            "the carried state named a process that is no child of this one; it is left alone"
+        );
+        return None;
+    }
+    if waited_process_id > 0 {
+        return None;
     }
     let _ = PtyChildKillControl::from_process_id(process_id).force_kill_process_tree();
-    true
+    Some(child_process_id)
 }
 
 /// End every pane the helper process holds, and tell the helper to end itself,
@@ -1863,15 +1963,14 @@ fn resume_session_readers(
     pty_owner.resume_readers();
 
     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
-    let mut rebuilt_session = Server::resume(
+    // The session comes back on the `koshi.kdl` that is on disk now.
+    Server::resume(
         pty_backend,
         session_server.into_inbox_receiver(),
+        koshi_link::config::load_app_layer(),
         resume_body,
         build_carried_pty_sizes(resume_header),
-    );
-    // The session comes back on the `koshi.kdl` that is on disk now.
-    rebuilt_session.load_startup_config(koshi_link::config::load_app_layer());
-    rebuilt_session
+    )
 }
 
 /// Apply what the inbox holds, taking detaches, and arm the window a carried

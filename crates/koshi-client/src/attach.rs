@@ -32,12 +32,16 @@
 //!
 //! A session replacing its own process image is not a way out. The session says
 //! so before it goes; this client leaves the terminal in every mode it is in
-//! and comes back as the same client. On this machine it reads that session's
-//! endpoint file until it names a new connection token and joins the new
-//! socket; on a server it dials that server again, so the certificate, the
-//! secret and the scope are checked again. The session's first frame there
-//! paints the same panes back, so the screen does not flicker. A session that
-//! moves this client to another session comes back the same way.
+//! and comes back. On this machine it reads that session's endpoint file until
+//! it names a new connection token and joins the new socket; on a server it
+//! dials that server again, so the certificate, the secret and the scope are
+//! checked again. A session that still holds this client's record hands it
+//! back, and its first frame paints the same panes back, so the screen does not
+//! flicker. A session that cannot hand the record back mints a fresh client,
+//! and the viewer takes that id as its own: a restart that could not bring the
+//! carried layout back holds no record, and a record whose tab closed is not
+//! handed back. A session that moves this client to another session comes back
+//! the same way.
 //!
 //! A dropped link to a session on a server is not a way out either, while
 //! `remote-reconnect` is on. The viewer draws
@@ -1830,9 +1834,9 @@ fn attach_once(
 /// [`reconnect_after_restart`] reads and stamps with the token of the connection this client
 /// comes back on.
 ///
-/// `client_id` is the client the open connection joined as. A redial that a
-/// session answers with a fresh client replaces it, and the viewer's own id
-/// with it.
+/// `client_id` is the client the open connection joined as. A redial or a
+/// return after a restart that a session answers with a fresh client replaces
+/// it, and the viewer's own id with it.
 ///
 /// `resume_token` is the secret the open connection's attach minted, presented
 /// on the next redial to get that attach's view back. Every reconnection
@@ -2160,7 +2164,7 @@ fn run_attachment<B: Backend>(
             }
         }
         if let Some(attachment_ending) = attachment_ending {
-            let reconnected_halves = match attachment_ending {
+            let reconnection = match attachment_ending {
                 AttachmentEnding::Restarting => {
                     // The session is replacing its own process image. The
                     // terminal keeps every mode it is in and the screen is left
@@ -2181,6 +2185,14 @@ fn run_attachment<B: Backend>(
                         graphics_support,
                         cell_size_query.get_current_cell_size(),
                     )
+                    .inspect(|(rejoined_client_id, _, _)| {
+                        if *rejoined_client_id != client_id {
+                            tracing::warn!(
+                                %session_id,
+                                "the restarted session did not hand this client back; this viewer goes on as the new client it minted"
+                            );
+                        }
+                    })
                 }
                 // The link broke. A viewer of a session on a server, with
                 // `remote-reconnect` on, dials that server again while the
@@ -2208,20 +2220,16 @@ fn run_attachment<B: Backend>(
                             cell_size_query.get_current_cell_size(),
                         ) {
                             Ok(joined_session) => {
-                                client_id = joined_session.client_id;
-                                client.set_client_id(joined_session.client_id);
                                 resume_token = joined_session.resume_token;
-                                client.end_mouse_gestures();
-                                pending_mouse_actions.clear();
-                                // The panes the old frame placed may be gone.
-                                // Mouse events wait for the new connection's
-                                // first frame to be placed against.
-                                last_mouse_frame = None;
                                 if drop_input_from_the_blackout(&incoming_receiver, cell_size_query)
                                 {
                                     break AttachmentEnding::TerminalGone;
                                 }
-                                Some((joined_session.reader, joined_session.writer))
+                                Some((
+                                    joined_session.client_id,
+                                    joined_session.reader,
+                                    joined_session.writer,
+                                ))
                             }
                             Err(cause) => break AttachmentEnding::LinkLost(cause),
                         }
@@ -2234,9 +2242,16 @@ fn run_attachment<B: Backend>(
                 | AttachmentEnding::SwitchSession(_)
                 | AttachmentEnding::LinkLost(_) => None,
             };
-            let Some((reader, writer)) = reconnected_halves else {
+            let Some((rejoined_client_id, reader, writer)) = reconnection else {
                 break attachment_ending;
             };
+            client_id = rejoined_client_id;
+            client.set_client_id(rejoined_client_id);
+            client.end_mouse_gestures();
+            pending_mouse_actions.clear();
+            // The panes the old frame placed may be gone. Mouse events wait for
+            // the new connection's first frame to be placed against.
+            last_mouse_frame = None;
             current_connection_index += 1;
             image_cache.clear_image_cache();
             spawn_frame_reader(reader, current_connection_index, incoming_sender.clone());
@@ -2508,8 +2523,8 @@ fn format_session_selector_name(session_selector: &SessionSelector) -> String {
 }
 
 /// Come back into `session_id` after it said it is replacing its own process
-/// image, and hand back the two halves of the connection this client comes back
-/// on.
+/// image, and hand back the client this viewer came back as and the two halves
+/// of the connection it came back on.
 ///
 /// On this machine [`rejoin_session`] waits for the session's new socket, and `connection_token` is
 /// stamped with the token that socket was advertised under. On a server the whole dial runs again —
@@ -2526,9 +2541,14 @@ fn format_session_selector_name(session_selector: &SessionSelector) -> String {
 /// naming `client_id`, and a session that still holds that record hands its
 /// view straight back.
 ///
-/// `None` for every way the client cannot come back, including a session that
-/// no longer holds this client's record. The caller reports each of them as the
-/// session ending unexpectedly.
+/// Returns the client the session answered with, then the two halves. That
+/// client is `client_id` when the session handed its record back, and a fresh
+/// client the session minted when it cannot: a restart that could not bring the
+/// carried layout back holds no record, and a record whose tab closed is not
+/// handed back.
+///
+/// `None` for every way the client cannot come back. The caller reports each
+/// of them as the session ending unexpectedly.
 fn reconnect_after_restart(
     home: &Home,
     session_id: SessionId,
@@ -2537,10 +2557,10 @@ fn reconnect_after_restart(
     resume_token: &mut Option<ConnectionToken>,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-) -> Option<(FrameReader, FrameWriter)> {
+) -> Option<(ClientId, FrameReader, FrameWriter)> {
     match home {
         Home::Local { runtime_directory } => {
-            let (endpoint, connection) = rejoin_session(
+            let (rejoined_client_id, endpoint, connection) = rejoin_session(
                 runtime_directory,
                 session_id,
                 client_id,
@@ -2551,7 +2571,7 @@ fn reconnect_after_restart(
             *connection_token = endpoint.connection_token;
             *resume_token = None;
             let (reader, writer) = connection.split();
-            Some((reader, writer))
+            Some((rejoined_client_id, reader, writer))
         }
         Home::Remote { server } => {
             let deadline = Instant::now() + RESTART_WINDOW_DURATION;
@@ -2567,17 +2587,10 @@ fn reconnect_after_restart(
                 )
                 .map_err(CliError::from)
                 {
-                    Ok(joined) if joined.client_id != client_id => {
-                        tracing::warn!(
-                            %session_id,
-                            "the restarted session no longer held this client and minted a new one"
-                        );
-                        return None;
-                    }
                     Ok(joined) => {
                         *connection_token = joined.connection_token;
                         *resume_token = joined.resume_token;
-                        return Some((joined.reader, joined.writer));
+                        return Some((joined.client_id, joined.reader, joined.writer));
                     }
                     Err(redial_error) => {
                         if Instant::now() >= deadline {
@@ -3100,18 +3113,20 @@ fn parse_attached_session(
 }
 
 /// Come back to a session that is replacing its own process image: wait for its
-/// new socket, connect to it, and join again as `client_id`. Returns the
-/// endpoint file and the open connection.
+/// new socket, connect to it, and join again as `client_id`. Returns the client
+/// the session answered with, the endpoint file and the open connection.
+///
+/// The client is `client_id` when the session handed that record back, and a
+/// fresh client the session minted otherwise.
 ///
 /// `connection_token` is the token this client attached under; the wait watches it for a
 /// change.
 ///
 /// `None` for every way the client cannot come back: another local user's
 /// session, which advertises no endpoint file this user can read; a session
-/// that has not come back inside [`RESTART_WINDOW_DURATION`]; a new socket that refuses
-/// the connection or the join; and a session that no longer held this client's
-/// record and minted a fresh one. The caller reports every one of them as the
-/// session ending unexpectedly.
+/// that has not come back inside [`RESTART_WINDOW_DURATION`]; and a new socket
+/// that refuses the connection or the join. The caller reports every one of
+/// them as the session ending unexpectedly.
 fn rejoin_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -3119,7 +3134,7 @@ fn rejoin_session(
     connection_token: &ConnectionToken,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-) -> Option<(EndpointFile, Connection)> {
+) -> Option<(ClientId, EndpointFile, Connection)> {
     if connection_token.expose_secret().is_empty() {
         tracing::warn!(
             %session_id,
@@ -3139,7 +3154,7 @@ fn rejoin_session(
             tracing::warn!(%connection_error, "could not reach the restarted session")
         })
         .ok()?;
-    let (rejoined, _, _) = join_session(
+    let (rejoined_client_id, _, _) = join_session(
         &mut connection,
         &endpoint.connection_token,
         Some(client_id),
@@ -3150,14 +3165,7 @@ fn rejoin_session(
         |join_error| tracing::warn!(%join_error, "the restarted session refused this client"),
     )
     .ok()?;
-    if rejoined != client_id {
-        tracing::warn!(
-            %session_id,
-            "the restarted session no longer held this client and minted a new one"
-        );
-        return None;
-    }
-    Some((endpoint, connection))
+    Some((rejoined_client_id, endpoint, connection))
 }
 
 /// Wait for `session_id` to advertise a socket under a token other than

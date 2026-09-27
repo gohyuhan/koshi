@@ -2023,6 +2023,7 @@ fn a_resumed_server_starts_with_every_carried_client_awaiting_its_own_attach() {
             InboxSink::from_event_sender(sender),
         ))),
         inbox_receiver,
+        None,
         carried_session_bytes,
         HashMap::new(),
     );
@@ -2120,6 +2121,7 @@ fn a_quit_applied_before_the_swap_is_carried_to_the_next_image() {
             InboxSink::from_event_sender(sender),
         ))),
         receiver,
+        None,
         body,
         HashMap::new(),
     );
@@ -2148,6 +2150,7 @@ fn a_zero_grace_quit_is_still_zero_grace_after_the_swap() {
             InboxSink::from_event_sender(sender),
         ))),
         receiver,
+        None,
         body,
         HashMap::new(),
     );
@@ -2192,6 +2195,7 @@ fn a_swap_with_no_quit_behind_it_comes_back_serving() {
             InboxSink::from_event_sender(sender),
         ))),
         receiver,
+        None,
         body,
         HashMap::new(),
     );
@@ -2728,6 +2732,7 @@ fn a_resumed_server_puts_every_carried_engine_back_with_its_undecoded_bytes() {
             InboxSink::from_event_sender(sender),
         ))),
         inbox_receiver,
+        None,
         body,
         HashMap::from([(root, carried_size)]),
     );
@@ -2768,6 +2773,7 @@ fn a_resumed_server_keeps_queued_graphics_events() {
             InboxSink::from_event_sender(sender),
         ))),
         inbox_receiver,
+        None,
         body,
         HashMap::from([(
             root,
@@ -2835,6 +2841,7 @@ fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
             InboxSink::from_event_sender(sender),
         ))),
         inbox_receiver,
+        None,
         body,
         HashMap::from([(
             root,
@@ -2892,6 +2899,7 @@ fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
             InboxSink::from_event_sender(sender),
         ))),
         inbox_receiver,
+        None,
         body,
         HashMap::from([(
             root,

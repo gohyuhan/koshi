@@ -2,8 +2,8 @@
 //! all authoritative session state, driven by the event loop.
 //!
 //! A [`Server`] owns the sessions and their layout trees, the per-pane
-//! terminal engines, the shared PTY backend, the action registry, and the
-//! service handles the event loop drives. The view side lives in its own
+//! terminal engines, the shared PTY backend, and the event inbox the event
+//! loop drains. The view side lives in its own
 //! crate, `koshi-client`; the two halves talk only through the
 //! server's doors — [`Server::submit_command`] carries a client's command in,
 //! [`Server::subscribe`] carries the emitted events out — so the server never
@@ -132,8 +132,8 @@ pub fn can_carry_panes(_pane_records: &[CarriedPtyPane]) -> Result<(), String> {
 }
 
 /// The authoritative half of one koshi process: owns the sessions and their
-/// layout trees, the per-pane terminal engines, the shared PTY backend, the
-/// action registry, and the service handles the event loop drives. One
+/// layout trees, the per-pane terminal engines, the shared PTY backend, and the
+/// event inbox the event loop drains. One
 /// process holds exactly one. The view side — viewport, rendering, the colors
 /// chrome is painted in, the subscribed event feed — lives in the
 /// `koshi-client` crate, which reaches session state only through
@@ -231,10 +231,9 @@ pub struct Server {
 }
 
 impl Server {
-    /// Build a server with no sessions, no terminal engines, no subscribers, a
-    /// fresh render scheduler, and an action registry holding the built-in
-    /// actions, holding the given PTY backend, service handles, and event
-    /// inbox. Both effective configs start at the built-in defaults, over an
+    /// Build a server with no sessions, no terminal engines, no subscribers and
+    /// a fresh render scheduler, holding the given PTY backend and event inbox.
+    /// Both effective configs start at the built-in defaults, over an
     /// empty app layer that [`load_startup_config`](Self::load_startup_config)
     /// and every `koshi.kdl` reload replace.
     pub fn from_runtime_parts(
@@ -272,12 +271,16 @@ impl Server {
     /// Rebuild a server from the state a previous process image carried out,
     /// over panes that are already running.
     ///
-    /// The event bus, the action registry, the render scheduler, the built-in config defaults, the
-    /// subscribers and the control socket are all built fresh here. What comes from the swap is
-    /// what [`ResumeBody`] carries, over the panes `pty_size_by_pane_id` names, plus the records
-    /// of the clients that were told to attach again.
-    /// [`load_startup_config`](Self::load_startup_config) still runs afterwards, so the session
-    /// comes back on the `koshi.kdl` that is on disk at that moment.
+    /// The event bus, the render scheduler and the subscribers are built fresh here, and no
+    /// control socket is attached: the caller attaches one with
+    /// [`attach_ipc_server`](Self::attach_ipc_server). What comes from the swap is what
+    /// [`ResumeBody`] carries, over the panes `pty_size_by_pane_id` names, plus the records of the
+    /// clients that were told to attach again.
+    ///
+    /// `startup_app_config` is applied through [`load_startup_config`](Self::load_startup_config)
+    /// before any pane is matched, so the session comes back on the `koshi.kdl` the caller read:
+    /// a blank screen takes its scrollback limits from it, and a closed pane's tab reflows under
+    /// its pane sizes. `None` keeps the built-in defaults.
     ///
     /// `pty_size_by_pane_id` names every pane whose child the backend drives, with the size its
     /// terminal holds. Two callers reach this: the new image after a successful swap passes the
@@ -302,10 +305,12 @@ impl Server {
     pub fn resume(
         pty_backend: Arc<dyn PtyBackend>,
         inbox_receiver: Receiver<RuntimeEvent>,
+        startup_app_config: Option<PartialKoshiConfig>,
         body: ResumeBody,
         pty_size_by_pane_id: HashMap<PaneId, PtySize>,
     ) -> Self {
         let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
+        server.load_startup_config(startup_app_config);
         server.client_ids_awaiting_reconnect = body
             .session_by_id
             .values()

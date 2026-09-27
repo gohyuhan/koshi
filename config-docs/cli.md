@@ -18,6 +18,13 @@ and after them the background process that tracks sessions. A session keeps its
 panes, the programs running in them and their scrollback, and an attached
 terminal rejoins the session on its own.
 
+A session whose saved state is partly damaged still comes back. A pane whose
+screen could not be read comes back blank with a notice, and its program keeps
+running. When the layout could not be read, each program comes back in a tab of
+its own. When nothing could be brought back, the session starts one new shell
+with a notice, and every program it ran is ended. An attached terminal rejoins
+in each of these cases.
+
 `koshi update` names every session that did not move on standard error, and that
 session keeps the old build until you end it and start it again. A session
 refuses the restart when a pane's program stopped reading its input, when a pane

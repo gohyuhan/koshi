@@ -51,10 +51,10 @@ use tempfile::TempDir;
 
 mod common;
 
-#[cfg(unix)]
-use common::copy_koshi_binary;
 #[cfg(any(unix, windows))]
 use common::start_koshi_process;
+#[cfg(unix)]
+use common::{build_koshi_command_at, build_koshi_command_under_home, copy_koshi_binary};
 
 /// How long a poll waits for something a started process has to do before the
 /// test calls it a failure.
@@ -150,7 +150,7 @@ fn wait_for_session_server_exit(session_process: &mut RunningSession) -> bool {
 ///
 /// The name is one letter and six random characters, so the home is
 /// `/tmp/k` plus six characters — 12 bytes — and the directory a `koshi`
-/// started under it serves is `<home>/run`, 16 bytes. The longest name these
+/// started under it serves is `<home_directory>/run`, 16 bytes. The longest name these
 /// tests bind in that directory is the session socket, `session-<uuid>.sock`
 /// at 49 bytes, which makes the bound path 66 bytes against the 103 bytes a
 /// Unix socket address holds.
@@ -170,31 +170,31 @@ fn build_test_shared_directory_base() -> TempDir {
     TempDir::new_in("/tmp").expect("a temporary shared session directory")
 }
 
-/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
+/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
 /// serves: `run/` inside the home directory.
 #[cfg(unix)]
-fn resolve_runtime_directory_under_home(home: &Path) -> PathBuf {
-    home.join("run")
+fn resolve_runtime_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join("run")
 }
 
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
+/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
 /// reads: macOS derives it from the home directory alone.
 #[cfg(target_os = "macos")]
-fn resolve_config_directory_under_home(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/koshi")
+fn resolve_config_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join("Library/Application Support/koshi")
 }
 
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
+/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
 /// reads: `.config/koshi` inside the home directory.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_config_directory_under_home(home: &Path) -> PathBuf {
-    home.join(".config/koshi")
+fn resolve_config_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join(".config/koshi")
 }
 
-/// Write `body` as the `koshi.kdl` a process started under `home` reads.
+/// Write `config_text` as the `koshi.kdl` a process started under `home_directory` reads.
 #[cfg(unix)]
-fn write_test_config(home: &Path, config_text: &str) {
-    let config_directory = resolve_config_directory_under_home(home);
+fn write_test_config(home_directory: &Path, config_text: &str) {
+    let config_directory = resolve_config_directory_under_home(home_directory);
     std::fs::create_dir_all(&config_directory).expect("a config directory under the test home");
     std::fs::write(config_directory.join("koshi.kdl"), config_text)
         .expect("the config file is written");
@@ -209,15 +209,15 @@ fn build_switched_on_config(shared_directory_base: &Path) -> String {
     )
 }
 
-/// Let every local user reach the `koshi.kdl` written under `home`: every
-/// directory from the config directory up to `home` opens to `0755`, and the
+/// Let every local user reach the `koshi.kdl` written under `home_directory`: every
+/// directory from the config directory up to `home_directory` opens to `0755`, and the
 /// file itself to `0644`. The second user's `koshi` has to read that file to
 /// learn the switch is on.
 #[cfg(unix)]
-fn set_config_read_permissions_for_every_user(home: &Path) {
+fn set_config_read_permissions_for_every_user(home_directory: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    let config_directory = resolve_config_directory_under_home(home);
+    let config_directory = resolve_config_directory_under_home(home_directory);
     let mut config_directory_path = config_directory.as_path();
     loop {
         std::fs::set_permissions(
@@ -230,7 +230,7 @@ fn set_config_read_permissions_for_every_user(home: &Path) {
                 config_directory_path.display()
             )
         });
-        if config_directory_path == home {
+        if config_directory_path == home_directory {
             break;
         }
         config_directory_path = config_directory_path
@@ -300,55 +300,19 @@ fn build_koshi_binary_for_every_user() -> (TempDir, PathBuf) {
     (test_home_directory, koshi_binary_path)
 }
 
-/// The `koshi` binary at `binary`, set to keep its files under `home` rather
-/// than in the developer's own directories, and stripped of the pane identity
-/// so it runs as a CLI outside any session. Standard input is closed, and both
-/// output streams are pipes the test reads. The runtime directory the child
-/// serves is `<home>/run`.
-#[cfg(unix)]
-fn build_koshi_command_at(binary: &Path, home: &Path) -> std::process::Command {
-    let mut process_command = std::process::Command::new(binary);
-    process_command
-        .env("HOME", home)
-        .env("KOSHI_RUNTIME_DIR", home.join("run"))
-        // The five variables the runtime injects at pane spawn; `KOSHI` is the
-        // marker `InSessionContext::from_env` reads, and a test run from inside
-        // a koshi pane would hand every one of them to this child.
-        .env_remove("KOSHI")
-        .env_remove("KOSHI_SESSION_ID")
-        .env_remove("KOSHI_CLIENT_ID")
-        .env_remove("KOSHI_PANE_ID")
-        .env_remove("KOSHI_SOCKET")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // On Linux `XDG_CONFIG_HOME` beats `$HOME/.config`, so a machine that sets
-    // it would send this child outside the test home for its `koshi.kdl`, past
-    // the one the test wrote. macOS never reads this.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    process_command.env("XDG_CONFIG_HOME", home.join(".config"));
-    process_command
-}
-
-/// [`build_koshi_command_at`], run from the binary this build produced.
-#[cfg(unix)]
-fn build_koshi_command_under_home(home: &Path) -> std::process::Command {
-    build_koshi_command_at(Path::new(env!("CARGO_BIN_EXE_koshi")), home)
-}
-
 /// [`build_koshi_command_at`], run as the user `user_id` and the group `group_id` instead of this
 /// one. The group is set first, which is the only order that works once the
 /// user id has been given up.
 #[cfg(unix)]
 fn build_koshi_command_as_user(
-    binary: &Path,
-    home: &Path,
+    binary_path: &Path,
+    home_directory: &Path,
     user_id: u32,
     group_id: u32,
 ) -> std::process::Command {
     use std::os::unix::process::CommandExt;
 
-    let mut process_command = build_koshi_command_at(binary, home);
+    let mut process_command = build_koshi_command_at(binary_path, home_directory);
     process_command.gid(group_id).uid(user_id);
     process_command
 }
@@ -363,16 +327,16 @@ fn run_koshi_command(process_command: &mut std::process::Command) -> std::proces
         .expect("the koshi binary runs to its end")
 }
 
-/// Start one session's server under `home`, so it reads the `koshi.kdl` written
+/// Start one session's server under `home_directory`, so it reads the `koshi.kdl` written
 /// there rather than the developer's own.
 #[cfg(unix)]
 fn start_session_server_under(
-    home: &Path,
+    home_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> RunningSession {
     let child_process = start_koshi_process(
-        build_koshi_command_under_home(home)
+        build_koshi_command_under_home(home_directory)
             .arg("serve-session")
             .arg(session_id.to_string())
             .arg(SESSION_SERVER_NAME)
@@ -587,16 +551,16 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
 #[test]
 fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     let shared_directory_base = build_test_shared_directory_base();
-    let home = build_test_home_directory();
+    let home_directory = build_test_home_directory();
     write_test_config(
-        home.path(),
+        home_directory.path(),
         &build_switched_on_config(shared_directory_base.path()),
     );
-    let runtime_directory = resolve_runtime_directory_under_home(home.path());
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home.path(), &runtime_directory, session_id);
+        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
     let endpoint_file =
         wait_for_session_endpoint(&mut session_process, &runtime_directory, session_id);
 
@@ -614,8 +578,9 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     assert_eq!(endpoint_path.parent(), Some(runtime_directory.as_path()));
     assert_eq!(get_file_permission_mode(&endpoint_path), 0o600);
 
-    let list_output =
-        run_koshi_command(build_koshi_command_under_home(home.path()).arg("list-sessions"));
+    let list_output = run_koshi_command(
+        build_koshi_command_under_home(home_directory.path()).arg("list-sessions"),
+    );
     assert_eq!(String::from_utf8_lossy(&list_output.stderr), "");
     assert_eq!(
         list_output.status.code(),
@@ -629,7 +594,7 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     // The version walk covers the same two places the listing does, so this
     // user's own session earns one row here and not two.
     let version_output = run_koshi_command(
-        build_koshi_command_under_home(home.path())
+        build_koshi_command_under_home(home_directory.path())
             .arg("server-version")
             .arg("--format")
             .arg("json"),
@@ -650,13 +615,13 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
 #[cfg(unix)]
 #[test]
 fn a_session_with_the_switch_off_keeps_its_socket_in_the_private_runtime_directory() {
-    let home = build_test_home_directory();
-    write_test_config(home.path(), "version 1\n");
-    let runtime_directory = resolve_runtime_directory_under_home(home.path());
+    let home_directory = build_test_home_directory();
+    write_test_config(home_directory.path(), "version 1\n");
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home.path(), &runtime_directory, session_id);
+        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
     let endpoint_file =
         wait_for_session_endpoint(&mut session_process, &runtime_directory, session_id);
 

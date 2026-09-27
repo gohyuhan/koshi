@@ -993,7 +993,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
     )
     .expect("the stand-in session advertised its socket");
 
-    let (rejoined_endpoint, client_connection) = rejoin_session(
+    let (rejoined_client_id, rejoined_endpoint, client_connection) = rejoin_session(
         runtime_directory.path(),
         session_id,
         client_id,
@@ -1004,6 +1004,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
     .expect("the stand-in session handed the client image record back");
     drop(client_connection);
 
+    assert_eq!(rejoined_client_id, client_id);
     assert_eq!(rejoined_endpoint, advertised_endpoint);
     assert_eq!(
         recorded_attach_request
@@ -1092,30 +1093,96 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         None,
     );
     assert_eq!(
-        attached.map(|(rejoined_endpoint, _)| rejoined_endpoint),
+        attached.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
         None
     );
 }
 
 #[test]
-fn a_restarted_session_that_mints_a_new_client_leaves_nothing_to_come_back_to() {
+fn a_restarted_session_that_mints_a_new_client_is_joined_as_that_client() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
+    let minted_client_id = ClientId::new();
     let _recorded_attach_request =
-        spawn_restarted_session(runtime_directory.path(), session_id, Ok(ClientId::new()));
+        spawn_restarted_session(runtime_directory.path(), session_id, Ok(minted_client_id));
+    let advertised_endpoint = EndpointFile::load_from_path(
+        &EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
+    )
+    .expect("the stand-in session advertised its socket");
 
-    let attached = rejoin_session(
+    let (rejoined_client_id, rejoined_endpoint, client_connection) = rejoin_session(
         runtime_directory.path(),
         session_id,
         ClientId::new(),
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
         terminal::GraphicsSupport::Unsupported,
         None,
+    )
+    .expect("the restarted session is joined as the client it minted");
+    drop(client_connection);
+
+    assert_eq!(rejoined_client_id, minted_client_id);
+    assert_eq!(rejoined_endpoint, advertised_endpoint);
+}
+
+#[test]
+fn a_viewer_whose_restarted_session_mints_a_new_client_goes_on_as_that_client() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let minted_client_id = ClientId::new();
+    let recorded_attach_request =
+        spawn_restarted_session(runtime_directory.path(), session_id, Ok(minted_client_id));
+    let mut client = build_test_client();
+    client.set_client_id(client_id);
+    let mut screen = build_test_screen();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = Uplink {
+        request_sender,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    incoming_sender
+        .send(Incoming::Frame {
+            connection_index: INITIAL_CONNECTION_INDEX,
+            session_event_result: Ok(SessionEvent::Restarting),
+        })
+        .expect("the loop's queue takes the restart frame");
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+
+    // The stand-in session answers the viewer's resize with a response frame,
+    // which the event stream cannot read, so the new connection ends there.
+    let attachment_ending = run_attachment(
+        &Home::Local {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+        },
+        session_id,
+        client_id,
+        ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut cell_size_query,
+        incoming_sender,
+        incoming_receiver,
     );
-    assert_eq!(
-        attached.map(|(rejoined_endpoint, _)| rejoined_endpoint),
-        None
-    );
+
+    assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
+    assert_eq!(client.get_client_id(), minted_client_id);
+    let IpcRequestKind::Attach {
+        resume_client_id, ..
+    } = recorded_attach_request
+        .lock()
+        .expect("the slot outlives every panic")
+        .clone()
+        .expect("the viewer joined the restarted session")
+    else {
+        panic!("the recorded request is an attach");
+    };
+    assert_eq!(resume_client_id, Some(client_id));
 }
 
 #[test]
@@ -1135,7 +1202,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
     );
 
     assert_eq!(
-        attached.map(|(rejoined_endpoint, _)| rejoined_endpoint),
+        attached.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
         None
     );
     assert!(
@@ -1145,7 +1212,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
 }
 
 #[test]
-fn a_restart_this_client_cannot_come_back_from_reports_the_death_it_reports_today() {
+fn a_restart_this_client_cannot_come_back_from_reports_the_session_ended_unexpectedly() {
     let session_id = SessionId::new();
     let ending_error = report_attachment_ending(
         &build_local_home(),
