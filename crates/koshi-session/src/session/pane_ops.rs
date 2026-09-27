@@ -7,7 +7,6 @@
 //! [`commit_new_pane`] to apply it.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
 
 use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use koshi_core::ids::{ClientId, PaneId, TabId};
@@ -31,15 +30,14 @@ pub struct NewPaneSpec {
 }
 
 /// Register `pane_id` in the session's pane registry as `Running`, carrying
-/// `pane_spec`'s working directory and spawn specification and stamped
-/// `created_at`. A pane id already in the registry keeps its existing record.
+/// `pane_spec`'s working directory and spawn specification. A pane id already
+/// in the registry keeps its existing record.
 pub(crate) fn register_running_pane(
     session: &mut Session,
     pane_id: PaneId,
     pane_spec: NewPaneSpec,
-    created_at: SystemTime,
 ) {
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, created_at);
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record.working_directory = pane_spec.working_directory;
     pane_record.spawn_spec = pane_spec.spawn_spec;
     let _ = pane_record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
@@ -58,14 +56,12 @@ pub(crate) fn register_running_pane(
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate_layout_tree` with
 /// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_pane_to_stack`],
-/// preflighted its fit against the sizing viewport, and spawned the child under
+/// preflighted its fit against the tab size, and spawned the child under
 /// `new_pane_id`.
 ///
 /// This is the single place a new pane's session state is committed: no session
 /// field is written for `NewPane` outside this op. `new_pane_spec` carries the working
-/// directory and spawn specification recorded on the new pane; `created_at` is
-/// the caller's timestamp,
-/// never read from the clock here.
+/// directory and spawn specification recorded on the new pane.
 ///
 /// Returns the focused client's *previous* tab when this op switched it onto
 /// `tab_id` (so the caller can reflow the tab it left), and the events to emit —
@@ -83,7 +79,6 @@ pub fn commit_new_pane(
     candidate_layout_tree: LayoutNode,
     focus_client: Option<ClientId>,
     new_pane_spec: NewPaneSpec,
-    created_at: SystemTime,
 ) -> (Option<TabId>, Vec<Event>) {
     if !session.tabs.contains_key(&tab_id) {
         return (None, Vec::new());
@@ -101,10 +96,10 @@ pub fn commit_new_pane(
     let mut previous_tab = None;
     if let Some(client_id) = focused_client_id {
         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            if client.get_active_tab() != tab_id {
-                let previous_tab_id = client.get_active_tab();
+            if client.get_active_tab_id() != tab_id {
+                let previous_tab_id = client.get_active_tab_id();
                 previous_tab = Some(previous_tab_id);
-                client.update_active_tab(tab_id);
+                client.update_active_tab_id(tab_id);
                 events.push(Event::TabFocused(TabFocused {
                     client_id,
                     tab_id,
@@ -114,7 +109,7 @@ pub fn commit_new_pane(
         }
     }
 
-    register_running_pane(session, new_pane_id, new_pane_spec, created_at);
+    register_running_pane(session, new_pane_id, new_pane_spec);
 
     // Swap in the pre-built tree; record the new pane in the tab's focus
     // history when a client focuses it.

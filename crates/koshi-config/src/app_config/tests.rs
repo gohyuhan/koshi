@@ -35,7 +35,7 @@ fn parse_file(config_text: &str) -> AppConfigFile {
 
 /// The message a [`ConfigError::Parse`] carries for `config_text`: the first
 /// sub-diagnostic of the raw kdl parse error.
-fn kdl_first_diagnostic(config_text: &str) -> String {
+fn get_kdl_first_diagnostic(config_text: &str) -> String {
     config_text
         .parse::<KdlDocument>()
         .expect_err("source is invalid KDL")
@@ -159,7 +159,6 @@ fn allow_beta_features_records_what_it_is_set_to() {
 
 #[test]
 fn an_absent_allow_beta_features_sets_no_layer() {
-    // Absent leaves the field unset; the built-in `false` stands.
     assert_eq!(parse_config("").should_allow_beta_features, None);
 }
 
@@ -563,7 +562,7 @@ fn syntax_error_is_a_parse_error() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        kdl_first_diagnostic(invalid_config_text)
+        get_kdl_first_diagnostic(invalid_config_text)
     );
 }
 
@@ -1134,10 +1133,10 @@ fn a_float_where_an_integer_is_required_is_skipped_as_a_non_integer() {
 fn the_largest_u32_interval_is_accepted_and_one_past_it_is_a_validation_error() {
     // u32's ceiling, 4294967295, fits the strict `update` interval field; one
     // more overflows it and fails the whole parse with the range reason.
-    let at_max = parse_config("update {\n    check-interval-days 4294967295\n}")
+    let at_maximum_config = parse_config("update {\n    check-interval-days 4294967295\n}")
         .update
         .expect("update present");
-    assert_eq!(at_max.check_interval_days, Some(4_294_967_295));
+    assert_eq!(at_maximum_config.check_interval_days, Some(4_294_967_295));
 
     let validation_error = parse_app_config(
         Path::new("koshi.kdl"),
@@ -1207,7 +1206,7 @@ fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        kdl_first_diagnostic(invalid_config_text)
+        get_kdl_first_diagnostic(invalid_config_text)
     );
 }
 

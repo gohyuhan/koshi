@@ -3,6 +3,16 @@
 use super::*;
 use koshi_input::host::{KeyCode, KeyEvent, Modifiers};
 
+impl<S: EventSource> InputReader<S> {
+    /// A reader over `event_source` with nothing buffered.
+    pub(in crate::terminal) fn from_event_source_for_tests(event_source: S) -> Self {
+        Self {
+            event_source,
+            buffered_events: VecDeque::with_capacity(32),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ProbeEventSource {
     events: VecDeque<io::Result<Option<Event>>>,

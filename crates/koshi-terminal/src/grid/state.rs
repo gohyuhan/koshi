@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for ImageFragments {
 /// The part of a cell that almost no cell has: continuation code points or
 /// Kitty placeholder metadata. A [`Cell`] holds it behind one pointer, eight
 /// bytes on a 64-bit target, null for ordinary cells.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct CellExtra {
     /// The continuation code points in arrival order.
     combining: Vec<char>,
@@ -226,7 +226,7 @@ pub struct Cell {
 /// 10 000 rows on top of that.
 ///
 /// Rare per-cell data goes behind [`CellExtra`]; a new boolean attribute goes
-/// in one of [`AttrFlags`](crate::style::AttrFlags)'s spare bits. Raising the
+/// in one of [`AttributeFlags`](crate::style::AttributeFlags)'s spare bits. Raising the
 /// figure obligates raising it in the [`Cell`] doc in the same edit.
 ///
 /// A 32-bit target holds the [`CellExtra`] pointer in four bytes; the check
@@ -239,15 +239,15 @@ const _: () = assert!(
 
 impl Cell {
     /// A blank cell: a single space in the default style.
-    pub fn blank() -> Self {
-        Cell::blank_with(Style::default())
+    pub fn build_blank() -> Self {
+        Cell::build_blank_with_style(Style::default())
     }
 
     /// A blank cell — a single space — in the given `style`. Erased and
     /// scrolled cells are built this way with the pen's background
     /// (background-color erase); the pen is the color and attribute state
     /// applied to newly written text.
-    pub fn blank_with(style: Style) -> Self {
+    pub fn build_blank_with_style(style: Style) -> Self {
         Cell {
             character: ' ',
             combining: None,
@@ -282,7 +282,7 @@ impl Cell {
     }
 
     /// Return native image portions in paint order.
-    pub(crate) fn image_fragments(&self) -> &[ImageCellFragment] {
+    pub(crate) fn get_image_fragments(&self) -> &[ImageCellFragment] {
         self.combining
             .as_ref()
             .map_or(&[], |extra| extra.image_fragments.get_fragment_slice())
@@ -291,7 +291,7 @@ impl Cell {
     /// Attach a native image portion, replacing or overlaying existing portions.
     pub(crate) fn set_image_fragment(&mut self, fragment: ImageCellFragment, should_overlay: bool) {
         if !should_overlay {
-            *self = Self::blank_with(self.style);
+            *self = Self::build_blank_with_style(self.style);
         } else if self.combining.as_mut().is_some_and(|extra| {
             extra
                 .image_fragments
@@ -299,18 +299,12 @@ impl Cell {
         }) {
             return;
         }
-        let cell_extra = self.combining.get_or_insert_with(|| {
-            Box::new(CellExtra {
-                combining: Vec::new(),
-                image_placeholder: None,
-                image_fragments: ImageFragments::Empty,
-            })
-        });
+        let cell_extra = self.combining.get_or_insert_with(Box::default);
         cell_extra.image_fragments.append_image_fragment(fragment);
     }
 
     /// Heap bytes occupied by native image metadata in this cell.
-    pub(crate) fn image_fragment_storage_bytes(&self) -> usize {
+    pub(crate) fn compute_image_fragment_storage_bytes(&self) -> usize {
         self.combining
             .as_ref()
             .filter(|extra| !extra.image_fragments.is_empty())
@@ -321,17 +315,6 @@ impl Cell {
                         .image_fragments
                         .compute_image_fragment_storage_byte_count()
             })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get_image_fragment_capacity(&self) -> usize {
-        self.combining.as_ref().map_or(0, |extra| {
-            if let ImageFragments::Many(fragments) = &extra.image_fragments {
-                fragments.capacity()
-            } else {
-                0
-            }
-        })
     }
 
     /// Remove native image portions from this cell.
@@ -345,7 +328,7 @@ impl Cell {
     }
 
     /// Return the Kitty Unicode-placeholder metadata carried by this cell.
-    pub(crate) fn image_placeholder(&self) -> Option<ImagePlaceholder> {
+    pub(crate) fn get_image_placeholder(&self) -> Option<ImagePlaceholder> {
         self.combining
             .as_ref()
             .and_then(|extra| extra.image_placeholder)
@@ -354,20 +337,14 @@ impl Cell {
     /// Return whether this cell carries a Kitty Unicode-placeholder marker.
     #[must_use]
     pub fn has_image_placeholder(&self) -> bool {
-        self.image_placeholder().is_some()
+        self.get_image_placeholder().is_some()
     }
 
     /// Set the Kitty Unicode-placeholder metadata and use a blank base glyph.
     pub(crate) fn set_image_placeholder(&mut self, placeholder: ImagePlaceholder) {
         self.character = ' ';
         self.combining
-            .get_or_insert_with(|| {
-                Box::new(CellExtra {
-                    combining: Vec::new(),
-                    image_placeholder: None,
-                    image_fragments: ImageFragments::Empty,
-                })
-            })
+            .get_or_insert_with(Box::default)
             .image_placeholder = Some(placeholder);
     }
 
@@ -399,13 +376,7 @@ impl Cell {
     /// vector.
     pub fn push_combining(&mut self, mark: char) {
         self.combining
-            .get_or_insert_with(|| {
-                Box::new(CellExtra {
-                    combining: Vec::new(),
-                    image_placeholder: None,
-                    image_fragments: ImageFragments::Empty,
-                })
-            })
+            .get_or_insert_with(Box::default)
             .combining
             .push(mark);
     }
@@ -498,7 +469,7 @@ pub struct RowMetadata {
 /// of content, and a [`RowEnd::SoftWide`] row's final blank is a spacer
 /// standing in for the wide glyph on the next row.
 pub(crate) fn count_row_content_cells(row_cells: &[Cell]) -> usize {
-    let blank = Cell::blank();
+    let blank = Cell::build_blank();
     row_cells
         .iter()
         .rposition(|cell| *cell != blank)
@@ -518,10 +489,10 @@ pub struct Grid {
 impl Grid {
     /// Build a grid with `row_count` rows and `column_count` columns, filling
     /// every cell with a blank space in `fill_style`.
-    pub fn blank(row_count: u16, column_count: u16, fill_style: Style) -> Self {
+    pub fn build_blank(row_count: u16, column_count: u16, fill_style: Style) -> Self {
         Grid {
             rows: vec![
-                vec![Cell::blank_with(fill_style); column_count as usize];
+                vec![Cell::build_blank_with_style(fill_style); column_count as usize];
                 row_count as usize
             ],
             row_metadata: vec![RowMetadata::default(); row_count as usize],
@@ -546,7 +517,10 @@ impl Grid {
         fill_style: Style,
     ) -> Self {
         for (row_cells, _) in &mut row_cells {
-            row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+            row_cells.resize(
+                column_count as usize,
+                Cell::build_blank_with_style(fill_style),
+            );
         }
         let (rows, row_metadata): (Vec<Vec<Cell>>, Vec<RowMetadata>) =
             row_cells.into_iter().unzip();
@@ -636,7 +610,7 @@ impl Grid {
         };
         if let Some(paired_column_index) = paired_column_index {
             if let Some(cell) = self.get_cell_mut(row_index, paired_column_index) {
-                *cell = Cell::blank_with(fill_style);
+                *cell = Cell::build_blank_with_style(fill_style);
             }
         }
     }
@@ -656,62 +630,13 @@ impl Grid {
             if let Some(cell_span) =
                 row_cells.get_mut(first_column_index as usize..end_column_index)
             {
-                cell_span.fill(Cell::blank_with(fill_style));
+                cell_span.fill(Cell::build_blank_with_style(fill_style));
             }
         }
         let (_, column_count) = self.get_grid_dimensions();
         if last_column_index_exclusive >= column_count && first_column_index < column_count {
             self.set_row_end(row_index, RowEnd::Hard);
         }
-    }
-
-    /// Insert `insert_cell_count` blank cells at `column_index` in `row_index`.
-    /// Cells pushed past the right edge are dropped. The row end resets to
-    /// [`RowEnd::Hard`].
-    pub fn insert_cells(
-        &mut self,
-        row_index: u16,
-        column_index: u16,
-        insert_cell_count: u16,
-        fill_style: Style,
-    ) {
-        let (row_count, column_count) = self.get_grid_dimensions();
-        if row_index >= row_count || column_index >= column_count {
-            return;
-        }
-
-        let row_cells = &mut self.rows[row_index as usize];
-        let inserted_cell_count = min(column_count - column_index, insert_cell_count);
-
-        row_cells.truncate((column_count - inserted_cell_count) as usize);
-        row_cells.splice(
-            column_index as usize..column_index as usize,
-            std::iter::repeat_n(Cell::blank_with(fill_style), inserted_cell_count as usize),
-        );
-        self.set_row_end(row_index, RowEnd::Hard);
-    }
-
-    /// Delete `delete_cell_count` cells starting at `column_index` in `row_index`.
-    /// Freed space on the right is filled with blank cells. The row end resets
-    /// to [`RowEnd::Hard`].
-    pub fn delete_cells(
-        &mut self,
-        row_index: u16,
-        column_index: u16,
-        delete_cell_count: u16,
-        fill_style: Style,
-    ) {
-        let (row_count, column_count) = self.get_grid_dimensions();
-        if row_index >= row_count || column_index >= column_count {
-            return;
-        }
-
-        let row_cells = &mut self.rows[row_index as usize];
-        let deleted_cell_count = min(column_count - column_index, delete_cell_count);
-
-        row_cells.drain(column_index as usize..(column_index + deleted_cell_count) as usize);
-        row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
-        self.set_row_end(row_index, RowEnd::Hard);
     }
 
     /// Insert blank cells within the inclusive column range. Cells pushed past
@@ -740,7 +665,7 @@ impl Grid {
                 .checked_sub(inserted_cell_count)
                 .filter(|&source_column_index| source_column_index >= first_column_index)
             else {
-                row_cells[destination_column_index] = Cell::blank_with(fill_style);
+                row_cells[destination_column_index] = Cell::build_blank_with_style(fill_style);
                 continue;
             };
             row_cells.swap(destination_column_index, source_column_index);
@@ -775,7 +700,7 @@ impl Grid {
             if source_column_index < last_column_index {
                 row_cells.swap(destination_column_index, source_column_index);
             } else {
-                row_cells[destination_column_index] = Cell::blank_with(fill_style);
+                row_cells[destination_column_index] = Cell::build_blank_with_style(fill_style);
             }
         }
         self.set_row_end(row_index, RowEnd::Hard);
@@ -817,7 +742,8 @@ impl Grid {
                         &mut lower_rows[0][column_index],
                     );
                 }
-                self.rows[usize::from(last_row_index)][column_index] = Cell::blank_with(fill_style);
+                self.rows[usize::from(last_row_index)][column_index] =
+                    Cell::build_blank_with_style(fill_style);
             }
         }
     }
@@ -861,7 +787,7 @@ impl Grid {
                     );
                 }
                 self.rows[usize::from(first_row_index)][column_index] =
-                    Cell::blank_with(fill_style);
+                    Cell::build_blank_with_style(fill_style);
             }
         }
     }
@@ -895,7 +821,10 @@ impl Grid {
         for _ in 0..removed_line_count as usize {
             let mut recycled_row_cells = self.rows.remove(first_row_index as usize);
             recycled_row_cells.clear();
-            recycled_row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+            recycled_row_cells.resize(
+                column_count as usize,
+                Cell::build_blank_with_style(fill_style),
+            );
             self.rows
                 .insert(last_row_index as usize, recycled_row_cells);
             self.row_metadata.remove(first_row_index as usize);
@@ -903,7 +832,7 @@ impl Grid {
                 .insert(last_row_index as usize, RowMetadata::default());
         }
         if removed_line_count > 0 {
-            // The row above the band and the row at `last_row - removed_line_count` both
+            // The row above the band and the row at `last_row_index - removed_line_count` both
             // end hard: each precedes a row it never wrapped into.
             if first_row_index > 0 {
                 self.set_row_end(first_row_index - 1, RowEnd::Hard);
@@ -943,7 +872,10 @@ impl Grid {
         for _ in 0..inserted_line_count as usize {
             let mut recycled_row_cells = self.rows.remove(last_row_index as usize);
             recycled_row_cells.clear();
-            recycled_row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+            recycled_row_cells.resize(
+                column_count as usize,
+                Cell::build_blank_with_style(fill_style),
+            );
             self.rows
                 .insert(first_row_index as usize, recycled_row_cells);
             self.row_metadata.remove(last_row_index as usize);
@@ -964,10 +896,7 @@ impl Grid {
 #[derive(Deserialize)]
 struct GridFields {
     rows: Vec<Vec<Cell>>,
-    #[serde(default)]
-    row_metadata: Option<Vec<RowMetadata>>,
-    #[serde(default)]
-    row_ends: Option<Vec<RowEnd>>,
+    row_metadata: Vec<RowMetadata>,
 }
 
 impl<'de> Deserialize<'de> for Grid {
@@ -976,18 +905,7 @@ impl<'de> Deserialize<'de> for Grid {
         Deserializer: DeserializerTrait<'de>,
     {
         let grid_fields = GridFields::deserialize(deserializer)?;
-        let row_metadata = match (grid_fields.row_metadata, grid_fields.row_ends) {
-            (Some(row_metadata), _) => row_metadata,
-            (None, Some(row_ends)) => row_ends
-                .into_iter()
-                .map(|row_end| RowMetadata {
-                    row_end,
-                    has_prompt_mark: false,
-                })
-                .collect(),
-            (None, None) => vec![RowMetadata::default(); grid_fields.rows.len()],
-        };
-        if row_metadata.len() != grid_fields.rows.len() {
+        if grid_fields.row_metadata.len() != grid_fields.rows.len() {
             return Err(de::Error::custom("grid row metadata does not match rows"));
         }
         let column_count = grid_fields.rows.first().map_or(0, Vec::len);
@@ -1000,7 +918,7 @@ impl<'de> Deserialize<'de> for Grid {
         }
         Ok(Grid {
             rows: grid_fields.rows,
-            row_metadata,
+            row_metadata: grid_fields.row_metadata,
         })
     }
 }

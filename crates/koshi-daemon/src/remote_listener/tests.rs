@@ -773,10 +773,10 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
     // one is refused and the connection ends unattached.
     let (admission_events_sender, _admission_question_receiver) = mpsc::channel();
     let mut reader = Cursor::new(build_remote_client_frame_bytes(&RemoteClientFrame::Hello {
-        min_remote_version: 1,
-        max_remote_version: 1,
-        min_protocol_version: 1,
-        max_protocol_version: 1,
+        minimum_remote_version: 1,
+        maximum_remote_version: 1,
+        minimum_protocol_version: 1,
+        maximum_protocol_version: 1,
         connection_token: ConnectionToken::from_secret("alreadyAdmitted"),
     }));
     let mut writer = RecordedWriter {
@@ -952,8 +952,8 @@ fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
         IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: 1,
-                max_protocol_version: 4,
+                minimum_protocol_version: 1,
+                maximum_protocol_version: 4,
                 connection_token: ConnectionToken::from_secret("endpointSecret"),
                 is_remote: true,
             },
@@ -1082,18 +1082,18 @@ mod doorway {
         response_frame
     }
 
-    /// A Hello naming the doorway versions `minimum_remote_version` to `maximum_remote_version`, the
-    /// session protocol versions this build speaks, and the secret `connection_token_text`.
+    /// A Hello naming the doorway versions `minimum_remote_version` to `maximum_remote_version`,
+    /// the session protocol versions this build speaks, and the secret `connection_token_text`.
     fn build_remote_hello(
         minimum_remote_version: u32,
         maximum_remote_version: u32,
         connection_token_text: &str,
     ) -> RemoteClientFrame {
         RemoteClientFrame::Hello {
-            min_remote_version: minimum_remote_version,
-            max_remote_version: maximum_remote_version,
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_remote_version,
+            maximum_remote_version,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret(connection_token_text),
         }
     }
@@ -1205,12 +1205,13 @@ mod bridge_round_trip {
     use koshi_core::ids::CommandId;
     use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags};
     use koshi_ipc::event::SessionEvent;
-    use koshi_ipc::protocol::{EventFilterSpec, IpcResponse, IpcResult};
+    use koshi_ipc::protocol::{IpcResponse, IpcResult};
     use koshi_ipc::router::SessionSelector;
     use koshi_link::remote_client;
     use koshi_pty::backend::state::PtyBackend;
     use koshi_runtime::ipc_server::IpcServer;
     use koshi_runtime::runtime::event::RuntimeEvent;
+    use koshi_runtime::runtime::pty_inbox::InboxSink;
     use koshi_runtime::server::Server;
     use koshi_test_support::fake_pty::FakePtyBackend;
     use koshi_test_support::fixtures::build_test_runtime_directory;
@@ -1246,8 +1247,10 @@ mod bridge_round_trip {
         fn start_running_session() -> RunningSession {
             let runtime_directory = build_test_runtime_directory();
             let session_id = SessionId::new();
-            let fake_pty_backend = Arc::new(FakePtyBackend::new());
             let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
+            let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+                InboxSink::from_event_sender(runtime_event_sender.clone()),
+            )));
 
             let session_server_runtime_directory = runtime_directory.path().to_path_buf();
             let session_server_event_sender = runtime_event_sender.clone();
@@ -1341,11 +1344,7 @@ mod bridge_round_trip {
         runtime_event_sender: mpsc::Sender<RuntimeEvent>,
     ) {
         let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend;
-        let mut session_server = Server::from_runtime_parts(
-            pty_backend,
-            runtime_event_receiver,
-            runtime_event_sender.clone(),
-        );
+        let mut session_server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
         session_server.load_startup_config(None);
         session_server
             .bootstrap_session(
@@ -1364,16 +1363,16 @@ mod bridge_round_trip {
 
         loop {
             let current_time = Instant::now();
-            let runtime_event = match session_server.next_render_wakeup(current_time) {
+            let runtime_event = match session_server.compute_next_render_wakeup(current_time) {
                 Some(render_wakeup_timeout) => match session_server
-                    .inbox_rx()
+                    .get_inbox_receiver()
                     .recv_timeout(render_wakeup_timeout)
                 {
                     Ok(runtime_event) => Some(runtime_event),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 },
-                None => match session_server.inbox_rx().recv() {
+                None => match session_server.get_inbox_receiver().recv() {
                     Ok(runtime_event) => Some(runtime_event),
                     Err(_) => break,
                 },
@@ -1384,7 +1383,7 @@ mod bridge_round_trip {
                     .handle_runtime_event(runtime_event)
                     .is_break();
             }
-            while let Ok(runtime_event) = session_server.inbox_rx().try_recv() {
+            while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
                 should_quit |= session_server
                     .handle_runtime_event(runtime_event)
                     .is_break();
@@ -1475,8 +1474,8 @@ mod bridge_round_trip {
             .send(&IpcRequest {
                 request_id: 1,
                 request_kind: IpcRequestKind::Hello {
-                    min_protocol_version: get_agreed_minimum_protocol_version(),
-                    max_protocol_version: get_agreed_maximum_protocol_version(),
+                    minimum_protocol_version: get_agreed_minimum_protocol_version(),
+                    maximum_protocol_version: get_agreed_maximum_protocol_version(),
                     connection_token: session_endpoint.connection_token.clone(),
                     is_remote: false,
                 },
@@ -1493,7 +1492,6 @@ mod bridge_round_trip {
         let envelope = CommandEnvelope::from_parts(
             CommandId::new(),
             CommandSource::from_external_cli(Some(running_session.session_id), None),
-            SystemTime::now(),
             command,
         );
         connection
@@ -1554,8 +1552,7 @@ mod bridge_round_trip {
             .send(&IpcRequest {
                 request_id: 2,
                 request_kind: IpcRequestKind::Attach {
-                    viewport: TEST_VIEWPORT_SIZE,
-                    event_filter: EventFilterSpec::All,
+                    viewport_size: TEST_VIEWPORT_SIZE,
                     resume_client_id: None,
                     resume_token: None,
                     pane_area: None,
@@ -1649,8 +1646,7 @@ mod bridge_round_trip {
             .send(&IpcRequest {
                 request_id: 2,
                 request_kind: IpcRequestKind::Attach {
-                    viewport: TEST_VIEWPORT_SIZE,
-                    event_filter: EventFilterSpec::All,
+                    viewport_size: TEST_VIEWPORT_SIZE,
                     resume_client_id: None,
                     resume_token: None,
                     pane_area: None,

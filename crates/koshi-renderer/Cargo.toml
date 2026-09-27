@@ -5,9 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+koshi-config.workspace = true
+koshi-core.workspace = true
+koshi-layout.workspace = true
+koshi-terminal.workspace = true
 ratatui.workspace = true
-koshi-config = { version = "0.4.0", path = "../koshi-config" }
-koshi-core = { version = "0.4.0", path = "../koshi-core" }
-koshi-layout = { version = "0.4.0", path = "../koshi-layout" }
-koshi-pane = { version = "0.4.0", path = "../koshi-pane" }
-koshi-terminal = { version = "0.4.0", path = "../koshi-terminal" }

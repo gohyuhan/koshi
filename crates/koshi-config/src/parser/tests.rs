@@ -27,7 +27,7 @@ fn valid_kdl_parses_to_document() {
     let node_names: Vec<&str> = config_document
         .nodes()
         .iter()
-        .map(|node| node.name().value())
+        .map(|kdl_node| kdl_node.name().value())
         .collect();
     assert_eq!(node_names, vec!["pane"]);
 }
@@ -54,7 +54,7 @@ fn nested_children_survive_the_parse() {
     let node_names: Vec<&str> = config_document
         .nodes()
         .iter()
-        .map(|node| node.name().value())
+        .map(|kdl_node| kdl_node.name().value())
         .collect();
     assert_eq!(node_names, vec!["pane", "theme"]);
     let child_node_names: Vec<&str> = config_document.nodes()[0]
@@ -62,7 +62,7 @@ fn nested_children_survive_the_parse() {
         .expect("`pane` keeps its child block")
         .nodes()
         .iter()
-        .map(|node| node.name().value())
+        .map(|kdl_node| kdl_node.name().value())
         .collect();
     assert_eq!(child_node_names, vec!["min-cols"]);
 }
@@ -555,7 +555,7 @@ fn parse_version_argument_reads_the_declared_number() {
 }
 
 /// The reason [`parse_version_argument`] gives for `version_text`, without its span.
-fn version_reason(version_text: &str) -> &'static str {
+fn get_version_reason(version_text: &str) -> &'static str {
     parse_version_argument(&parse_test_kdl_node(version_text))
         .expect_err("the node is wrong")
         .1
@@ -564,31 +564,31 @@ fn version_reason(version_text: &str) -> &'static str {
 #[test]
 fn parse_version_argument_names_each_way_the_node_can_be_wrong() {
     assert_eq!(
-        version_reason("version 1 {}"),
+        get_version_reason("version 1 {}"),
         "`version` takes no children"
     );
     assert_eq!(
-        version_reason("version"),
+        get_version_reason("version"),
         "`version` takes exactly one integer argument"
     );
     assert_eq!(
-        version_reason("version 1 2"),
+        get_version_reason("version 1 2"),
         "`version` takes exactly one integer argument"
     );
     assert_eq!(
-        version_reason("version schema=1"),
+        get_version_reason("version schema=1"),
         "`version` takes exactly one integer argument"
     );
     assert_eq!(
-        version_reason("version \"1\""),
+        get_version_reason("version \"1\""),
         "`version` must be an integer from 1 to 4294967295"
     );
     assert_eq!(
-        version_reason("version -1"),
+        get_version_reason("version -1"),
         "`version` must be an integer from 1 to 4294967295"
     );
     assert_eq!(
-        version_reason("version 4294967296"),
+        get_version_reason("version 4294967296"),
         "`version` must be an integer from 1 to 4294967295"
     );
 }
@@ -620,7 +620,7 @@ fn a_version_node_that_is_wrong_as_a_whole_puts_the_caret_on_the_node() {
 }
 
 /// The first problem `koshi.kdl` reports for `config_text`.
-fn app_version_detail(config_text: &str) -> String {
+fn get_app_version_detail(config_text: &str) -> String {
     match crate::app_config::parse_app_config(Path::new("koshi.kdl"), config_text) {
         Err(ConfigError::Validation {
             validation_detail, ..
@@ -630,7 +630,7 @@ fn app_version_detail(config_text: &str) -> String {
 }
 
 /// The first problem a theme file reports for `config_text`.
-fn theme_version_detail(config_text: &str) -> String {
+fn get_theme_version_detail(config_text: &str) -> String {
     match crate::theme::parse_theme(Path::new("themes/midnight.kdl"), config_text) {
         Err(ConfigError::Validation {
             validation_detail, ..
@@ -640,7 +640,7 @@ fn theme_version_detail(config_text: &str) -> String {
 }
 
 /// The first problem `keybinding.kdl` reports for `config_text`.
-fn keybinding_version_detail(config_text: &str) -> String {
+fn get_keybinding_version_detail(config_text: &str) -> String {
     match crate::keybinding::parse_keybindings(Path::new("keybinding.kdl"), config_text) {
         Err(crate::keybinding::KeybindingParseError::Invalid { diagnostics, .. }) => {
             diagnostics[0].get_diagnostic_message().to_string()
@@ -650,7 +650,7 @@ fn keybinding_version_detail(config_text: &str) -> String {
 }
 
 /// The first problem a profile file reports for `config_text`.
-fn profile_version_detail(config_text: &str) -> String {
+fn get_profile_version_detail(config_text: &str) -> String {
     let profile_text = format!("{config_text}\ntab {{ pane }}");
     match crate::profile::parse_profile(Path::new("profile/dev.kdl"), &profile_text) {
         Err(crate::profile::ProfileError::Invalid { diagnostics, .. }) => {
@@ -701,22 +701,22 @@ fn every_config_file_words_a_bad_version_the_same_way() {
         ),
     ] {
         assert_eq!(
-            app_version_detail(version_text),
+            get_app_version_detail(version_text),
             expected_version_error_detail,
             "koshi.kdl: {version_text}"
         );
         assert_eq!(
-            theme_version_detail(version_text),
+            get_theme_version_detail(version_text),
             expected_version_error_detail,
             "theme: {version_text}"
         );
         assert_eq!(
-            keybinding_version_detail(version_text),
+            get_keybinding_version_detail(version_text),
             expected_version_error_detail,
             "keybinding.kdl: {version_text}"
         );
         assert_eq!(
-            profile_version_detail(version_text),
+            get_profile_version_detail(version_text),
             expected_version_error_detail,
             "profile: {version_text}"
         );

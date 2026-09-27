@@ -102,8 +102,8 @@ impl Server {
 
     /// Whether `command` may arrive from `command source`. CLI sources are limited to
     /// the commands the CLI's own verbs build; everything else — selection and
-    /// mouse-select commands (mouse/keybinding only), plugin commands (plugin
-    /// host only) — is refused before any state is read. `Quit` is accepted
+    /// mouse-select commands (mouse/keybinding only) — is refused before any
+    /// state is read. `Quit` is accepted
     /// from an external CLI (`kill-session`) but not from inside a pane.
     /// `Detach` and `DetachAll` are accepted from both, since a client detaches
     /// itself from inside the session and by id from outside it.
@@ -141,10 +141,7 @@ impl Server {
             CommandSource::ExternalCli { .. } => {
                 is_cli_command_allowed || matches!(command, Command::Quit)
             }
-            CommandSource::KeyBinding { .. }
-            | CommandSource::Mouse { .. }
-            | CommandSource::Plugin { .. }
-            | CommandSource::Internal => true,
+            CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => true,
         }
     }
 
@@ -213,8 +210,8 @@ impl Server {
     /// keybinding/mouse names only a client and is located by it — a client
     /// with no session is [`RejectReason::SourceClientStale`]. An external
     /// CLI naming a session must match one. A missing
-    /// session is [`RejectReason::TargetNotFound`]. Sources with no session
-    /// context (`Plugin`, `Internal`, external with no session) resolve to `None`.
+    /// session is [`RejectReason::TargetNotFound`]. An external CLI naming no
+    /// session resolves to `None`.
     pub(super) fn resolve_acting_session(
         &self,
         command_source: &CommandSource,
@@ -235,9 +232,7 @@ impl Server {
                 .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale)),
             CommandSource::ExternalCli {
                 session_id: None, ..
-            }
-            | CommandSource::Plugin { .. }
-            | CommandSource::Internal => Ok(None),
+            } => Ok(None),
         }
     }
 
@@ -303,25 +298,19 @@ impl Server {
             // Mouse-select is client-scoped: the acting client resolved by the
             // client-scoped check in `validate_command` is the whole target.
             Command::ToggleMouseSelect => Ok(()),
-            // A highlight command names its own pane, so there is no default to
-            // resolve: the pane it names is the pane it means, and its handler
-            // confirms that one still exists. Falling back to the focused pane
-            // would let a command that named pane A act on pane B. The client
-            // is the issuer alone — a highlight lives on the screen that made
-            // it — so it is checked here rather than through the acting-client
-            // fallback.
-            Command::Visual(VisualCommand::SetSelection(_) | VisualCommand::ClearSelection(_)) => {
-                Self::resolve_issuing_client_id(command_source).map(drop)
-            }
+            // A highlight command acts on the pane it names, never on the
+            // focused pane, and its handler confirms that pane still exists.
+            // The client checked is the issuing client alone.
+            Command::Visual(
+                VisualCommand::SetSelection(_)
+                | VisualCommand::ClearSelection(_)
+                | VisualCommand::Copy(_),
+            ) => Self::resolve_issuing_client_id(command_source).map(drop),
             // A zoom flips one client's own view of the pane that client is
             // looking at. The pane and the client resolve together through one
             // helper the handler shares.
             Command::TogglePaneFullscreen => self
                 .resolve_fullscreen_target(command_source, session)
-                .map(drop),
-            // Copy carries no pane yet, so it still means the focused one.
-            Command::Visual(VisualCommand::Copy(_)) => self
-                .resolve_pane_target(None, command_source, session)
                 .map(drop),
             Command::CloseTab(command_args) => self
                 .resolve_tab_or_active(command_args.tab_id, command_source, session)
@@ -358,7 +347,7 @@ impl Server {
                 Self::require_session(session)?,
             )
             .map(drop),
-            Command::Plugin(_) | Command::DetachAll | Command::Quit => Ok(()),
+            Command::DetachAll | Command::Quit => Ok(()),
         }
     }
 
@@ -460,9 +449,6 @@ impl Server {
         )?;
         let pane_target =
             self.resolve_pane_target(command_args.pane_id, command_source, Some(session))?;
-        if pane_target.session_id != session.session_id {
-            return Err(Rejection::from_reason(RejectReason::TargetNotFound));
-        }
         Self::require_pane_in_active_tab(session, client_id, pane_target.pane_id)?;
         Ok(ClientPaneTarget {
             session_id: pane_target.session_id,
@@ -577,7 +563,7 @@ impl Server {
     /// registry membership, and a winding-down owner rejects. Without one, the
     /// in-session CLI targets the pane it was issued from, and any other
     /// command source targets the target client's focused pane in its active tab —
-    /// the client the caller named ([`CommandSource::target_client`]) when
+    /// the client the caller named ([`CommandSource::get_target_client_id`]) when
     /// there is one, else the issuer while attached, else the session's sole
     /// attached client ([`Self::resolve_view_client`]) — so an external CLI
     /// acts exactly where a keypress on that client would. Resolved through the
@@ -631,7 +617,7 @@ impl Server {
                             command_source,
                             session,
                         )?;
-                        let tab_id = Self::require_client(session, client_id)?.get_active_tab();
+                        let tab_id = Self::require_client(session, client_id)?.get_active_tab_id();
                         Ok(PaneTarget {
                             session_id: session.session_id,
                             tab_id,
@@ -652,7 +638,7 @@ impl Server {
         session
             .tabs
             .values()
-            .find(|tab_state| tab_state.get_layout_tree().contains_pane(pane_id))
+            .find(|tab_state| tab_state.get_layout_tree().has_pane(pane_id))
             .map(|tab_state| tab_state.get_tab_id())
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))
     }
@@ -710,9 +696,9 @@ impl Server {
         let client_record = Self::require_client(session, client_id)?;
         let tab_state = session
             .tabs
-            .get(&client_record.get_active_tab())
+            .get(&client_record.get_active_tab_id())
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        if tab_state.get_layout_tree().contains_pane(pane_id) {
+        if tab_state.get_layout_tree().has_pane(pane_id) {
             Ok(())
         } else {
             Err(Rejection::from_reason_and_help(
@@ -757,7 +743,7 @@ impl Server {
             }
         };
         Self::require_pane_in_active_tab(session, client_id, pane_id)?;
-        let tab_id = Self::require_client(session, client_id)?.get_active_tab();
+        let tab_id = Self::require_client(session, client_id)?.get_active_tab_id();
         Ok(ClientPaneTarget {
             session_id: session.session_id,
             client_id,
@@ -784,18 +770,18 @@ impl Server {
         pane_sizing: PaneSizing,
     ) -> Result<PaneId, Rejection> {
         let client_record = Self::require_client(session, client_id)?;
-        let tab_id = client_record.get_active_tab();
+        let tab_id = client_record.get_active_tab_id();
         let tab_record = session
             .tabs
             .get(&tab_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
-        let tab_viewport_size = session
-            .get_tab_viewport(tab_id)
+        let tab_size = session
+            .get_tab_size(tab_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::InvalidState))?;
         let solved_layout = crate::runtime::snapshot::solve_tab_layout(
             tab_record,
             client_record.get_layout_mode(tab_id),
-            tab_viewport_size,
+            tab_size,
             pane_sizing,
         );
         let source_pane_rect = solved_layout
@@ -831,7 +817,7 @@ impl Server {
     ) -> Result<PaneId, Rejection> {
         let client = Self::require_client(session, client_id)?;
         let focused_pane_id = client
-            .get_focused_pane(client.get_active_tab())
+            .get_focused_pane_id(client.get_active_tab_id())
             .ok_or_else(|| {
                 Rejection::from_reason_and_help(RejectReason::TargetNotFound, "no focused pane")
             })?;
@@ -861,30 +847,21 @@ impl Server {
             }
             None => {
                 if let CommandSource::InSessionCli { pane_id, .. } = command_source {
-                    return Self::require_tab_containing_pane(session, *pane_id);
+                    Self::resolve_pane_in_session(session, *pane_id)?;
+                    return Self::resolve_tab_id_for_pane(session, *pane_id).map_err(|_| {
+                        Rejection::from_reason_and_help(
+                            RejectReason::TargetNotFound,
+                            "source pane not found in any tab",
+                        )
+                    });
                 }
                 let client_id = Self::resolve_acting_client(command_source, session)?;
                 let client = Self::require_client(session, client_id)?;
-                let active_tab_id = client.get_active_tab();
+                let active_tab_id = client.get_active_tab_id();
                 Self::require_tab(session, active_tab_id)?;
                 Ok(active_tab_id)
             }
         }
-    }
-
-    /// Find the tab in `session` whose layout contains `pane`, confirming the
-    /// pane also has a live registry record.
-    pub(super) fn require_tab_containing_pane(
-        session: &Session,
-        pane_id: PaneId,
-    ) -> Result<TabId, Rejection> {
-        Self::resolve_pane_in_session(session, pane_id)?;
-        Self::resolve_tab_id_for_pane(session, pane_id).map_err(|_| {
-            Rejection::from_reason_and_help(
-                RejectReason::TargetNotFound,
-                "source pane not found in any tab",
-            )
-        })
     }
 
     /// Resolve the client a tab-view command acts for: the explicit `client`
@@ -961,7 +938,7 @@ impl Server {
     /// Resolve the [`Command::FocusTab`] target: the client whose view
     /// switches ([`Self::resolve_view_client`]) and the concrete tab the
     /// target names — an id or index must match an existing tab, and
-    /// `next`/`prev` step from the *target* client's active tab, wrapping at
+    /// `Next`/`Previous` step from the *target* client's active tab, wrapping at
     /// the ends. Shared by validation and [`Self::handle_focus_tab`] so both
     /// apply one contract.
     pub(super) fn resolve_focus_tab_target(
@@ -976,9 +953,9 @@ impl Server {
             TabTarget::Id(tab_id) => tab_ops::TabTarget::Id(tab_id),
             TabTarget::Index(tab_index) => tab_ops::TabTarget::Index(tab_index),
             TabTarget::Next => tab_ops::TabTarget::Next,
-            TabTarget::Prev => tab_ops::TabTarget::Prev,
+            TabTarget::Previous => tab_ops::TabTarget::Previous,
         };
-        let tab_id = tab_ops::resolve_tab_target(session, client.get_active_tab(), tab_target)
+        let tab_id = tab_ops::resolve_tab_target(session, client.get_active_tab_id(), tab_target)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         Ok(FocusTabTarget {
             session_id: session.session_id,
@@ -1042,7 +1019,7 @@ fn validate_placement_anchor(
     let layout_tree = tab.get_layout_tree();
     match anchor {
         PanePlacementAnchor::Pane(pane_id) => {
-            if layout_tree.contains_pane(*pane_id) {
+            if layout_tree.has_pane(*pane_id) {
                 Ok(())
             } else {
                 Err(Rejection::from_reason(RejectReason::TargetNotFound))
@@ -1052,7 +1029,7 @@ fn validate_placement_anchor(
             let mut unique_pane_ids = HashSet::with_capacity(pane_ids.len());
             if pane_ids.is_empty()
                 || pane_ids.iter().any(|pane_id| {
-                    !unique_pane_ids.insert(*pane_id) || !layout_tree.contains_pane(*pane_id)
+                    !unique_pane_ids.insert(*pane_id) || !layout_tree.has_pane(*pane_id)
                 })
             {
                 return Err(Rejection::from_reason(RejectReason::TargetNotFound));

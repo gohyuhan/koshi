@@ -1,6 +1,5 @@
-//! IPC domain error. Classifies into [`koshi_core::error::DomainCategory::Ipc`].
+//! IPC domain error.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use thiserror::Error;
 
 /// A failure on the control channel.
@@ -59,7 +58,7 @@ pub enum IpcError {
     /// whole but did not decode, or a message failed to encode.
     #[error("ipc frame is not a readable message: {error_detail}")]
     MalformedFrame { error_detail: String },
-    /// A socket address that failed a trust check, named in `reason`: the
+    /// A socket address that failed a trust check, named in `trust_failure_reason`: the
     /// path is not directly inside the directory it must sit in, that
     /// directory is a symbolic link, is not a directory, carries the wrong
     /// mode, or belongs to another user, or (Windows) the pipe name is
@@ -171,43 +170,14 @@ pub enum RemoteFile {
 }
 
 impl std::fmt::Display for RemoteFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let remote_file_name = match self {
             Self::SavedServers => "saved servers file",
             Self::Certificate => "remote access certificate",
             Self::RemoteAccessMark => "remote access record",
             Self::TokenStore => "remote access token store",
         };
-        f.write_str(remote_file_name)
-    }
-}
-
-impl DomainError for IpcError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Ipc
-    }
-
-    fn get_severity(&self) -> Severity {
-        match self {
-            IpcError::Transport { .. }
-            | IpcError::Disconnected
-            | IpcError::FrameTooLarge { .. }
-            | IpcError::UntrustedSocket { .. }
-            | IpcError::NoListener { .. }
-            | IpcError::SocketBusy { .. }
-            | IpcError::EndpointFileMissing { .. }
-            | IpcError::EndpointFileUnreadable { .. }
-            | IpcError::RemoteFileUnreadable { .. }
-            | IpcError::RemoteFileWrite { .. }
-            | IpcError::ConnectRefused { .. }
-            | IpcError::ConnectTimedOut { .. }
-            | IpcError::TlsHandshakeFailed { .. }
-            | IpcError::CertificateChanged { .. } => Severity::ClientFatal,
-            IpcError::EndpointFileWrite { .. } | IpcError::AdvertWrite { .. } => {
-                Severity::SessionFatal
-            }
-            IpcError::MalformedFrame { .. } => Severity::Recoverable,
-        }
+        formatter.write_str(remote_file_name)
     }
 }
 

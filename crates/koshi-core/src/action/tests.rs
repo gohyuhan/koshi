@@ -1,7 +1,6 @@
 //! Tests for the action vocabulary.
 
 use super::*;
-use crate::ids::PluginId;
 use std::collections::BTreeSet;
 
 /// Roundtrip a value through JSON and assert it survives unchanged.
@@ -180,29 +179,10 @@ fn action_name_deserialization_validates_grammar() {
 }
 
 #[test]
-fn action_reference_display_includes_each_namespace_form() {
+fn action_reference_display_writes_the_core_prefix() {
     let core_action_reference = ActionReference::from_core_action_name("new-pane").expect("valid");
     assert_eq!(core_action_reference.to_string(), "core:new-pane");
-
-    let user_action_reference = ActionReference::from_user_action_name("my-macro").expect("valid");
-    assert_eq!(user_action_reference.to_string(), "user:my-macro");
-
-    let plugin_id = PluginId::new();
-    let plugin_action_reference =
-        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid");
-    assert_eq!(
-        plugin_action_reference.to_string(),
-        format!("plugin:{}:open-status", plugin_id.get_uuid())
-    );
-}
-
-#[test]
-fn action_reference_roundtrips_each_namespace_through_serde() {
-    assert_json_roundtrip(&ActionReference::from_core_action_name("close-pane").expect("valid"));
-    assert_json_roundtrip(&ActionReference::from_user_action_name("workflow-1").expect("valid"));
-    assert_json_roundtrip(
-        &ActionReference::from_plugin_action_name(PluginId::new(), "diff").expect("valid"),
-    );
+    assert_eq!(String::from(core_action_reference), "core:new-pane");
 }
 
 #[test]
@@ -218,6 +198,7 @@ fn action_reference_serialization_uses_canonical_string() {
     let decoded_action_reference: ActionReference =
         serde_json::from_str("\"core:new-pane\"").expect("deserialize");
     assert_eq!(decoded_action_reference, core_action_reference);
+    assert_json_roundtrip(&core_action_reference);
 }
 
 #[test]
@@ -225,19 +206,6 @@ fn action_reference_parser_accepts_canonical_strings() {
     assert_eq!(
         "core:new-pane".parse::<ActionReference>().expect("valid"),
         ActionReference::from_core_action_name("new-pane").expect("valid")
-    );
-    assert_eq!(
-        "user:my-macro".parse::<ActionReference>().expect("valid"),
-        ActionReference::from_user_action_name("my-macro").expect("valid")
-    );
-
-    let plugin_id = PluginId::new();
-    let plugin_action_reference_text = format!("plugin:{}:open-status", plugin_id.get_uuid());
-    assert_eq!(
-        plugin_action_reference_text
-            .parse::<ActionReference>()
-            .expect("valid"),
-        ActionReference::from_plugin_action_name(plugin_id, "open-status").expect("valid")
     );
 }
 
@@ -252,14 +220,6 @@ fn action_reference_parser_rejects_malformed_strings() {
         Err(ActionReferenceParseError::UnknownNamespace {
             unknown_namespace: "shell".to_string()
         })
-    );
-    assert_eq!(
-        "plugin:not-a-uuid:x".parse::<ActionReference>(),
-        Err(ActionReferenceParseError::InvalidPluginId)
-    );
-    assert_eq!(
-        format!("plugin:{}", PluginId::new().get_uuid()).parse::<ActionReference>(),
-        Err(ActionReferenceParseError::MissingPluginName)
     );
     assert_eq!(
         "core:Bad Name".parse::<ActionReference>(),
@@ -281,66 +241,53 @@ fn action_reference_parser_rejects_malformed_strings() {
     );
 }
 
+/// `user:` and `plugin:` are not namespaces: both are refused by name, like
+/// any other unknown prefix.
+#[test]
+fn action_reference_parser_refuses_user_and_plugin_prefixes() {
+    assert_eq!(
+        "user:my-macro".parse::<ActionReference>(),
+        Err(ActionReferenceParseError::UnknownNamespace {
+            unknown_namespace: "user".to_string()
+        })
+    );
+    assert_eq!(
+        "plugin:0192f0c1-0000-7000-8000-000000000000:open-status".parse::<ActionReference>(),
+        Err(ActionReferenceParseError::UnknownNamespace {
+            unknown_namespace: "plugin".to_string()
+        })
+    );
+}
+
 #[test]
 fn action_reference_parser_reports_first_failing_rule() {
-    let plugin_id = PluginId::new();
-    let uuid = plugin_id.get_uuid();
-    let parse_error_cases: &[(String, ActionReferenceParseError)] = &[
-        (String::new(), ActionReferenceParseError::MissingNamespace),
+    let parse_error_cases: &[(&str, ActionReferenceParseError)] = &[
+        ("", ActionReferenceParseError::MissingNamespace),
+        ("core", ActionReferenceParseError::MissingNamespace),
         (
-            "core".to_string(),
-            ActionReferenceParseError::MissingNamespace,
-        ),
-        (
-            ":".to_string(),
+            ":",
             ActionReferenceParseError::UnknownNamespace {
                 unknown_namespace: String::new(),
             },
         ),
         (
-            "CORE:new-pane".to_string(),
+            "CORE:new-pane",
             ActionReferenceParseError::UnknownNamespace {
                 unknown_namespace: "CORE".to_string(),
             },
         ),
         (
-            " core:new-pane".to_string(),
+            " core:new-pane",
             ActionReferenceParseError::UnknownNamespace {
                 unknown_namespace: " core".to_string(),
             },
         ),
         (
-            "core:".to_string(),
+            "core:",
             ActionReferenceParseError::InvalidActionName(ActionNameError::Empty),
         ),
         (
-            "user:".to_string(),
-            ActionReferenceParseError::InvalidActionName(ActionNameError::Empty),
-        ),
-        (
-            "core:new-pane:x".to_string(),
-            ActionReferenceParseError::InvalidActionName(ActionNameError::InvalidChar {
-                invalid_character: ':',
-            }),
-        ),
-        (
-            "plugin:".to_string(),
-            ActionReferenceParseError::MissingPluginName,
-        ),
-        (
-            "plugin:not-a-uuid".to_string(),
-            ActionReferenceParseError::MissingPluginName,
-        ),
-        (
-            "plugin::x".to_string(),
-            ActionReferenceParseError::InvalidPluginId,
-        ),
-        (
-            format!("plugin:{uuid}:"),
-            ActionReferenceParseError::InvalidActionName(ActionNameError::Empty),
-        ),
-        (
-            format!("plugin:{uuid}:a:b"),
+            "core:new-pane:x",
             ActionReferenceParseError::InvalidActionName(ActionNameError::InvalidChar {
                 invalid_character: ':',
             }),
@@ -366,15 +313,7 @@ fn action_reference_parse_error_display_uses_stable_messages() {
             unknown_namespace: "shell".to_string()
         }
         .to_string(),
-        "unknown action namespace \"shell\"; expected core, plugin, or user"
-    );
-    assert_eq!(
-        ActionReferenceParseError::MissingPluginName.to_string(),
-        "plugin action reference must be 'plugin:<uuid>:<name>'"
-    );
-    assert_eq!(
-        ActionReferenceParseError::InvalidPluginId.to_string(),
-        "plugin action reference has an invalid UUID"
+        "unknown action namespace \"shell\"; expected core"
     );
     assert_eq!(
         ActionReferenceParseError::InvalidActionName(ActionNameError::Empty).to_string(),
@@ -396,8 +335,6 @@ fn action_reference_parse_error_source_exposes_only_name_error() {
         ActionReferenceParseError::UnknownNamespace {
             unknown_namespace: "shell".to_string(),
         },
-        ActionReferenceParseError::MissingPluginName,
-        ActionReferenceParseError::InvalidPluginId,
     ] {
         assert_eq!(
             action_parse_error.source().map(ToString::to_string),
@@ -408,194 +345,15 @@ fn action_reference_parse_error_source_exposes_only_name_error() {
 }
 
 #[test]
-fn action_reference_parser_accepts_plugin_uuid_without_hyphens() {
-    let plugin_id = PluginId::new();
-    let plugin_action_reference_text = format!("plugin:{}:x", plugin_id.get_uuid().simple());
-    let parsed_action_reference = plugin_action_reference_text
-        .parse::<ActionReference>()
-        .expect("valid");
-    assert_eq!(
-        parsed_action_reference,
-        ActionReference::from_plugin_action_name(plugin_id, "x").expect("valid")
-    );
-    // The canonical form always prints the hyphenated UUID.
-    assert_eq!(
-        parsed_action_reference.to_string(),
-        format!("plugin:{}:x", plugin_id.get_uuid().hyphenated())
-    );
-}
-
-#[test]
-fn action_reference_serialization_uses_user_and_plugin_strings() {
-    let user_action_reference = ActionReference::from_user_action_name("my-macro").expect("valid");
-    assert_eq!(
-        serde_json::to_string(&user_action_reference).expect("serialize"),
-        "\"user:my-macro\""
-    );
-    assert_eq!(String::from(user_action_reference.clone()), "user:my-macro");
-
-    let plugin_id = PluginId::new();
-    let plugin_action_reference =
-        ActionReference::from_plugin_action_name(plugin_id, "diff").expect("valid");
-    let expected_plugin_reference = format!("plugin:{}:diff", plugin_id.get_uuid());
-    assert_eq!(
-        serde_json::to_string(&plugin_action_reference).expect("serialize"),
-        format!("\"{expected_plugin_reference}\"")
-    );
-    assert_eq!(
-        String::from(plugin_action_reference),
-        expected_plugin_reference
-    );
-}
-
-#[test]
-fn action_namespace_serialization_uses_stable_wire_forms() {
-    use serde_json::json;
-
-    assert_eq!(
-        serde_json::to_value(ActionNamespace::Core).expect("serialize"),
-        json!("Core")
-    );
-    assert_eq!(
-        serde_json::to_value(ActionNamespace::User).expect("serialize"),
-        json!("User")
-    );
-    let plugin_id = PluginId::new();
-    assert_eq!(
-        serde_json::to_value(ActionNamespace::Plugin(plugin_id)).expect("serialize"),
-        json!({ "Plugin": plugin_id.get_uuid().to_string() })
-    );
-}
-
-#[test]
-fn action_status_serialization_uses_declared_variant_names() {
-    assert_eq!(
-        serde_json::to_string(&ActionStatus::Available).expect("serialize"),
-        "\"Available\""
-    );
-    assert_eq!(
-        serde_json::to_string(&ActionStatus::ComingSoon).expect("serialize"),
-        "\"ComingSoon\""
-    );
-    let decoded_action_status: ActionStatus =
-        serde_json::from_str("\"ComingSoon\"").expect("deserialize");
-    assert_eq!(decoded_action_status, ActionStatus::ComingSoon);
-    let rejected: Result<ActionStatus, _> = serde_json::from_str("\"coming-soon\"");
-    assert_eq!(
-        rejected
-            .expect_err("kebab-case is not the wire form")
-            .to_string(),
-        "unknown variant `coming-soon`, expected `Available` or `ComingSoon` at line 1 column 13"
-    );
-}
-
-#[test]
-fn action_handler_reference_serialization_uses_stable_wire_forms() {
-    use serde_json::json;
-
-    assert_eq!(
-        serde_json::to_value(ActionHandlerReference::CoreCommand(CommandKind::NewPane))
-            .expect("serialize"),
-        json!({ "CoreCommand": "NewPane" })
-    );
-    assert_eq!(
-        serde_json::to_value(ActionHandlerReference::CoreClient(
-            ClientActionKind::BeginPanePlacement
-        ))
-        .expect("serialize"),
-        json!({ "CoreClient": "BeginPanePlacement" })
-    );
-    let plugin_id = PluginId::new();
-    assert_eq!(
-        serde_json::to_value(ActionHandlerReference::PluginHostCall(plugin_id)).expect("serialize"),
-        json!({ "PluginHostCall": plugin_id.get_uuid().to_string() })
-    );
-    assert_eq!(
-        serde_json::to_value(ActionHandlerReference::Sequence(vec![
-            ActionReference::from_core_action_name("lock").expect("valid"),
-            ActionReference::from_core_action_name("new-tab").expect("valid"),
-        ]))
-        .expect("serialize"),
-        json!({ "Sequence": ["core:lock", "core:new-tab"] })
-    );
-}
-
-#[test]
-fn action_handler_reference_roundtrips_through_serde() {
-    assert_json_roundtrip(&ActionHandlerReference::CoreCommand(CommandKind::NewPane));
-    assert_json_roundtrip(&ActionHandlerReference::CoreClient(
-        ClientActionKind::BeginPanePlacement,
-    ));
-    assert_json_roundtrip(&ActionHandlerReference::PluginHostCall(PluginId::new()));
-    assert_json_roundtrip(&ActionHandlerReference::Sequence(vec![
-        ActionReference::from_core_action_name("lock").expect("valid"),
-        ActionReference::from_core_action_name("new-tab").expect("valid"),
-    ]));
-}
-
-#[test]
-fn action_metadata_roundtrips_through_serde() {
-    let metadata = ActionMetadata {
-        namespace: ActionNamespace::Core,
-        display_name: "New Pane".to_string(),
-        description: "Split the focused pane".to_string(),
-        scope: ActionScope::PaneSession,
-        target_kinds: vec![TargetKind::Pane],
-        handler: ActionHandlerReference::CoreCommand(CommandKind::NewPane),
-        action_status: ActionStatus::Available,
-        is_continuous: false,
-    };
-    assert_json_roundtrip(&metadata);
-}
-
-#[test]
-fn action_metadata_defaults_is_continuous_when_wire_field_is_absent() {
-    let metadata = ActionMetadata {
-        namespace: ActionNamespace::Core,
-        display_name: "Resize Pane".to_string(),
-        description: "Grow or shrink the focused pane along one edge".to_string(),
-        scope: ActionScope::PaneSession,
-        target_kinds: vec![TargetKind::Pane],
-        handler: ActionHandlerReference::CoreCommand(CommandKind::ResizePane),
-        action_status: ActionStatus::Available,
-        is_continuous: true,
-    };
-    let mut metadata_json = serde_json::to_value(&metadata).expect("serialize");
-    assert_eq!(
-        metadata_json["is_continuous"],
-        serde_json::Value::Bool(true)
-    );
-    let removed_continuous_wire_field = metadata_json
-        .as_object_mut()
-        .expect("metadata is an object")
-        .remove("is_continuous");
-    assert_eq!(
-        removed_continuous_wire_field,
-        Some(serde_json::Value::Bool(true))
-    );
-
-    let decoded_metadata: ActionMetadata =
-        serde_json::from_value(metadata_json).expect("deserialize");
-    assert_eq!(
-        decoded_metadata,
-        ActionMetadata {
-            is_continuous: false,
-            ..metadata
-        }
-    );
-}
-
-#[test]
 #[should_panic(expected = "core seed action name must satisfy the action-name grammar")]
 fn core_action_seed_panics_on_invalid_action_name() {
     let _ = build_core_action_seed(
         "Bad Name",
         "Bad",
         "An invalid seed",
-        ActionScope::Global,
+        ActionScope::Client,
         vec![],
         ActionHandlerReference::CoreCommand(CommandKind::Quit),
-        ActionStatus::Available,
     );
 }
 
@@ -614,10 +372,10 @@ fn mouse_select_seed_uses_hint_label_as_display_name() {
 }
 
 /// Pins every seed's position, command kind, scope, and targets, in table
-/// order. `koshi actions list` prints the `Available` rows in this order.
+/// order. `koshi actions list` prints the rows in this order.
 #[test]
 fn core_action_seed_order_kind_scope_and_targets_are_stable() {
-    use ActionScope::{Client, Global, PaneSession, Tab};
+    use ActionScope::{Client, PaneSession, Tab};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
     let seeds = build_core_action_seeds();
@@ -853,18 +611,6 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
             PaneSession,
             vec![Pane],
         ),
-        (
-            "core:copy-selection",
-            CommandKind::Visual,
-            PaneSession,
-            vec![Pane],
-        ),
-        ("core:plugin-install", CommandKind::Plugin, Global, vec![]),
-        ("core:plugin-uninstall", CommandKind::Plugin, Global, vec![]),
-        ("core:plugin-enable", CommandKind::Plugin, Global, vec![]),
-        ("core:plugin-disable", CommandKind::Plugin, Global, vec![]),
-        ("core:plugin-update", CommandKind::Plugin, Global, vec![]),
-        ("core:plugin-reload", CommandKind::Plugin, Global, vec![]),
     ]
     .into_iter()
     .map(|(action_name, command_kind, action_scope, target_kinds)| {
@@ -982,14 +728,8 @@ fn core_action_seed_order_kind_scope_and_targets_are_stable() {
 }
 
 #[test]
-fn core_action_seeds_have_valid_namespaces_and_serde_forms() {
+fn core_action_seeds_are_unique_and_roundtrip_through_serde() {
     let seeds = build_core_action_seeds();
-
-    // Every seed is in the core namespace, on both the ref and its metadata.
-    for (action_reference, action_metadata) in &seeds {
-        assert_eq!(action_reference.namespace, ActionNamespace::Core);
-        assert_eq!(action_metadata.namespace, ActionNamespace::Core);
-    }
 
     // No duplicate action references.
     let unique_action_references: BTreeSet<String> = seeds
@@ -1002,10 +742,9 @@ fn core_action_seeds_have_valid_namespaces_and_serde_forms() {
         "seed action names must be unique"
     );
 
-    // The whole table roundtrips through serde.
-    for (action_reference, action_metadata) in &seeds {
+    // Every seeded reference roundtrips through serde.
+    for (action_reference, _) in &seeds {
         assert_json_roundtrip(action_reference);
-        assert_json_roundtrip(action_metadata);
     }
 }
 
@@ -1064,38 +803,6 @@ fn lock_and_focus_seeds_use_client_scope_and_targets() {
     }
 }
 
-/// Pins which seeds are coming-soon: `core:copy-selection` and the six plugin
-/// actions have no runtime handler, so each is seeded `ComingSoon` and every
-/// other action is `Available`.
-#[test]
-fn coming_soon_action_seeds_are_stable() {
-    let mut coming_soon: Vec<String> = build_core_action_seeds()
-        .iter()
-        .filter(|(_, action_metadata)| action_metadata.action_status == ActionStatus::ComingSoon)
-        .map(|(action_reference, _)| action_reference.to_string())
-        .collect();
-    coming_soon.sort();
-
-    // Visual mode contributes exactly one action — copying the highlight.
-    // Entering and leaving it are not actions (a drag enters, any key leaves),
-    // and setting/clearing the selection is the mouse layer's command, not a
-    // name a user can bind.
-    let mut expected_coming_soon_action_names = [
-        "core:copy-selection",
-        "core:plugin-disable",
-        "core:plugin-enable",
-        "core:plugin-install",
-        "core:plugin-reload",
-        "core:plugin-uninstall",
-        "core:plugin-update",
-    ]
-    .map(String::from)
-    .to_vec();
-    expected_coming_soon_action_names.sort();
-
-    assert_eq!(coming_soon, expected_coming_soon_action_names);
-}
-
 /// Pins which seeds are continuous: the resize-pane, focus-pane, and scroll
 /// action families. A new member of a family added without the `continuous`
 /// flag — or the flag appearing on any other action — changes this list and
@@ -1147,7 +854,6 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:close-pane-tree",
         "core:close-tab",
         "core:confirm-pane-placement",
-        "core:copy-selection",
         "core:cycle-pane-placement-span",
         "core:focus-pane",
         "core:focus-pane-down",
@@ -1168,12 +874,6 @@ fn core_action_seed_name_snapshot_is_stable() {
         "core:new-tab",
         "core:next-tab",
         "core:place-pane",
-        "core:plugin-disable",
-        "core:plugin-enable",
-        "core:plugin-install",
-        "core:plugin-reload",
-        "core:plugin-uninstall",
-        "core:plugin-update",
         "core:previous-tab",
         "core:quit",
         "core:resize-pane",

@@ -9,13 +9,12 @@ use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseTracking};
 use koshi_layout::mode::LayoutMode;
-use koshi_pane::pane::state::PaneKind;
 use serde_json::json;
 
 use crate::frame::{
     FrameClient, FrameCursor, FrameCursorShape, FrameGraphicsProtocol, FrameImageAction,
     FrameImageChunk, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameScrollback,
-    FrameSession, FrameSlot, FrameTab, FrameTabMeta,
+    FrameSession, FrameSlot, FrameTab, FrameTabMetadata,
 };
 
 use super::*;
@@ -44,24 +43,22 @@ fn build_test_painted_frame() -> PaintedFrame {
                     pane_id,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 4,
                             row_count: 3,
                         },
                     },
                     content_rect: Some(Rect {
                         origin: Point { column: 1, row: 1 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 2,
                             row_count: 1,
                         },
                     }),
-                    pane_kind: PaneKind::Terminal,
                     is_visible: true,
                     is_suppressed: false,
-                    is_dead: false,
                 }],
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 4,
                     row_count: 3,
                 },
@@ -70,7 +67,7 @@ fn build_test_painted_frame() -> PaintedFrame {
                 is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tab_snapshots: vec![FrameTabMeta {
+            tab_snapshots: vec![FrameTabMetadata {
                 tab_id,
                 tab_name: "edit".to_string(),
                 tab_index: 0,
@@ -91,13 +88,12 @@ fn build_test_painted_frame() -> PaintedFrame {
             image_placement_snapshots: Vec::new(),
             is_reverse_video: false,
             mouse_tracking: MouseTracking::Off,
-            is_alt_scroll_enabled: false,
+            is_alternate_scroll_enabled: false,
             is_on_alt_screen: false,
             view_top_row_index: 7,
             selection_spans: None,
             has_selection: false,
-            scrollback_meta: FrameScrollback {
-                is_truncated: false,
+            scrollback_metadata: FrameScrollback {
                 retained_line_count: 12,
             },
         }],
@@ -676,67 +672,41 @@ tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v
     );
 }
 
-/// The shape a session server speaking session protocol 2 writes. A client
-/// that upgraded while such a session is still running reads it.
 #[test]
-fn a_host_write_carrying_a_list_of_numbers_still_reads() {
+fn a_host_write_carrying_a_list_of_numbers_is_refused() {
+    let decode_error = serde_json::from_str::<SessionEvent>(
+        r#"{"HostWrite":{"host_output_bytes":[27,93,195,169]}}"#,
+    )
+    .expect_err("a number list is not base64 text");
+
+    assert_eq!(
+        decode_error.to_string(),
+        "invalid type: sequence, expected bytes as a base64 string at line 1 column 34"
+    );
+}
+
+#[test]
+fn an_empty_host_write_reads_as_no_bytes() {
     let decoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":[27,93,195,169]}}"#)
-            .expect("event decodes");
+        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":""}}"#).expect("event decodes");
 
     assert_eq!(
         decoded_event,
         SessionEvent::HostWrite {
-            host_output_bytes: vec![0x1b, b']', 0xc3, 0xa9],
-        }
-    );
-    // What it decoded to is written back as base64, never as the list it came
-    // from.
-    assert_eq!(
-        serde_json::to_string(&decoded_event).expect("event encodes"),
-        r#"{"HostWrite":{"host_output_bytes":"G13DqQ=="}}"#
-    );
-}
-
-#[test]
-fn an_empty_host_write_reads_from_either_shape() {
-    let list_encoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":[]}}"#).expect("event decodes");
-    let base64_encoded_event: SessionEvent =
-        serde_json::from_str(r#"{"HostWrite":{"host_output_bytes":""}}"#).expect("event decodes");
-
-    assert_eq!(
-        list_encoded_event,
-        SessionEvent::HostWrite {
             host_output_bytes: Vec::new(),
         }
     );
-    assert_eq!(base64_encoded_event, list_encoded_event);
 }
 
 #[test]
-fn a_host_write_list_entry_outside_a_byte_is_refused() {
-    let decode_error =
-        serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":[27,256]}}"#)
-            .expect_err("256 is not a byte");
-
-    assert!(
-        decode_error.to_string().contains("invalid value"),
-        "unexpected refusal: {decode_error}"
-    );
-}
-
-#[test]
-fn a_host_write_carrying_neither_shape_is_refused() {
+fn a_host_write_carrying_a_number_is_refused() {
     let decode_error =
         serde_json::from_str::<SessionEvent>(r#"{"HostWrite":{"host_output_bytes":27}}"#)
-            .expect_err("a number is neither shape");
+            .expect_err("a number is not base64 text");
 
-    assert!(
-        decode_error
-            .to_string()
-            .contains("bytes as a base64 string or as a list of numbers"),
-        "unexpected refusal: {decode_error}"
+    assert_eq!(
+        decode_error.to_string(),
+        "invalid type: integer `27`, expected bytes as a base64 string at line 1 column 36"
     );
 }
 
@@ -835,29 +805,6 @@ fn quit_serializes_as_the_bare_name() {
     assert_eq!(
         serde_json::to_string(&SessionEvent::Quit).expect("serialize"),
         r#""Quit""#
-    );
-}
-
-/// A peer that predates the `signal` field sends a `PaneProcessExited`
-/// without it; the field reads as `None`.
-#[test]
-fn a_pane_exit_frame_without_a_signal_field_decodes_with_no_signal() {
-    let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-    let exit_event_json = format!(
-        r#"{{"PaneProcessExited":{{"pane_id":"{}","exit_code":null}}}}"#,
-        pane_id.get_uuid()
-    );
-
-    let decoded_event: SessionEvent =
-        serde_json::from_str(&exit_event_json).expect("decodes without signal");
-
-    assert_eq!(
-        decoded_event,
-        SessionEvent::PaneProcessExited {
-            pane_id,
-            exit_code: None,
-            signal: None,
-        }
     );
 }
 

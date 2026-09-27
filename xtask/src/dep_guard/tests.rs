@@ -75,21 +75,9 @@ fn allowed_graph_has_no_violations() {
     let crate_dependencies = build_dependency_graph(&[
         ("koshi-core", &[]),
         ("koshi-pty", &["koshi-core", "portable-pty"]),
-        (
-            "koshi-plugin-host",
-            &["koshi-core", "koshi-plugin-api", "wasmtime"],
-        ),
-        (
-            "koshi-plugin-manager",
-            &["koshi-core", "koshi-plugin-api", "koshi-storage"],
-        ),
-        ("koshi-plugin-api", &["koshi-core"]),
-        // This graph has `koshi-runtime` -> `koshi-plugin-host` but no direct
-        // `koshi-runtime` -> `wasmtime` edge.
-        (
-            "koshi-runtime",
-            &["koshi-core", "koshi-plugin-manager", "koshi-plugin-host"],
-        ),
+        // This graph has `koshi-daemon` -> `koshi-pty` but no direct
+        // `koshi-daemon` -> `portable-pty` edge.
+        ("koshi-daemon", &["koshi-core", "koshi-pty"]),
     ]);
     assert_eq!(
         validate_dependency_edges(&crate_dependencies),
@@ -109,73 +97,6 @@ fn core_internal_dep_is_named() {
 }
 
 #[test]
-fn plugin_manager_runtime_dep_is_named() {
-    let crate_dependencies =
-        build_dependency_graph(&[("koshi-plugin-manager", &["koshi-runtime"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-plugin-manager -> koshi-runtime \
-             (koshi-plugin-manager must not depend on runtime/ipc/host)"
-            .to_string()]
-    );
-}
-
-#[test]
-fn plugin_manager_host_dep_is_named() {
-    let crate_dependencies =
-        build_dependency_graph(&[("koshi-plugin-manager", &["koshi-plugin-host"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-plugin-manager -> koshi-plugin-host \
-             (koshi-plugin-manager must not depend on runtime/ipc/host)"
-            .to_string()]
-    );
-}
-
-#[test]
-fn plugin_api_client_dep_is_named() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-plugin-api", &["koshi-client"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-plugin-api -> koshi-client \
-             (koshi-plugin-api must not depend on client/renderer)"
-            .to_string()]
-    );
-}
-
-#[test]
-fn plugin_api_renderer_dep_is_named() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-plugin-api", &["koshi-renderer"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-plugin-api -> koshi-renderer \
-             (koshi-plugin-api must not depend on client/renderer)"
-            .to_string()]
-    );
-}
-
-#[test]
-fn a_crate_other_than_plugin_api_may_depend_on_client_and_renderer() {
-    let crate_dependencies =
-        build_dependency_graph(&[("koshi", &["koshi-client", "koshi-renderer"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn wasmtime_outside_host_is_named() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-runtime", &["wasmtime"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-runtime -> wasmtime \
-             (wasmtime is owned only by koshi-plugin-host)"
-            .to_string()]
-    );
-}
-
-#[test]
 fn portable_pty_outside_pty_is_named() {
     let crate_dependencies = build_dependency_graph(&[("koshi-pane", &["portable-pty"])]);
     assert_eq!(
@@ -187,23 +108,11 @@ fn portable_pty_outside_pty_is_named() {
 }
 
 #[test]
-fn plugin_manager_ipc_dep_is_named() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-plugin-manager", &["koshi-ipc"])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-plugin-manager -> koshi-ipc \
-             (koshi-plugin-manager must not depend on runtime/ipc/host)"
-            .to_string()]
-    );
-}
-
-#[test]
 fn each_broken_rule_reports_its_own_text_and_the_list_is_sorted() {
     let crate_dependencies = build_dependency_graph(&[
-        ("koshi-runtime", &["wasmtime"]),
+        ("koshi-runtime", &["portable-pty"]),
         ("koshi-core", &["koshi-pty"]),
         ("koshi-pane", &["portable-pty"]),
-        ("koshi-plugin-manager", &["koshi-plugin-host"]),
     ]);
     assert_eq!(
         validate_dependency_edges(&crate_dependencies),
@@ -214,11 +123,8 @@ fn each_broken_rule_reports_its_own_text_and_the_list_is_sorted() {
             "forbidden edge: koshi-pane -> portable-pty \
              (portable-pty is owned only by koshi-pty)"
                 .to_string(),
-            "forbidden edge: koshi-plugin-manager -> koshi-plugin-host \
-             (koshi-plugin-manager must not depend on runtime/ipc/host)"
-                .to_string(),
-            "forbidden edge: koshi-runtime -> wasmtime \
-             (wasmtime is owned only by koshi-plugin-host)"
+            "forbidden edge: koshi-runtime -> portable-pty \
+             (portable-pty is owned only by koshi-pty)"
                 .to_string(),
         ]
     );
@@ -227,13 +133,13 @@ fn each_broken_rule_reports_its_own_text_and_the_list_is_sorted() {
 #[test]
 fn the_same_forbidden_edge_listed_twice_is_reported_once() {
     let crate_dependencies = build_dependency_graph(&[
-        ("koshi-runtime", &["wasmtime", "wasmtime"]),
-        ("koshi-runtime", &["wasmtime"]),
+        ("koshi-runtime", &["portable-pty", "portable-pty"]),
+        ("koshi-runtime", &["portable-pty"]),
     ]);
     assert_eq!(
         validate_dependency_edges(&crate_dependencies),
-        vec!["forbidden edge: koshi-runtime -> wasmtime \
-             (wasmtime is owned only by koshi-plugin-host)"
+        vec!["forbidden edge: koshi-runtime -> portable-pty \
+             (portable-pty is owned only by koshi-pty)"
             .to_string()]
     );
 }
@@ -249,8 +155,8 @@ fn koshi_core_may_depend_on_crates_outside_the_workspace() {
 }
 
 #[test]
-fn a_crate_whose_name_only_starts_with_wasmtime_is_allowed_outside_the_host() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-runtime", &["wasmtime-wasi"])]);
+fn a_crate_whose_name_only_starts_with_portable_pty_is_allowed_outside_the_pty_crate() {
+    let crate_dependencies = build_dependency_graph(&[("koshi-runtime", &["portable-pty-extras"])]);
     assert_eq!(
         validate_dependency_edges(&crate_dependencies),
         Vec::<String>::new()
@@ -264,16 +170,7 @@ fn empty_graph_has_no_violations() {
 
 #[test]
 fn a_crate_with_no_dependencies_has_no_violations() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-plugin-manager", &[])]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn plugin_host_may_depend_on_wasmtime() {
-    let crate_dependencies = build_dependency_graph(&[("koshi-plugin-host", &["wasmtime"])]);
+    let crate_dependencies = build_dependency_graph(&[("koshi-runtime", &[])]);
     assert_eq!(
         validate_dependency_edges(&crate_dependencies),
         Vec::<String>::new()
@@ -290,21 +187,9 @@ fn pty_crate_may_depend_on_portable_pty() {
 }
 
 #[test]
-fn a_crate_other_than_plugin_manager_may_depend_on_runtime_ipc_and_host() {
-    let crate_dependencies = build_dependency_graph(&[(
-        "koshi",
-        &["koshi-runtime", "koshi-ipc", "koshi-plugin-host"],
-    )]);
-    assert_eq!(
-        validate_dependency_edges(&crate_dependencies),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
 fn every_forbidden_dependency_of_one_crate_is_named() {
     let crate_dependencies =
-        build_dependency_graph(&[("koshi-core", &["wasmtime", "koshi-pty", "koshi-ipc"])]);
+        build_dependency_graph(&[("koshi-core", &["portable-pty", "koshi-pty", "koshi-ipc"])]);
     assert_eq!(
         validate_dependency_edges(&crate_dependencies),
         vec![
@@ -314,8 +199,8 @@ fn every_forbidden_dependency_of_one_crate_is_named() {
             "forbidden edge: koshi-core -> koshi-pty \
              (koshi-core must not depend on internal crates)"
                 .to_string(),
-            "forbidden edge: koshi-core -> wasmtime \
-             (wasmtime is owned only by koshi-plugin-host)"
+            "forbidden edge: koshi-core -> portable-pty \
+             (portable-pty is owned only by koshi-pty)"
                 .to_string(),
         ]
     );
@@ -354,18 +239,17 @@ fn direct_deps_keeps_only_workspace_members_sorted_by_name() {
 
 #[test]
 fn direct_deps_uses_package_name_for_renamed_dependencies() {
-    let dependency_json =
-        format_dependency_json("koshi-renderer", "null", false, None, Some("renderer"));
+    let dependency_json = format_dependency_json("portable-pty", "null", false, None, Some("pty"));
     let workspace_metadata = build_metadata(
-        &["koshi-plugin-api"],
-        &[("koshi-plugin-api", &format!("[{dependency_json}]"))],
+        &["koshi-runtime"],
+        &[("koshi-runtime", &format!("[{dependency_json}]"))],
     );
 
     assert_eq!(
         list_direct_dependencies(&workspace_metadata),
         vec![(
-            "koshi-plugin-api".to_string(),
-            vec!["koshi-renderer".to_string()]
+            "koshi-runtime".to_string(),
+            vec!["portable-pty".to_string()]
         )]
     );
 }

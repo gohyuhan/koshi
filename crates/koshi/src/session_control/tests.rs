@@ -18,13 +18,14 @@ use koshi_ipc::router::{
     RouterResponse, SessionAddress, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
+use koshi_link::router_client::request_new_session;
 use uuid::Uuid;
 
 use super::*;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
 
 /// The answer an accepted session Hello earns.
-fn hello_accepted() -> IpcResult {
+fn build_hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -32,7 +33,7 @@ fn hello_accepted() -> IpcResult {
 }
 
 /// The answer an accepted router Hello earns.
-fn router_hello_accepted() -> RouterResult {
+fn build_router_hello_accepted() -> RouterResult {
     RouterResult::Hello {
         protocol_version: ROUTER_PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -131,7 +132,7 @@ fn serve_kill_session(
         send_ipc_reply(
             &mut discovery_connection,
             hello_request.request_id,
-            hello_accepted(),
+            build_hello_accepted(),
         );
         send_ipc_reply(
             &mut discovery_connection,
@@ -151,7 +152,7 @@ fn serve_kill_session(
         send_ipc_reply(
             &mut kill_connection,
             kill_hello_request.request_id,
-            hello_accepted(),
+            build_hello_accepted(),
         );
         send_ipc_reply(
             &mut kill_connection,
@@ -204,7 +205,7 @@ fn serve_kill_session_without_discovery(
         send_ipc_reply(
             &mut kill_connection,
             kill_hello_request.request_id,
-            hello_accepted(),
+            build_hello_accepted(),
         );
         send_ipc_reply(
             &mut kill_connection,
@@ -228,7 +229,7 @@ struct RouterLog {
 
 /// The create request a caller is expected to put on the wire for `profile_name` and
 /// `is_other_user_access_allowed`.
-fn expected_create_session_request(
+fn build_expected_create_session_request(
     profile_name: Option<&str>,
     is_other_user_access_allowed: Option<bool>,
 ) -> RouterRequestKind {
@@ -296,7 +297,7 @@ fn serve_router_request(
 
         let _ = router_connection.send(&RouterResponse {
             request_id: Some(hello_request.request_id),
-            answer_result: router_hello_accepted(),
+            answer_result: build_router_hello_accepted(),
         });
         let _ = router_connection.send(&RouterResponse {
             request_id: Some(router_request.request_id),
@@ -338,15 +339,14 @@ fn a_created_answer_hands_back_the_new_session_id() {
     assert!(is_hello_accepted, "the hello opens the gate");
     assert_eq!(
         router_request_kind,
-        Some(expected_create_session_request(None, None))
+        Some(build_expected_create_session_request(None, None))
     );
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
-/// `request_headless_session` forwards to `request_new_session`, so this one request
-/// is what either entry point puts on the wire.
+/// A create naming a profile carries that name to the router.
 #[test]
-fn the_headless_wrapper_and_the_plain_create_ask_the_router_the_same_thing() {
+fn a_create_naming_a_profile_carries_that_name_to_the_router() {
     let runtime_directory = build_test_runtime_directory("create-with-profile");
     let session_id = SessionId::from_uuid(Uuid::from_u128(11));
     let router_log = serve_router_request(
@@ -359,7 +359,7 @@ fn the_headless_wrapper_and_the_plain_create_ask_the_router_the_same_thing() {
         }),
     );
 
-    let created_session_id = request_headless_session(&runtime_directory, Some("work"), None)
+    let created_session_id = request_new_session(&runtime_directory, Some("work"), None)
         .expect("the router created a session");
 
     assert_eq!(created_session_id, session_id);
@@ -367,7 +367,7 @@ fn the_headless_wrapper_and_the_plain_create_ask_the_router_the_same_thing() {
     assert!(is_hello_accepted, "the hello opens the gate");
     assert_eq!(
         router_request_kind,
-        Some(expected_create_session_request(Some("work"), None))
+        Some(build_expected_create_session_request(Some("work"), None))
     );
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
@@ -388,7 +388,7 @@ fn a_headless_create_forcing_the_other_users_on_carries_that_answer_to_the_route
         }),
     );
 
-    let created_session_id = request_headless_session(&runtime_directory, None, Some(true))
+    let created_session_id = request_new_session(&runtime_directory, None, Some(true))
         .expect("the router created a session");
 
     assert_eq!(created_session_id, session_id);
@@ -396,7 +396,7 @@ fn a_headless_create_forcing_the_other_users_on_carries_that_answer_to_the_route
     assert!(is_hello_accepted, "the hello opens the gate");
     assert_eq!(
         router_request_kind,
-        Some(expected_create_session_request(None, Some(true)))
+        Some(build_expected_create_session_request(None, Some(true)))
     );
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
@@ -423,7 +423,7 @@ fn a_refused_create_reports_the_routers_own_message() {
     assert!(is_hello_accepted, "the hello opens the gate");
     assert_eq!(
         router_request_kind,
-        Some(expected_create_session_request(None, None))
+        Some(build_expected_create_session_request(None, None))
     );
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
@@ -431,7 +431,7 @@ fn a_refused_create_reports_the_routers_own_message() {
 #[test]
 fn an_answer_to_another_request_names_what_came_back() {
     let runtime_directory = build_test_runtime_directory("headless-wrong-answer");
-    let router_log = serve_router_request(&runtime_directory, router_hello_accepted());
+    let router_log = serve_router_request(&runtime_directory, build_router_hello_accepted());
 
     let create_error =
         request_new_session(&runtime_directory, None, None).expect_err("the answer fits no create");
@@ -444,7 +444,7 @@ fn an_answer_to_another_request_names_what_came_back() {
     assert!(is_hello_accepted, "the hello opens the gate");
     assert_eq!(
         router_request_kind,
-        Some(expected_create_session_request(None, None))
+        Some(build_expected_create_session_request(None, None))
     );
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }

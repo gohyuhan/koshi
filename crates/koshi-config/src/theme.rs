@@ -54,7 +54,7 @@ const COLOR_KEYS: &[&str] = &[
     "colors.bar-bg",
 ];
 
-/// Parses a theme file's `source` into a [`PartialThemeConfig`] override layer
+/// Parses a theme file's `theme_source_text` into a [`PartialThemeConfig`] override layer
 /// and one warning per skipped color, unknown key, value written on the
 /// `colors` line, and repeated `colors` block, in file order. The returned
 /// layer's
@@ -62,7 +62,7 @@ const COLOR_KEYS: &[&str] = &[
 /// file, which the caller knows and this parser does not.
 ///
 /// # Errors
-/// Returns [`ConfigError::Parse`] when `source` is not valid KDL.
+/// Returns [`ConfigError::Parse`] when `theme_source_text` is not valid KDL.
 ///
 /// Returns [`ConfigError::Validation`] with key `version` when `version` is
 /// missing, declared twice, carries a `{ … }` block, is not a single integer
@@ -120,7 +120,7 @@ pub fn parse_theme(
 
 /// Reads the `colors { … }` block into per-role overrides. A role whose value
 /// is unreadable, and a name outside [`COLOR_KEYS`], are left unset and pushed
-/// onto `warnings`. A `colors` node with no `{ … }` block sets no role, and a
+/// onto `parse_warnings`. A `colors` node with no `{ … }` block sets no role, and a
 /// value written on the `colors` line itself is warned about and ignored.
 fn parse_color_section(
     config_node: &KdlNode,

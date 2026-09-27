@@ -12,10 +12,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::{
-        mpsc::{Receiver, Sender},
-        Arc,
-    },
+    sync::{mpsc::Receiver, Arc},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -25,25 +22,24 @@ use koshi_core::command::{CommandEnvelope, CommandResult};
 use koshi_core::event::{Event, QuitCause};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
-use koshi_core::process::PtySize;
-use koshi_core::registry::ActionRegistry;
+use koshi_core::process::{KillPolicy, PtySize};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_observability::logging::event_log::log_event;
 use koshi_observability::logging::recent_events;
-use koshi_pty::backend::state::CarriedPtyPane;
-use koshi_pty::backend::state::{PtyBackend, PtyHandle};
+use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, UNOBSERVED_EXIT};
 use koshi_renderer::snapshot::Delivery;
 use koshi_session::client::Client;
 use koshi_session::session::state::Session;
-use koshi_terminal::engine::{
-    GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport, TerminalEngine,
-};
+use koshi_terminal::engine::TerminalEngine;
 
 use crate::{
     ipc_server::IpcServer,
-    resume::{CarriedPane, CarriedQuit, ResumeBody, ResumeHeader, RESUME_FORMAT},
+    resume::{
+        CarriedPane, CarriedPaneState, CarriedQuit, ResumeBody, ResumeHeader, RESUME_FORMAT,
+        SCREEN_NOT_RESTORED_NOTICE_BYTES,
+    },
     runtime::{
-        bus::{EventBus, EventFilter},
+        bus::EventBus,
         event::RuntimeEvent,
         reload::{merge_app_layer_into_client_config, merge_app_layer_into_server_config},
         render_schedule::RenderScheduler,
@@ -82,14 +78,14 @@ pub type RestartCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 /// Returns the sentence naming the path and what is wrong with it.
 pub fn is_binary_runnable(executable_path: &Path) -> Result<(), String> {
     match std::fs::metadata(executable_path) {
-        Err(error) => Err(format!(
-            "the binary at {} could not be read: {error}",
+        Err(io_error) => Err(format!(
+            "the binary at {} could not be read: {io_error}",
             executable_path.display()
         )),
         #[cfg(unix)]
-        Ok(metadata) => {
+        Ok(executable_metadata) => {
             use std::os::unix::fs::PermissionsExt as _;
-            if metadata.permissions().mode() & 0o111 == 0 {
+            if executable_metadata.permissions().mode() & 0o111 == 0 {
                 Err(format!(
                     "the binary at {} is not executable",
                     executable_path.display()
@@ -153,11 +149,9 @@ pub struct Server {
     /// PTY is, and removed when the pane closes — engines exist exactly for
     /// live panes.
     pub(crate) terminal_engine_by_pane_id: HashMap<PaneId, TerminalEngine>,
-    /// The read side of every spawned pane's PTY, keyed by pane id. Holding the
-    /// handle keeps the pane's PTY sending ends alive and marks the pane live;
-    /// a per-pane forwarder thread owns the handle's receivers and pushes the
-    /// child's output and exit into the inbox.
-    pub(crate) pty_handle_by_pane_id: HashMap<PaneId, PtyHandle>,
+    /// Every pane whose child the backend drives. The backend's sink pushes
+    /// each one's child output and exit into the inbox.
+    pub(crate) live_pane_ids: HashSet<PaneId>,
     /// The last size each live pane's PTY was set to, keyed by pane id. Every
     /// path that resizes a PTY writes the new size here. A reflow resizes, and
     /// emits [`Event::PtyResized`], only for the panes whose solved size
@@ -168,17 +162,13 @@ pub struct Server {
     pub(crate) event_bus: EventBus,
     /// Which client each bus subscriber views as, in subscription order. Every
     /// due render puts the frame of the client named here on the subscriber's
-    /// queue, a subscriber paused by a dropped critical event is resynced from
+    /// queue, a subscriber paused by a dropped event is resynced from
     /// that same frame, and a mouse round's answer goes to the subscriber that
     /// views the client whose viewer sent the round.
     pub(crate) subscriptions: Vec<(SubscriberId, ClientId)>,
     /// Control-socket server, present once the session's socket is serving.
     /// Shutdown takes it to stop accepting and withdraw the endpoint file.
     pub(crate) ipc_server: Option<IpcServer>,
-    /// Every action this process can perform, seeded with the built-in `core:`
-    /// table and extended by plugins as they load. The dispatcher is its only
-    /// writer.
-    pub(crate) action_registry: ActionRegistry,
     /// The user's stored `koshi.kdl` overrides. The only config file whose
     /// settings a session keeps; the theme and the keybindings are each
     /// viewer's own. Replaced whole by a `koshi.kdl` reload.
@@ -198,23 +188,14 @@ pub struct Server {
     /// Monotonic time at which retained image animations were last advanced.
     pub(crate) animation_clock: Instant,
     /// Receiving end of the single runtime event inbox; the loop drains it.
-    inbox_rx: Receiver<RuntimeEvent>,
-    /// Sending end of the inbox, cloned for each pane's PTY forwarder threads so
-    /// they can push [`RuntimeEvent::PtyOutput`] and [`RuntimeEvent::ChildExit`].
-    pub(crate) inbox_tx: Sender<RuntimeEvent>,
-    /// Set once shutdown begins, and never cleared. The event loop has already
-    /// exited when it is set, so no queued IPC or plugin command dispatches
-    /// after it; the control socket is stopped in the next shutdown stage. No
-    /// command-dispatch path reads it; [`is_draining`](Self::is_draining) is
-    /// its only reader.
-    pub(crate) is_draining: bool,
+    inbox_receiver: Receiver<RuntimeEvent>,
     /// True when a quit asked for zero-grace process teardown, in this process
     /// or carried across an image swap.
     pub(crate) should_shutdown_immediately: bool,
     /// True once a `core:quit` command was applied, in this process or carried
     /// across an image swap. The event loop polls it before it waits for an
     /// event and after each event batch, and exits once
-    /// [`awaits_a_client`](Self::awaits_a_client) is false; the flag never
+    /// [`is_awaiting_client`](Self::is_awaiting_client) is false; the flag never
     /// resets.
     pub(crate) is_quit_requested: bool,
     /// True once a restart request passed [`restart_check`](Self::restart_check)
@@ -258,8 +239,7 @@ impl Server {
     /// and every `koshi.kdl` reload replace.
     pub fn from_runtime_parts(
         pty_backend: Arc<dyn PtyBackend>,
-        inbox_rx: Receiver<RuntimeEvent>,
-        inbox_tx: Sender<RuntimeEvent>,
+        inbox_receiver: Receiver<RuntimeEvent>,
     ) -> Self {
         let app_layer = PartialKoshiConfig::default();
         let config = merge_app_layer_into_server_config(&app_layer);
@@ -268,17 +248,14 @@ impl Server {
             session_by_id: HashMap::new(),
             pty_backend,
             terminal_engine_by_pane_id: HashMap::new(),
-            pty_handle_by_pane_id: HashMap::new(),
+            live_pane_ids: HashSet::new(),
             pty_size_by_pane_id: HashMap::new(),
             event_bus: EventBus::new(),
             subscriptions: Vec::new(),
             ipc_server: None,
-            action_registry: ActionRegistry::new(),
             render_scheduler: RenderScheduler::new(),
             animation_clock: Instant::now(),
-            inbox_rx,
-            inbox_tx,
-            is_draining: false,
+            inbox_receiver,
             should_shutdown_immediately: false,
             is_quit_requested: false,
             is_restart_requested: false,
@@ -295,21 +272,28 @@ impl Server {
     /// Rebuild a server from the state a previous process image carried out,
     /// over panes that are already running.
     ///
-    /// The event bus, the action registry, the render scheduler, the built-in
-    /// config defaults, the subscribers and the control socket are all built
-    /// fresh here. What comes from the swap is what [`ResumeBody`] carries, over
-    /// `pty_handle_by_pane_id` and `pty_size_by_pane_id`, plus the records of the clients that were told to
-    /// attach again.
-    /// [`load_startup_config`](Self::load_startup_config) still runs afterwards,
-    /// so the session comes back on the `koshi.kdl` that is on disk at that
-    /// moment.
+    /// The event bus, the action registry, the render scheduler, the built-in config defaults, the
+    /// subscribers and the control socket are all built fresh here. What comes from the swap is
+    /// what [`ResumeBody`] carries, over the panes `pty_size_by_pane_id` names, plus the records
+    /// of the clients that were told to attach again.
+    /// [`load_startup_config`](Self::load_startup_config) still runs afterwards, so the session
+    /// comes back on the `koshi.kdl` that is on disk at that moment.
     ///
-    /// Two callers reach this, and they differ in where `pty_handle_by_pane_id` comes from.
-    /// The new image after a successful swap passes the handles its backend
-    /// built by taking each pane back from its descriptor and process id. The
-    /// old image after a swap that failed to start passes
-    /// [`PtyHandle::from_detached_pane_id`] handles: it never let its panes go, so the same
-    /// backend still holds them.
+    /// `pty_size_by_pane_id` names every pane whose child the backend drives, with the size its
+    /// terminal holds. Two callers reach this: the new image after a successful swap passes the
+    /// panes it took back, and the old image after a swap that failed to start passes every pane
+    /// it still holds.
+    ///
+    /// Each pane is matched against the carried sessions:
+    ///
+    /// 1. A driven pane that a session holds and the body carries a state for comes back with
+    ///    that screen.
+    /// 2. A driven pane that a session holds and the body carries no state for comes back with a
+    ///    blank screen showing [`SCREEN_NOT_RESTORED_NOTICE_BYTES`]. Its child keeps running.
+    /// 3. A driven pane that no session holds has its child ended with [`KillPolicy::Tree`] and
+    ///    is not recorded.
+    /// 4. A pane a session holds that the backend does not drive is closed as if its child had
+    ///    ended with [`UNOBSERVED_EXIT`].
     ///
     /// No connection survives the swap, so every client the carried sessions
     /// hold starts out awaiting its own re-attach. Each one that attaches again
@@ -317,13 +301,11 @@ impl Server {
     /// grace window closes.
     pub fn resume(
         pty_backend: Arc<dyn PtyBackend>,
-        inbox_rx: Receiver<RuntimeEvent>,
-        inbox_tx: Sender<RuntimeEvent>,
+        inbox_receiver: Receiver<RuntimeEvent>,
         body: ResumeBody,
-        pty_handle_by_pane_id: HashMap<PaneId, PtyHandle>,
         pty_size_by_pane_id: HashMap<PaneId, PtySize>,
     ) -> Self {
-        let mut server = Server::from_runtime_parts(pty_backend, inbox_rx, inbox_tx);
+        let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
         server.client_ids_awaiting_reconnect = body
             .session_by_id
             .values()
@@ -338,81 +320,49 @@ impl Server {
             server.is_quit_requested = true;
             server.should_shutdown_immediately = carried_quit == CarriedQuit::Immediate;
         }
-        let mut undecoded_bytes_by_pane_id = body.undecoded_bytes_by_pane_id;
-        let mut graphics_undecoded_bytes_by_pane_id = body.graphics_undecoded_bytes_by_pane_id;
-        let mut graphics_screen_continuation_by_pane_id =
-            body.graphics_screen_continuation_by_pane_id;
-        let mut graphics_screen_wrapper_active_by_pane_id =
-            body.graphics_screen_wrapper_active_by_pane_id;
-        let mut graphics_tmux_continuation_by_pane_id = body.graphics_tmux_continuation_by_pane_id;
-        let mut graphics_tmux_wrapper_active_by_pane_id =
-            body.graphics_tmux_wrapper_active_by_pane_id;
-        let mut graphics_events_by_pane_id = body.graphics_events_by_pane_id;
-        let mut graphics_transport_by_pane_id = body.graphics_transport_by_pane_id;
-        let mut synchronized_output_by_pane_id = body.synchronized_output_by_pane_id;
+        let session_pane_ids: HashSet<PaneId> = server
+            .session_by_id
+            .values()
+            .flat_map(|session| session.panes.list_pane_records())
+            .map(|pane_record| pane_record.get_pane_id())
+            .collect();
+        let mut carried_pane_state_by_pane_id = body.carried_pane_state_by_pane_id;
         let restored_at = Instant::now();
         let restored_wall_time = SystemTime::now();
-        server.terminal_engine_by_pane_id = body
-            .terminal_state_by_pane_id
-            .into_iter()
-            .map(|(pane_id, terminal_state)| {
-                let undecoded_bytes = undecoded_bytes_by_pane_id
-                    .remove(&pane_id)
-                    .unwrap_or_default();
-                let legacy_graphics_carry_bytes =
-                    graphics_undecoded_bytes_by_pane_id
-                        .remove(&pane_id)
-                        .unwrap_or_default();
-                let screen_continuation = graphics_screen_continuation_by_pane_id
-                    .remove(&pane_id)
-                    .unwrap_or(false);
-                let screen_wrapper_active = graphics_screen_wrapper_active_by_pane_id
-                    .remove(&pane_id)
-                    .unwrap_or(false);
-                let tmux_continuation = graphics_tmux_continuation_by_pane_id
-                    .remove(&pane_id)
-                    .unwrap_or(false);
-                let tmux_wrapper_active = graphics_tmux_wrapper_active_by_pane_id
-                    .remove(&pane_id)
-                    .unwrap_or(false);
-                let pane_graphics_events = graphics_events_by_pane_id
-                    .remove(&pane_id)
-                    .unwrap_or_default();
-                let (graphics_carry_bytes, graphics_transport_state) =
-                    match graphics_transport_by_pane_id.remove(&pane_id) {
-                    Some(graphics_transport_state) => (
-                        graphics_transport_state.carry_bytes.clone(),
-                        graphics_transport_state,
-                    ),
-                    None => (
-                        legacy_graphics_carry_bytes.clone(),
-                        GraphicsTransportState {
-                            carry_bytes: legacy_graphics_carry_bytes,
-                            is_screen_continuation: screen_continuation,
-                            is_screen_wrapper_active: screen_wrapper_active,
-                            is_tmux_continuation: tmux_continuation,
-                            is_tmux_wrapper_active: tmux_wrapper_active,
-                            ..GraphicsTransportState::default()
-                        },
-                    ),
-                };
-                (
-                    pane_id,
-                    TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-                        terminal_state,
-                        &undecoded_bytes,
-                        &graphics_carry_bytes,
-                        &pane_graphics_events,
-                        graphics_transport_state,
-                        synchronized_output_by_pane_id.remove(&pane_id),
-                        restored_at,
-                        restored_wall_time,
-                    ),
-                )
-            })
-            .collect();
-        server.pty_handle_by_pane_id = pty_handle_by_pane_id;
-        server.pty_size_by_pane_id = pty_size_by_pane_id;
+        for (pane_id, pty_size) in pty_size_by_pane_id {
+            if !session_pane_ids.contains(&pane_id) {
+                tracing::warn!(%pane_id, "a carried pane belongs to no session; its child is ended");
+                let _ = server.pty_backend.kill_pane(pane_id, KillPolicy::Tree);
+                continue;
+            }
+            let Some(carried_pane_state) = carried_pane_state_by_pane_id.remove(&pane_id) else {
+                tracing::warn!(%pane_id, "a carried pane has no screen to restore; it comes back blank");
+                server.park_pane_pty(pane_id, pty_size);
+                server.handle_pty_output(pane_id, SCREEN_NOT_RESTORED_NOTICE_BYTES);
+                continue;
+            };
+            server.live_pane_ids.insert(pane_id);
+            server.pty_size_by_pane_id.insert(pane_id, pty_size);
+            server.terminal_engine_by_pane_id.insert(
+                pane_id,
+                TerminalEngine::from_carried_state(
+                    carried_pane_state.terminal_state,
+                    &carried_pane_state.undecoded_bytes,
+                    &carried_pane_state.graphics_events,
+                    carried_pane_state.graphics_transport.unwrap_or_default(),
+                    carried_pane_state.synchronized_output,
+                    restored_at,
+                    restored_wall_time,
+                ),
+            );
+        }
+        for pane_id in session_pane_ids {
+            if server.live_pane_ids.contains(&pane_id) {
+                continue;
+            }
+            tracing::warn!(%pane_id, "a carried pane has no running child; it closes");
+            let _ = server.handle_child_exit(pane_id, UNOBSERVED_EXIT);
+        }
         server
     }
 
@@ -474,67 +424,23 @@ impl Server {
             session_name,
             carried_panes,
         };
-        let mut undecoded_bytes_by_pane_id = HashMap::new();
-        let mut graphics_undecoded_bytes_by_pane_id = HashMap::new();
-        let mut graphics_screen_continuation_by_pane_id = HashMap::new();
-        let mut graphics_screen_wrapper_active_by_pane_id = HashMap::new();
-        let mut graphics_tmux_continuation_by_pane_id = HashMap::new();
-        let mut graphics_tmux_wrapper_active_by_pane_id = HashMap::new();
-        let mut graphics_events_by_pane_id: HashMap<PaneId, Vec<GraphicsEvent>> = HashMap::new();
-        let mut graphics_transport_by_pane_id = HashMap::new();
-        let mut synchronized_output_by_pane_id: HashMap<PaneId, SynchronizedOutputTransport> =
-            HashMap::new();
         let carried_at = Instant::now();
-        let terminal_state_by_pane_id = std::mem::take(&mut self.terminal_engine_by_pane_id)
+        let carried_pane_state_by_pane_id = std::mem::take(&mut self.terminal_engine_by_pane_id)
             .into_iter()
             .map(|(pane_id, mut engine)| {
-                if !engine.undecoded_terminal_bytes().is_empty() {
-                    undecoded_bytes_by_pane_id
-                        .insert(pane_id, engine.undecoded_terminal_bytes().to_vec());
-                }
-                if !engine.undecoded_graphics_bytes().is_empty() {
-                    graphics_undecoded_bytes_by_pane_id
-                        .insert(pane_id, engine.undecoded_graphics_bytes().to_vec());
-                }
-                if engine.is_graphics_screen_continuation() {
-                    graphics_screen_continuation_by_pane_id.insert(pane_id, true);
-                }
-                if engine.is_graphics_screen_wrapper_active() {
-                    graphics_screen_wrapper_active_by_pane_id.insert(pane_id, true);
-                }
-                if engine.is_graphics_tmux_continuation() {
-                    graphics_tmux_continuation_by_pane_id.insert(pane_id, true);
-                }
-                if engine.is_graphics_tmux_wrapper_active() {
-                    graphics_tmux_wrapper_active_by_pane_id.insert(pane_id, true);
-                }
-                if let Some(graphics_transport_state) = engine.get_graphics_transport_state() {
-                    graphics_transport_by_pane_id.insert(pane_id, graphics_transport_state);
-                }
-                if let Some(synchronized_output_transport) =
-                    engine.get_synchronized_output_transport(carried_at)
-                {
-                    synchronized_output_by_pane_id.insert(pane_id, synchronized_output_transport);
-                }
-                let pane_graphics_events = engine.take_graphics_events();
-                if !pane_graphics_events.is_empty() {
-                    graphics_events_by_pane_id.insert(pane_id, pane_graphics_events);
-                }
-                (pane_id, engine.into_terminal_state())
+                let carried_pane_state = CarriedPaneState {
+                    undecoded_bytes: engine.get_undecoded_terminal_bytes().to_vec(),
+                    graphics_events: engine.take_graphics_events(),
+                    graphics_transport: engine.get_graphics_transport_state(),
+                    synchronized_output: engine.get_synchronized_output_transport(carried_at),
+                    terminal_state: engine.into_terminal_state(),
+                };
+                (pane_id, carried_pane_state)
             })
             .collect();
         let resume_body = ResumeBody {
             session_by_id: std::mem::take(&mut self.session_by_id),
-            terminal_state_by_pane_id,
-            undecoded_bytes_by_pane_id,
-            graphics_undecoded_bytes_by_pane_id,
-            graphics_screen_continuation_by_pane_id,
-            graphics_screen_wrapper_active_by_pane_id,
-            graphics_tmux_continuation_by_pane_id,
-            graphics_tmux_wrapper_active_by_pane_id,
-            graphics_events_by_pane_id,
-            graphics_transport_by_pane_id,
-            synchronized_output_by_pane_id,
+            carried_pane_state_by_pane_id,
             carried_quit: self
                 .is_quit_requested
                 .then_some(if self.should_shutdown_immediately {
@@ -559,10 +465,10 @@ impl Server {
     ///
     /// `client_id` is the client the subscriber views as: the one whose frame
     /// [`push_frames`](Self::push_frames) queues each due render, and the one
-    /// [`resync_lagged`](Self::resync_lagged) builds when a critical event does
+    /// [`resync_lagged`](Self::resync_lagged) builds when an event does
     /// not fit the queue.
-    pub fn subscribe(&mut self, client_id: ClientId, filter: EventFilter) -> Receiver<Delivery> {
-        let (subscriber_id, receiver) = self.event_bus.subscribe(filter);
+    pub fn subscribe(&mut self, client_id: ClientId) -> Receiver<Delivery> {
+        let (subscriber_id, receiver) = self.event_bus.subscribe();
         self.subscriptions.push((subscriber_id, client_id));
         receiver
     }
@@ -589,7 +495,7 @@ impl Server {
     }
 
     /// Put a fresh frame on the queue of every subscriber paused by a dropped
-    /// critical event, returning it to live delivery. Called once per pass of
+    /// event, returning it to live delivery. Called once per pass of
     /// the event loop, before the frame the loop paints.
     ///
     /// The frame is this subscriber's viewing client's, built by
@@ -608,7 +514,7 @@ impl Server {
                 .map(|&(_, client_id)| client_id)
             else {
                 tracing::warn!(
-                    subscriber = %desynced_subscriber_id,
+                    subscriber_id = %desynced_subscriber_id,
                     "paused subscriber views no client; unsubscribing"
                 );
                 self.event_bus.unsubscribe(desynced_subscriber_id);
@@ -616,8 +522,8 @@ impl Server {
             };
             let Some(snapshot) = self.build_snapshot(client_id) else {
                 tracing::warn!(
-                    subscriber = %desynced_subscriber_id,
-                    client = %client_id,
+                    subscriber_id = %desynced_subscriber_id,
+                    client_id = %client_id,
                     "paused subscriber's client is gone; unsubscribing"
                 );
                 self.event_bus.unsubscribe(desynced_subscriber_id);
@@ -757,14 +663,6 @@ impl Server {
         }
     }
 
-    /// Take every byte queued for `client_id`'s outer terminal, or `None` when
-    /// nothing is queued. Test-only: delivery runs through
-    /// [`push_frames`](Self::push_frames).
-    #[cfg(test)]
-    pub(crate) fn take_host_writes(&mut self, client_id: ClientId) -> Option<Vec<u8>> {
-        self.host_write_bytes_by_client_id.remove(&client_id)
-    }
-
     /// Queue `host_input_bytes` for `client_id`'s outer terminal, behind anything already
     /// queued.
     pub(crate) fn queue_host_write(&mut self, client_id: ClientId, host_input_bytes: &[u8]) {
@@ -776,7 +674,7 @@ impl Server {
 
     /// Whether a `core:quit` command was applied, in this process or carried
     /// across an image swap. The event loop exits once this is true and
-    /// [`awaits_a_client`](Self::awaits_a_client) is false.
+    /// [`is_awaiting_client`](Self::is_awaiting_client) is false.
     #[must_use]
     pub fn is_quit_requested(&self) -> bool {
         self.is_quit_requested
@@ -812,7 +710,7 @@ impl Server {
     /// session. The window is what empties this — see
     /// `handle_drop_unclaimed_clients` — so the wait is always bounded.
     #[must_use]
-    pub fn awaits_a_client(&self) -> bool {
+    pub fn is_awaiting_client(&self) -> bool {
         !self.client_ids_awaiting_reconnect.is_empty()
     }
 
@@ -858,7 +756,7 @@ impl Server {
     pub fn announce_quit(&mut self) {
         if self
             .event_bus
-            .ending_notice()
+            .get_ending_notice()
             .get_session_ending()
             .is_none()
         {
@@ -875,10 +773,10 @@ impl Server {
     /// [`CLIENT_NOTIFICATION_TIMEOUT_DURATION`] and says so.
     fn wait_for_clients_told(&self) {
         let deadline = Instant::now() + CLIENT_NOTIFICATION_TIMEOUT_DURATION;
-        while self.event_bus.ending_notice().count_running_writers() > 0 {
+        while self.event_bus.get_ending_notice().count_running_writers() > 0 {
             if Instant::now() >= deadline {
                 tracing::warn!(
-                    clients = self.event_bus.ending_notice().count_running_writers(),
+                    clients = self.event_bus.get_ending_notice().count_running_writers(),
                     "a client did not take the last frame within the wait"
                 );
                 return;
@@ -887,28 +785,22 @@ impl Server {
         }
     }
 
-    /// Borrow what this session and its clients' writing threads share about
-    /// the session's last frame.
-    #[cfg(test)]
-    pub(crate) fn ending_notice(&self) -> &Arc<crate::runtime::event::EndingNotice> {
-        self.event_bus.ending_notice()
-    }
-
     /// Hand the runtime inbox's receiving end over, consuming the server.
     ///
     /// The image swap calls this: the panes keep delivering into the same inbox
     /// across the swap, so the server [`resume`](Self::resume) builds reads the
     /// same receiver the drained one held.
     #[must_use]
-    pub fn into_inbox_rx(self) -> Receiver<RuntimeEvent> {
-        self.inbox_rx
+    pub fn into_inbox_receiver(self) -> Receiver<RuntimeEvent> {
+        self.inbox_receiver
     }
 
     /// Serve one restart request: run the installed check, and accept the
     /// restart only when it passes.
     ///
-    /// An accepted restart sets [`restart_requested`](Self::restart_requested)
-    /// and changes nothing else, so the swap runs after the reply is written. A
+    /// An accepted restart sets
+    /// [`is_restart_requested`](Self::is_restart_requested) and changes nothing
+    /// else, so the swap runs after the reply is written. A
     /// refused one changes nothing at all and the session keeps serving.
     ///
     /// # Errors
@@ -1017,13 +909,8 @@ impl Server {
     pub fn list_terminal_engines(&self) -> &HashMap<PaneId, TerminalEngine> {
         &self.terminal_engine_by_pane_id
     }
-    /// Borrow the event bus.
-    #[cfg(test)]
-    pub(crate) fn event_bus(&self) -> &EventBus {
-        &self.event_bus
-    }
     /// Borrow the IPC server, if one is wired.
-    pub fn ipc_server(&self) -> Option<&IpcServer> {
+    pub fn get_ipc_server(&self) -> Option<&IpcServer> {
         self.ipc_server.as_ref()
     }
     /// Wire the serving control-socket server in, so shutdown stops it and
@@ -1032,13 +919,8 @@ impl Server {
         self.ipc_server = Some(ipc_server);
     }
     /// Borrow the runtime event inbox receiver.
-    pub fn inbox_rx(&self) -> &Receiver<RuntimeEvent> {
-        &self.inbox_rx
-    }
-    /// Whether shutdown has begun. It records that teardown started; it gates
-    /// no command.
-    pub fn is_draining(&self) -> bool {
-        self.is_draining
+    pub fn get_inbox_receiver(&self) -> &Receiver<RuntimeEvent> {
+        &self.inbox_receiver
     }
 }
 

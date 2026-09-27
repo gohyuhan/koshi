@@ -9,10 +9,6 @@ mod commands;
 pub(crate) use commands::{KittyCommand, KittyCommandKind, KittyDelete};
 use std::ops::Range;
 
-#[cfg(test)]
-use base64::engine::general_purpose::STANDARD;
-#[cfg(test)]
-use base64::Engine;
 use koshi_image::BoundedBytesSeed;
 use koshi_iterm::{
     can_iterm_command_be_graphics, is_iterm_graphics_command, is_iterm_payload_started,
@@ -67,35 +63,22 @@ pub enum GraphicsAbandonment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GraphicsTransportState {
     /// Bytes that rebuild this parser's own active sequence or transfer.
-    #[serde(default)]
     pub carry_bytes: Vec<u8>,
     /// Whether [`carry_bytes`](Self::carry_bytes) contains a complete bounded rebuild.
     /// `false` means [`graphics_abandonment`](Self::graphics_abandonment) describes how to drain
     /// the open transfer after restore.
-    #[serde(default = "default_is_true")]
     pub is_carryable: bool,
     /// How to drain an open sequence when `is_carryable` is false.
-    #[serde(default)]
     pub graphics_abandonment: Option<GraphicsAbandonment>,
     /// Whether the next DCS is a GNU Screen continuation wrapper.
-    #[serde(default)]
     pub is_screen_continuation: bool,
-    /// Whether the carried bytes are inside an open GNU Screen wrapper.
-    #[serde(default)]
-    pub is_screen_wrapper_active: bool,
     /// The parser state inside the carried GNU Screen wrapper, when that
     /// wrapper ended while its enclosed stream was incomplete.
-    #[serde(default)]
     pub screen_inner_transport: Option<Box<GraphicsTransportState>>,
     /// Whether the next DCS is a tmux continuation wrapper.
-    #[serde(default)]
     pub is_tmux_continuation: bool,
-    /// Whether the carried bytes are inside an open tmux wrapper.
-    #[serde(default)]
-    pub is_tmux_wrapper_active: bool,
     /// The parser state inside the carried tmux wrapper, when that wrapper
     /// ended while its enclosed stream was incomplete.
-    #[serde(default)]
     pub tmux_inner_transport: Option<Box<GraphicsTransportState>>,
 }
 
@@ -106,10 +89,8 @@ impl Default for GraphicsTransportState {
             is_carryable: true,
             graphics_abandonment: None,
             is_screen_continuation: false,
-            is_screen_wrapper_active: false,
             screen_inner_transport: None,
             is_tmux_continuation: false,
-            is_tmux_wrapper_active: false,
             tmux_inner_transport: None,
         }
     }
@@ -146,10 +127,8 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
         let mut is_carryable = None;
         let mut graphics_abandonment = None;
         let mut is_screen_continuation = None;
-        let mut is_screen_wrapper_active = None;
         let mut screen_inner_transport = None;
         let mut is_tmux_continuation = None;
-        let mut is_tmux_wrapper_active = None;
         let mut tmux_inner_transport = None;
 
         while let Some(field_name) = transport_state_map.next_key::<String>()? {
@@ -183,12 +162,6 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
                     }
                     is_screen_continuation = Some(transport_state_map.next_value()?);
                 }
-                "is_screen_wrapper_active" => {
-                    if is_screen_wrapper_active.is_some() {
-                        return Err(de::Error::duplicate_field("is_screen_wrapper_active"));
-                    }
-                    is_screen_wrapper_active = Some(transport_state_map.next_value()?);
-                }
                 "screen_inner_transport" => {
                     if screen_inner_transport.is_some() {
                         return Err(de::Error::duplicate_field("screen_inner_transport"));
@@ -204,12 +177,6 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
                         return Err(de::Error::duplicate_field("is_tmux_continuation"));
                     }
                     is_tmux_continuation = Some(transport_state_map.next_value()?);
-                }
-                "is_tmux_wrapper_active" => {
-                    if is_tmux_wrapper_active.is_some() {
-                        return Err(de::Error::duplicate_field("is_tmux_wrapper_active"));
-                    }
-                    is_tmux_wrapper_active = Some(transport_state_map.next_value()?);
                 }
                 "tmux_inner_transport" => {
                     if tmux_inner_transport.is_some() {
@@ -228,15 +195,18 @@ impl<'de> Visitor<'de> for GraphicsTransportVisitor {
         }
 
         Ok(GraphicsTransportState {
-            carry_bytes: carry_bytes.unwrap_or_default(),
-            is_carryable: is_carryable.unwrap_or_else(default_is_true),
-            graphics_abandonment: graphics_abandonment.unwrap_or_default(),
-            is_screen_continuation: is_screen_continuation.unwrap_or(false),
-            is_screen_wrapper_active: is_screen_wrapper_active.unwrap_or(false),
-            screen_inner_transport: screen_inner_transport.unwrap_or_default(),
-            is_tmux_continuation: is_tmux_continuation.unwrap_or(false),
-            is_tmux_wrapper_active: is_tmux_wrapper_active.unwrap_or(false),
-            tmux_inner_transport: tmux_inner_transport.unwrap_or_default(),
+            carry_bytes: carry_bytes.ok_or_else(|| de::Error::missing_field("carry_bytes"))?,
+            is_carryable: is_carryable.ok_or_else(|| de::Error::missing_field("is_carryable"))?,
+            graphics_abandonment: graphics_abandonment
+                .ok_or_else(|| de::Error::missing_field("graphics_abandonment"))?,
+            is_screen_continuation: is_screen_continuation
+                .ok_or_else(|| de::Error::missing_field("is_screen_continuation"))?,
+            screen_inner_transport: screen_inner_transport
+                .ok_or_else(|| de::Error::missing_field("screen_inner_transport"))?,
+            is_tmux_continuation: is_tmux_continuation
+                .ok_or_else(|| de::Error::missing_field("is_tmux_continuation"))?,
+            tmux_inner_transport: tmux_inner_transport
+                .ok_or_else(|| de::Error::missing_field("tmux_inner_transport"))?,
         })
     }
 }
@@ -296,10 +266,6 @@ impl<'de> Visitor<'de> for GraphicsTransportOptionVisitor {
         })?;
         Ok(Some(Box::new(transport_state)))
     }
-}
-
-fn default_is_true() -> bool {
-    true
 }
 
 /// One completed graphics operation in terminal byte order.
@@ -629,14 +595,14 @@ impl GraphicsParser {
             MAX_GRAPHICS_TRANSFER_BYTE_COUNT.saturating_sub(parser.payload_bytes.len());
         let sequence_byte_capacity =
             MAX_GRAPHICS_TRANSFER_BYTE_COUNT.saturating_sub(self.graphics_sequence_byte_count);
-        let max_consumed_byte_count = graphics_bytes
+        let maximum_consumed_byte_count = graphics_bytes
             .len()
             .min(payload_byte_capacity)
             .min(sequence_byte_capacity);
-        let consumed_byte_count = graphics_bytes[..max_consumed_byte_count]
+        let consumed_byte_count = graphics_bytes[..maximum_consumed_byte_count]
             .iter()
             .position(|wrapper_byte| matches!(*wrapper_byte, 0x18 | 0x1a | 0x1b | 0x9c))
-            .unwrap_or(max_consumed_byte_count);
+            .unwrap_or(maximum_consumed_byte_count);
         if consumed_byte_count == 0 {
             return None;
         }
@@ -670,14 +636,14 @@ impl GraphicsParser {
             MAX_SCREEN_PASSTHROUGH_BYTE_COUNT.saturating_sub(parser.payload_bytes.len());
         let sequence_byte_capacity =
             MAX_GRAPHICS_TRANSFER_BYTE_COUNT.saturating_sub(self.graphics_sequence_byte_count);
-        let max_consumed_byte_count = graphics_bytes
+        let maximum_consumed_byte_count = graphics_bytes
             .len()
             .min(screen_payload_byte_capacity)
             .min(sequence_byte_capacity);
-        let consumed_byte_count = graphics_bytes[..max_consumed_byte_count]
+        let consumed_byte_count = graphics_bytes[..maximum_consumed_byte_count]
             .iter()
             .position(|wrapper_byte| matches!(*wrapper_byte, 0x18 | 0x1a | 0x1b | 0x9c))
-            .unwrap_or(max_consumed_byte_count);
+            .unwrap_or(maximum_consumed_byte_count);
         if consumed_byte_count == 0 {
             return None;
         }
@@ -693,36 +659,6 @@ impl GraphicsParser {
             .payload_bytes
             .extend_from_slice(&graphics_bytes[..consumed_byte_count]);
         Some(consumed_byte_count)
-    }
-
-    /// Return bytes needed to rebuild an active graphics parser after a
-    /// process-image swap. An empty slice means that the active transfer
-    /// exceeded the carry bound and must not be resumed from its opening.
-    pub(crate) fn get_graphics_carry_bytes(&self) -> Option<&[u8]> {
-        if matches!(self.graphics_state, GraphicsState::Ground) {
-            if !self.pending_utf8_bytes.is_empty() {
-                return Some(&self.pending_utf8_bytes);
-            }
-            if let Some(inner_parser) = &self.screen_inner_parser {
-                return inner_parser.get_graphics_carry_bytes();
-            }
-            if let Some(inner_parser) = &self.tmux_inner_parser {
-                return inner_parser.get_graphics_carry_bytes();
-            }
-        }
-        if matches!(self.graphics_state, GraphicsState::Ground) {
-            if self.has_open_transfer() && self.is_transfer_carryable {
-                Some(&self.graphics_transfer_carry_bytes)
-            } else if self.has_open_transfer() {
-                Some(&[])
-            } else {
-                None
-            }
-        } else if self.is_carryable {
-            Some(&self.pending_graphics_bytes)
-        } else {
-            Some(&[])
-        }
     }
 
     pub(crate) fn get_graphics_transport_state(&self) -> Option<GraphicsTransportState> {
@@ -750,13 +686,11 @@ impl GraphicsParser {
             is_carryable,
             graphics_abandonment: self.get_graphics_abandonment(),
             is_screen_continuation: self.is_screen_continuation,
-            is_screen_wrapper_active: self.is_screen_wrapper_active(),
             screen_inner_transport: self
                 .screen_inner_parser
                 .as_ref()
                 .map(|inner_parser| Box::new(inner_parser.build_graphics_transport_snapshot())),
             is_tmux_continuation: self.is_tmux_continuation,
-            is_tmux_wrapper_active: self.is_tmux_wrapper_active(),
             tmux_inner_transport: self
                 .tmux_inner_parser
                 .as_ref()
@@ -840,43 +774,9 @@ impl GraphicsParser {
             || !self.pending_utf8_bytes.is_empty()
     }
 
-    /// Return whether the next DCS is a GNU Screen continuation wrapper.
-    pub(crate) fn is_screen_continuation(&self) -> bool {
-        self.is_screen_continuation
-    }
-
-    pub(crate) fn is_screen_wrapper_active(&self) -> bool {
-        self.is_screen_continuation
-            && matches!(
-                self.graphics_state,
-                GraphicsState::DcsIntro | GraphicsState::Screen(_)
-            )
-    }
-
-    pub(crate) fn is_tmux_continuation(&self) -> bool {
-        self.is_tmux_continuation
-    }
-
-    pub(crate) fn is_tmux_wrapper_active(&self) -> bool {
-        self.is_tmux_continuation
-            && matches!(
-                self.graphics_state,
-                GraphicsState::DcsIntro | GraphicsState::Tmux(_)
-            )
-    }
-
-    pub(crate) fn restore_graphics_carry_state(
-        &mut self,
-        graphics_carry_bytes: &[u8],
-        graphics_transport_state: GraphicsTransportState,
-    ) {
-        self.restore_graphics_transport_state(graphics_transport_state, Some(graphics_carry_bytes));
-    }
-
-    fn restore_graphics_transport_state(
+    pub(crate) fn restore_graphics_transport_state(
         &mut self,
         graphics_transport_state: GraphicsTransportState,
-        top_level_graphics_bytes: Option<&[u8]>,
     ) {
         self.is_screen_continuation = graphics_transport_state.is_screen_continuation;
         self.is_tmux_continuation = graphics_transport_state.is_tmux_continuation;
@@ -905,28 +805,17 @@ impl GraphicsParser {
             | None => None,
         };
 
-        if let Some(GraphicsAbandonment::Sequence(protocol)) =
-            graphics_transport_state.graphics_abandonment
-        {
+        let abandoned_sequence = match graphics_transport_state.graphics_abandonment {
+            Some(GraphicsAbandonment::Sequence(protocol)) => Some((protocol, true)),
+            Some(GraphicsAbandonment::SilentSequence(protocol)) => Some((protocol, false)),
+            Some(GraphicsAbandonment::Transfer(_)) | None => None,
+        };
+        if let Some((protocol, should_report)) = abandoned_sequence {
             self.graphics_state = GraphicsState::Discard(DiscardParser {
                 discarded_string_kind: resolve_string_kind(protocol),
                 graphics_error: GraphicsError::TransferTooLarge { protocol },
                 is_escaped: false,
-                should_report: true,
-            });
-            self.pending_graphics_bytes.clear();
-            self.is_carryable = false;
-            self.graphics_sequence_byte_count = 0;
-            return;
-        }
-        if let Some(GraphicsAbandonment::SilentSequence(protocol)) =
-            graphics_transport_state.graphics_abandonment
-        {
-            self.graphics_state = GraphicsState::Discard(DiscardParser {
-                discarded_string_kind: resolve_string_kind(protocol),
-                graphics_error: GraphicsError::TransferTooLarge { protocol },
-                is_escaped: false,
-                should_report: false,
+                should_report,
             });
             self.pending_graphics_bytes.clear();
             self.is_carryable = false;
@@ -934,43 +823,8 @@ impl GraphicsParser {
             return;
         }
 
-        let provided_graphics_bytes = top_level_graphics_bytes
-            .filter(|graphics_bytes| !graphics_bytes.is_empty())
-            .unwrap_or(&graphics_transport_state.carry_bytes);
-        if self.is_screen_continuation
-            && !graphics_transport_state.is_screen_wrapper_active
-            && self.screen_inner_parser.is_none()
-            && !provided_graphics_bytes.is_empty()
-        {
-            let mut inner_parser = GraphicsParser {
-                wrapper_depth: self.wrapper_depth.saturating_add(1),
-                ..GraphicsParser::default()
-            };
-            let _ = inner_parser.process_graphics_operations(provided_graphics_bytes);
-            self.screen_inner_parser = Some(Box::new(inner_parser));
-            return;
-        }
-        if self.is_tmux_continuation
-            && !graphics_transport_state.is_tmux_wrapper_active
-            && self.tmux_inner_parser.is_none()
-            && !provided_graphics_bytes.is_empty()
-        {
-            let mut inner_parser = GraphicsParser {
-                wrapper_depth: self.wrapper_depth.saturating_add(1),
-                ..GraphicsParser::default()
-            };
-            let _ = inner_parser.process_graphics_operations(provided_graphics_bytes);
-            self.tmux_inner_parser = Some(Box::new(inner_parser));
-            return;
-        }
-        let restored_graphics_bytes =
-            if self.screen_inner_parser.is_some() || self.tmux_inner_parser.is_some() {
-                graphics_transport_state.carry_bytes.as_slice()
-            } else {
-                provided_graphics_bytes
-            };
         if graphics_transport_state.is_carryable {
-            let _ = self.process_graphics_operations(restored_graphics_bytes);
+            let _ = self.process_graphics_operations(&graphics_transport_state.carry_bytes);
         }
     }
 
@@ -982,7 +836,7 @@ impl GraphicsParser {
             wrapper_depth,
             ..GraphicsParser::default()
         };
-        graphics_parser.restore_graphics_transport_state(graphics_transport_state, None);
+        graphics_parser.restore_graphics_transport_state(graphics_transport_state);
         graphics_parser
     }
 
@@ -1245,8 +1099,10 @@ impl GraphicsParser {
                     self.graphics_state = GraphicsState::Sixel(Box::new(parser));
                 }
             }
-            b't' => self.graphics_state = GraphicsState::Tmux(TmuxParser::new()),
-            0x1b => self.graphics_state = GraphicsState::Screen(ScreenParser::new()),
+            b't' => self.graphics_state = GraphicsState::Tmux(TmuxParser::from_first_byte(b't')),
+            0x1b => {
+                self.graphics_state = GraphicsState::Screen(ScreenParser::from_first_byte(0x1b))
+            }
             b'0'..=b'9' | b';' => {
                 let mut parser = ProtocolSixelParser::new();
                 if parser.feed_input_byte(graphics_byte).is_err() {
@@ -1453,13 +1309,14 @@ impl GraphicsParser {
         }
         if graphics_byte == 0x9c {
             if !parser.is_inner_terminated
-                && !self.body_has_complete_graphics(
+                && !self.has_complete_graphics_body(
                     self.tmux_inner_parser.as_deref(),
                     &parser.payload_bytes,
                 )
-                && self.body_has_c1_terminated_graphics(
+                && self.has_terminated_graphics_body(
                     self.tmux_inner_parser.as_deref(),
                     &parser.payload_bytes,
+                    &[0x9c],
                 )
             {
                 if parser.payload_bytes.len() == MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
@@ -1538,17 +1395,19 @@ impl GraphicsParser {
     ) {
         if graphics_byte == 0x9c {
             let is_inner_complete = if parser.is_inner_terminated {
-                self.body_has_c1_terminated_graphics_after_boundary(
+                self.has_terminated_graphics_body_after_boundary(
                     self.screen_inner_parser.as_deref(),
                     &parser,
+                    &[0x9c],
                 )
             } else {
-                !self.body_has_complete_graphics(
+                !self.has_complete_graphics_body(
                     self.screen_inner_parser.as_deref(),
                     &parser.payload_bytes,
-                ) && self.body_has_c1_terminated_graphics(
+                ) && self.has_terminated_graphics_body(
                     self.screen_inner_parser.as_deref(),
                     &parser.payload_bytes,
+                    &[0x9c],
                 )
             };
             if is_inner_complete {
@@ -1559,7 +1418,6 @@ impl GraphicsParser {
                         }),
                         graphics_events,
                     );
-                    self.is_screen_continuation = false;
                 } else {
                     parser.payload_bytes.push(graphics_byte);
                     parser.is_inner_terminated = true;
@@ -1583,17 +1441,19 @@ impl GraphicsParser {
                 self.reset_graphics_parser();
             } else if graphics_byte == b'\\' {
                 let is_inner_complete = if parser.is_inner_terminated {
-                    self.body_has_st_terminated_graphics_after_boundary(
+                    self.has_terminated_graphics_body_after_boundary(
                         self.screen_inner_parser.as_deref(),
                         &parser,
+                        b"\x1b\\",
                     )
                 } else {
-                    !self.body_has_complete_graphics(
+                    !self.has_complete_graphics_body(
                         self.screen_inner_parser.as_deref(),
                         &parser.payload_bytes,
-                    ) && self.body_has_st_terminated_graphics(
+                    ) && self.has_terminated_graphics_body(
                         self.screen_inner_parser.as_deref(),
                         &parser.payload_bytes,
+                        b"\x1b\\",
                     )
                 };
                 if is_inner_complete {
@@ -1606,7 +1466,6 @@ impl GraphicsParser {
                             }),
                             graphics_events,
                         );
-                        self.is_screen_continuation = false;
                     } else {
                         parser.payload_bytes.push(0x1b);
                         parser.payload_bytes.push(b'\\');
@@ -1621,7 +1480,6 @@ impl GraphicsParser {
                         }),
                         graphics_events,
                     );
-                    self.is_screen_continuation = false;
                 } else {
                     self.finish_screen(parser.payload_bytes, graphics_events);
                 }
@@ -1704,49 +1562,18 @@ impl GraphicsParser {
         }
     }
 
-    fn body_has_st_terminated_graphics(
+    fn has_terminated_graphics_body(
         &self,
         inner_parser: Option<&GraphicsParser>,
         graphics_body_bytes: &[u8],
+        terminator: &[u8],
     ) -> bool {
         let mut candidate_graphics_bytes = graphics_body_bytes.to_vec();
-        candidate_graphics_bytes.extend_from_slice(b"\x1b\\");
-        matches!(
-            self.decode_wrapper(inner_parser, &candidate_graphics_bytes),
-            Ok(Some(_))
-        )
+        candidate_graphics_bytes.extend_from_slice(terminator);
+        self.has_complete_graphics_body(inner_parser, &candidate_graphics_bytes)
     }
 
-    fn body_has_c1_terminated_graphics(
-        &self,
-        inner_parser: Option<&GraphicsParser>,
-        graphics_body_bytes: &[u8],
-    ) -> bool {
-        let mut candidate_graphics_bytes = graphics_body_bytes.to_vec();
-        candidate_graphics_bytes.push(0x9c);
-        matches!(
-            self.decode_wrapper(inner_parser, &candidate_graphics_bytes),
-            Ok(Some(_))
-        )
-    }
-
-    fn body_has_st_terminated_graphics_after_boundary(
-        &self,
-        inner_parser: Option<&GraphicsParser>,
-        screen_parser: &ScreenParser,
-    ) -> bool {
-        self.body_has_terminated_graphics_after_boundary(inner_parser, screen_parser, b"\x1b\\")
-    }
-
-    fn body_has_c1_terminated_graphics_after_boundary(
-        &self,
-        inner_parser: Option<&GraphicsParser>,
-        screen_parser: &ScreenParser,
-    ) -> bool {
-        self.body_has_terminated_graphics_after_boundary(inner_parser, screen_parser, &[0x9c])
-    }
-
-    fn body_has_terminated_graphics_after_boundary(
+    fn has_terminated_graphics_body_after_boundary(
         &self,
         inner_parser: Option<&GraphicsParser>,
         screen_parser: &ScreenParser,
@@ -1759,13 +1586,10 @@ impl GraphicsParser {
         let mut candidate_graphics_bytes =
             screen_parser.payload_bytes[screen_parser.inner_data_start_index..].to_vec();
         candidate_graphics_bytes.extend_from_slice(terminator);
-        matches!(
-            self.decode_wrapper(Some(&replay_parser), &candidate_graphics_bytes),
-            Ok(Some(_))
-        )
+        self.has_complete_graphics_body(Some(&replay_parser), &candidate_graphics_bytes)
     }
 
-    fn body_has_complete_graphics(
+    fn has_complete_graphics_body(
         &self,
         inner_parser: Option<&GraphicsParser>,
         graphics_body_bytes: &[u8],
@@ -1852,27 +1676,24 @@ impl GraphicsParser {
                             || control_field_bytes.starts_with(b"q=")
                     })
             });
-        if is_continuation_chunk {
-            if let Some(transfer) = &self.kitty_transfer {
-                let response_suppression_level = image_display_reply.response_suppression_level;
-                image_display_reply = transfer.get_image_display().clone();
-                if kitty_parser
-                    .get_control_header_bytes()
-                    .windows(2)
-                    .any(|control_pair_bytes| control_pair_bytes == b"q=")
-                {
-                    image_display_reply.response_suppression_level = response_suppression_level;
-                }
-            } else if let Some(transfer) = &self.kitty_animation_transfer {
-                let response_suppression_level = image_display_reply.response_suppression_level;
-                image_display_reply = transfer.get_image_display();
-                if kitty_parser
-                    .get_control_header_bytes()
-                    .windows(2)
-                    .any(|control_pair_bytes| control_pair_bytes == b"q=")
-                {
-                    image_display_reply.response_suppression_level = response_suppression_level;
-                }
+        let transfer_image_display = if !is_continuation_chunk {
+            None
+        } else if let Some(transfer) = &self.kitty_transfer {
+            Some(transfer.get_image_display().clone())
+        } else {
+            self.kitty_animation_transfer
+                .as_ref()
+                .map(KittyAnimationTransfer::get_image_display)
+        };
+        if let Some(transfer_image_display) = transfer_image_display {
+            let response_suppression_level = image_display_reply.response_suppression_level;
+            image_display_reply = transfer_image_display;
+            if kitty_parser
+                .get_control_header_bytes()
+                .windows(2)
+                .any(|control_pair_bytes| control_pair_bytes == b"q=")
+            {
+                image_display_reply.response_suppression_level = response_suppression_level;
             }
         }
         let first_graphics_event_index = graphics_events.len();
@@ -2251,12 +2072,7 @@ impl GraphicsParser {
     }
 
     fn remember_graphics_transfer_sequence(&mut self) {
-        if !self.is_carryable {
-            self.graphics_transfer_carry_bytes.clear();
-            self.is_transfer_carryable = false;
-            return;
-        }
-        if self.pending_graphics_bytes.len() > MAX_GRAPHICS_CARRY_BYTE_COUNT {
+        if !self.is_carryable || self.pending_graphics_bytes.len() > MAX_GRAPHICS_CARRY_BYTE_COUNT {
             self.graphics_transfer_carry_bytes.clear();
             self.is_transfer_carryable = false;
             return;
@@ -2349,12 +2165,13 @@ impl ItermParser {
             self.prefix_bytes.push(iterm_input_byte);
             return Ok(());
         }
-        push_bounded_bytes(
-            &mut self.command_bytes,
-            iterm_input_byte,
-            MAX_GRAPHICS_TRANSFER_BYTE_COUNT,
-            GraphicsProtocol::Iterm2,
-        )
+        if self.command_bytes.len() == MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
+            return Err(GraphicsError::TransferTooLarge {
+                protocol: GraphicsProtocol::Iterm2,
+            });
+        }
+        self.command_bytes.push(iterm_input_byte);
+        Ok(())
     }
 }
 
@@ -2367,10 +2184,6 @@ struct TmuxParser {
 }
 
 impl TmuxParser {
-    fn new() -> Self {
-        Self::from_first_byte(b't')
-    }
-
     fn from_first_byte(first_byte: u8) -> Self {
         TmuxParser {
             prefix_bytes: vec![first_byte],
@@ -2390,10 +2203,6 @@ struct ScreenParser {
 }
 
 impl ScreenParser {
-    fn new() -> Self {
-        Self::from_first_byte(0x1b)
-    }
-
     fn from_first_byte(first_byte: u8) -> Self {
         ScreenParser {
             payload_bytes: vec![first_byte],
@@ -2402,19 +2211,6 @@ impl ScreenParser {
             inner_data_start_index: 0,
         }
     }
-}
-
-fn push_bounded_bytes(
-    bounded_bytes: &mut Vec<u8>,
-    graphics_input_byte: u8,
-    maximum_byte_count: usize,
-    protocol: GraphicsProtocol,
-) -> Result<(), GraphicsError> {
-    if bounded_bytes.len() == maximum_byte_count {
-        return Err(GraphicsError::TransferTooLarge { protocol });
-    }
-    bounded_bytes.push(graphics_input_byte);
-    Ok(())
 }
 
 #[cfg(test)]

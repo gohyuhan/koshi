@@ -1,19 +1,18 @@
 //! Pane-module integration tests: driving a `PaneRecord` across the whole
 //! lifecycle state machine (`state` + `lifecycle` together), including that
-//! `Exited` never returns to a live state, terminality of `Removed`, and that a
-//! plugin pane threads its kind into a rejected-transition error.
+//! `Exited` never returns to a live state, and terminality of `Removed`.
 
 use std::time::{Duration, SystemTime};
 
-use koshi_core::ids::{PaneId, PluginId};
+use koshi_core::ids::PaneId;
 
 use crate::error::InvalidTransitionError;
 use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
-use crate::pane::state::{PaneKind, PaneRecord};
+use crate::pane::state::PaneRecord;
 
 #[test]
 fn a_pane_walks_from_spawning_to_removed_one_event_at_a_time() {
-    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new(), SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new());
     assert_eq!(pane_record.get_lifecycle(), &PaneLifecycle::Spawning);
 
     pane_record
@@ -57,7 +56,6 @@ fn a_pane_walks_from_spawning_to_removed_one_event_at_a_time() {
         Err(InvalidTransitionError {
             previous_lifecycle: PaneLifecycle::Removed,
             lifecycle_event: PaneLifecycleEvent::ProcessStarted,
-            pane_kind: PaneKind::Terminal,
         })
     );
     assert_eq!(pane_record.get_lifecycle(), &PaneLifecycle::Removed);
@@ -66,7 +64,7 @@ fn a_pane_walks_from_spawning_to_removed_one_event_at_a_time() {
 #[test]
 fn an_exited_pane_only_moves_on_to_closing() {
     let exited_at = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
-    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new(), SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new());
 
     pane_record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
@@ -92,7 +90,6 @@ fn an_exited_pane_only_moves_on_to_closing() {
                     exited_at
                 },
                 lifecycle_event,
-                pane_kind: PaneKind::Terminal,
             })
         );
         assert_eq!(
@@ -118,7 +115,7 @@ fn an_exited_pane_only_moves_on_to_closing() {
 #[test]
 fn a_pane_can_be_closed_before_its_process_ever_starts() {
     let close_requested_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
-    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new(), SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new());
 
     pane_record
         .update_lifecycle(PaneLifecycleEvent::CloseRequested { close_requested_at })
@@ -128,25 +125,4 @@ fn a_pane_can_be_closed_before_its_process_ever_starts() {
         pane_record.get_lifecycle(),
         &PaneLifecycle::Closing { close_requested_at }
     );
-}
-
-#[test]
-fn a_rejected_transition_on_a_plugin_pane_reports_the_plugin_kind() {
-    let plugin_kind = PaneKind::Plugin {
-        plugin_id: PluginId::new(),
-    };
-    let mut pane_record =
-        PaneRecord::from_pane_kind(PaneId::new(), plugin_kind, SystemTime::UNIX_EPOCH);
-
-    let rejected = pane_record.update_lifecycle(PaneLifecycleEvent::Cleaned);
-
-    assert_eq!(
-        rejected,
-        Err(InvalidTransitionError {
-            previous_lifecycle: PaneLifecycle::Spawning,
-            lifecycle_event: PaneLifecycleEvent::Cleaned,
-            pane_kind: plugin_kind,
-        })
-    );
-    assert_eq!(pane_record.get_lifecycle(), &PaneLifecycle::Spawning);
 }

@@ -510,7 +510,7 @@ fn spawning_a_pane_asks_the_supervisor_and_records_the_reported_child() {
     let sink = RecordingSink::new();
     let backend = connect_test_backend(&peer, Arc::clone(&sink));
 
-    let handle = backend
+    backend
         .spawn_pane(
             pane_id,
             build_shell_spawn_spec("sleep 30"),
@@ -518,12 +518,6 @@ fn spawning_a_pane_asks_the_supervisor_and_records_the_reported_child() {
         )
         .expect("the supervisor opens the pane");
 
-    assert_eq!(handle.get_pane_id(), pane_id);
-    assert_eq!(
-        handle.try_receive_output_chunk(),
-        None,
-        "a pane delivering through a sink carries no channels"
-    );
     assert_eq!(
         backend.list_carried_panes(),
         vec![CarriedPtyPane {
@@ -1397,7 +1391,7 @@ fn a_pane_list_answered_with_something_else_fails_the_opening() {
     );
     let sink = RecordingSink::new();
 
-    let error = SupervisorPtyBackend::connect(
+    let connect_error = SupervisorPtyBackend::connect(
         &peer.supervisor_address,
         ConnectionToken::from_secret("k7QxSecret"),
         Arc::clone(&sink) as Arc<dyn PtySink>,
@@ -1407,7 +1401,7 @@ fn a_pane_list_answered_with_something_else_fails_the_opening() {
     .expect("an answer that does not fit fails the opening");
 
     assert_eq!(
-        error,
+        connect_error,
         PtyError::Io {
             detail: "the supervisor answered ListPanes with Done".to_string(),
         }

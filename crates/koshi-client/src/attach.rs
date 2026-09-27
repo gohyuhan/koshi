@@ -96,7 +96,7 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::terminal::size;
@@ -124,11 +124,8 @@ use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
-#[cfg(test)]
-use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    ConnectionToken, EventFilterSpec, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
-    WireMouseAction,
+    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, WireMouseAction,
 };
 use koshi_ipc::remote_wire::{RemoteServerFrame, RemoteSessionRow};
 use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, SessionSelector};
@@ -142,8 +139,6 @@ use koshi_renderer::snapshot::{
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 
-#[cfg(test)]
-use crate::attach::paint::build_render_snapshot;
 use crate::terminal;
 use koshi_core::ids::parse_prefixed_uuid;
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
@@ -232,7 +227,7 @@ const MAX_PENDING_MOUSE_ACTION_COUNT: usize = 256;
 /// [`Client::note_resize_applied`] moves that anchor only when an answer comes
 /// back, so every move decided before that answer names cells an earlier move
 /// already asked for. This entry is what takes them off: it lives from the write
-/// until the answer carrying the same `request_id`, `pane` and `side`.
+/// until the answer carrying the same `request_id`, `pane_id` and `border_side`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SentBorderMove {
     /// The round this move went out in.
@@ -328,10 +323,10 @@ fn can_slide_between_tab_snapshots(
     to_tab_snapshot: &TabSnapshot,
 ) -> bool {
     from_tab_snapshot.tab_id == to_tab_snapshot.tab_id
-        && from_tab_snapshot.effective_cell_size == to_tab_snapshot.effective_cell_size
+        && from_tab_snapshot.tab_size == to_tab_snapshot.tab_size
         && from_tab_snapshot.layout_mode == to_tab_snapshot.layout_mode
-        && !from_tab_snapshot.are_all_panes_suppressed
-        && !to_tab_snapshot.are_all_panes_suppressed
+        && !from_tab_snapshot.is_every_pane_suppressed
+        && !to_tab_snapshot.is_every_pane_suppressed
 }
 
 impl ViewerPaint {
@@ -504,21 +499,10 @@ struct Screen<B: Backend> {
 }
 
 impl<B: Backend> Screen<B> {
-    /// A screen that has drawn nothing yet.
-    #[cfg(test)]
-    fn from_terminal_and_viewport(terminal: Terminal<B>, viewport: Size) -> Self {
-        Self::with_graphics_support(
-            terminal,
-            viewport,
-            terminal::GraphicsSupport::Unsupported,
-            None,
-        )
-    }
-
     /// A screen that has drawn nothing yet, with its image protocol capability.
     fn with_graphics_support(
         terminal: Terminal<B>,
-        viewport: Size,
+        viewport_size: Size,
         graphics_support: terminal::GraphicsSupport,
         cell_size: Option<PixelCellSize>,
     ) -> Self {
@@ -534,7 +518,7 @@ impl<B: Backend> Screen<B> {
             shown_tab_snapshot: None,
             committed_placement_tab_ids: Vec::new(),
             committed_placement_animation: None,
-            committed_regions: CommittedRegions::core(viewport, 0),
+            committed_regions: CommittedRegions::build_core(viewport_size, 0),
             shown_viewer_paint: None,
             pending_snapshot: None,
             graphics_support,
@@ -548,27 +532,17 @@ impl<B: Backend> Screen<B> {
         }
     }
 
-    /// Draw one frame the session sent, and hand back the frame a mouse event
-    /// is placed against. Returns `None` when the terminal rejects the paint.
+    /// Draw `snapshot`, built from one frame the session sent, and hand back the
+    /// frame a mouse event is placed against. Returns `None` when the terminal
+    /// rejects the paint.
     ///
-    /// It applies the frame to `client` and paints from the result. When the
+    /// It applies the snapshot to `client` and paints from the result. When the
     /// terminal rejects the paint, `client` returns to its state before the
     /// frame: a rejected locked frame leaves the viewer unlocked.
     ///
     /// The returned [`MouseFrame`] holds the committed region solve, where the
     /// surfaces sit, and the per-pane scroll and mouse fields. That is what the
     /// next mouse event is answered from.
-    #[cfg(test)]
-    fn draw_painted_frame(
-        &mut self,
-        client: &mut Client,
-        frame: Box<PaintedFrame>,
-    ) -> Option<MouseFrame> {
-        let snapshot = build_render_snapshot(&frame);
-        self.draw_snapshot(client, snapshot)
-    }
-
-    /// Draw a snapshot after its image transfers have been assembled.
     fn draw_snapshot(
         &mut self,
         client: &mut Client,
@@ -587,7 +561,7 @@ impl<B: Backend> Screen<B> {
         client: &mut Client,
         current_time: Instant,
     ) -> Option<MouseFrame> {
-        let is_native_image_output = self.image_output_state.output_kind().is_some();
+        let is_native_image_output = self.image_output_state.get_output_kind().is_some();
         if is_native_image_output
             && self
                 .native_retry_at
@@ -1007,29 +981,26 @@ impl<B: Backend> Screen<B> {
         }
     }
 
-    /// Return the next wakeup while native image output has work or needs a retry.
-    #[cfg(test)]
-    fn next_image_wakeup(&self) -> Option<Duration> {
-        self.next_image_wakeup_at(Instant::now())
-    }
-
-    fn next_image_wakeup_at(&self, current_time: Instant) -> Option<Duration> {
-        if self.image_output_state.work_pending() {
+    fn compute_next_image_wakeup_at(&self, current_time: Instant) -> Option<Duration> {
+        if self.image_output_state.is_work_pending() {
             return Some(IMAGE_OUTPUT_STEP_DELAY_DURATION);
         }
-        let native_frame_pending =
-            self.pending_snapshot.is_some() && self.image_output_state.output_kind().is_some();
+        let is_native_frame_pending =
+            self.pending_snapshot.is_some() && self.image_output_state.get_output_kind().is_some();
         let retry_delay = self
             .native_retry_at
             .map_or(self.native_retry_delay, |retry_time| {
                 retry_time.saturating_duration_since(current_time)
             });
-        native_frame_pending.then_some(retry_delay)
+        is_native_frame_pending.then_some(retry_delay)
     }
 
     /// Return the next redraw interval for an active placement preview
     /// interpolation or committed-placement slide.
-    fn next_placement_animation_wakeup_at(&self, current_time: Instant) -> Option<Duration> {
+    fn compute_next_placement_animation_wakeup_at(
+        &self,
+        current_time: Instant,
+    ) -> Option<Duration> {
         let animation_started_at = self
             .placement_animation
             .as_ref()
@@ -1054,7 +1025,7 @@ impl<B: Backend> Screen<B> {
         self.cell_size = cell_size;
         if self
             .image_output_state
-            .output_kind()
+            .get_output_kind()
             .is_some_and(|output_kind| {
                 matches!(output_kind, terminal::ImageOutputKind::Iterm)
                     || terminal::ImageOutputKind::is_sixel(output_kind)
@@ -1098,7 +1069,7 @@ impl<B: Backend> Screen<B> {
                 .region_input_revision
                 .saturating_add(1)
         };
-        CommittedRegions::core(viewport_size, region_input_revision)
+        CommittedRegions::build_core(viewport_size, region_input_revision)
     }
 }
 
@@ -1292,7 +1263,6 @@ impl Uplink {
         let envelope = CommandEnvelope::from_parts(
             command_id,
             CommandSource::from_key_binding(client.get_client_id()),
-            SystemTime::now(),
             command,
         );
         self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
@@ -1304,7 +1274,6 @@ impl Uplink {
         let envelope = CommandEnvelope::from_parts(
             CommandId::new(),
             CommandSource::from_mouse(client.get_client_id()),
-            SystemTime::now(),
             Command::FocusPane(FocusPaneArgs {
                 focus_target: FocusTarget::Pane(pane_id),
                 client_id: Some(client.get_client_id()),
@@ -1350,42 +1319,29 @@ impl Uplink {
     /// `new_pane_direction` is this viewer's own setting, so a pane-opening
     /// binding that names no direction already says where the pane goes by the
     /// time the command leaves. A viewer-local action runs here; an action the
-    /// table refuses, and one the plugin host owns, sends no session command.
+    /// table refuses sends no session command.
     fn submit_bound_action(&mut self, client: &mut Client, bound_action: BoundAction) {
         let new_pane_direction = client.get_client_config().layout.new_pane_direction;
         let Ok(dispatch_plan) = resolve_action_with_scroll_line_count(
             &bound_action.action_reference,
-            &bound_action.action_arguments,
             &self.registry,
             new_pane_direction,
             client.get_client_config().mouse.scroll_line_count,
         ) else {
             return;
         };
-        self.submit_dispatch_plan(client, dispatch_plan);
-    }
-
-    /// Run one resolved action plan in order.
-    fn submit_dispatch_plan(&mut self, client: &mut Client, dispatch_plan: DispatchPlan) {
         match dispatch_plan {
             DispatchPlan::Command(command) => {
                 let envelope = CommandEnvelope::from_parts(
                     CommandId::new(),
                     CommandSource::from_key_binding(client.get_client_id()),
-                    SystemTime::now(),
-                    command,
+                    *command,
                 );
                 self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
             }
             DispatchPlan::ClientAction(client_action_kind) => {
                 let placement_input_action = client.apply_client_action(client_action_kind);
                 self.submit_placement_input_action(client, placement_input_action);
-            }
-            DispatchPlan::PluginHostCall { .. } => {}
-            DispatchPlan::Sequence(dispatch_plans) => {
-                for dispatch_plan in dispatch_plans {
-                    self.submit_dispatch_plan(client, dispatch_plan);
-                }
             }
         }
     }
@@ -1797,10 +1753,12 @@ fn attach_once(
     // The subscriber this client writes its own log through. `koshi attach`
     // installs none before this point; a bare `koshi` already has one, and
     // this call answers `AlreadyInitialized` for it.
-    let _ = koshi_observability::logging::init_tracing(koshi_link::config::build_logging_params(
-        loaded_config.app_config_layer.as_ref(),
-        session_id,
-    ));
+    let _ = koshi_observability::logging::initialize_tracing(
+        koshi_link::config::build_logging_parameters(
+            loaded_config.app_config_layer.as_ref(),
+            session_id,
+        ),
+    );
     for warning in &config_warnings {
         tracing::warn!("{warning}");
     }
@@ -1916,16 +1874,16 @@ fn run_attachment<B: Backend>(
         let current_time = Instant::now();
         let next_wakeup_duration = select_earliest_duration(
             select_earliest_duration(
-                client.next_key_wakeup(current_time),
-                client.next_mouse_wakeup(current_time),
+                client.compute_next_key_wakeup(current_time),
+                client.compute_next_mouse_wakeup(current_time),
             ),
             select_earliest_duration(
-                client.next_placement_read_wakeup(current_time),
+                client.compute_next_placement_read_wakeup(current_time),
                 select_earliest_duration(
-                    client.next_placement_tab_hover_wakeup(current_time),
+                    client.compute_next_placement_tab_hover_wakeup(current_time),
                     select_earliest_duration(
-                        screen.next_image_wakeup_at(current_time),
-                        screen.next_placement_animation_wakeup_at(current_time),
+                        screen.compute_next_image_wakeup_at(current_time),
+                        screen.compute_next_placement_animation_wakeup_at(current_time),
                     ),
                 ),
             ),
@@ -2086,10 +2044,13 @@ fn run_attachment<B: Backend>(
                             );
                             send_next_queued_placement_read(client, uplink);
                         }
-                        Ok(SessionEvent::PanePlacementRefused { request_id, error }) => {
+                        Ok(SessionEvent::PanePlacementRefused {
+                            request_id,
+                            refusal,
+                        }) => {
                             let is_refusal_accepted = client.accept_placement_refusal(
                                 request_id,
-                                error.code,
+                                refusal.code,
                                 Instant::now(),
                             );
                             if !is_refusal_accepted {
@@ -2098,7 +2059,7 @@ fn run_attachment<B: Backend>(
                             if is_refusal_accepted || !client.is_placement_read_pending() {
                                 send_next_queued_placement_read(client, uplink);
                             }
-                            tracing::debug!(request_id, message = %error.message, "placement preview refused");
+                            tracing::debug!(request_id, message = %refusal.message, "placement preview refused");
                         }
                         Ok(SessionEvent::PanePlacementCommitted {
                             command_id,
@@ -2131,13 +2092,12 @@ fn run_attachment<B: Backend>(
                                 );
                             }
                         }
-                        // The stream dropped events, so the answers to the
+                        // The stream dropped events, and the answers to the
                         // border moves now on the wire may be among them. A
-                        // remembered move whose answer never lands would take
-                        // its cells off every subsequent move for that border for
-                        // good, so a resync forgets them all and the next move
-                        // asks for its whole distance from the drag anchor.
-                        // Nothing is released by this: no round ever waited.
+                        // resync forgets every remembered move, and the next
+                        // move asks for its whole distance from the drag
+                        // anchor. Nothing is released by this: no round ever
+                        // waited.
                         Ok(SessionEvent::Resync { .. }) => {
                             sent_border_moves.clear();
                             client.prepare_placement_reconciliation();
@@ -2551,13 +2511,12 @@ fn format_session_selector_name(session_selector: &SessionSelector) -> String {
 /// image, and hand back the two halves of the connection this client comes back
 /// on.
 ///
-/// On this machine [`rejoin`] waits for the session's new socket, and `connection_token`
-/// is stamped with the token that socket was advertised under. On a server the
-/// whole dial runs again — no endpoint file for that session exists on this
-/// machine — until the serving machine reaches the restarted session or
-/// [`RESTART_WINDOW_DURATION`] passes. Each dial is paced by [`REMOTE_RESTART_POLL_INTERVAL_DURATION`],
-/// and the pause comes first, so the dial meets the session's new image rather
-/// than the one it is replacing.
+/// On this machine [`rejoin_session`] waits for the session's new socket, and `connection_token` is
+/// stamped with the token that socket was advertised under. On a server the whole dial runs again —
+/// no endpoint file for that session exists on this machine — until the serving machine reaches the
+/// restarted session or [`RESTART_WINDOW_DURATION`] passes. Each dial is paced by
+/// [`REMOTE_RESTART_POLL_INTERVAL_DURATION`], and the pause comes first, so the dial meets the
+/// session's new image rather than the one it is replacing.
 ///
 /// `resume_token` is stamped with the secret the attach this client came back
 /// on minted: the local rejoin records none, and a fresh dial of a server
@@ -2636,7 +2595,7 @@ fn reconnect_after_restart(
 /// and hand back the connection it joined on.
 ///
 /// The pause comes before each dial and widens as
-/// [`next_redial_wait`] says: 1 second, 2, 4, 8, then 8 before every dial after
+/// [`compute_next_redial_wait`] says: 1 second, 2, 4, 8, then 8 before every dial after
 /// that. A pause that would end past [`REDIAL_WINDOW_DURATION`] — 120 seconds from the
 /// first pause — is not taken, and no dial follows it: the answer is the last
 /// dial's cause. A dial already under way runs to its own timeout, so that
@@ -2650,7 +2609,7 @@ fn reconnect_after_restart(
 /// `Reconnecting { attempt, retry_in_seconds }` on `client` and draws the frame
 /// already on the screen again through `screen`, so the tabline tag counts down
 /// `RECONNECTING (attempt 1, retry in 1s)` before the first dial and
-/// `attempt 2, retry in 2s` … `retry in 1s` before the second. `active_tab` is
+/// `attempt 2, retry in 2s` … `retry in 1s` before the second. `active_tab_id` is
 /// the tab that frame shows, and `None` before any frame has been drawn. On
 /// every answer, and before returning either way, `client` is put back to no
 /// dialing under way; a dial that joined repaints once more, so the tag leaves
@@ -2698,7 +2657,7 @@ fn redial_remote_session<B: Backend>(
     )
 }
 
-/// [`redial_remote_session`]'s loop over any dial: pause, paint the countdown, call `dial`,
+/// [`redial_remote_session`]'s loop over any dial: pause, paint the countdown, call `dial_connection`,
 /// and classify its answer — a [`DialError::Refused`] ends the loop at once, a
 /// [`DialError::Unreachable`] widens the pause and dials again while the pause
 /// fits [`REDIAL_WINDOW_DURATION`].
@@ -2734,9 +2693,9 @@ fn redial_remote_session_with<B: Backend>(
             }
             Err(DialError::Refused(error)) => break error,
             Err(DialError::Unreachable(error)) => {
-                retry_wait = next_redial_wait(retry_wait);
+                retry_wait = compute_next_redial_wait(retry_wait);
                 redial_attempt += 1;
-                if !does_redial_pause_fit(redial_started_at.elapsed(), retry_wait) {
+                if !can_redial_pause_fit(redial_started_at.elapsed(), retry_wait) {
                     break error;
                 }
             }
@@ -2750,9 +2709,10 @@ fn redial_remote_session_with<B: Backend>(
 /// Whether a pause of `pause_duration`, begun `elapsed_duration` after the first one, ends inside
 /// [`REDIAL_WINDOW_DURATION`].
 ///
-/// `elapsed` 111 seconds with an 8-second `wait` ends at 119 and fits;
-/// 112 seconds with the same `wait` ends at 120 and does not.
-fn does_redial_pause_fit(elapsed_duration: Duration, pause_duration: Duration) -> bool {
+/// `elapsed_duration` 111 seconds with an 8-second `pause_duration` ends at
+/// 119 and fits; 112 seconds with the same `pause_duration` ends at 120 and
+/// does not.
+fn can_redial_pause_fit(elapsed_duration: Duration, pause_duration: Duration) -> bool {
     elapsed_duration + pause_duration < REDIAL_WINDOW_DURATION
 }
 
@@ -2761,7 +2721,7 @@ fn does_redial_pause_fit(elapsed_duration: Duration, pause_duration: Duration) -
 ///
 /// From [`FIRST_REDIAL_WAIT_DURATION`] that walks 1 second → 2 → 4 → 8 → 8, and stays at
 /// 8 seconds however many dials follow.
-fn next_redial_wait(current_wait_duration: Duration) -> Duration {
+fn compute_next_redial_wait(current_wait_duration: Duration) -> Duration {
     (current_wait_duration * 2).min(MAX_REDIAL_WAIT_DURATION)
 }
 
@@ -2770,14 +2730,9 @@ fn next_redial_wait(current_wait_duration: Duration) -> Duration {
 ///
 /// The `Resize` carries `Reported(viewport.rows - 2)`, with rows saturating at
 /// zero. An `80x24` terminal therefore reports an `80x22` pane area.
-#[cfg(test)]
-fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
-    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
-    report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query, None);
-}
-
-/// Report the terminal's size and supplied cell measurement, then request a
-/// fresh CSI 16t reply only when no usable pixel dimensions were supplied.
+///
+/// `locally_measured_cell_size` is the cell measurement already in hand. A fresh
+/// CSI 16t reply is requested only when it carries no usable pixel dimensions.
 fn report_terminal_size_with_cell_size(
     client: &mut Client,
     uplink: &mut Uplink,
@@ -2788,9 +2743,9 @@ fn report_terminal_size_with_cell_size(
     let needs_cell_size_query =
         cell_size_query.update_cell_size_for_resize(locally_measured_cell_size);
     let current_cell_size = cell_size_query.get_current_cell_size();
-    client.set_viewport(viewport_size);
+    client.set_viewport_size(viewport_size);
     uplink.send_request(IpcRequestKind::Resize {
-        viewport: viewport_size,
+        viewport_size,
         pane_area: Some(compute_core_pane_area(viewport_size)),
         cell_size: current_cell_size,
     });
@@ -2815,7 +2770,7 @@ fn drop_input_from_the_blackout(
     incoming_receiver: &mpsc::Receiver<Incoming>,
     cell_size_query: &mut terminal::CellSizeQuery,
 ) -> bool {
-    let mut terminal_gone = false;
+    let mut is_terminal_gone = false;
     while let Ok(incoming_event) = incoming_receiver.try_recv() {
         let Incoming::Input(runtime_event) = incoming_event else {
             continue;
@@ -2824,11 +2779,11 @@ fn drop_input_from_the_blackout(
             RuntimeEvent::CellSize { cell_size, .. } => {
                 let _ = cell_size_query.accept_cell_size_reply(cell_size);
             }
-            RuntimeEvent::Quit => terminal_gone = true,
+            RuntimeEvent::Quit => is_terminal_gone = true,
             _ => {}
         }
     }
-    terminal_gone
+    is_terminal_gone
 }
 
 /// The session a listing settles on, picked from the sessions running for this
@@ -2879,7 +2834,7 @@ fn select_session(
     })
 }
 
-/// Whether a listing of `total` rows, the first `local` of them on this
+/// Whether a listing of `session_row_count` rows, the first `local_session_row_count` of them on this
 /// machine, settles on its only row without asking: exactly one row, and that
 /// row is local. A single remote row, and every longer listing, is asked.
 fn is_single_local_session_selection(
@@ -2961,7 +2916,7 @@ fn prompt_for_session_selection(session_rows: &[SessionRow]) -> Result<String, C
 }
 
 /// Where in `session_rows` a listing settles: the place the number on
-/// `typed_line` names.
+/// `session_selection_line` names.
 ///
 /// Empty `rows` is [`CliError::NoSessions`]; a number outside
 /// `1..=rows.len()`, and a line that is not a number, are
@@ -3011,7 +2966,7 @@ fn lookup_session_address(
         other => Err(CliError::IpcUnavailable {
             detail: format!(
                 "the router answered an attach lookup with {}",
-                other.wire_name()
+                other.get_wire_name()
             ),
         }),
     }
@@ -3035,7 +2990,7 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 /// The client names no identity of its own — the server mints the client id
 /// and answers with it — so every value comes from the reply.
 ///
-/// `resume` names the client record to come back as: a client returning after
+/// `resume_client_id` names the client record to come back as: a client returning after
 /// the session replaced its own process image carries it, and a first join
 /// leaves it `None`. The server hands that record back when it still holds it,
 /// the tab that record was viewing still exists, and no connection is
@@ -3082,7 +3037,7 @@ fn join_session(
 /// The Attach this client writes, numbered 2: the request that follows the
 /// Hello on every connection into a session.
 ///
-/// `resume` names the client record to come back as, and is `None` on a first
+/// `resume_client_id` names the client record to come back as, and is `None` on a first
 /// join. `resume_token` is the secret the last attach minted, presented to get
 /// that attach's view back, and is `None` on a first join and whenever no
 /// token was minted. Reports the pane area left by the built-in two-row UI.
@@ -3096,8 +3051,7 @@ fn build_attach_request(
     IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Attach {
-            viewport: viewport_size,
-            event_filter: EventFilterSpec::All,
+            viewport_size,
             resume_client_id,
             resume_token: resume_token.cloned(),
             pane_area: Some(compute_core_pane_area(viewport_size)),
@@ -3166,7 +3120,7 @@ fn rejoin_session(
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
 ) -> Option<(EndpointFile, Connection)> {
-    if connection_token.expose().is_empty() {
+    if connection_token.expose_secret().is_empty() {
         tracing::warn!(
             %session_id,
             "another local user's session is restarting, and this user cannot read its endpoint file"
@@ -3305,7 +3259,8 @@ fn spawn_frame_reader(
 /// Requests leave in the order they were queued and nothing here is folded or
 /// reordered: a [`WireMouseAction::Forward`] is one report the pane's program
 /// must see, and every request carries the `request_id` the session answers
-/// under. The pile the loop holds is where folding happens, in [`hold`].
+/// under. The pile the loop holds is where folding happens, in
+/// [`coalesce_mouse_actions`].
 ///
 /// A request over the frame cap — a paste of more text than one frame carries —
 /// is refused with nothing written, and that request alone is dropped; the next
@@ -3388,17 +3343,12 @@ fn build_input_channel() -> (mpsc::SyncSender<RuntimeEvent>, mpsc::Receiver<Runt
 /// this terminal.
 ///
 /// [`RuntimeEvent::Quit`] never reaches here: the loop reads it as
-/// [`Ending::TerminalGone`] and stops. An input thread runs only for a terminal
+/// [`AttachmentEnding::TerminalGone`] and stops. An input thread runs only for a terminal
 /// that had keys to read, so a read failure from one is that terminal going
 /// away.
-#[cfg(test)]
-fn process_runtime_input(client: &mut Client, uplink: &mut Uplink, runtime_event: RuntimeEvent) {
-    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
-    process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event);
-}
-
-/// Handle one input event while coordinating resize invalidation and cell-size
-/// replies with the attachment's terminal query state.
+///
+/// `cell_size_query` holds the attachment's terminal query state: a resize
+/// invalidates it and a cell-size reply settles it.
 fn process_runtime_input_with_cell_size(
     client: &mut Client,
     uplink: &mut Uplink,
@@ -3449,10 +3399,10 @@ fn process_runtime_input_with_cell_size(
         } => {
             let needs_cell_size_query = cell_size_query.update_cell_size_for_resize(cell_size);
             let cell_size = cell_size_query.get_current_cell_size();
-            client.set_viewport(viewport_size);
+            client.set_viewport_size(viewport_size);
             let pane_area = pane_area.unwrap_or_else(|| compute_core_pane_area(viewport_size));
             uplink.send_request(IpcRequestKind::Resize {
-                viewport: viewport_size,
+                viewport_size,
                 pane_area: Some(pane_area),
                 cell_size,
             });
@@ -3553,7 +3503,7 @@ fn handle_mouse_event(
 /// oldest wheel ticks of the burst.
 ///
 /// Nothing else is ever dropped. A [`MouseAction::Forward`] is one report the
-/// pane's program must see, and [`MouseAction::AltScrollArrows`] is arrow keys
+/// pane's program must see, and [`MouseAction::AlternateScrollArrows`] is arrow keys
 /// that program reads; a [`MouseAction::Command`] runs once, and a
 /// [`MouseAction::Resize`] states a border's whole distance from its drag
 /// anchor. A pile holding no scrolls therefore stays over the cap rather than
@@ -3828,11 +3778,11 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
             pane_id,
             mouse_input,
         },
-        MouseAction::AltScrollArrows {
+        MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up,
             arrow_count,
-        } => WireMouseAction::AltScrollArrows {
+        } => WireMouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up,
             arrow_count,
@@ -3858,10 +3808,10 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
 /// keeps them apart: a scroll, a forward, then a scroll stays three actions.
 ///
 /// - Two scrolls over one pane in one direction become one scroll of the summed
-///   `lines`: the session moves the view by a count, so two counts are their
+///   `scroll_line_count`: the session moves the view by a count, so two counts are their
 ///   sum.
 /// - Two alternate-scroll runs over one pane in one direction become one run of
-///   the summed `count`: the pane's program receives arrow keys, so two runs are
+///   the summed `arrow_count`: the pane's program receives arrow keys, so two runs are
 ///   the same keys back to back.
 /// - Two selection changes for one pane keep the newer: each carries the whole
 ///   highlight — kind, anchor and cursor — so the newer states all of it.
@@ -3909,12 +3859,12 @@ fn fold_mouse_action(
             None
         }
         (
-            MouseAction::AltScrollArrows {
+            MouseAction::AlternateScrollArrows {
                 pane_id,
                 is_scrolling_up,
                 arrow_count,
             },
-            MouseAction::AltScrollArrows {
+            MouseAction::AlternateScrollArrows {
                 pane_id: next_pane_id,
                 is_scrolling_up: next_is_scrolling_up,
                 arrow_count: next_arrow_count,
@@ -3961,21 +3911,6 @@ fn select_earliest_duration(
         .into_iter()
         .flatten()
         .min()
-}
-
-/// Every command a plan runs, in order. Viewer-local actions and plugin host calls
-/// run outside this command-only test helper.
-#[cfg(test)]
-fn build_commands(dispatch_plan: DispatchPlan) -> Vec<Command> {
-    match dispatch_plan {
-        DispatchPlan::Command(command) => vec![command],
-        DispatchPlan::ClientAction(_) => Vec::new(),
-        DispatchPlan::Sequence(dispatch_plans) => dispatch_plans
-            .into_iter()
-            .flat_map(build_commands)
-            .collect(),
-        DispatchPlan::PluginHostCall { .. } => Vec::new(),
-    }
 }
 
 /// Classify one frame read from the event stream. `None` keeps the loop

@@ -32,7 +32,7 @@ pub enum NameKind {
 impl NameKind {
     /// The one-letter tag a generated name of this kind starts with.
     #[must_use]
-    pub const fn get_type_tag(self) -> &'static str {
+    const fn get_type_tag(self) -> &'static str {
         match self {
             NameKind::Session => "S",
             NameKind::Tab => "T",
@@ -42,7 +42,7 @@ impl NameKind {
 }
 
 /// English adjectives: exactly 50 entries.
-pub const EN_ADJECTIVES: [&str; 50] = [
+const EN_ADJECTIVES: [&str; 50] = [
     "swift", "quiet", "brave", "calm", "bright", "gentle", "bold", "merry", "keen", "lucky",
     "misty", "golden", "silver", "wild", "cozy", "vivid", "noble", "amber", "breezy", "candid",
     "daring", "dusty", "eager", "fabled", "fierce", "frosty", "hearty", "humble", "jolly",
@@ -52,7 +52,7 @@ pub const EN_ADJECTIVES: [&str; 50] = [
 ];
 
 /// English nouns: exactly 50 entries.
-pub const EN_NOUNS: [&str; 50] = [
+const EN_NOUNS: [&str; 50] = [
     "otter", "maple", "ember", "river", "falcon", "harbor", "meadow", "comet", "pebble", "willow",
     "badger", "lantern", "tundra", "orchid", "walnut", "heron", "prairie", "acorn", "beacon",
     "canyon", "cedar", "clover", "coral", "crane", "dune", "fern", "fox", "garnet", "glacier",
@@ -62,7 +62,7 @@ pub const EN_NOUNS: [&str; 50] = [
 ];
 
 /// Japanese adjectives: exactly 50 entries.
-pub const JA_ADJECTIVES: [&str; 50] = [
+const JA_ADJECTIVES: [&str; 50] = [
     "しずか",
     "はやい",
     "あかい",
@@ -116,7 +116,7 @@ pub const JA_ADJECTIVES: [&str; 50] = [
 ];
 
 /// Japanese nouns: exactly 50 entries.
-pub const JA_NOUNS: [&str; 50] = [
+const JA_NOUNS: [&str; 50] = [
     "ねこ",
     "つき",
     "さくら",
@@ -170,7 +170,7 @@ pub const JA_NOUNS: [&str; 50] = [
 ];
 
 /// Traditional Chinese adjectives: exactly 50 entries.
-pub const ZH_HANT_ADJECTIVES: [&str; 50] = [
+const ZH_HANT_ADJECTIVES: [&str; 50] = [
     "快樂", "安靜", "勇敢", "聰明", "溫柔", "明亮", "神秘", "悠閒", "燦爛", "可愛", "強壯", "輕盈",
     "靈巧", "沉穩", "活潑", "優雅", "潔白", "碧綠", "金黃", "銀白", "溫暖", "涼爽", "清新", "甜美",
     "嶄新", "古樸", "高遠", "遼闊", "細膩", "圓潤", "迅捷", "敏捷", "從容", "安然", "祥和", "開朗",
@@ -179,7 +179,7 @@ pub const ZH_HANT_ADJECTIVES: [&str; 50] = [
 ];
 
 /// Traditional Chinese nouns: exactly 50 entries.
-pub const ZH_HANT_NOUNS: [&str; 50] = [
+const ZH_HANT_NOUNS: [&str; 50] = [
     "老虎",
     "熊貓",
     "竹子",
@@ -253,7 +253,7 @@ const TOTAL_NAME_COMBINATIONS: usize = LANGUAGES.len() * WORDS_PER_LIST * WORDS_
 /// once. `73 % 3 == 1`: every step moves the walk to the next language.
 const NAME_COMBINATION_STRIDE: usize = 73;
 
-/// Generate a random default name of `kind` that `is_taken` does not already
+/// Generate a random default name of `name_kind` that `is_taken` does not already
 /// claim.
 ///
 /// The random start lands on a random language as well as a random word pair;
@@ -270,7 +270,7 @@ pub fn generate_name(name_kind: NameKind, is_taken: impl Fn(&str) -> bool) -> St
     )
 }
 
-/// Generate the first free name of `kind` walking the combination space from
+/// Generate the first free name of `name_kind` walking the combination space from
 /// `starting_combination_index`.
 ///
 /// Visits every language x adjective x noun combination once per round in

@@ -11,8 +11,9 @@ use super::*;
 
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_client::mouse::{MouseAction, TABLINE_DRAG_CELL_COUNT};
 use koshi_client::Client as ViewerClient;
 use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
@@ -28,10 +29,8 @@ use koshi_layout::mode::LayoutMode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::error::PtyError;
 use koshi_renderer::snapshot::{Delivery, MouseFrame, ViewerChrome};
-use koshi_renderer::{compute_pane_local_cell, hit_test, HitRegion};
+use koshi_renderer::{compute_pane_local_cell, resolve_hit_region, HitRegion};
 use koshi_test_support::fake_pty::FakePtyBackend;
-
-use crate::runtime::bus::EventFilter;
 
 fn build_runtime() -> (Server, ClientId) {
     let (runtime, _fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
@@ -55,13 +54,13 @@ fn build_new_pane_args() -> NewPaneArgs {
 /// and `copy` config and answers every mouse event below before the session
 /// hears about it.
 fn build_viewer(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
-    ViewerClient::from_client_id_and_viewport(
+    ViewerClient::from_client_id_and_viewport_size(
         client_id,
         Size {
             column_count: 80,
             row_count: 24,
         },
-        runtime.subscribe(client_id, EventFilter::All),
+        runtime.subscribe(client_id),
         TerminalCleanupGuard::new(),
     )
 }
@@ -109,7 +108,7 @@ fn dispatch_mouse_input_at_time(
     event_time: Instant,
 ) {
     viewer.apply_events();
-    let mouse_frame = MouseFrame::from(
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
         runtime
             .build_snapshot(viewer.get_client_id())
             .expect("render snapshot"),
@@ -157,12 +156,12 @@ fn apply_mouse_actions(
                     viewer.note_press_forwarded(pane_id, mouse_button);
                 }
             }
-            MouseAction::AltScrollArrows {
+            MouseAction::AlternateScrollArrows {
                 pane_id,
                 is_scrolling_up,
                 arrow_count,
             } => {
-                runtime.write_alt_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                runtime.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
             }
             MouseAction::Resize {
                 pane_id,
@@ -183,7 +182,6 @@ fn apply_mouse_actions(
                 let command_envelope = CommandEnvelope::from_parts(
                     CommandId::new(),
                     CommandSource::from_mouse(client_id),
-                    SystemTime::now(),
                     command,
                 );
                 let _ = runtime.submit_command(command_envelope);
@@ -211,9 +209,11 @@ fn build_runtime_with_fake_pty_backend() -> (Server, Arc<FakePtyBackend>, Client
 /// [`build_runtime_with_fake_pty_backend`] on a viewport of `viewport_size`, for a case that needs
 /// room for more panes than the stock 80 by 24 holds.
 fn build_sized_runtime(viewport_size: Size) -> (Server, Arc<FakePtyBackend>, ClientId) {
-    let fake_pty_backend = Arc::new(FakePtyBackend::new());
-    let (tx, rx) = mpsc::channel();
-    let mut runtime = Server::from_runtime_parts(fake_pty_backend.clone(), rx, tx);
+    let (sender, receiver) = mpsc::channel();
+    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(sender),
+    )));
+    let mut runtime = Server::from_runtime_parts(fake_pty_backend.clone(), receiver);
     let client_id = runtime
         .bootstrap_local(SessionId::new(), viewport_size, SystemTime::UNIX_EPOCH)
         .expect("bootstrap client");
@@ -233,7 +233,7 @@ fn list_stacked_pane_sizes(runtime: &Server, client_id: ClientId) -> Vec<(PaneId
             (
                 pane_slot.outer_rect.origin.row,
                 pane_slot.pane_id,
-                pane_slot.outer_rect.cell_size.row_count,
+                pane_slot.outer_rect.size.row_count,
             )
         })
         .collect();
@@ -251,11 +251,7 @@ fn list_pane_row_counts(pane_sizes: &[(PaneId, u16)]) -> Vec<u16> {
 
 /// The client's single bootstrap pane.
 fn get_only_pane_id(runtime: &Server) -> PaneId {
-    *runtime
-        .pty_handle_by_pane_id
-        .keys()
-        .next()
-        .expect("one pane")
+    *runtime.live_pane_ids.iter().next().expect("one pane")
 }
 
 /// A screen cell inside `pane_id`'s content, with the 1-based pane-local column and
@@ -273,7 +269,7 @@ fn find_pane_content_cell(
                 column: column_index,
                 row: row_index,
             };
-            if hit_test(
+            if resolve_hit_region(
                 render_snapshot.build_frame_layout(ViewerChrome::default()),
                 screen_point,
             ) == (HitRegion::PaneContent { pane_id })
@@ -306,7 +302,6 @@ fn build_tab(runtime: &mut Server, client_id: ClientId) {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::NewTab(NewTabArgs::default()),
     );
     let _ = runtime.dispatch(command_envelope);
@@ -326,7 +321,7 @@ fn find_tabline_pointer_column(
     let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
     (minimum_column..render_snapshot.client_snapshot.viewport_size.column_count)
         .find(|&pointer_column| {
-            region_predicate(hit_test(
+            region_predicate(resolve_hit_region(
                 render_snapshot.build_frame_layout(viewer_chrome),
                 Point {
                     column: pointer_column,
@@ -400,7 +395,7 @@ fn clicking_an_inactive_tab_focuses_it_and_clears_the_peek() {
         .session_snapshot
         .tabs_metadata
         .iter()
-        .find(|tab_meta| tab_meta.tab_index == 0)
+        .find(|tab_metadata| tab_metadata.tab_index == 0)
         .expect("a first tab")
         .tab_id;
     let pointer_column = find_tabline_pointer_column(&runtime, &viewer, 0, |region| {
@@ -445,13 +440,12 @@ fn a_tab_switch_by_any_route_reveals_the_new_tab() {
         .session_snapshot
         .tabs_metadata
         .iter()
-        .find(|tab_meta| tab_meta.tab_index == 0)
+        .find(|tab_metadata| tab_metadata.tab_index == 0)
         .expect("a first tab")
         .tab_id;
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::FocusTab(FocusTabArgs {
             focus_target: TabTarget::Id(first_tab_id),
             client_id: Some(client_id),
@@ -480,7 +474,7 @@ fn clicking_the_right_scroll_arrow_peeks_toward_the_end() {
     });
     let render_snapshot = runtime.build_snapshot(client_id).expect("render snapshot");
     let viewer_chrome = viewer.build_viewer_chrome(render_snapshot.client_snapshot.active_tab_id);
-    let target_tab_index = match hit_test(
+    let target_tab_index = match resolve_hit_region(
         render_snapshot.build_frame_layout(viewer_chrome),
         Point {
             column: pointer_column,
@@ -704,14 +698,13 @@ fn split_focused_pane(runtime: &mut Server, client_id: ClientId) {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::NewPane(build_new_pane_args()),
     );
     let _ = runtime.dispatch(command_envelope);
 }
 
 /// The solved width, in columns, of `pane`'s box in `client`'s current mouse_frame.
-fn pane_column_count(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> u16 {
+fn get_pane_column_count(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> u16 {
     let render_snapshot = runtime.build_snapshot(client_id).expect("render snapshot");
     render_snapshot
         .session_snapshot
@@ -721,7 +714,7 @@ fn pane_column_count(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> 
         .find(|pane_slot| pane_slot.pane_id == pane_id)
         .expect("pane in layout")
         .outer_rect
-        .cell_size
+        .size
         .column_count
 }
 
@@ -739,7 +732,7 @@ fn find_vertical_border(runtime: &Server, client_id: ClientId) -> (Point, PaneId
         if let HitRegion::PaneBorder {
             pane_id,
             side: border_side,
-        } = hit_test(
+        } = resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             Point {
                 column: column_index,
@@ -804,7 +797,7 @@ fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
     split_focused_pane(&mut runtime, client);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&runtime, client);
-    let initial_column_count = pane_column_count(&runtime, client, pane_id);
+    let initial_column_count = get_pane_column_count(&runtime, client, pane_id);
 
     dispatch_mouse_input(
         &mut runtime,
@@ -821,7 +814,7 @@ fn dragging_a_vertical_border_resizes_the_grabbed_pane_live() {
     );
 
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         initial_column_count + 3,
         "the grabbed pane grew by the three cells dragged toward its border"
     );
@@ -834,7 +827,7 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
     split_focused_pane(&mut runtime, client);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&runtime, client);
-    let initial_column_count = pane_column_count(&runtime, client, pane_id);
+    let initial_column_count = get_pane_column_count(&runtime, client, pane_id);
 
     dispatch_mouse_input(
         &mut runtime,
@@ -852,7 +845,7 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
         ),
     );
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         initial_column_count - 3,
         "the grabbed pane shrank by the three cells dragged inward"
     );
@@ -868,7 +861,7 @@ fn a_shrink_drag_tracks_the_pointer_cell_for_cell() {
         ),
     );
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         initial_column_count - 4,
         "the second drag shrinks one cell, tracking the pointer"
     );
@@ -894,7 +887,7 @@ fn a_release_ends_the_resize_drag_so_a_new_drag_does_nothing() {
             border_cell.row,
         ),
     );
-    let column_count_after_drag = pane_column_count(&runtime, client, pane_id);
+    let column_count_after_drag = get_pane_column_count(&runtime, client, pane_id);
 
     dispatch_mouse_input(&mut runtime, &mut viewer, build_left_release_input());
 
@@ -908,7 +901,7 @@ fn a_release_ends_the_resize_drag_so_a_new_drag_does_nothing() {
         ),
     );
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         column_count_after_drag,
         "no resize drag is in progress, so the pointer move is ignored"
     );
@@ -921,7 +914,7 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
     split_focused_pane(&mut runtime, client);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&runtime, client);
-    let initial_column_count = pane_column_count(&runtime, client, pane_id);
+    let initial_column_count = get_pane_column_count(&runtime, client, pane_id);
     let viewport_column_count = runtime
         .build_snapshot(client)
         .unwrap()
@@ -946,7 +939,7 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
             border_cell.row,
         ),
     );
-    let grown_column_count = pane_column_count(&runtime, client, pane_id);
+    let grown_column_count = get_pane_column_count(&runtime, client, pane_id);
     assert_eq!(
         initial_column_count, 40,
         "the split starts even, 40 columns each"
@@ -967,7 +960,7 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
         ),
     );
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         grown_column_count,
         "held at the wall while the pointer overshoots"
     );
@@ -980,7 +973,7 @@ fn a_fast_over_drag_fills_to_the_wall_then_reverses_at_once() {
         build_left_drag_input(border_cell.column, border_cell.row),
     );
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         initial_column_count,
         "a reverse drag returns the border to where it started, no lag"
     );
@@ -992,7 +985,6 @@ fn split_focused_downward(runtime: &mut Server, client_id: ClientId) {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::NewPane(NewPaneArgs {
             direction: Direction::Down,
             ..build_new_pane_args()
@@ -1003,7 +995,7 @@ fn split_focused_downward(runtime: &mut Server, client_id: ClientId) {
 
 /// The solved row count of `pane_id`'s box in `client_id`'s current render
 /// render_snapshot.
-fn pane_row_count(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> u16 {
+fn get_pane_row_count(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> u16 {
     let render_snapshot = runtime.build_snapshot(client_id).expect("render snapshot");
     render_snapshot
         .session_snapshot
@@ -1013,7 +1005,7 @@ fn pane_row_count(runtime: &Server, client_id: ClientId, pane_id: PaneId) -> u16
         .find(|pane_slot| pane_slot.pane_id == pane_id)
         .expect("pane in layout")
         .outer_rect
-        .cell_size
+        .size
         .row_count
 }
 
@@ -1030,7 +1022,7 @@ fn find_horizontal_border(runtime: &Server, client_id: ClientId) -> (Point, Pane
         if let HitRegion::PaneBorder {
             pane_id,
             side: border_side,
-        } = hit_test(
+        } = resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             Point {
                 column: column_index,
@@ -1081,7 +1073,7 @@ fn find_outer_vertical_frame(runtime: &Server, client_id: ClientId) -> (Point, P
         if let HitRegion::PaneBorder {
             pane_id,
             side: border_side,
-        } = hit_test(
+        } = resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             Point {
                 column: column_index,
@@ -1114,7 +1106,7 @@ fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
     split_focused_downward(&mut runtime, client);
 
     let (border_cell, pane_id, border_side) = find_horizontal_border(&runtime, client);
-    let initial_row_count = pane_row_count(&runtime, client, pane_id);
+    let initial_row_count = get_pane_row_count(&runtime, client, pane_id);
 
     dispatch_mouse_input(
         &mut runtime,
@@ -1131,7 +1123,7 @@ fn dragging_a_horizontal_border_resizes_the_grabbed_pane_live() {
     );
 
     assert_eq!(
-        pane_row_count(&runtime, client, pane_id),
+        get_pane_row_count(&runtime, client, pane_id),
         initial_row_count + 3,
         "the grabbed pane grew by the three rows dragged toward its border"
     );
@@ -1149,7 +1141,7 @@ fn grabbing_the_outer_frame_starts_no_resize() {
         Direction::Right,
         "the rightmost mouse_frame is a right border"
     );
-    let initial_column_count = pane_column_count(&runtime, client, pane_id);
+    let initial_column_count = get_pane_column_count(&runtime, client, pane_id);
 
     // The outer mouse_frame sits at the tab edge and cannot move, so grabbing it starts
     // no resize drag.
@@ -1166,7 +1158,7 @@ fn grabbing_the_outer_frame_starts_no_resize() {
         build_left_drag_input(border_cell.column - 3, border_cell.row),
     );
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         initial_column_count,
         "grabbing the terminal's outer edge resizes nothing"
     );
@@ -1178,18 +1170,17 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     let mut viewer = build_viewer(&mut runtime, client);
     split_focused_pane(&mut runtime, client);
     let (_, pane_id, _) = find_vertical_border(&runtime, client);
-    let tiled_column_count = pane_column_count(&runtime, client, pane_id);
+    let tiled_column_count = get_pane_column_count(&runtime, client, pane_id);
 
     // Zoom the focused pane: its border ring is now the outer mouse_frame, while the
     // tiled tree underneath still has a hidden neighbor to its side.
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client),
-        SystemTime::now(),
         Command::TogglePaneFullscreen,
     );
     let _ = runtime.dispatch(command_envelope);
-    let active_tab_id = runtime.get_client_mut(client).unwrap().get_active_tab();
+    let active_tab_id = runtime.get_client_mut(client).unwrap().get_active_tab_id();
     let fullscreen_pane_id = runtime.find_typed_pane(client).expect("a focused pane");
 
     // Grab the zoomed pane's right mouse_frame edge and drag inward: no divider is
@@ -1222,12 +1213,11 @@ fn grabbing_the_frame_of_a_fullscreen_pane_starts_no_resize() {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client),
-        SystemTime::now(),
         Command::TogglePaneFullscreen,
     );
     let _ = runtime.dispatch(command_envelope);
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         tiled_column_count,
         "the hidden tiled layout was not mutated by the drag"
     );
@@ -1370,7 +1360,6 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
     let _ = runtime.submit_command(CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client),
-        SystemTime::now(),
         Command::ToggleMouseSelect,
     ));
     let (screen_point, _, _) = find_pane_content_cell(&runtime, client, pane);
@@ -1651,7 +1640,7 @@ fn border_resize_off_leaves_a_border_press_inert() {
     split_focused_pane(&mut runtime, client);
 
     let (border_cell, pane_id, border_side) = find_vertical_border(&runtime, client);
-    let initial_column_count = pane_column_count(&runtime, client, pane_id);
+    let initial_column_count = get_pane_column_count(&runtime, client, pane_id);
 
     dispatch_mouse_input(
         &mut runtime,
@@ -1668,7 +1657,7 @@ fn border_resize_off_leaves_a_border_press_inert() {
     );
 
     assert_eq!(
-        pane_column_count(&runtime, client, pane_id),
+        get_pane_column_count(&runtime, client, pane_id),
         initial_column_count,
         "with border resize disabled, a border drag changes nothing"
     );
@@ -1752,7 +1741,7 @@ fn has_pane_highlight(runtime: &Server, client_id: ClientId, pane_id: PaneId) ->
 }
 
 /// The pane the viewer's pointer is marked as hovering over.
-fn hovered_pane_id(runtime: &Server, viewer: &ViewerClient) -> Option<PaneId> {
+fn find_hovered_pane_id(runtime: &Server, viewer: &ViewerClient) -> Option<PaneId> {
     let render_snapshot = runtime
         .build_snapshot(viewer.get_client_id())
         .expect("render snapshot");
@@ -1908,7 +1897,7 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
 }
 
 #[test]
-fn a_wheel_on_the_alternate_screen_with_alt_scroll_sends_arrow_keys() {
+fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
     let (mut runtime, fake_pty_backend, client) = build_runtime_with_fake_pty_backend();
     let pane = get_only_pane_id(&runtime);
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
@@ -1946,7 +1935,7 @@ fn a_wheel_on_the_alternate_screen_with_alt_scroll_sends_arrow_keys() {
 }
 
 #[test]
-fn alt_scroll_uses_application_cursor_keys_when_the_program_asks() {
+fn alternate_scroll_uses_application_cursor_keys_when_the_program_asks() {
     let (mut runtime, fake_pty_backend, client) = build_runtime_with_fake_pty_backend();
     let pane = get_only_pane_id(&runtime);
     // Alternate screen, alternate-scroll on, application cursor keys on.
@@ -2038,7 +2027,7 @@ fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
         },
     );
     assert_eq!(
-        hovered_pane_id(&runtime, &viewer),
+        find_hovered_pane_id(&runtime, &viewer),
         Some(pane),
         "a move over pane content marks it hovered"
     );
@@ -2054,7 +2043,7 @@ fn a_move_marks_the_hovered_pane_and_clears_it_off_a_pane() {
         },
     );
     assert_eq!(
-        hovered_pane_id(&runtime, &viewer),
+        find_hovered_pane_id(&runtime, &viewer),
         None,
         "a move onto chrome clears the hover"
     );
@@ -2210,7 +2199,9 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
     let (screen_point, _, _) = find_pane_content_cell(&runtime, client, pane);
     let mut viewer = build_viewer(&mut runtime, client);
     let wheel_input = build_wheel_input(ScrollDirection::Up, screen_point);
-    let mouse_frame = MouseFrame::from(runtime.build_snapshot(client).expect("render snapshot"));
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
+        runtime.build_snapshot(client).expect("render snapshot"),
+    );
     let mouse_decision = viewer
         .handle_mouse_wheel(wheel_input, &mouse_frame)
         .expect("a wheel event decides");
@@ -2237,7 +2228,7 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
 }
 
 #[test]
-fn alt_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written() {
+fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written() {
     // DECCKM (`?1`) is read when the arrows are written, not when the mouse_frame the
     // viewer decided from was painted.
     let (mut runtime, fake_pty_backend, client) = build_runtime_with_fake_pty_backend();
@@ -2245,7 +2236,9 @@ fn alt_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written()
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&runtime, client, pane);
     let mut viewer = build_viewer(&mut runtime, client);
-    let mouse_frame = MouseFrame::from(runtime.build_snapshot(client).expect("render snapshot"));
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
+        runtime.build_snapshot(client).expect("render snapshot"),
+    );
     let mouse_decision = viewer
         .handle_mouse_wheel(
             build_wheel_input(ScrollDirection::Up, screen_point),
@@ -2254,7 +2247,7 @@ fn alt_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written()
         .expect("a wheel event decides");
     assert_eq!(
         mouse_decision.mouse_action,
-        Some(MouseAction::AltScrollArrows {
+        Some(MouseAction::AlternateScrollArrows {
             pane_id: pane,
             is_scrolling_up: true,
             arrow_count: 3,
@@ -2263,7 +2256,7 @@ fn alt_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_written()
 
     // The program switches to application cursor keys before the write.
     runtime.handle_pty_output(pane, b"\x1b[?1h");
-    runtime.write_alt_scroll_arrows(pane, true, 3);
+    runtime.write_alternate_scroll_arrows(pane, true, 3);
 
     assert_eq!(
         fake_pty_backend
@@ -2284,7 +2277,9 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
     let (screen_point, _, _) = find_pane_content_cell(&runtime, client, pane);
     let mut viewer = build_viewer(&mut runtime, client);
-    let mouse_frame = MouseFrame::from(runtime.build_snapshot(client).expect("render snapshot"));
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
+        runtime.build_snapshot(client).expect("render snapshot"),
+    );
     let mouse_decision = viewer
         .handle_mouse_wheel(
             build_wheel_input(ScrollDirection::Up, screen_point),
@@ -2293,7 +2288,7 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
         .expect("a wheel event decides");
     assert_eq!(
         mouse_decision.mouse_action,
-        Some(MouseAction::AltScrollArrows {
+        Some(MouseAction::AlternateScrollArrows {
             pane_id: pane,
             is_scrolling_up: true,
             arrow_count: 3,
@@ -2303,7 +2298,7 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
 
     // The program leaves the alternate screen before the write.
     runtime.handle_pty_output(pane, b"\x1b[?1049l");
-    runtime.write_alt_scroll_arrows(pane, true, 3);
+    runtime.write_alternate_scroll_arrows(pane, true, 3);
 
     assert_eq!(
         fake_pty_backend
@@ -2328,7 +2323,7 @@ fn the_write_doors_do_nothing_for_a_pane_that_is_gone() {
         missing_pane_id,
         build_wheel_input(ScrollDirection::Up, Point { column: 5, row: 5 }),
     );
-    runtime.write_alt_scroll_arrows(missing_pane_id, true, 3);
+    runtime.write_alternate_scroll_arrows(missing_pane_id, true, 3);
     let applied_cell_count = runtime.drag_resize(client, missing_pane_id, Direction::Right, 1, 3);
 
     assert_eq!(
@@ -2367,7 +2362,7 @@ fn a_zero_line_notch_sends_no_arrow_keys() {
     let pane = get_only_pane_id(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
 
-    runtime.write_alt_scroll_arrows(pane, true, 0);
+    runtime.write_alternate_scroll_arrows(pane, true, 0);
 
     assert_eq!(
         fake_pty_backend
@@ -2384,7 +2379,7 @@ fn a_one_line_notch_sends_one_arrow() {
     let pane = get_only_pane_id(&runtime);
     runtime.handle_pty_output(pane, b"\x1b[?1049h\x1b[?1007h");
 
-    runtime.write_alt_scroll_arrows(pane, false, 1);
+    runtime.write_alternate_scroll_arrows(pane, false, 1);
 
     assert_eq!(
         fake_pty_backend
@@ -2444,7 +2439,7 @@ fn a_scroll_for_a_client_the_session_does_not_hold_moves_nothing() {
 }
 
 #[test]
-fn a_wheel_on_the_alternate_screen_without_alt_scroll_stores_no_offset() {
+fn a_wheel_on_the_alternate_screen_without_alternate_scroll_stores_no_offset() {
     let (mut runtime, client) = build_runtime();
     let pane = get_only_pane_id(&runtime);
     feed_pane_scrollback(&mut runtime, pane, 40);
@@ -2481,7 +2476,7 @@ fn find_chrome_cell(runtime: &Server, client_id: ClientId) -> Point {
                 row: row_index,
             };
             if matches!(
-                hit_test(
+                resolve_hit_region(
                     render_snapshot.build_frame_layout(ViewerChrome::default()),
                     screen_point
                 ),
@@ -2538,7 +2533,9 @@ fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
-    let mouse_frame = MouseFrame::from(server.build_snapshot(client_id).expect("render snapshot"));
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
+        server.build_snapshot(client_id).expect("render snapshot"),
+    );
     let press_input = build_left_press_input(screen_point.column, screen_point.row);
     let mouse_actions =
         viewer.handle_mouse(press_input, &mouse_frame, compute_separated_event_time());
@@ -2571,7 +2568,6 @@ fn stack_pane_onto_focused(server: &mut Server, client_id: ClientId) {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::NewPane(NewPaneArgs {
             should_stack: true,
             ..build_new_pane_args()
@@ -2586,7 +2582,7 @@ fn find_border_against_stack_header(server: &Server, client_id: ClientId) -> Poi
     let render_snapshot = server.build_snapshot(client_id).expect("render snapshot");
     let viewport_size = render_snapshot.client_snapshot.viewport_size;
     let hit_region_at = |screen_point: Point| {
-        hit_test(
+        resolve_hit_region(
             render_snapshot.build_frame_layout(ViewerChrome::default()),
             screen_point,
         )
@@ -2634,7 +2630,9 @@ fn grabbing_the_border_against_a_collapsed_stack_member_starts_no_resize() {
     stack_pane_onto_focused(&mut server, client_id);
 
     let border_cell = find_border_against_stack_header(&server, client_id);
-    let mouse_frame = MouseFrame::from(server.build_snapshot(client_id).expect("render snapshot"));
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
+        server.build_snapshot(client_id).expect("render snapshot"),
+    );
 
     let pressed = viewer.handle_mouse(
         build_left_press_input(border_cell.column, border_cell.row),
@@ -2669,7 +2667,7 @@ fn build_server_with_mouse_event_queue() -> (
     mpsc::Receiver<Delivery>,
 ) {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
-    let mouse_event_queue = server.subscribe(client_id, EventFilter::All);
+    let mouse_event_queue = server.subscribe(client_id);
     (server, fake_pty_backend, client_id, mouse_event_queue)
 }
 
@@ -2737,7 +2735,7 @@ fn a_round_holding_one_border_move_answers_with_the_cells_it_took() {
         build_server_with_mouse_event_queue();
     let pane_id = get_only_pane_id(&server);
     split_focused_pane(&mut server, client_id);
-    let initial_column_count = pane_column_count(&server, client_id, pane_id);
+    let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
 
     server.run_client_mouse(
         client_id,
@@ -2751,7 +2749,7 @@ fn a_round_holding_one_border_move_answers_with_the_cells_it_took() {
     );
 
     assert_eq!(
-        pane_column_count(&server, client_id, pane_id),
+        get_pane_column_count(&server, client_id, pane_id),
         initial_column_count + 3,
         "the border moved three cells"
     );
@@ -2803,7 +2801,7 @@ fn a_round_holding_one_forward_writes_the_report_and_answers_with_an_empty_list(
 }
 
 #[test]
-fn a_round_holding_one_alt_scroll_writes_the_arrows_and_answers_with_an_empty_list() {
+fn a_round_holding_one_alternate_scroll_writes_the_arrows_and_answers_with_an_empty_list() {
     let (mut server, fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
     let pane_id = get_only_pane_id(&server);
@@ -2813,7 +2811,7 @@ fn a_round_holding_one_alt_scroll_writes_the_arrows_and_answers_with_an_empty_li
     server.run_client_mouse(
         client_id,
         10,
-        vec![WireMouseAction::AltScrollArrows {
+        vec![WireMouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: true,
             arrow_count: 3,
@@ -2924,7 +2922,7 @@ fn the_answers_follow_the_order_of_the_actions_that_reported() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
-    let initial_column_count = pane_column_count(&server, client_id, pane_id);
+    let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
 
     server.run_client_mouse(
         client_id,
@@ -2956,7 +2954,7 @@ fn the_answers_follow_the_order_of_the_actions_that_reported() {
         "the forward in the middle of the round still reached the program"
     );
     assert_eq!(
-        pane_column_count(&server, client_id, pane_id),
+        get_pane_column_count(&server, client_id, pane_id),
         initial_column_count + 3,
         "the border move at the end of the round still ran"
     );
@@ -2989,7 +2987,7 @@ fn a_client_with_no_subscription_is_answered_nothing() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Another client's queue, which would catch an answer sent to the wrong one.
-    let unrelated_event_queue = server.subscribe(ClientId::new(), EventFilter::All);
+    let unrelated_event_queue = server.subscribe(ClientId::new());
 
     server.run_client_mouse(
         client_id,
@@ -3051,13 +3049,13 @@ fn a_border_drag_of_zero_cells_moves_nothing_and_reports_zero() {
     let (mut server, _fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     split_focused_pane(&mut server, client_id);
-    let initial_column_count = pane_column_count(&server, client_id, pane_id);
+    let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
 
     let applied_cell_count = server.drag_resize(client_id, pane_id, Direction::Right, 1, 0);
 
     assert_eq!(applied_cell_count, 0, "a drag of no cells takes none");
     assert_eq!(
-        pane_column_count(&server, client_id, pane_id),
+        get_pane_column_count(&server, client_id, pane_id),
         initial_column_count,
         "and the border did not move"
     );
@@ -3068,7 +3066,7 @@ fn a_negative_step_moves_the_border_the_other_way() {
     let (mut server, _fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     split_focused_pane(&mut server, client_id);
-    let initial_column_count = pane_column_count(&server, client_id, pane_id);
+    let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
 
     let applied_cell_count = server.drag_resize(client_id, pane_id, Direction::Right, -1, 4);
 
@@ -3077,7 +3075,7 @@ fn a_negative_step_moves_the_border_the_other_way() {
         "all four cells of the shrink were taken"
     );
     assert_eq!(
-        pane_column_count(&server, client_id, pane_id),
+        get_pane_column_count(&server, client_id, pane_id),
         initial_column_count - 4,
         "a step of -1 shrinks the grabbed pane"
     );
@@ -3097,7 +3095,7 @@ fn a_border_drag_into_a_neighbor_at_its_minimum_reports_no_cells_taken() {
         "the neighbor gave every column above its minimum"
     );
     assert_eq!(
-        pane_column_count(&server, client_id, pane_id),
+        get_pane_column_count(&server, client_id, pane_id),
         76,
         "40 columns plus 36"
     );
@@ -3109,7 +3107,7 @@ fn a_border_drag_into_a_neighbor_at_its_minimum_reports_no_cells_taken() {
         "a neighbor at its minimum donates nothing"
     );
     assert_eq!(
-        pane_column_count(&server, client_id, pane_id),
+        get_pane_column_count(&server, client_id, pane_id),
         76,
         "and the border stayed at the wall"
     );

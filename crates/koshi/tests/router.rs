@@ -139,8 +139,8 @@ fn try_connect_to_router(runtime_directory: &Path) -> Option<Connection> {
     let hello = RouterRequest {
         request_id: 1,
         request_kind: RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: endpoint.connection_token,
         },
     };
@@ -162,8 +162,8 @@ fn get_router_hello_version(runtime_directory: &Path) -> Option<String> {
     let hello = RouterRequest {
         request_id: 1,
         request_kind: RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: endpoint.connection_token,
         },
     };
@@ -270,8 +270,8 @@ fn wait_for_restarted_router_endpoint(
         if let Ok(endpoint) =
             EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory))
         {
-            if endpoint.connection_token.expose()
-                != endpoint_before_restart.connection_token.expose()
+            if endpoint.connection_token.expose_secret()
+                != endpoint_before_restart.connection_token.expose_secret()
             {
                 return endpoint;
             }

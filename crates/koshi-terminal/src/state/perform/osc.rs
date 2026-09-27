@@ -29,8 +29,8 @@ pub(super) enum Osc133 {
 /// is the finish carrying `0`. A `D` whose first following parameter is empty
 /// carries no code. Anything else — another command number, a marker other
 /// than `A`–`D`, a `D` code that is not a decimal `i32` — yields `None`.
-pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
-    let [command, marker, rest @ ..] = params else {
+pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
+    let [command, marker, rest @ ..] = osc_parameters else {
         return None;
     };
     if *command != b"133" {

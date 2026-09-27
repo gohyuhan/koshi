@@ -5,7 +5,6 @@
 //! leaving the input untouched. A failed edit returns an error and changes
 //! nothing; there is no half-edited tree.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::{Direction, Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -20,16 +19,6 @@ pub enum SplitError {
     /// The pane to split next to, or to stack onto, is not in this layout.
     #[error("pane {target_pane_id} is not in this layout")]
     PaneNotFound { target_pane_id: PaneId },
-}
-
-impl DomainError for SplitError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// Split next to `target_pane_id`, placing `new_pane_id` beside it.
@@ -99,7 +88,7 @@ pub fn add_pane_to_stack(
     anchor_pane_id: PaneId,
     new_pane_id: PaneId,
 ) -> Result<LayoutNode, SplitError> {
-    if !layout_tree.contains_pane(anchor_pane_id) {
+    if !layout_tree.has_pane(anchor_pane_id) {
         return Err(SplitError::PaneNotFound {
             target_pane_id: anchor_pane_id,
         });
@@ -133,16 +122,6 @@ pub enum RemoveError {
     /// leave no layout at all.
     #[error("pane {pane_id} is the last pane in this layout")]
     LastPane { pane_id: PaneId },
-}
-
-impl DomainError for RemoveError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// What a removal freed and who took it over. Callers use this to repair
@@ -231,8 +210,7 @@ pub fn remove_pane(
                     .pane_rects
                     .iter()
                     .any(|&(before_pane_id, before_pane_rect)| {
-                        before_pane_id == pane_id
-                            && before_pane_rect.cell_size != pane_rect.cell_size
+                        before_pane_id == pane_id && before_pane_rect.size != pane_rect.size
                     });
             (absorbed_cell_area > 0 || is_resized).then_some((pane_id, absorbed_cell_area))
         })

@@ -94,64 +94,39 @@ fn compute_center_distance(first_rect: Rect, second_rect: Rect) -> u64 {
     (column_distance * column_distance + row_distance * row_distance) as u64
 }
 
-/// The center of `rect` with both components doubled: `2·origin + cell_size`
+/// The center of `rect` with both components doubled: `2·origin + size`
 /// on each axis. A rect at column 0 spanning 5 columns yields column 5, an
 /// odd half-cell center held as an exact integer.
 fn compute_doubled_center(rect: Rect) -> (u32, u32) {
     (
-        2 * u32::from(rect.origin.column) + u32::from(rect.cell_size.column_count),
-        2 * u32::from(rect.origin.row) + u32::from(rect.cell_size.row_count),
+        2 * u32::from(rect.origin.column) + u32::from(rect.size.column_count),
+        2 * u32::from(rect.origin.row) + u32::from(rect.size.row_count),
     )
 }
 
-/// A completed stack-local focus move: which member expanded and which
-/// collapsed. The caller forwards these to its focus and render state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StackFocusChange {
-    /// The member that just expanded.
-    pub newly_active_pane_id: PaneId,
-    /// The member that collapsed to a header, when the previously active
-    /// slot held one.
-    pub deactivated_pane_id: Option<PaneId>,
-}
-
-/// Expand the stack member holding `pane_id`. A collapsed member is a valid
-/// target. The member may be a subtree; [`StackFocusChange::newly_active_pane_id`]
-/// is then its first leaf, which can differ from `pane_id`.
+/// Expand the stack member holding `pane_id`, which collapses every other
+/// member. A collapsed member is a valid target, and the member may be a
+/// subtree.
 ///
-/// Returns `None` when `stack` is not a stack, when `pane_id` is not in it, or
-/// when the member holding `pane_id` is already the active member; the stack is
-/// unchanged in that case.
-pub fn activate_stack_member(stack: &mut SplitNode, pane_id: PaneId) -> Option<StackFocusChange> {
+/// Returns `true` when the active member changed. Returns `false`, with
+/// `stack` unchanged, when `stack` is not a stack, when `pane_id` is not in
+/// it, or when the member holding `pane_id` is already the active member.
+pub fn activate_stack_member(stack: &mut SplitNode, pane_id: PaneId) -> bool {
     if stack.direction != SplitDirection::Stacked {
-        return None;
+        return false;
     }
-    let target_child_index = stack
+    let Some(target_child_index) = stack
         .children
         .iter()
-        .position(|child| child.contains_pane(pane_id))?;
+        .position(|child| child.has_pane(pane_id))
+    else {
+        return false;
+    };
     if target_child_index == stack.get_active_child_index() {
-        return None;
+        return false;
     }
-    Some(set_active_child(stack, target_child_index))
-}
-
-/// Set the stack's active member to `target_child_index`, which collapses every
-/// other member. `deactivated_pane_id` is the first leaf of the member that was
-/// in the active slot. Panics when the member at `target_child_index` holds no
-/// pane.
-fn set_active_child(stack: &mut SplitNode, target_child_index: usize) -> StackFocusChange {
-    let deactivated_pane_id = stack
-        .children
-        .get(stack.get_active_child_index())
-        .and_then(|child| child.find_first_leaf_pane_id());
     stack.active_child_index = target_child_index;
-    StackFocusChange {
-        newly_active_pane_id: stack.children[target_child_index]
-            .find_first_leaf_pane_id()
-            .expect("callers only activate members that hold a pane"),
-        deactivated_pane_id,
-    }
+    true
 }
 
 #[cfg(test)]

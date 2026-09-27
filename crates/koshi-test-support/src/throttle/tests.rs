@@ -13,7 +13,7 @@ const SLICE_DURATION: Duration = Duration::from_millis(10);
 
 /// A connected loopback pair: the stream a test writes into, and the stream the
 /// pump reads out of.
-fn loopback_pair() -> (TcpStream, TcpStream) {
+fn connect_loopback_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let listener_address = listener
         .local_addr()
@@ -25,8 +25,8 @@ fn loopback_pair() -> (TcpStream, TcpStream) {
 
 #[test]
 fn ten_slices_of_bytes_take_ten_slices_of_time_and_arrive_whole() {
-    let (mut source_writer, source_reader) = loopback_pair();
-    let (destination_writer, mut destination_reader) = loopback_pair();
+    let (mut source_writer, source_reader) = connect_loopback_pair();
+    let (destination_writer, mut destination_reader) = connect_loopback_pair();
     let throttle_input_bytes = vec![7_u8; SLICE_BYTE_COUNT * 10];
     let sent_byte_count = throttle_input_bytes.len();
 
@@ -67,8 +67,8 @@ fn ten_slices_of_bytes_take_ten_slices_of_time_and_arrive_whole() {
 
 #[test]
 fn a_peer_that_never_writes_ends_the_pump_at_its_deadline_with_nothing_copied() {
-    let (_source_writer, source_reader) = loopback_pair();
-    let (destination_writer, _destination_reader) = loopback_pair();
+    let (_source_writer, source_reader) = connect_loopback_pair();
+    let (destination_writer, _destination_reader) = connect_loopback_pair();
     source_reader
         .set_read_timeout(Some(Duration::from_millis(50)))
         .expect("set the read timeout");
@@ -159,13 +159,13 @@ impl Write for CountedWriter {
 }
 
 /// A counted writer that accepts every write and returns the bytes it received.
-fn collecting_writer() -> (CountedWriter, Arc<Mutex<Vec<u8>>>) {
-    failing_writer(usize::MAX)
+fn build_collecting_writer() -> (CountedWriter, Arc<Mutex<Vec<u8>>>) {
+    build_failing_writer(usize::MAX)
 }
 
 /// A counted writer that fails on write number `failure_after_write_count + 1` and returns
 /// the bytes it received before that write.
-fn failing_writer(failure_after_write_count: usize) -> (CountedWriter, Arc<Mutex<Vec<u8>>>) {
+fn build_failing_writer(failure_after_write_count: usize) -> (CountedWriter, Arc<Mutex<Vec<u8>>>) {
     let written_bytes = Arc::new(Mutex::new(Vec::new()));
     (
         CountedWriter {
@@ -188,7 +188,7 @@ fn a_read_timeout_is_a_pause_so_the_bytes_after_it_still_cross() {
         Err(io::Error::from(io::ErrorKind::TimedOut)),
         Ok(b"two".to_vec()),
     ]);
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         scripted_reader,
@@ -212,7 +212,7 @@ fn a_read_error_that_is_not_a_timeout_ends_the_pump_with_what_it_already_copied(
         // The pump must never reach this step.
         Ok(b"never".to_vec()),
     ]);
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         scripted_reader,
@@ -236,7 +236,7 @@ fn a_write_failure_ends_the_pump_and_the_failed_bytes_are_not_counted() {
         // The pump must never reach this step.
         Ok(b"never".to_vec()),
     ]);
-    let (counted_writer, received_bytes) = failing_writer(1);
+    let (counted_writer, received_bytes) = build_failing_writer(1);
 
     let copied_byte_count = pump_throttled(
         scripted_reader,
@@ -260,7 +260,7 @@ fn a_flush_failure_ends_the_pump_and_the_flushed_bytes_are_not_counted() {
         // The pump must never reach this step.
         Ok(b"never".to_vec()),
     ]);
-    let (mut counted_writer, received_bytes) = collecting_writer();
+    let (mut counted_writer, received_bytes) = build_collecting_writer();
     counted_writer.should_fail_flush = true;
 
     let copied_byte_count = pump_throttled(
@@ -282,7 +282,7 @@ fn a_flush_failure_ends_the_pump_and_the_flushed_bytes_are_not_counted() {
 #[test]
 fn a_deadline_already_passed_ends_the_pump_before_the_first_read() {
     let scripted_reader = ScriptedReader::from_steps(vec![Ok(b"unread".to_vec())]);
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         scripted_reader,
@@ -301,7 +301,7 @@ fn a_deadline_already_passed_ends_the_pump_before_the_first_read() {
 #[test]
 fn a_zero_byte_slice_ends_the_pump_at_once_with_nothing_copied() {
     let throttle_input_bytes: &'static [u8] = b"never crosses";
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         throttle_input_bytes,
@@ -319,7 +319,7 @@ fn a_zero_byte_slice_ends_the_pump_at_once_with_nothing_copied() {
 
 #[test]
 fn an_empty_source_ends_the_pump_with_nothing_copied() {
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         ScriptedReader::from_steps(Vec::new()),
@@ -339,7 +339,7 @@ fn an_empty_source_ends_the_pump_with_nothing_copied() {
 fn a_read_that_fills_the_whole_buffer_is_forwarded_whole() {
     let chunk = vec![9_u8; SLICE_BYTE_COUNT];
     let scripted_reader = ScriptedReader::from_steps(vec![Ok(chunk.clone())]);
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         scripted_reader,
@@ -362,7 +362,7 @@ fn only_timeouts_until_the_deadline_end_the_pump_with_nothing_copied() {
             .take(1000)
             .collect(),
     );
-    let (counted_writer, received_bytes) = collecting_writer();
+    let (counted_writer, received_bytes) = build_collecting_writer();
 
     let copied_byte_count = pump_throttled(
         scripted_reader,

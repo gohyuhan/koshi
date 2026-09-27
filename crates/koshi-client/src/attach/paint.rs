@@ -4,7 +4,7 @@
 //! paints.
 //!
 //! [`build_render_snapshot`](crate::attach::paint::build_render_snapshot) is the inverse of
-//! [`wire_frame`](koshi_runtime::runtime::frame::wire_frame), with the four
+//! [`build_wire_frame`](koshi_runtime::runtime::frame::build_wire_frame), with the four
 //! names the answering session chose filtered on the way in. The session, tab,
 //! slot, tab-bar and client parts already hold shared types, so they copy
 //! straight back. Each pane's cells are rebuilt: every
@@ -25,13 +25,9 @@
 //! every pane title pass through
 //! [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text). This
 //! process paints those four into its own terminal and puts two of them inside
-//! an `OSC 0` window-title sequence, so a control character in one of them
-//! would reach the terminal as a control character. A pane's cells are not
+//! an `OSC 0` window-title sequence. A pane's cells are not
 //! filtered: they are the pane's screen, and every byte in them is already a
 //! grid cell.
-//!
-//! Plugin UI does not travel, so every frame read here carries the default
-//! [`PluginUiSnapshot`](koshi_renderer::snapshot::PluginUiSnapshot).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -43,7 +39,7 @@ use koshi_ipc::frame::{
     FrameCell, FrameColor, FrameCursorShape, FrameGraphicsProtocol, FrameImageAction,
     FrameImageChunk, FrameImageDimension, FrameImageDisplay, FrameImagePlacement,
     FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameRow, FrameRowEnd,
-    FrameSixelBackground, FrameSlot, FrameStyle, FrameTabMeta, FrameUnderline, FrameWindow,
+    FrameSixelBackground, FrameSlot, FrameStyle, FrameTabMetadata, FrameUnderline, FrameWindow,
     PaintedFrame, MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT,
     MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
@@ -51,8 +47,7 @@ use koshi_ipc::placement::PanePlacementSnapshot;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot,
     PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
-    PluginUiSnapshot, RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
-    TabSnapshot,
+    RenderSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
@@ -95,10 +90,10 @@ fn build_render_snapshot_with_images(
                     .iter()
                     .map(build_pane_slot)
                     .collect(),
-                effective_cell_size: active_tab_snapshot.effective_cell_size,
+                tab_size: active_tab_snapshot.tab_size,
                 stack_headers: active_tab_snapshot.stack_headers.clone(),
                 layout_mode: active_tab_snapshot.layout_mode,
-                are_all_panes_suppressed: active_tab_snapshot.is_every_pane_suppressed,
+                is_every_pane_suppressed: active_tab_snapshot.is_every_pane_suppressed,
                 gap_cell_count: active_tab_snapshot.gap_cell_count,
             },
             tabs_metadata: painted_frame
@@ -122,7 +117,6 @@ fn build_render_snapshot_with_images(
             lock_mode: painted_frame.client_snapshot.lock_mode,
             is_mouse_selection_enabled: painted_frame.client_snapshot.is_mouse_selection_enabled,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
@@ -160,10 +154,10 @@ fn build_placement_render_snapshot(
                     .iter()
                     .map(build_pane_slot)
                     .collect(),
-                effective_cell_size: tab_snapshot.effective_cell_size,
+                tab_size: tab_snapshot.tab_size,
                 stack_headers: tab_snapshot.stack_headers.clone(),
                 layout_mode: tab_snapshot.layout_mode,
-                are_all_panes_suppressed: tab_snapshot.is_every_pane_suppressed,
+                is_every_pane_suppressed: tab_snapshot.is_every_pane_suppressed,
                 gap_cell_count: tab_snapshot.gap_cell_count,
             },
             pane_snapshots,
@@ -395,7 +389,7 @@ impl ImageCache {
                 {
                     return Err(ImageAssemblyError::DuplicatePlacement);
                 }
-                let is_valid = image_placement_with_record(
+                let is_valid = build_image_placement_snapshot_from_record(
                     image_placement,
                     self.image_record_by_content_id
                         .get(&image_placement.image_content_id),
@@ -502,7 +496,7 @@ impl ImageCache {
             .map_err(|_| ImageAssemblyError::InvalidPlacement)?;
         let mut required_image_content_ids = HashSet::new();
         for placement in list_placement_image_snapshots(&placement_snapshot) {
-            let is_valid = image_placement_with_record(
+            let is_valid = build_image_placement_snapshot_from_record(
                 placement,
                 self.image_record_by_content_id
                     .get(&placement.image_content_id),
@@ -740,7 +734,11 @@ impl ImageCache {
                             && image_placement.image_content_id == image_content_id
                     })
                     .all(|image_placement| {
-                        image_placement_with_record(image_placement, Some(image_record)).is_some()
+                        build_image_placement_snapshot_from_record(
+                            image_placement,
+                            Some(image_record),
+                        )
+                        .is_some()
                     })
             })
         });
@@ -755,8 +753,11 @@ impl ImageCache {
                                 && image_placement.image_content_id == image_content_id
                         })
                         .all(|image_placement| {
-                            image_placement_with_record(image_placement, Some(image_record))
-                                .is_some()
+                            build_image_placement_snapshot_from_record(
+                                image_placement,
+                                Some(image_record),
+                            )
+                            .is_some()
                         })
                 });
         if has_valid_painted_placement && has_valid_placement_snapshot {
@@ -816,17 +817,15 @@ fn build_pane_slot(frame_slot: &FrameSlot) -> PaneSlot {
         pane_id: frame_slot.pane_id,
         outer_rect: frame_slot.outer_rect,
         content_rect: frame_slot.content_rect,
-        pane_kind: frame_slot.pane_kind,
         is_visible: frame_slot.is_visible,
         is_suppressed: frame_slot.is_suppressed,
-        is_dead: frame_slot.is_dead,
     }
 }
 
 /// One tab-bar entry, as the renderer reads it. The name is filtered by
 /// [`sanitize_reported_text`].
-fn build_tab_metadata(frame_tab_metadata: &FrameTabMeta) -> TabMeta {
-    TabMeta {
+fn build_tab_metadata(frame_tab_metadata: &FrameTabMetadata) -> TabMetadata {
+    TabMetadata {
         tab_id: frame_tab_metadata.tab_id,
         tab_name: sanitize_reported_text(&frame_tab_metadata.tab_name),
         tab_index: frame_tab_metadata.tab_index,
@@ -865,7 +864,7 @@ fn build_pane_snapshot(
             .collect(),
         is_reverse_video: frame_pane.is_reverse_video,
         mouse_tracking: frame_pane.mouse_tracking,
-        is_alternate_scroll_enabled: frame_pane.is_alt_scroll_enabled,
+        is_alternate_scroll_enabled: frame_pane.is_alternate_scroll_enabled,
         is_on_alternate_screen: frame_pane.is_on_alt_screen,
         view_top_row_index: frame_pane.view_top_row_index,
         selection_spans: frame_pane
@@ -875,9 +874,8 @@ fn build_pane_snapshot(
                 row_spans: frame_selection_spans.row_spans.clone(),
             }),
         has_selection: frame_pane.has_selection,
-        scrollback_meta: ScrollbackMeta {
-            is_truncated: frame_pane.scrollback_meta.is_truncated,
-            retained_line_count: frame_pane.scrollback_meta.retained_line_count,
+        scrollback_metadata: ScrollbackMetadata {
+            retained_line_count: frame_pane.scrollback_metadata.retained_line_count,
         },
     }
 }
@@ -887,13 +885,13 @@ fn build_image_placement_snapshot(
     frame_image_placement: &FrameImagePlacement,
     image_record_by_content_id: &HashMap<u64, Arc<ImageRecord>>,
 ) -> Option<ImagePlacementSnapshot> {
-    image_placement_with_record(
+    build_image_placement_snapshot_from_record(
         frame_image_placement,
         image_record_by_content_id.get(&frame_image_placement.image_content_id),
     )
 }
 
-fn image_placement_with_record(
+fn build_image_placement_snapshot_from_record(
     frame_image_placement: &FrameImagePlacement,
     cached_image_record: Option<&Arc<ImageRecord>>,
 ) -> Option<ImagePlacementSnapshot> {
@@ -926,7 +924,7 @@ fn image_placement_with_record(
             frame_image_placement.row_count,
         )?
     } else {
-        ImagePlacementSnapshot::unavailable(
+        ImagePlacementSnapshot::build_unavailable(
             frame_image_placement.placement_id,
             frame_image_placement.image_content_id,
             frame_image_placement.anchor_cell,

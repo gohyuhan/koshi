@@ -4,8 +4,8 @@
 //! template is a [`crate::tree::LayoutNode`] tree with the pane ids
 //! abstracted away: interior nodes mirror [`SplitNode`] field for field
 //! (direction, ordered children, parallel weights, expanded member), and each
-//! leaf carries *what to put there* — a terminal command or a plugin name —
-//! instead of *which pane is there*.
+//! leaf carries *what to put there* — a terminal command — instead of *which
+//! pane is there*.
 //!
 //! To instantiate a template, create one pane per leaf, then call
 //! [`TemplateNode::build_layout_node`] with the new ids in layout order.
@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -56,8 +55,8 @@ pub struct TabTemplate {
 /// A node in a template tree: a leaf to fill with a pane, or a split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateNode {
-    /// A slot one pane will occupy.
-    Leaf(LeafTemplate),
+    /// A slot one terminal pane will occupy.
+    Leaf(TerminalTemplate),
     /// An interior node dividing (or stacking) its rectangle, mirroring
     /// [`SplitNode`].
     Split(TemplateSplit),
@@ -69,7 +68,7 @@ impl TemplateNode {
     /// tree: leaf `i` here is the slot `ids[i]` fills in
     /// [`TemplateNode::build_layout_node`].
     #[must_use]
-    pub fn list_leaf_templates(&self) -> Vec<&LeafTemplate> {
+    pub fn list_leaf_templates(&self) -> Vec<&TerminalTemplate> {
         let mut leaf_templates = Vec::new();
         self.append_leaf_templates(&mut leaf_templates);
         leaf_templates
@@ -91,7 +90,7 @@ impl TemplateNode {
 
     /// Recursively appends leaves to `leaf_templates`, depth-first in layout
     /// order.
-    fn append_leaf_templates<'a>(&'a self, leaf_templates: &mut Vec<&'a LeafTemplate>) {
+    fn append_leaf_templates<'a>(&'a self, leaf_templates: &mut Vec<&'a TerminalTemplate>) {
         match self {
             Self::Leaf(leaf) => leaf_templates.push(leaf),
             Self::Split(split) => {
@@ -187,15 +186,6 @@ impl TemplateNode {
     }
 }
 
-/// What fills a leaf slot: a terminal pane or a plugin pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeafTemplate {
-    /// A terminal pane running a command (or the default shell).
-    Terminal(TerminalTemplate),
-    /// A plugin pane rendered by the named plugin.
-    Plugin(PluginTemplate),
-}
-
 /// A terminal pane to spawn: what to run, where, and with which extra
 /// environment.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -216,13 +206,6 @@ pub struct CommandTemplate {
     pub program: PathBuf,
     /// Arguments passed to the program, in order.
     pub arguments: Vec<String>,
-}
-
-/// A plugin pane to open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginTemplate {
-    /// The plugin's identifier, e.g. `"session-manager"`.
-    pub plugin_name: String,
 }
 
 /// An interior template node, mirroring [`SplitNode`]: `children` and
@@ -254,14 +237,4 @@ pub enum TemplateError {
         /// Length of the supplied id slice.
         provided_pane_id_count: usize,
     },
-}
-
-impl DomainError for TemplateError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }

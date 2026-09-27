@@ -31,7 +31,7 @@
 //!
 //! The decisions every koshi server makes the same way — a request kind this
 //! build does not have, a malformed-but-aligned frame, an oversize frame, and
-//! the Hello — belong to [`plane::next_request`], which this loop reads its
+//! the Hello — belong to [`plane::read_next_request`], which this loop reads its
 //! requests through. None of them reaches the session, any pane, or any other
 //! connection.
 //!
@@ -44,7 +44,7 @@
 //! A `Leaving` request ends the connection it arrives on: the thread serving it
 //! stops reading and the connection closes. Requests arrive in the order the
 //! peer queued them, so every request that peer sent is already with the
-//! dispatcher by then. [`IpcServer::attached_connections`] counts the attached
+//! dispatcher by then. [`IpcServer::count_attached_connections`] counts the attached
 //! clients still being read.
 //!
 //! [`IpcServer::close_intake`] ends the connections that are left: no event a
@@ -67,9 +67,8 @@ use std::time::{Duration, SystemTime};
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
-    compute_shared_socket_address, compute_socket_address, remove_advertisement_marker,
-    remove_socket_file, resolve_advertisement_marker_path, write_advertisement_marker,
-    EndpointFile,
+    compute_socket_address, remove_advertisement_marker, remove_socket_file,
+    resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile,
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
@@ -91,11 +90,11 @@ use koshi_renderer::snapshot::{
 };
 use koshi_terminal::graphics::ImageRecord;
 
-use crate::runtime::bus::wire_event;
+use crate::runtime::bus::build_wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
-    wire_frame, wire_frame_with_content_ids, wire_image_chunk_sources, wire_image_transfer,
-    wire_placement_snapshot,
+    build_wire_frame, build_wire_frame_with_content_ids, build_wire_image_chunk_sources,
+    build_wire_image_transfer, build_wire_placement_snapshot,
 };
 
 /// How long the accept loop sleeps after a failed accept before it accepts
@@ -134,7 +133,7 @@ pub struct OtherUsers {
 /// them carry an attached client, and whether what a peer sends still reaches
 /// the session.
 ///
-/// A serving thread reads `closed` and hands its event to the dispatcher under
+/// A serving thread reads `is_closed` and hands its event to the dispatcher under
 /// one shared borrow of the intake, and [`close_intake`](Intake::close_intake) sets
 /// `is_closed`
 /// under the exclusive borrow. So a hand-off either finished before the close,
@@ -166,7 +165,7 @@ impl Intake {
     /// thread holds. `None` means the connection is not served: intake is
     /// closed, or its read direction could not be taken.
     fn accept_connection(self: &Arc<Self>, connection: &Connection) -> Option<ServedConnection> {
-        let reader = connection.read_closer().ok()?;
+        let reader = connection.create_read_closer().ok()?;
         let mut intake_state = self.intake_state.write().expect("intake");
         if intake_state.is_closed {
             return None;
@@ -187,11 +186,11 @@ impl Intake {
     /// the caller's connection ends.
     fn hand_over_event(
         &self,
-        inbox_tx: &Sender<RuntimeEvent>,
+        inbox_sender: &Sender<RuntimeEvent>,
         runtime_event: RuntimeEvent,
     ) -> bool {
         let intake_state = self.intake_state.read().expect("intake");
-        !intake_state.is_closed && inbox_tx.send(runtime_event).is_ok()
+        !intake_state.is_closed && inbox_sender.send(runtime_event).is_ok()
     }
 
     /// Count one attached client's connection as being read, and hand back the
@@ -207,7 +206,7 @@ impl Intake {
     }
 
     /// How many connections carry an attached client and are still being read.
-    fn attached_connections(&self) -> usize {
+    fn count_attached_connections(&self) -> usize {
         self.intake_state
             .read()
             .expect("intake")
@@ -304,14 +303,14 @@ pub struct IpcServer {
     shared_socket_marker_path: Option<PathBuf>,
     /// Set by [`shutdown`](Self::shutdown); the accept loop exits when it
     /// observes the flag.
-    shutting_down: Arc<AtomicBool>,
+    is_shutting_down: Arc<AtomicBool>,
     /// The secret a connection presents at Hello, shared with the accept loop,
     /// which reads it for each connection it accepts.
     connection_token: Arc<RwLock<ConnectionToken>>,
     /// What the socket takes in, shared with every serving thread.
     connection_intake: Arc<Intake>,
     /// The accept loop, joined at shutdown. `None` once
-    /// [`stop`](Self::stop) has taken it out to join it.
+    /// [`stop_ipc_server`](Self::stop_ipc_server) has taken it out to join it.
     accept_thread: Option<JoinHandle<()>>,
 }
 
@@ -337,7 +336,7 @@ impl IpcServer {
     pub fn start(
         runtime_directory: &Path,
         session: SessionId,
-        inbox_tx: Sender<RuntimeEvent>,
+        inbox_sender: Sender<RuntimeEvent>,
         other_users: Option<OtherUsers>,
     ) -> Result<IpcServer, IpcError> {
         koshi_paths::ensure_private_directory(runtime_directory).map_err(|directory_error| {
@@ -357,7 +356,7 @@ impl IpcServer {
             Some(other_users) => {
                 let shared_user_directory =
                     ensure_shared_directories(&other_users.shared_directory)?;
-                let socket_address = compute_shared_socket_address(&shared_user_directory, session);
+                let socket_address = compute_socket_address(&shared_user_directory, session);
                 validate_shared_socket_address(&socket_address, &shared_user_directory)?;
                 // A Windows pipe has no filesystem entry, so a marker file is
                 // what names the session listening on one.
@@ -409,8 +408,8 @@ impl IpcServer {
         }
 
         let allow_other_users_setting = other_users.map(|other_users| other_users.is_enabled);
-        let shutting_down = Arc::new(AtomicBool::new(false));
-        let accept_flag = Arc::clone(&shutting_down);
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let accept_flag = Arc::clone(&is_shutting_down);
         let connection_intake = Arc::new(Intake::default());
         let accept_intake = Arc::clone(&connection_intake);
         let connection_token = Arc::new(RwLock::new(connection_token));
@@ -419,7 +418,7 @@ impl IpcServer {
             run_accept_loop(
                 &listener,
                 &accept_connection_token,
-                &inbox_tx,
+                &inbox_sender,
                 &accept_flag,
                 allow_other_users_setting.as_ref(),
                 &accept_intake,
@@ -430,7 +429,7 @@ impl IpcServer {
             socket_address,
             endpoint_path,
             shared_socket_marker_path,
-            shutting_down,
+            is_shutting_down,
             connection_token,
             connection_intake,
             accept_thread: Some(accept_thread),
@@ -488,8 +487,8 @@ impl IpcServer {
     /// read everything it sent. After that frame, `0` means every attached
     /// client's input is in the runtime inbox.
     #[must_use]
-    pub fn attached_connections(&self) -> usize {
-        self.connection_intake.attached_connections()
+    pub fn count_attached_connections(&self) -> usize {
+        self.connection_intake.count_attached_connections()
     }
 
     /// The control-socket address this server is serving.
@@ -515,7 +514,7 @@ impl IpcServer {
     /// guarded by taking `accept_thread`, and removing an already-removed
     /// file is a no-op.
     fn stop_ipc_server(&mut self) {
-        self.shutting_down.store(true, Ordering::SeqCst);
+        self.is_shutting_down.store(true, Ordering::SeqCst);
         if let Some(accept_thread_handle) = self.accept_thread.take() {
             // The accept loop sits blocked in `accept`. A bare connect wakes it
             // and it reads the flag. That connection stays open across the join:
@@ -610,14 +609,14 @@ impl Drop for IpcServer {
 fn run_accept_loop(
     listener: &Listener,
     connection_token: &RwLock<ConnectionToken>,
-    inbox_tx: &Sender<RuntimeEvent>,
-    shutting_down: &AtomicBool,
+    inbox_sender: &Sender<RuntimeEvent>,
+    is_shutting_down: &AtomicBool,
     allow_other_users_setting: Option<&OtherUsersSetting>,
     connection_intake: &Arc<Intake>,
 ) {
     transport::accept_until_shutdown(
         listener,
-        shutting_down,
+        is_shutting_down,
         ACCEPT_RETRY_DELAY_DURATION,
         |connection| {
             // The OS reports which user opened the connection, so a peer
@@ -642,12 +641,12 @@ fn run_accept_loop(
             // Read for each connection, so a token rotated after this
             // server started is the one the next Hello is checked against.
             let connection_token = connection_token.read().expect("connection token").clone();
-            let inbox_tx = inbox_tx.clone();
+            let inbox_sender = inbox_sender.clone();
             std::thread::spawn(move || {
                 serve_connection(
                     connection,
                     connection_token,
-                    &inbox_tx,
+                    &inbox_sender,
                     peer,
                     live_setting,
                     &served_connection,
@@ -659,7 +658,7 @@ fn run_accept_loop(
 
 /// Serve one connection until its peer hangs up or a fault closes it.
 ///
-/// [`plane::next_request`] makes every decision that is the same on every
+/// [`plane::read_next_request`] makes every decision that is the same on every
 /// koshi protocol — the framing faults, a request kind this build does not
 /// have, and the Hello — and reads `live_setting` before any of its answers go
 /// out. What is left is this session's own vocabulary: `SubmitCommand`,
@@ -694,7 +693,7 @@ fn run_accept_loop(
 fn serve_connection(
     mut connection: Connection,
     connection_token: ConnectionToken,
-    inbox_tx: &Sender<RuntimeEvent>,
+    inbox_sender: &Sender<RuntimeEvent>,
     peer: Peer,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
@@ -709,7 +708,7 @@ fn serve_connection(
         Some(is_enabled) => is_enabled(),
     };
     loop {
-        let (request_id, request_kind) = match plane::next_request::<SessionPlane>(
+        let (request_id, request_kind) = match plane::read_next_request::<SessionPlane>(
             &mut connection,
             &mut gate,
             BUILD_VERSION,
@@ -729,10 +728,10 @@ fn serve_connection(
                 unreachable!("Hello is answered by the connection thread before dispatch")
             }
             IpcRequestKind::SubmitCommand(envelope) => {
-                let envelope = stamp_cli_command_source(*envelope);
+                let envelope = Box::new(stamp_cli_command_source(*envelope));
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
-                    inbox_tx,
+                    inbox_sender,
                     |response_sender| RuntimeEvent::Ipc {
                         envelope,
                         response_sender,
@@ -747,8 +746,7 @@ fn serve_connection(
                 }
             }
             IpcRequestKind::Attach {
-                viewport: viewport_size,
-                event_filter,
+                viewport_size,
                 resume_client_id,
                 resume_token,
                 pane_area,
@@ -757,14 +755,13 @@ fn serve_connection(
             } => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
-                    inbox_tx,
+                    inbox_sender,
                     |response_sender| RuntimeEvent::IpcAttach {
                         resume_client_id,
                         resume_token,
                         viewport_size,
                         pane_area,
                         cell_size,
-                        event_filter: event_filter.into(),
                         attached_at: SystemTime::now(),
                         is_remote: gate.is_remote_caller(),
                         response_sender,
@@ -793,7 +790,7 @@ fn serve_connection(
                 };
                 if connection.send(&attached_response).is_err() {
                     served_connection.intake.hand_over_event(
-                        inbox_tx,
+                        inbox_sender,
                         RuntimeEvent::ClientDetached {
                             client_id: accepted_client.client_id,
                             detached_at: SystemTime::now(),
@@ -812,7 +809,7 @@ fn serve_connection(
                         ending_notice: accepted_client.ending_notice,
                         graphics_capabilities,
                     },
-                    inbox_tx,
+                    inbox_sender,
                     live_setting,
                     served_connection,
                 );
@@ -831,7 +828,7 @@ fn serve_connection(
             IpcRequestKind::Discovery => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
-                    inbox_tx,
+                    inbox_sender,
                     |response_sender| RuntimeEvent::IpcDiscovery { response_sender },
                 );
                 // No running session: the process is past its last session, so
@@ -847,7 +844,7 @@ fn serve_connection(
             IpcRequestKind::Layout { tab_id } => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
-                    inbox_tx,
+                    inbox_sender,
                     |response_sender| RuntimeEvent::IpcLayout {
                         tab_id,
                         response_sender,
@@ -870,7 +867,7 @@ fn serve_connection(
             IpcRequestKind::Restart => {
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
-                    inbox_tx,
+                    inbox_sender,
                     |response_sender| RuntimeEvent::IpcRestart { response_sender },
                 );
                 match dispatch_response {
@@ -960,13 +957,13 @@ fn serve_connection(
 /// caller: taken before the `Attached` frame is written, dropped once this
 /// returns.
 ///
-/// `served` is this connection's entry in the [`Intake`]: the intake holds this
+/// `served_connection` is this connection's entry in the [`Intake`]: the intake holds this
 /// connection's read direction through it. The client's record stays as it is,
 /// so the image swap that cut the connection carries it across.
 fn stream_events(
     connection: Connection,
     stream: AttachedStream,
-    inbox_tx: &Sender<RuntimeEvent>,
+    inbox_sender: &Sender<RuntimeEvent>,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
 ) {
@@ -977,7 +974,7 @@ fn stream_events(
         graphics_capabilities,
     } = stream;
     let (mut reader, mut writer) = connection.split();
-    let writer_inbox = inbox_tx.clone();
+    let writer_inbox = inbox_sender.clone();
     let writer_intake = Arc::clone(&served_connection.intake);
     ending_notice.record_writer_started();
     std::thread::spawn(move || {
@@ -1010,7 +1007,7 @@ fn stream_events(
                 let _ = writer.send(&SessionEvent::Detached);
                 break;
             };
-            let write_failed = match &delivery {
+            let has_write_failed = match &delivery {
                 Delivery::Frame(snapshot) => send_painted_frame(
                     &mut writer,
                     &mut image_cache,
@@ -1031,7 +1028,7 @@ fn stream_events(
                 ),
                 _ => false,
             };
-            if write_failed {
+            if has_write_failed {
                 break;
             }
             if matches!(
@@ -1040,9 +1037,9 @@ fn stream_events(
             ) {
                 continue;
             }
-            let session_event = wire_event(&delivery);
+            let session_event = build_wire_event(&delivery);
             if let Some(session_event) = session_event {
-                let write_failed = match writer.send(&session_event) {
+                let has_write_failed = match writer.send(&session_event) {
                     Ok(()) => false,
                     Err(IpcError::FrameTooLarge {
                         frame_byte_count,
@@ -1058,7 +1055,7 @@ fn stream_events(
                     }
                     Err(_) => true,
                 };
-                if write_failed {
+                if has_write_failed {
                     break;
                 }
                 // `Quit` and `Restarting` are the stream's terminal frames; the
@@ -1126,7 +1123,7 @@ fn stream_events(
                 key_input,
             },
             IpcRequestKind::Resize {
-                viewport: viewport_size,
+                viewport_size,
                 pane_area,
                 cell_size,
             } => RuntimeEvent::Resize {
@@ -1150,7 +1147,7 @@ fn stream_events(
                 // into it fails.
                 let (response_sender, _) = mpsc::channel();
                 RuntimeEvent::Ipc {
-                    envelope: stamp_client_command_source(*envelope, client_id),
+                    envelope: Box::new(stamp_client_command_source(*envelope, client_id)),
                     response_sender,
                 }
             }
@@ -1175,13 +1172,13 @@ fn stream_events(
         };
         if !served_connection
             .intake
-            .hand_over_event(inbox_tx, runtime_event)
+            .hand_over_event(inbox_sender, runtime_event)
         {
             break;
         }
     }
     served_connection.intake.hand_over_event(
-        inbox_tx,
+        inbox_sender,
         RuntimeEvent::ClientDetached {
             client_id,
             detached_at: SystemTime::now(),
@@ -1191,7 +1188,6 @@ fn stream_events(
 }
 
 /// One image record retained while its placement remains in this connection's frame.
-#[derive(Clone)]
 struct CachedConnectionImage {
     /// Identity used by painted frames and image transfer events.
     image_content_id: u64,
@@ -1243,7 +1239,7 @@ impl ConnectionImageCache {
             self.prepare_image_records(image_placements);
 
         let painted_frame =
-            wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
+            build_wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
                 self.cached_image_by_pane_and_placement_id
                     .get(&(pane_id, image_placement.get_placement_id()))
                     .map_or(image_placement.get_image_content_id(), |cached_image| {
@@ -1382,16 +1378,17 @@ impl ConnectionImageCache {
         .collect();
         let (should_reset_image_cache, image_uploads) =
             self.prepare_image_records(image_placements);
-        let placement_snapshot = crate::runtime::frame::wire_placement_snapshot_with_content_ids(
-            placement_snapshot,
-            |pane_id, image_placement| {
-                self.cached_image_by_pane_and_placement_id
-                    .get(&(pane_id, image_placement.get_placement_id()))
-                    .map_or(image_placement.get_image_content_id(), |cached_image| {
-                        cached_image.image_content_id
-                    })
-            },
-        );
+        let placement_snapshot =
+            crate::runtime::frame::build_wire_placement_snapshot_with_content_ids(
+                placement_snapshot,
+                |pane_id, image_placement| {
+                    self.cached_image_by_pane_and_placement_id
+                        .get(&(pane_id, image_placement.get_placement_id()))
+                        .map_or(image_placement.get_image_content_id(), |cached_image| {
+                            cached_image.image_content_id
+                        })
+                },
+            );
         PreparedPlacementSnapshot {
             should_reset_image_cache,
             placement_snapshot,
@@ -1451,7 +1448,7 @@ fn send_painted_frame(
 ) -> bool {
     if !graphics_capabilities.has_native_image_protocol() {
         let painted_frame_event = SessionEvent::Painted {
-            frame: Box::new(wire_frame(render_snapshot)),
+            frame: Box::new(build_wire_frame(render_snapshot)),
         };
         return match writer.send(&painted_frame_event) {
             Ok(()) => false,
@@ -1471,67 +1468,17 @@ fn send_painted_frame(
             );
         }
     }
-    let repeated_painted_frame = (prepared_image_frame.image_uploads.len()
-        > MAX_FRAME_IMAGE_TRANSFER_COUNT)
-        .then(|| prepared_image_frame.painted_frame.clone());
     let painted_frame_event = SessionEvent::Painted {
         frame: Box::new(prepared_image_frame.painted_frame),
     };
-    if let Err(write_error) = writer.send(&painted_frame_event) {
-        return report_image_send_error(image_cache, client_id, write_error, "the painted frame");
-    }
-    for (upload_index, (image_content_id, image_record)) in
-        prepared_image_frame.image_uploads.into_iter().enumerate()
-    {
-        if upload_index != 0 && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0 {
-            let repeated_painted_frame_event = SessionEvent::Painted {
-                frame: Box::new(
-                    repeated_painted_frame
-                        .as_ref()
-                        .expect("a repeated image batch retained its painted frame")
-                        .clone(),
-                ),
-            };
-            if let Err(write_error) = writer.send(&repeated_painted_frame_event) {
-                return report_image_send_error(
-                    image_cache,
-                    client_id,
-                    write_error,
-                    "the painted frame",
-                );
-            }
-        }
-        let image_transfer_start_event = SessionEvent::ImageContentStart {
-            image_transfer: wire_image_transfer(image_content_id, &image_record),
-        };
-        if let Err(write_error) = writer.send(&image_transfer_start_event) {
-            return report_image_send_error(
-                image_cache,
-                client_id,
-                write_error,
-                "an image transfer start",
-            );
-        }
-        for (byte_offset, is_last_chunk, chunk_bytes) in wire_image_chunk_sources(&image_record) {
-            let image_transfer_chunk_event = SessionEvent::ImageContentChunk {
-                image_chunk: FrameImageChunk {
-                    image_transfer_id: image_content_id,
-                    byte_offset,
-                    is_last: is_last_chunk,
-                    chunk_bytes: chunk_bytes.to_vec(),
-                },
-            };
-            if let Err(write_error) = writer.send(&image_transfer_chunk_event) {
-                return report_image_send_error(
-                    image_cache,
-                    client_id,
-                    write_error,
-                    "an image transfer chunk",
-                );
-            }
-        }
-    }
-    false
+    send_image_uploads(
+        writer,
+        image_cache,
+        client_id,
+        &painted_frame_event,
+        "the painted frame",
+        prepared_image_frame.image_uploads,
+    )
 }
 
 /// Send one placement preview and each new image record after it.
@@ -1544,7 +1491,7 @@ fn send_placement_snapshot(
     client_id: ClientId,
 ) -> bool {
     if !graphics_capabilities.has_native_image_protocol() {
-        let mut wire_snapshot = wire_placement_snapshot(placement_snapshot);
+        let mut wire_snapshot = build_wire_placement_snapshot(placement_snapshot);
         hide_placement_image_records(&mut wire_snapshot);
         let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
             request_id,
@@ -1571,57 +1518,65 @@ fn send_placement_snapshot(
             );
         }
     }
-    let repeated_placement_snapshot = (prepared_placement_snapshot.image_uploads.len()
-        > MAX_FRAME_IMAGE_TRANSFER_COUNT)
-        .then(|| prepared_placement_snapshot.placement_snapshot.clone());
     let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
         request_id,
         snapshot: Box::new(prepared_placement_snapshot.placement_snapshot),
     };
-    if let Err(write_error) = writer.send(&placement_snapshot_event) {
-        return report_image_send_error(
-            image_cache,
-            client_id,
-            write_error,
-            "the placement snapshot",
-        );
+    send_image_uploads(
+        writer,
+        image_cache,
+        client_id,
+        &placement_snapshot_event,
+        "the placement snapshot",
+        prepared_placement_snapshot.image_uploads,
+    )
+}
+
+/// Send `leading_event`, then each record in `image_uploads` as one
+/// `ImageContentStart` followed by its `ImageContentChunk` frames.
+/// `leading_event` is sent again before every
+/// `MAX_FRAME_IMAGE_TRANSFER_COUNT`-th record: 9 records with a limit of 4 send
+/// the event, records 0-3, the event, records 4-7, the event, record 8.
+/// `leading_event_part` names `leading_event` in the warning a failed write
+/// logs, and a failed record write logs `an image transfer start after
+/// <leading_event_part>` or `an image transfer chunk after <leading_event_part>`.
+/// Returns `true` when the connection is no longer usable.
+fn send_image_uploads(
+    writer: &mut FrameWriter,
+    image_cache: &mut ConnectionImageCache,
+    client_id: ClientId,
+    leading_event: &SessionEvent,
+    leading_event_part: &str,
+    image_uploads: Vec<(u64, Arc<ImageRecord>)>,
+) -> bool {
+    if let Err(write_error) = writer.send(leading_event) {
+        return report_image_send_error(image_cache, client_id, write_error, leading_event_part);
     }
-    for (upload_index, (image_content_id, image_record)) in prepared_placement_snapshot
-        .image_uploads
-        .into_iter()
-        .enumerate()
-    {
+    for (upload_index, (image_content_id, image_record)) in image_uploads.into_iter().enumerate() {
         if upload_index != 0 && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0 {
-            let repeated_placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
-                request_id,
-                snapshot: Box::new(
-                    repeated_placement_snapshot
-                        .as_ref()
-                        .expect("a repeated image batch retained its placement snapshot")
-                        .clone(),
-                ),
-            };
-            if let Err(write_error) = writer.send(&repeated_placement_snapshot_event) {
+            if let Err(write_error) = writer.send(leading_event) {
                 return report_image_send_error(
                     image_cache,
                     client_id,
                     write_error,
-                    "the placement snapshot",
+                    leading_event_part,
                 );
             }
         }
         let image_transfer_start_event = SessionEvent::ImageContentStart {
-            image_transfer: wire_image_transfer(image_content_id, &image_record),
+            image_transfer: build_wire_image_transfer(image_content_id, &image_record),
         };
         if let Err(write_error) = writer.send(&image_transfer_start_event) {
             return report_image_send_error(
                 image_cache,
                 client_id,
                 write_error,
-                "a placement image transfer start",
+                &format!("an image transfer start after {leading_event_part}"),
             );
         }
-        for (byte_offset, is_last_chunk, chunk_bytes) in wire_image_chunk_sources(&image_record) {
+        for (byte_offset, is_last_chunk, chunk_bytes) in
+            build_wire_image_chunk_sources(&image_record)
+        {
             let image_transfer_chunk_event = SessionEvent::ImageContentChunk {
                 image_chunk: FrameImageChunk {
                     image_transfer_id: image_content_id,
@@ -1635,7 +1590,7 @@ fn send_placement_snapshot(
                     image_cache,
                     client_id,
                     write_error,
-                    "a placement image transfer chunk",
+                    &format!("an image transfer chunk after {leading_event_part}"),
                 );
             }
         }
@@ -1702,32 +1657,26 @@ fn report_image_send_error(
 /// A control connection carries a `koshi` CLI invocation. Its two sources,
 /// [`CommandSource::InSessionCli`] and [`CommandSource::ExternalCli`], are kept
 /// as they stand. Every other source becomes
-/// `ExternalCli { session_id: None, target_client: None }`, which names no
+/// `ExternalCli { session_id: None, target_client_id: None }`, which names no
 /// session and no client.
 ///
 /// The envelope's `client_id` is re-derived from the stamped source; the two
 /// always agree.
 ///
-/// A sender that writes `CommandSource::Internal` and
+/// A sender that writes `CommandSource::KeyBinding` and
 /// `Command::ToggleMouseSelect` reaches the dispatcher as
-/// `ExternalCli { session_id: None, target_client: None }` carrying
+/// `ExternalCli { session_id: None, target_client_id: None }` carrying
 /// `Command::ToggleMouseSelect`. The dispatcher's CLI-admission check refuses
 /// it: the CLI has no mouse-select verb.
 fn stamp_cli_command_source(envelope: CommandEnvelope) -> CommandEnvelope {
     let command_source = match envelope.command_source {
         command_source @ (CommandSource::InSessionCli { .. }
         | CommandSource::ExternalCli { .. }) => command_source,
-        CommandSource::KeyBinding { .. }
-        | CommandSource::Mouse { .. }
-        | CommandSource::Plugin { .. }
-        | CommandSource::Internal => CommandSource::from_external_cli(None, None),
+        CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
+            CommandSource::from_external_cli(None, None)
+        }
     };
-    CommandEnvelope::from_parts(
-        envelope.command_id,
-        command_source,
-        envelope.issued_at,
-        envelope.command,
-    )
+    CommandEnvelope::from_parts(envelope.command_id, command_source, envelope.command)
 }
 
 /// Rebuild `envelope` with [`CommandSource::KeyBinding`] naming `client_id`,
@@ -1742,7 +1691,6 @@ fn stamp_client_command_source(envelope: CommandEnvelope, client_id: ClientId) -
     CommandEnvelope::from_parts(
         envelope.command_id,
         CommandSource::from_key_binding(client_id),
-        envelope.issued_at,
         envelope.command,
     )
 }
@@ -1753,11 +1701,11 @@ fn stamp_client_command_source(envelope: CommandEnvelope, client_id: ClientId) -
 /// or the dispatcher is gone — so the caller closes its connection without one.
 fn request_dispatcher_response<T>(
     connection_intake: &Intake,
-    inbox_tx: &Sender<RuntimeEvent>,
+    inbox_sender: &Sender<RuntimeEvent>,
     build_runtime_event: impl FnOnce(mpsc::Sender<T>) -> RuntimeEvent,
 ) -> Option<T> {
     let (response_sender, response_receiver) = mpsc::channel();
-    if !connection_intake.hand_over_event(inbox_tx, build_runtime_event(response_sender)) {
+    if !connection_intake.hand_over_event(inbox_sender, build_runtime_event(response_sender)) {
         return None;
     }
     response_receiver.recv().ok()

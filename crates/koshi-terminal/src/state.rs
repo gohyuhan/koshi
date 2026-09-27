@@ -86,7 +86,7 @@ pub struct TerminalState {
     /// The primary (normal, scrolling) screen buffer, including row metadata,
     /// reference-counted: a render snapshot shares it without copying, and a
     /// write clones it once on demand (copy-on-write via `Arc::make_mut` in
-    /// `active_grid_mut`).
+    /// `get_active_grid_mut`).
     primary: Arc<Grid>,
     /// The alternate screen buffer used by full-screen apps, including row
     /// metadata; swapped in via DEC mode `?1049`/`?47` and never appended to the
@@ -177,7 +177,6 @@ pub struct TerminalState {
 
 #[derive(Serialize)]
 struct TerminalStateSerializeFields<'a> {
-    native_image_coverage: bool,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: &'a Arc<Grid>,
     alternate: &'a Arc<Grid>,
@@ -256,7 +255,6 @@ impl Serialize for TerminalState {
         let image_contents =
             images::serialize_image_content_table(self).map_err(serde::ser::Error::custom)?;
         TerminalStateSerializeFields {
-            native_image_coverage: true,
             cell_size: self.cell_size,
             primary: &self.primary,
             alternate: &self.alternate,
@@ -295,7 +293,6 @@ impl Serialize for TerminalState {
 }
 
 struct TerminalStateFields {
-    native_image_coverage: bool,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
@@ -330,7 +327,6 @@ struct TerminalStateFields {
 }
 
 struct RawTerminalStateFields {
-    native_image_coverage: bool,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     primary: Arc<Grid>,
     alternate: Arc<Grid>,
@@ -343,8 +339,8 @@ struct RawTerminalStateFields {
     primary_image_history: Vec<images::SerializedImagePlacement>,
     alternate_image_placements: Vec<images::SerializedImagePlacement>,
     kitty_images: Vec<images::SerializedKittyImage>,
-    image_contents: Option<Vec<images::SerializedImageContent>>,
-    next_image_content_id: Option<images::ImageContentId>,
+    image_contents: Vec<images::SerializedImageContent>,
+    next_image_content_id: images::ImageContentId,
     next_image_placement_id: ImagePlacementId,
     modes: TerminalModes,
     sixel_palette: SixelPalette,
@@ -427,7 +423,6 @@ fn normalize_restored_horizontal_margins(
 }
 
 enum RawTerminalStateField {
-    NativeImageCoverage,
     CellSize,
     Primary,
     Alternate,
@@ -482,7 +477,6 @@ impl<'de> Deserialize<'de> for RawTerminalStateField {
                 E: serde::de::Error,
             {
                 Ok(match field_name {
-                    "native_image_coverage" => RawTerminalStateField::NativeImageCoverage,
                     "cell_size" => RawTerminalStateField::CellSize,
                     "primary" => RawTerminalStateField::Primary,
                     "alternate" => RawTerminalStateField::Alternate,
@@ -537,11 +531,13 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         formatter.write_str("a terminal state")
     }
 
-    fn visit_map<MapAccess>(self, mut map: MapAccess) -> Result<Self::Value, MapAccess::Error>
+    fn visit_map<MapAccess>(
+        self,
+        mut map_access: MapAccess,
+    ) -> Result<Self::Value, MapAccess::Error>
     where
         MapAccess: serde::de::MapAccess<'de>,
     {
-        let mut native_image_coverage = None;
         let mut cell_size = None;
         let mut primary_grid = None;
         let mut alternate_grid = None;
@@ -575,61 +571,55 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut cluster_base = None;
         let mut device_query_replies = None;
 
-        while let Some(terminal_state_field) = map.next_key::<RawTerminalStateField>()? {
+        while let Some(terminal_state_field) = map_access.next_key::<RawTerminalStateField>()? {
             match terminal_state_field {
-                RawTerminalStateField::NativeImageCoverage => {
-                    if native_image_coverage.is_some() {
-                        return Err(serde::de::Error::duplicate_field("native_image_coverage"));
-                    }
-                    native_image_coverage = Some(map.next_value()?);
-                }
                 RawTerminalStateField::CellSize => {
                     if cell_size.is_some() {
                         return Err(serde::de::Error::duplicate_field("cell_size"));
                     }
-                    cell_size = Some(map.next_value()?);
+                    cell_size = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Primary => {
                     if primary_grid.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary"));
                     }
-                    primary_grid = Some(map.next_value()?);
+                    primary_grid = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Alternate => {
                     if alternate_grid.is_some() {
                         return Err(serde::de::Error::duplicate_field("alternate"));
                     }
-                    alternate_grid = Some(map.next_value()?);
+                    alternate_grid = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Active => {
                     if active_screen.is_some() {
                         return Err(serde::de::Error::duplicate_field("active_screen"));
                     }
-                    active_screen = Some(map.next_value()?);
+                    active_screen = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::PrimaryCursor => {
                     if primary_cursor.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary_cursor"));
                     }
-                    primary_cursor = Some(map.next_value()?);
+                    primary_cursor = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::AlternateCursor => {
                     if alternate_cursor.is_some() {
                         return Err(serde::de::Error::duplicate_field("alternate_cursor"));
                     }
-                    alternate_cursor = Some(map.next_value()?);
+                    alternate_cursor = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::PrimaryRender => {
                     if primary_render.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary_render"));
                     }
-                    primary_render = Some(map.next_value()?);
+                    primary_render = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::AlternateRender => {
                     if alternate_render.is_some() {
                         return Err(serde::de::Error::duplicate_field("alternate_render"));
                     }
-                    alternate_render = Some(map.next_value()?);
+                    alternate_render = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::PrimaryImagePlacements => {
                     if primary_image_placements.is_some() {
@@ -638,18 +628,14 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                         ));
                     }
                     primary_image_placements =
-                        Some(map.next_value_seed(images::SerializedImagePlacementsSeed {
-                            budget: self.budget,
-                        })?);
+                        Some(map_access.next_value_seed(images::SerializedImagePlacementsSeed)?);
                 }
                 RawTerminalStateField::PrimaryImageHistory => {
                     if primary_image_history.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary_image_history"));
                     }
                     primary_image_history =
-                        Some(map.next_value_seed(images::SerializedImagePlacementsSeed {
-                            budget: self.budget,
-                        })?);
+                        Some(map_access.next_value_seed(images::SerializedImagePlacementsSeed)?);
                 }
                 RawTerminalStateField::AlternateImagePlacements => {
                     if alternate_image_placements.is_some() {
@@ -658,62 +644,60 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                         ));
                     }
                     alternate_image_placements =
-                        Some(map.next_value_seed(images::SerializedImagePlacementsSeed {
-                            budget: self.budget,
-                        })?);
+                        Some(map_access.next_value_seed(images::SerializedImagePlacementsSeed)?);
                 }
                 RawTerminalStateField::KittyImages => {
                     if kitty_images.is_some() {
                         return Err(serde::de::Error::duplicate_field("kitty_images"));
                     }
                     kitty_images =
-                        Some(map.next_value_seed(images::SerializedKittyImagesSeed {
-                            budget: self.budget,
-                        })?);
+                        Some(map_access.next_value_seed(images::SerializedKittyImagesSeed)?);
                 }
                 RawTerminalStateField::ImageContents => {
                     if image_contents.is_some() {
                         return Err(serde::de::Error::duplicate_field("image_contents"));
                     }
-                    image_contents = Some(map.next_value_seed(images::OptionalContentsSeed {
-                        budget: self.budget,
-                    })?);
+                    image_contents = Some(map_access.next_value_seed(
+                        images::SerializedImageContentsSeed {
+                            budget: self.budget,
+                        },
+                    )?);
                 }
                 RawTerminalStateField::NextImageContentId => {
                     if next_image_content_id.is_some() {
                         return Err(serde::de::Error::duplicate_field("next_image_content_id"));
                     }
-                    next_image_content_id = Some(map.next_value()?);
+                    next_image_content_id = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::NextImagePlacementId => {
                     if next_image_placement_id.is_some() {
                         return Err(serde::de::Error::duplicate_field("next_image_placement_id"));
                     }
-                    next_image_placement_id = Some(map.next_value()?);
+                    next_image_placement_id = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Modes => {
                     if modes.is_some() {
                         return Err(serde::de::Error::duplicate_field("modes"));
                     }
-                    modes = Some(map.next_value()?);
+                    modes = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::SixelPalette => {
                     if sixel_palette.is_some() {
                         return Err(serde::de::Error::duplicate_field("sixel_palette"));
                     }
-                    sixel_palette = Some(map.next_value()?);
+                    sixel_palette = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::TabStops => {
                     if tab_stops.is_some() {
                         return Err(serde::de::Error::duplicate_field("tab_stops"));
                     }
-                    tab_stops = Some(map.next_value()?);
+                    tab_stops = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Title => {
                     if title.is_some() {
                         return Err(serde::de::Error::duplicate_field("title"));
                     }
-                    title = Some(map.next_value()?);
+                    title = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::ReportedWorkingDirectory => {
                     if reported_working_directory.is_some() {
@@ -721,37 +705,37 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                             "reported_working_directory",
                         ));
                     }
-                    reported_working_directory = Some(map.next_value()?);
+                    reported_working_directory = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::ShellIntegrationState => {
                     if shell_integration_state.is_some() {
                         return Err(serde::de::Error::duplicate_field("shell_integration_state"));
                     }
-                    shell_integration_state = Some(map.next_value()?);
+                    shell_integration_state = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::ShellIntegrationFacts => {
                     if shell_integration_facts.is_some() {
                         return Err(serde::de::Error::duplicate_field("shell_integration_facts"));
                     }
-                    shell_integration_facts = Some(map.next_value()?);
+                    shell_integration_facts = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Scrollback => {
                     if scrollback.is_some() {
                         return Err(serde::de::Error::duplicate_field("scrollback"));
                     }
-                    scrollback = Some(map.next_value()?);
+                    scrollback = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::PrimaryScrollRegion => {
                     if primary_scroll_region.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary_scroll_region"));
                     }
-                    primary_scroll_region = Some(map.next_value()?);
+                    primary_scroll_region = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::AlternateScrollRegion => {
                     if alternate_scroll_region.is_some() {
                         return Err(serde::de::Error::duplicate_field("alternate_scroll_region"));
                     }
-                    alternate_scroll_region = Some(map.next_value()?);
+                    alternate_scroll_region = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::PrimaryHorizontalMargins => {
                     if primary_horizontal_margins.is_some() {
@@ -759,7 +743,7 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                             "primary_horizontal_margins",
                         ));
                     }
-                    primary_horizontal_margins = Some(map.next_value()?);
+                    primary_horizontal_margins = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::AlternateHorizontalMargins => {
                     if alternate_horizontal_margins.is_some() {
@@ -767,13 +751,13 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                             "alternate_horizontal_margins",
                         ));
                     }
-                    alternate_horizontal_margins = Some(map.next_value()?);
+                    alternate_horizontal_margins = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::PrimaryKeyboardStack => {
                     if primary_keyboard_stack.is_some() {
                         return Err(serde::de::Error::duplicate_field("primary_keyboard_stack"));
                     }
-                    primary_keyboard_stack = Some(map.next_value()?);
+                    primary_keyboard_stack = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::AlternateKeyboardStack => {
                     if alternate_keyboard_stack.is_some() {
@@ -781,35 +765,34 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                             "alternate_keyboard_stack",
                         ));
                     }
-                    alternate_keyboard_stack = Some(map.next_value()?);
+                    alternate_keyboard_stack = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Cluster => {
                     if cluster.is_some() {
                         return Err(serde::de::Error::duplicate_field("cluster"));
                     }
-                    cluster = Some(map.next_value()?);
+                    cluster = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::ClusterBase => {
                     if cluster_base.is_some() {
                         return Err(serde::de::Error::duplicate_field("cluster_base"));
                     }
-                    cluster_base = Some(map.next_value()?);
+                    cluster_base = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::DeviceQueryReplies => {
                     if device_query_replies.is_some() {
                         return Err(serde::de::Error::duplicate_field("device_query_replies"));
                     }
-                    device_query_replies = Some(map.next_value()?);
+                    device_query_replies = Some(map_access.next_value()?);
                 }
                 RawTerminalStateField::Other => {
-                    let _: serde::de::IgnoredAny = map.next_value()?;
+                    let _: serde::de::IgnoredAny = map_access.next_value()?;
                 }
             }
         }
 
         Ok(RawTerminalStateFields {
-            native_image_coverage: native_image_coverage.unwrap_or(false),
-            cell_size: cell_size.unwrap_or_default(),
+            cell_size: cell_size.ok_or_else(|| serde::de::Error::missing_field("cell_size"))?,
             primary: primary_grid.ok_or_else(|| serde::de::Error::missing_field("primary"))?,
             alternate: alternate_grid
                 .ok_or_else(|| serde::de::Error::missing_field("alternate"))?,
@@ -823,31 +806,44 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 .ok_or_else(|| serde::de::Error::missing_field("primary_render"))?,
             alternate_render: alternate_render
                 .ok_or_else(|| serde::de::Error::missing_field("alternate_render"))?,
-            primary_image_placements: primary_image_placements.unwrap_or_default(),
-            primary_image_history: primary_image_history.unwrap_or_default(),
-            alternate_image_placements: alternate_image_placements.unwrap_or_default(),
-            kitty_images: kitty_images.unwrap_or_default(),
-            image_contents: image_contents.unwrap_or_default(),
-            next_image_content_id: next_image_content_id.unwrap_or_default(),
+            primary_image_placements: primary_image_placements
+                .ok_or_else(|| serde::de::Error::missing_field("primary_image_placements"))?,
+            primary_image_history: primary_image_history
+                .ok_or_else(|| serde::de::Error::missing_field("primary_image_history"))?,
+            alternate_image_placements: alternate_image_placements
+                .ok_or_else(|| serde::de::Error::missing_field("alternate_image_placements"))?,
+            kitty_images: kitty_images
+                .ok_or_else(|| serde::de::Error::missing_field("kitty_images"))?,
+            image_contents: image_contents
+                .ok_or_else(|| serde::de::Error::missing_field("image_contents"))?,
+            next_image_content_id: next_image_content_id
+                .ok_or_else(|| serde::de::Error::missing_field("next_image_content_id"))?,
             next_image_placement_id: next_image_placement_id
-                .unwrap_or_else(images::default_next_image_placement_id),
+                .ok_or_else(|| serde::de::Error::missing_field("next_image_placement_id"))?,
             modes: modes.ok_or_else(|| serde::de::Error::missing_field("modes"))?,
-            sixel_palette: sixel_palette.unwrap_or_default(),
+            sixel_palette: sixel_palette
+                .ok_or_else(|| serde::de::Error::missing_field("sixel_palette"))?,
             tab_stops: tab_stops.ok_or_else(|| serde::de::Error::missing_field("tab_stops"))?,
             title: title.ok_or_else(|| serde::de::Error::missing_field("title"))?,
             reported_working_directory: reported_working_directory
                 .ok_or_else(|| serde::de::Error::missing_field("reported_working_directory"))?,
-            shell_integration_state: shell_integration_state.unwrap_or_default(),
-            shell_integration_facts: shell_integration_facts.unwrap_or_default(),
+            shell_integration_state: shell_integration_state
+                .ok_or_else(|| serde::de::Error::missing_field("shell_integration_state"))?,
+            shell_integration_facts: shell_integration_facts
+                .ok_or_else(|| serde::de::Error::missing_field("shell_integration_facts"))?,
             scrollback: scrollback.ok_or_else(|| serde::de::Error::missing_field("scrollback"))?,
             primary_scroll_region: primary_scroll_region
                 .ok_or_else(|| serde::de::Error::missing_field("primary_scroll_region"))?,
             alternate_scroll_region: alternate_scroll_region
                 .ok_or_else(|| serde::de::Error::missing_field("alternate_scroll_region"))?,
-            primary_horizontal_margins: primary_horizontal_margins.unwrap_or_default(),
-            alternate_horizontal_margins: alternate_horizontal_margins.unwrap_or_default(),
-            primary_keyboard_stack: primary_keyboard_stack.unwrap_or_default(),
-            alternate_keyboard_stack: alternate_keyboard_stack.unwrap_or_default(),
+            primary_horizontal_margins: primary_horizontal_margins
+                .ok_or_else(|| serde::de::Error::missing_field("primary_horizontal_margins"))?,
+            alternate_horizontal_margins: alternate_horizontal_margins
+                .ok_or_else(|| serde::de::Error::missing_field("alternate_horizontal_margins"))?,
+            primary_keyboard_stack: primary_keyboard_stack
+                .ok_or_else(|| serde::de::Error::missing_field("primary_keyboard_stack"))?,
+            alternate_keyboard_stack: alternate_keyboard_stack
+                .ok_or_else(|| serde::de::Error::missing_field("alternate_keyboard_stack"))?,
             cluster: cluster.ok_or_else(|| serde::de::Error::missing_field("cluster"))?,
             cluster_base: cluster_base
                 .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
@@ -885,7 +881,9 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
         Deserializer: serde::Deserializer<'de>,
     {
         let serialized_terminal_state = RawTerminalStateFields::deserialize(deserializer)?;
-        let is_declrmm_enabled = serialized_terminal_state.modes.declrmm;
+        let is_declrmm_enabled = serialized_terminal_state
+            .modes
+            .is_left_right_margin_mode_enabled;
         let primary_horizontal_margins = normalize_restored_horizontal_margins(
             &serialized_terminal_state.primary,
             serialized_terminal_state.primary_horizontal_margins,
@@ -910,7 +908,6 @@ impl<'de> Deserialize<'de> for TerminalStateFields {
         )
         .map_err(serde::de::Error::custom)?;
         Ok(Self {
-            native_image_coverage: serialized_terminal_state.native_image_coverage,
             cell_size: serialized_terminal_state.cell_size,
             primary: serialized_terminal_state.primary,
             alternate: serialized_terminal_state.alternate,
@@ -954,7 +951,6 @@ impl<'de> Deserialize<'de> for TerminalState {
         let fields = TerminalStateFields::deserialize(deserializer)?;
         images::validate_image_state(&fields).map_err(serde::de::Error::custom)?;
 
-        let native_image_coverage = fields.native_image_coverage;
         let mut terminal_state = TerminalState {
             native_images: Vec::new(),
             native_fragment_count_by_image_source_id: HashMap::new(),
@@ -991,7 +987,7 @@ impl<'de> Deserialize<'de> for TerminalState {
             device_query_replies: fields.device_query_replies,
         };
         terminal_state
-            .restore_native_image_coverage(native_image_coverage)
+            .restore_native_image_coverage()
             .map_err(serde::de::Error::custom)?;
         Ok(terminal_state)
     }
@@ -1014,17 +1010,17 @@ impl TerminalState {
         sixel_graphic: SixelGraphic,
         anchor_position: (u16, u16),
     ) -> Result<Option<crate::graphics::ImageRecord>, crate::graphics::GraphicsError> {
-        let mut palette = if self.modes.sixel_private_color_registers {
+        let mut palette = if self.modes.is_sixel_private_color_registers_enabled {
             SixelPalette::default()
         } else {
             self.sixel_palette.clone()
         };
         palette.apply_palette_changes(sixel_graphic.get_palette_changes());
-        if !self.modes.sixel_private_color_registers {
+        if !self.modes.is_sixel_private_color_registers_enabled {
             self.sixel_palette = palette.clone();
         }
 
-        let is_shared_palette = !self.modes.sixel_private_color_registers;
+        let is_shared_palette = !self.modes.is_sixel_private_color_registers_enabled;
         if is_shared_palette
             && !sixel_graphic
                 .get_palette_changes()
@@ -1044,7 +1040,7 @@ impl TerminalState {
         );
         let sixel_image =
             self.get_or_share_image_pixels(sixel_image_source.resolve_sixel_image(&palette)?);
-        let should_scroll_cursor = self.modes.sixel_scrolling;
+        let should_scroll_cursor = self.modes.is_sixel_scrolling_enabled;
         let image_record = crate::graphics::ImageRecord {
             protocol: crate::graphics::GraphicsProtocol::Sixel,
             image: sixel_image,
@@ -1064,7 +1060,7 @@ impl TerminalState {
         self.apply_sixel_image_record(
             &image_record,
             should_scroll_cursor,
-            self.modes.sixel_cursor_right,
+            self.modes.is_sixel_cursor_right_enabled,
             sixel_image_source,
         )
         .map_err(
@@ -1084,13 +1080,14 @@ impl TerminalState {
 
     /// Like [`from_pty_size`](Self::from_pty_size), but with an explicit scrollback limit.
     pub fn with_scrollback(pty_size: PtySize, scrollback_limit: ScrollbackLimit) -> Self {
-        let blank_screen = Grid::blank(pty_size.row_count, pty_size.column_count, Style::default());
+        let blank_screen =
+            Grid::build_blank(pty_size.row_count, pty_size.column_count, Style::default());
         let home_cursor = Cursor {
             row: 0,
             column: 0,
             is_visible: true,
-            pending_wrap: false,
-            origin: false,
+            is_wrap_pending: false,
+            is_origin_mode_enabled: false,
             saved: None,
         };
         TerminalState {
@@ -1100,16 +1097,16 @@ impl TerminalState {
             active_screen: Screen::Primary,
             primary_cursor: home_cursor,
             alternate_cursor: home_cursor,
-            primary_render: RenderState::fresh(),
-            alternate_render: RenderState::fresh(),
+            primary_render: RenderState::new(),
+            alternate_render: RenderState::new(),
             native_images: Vec::new(),
             native_fragment_count_by_image_source_id: HashMap::new(),
             primary_image_placements: Vec::new(),
             primary_image_history: Vec::new(),
             alternate_image_placements: Vec::new(),
             kitty_images: Vec::new(),
-            next_image_placement_id: images::default_next_image_placement_id(),
-            next_image_content_id: images::default_next_image_content_id(),
+            next_image_placement_id: images::get_default_next_image_placement_id(),
+            next_image_content_id: images::get_default_next_image_content_id(),
             modes: TerminalModes::default(),
             sixel_palette: SixelPalette::default(),
             tab_stops: build_default_tab_stops(pty_size.column_count),
@@ -1132,13 +1129,16 @@ impl TerminalState {
 
     /// Resize the tab-stop table while keeping stops in surviving columns.
     fn resize_tab_stops(&mut self, column_count: u16) {
-        let retained_tab_stop_count = self.tab_stops.len().min(column_count as usize);
         self.tab_stops.truncate(column_count as usize);
-        self.tab_stops
-            .extend((retained_tab_stop_count..column_count as usize).map(|column| column % 8 == 0));
+        let retained_tab_stop_count = self.tab_stops.len();
+        self.tab_stops.extend(
+            build_default_tab_stops(column_count)
+                .into_iter()
+                .skip(retained_tab_stop_count),
+        );
     }
 
-    /// Resize both screen buffers to `size`, preserving their contents.
+    /// Resize both screen buffers to `pty_size`, preserving their contents.
     ///
     /// The primary screen REFLOWS: soft-wrapped rows re-join into logical
     /// lines ([`RowEnd`](crate::grid::state::RowEnd)) and re-wrap to the new
@@ -1194,7 +1194,7 @@ impl TerminalState {
         alternate_rows.resize(
             pty_size.row_count as usize,
             (
-                vec![Cell::blank_with(alternate_fill); pty_size.column_count as usize],
+                vec![Cell::build_blank_with_style(alternate_fill); pty_size.column_count as usize],
                 RowMetadata::default(),
             ),
         );
@@ -1221,7 +1221,7 @@ impl TerminalState {
             self.primary_cursor.column,
             pty_size.column_count.saturating_sub(1),
         );
-        self.primary_cursor.pending_wrap = false;
+        self.primary_cursor.is_wrap_pending = false;
 
         self.alternate_cursor.row = min(
             self.alternate_cursor.row,
@@ -1231,7 +1231,7 @@ impl TerminalState {
             self.alternate_cursor.column,
             pty_size.column_count.saturating_sub(1),
         );
-        self.alternate_cursor.pending_wrap = false;
+        self.alternate_cursor.is_wrap_pending = false;
 
         // Both margin axes are dropped: the resized screens use their full
         // dimensions until the app issues DECSTBM or DECSLRM again.
@@ -1242,8 +1242,7 @@ impl TerminalState {
 
         // An in-progress cluster is dropped: its recorded base position indexes
         // the old geometry.
-        self.cluster.clear();
-        self.cluster_base = None;
+        self.reset_cluster();
     }
 
     /// Which screen (primary or alternate) is currently displayed and written to.
@@ -1270,7 +1269,7 @@ impl TerminalState {
     /// Mutable access to the active screen buffer, for writing cells. Clones the
     /// buffer once (copy-on-write) if a render snapshot still shares it; the
     /// snapshot keeps the pre-write contents.
-    pub(crate) fn active_grid_mut(&mut self) -> &mut Grid {
+    pub(crate) fn get_active_grid_mut(&mut self) -> &mut Grid {
         match self.active_screen {
             Screen::Primary => Arc::make_mut(&mut self.primary),
             Screen::Alternate => Arc::make_mut(&mut self.alternate),
@@ -1314,7 +1313,7 @@ impl TerminalState {
     /// This is the one place the clamp happens; the composed grid, the scroll
     /// indicator, cursor suppression, and the row a selection resolves to all
     /// read it.
-    pub fn effective_view_offset(&self, offset: usize) -> usize {
+    pub fn compute_effective_view_offset(&self, offset: usize) -> usize {
         if !self.is_primary_screen_active() {
             return 0;
         }
@@ -1333,7 +1332,7 @@ impl TerminalState {
     /// line. The composed grid, the scroll indicator, and cursor suppression all
     /// read the returned value.
     ///
-    /// A non-zero effective offset composes a fresh window `rows` tall from the
+    /// A non-zero effective offset composes a fresh window `row_count` tall from the
     /// primary screen: its top rows are the newest scrollback lines, its lower
     /// rows the top of the live grid. A view scrolled that many lines up shows
     /// that much history with the rest of the live screen below.
@@ -1342,8 +1341,8 @@ impl TerminalState {
     /// to the screen width; composing the window pads each history row back out
     /// with default blanks, not the running program's current background. Live
     /// rows already span the full width.
-    pub fn scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
-        let scrolled = self.effective_view_offset(offset);
+    pub fn get_scrolled_view(&self, offset: usize) -> (Arc<Grid>, usize) {
+        let scrolled = self.compute_effective_view_offset(offset);
         if scrolled == 0 {
             return (self.get_active_grid_arc(), 0);
         }
@@ -1354,7 +1353,7 @@ impl TerminalState {
         let retained_line_count = history.len();
 
         // The visible window: the `scrolled` newest history rows, then the live
-        // rows, capped at the screen height. The live grid alone is `rows` tall;
+        // rows, capped at the screen height. The live grid alone is `row_count` tall;
         // the chain always yields a full window and keeps row metadata.
         let window: Vec<(Vec<Cell>, RowMetadata)> = history
             .iter()
@@ -1396,13 +1395,13 @@ impl TerminalState {
 
     /// Whether the cursor should be drawn — toggled by DECTCEM (`?25`).
     pub fn is_cursor_visible(&self) -> bool {
-        self.active_cursor().is_visible
+        self.get_active_cursor().is_visible
     }
 
     /// Whether bracketed-paste mode (`?2004`) is active — the input layer reads
     /// this to decide whether to bracket a paste in `ESC[200~`…`ESC[201~`.
     pub fn is_bracketed_paste_enabled(&self) -> bool {
-        self.modes.bracketed_paste
+        self.modes.is_bracketed_paste_enabled
     }
 
     /// The active mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`) — the
@@ -1420,33 +1419,26 @@ impl TerminalState {
     /// Whether alternate-scroll mode (`?1007`) is active — the mouse layer reads
     /// this to translate wheel motion into arrow keys on the alternate screen.
     pub fn is_alternate_scroll_enabled(&self) -> bool {
-        self.modes.alternate_scroll
-    }
-
-    /// Whether autowrap (DECAWM `?7`) is active — `print` reads this to decide
-    /// whether a glyph at the effective right bound wraps onto a new line.
-    /// Default on.
-    pub fn is_autowrap_enabled(&self) -> bool {
-        self.modes.autowrap
+        self.modes.is_alternate_scroll_enabled
     }
 
     /// Whether application-cursor-keys mode (DECCKM `?1`) is active — the input
     /// layer reads this to pick the arrow-key byte form.
-    pub fn are_application_cursor_keys_enabled(&self) -> bool {
-        self.modes.application_cursor_keys
+    pub fn is_application_cursor_keys_enabled(&self) -> bool {
+        self.modes.is_application_cursor_keys_enabled
     }
 
     /// Whether reverse-video mode (DECSCNM `?5`) is active — the renderer reads
     /// this to swap foreground and background across the screen.
     pub fn is_reverse_video_enabled(&self) -> bool {
-        self.modes.reverse_video
+        self.modes.is_reverse_video_enabled
     }
 
     /// Whether cursor-blink mode is active — the renderer reads this to blink
     /// the cursor cell. Set by `?12` (att610) and by DECSCUSR, whose style
     /// value says both shape and blink; the last of the two to arrive wins.
     pub fn is_cursor_blink_enabled(&self) -> bool {
-        self.modes.cursor_blink
+        self.modes.is_cursor_blink_enabled
     }
 
     /// The shape the cursor is drawn as (DECSCUSR), or `None` while the pane has
@@ -1457,9 +1449,8 @@ impl TerminalState {
         self.modes.cursor_shape
     }
 
-    /// The pane's scrollback history. A snapshot reads its truncation tally as
-    /// `ScrollbackMeta::truncated`, and the renderer reads its rows to compose
-    /// a scrolled-back view.
+    /// The pane's scrollback history. The renderer reads its rows to compose a
+    /// scrolled-back view.
     pub fn get_scrollback(&self) -> &Scrollback {
         &self.scrollback
     }
@@ -1505,7 +1496,7 @@ impl TerminalState {
     }
 
     /// Mutable access to the horizontal margins for the active screen.
-    pub(crate) fn horizontal_margins_mut(&mut self) -> &mut Option<(u16, u16)> {
+    pub(crate) fn get_horizontal_margins_mut(&mut self) -> &mut Option<(u16, u16)> {
         match self.active_screen {
             Screen::Primary => &mut self.primary_horizontal_margins,
             Screen::Alternate => &mut self.alternate_horizontal_margins,
@@ -1531,11 +1522,14 @@ impl TerminalState {
 
     /// The cursor position `(row, column)` on the active screen, both zero-based.
     pub fn get_active_cursor_position(&self) -> (u16, u16) {
-        (self.active_cursor().row, self.active_cursor().column)
+        (
+            self.get_active_cursor().row,
+            self.get_active_cursor().column,
+        )
     }
 
     /// The cursor for the active screen.
-    fn active_cursor(&self) -> &Cursor {
+    fn get_active_cursor(&self) -> &Cursor {
         match self.active_screen {
             Screen::Primary => &self.primary_cursor,
             Screen::Alternate => &self.alternate_cursor,
@@ -1543,7 +1537,7 @@ impl TerminalState {
     }
 
     /// Mutable access to the cursor for the active screen.
-    fn active_cursor_mut(&mut self) -> &mut Cursor {
+    fn get_active_cursor_mut(&mut self) -> &mut Cursor {
         match self.active_screen {
             Screen::Primary => &mut self.primary_cursor,
             Screen::Alternate => &mut self.alternate_cursor,
@@ -1551,7 +1545,7 @@ impl TerminalState {
     }
 
     /// The render state (pen, charsets, GL slot) for the active screen.
-    fn active_render(&self) -> &RenderState {
+    fn get_active_render(&self) -> &RenderState {
         match self.active_screen {
             Screen::Primary => &self.primary_render,
             Screen::Alternate => &self.alternate_render,
@@ -1559,7 +1553,7 @@ impl TerminalState {
     }
 
     /// Mutable access to the render state for the active screen.
-    fn active_render_mut(&mut self) -> &mut RenderState {
+    fn get_active_render_mut(&mut self) -> &mut RenderState {
         match self.active_screen {
             Screen::Primary => &mut self.primary_render,
             Screen::Alternate => &mut self.alternate_render,
@@ -1590,13 +1584,16 @@ fn rebuild_cell_with_width(terminal_cell: &Cell, cell_width: u8) -> Cell {
 }
 
 /// Normalize `row_cells` to exactly `column_count` cells: truncate on the right or pad with
-/// blanks in `fill`. A wide glyph whose right (width-0) half falls past the new
+/// blanks in `fill_style`. A wide glyph whose right (width-0) half falls past the new
 /// edge leaves its base as the last cell; that dangling base is blanked.
 fn crop_columns(row_cells: &mut Vec<Cell>, column_count: u16, fill_style: Style) {
-    row_cells.resize(column_count as usize, Cell::blank_with(fill_style));
+    row_cells.resize(
+        column_count as usize,
+        Cell::build_blank_with_style(fill_style),
+    );
     if let Some(trailing_cell) = row_cells.last_mut() {
         if trailing_cell.get_display_width() > 1 {
-            *trailing_cell = Cell::blank_with(fill_style);
+            *trailing_cell = Cell::build_blank_with_style(fill_style);
         }
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use koshi_core::command::{NewPaneArgs, NewTabArgs, RunCommandPaneArgs, ToggleLockModeArgs};
 use koshi_core::discovery::SessionDiscovery;
@@ -390,15 +390,15 @@ fn a_refused_command_carries_the_sessions_sentence() {
         }),
     );
 
-    let error = submit_command_via_runtime_directory(
+    let submit_error = submit_command_via_runtime_directory(
         &runtime_directory,
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect_err("the session refuses the command");
 
-    let CliError::IpcUnavailable { detail } = error else {
-        panic!("expected IpcUnavailable, got {error:?}");
+    let CliError::IpcUnavailable { detail } = submit_error else {
+        panic!("expected IpcUnavailable, got {submit_error:?}");
     };
     assert_eq!(detail, "this session holds no pane by that id");
     assert_eq!(
@@ -420,15 +420,15 @@ fn a_command_answered_with_another_reply_kind_names_that_kind() {
     let (server, _asked) =
         spawn_answering_session(&runtime_directory, session_id, IpcResult::Restarting);
 
-    let error = submit_command_via_runtime_directory(
+    let submit_error = submit_command_via_runtime_directory(
         &runtime_directory,
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
     .expect_err("a Restarting does not answer a submitted command");
 
-    let CliError::IpcUnavailable { detail } = error else {
-        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    let CliError::IpcUnavailable { detail } = submit_error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {submit_error:?}");
     };
     assert_eq!(
         detail,
@@ -666,11 +666,11 @@ fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
     let runtime_directory = build_test_runtime_directory("layout-no-endpoint");
     let session_id = SessionId::new();
 
-    let error =
+    let layout_error =
         fetch_layout(&runtime_directory, session_id, None).expect_err("no endpoint file exists");
 
     assert_eq!(
-        error.to_string(),
+        layout_error.to_string(),
         CliError::SessionNotFound {
             session_name: session_id.to_string(),
         }
@@ -693,11 +693,11 @@ fn a_layout_request_a_session_cannot_read_reports_the_session_as_too_old() {
         }),
     );
 
-    let error =
+    let layout_error =
         fetch_layout(&runtime_directory, session_id, None).expect_err("the request is refused");
 
     assert_eq!(
-        error.to_string(),
+        layout_error.to_string(),
         CliError::IpcUnavailable {
             detail: "this session was started by an older koshi that cannot report its \
                      layout; restart the session to use `debug dump-layout`, or run \
@@ -724,11 +724,11 @@ fn a_layout_refusal_that_is_not_about_reading_carries_its_own_message() {
         }),
     );
 
-    let error =
+    let layout_error =
         fetch_layout(&runtime_directory, session_id, None).expect_err("the request is refused");
 
     assert_eq!(
-        error.to_string(),
+        layout_error.to_string(),
         CliError::IpcUnavailable {
             detail: "the token presented does not match this Koshi's".to_string(),
         }
@@ -752,11 +752,11 @@ fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
         IpcResult::Layout(build_named_session_layout("workspace", session_id)),
     );
 
-    let error = fetch_layout(&runtime_directory, session_id, Some(tab_id))
+    let layout_error = fetch_layout(&runtime_directory, session_id, Some(tab_id))
         .expect_err("the tab is no longer there");
 
     assert_eq!(
-        error.to_string(),
+        layout_error.to_string(),
         CliError::CommandRejected {
             reason: RejectReason::TargetNotFound,
             help: Some(format!("no running session has tab {tab_id}")),
@@ -781,11 +781,11 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
         },
     );
 
-    let error = fetch_layout(&runtime_directory, session_id, None)
+    let layout_error = fetch_layout(&runtime_directory, session_id, None)
         .expect_err("a Hello does not answer a layout request");
 
-    let CliError::IpcUnavailable { detail } = error else {
-        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    let CliError::IpcUnavailable { detail } = layout_error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {layout_error:?}");
     };
     assert_eq!(
         detail,
@@ -835,11 +835,11 @@ fn a_refused_overview_carries_the_sessions_sentence() {
         }),
     );
 
-    let error =
+    let overview_error =
         fetch_session_overview(&runtime_directory, session_id).expect_err("the request is refused");
 
-    let CliError::IpcUnavailable { detail } = error else {
-        panic!("expected IpcUnavailable, got {error:?}");
+    let CliError::IpcUnavailable { detail } = overview_error else {
+        panic!("expected IpcUnavailable, got {overview_error:?}");
     };
     assert_eq!(detail, "the token presented does not match this Koshi's");
 
@@ -854,11 +854,11 @@ fn an_overview_request_answered_with_another_reply_kind_names_that_kind() {
     let (server, _asked) =
         spawn_answering_session(&runtime_directory, session_id, IpcResult::Restarting);
 
-    let error = fetch_session_overview(&runtime_directory, session_id)
+    let overview_error = fetch_session_overview(&runtime_directory, session_id)
         .expect_err("a Restarting does not describe a session");
 
-    let CliError::IpcUnavailable { detail } = error else {
-        panic!("expected IpcUnavailable naming the reply kind, got {error:?}");
+    let CliError::IpcUnavailable { detail } = overview_error else {
+        panic!("expected IpcUnavailable naming the reply kind, got {overview_error:?}");
     };
     assert_eq!(
         detail,
@@ -1251,28 +1251,37 @@ fn the_shared_listing_holds_other_users_sockets_and_not_this_users() {
 
     let runtime_directory = build_test_runtime_directory("shared-unix");
     let shared = build_test_runtime_directory("shared-unix-base");
-    let own = std::fs::metadata(&runtime_directory)
+    let own_user_id = std::fs::metadata(&runtime_directory)
         .expect("read the runtime directory")
         .uid();
-    let theirs_dir = (own + 1).to_string();
+    let other_user_directory_name = (own_user_id + 1).to_string();
     let mine = SessionId::new();
     let theirs = SessionId::new();
-    std::fs::create_dir_all(shared.join(own.to_string())).expect("create this user's directory");
-    std::fs::create_dir_all(shared.join(&theirs_dir)).expect("create the other user's directory");
+    std::fs::create_dir_all(shared.join(own_user_id.to_string()))
+        .expect("create this user's directory");
+    std::fs::create_dir_all(shared.join(&other_user_directory_name))
+        .expect("create the other user's directory");
     std::fs::write(
-        shared.join(own.to_string()).join(format!("{mine}.sock")),
+        shared
+            .join(own_user_id.to_string())
+            .join(format!("{mine}.sock")),
         b"",
     )
     .expect("plant this user's socket");
-    std::fs::write(shared.join(&theirs_dir).join(format!("{theirs}.sock")), b"")
-        .expect("plant the other user's socket");
+    std::fs::write(
+        shared
+            .join(&other_user_directory_name)
+            .join(format!("{theirs}.sock")),
+        b"",
+    )
+    .expect("plant the other user's socket");
 
     assert_eq!(
         list_foreign_sessions(&shared, &runtime_directory),
         vec![(
             theirs,
             shared
-                .join(&theirs_dir)
+                .join(&other_user_directory_name)
                 .join(format!("{theirs}.sock"))
                 .display()
                 .to_string(),
@@ -1402,9 +1411,9 @@ fn an_absent_runtime_directory_skips_no_shared_subdirectory() {
         ),
         vec![(
             foreign_session_id,
-            koshi_ipc::endpoint::compute_shared_socket_address(
+            koshi_ipc::endpoint::compute_socket_address(
                 &foreign_user_directory,
-                foreign_session_id,
+                foreign_session_id
             )
         )],
     );
@@ -1547,7 +1556,7 @@ fn a_session_another_user_started_is_asked_with_an_empty_token() {
     let runtime_directory = build_test_runtime_directory("shared-empty-token");
     let session_id = SessionId::new();
     let socket_address =
-        koshi_ipc::endpoint::compute_shared_socket_address(&runtime_directory, session_id);
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
     let expected_session_overview = build_named_session_overview("S-quiet-lake", session_id);
     let (foreign_session_thread, presented_connection_tokens) =
         spawn_foreign_session(&socket_address, expected_session_overview.clone());
@@ -1576,7 +1585,7 @@ fn a_shared_advert_nothing_listens_behind_reports_the_session_not_running() {
     let runtime_directory = build_test_runtime_directory("shared-dead");
     let session_id = SessionId::new();
     let socket_address =
-        koshi_ipc::endpoint::compute_shared_socket_address(&runtime_directory, session_id);
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
 
     let session_lookup_error = fetch_foreign_session_overview(session_id, &socket_address)
         .expect_err("nothing listens at the address");
@@ -1612,7 +1621,7 @@ fn a_pane_creating_command_gets_this_process_directory_at_send_time() {
 
     let captured_command =
         capture_current_working_directory(Command::RunCommandPane(RunCommandPaneArgs {
-            spawn_spec: SpawnSpec::default_shell(None, BTreeMap::new()),
+            spawn_spec: SpawnSpec::build_default_shell(None, BTreeMap::new()),
             working_directory: None,
             source_pane_id: None,
             tab_id: None,

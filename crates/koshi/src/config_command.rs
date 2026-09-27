@@ -430,10 +430,10 @@ pub(crate) struct ConfigReport {
     pub(crate) validation_errors: Vec<String>,
 }
 
-/// Read and validate every known config file under `dir`.
+/// Read and validate every known config file under `config_directory`.
 ///
 /// Reads the filesystem and writes nothing. A directory with no config file
-/// gives empty `lines` and empty `errors`.
+/// gives empty `report_lines` and empty `validation_errors`.
 pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport {
     let loaded_config_files = load_config_files(config_directory);
     let mut report_lines = Vec::with_capacity(loaded_config_files.config_files.len());
@@ -602,15 +602,15 @@ fn load_config_file(
     config_path: PathBuf,
 ) -> Result<Option<ConfigFile>, String> {
     let link_metadata = match fs::symlink_metadata(&config_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("read {}: {error}", config_path.display())),
+        Ok(link_metadata) => link_metadata,
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(io_error) => return Err(format!("read {}: {io_error}", config_path.display())),
     };
     let (config_file_metadata, config_write_path) = if link_metadata.file_type().is_symlink() {
         let config_write_path = fs::canonicalize(&config_path)
-            .map_err(|error| format!("read {}: {error}", config_path.display()))?;
+            .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
         let config_file_metadata = fs::metadata(&config_path)
-            .map_err(|error| format!("read {}: {error}", config_path.display()))?;
+            .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
         (config_file_metadata, config_write_path)
     } else {
         (link_metadata, config_path.clone())
@@ -622,7 +622,7 @@ fn load_config_file(
         ));
     }
     let config_source_text = fs::read_to_string(&config_path)
-        .map_err(|error| format!("read {}: {error}", config_path.display()))?;
+        .map_err(|io_error| format!("read {}: {io_error}", config_path.display()))?;
     Ok(Some(ConfigFile {
         config_file_kind,
         config_path,
@@ -639,17 +639,17 @@ fn append_kdl_file_paths(
 ) {
     let directory_entries = match fs::read_dir(config_directory) {
         Ok(directory_entries) => directory_entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => {
-            read_errors.push(format!("read {}: {error}", config_directory.display()));
+        Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(io_error) => {
+            read_errors.push(format!("read {}: {io_error}", config_directory.display()));
             return;
         }
     };
     for directory_entry_result in directory_entries {
         let directory_entry = match directory_entry_result {
             Ok(directory_entry) => directory_entry,
-            Err(error) => {
-                read_errors.push(format!("read {}: {error}", config_directory.display()));
+            Err(io_error) => {
+                read_errors.push(format!("read {}: {io_error}", config_directory.display()));
                 continue;
             }
         };

@@ -28,7 +28,7 @@
 //! or not absolute.
 //!
 //! Resolvers do not inspect the filesystem or create directories. Startup uses
-//! [`ensure_directory`], [`ensure_private_directory`], [`ensure_shared_base`], and
+//! [`ensure_private_directory`], [`ensure_shared_base`], and
 //! [`ensure_shared_user_directory`] to create the directories it needs.
 
 use std::io;
@@ -49,7 +49,7 @@ fn resolve_project_directories() -> Option<ProjectDirs> {
 /// This process's effective user id. It names [`resolve_runtime_directory`] and this user's
 /// directory under [`resolve_shared_sessions_directory`].
 #[cfg(unix)]
-fn effective_user_id() -> u32 {
+fn get_effective_user_id() -> u32 {
     // SAFETY: `geteuid` reads this process's own identity, takes no argument,
     // and cannot fail.
     unsafe { libc::geteuid() }
@@ -99,12 +99,12 @@ pub enum RuntimeDirectoryRule {
 /// Returns the runtime directory for sockets and other per-boot files together
 /// with the rule that selected it.
 ///
-/// An absolute `KOSHI_RUNTIME_DIR` gives [`RuntimeDirectoryRule::EnvironmentVariable`]. Without
-/// it, Unix returns `/tmp/koshi-<effective uid>` with
-/// [`RuntimeDirectoryRule::UserId`] and never returns `None`. Windows returns
-/// `run/` under [`resolve_data_directory`] with [`RuntimeDirectoryRule::DataDirectory`], or `None` when
-/// the project data directory cannot be resolved. Create the directory with
-/// [`ensure_private_directory`]; runtime files are per-user private.
+/// An absolute `KOSHI_RUNTIME_DIR` gives [`RuntimeDirectoryRule::EnvironmentVariable`]. Without it,
+/// Unix returns `/tmp/koshi-<effective uid>` with [`RuntimeDirectoryRule::UserId`] and never
+/// returns `None`. Windows returns `run/` under [`resolve_data_directory`] with
+/// [`RuntimeDirectoryRule::DataDirectory`], or `None` when the project data directory cannot be
+/// resolved. Create the directory with [`ensure_private_directory`]; runtime files are per-user
+/// private.
 #[must_use]
 pub fn resolve_runtime_directory_with_rule() -> Option<(PathBuf, RuntimeDirectoryRule)> {
     if let Some(runtime_directory) = std::env::var_os(RUNTIME_DIRECTORY_ENV_VAR)
@@ -116,7 +116,7 @@ pub fn resolve_runtime_directory_with_rule() -> Option<(PathBuf, RuntimeDirector
     #[cfg(unix)]
     {
         Some((
-            PathBuf::from(format!("/tmp/koshi-{}", effective_user_id())),
+            PathBuf::from(format!("/tmp/koshi-{}", get_effective_user_id())),
             RuntimeDirectoryRule::UserId,
         ))
     }
@@ -168,7 +168,7 @@ pub fn resolve_shared_sessions_directory() -> Option<PathBuf> {
 /// Returns a [`io::ErrorKind::PermissionDenied`] error with the message
 /// `<path> <reason>`, such as `/tmp/koshi-501 is not a directory`.
 #[cfg(unix)]
-fn directory_refused(refused_path: &Path, refusal_reason: &str) -> io::Error {
+fn build_directory_refused_error(refused_path: &Path, refusal_reason: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!("{} {refusal_reason}", refused_path.display()),
@@ -185,10 +185,10 @@ fn directory_refused(refused_path: &Path, refusal_reason: &str) -> io::Error {
 fn verify_owner_is_this_user(filesystem_path: &Path) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let expected_user_id = effective_user_id();
+    let expected_user_id = get_effective_user_id();
     let owner_user_id = std::fs::symlink_metadata(filesystem_path)?.uid();
     if owner_user_id != expected_user_id {
-        return Err(directory_refused(
+        return Err(build_directory_refused_error(
             filesystem_path,
             &format!("is owned by uid {owner_user_id}, expected {expected_user_id}"),
         ));
@@ -224,7 +224,10 @@ fn verify_directory_mode(directory_path: &Path, directory_mode: u32) -> io::Resu
 
     let path_metadata = std::fs::symlink_metadata(directory_path)?;
     if !path_metadata.is_dir() {
-        return Err(directory_refused(directory_path, "is not a directory"));
+        return Err(build_directory_refused_error(
+            directory_path,
+            "is not a directory",
+        ));
     }
     if path_metadata.permissions().mode() & 0o7777 != directory_mode {
         std::fs::set_permissions(
@@ -232,7 +235,7 @@ fn verify_directory_mode(directory_path: &Path, directory_mode: u32) -> io::Resu
             std::fs::Permissions::from_mode(directory_mode),
         )
         .map_err(|permission_error| {
-            directory_refused(
+            build_directory_refused_error(
                 directory_path,
                 &format!("mode could not be set: {permission_error}"),
             )
@@ -242,7 +245,7 @@ fn verify_directory_mode(directory_path: &Path, directory_mode: u32) -> io::Resu
             .mode()
             & 0o7777;
         if observed_mode != directory_mode {
-            return Err(directory_refused(
+            return Err(build_directory_refused_error(
                 directory_path,
                 &format!("mode is {observed_mode:04o}, expected {directory_mode:04o}"),
             ));
@@ -279,15 +282,15 @@ pub fn ensure_shared_base(shared_base_path: &Path) -> io::Result<()> {
 ///
 /// On Unix the path is named after the effective user id, such as
 /// `/tmp/koshi/501`, and must be owned by that user with mode `0755`. It
-/// creates no parents; a missing `base` returns [`io::ErrorKind::NotFound`] and
+/// creates no parents; a missing `shared_base_path` returns [`io::ErrorKind::NotFound`] and
 /// remains uncreated. A different owner, symbolic link, or regular file at the
 /// user path returns [`io::ErrorKind::PermissionDenied`] with the path. Another
-/// mode is replaced and checked. On Windows it creates `base` and missing
-/// parents, returns `base`, and uses no per-user directory.
+/// mode is replaced and checked. On Windows it creates `shared_base_path` and missing
+/// parents, returns `shared_base_path`, and uses no per-user directory.
 pub fn ensure_shared_user_directory(shared_base_path: &Path) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        let user_directory_path = shared_base_path.join(effective_user_id().to_string());
+        let user_directory_path = shared_base_path.join(get_effective_user_id().to_string());
         create_directory_if_absent(&user_directory_path)?;
         verify_owner_is_this_user(&user_directory_path)?;
         verify_directory_mode(&user_directory_path, 0o755)?;
@@ -298,13 +301,6 @@ pub fn ensure_shared_user_directory(shared_base_path: &Path) -> io::Result<PathB
         std::fs::create_dir_all(shared_base_path)?;
         Ok(shared_base_path.to_path_buf())
     }
-}
-
-/// Creates `path` and any missing parents. An existing directory is success;
-/// a regular file at `path` returns [`io::ErrorKind::AlreadyExists`]. Other
-/// filesystem errors are returned unchanged.
-pub fn ensure_directory(directory_path: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(directory_path)
 }
 
 /// Creates `path` and missing parents, then validates the final directory as

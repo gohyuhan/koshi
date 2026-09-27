@@ -45,7 +45,7 @@ fn current_valid_file_stays_byte_for_byte_unchanged() {
 
 #[test]
 fn production_registry_covers_every_supported_version() {
-    validate_schema_registry(CONFIG_SCHEMAS).unwrap();
+    validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION).unwrap();
 }
 
 #[test]

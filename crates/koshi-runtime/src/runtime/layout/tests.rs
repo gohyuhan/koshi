@@ -5,6 +5,7 @@
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_layout::mode::LayoutMode;
@@ -34,12 +35,14 @@ const TAB_VIEWPORT_SIZE: Size = Size {
     row_count: 22,
 };
 
-/// A bare runtime with stub services and no sessions. The sender is returned
-/// so the inbox stays open.
+/// A bare runtime with stub services and no sessions, and the sender
+/// that queues events on its inbox.
 fn build_test_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let (event_sender, event_receiver) = mpsc::channel();
-    let server = Server::from_runtime_parts(pty_backend, event_receiver, event_sender.clone());
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(event_sender.clone()),
+    )));
+    let server = Server::from_runtime_parts(pty_backend, event_receiver);
     (server, event_sender)
 }
 
@@ -107,10 +110,10 @@ fn attach_test_client(
 }
 
 /// A runtime holding exactly `session`.
-fn build_test_runtime_with_session(session: Session) -> (Server, mpsc::Sender<RuntimeEvent>) {
-    let (mut server, event_sender) = build_test_runtime();
+fn build_test_runtime_with_session(session: Session) -> Server {
+    let (mut server, _event_sender) = build_test_runtime();
     server.session_by_id.insert(session.session_id, session);
-    (server, event_sender)
+    server
 }
 
 /// A left-right split of `left_pane_id` and `right_pane_id`, each taking an equal share.
@@ -126,7 +129,7 @@ fn build_horizontal_split(left_pane_id: PaneId, right_pane_id: PaneId) -> Layout
 
 #[test]
 fn no_session_yields_no_layout() {
-    let (runtime, _tx) = build_test_runtime();
+    let (runtime, _inbox_sender) = build_test_runtime();
 
     assert_eq!(runtime.build_session_layout(None), None);
 }
@@ -148,7 +151,7 @@ fn one_tab_one_client_reports_the_tree_the_solve_and_the_focus() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -203,7 +206,7 @@ fn a_client_that_has_focused_nothing_reports_no_focused_pane() {
         None,
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -222,7 +225,7 @@ fn a_client_that_has_focused_nothing_reports_no_focused_pane() {
 #[test]
 fn a_session_with_no_tabs_and_no_clients_reports_only_its_own_name() {
     let session_id = SessionId::new();
-    let (runtime, _tx) = build_test_runtime_with_session(build_empty_session(session_id));
+    let runtime = build_test_runtime_with_session(build_empty_session(session_id));
 
     let layout = runtime
         .build_session_layout(None)
@@ -256,7 +259,7 @@ fn a_tab_whose_only_viewer_is_starving_lists_no_solved_layout() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -293,7 +296,7 @@ fn a_reported_pane_area_is_the_size_the_tab_solves_against() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -341,7 +344,7 @@ fn a_reported_pane_area_larger_than_the_terminal_is_clamped_to_it() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -389,7 +392,7 @@ fn a_starving_viewer_still_gets_a_solve_when_another_viewer_reports_a_size() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -440,7 +443,7 @@ fn a_tab_no_client_views_carries_its_tree_and_no_solve() {
         Some(watched_pane),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -496,7 +499,7 @@ fn a_client_viewing_another_tab_is_left_out_of_this_tab_solve() {
         Some(logs_pane),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -535,7 +538,7 @@ fn tabs_come_back_in_tab_bar_order_not_in_id_order() {
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, lower, "second", 1, PaneId::new());
     add_session_tab(&mut session, higher, "first", 0, PaneId::new());
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -559,7 +562,7 @@ fn two_tabs_at_the_same_bar_index_come_back_in_id_order() {
     let mut session = build_empty_session(session_id);
     add_session_tab(&mut session, lower, "editor", 0, PaneId::new());
     add_session_tab(&mut session, higher, "logs", 0, PaneId::new());
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -593,7 +596,7 @@ fn narrowing_to_one_tab_describes_that_tab_alone_and_still_names_every_client() 
         Some(first_pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(Some(second_tab_id))
@@ -639,7 +642,7 @@ fn narrowing_to_the_tab_its_own_viewer_watches_keeps_that_tabs_solve() {
         Some(editor_pane),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(Some(editor))
@@ -685,7 +688,7 @@ fn narrowing_to_a_tab_that_does_not_exist_describes_no_tab_at_all() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(Some(TabId::new()))
@@ -729,7 +732,7 @@ fn a_zoomed_client_reports_fullscreen_and_gives_the_whole_tab_to_one_pane() {
         Some(right_pane_id),
         Some(right_pane_id),
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -747,7 +750,7 @@ fn a_zoomed_client_reports_fullscreen_and_gives_the_whole_tab_to_one_pane() {
         vec![
             SolvedPane {
                 pane_id: left_pane_id,
-                outer_rect: Rect::empty_at_origin(),
+                outer_rect: Rect::build_empty_at_origin(),
             },
             SolvedPane {
                 pane_id: right_pane_id,
@@ -794,7 +797,7 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
         Some(left_pane_id),
         Some(left_pane_id),
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -843,7 +846,7 @@ fn two_clients_on_one_tab_each_get_their_own_solve_of_the_same_tree() {
             },
             SolvedPane {
                 pane_id: right_pane_id,
-                outer_rect: Rect::empty_at_origin(),
+                outer_rect: Rect::build_empty_at_origin(),
             },
         ],
     );
@@ -880,7 +883,7 @@ fn two_clients_of_different_sizes_on_one_tab_both_solve_against_the_smaller() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -937,7 +940,7 @@ fn a_collapsed_stack_member_reports_its_header_strip() {
         Some(shown_pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -1019,7 +1022,7 @@ fn a_stack_whose_active_member_is_flagged_collapsed_still_expands_that_member() 
         Some(first_pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -1086,7 +1089,7 @@ fn a_terminal_too_small_for_one_pane_suppresses_every_pane() {
         Some(pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -1104,7 +1107,7 @@ fn a_terminal_too_small_for_one_pane_suppresses_every_pane() {
         solved.pane_rects,
         vec![SolvedPane {
             pane_id,
-            outer_rect: Rect::empty_at_origin(),
+            outer_rect: Rect::build_empty_at_origin(),
         }],
     );
     assert_eq!(solved.suppressed_pane_ids, vec![pane_id]);
@@ -1138,7 +1141,7 @@ fn a_pane_that_no_longer_fits_beside_its_neighbour_is_the_only_one_suppressed() 
         Some(left_pane_id),
         None,
     );
-    let (runtime, _tx) = build_test_runtime_with_session(session);
+    let runtime = build_test_runtime_with_session(session);
 
     let layout = runtime
         .build_session_layout(None)
@@ -1157,7 +1160,7 @@ fn a_pane_that_no_longer_fits_beside_its_neighbour_is_the_only_one_suppressed() 
             },
             SolvedPane {
                 pane_id: right_pane_id,
-                outer_rect: Rect::empty_at_origin(),
+                outer_rect: Rect::build_empty_at_origin(),
             },
         ],
     );

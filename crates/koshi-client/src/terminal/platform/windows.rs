@@ -52,8 +52,8 @@ impl TerminalDevice {
         )?;
         let original_input_mode = input_handle.read_console_mode()?;
         let original_output_mode = output_handle.read_console_mode()?;
-        let original_input_code_page = input_code_page()?;
-        let original_output_code_page = output_code_page()?;
+        let original_input_code_page = get_input_code_page()?;
+        let original_output_code_page = get_output_code_page()?;
         Ok((
             Self {
                 input_handle,
@@ -435,7 +435,7 @@ impl Write for ConsoleHandle {
     }
 }
 
-fn input_code_page() -> io::Result<u32> {
+fn get_input_code_page() -> io::Result<u32> {
     let code_page = unsafe { GetConsoleCP() };
     if code_page == 0 {
         Err(io::Error::last_os_error())
@@ -444,7 +444,7 @@ fn input_code_page() -> io::Result<u32> {
     }
 }
 
-fn output_code_page() -> io::Result<u32> {
+fn get_output_code_page() -> io::Result<u32> {
     let code_page = unsafe { GetConsoleOutputCP() };
     if code_page == 0 {
         Err(io::Error::last_os_error())

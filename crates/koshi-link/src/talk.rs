@@ -99,15 +99,15 @@ impl PeerWords {
         &self,
         response_result: &Response,
     ) -> CliError {
-        self.build_unexpected_wire_name_error(response_result.wire_name())
+        self.build_unexpected_wire_name_error(response_result.get_wire_name())
     }
 
-    /// The same failure named by `name` alone, filtered by
+    /// The same failure named by `wire_name` alone, filtered by
     /// [`sanitize_reported_text`] — for a reply this build has no variant for.
     ///
-    /// `SESSION_PEER_WORDS` with `name` `"Rehomed"` gives [`CliError::IpcUnavailable`]
+    /// `SESSION_PEER_WORDS` with `wire_name` `"Rehomed"` gives [`CliError::IpcUnavailable`]
     /// carrying `the session answered with an unexpected Rehomed reply`.
-    /// `name` `"\u{1b}[2JRehomed"` gives the same sentence.
+    /// `wire_name` `"\u{1b}[2JRehomed"` gives the same sentence.
     pub fn build_unexpected_wire_name_error(&self, wire_name: &str) -> CliError {
         CliError::IpcUnavailable {
             detail: format!(
@@ -132,7 +132,7 @@ pub fn build_ipc_unavailable_error(ipc_error: IpcError) -> CliError {
     }
 }
 
-/// `result` with a rejection's hint filtered by [`sanitize_reported_text`].
+/// `command_result` with a rejection's hint filtered by [`sanitize_reported_text`].
 /// An applied result is unchanged, and so is a rejection carrying no hint.
 ///
 /// The hint is written by the session that answered, which is another user's
@@ -165,8 +165,7 @@ pub fn build_peer_refusal_error(refusal: &IpcErrorPayload) -> CliError {
 }
 
 /// The version a session settled on and the build it named in its Hello
-/// answer, once the version is checked against the range this build sent. An
-/// empty build string is a session that predates the version field.
+/// answer, once the version is checked against the range this build sent.
 ///
 /// The build string is written by the session that answered, which is another
 /// user's process for a session reached through the shared directory and
@@ -196,8 +195,8 @@ pub(crate) fn parse_session_hello_version(
     }
 }
 
-/// The build the router named in its Hello answer, once the version it settled
-/// on is checked. An empty string is a router that predates the version field.
+/// The build the router named in its Hello answer, filtered by
+/// [`sanitize_reported_text`], once the version it settled on is checked.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the router settled on a version outside
@@ -212,7 +211,7 @@ pub(crate) fn parse_router_hello_version(
             build_version,
         } => {
             ROUTER_PEER_WORDS.validate_settled_protocol_version(protocol_version)?;
-            Ok(build_version)
+            Ok(sanitize_reported_text(&build_version))
         }
         RouterResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
         unexpected_result => {

@@ -12,7 +12,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::registry::ActionRegistry;
-use koshi_core::resolve::{resolve_action, ActionArgs, DispatchPlan, ResolveError};
+use koshi_core::resolve::{resolve_action, DispatchPlan, ResolveError};
 
 use crate::error::ColorParseError;
 use crate::key::{parse_chord, Leader};
@@ -22,7 +22,6 @@ fn build_bound_action(action_name: &str) -> BoundAction {
     BoundAction {
         action_reference: ActionReference::from_core_action_name(action_name)
             .expect("expected action name is valid"),
-        action_arguments: ActionArgs::None,
     }
 }
 
@@ -54,7 +53,7 @@ fn default_loads_with_expected_values() {
 
     assert_eq!(client_config.keybindings.chord_timeout_ms, 500);
     assert_eq!(client_config.keybindings.which_key_delay_ms, 300);
-    assert_eq!(client_config.keybindings.max_chord_depth, 4);
+    assert_eq!(client_config.keybindings.maximum_chord_depth, 4);
     assert_eq!(
         client_config.keybindings.leader,
         Leader::Mods(ModFlags::CTRL)
@@ -79,9 +78,7 @@ fn default_loads_with_expected_values() {
     assert_eq!(client_config.mouse.scroll_line_count, 3);
     assert_eq!(client_config.mouse.wheel, WheelScroll::ScrollScrollback);
 
-    assert!(client_config.copy.should_copy_on_select);
     assert!(client_config.copy.should_trim_trailing_whitespace);
-    assert_eq!(client_config.copy.clipboard, ClipboardBackend::Osc52);
 
     assert_eq!(server.terminal.term, "xterm-256color");
     assert_eq!(server.terminal.colorterm, "truecolor");
@@ -358,15 +355,15 @@ fn mode_names_compare_by_exact_text() {
 fn mode_name_maps_answer_str_lookups() {
     // `ModeName` borrows as `str`, so a `BTreeMap<ModeName, _>` answers a
     // `&str` key exactly as it answers the owned key.
-    let map = BTreeMap::from([
+    let value_by_mode_name = BTreeMap::from([
         (ModeName::from_text("locked"), 1),
         (ModeName::from_text("normal"), 2),
     ]);
-    assert_eq!(map.get("locked"), Some(&1));
-    assert_eq!(map.get("normal"), Some(&2));
-    assert_eq!(map.get("Normal"), None);
-    assert_eq!(map.get("normal "), None);
-    assert_eq!(map.get(""), None);
+    assert_eq!(value_by_mode_name.get("locked"), Some(&1));
+    assert_eq!(value_by_mode_name.get("normal"), Some(&2));
+    assert_eq!(value_by_mode_name.get("Normal"), None);
+    assert_eq!(value_by_mode_name.get("normal "), None);
+    assert_eq!(value_by_mode_name.get(""), None);
 }
 
 #[test]
@@ -425,7 +422,6 @@ fn each_default_mode_binds_every_action_to_one_key() {
 #[test]
 fn enum_defaults_are_the_shipped_variants() {
     assert_eq!(WheelScroll::default(), WheelScroll::ScrollScrollback);
-    assert_eq!(ClipboardBackend::default(), ClipboardBackend::Osc52);
     assert_eq!(Leader::default(), Leader::Mods(ModFlags::CTRL));
 }
 
@@ -530,23 +526,20 @@ struct ExpectedBinding {
     mode_name: &'static str,
     key_sequence_text: &'static str,
     action_name: &'static str,
-    action_arguments: ActionArgs,
     resolved_dispatch: Result<Command, ResolveError>,
     client_action: Option<ClientActionKind>,
 }
 
 /// The complete expected default binding table, binding by binding.
-fn expected_default_bindings() -> Vec<ExpectedBinding> {
+fn list_expected_default_bindings() -> Vec<ExpectedBinding> {
     let build_expected_binding =
         |mode_name: &'static str,
          key_sequence_text: &'static str,
          action_name: &'static str,
-         action_arguments: ActionArgs,
          resolved_dispatch: Result<Command, ResolveError>| ExpectedBinding {
             mode_name,
             key_sequence_text,
             action_name,
-            action_arguments,
             resolved_dispatch,
             client_action: None,
         };
@@ -554,13 +547,11 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
         |mode_name: &'static str,
          key_sequence_text: &'static str,
          action_name: &'static str,
-         action_arguments: ActionArgs,
          client_action: ClientActionKind| ExpectedBinding {
             mode_name,
             key_sequence_text,
             action_name,
-            action_arguments,
-            resolved_dispatch: Err(ResolveError::ArgsMismatch {
+            resolved_dispatch: Err(ResolveError::ArgumentsRequired {
                 action_reference: ActionReference::from_core_action_name(action_name)
                     .expect("expected action name is valid"),
             }),
@@ -596,59 +587,46 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<C-l>",
             "lock",
-            ActionArgs::None,
             Ok(Command::SetLockMode(LockModeArgs {
                 is_locked: true,
                 client_id: None,
             })),
         ),
-        build_expected_binding(
-            "normal",
-            "<C-q>",
-            "quit",
-            ActionArgs::None,
-            Ok(Command::Quit),
-        ),
+        build_expected_binding("normal", "<C-q>", "quit", Ok(Command::Quit)),
         build_expected_binding(
             "normal",
             "<C-p> n",
             "new-pane",
-            ActionArgs::None,
             Ok(build_new_pane_command(CLIENT_SPLIT_DIRECTION)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> h",
             "new-pane-left",
-            ActionArgs::None,
             Ok(build_new_pane_command(Direction::Left)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> j",
             "new-pane-down",
-            ActionArgs::None,
             Ok(build_new_pane_command(Direction::Down)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> k",
             "new-pane-up",
-            ActionArgs::None,
             Ok(build_new_pane_command(Direction::Up)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> l",
             "new-pane-right",
-            ActionArgs::None,
             Ok(build_new_pane_command(Direction::Right)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> s",
             "new-pane-stacked",
-            ActionArgs::None,
             Ok(Command::NewPane(NewPaneArgs {
                 source_pane_id: None,
                 tab_id: None,
@@ -663,14 +641,12 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<C-p> m",
             "begin-pane-placement",
-            ActionArgs::None,
             ClientActionKind::BeginPanePlacement,
         ),
         build_expected_binding(
             "normal",
             "<C-p> x",
             "close-pane-tree",
-            ActionArgs::None,
             Ok(Command::ClosePane(ClosePaneArgs {
                 pane_id: None,
                 should_force_close: false,
@@ -681,70 +657,60 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<A-f>",
             "toggle-pane-fullscreen",
-            ActionArgs::None,
             Ok(Command::TogglePaneFullscreen),
         ),
         build_expected_binding(
             "normal",
             "<C-p> <Left>",
             "focus-pane-left",
-            ActionArgs::None,
             Ok(build_focus_command(Direction::Left)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> <Down>",
             "focus-pane-down",
-            ActionArgs::None,
             Ok(build_focus_command(Direction::Down)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> <Up>",
             "focus-pane-up",
-            ActionArgs::None,
             Ok(build_focus_command(Direction::Up)),
         ),
         build_expected_binding(
             "normal",
             "<C-p> <Right>",
             "focus-pane-right",
-            ActionArgs::None,
             Ok(build_focus_command(Direction::Right)),
         ),
         build_expected_binding(
             "normal",
             "<C-s> <Left>",
             "resize-pane-left",
-            ActionArgs::None,
             Ok(build_resize_command(Direction::Left)),
         ),
         build_expected_binding(
             "normal",
             "<C-s> <Down>",
             "resize-pane-down",
-            ActionArgs::None,
             Ok(build_resize_command(Direction::Down)),
         ),
         build_expected_binding(
             "normal",
             "<C-s> <Up>",
             "resize-pane-up",
-            ActionArgs::None,
             Ok(build_resize_command(Direction::Up)),
         ),
         build_expected_binding(
             "normal",
             "<C-s> <Right>",
             "resize-pane-right",
-            ActionArgs::None,
             Ok(build_resize_command(Direction::Right)),
         ),
         build_expected_binding(
             "normal",
             "<C-t> n",
             "new-tab",
-            ActionArgs::None,
             Ok(Command::NewTab(NewTabArgs {
                 working_directory: None,
                 client_id: None,
@@ -754,14 +720,12 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<C-t> x",
             "close-tab",
-            ActionArgs::None,
             Ok(Command::CloseTab(CloseTabArgs::default())),
         ),
         build_expected_binding(
             "normal",
             "<Tab>",
             "next-tab",
-            ActionArgs::None,
             Ok(Command::FocusTab(FocusTabArgs {
                 focus_target: TabTarget::Next,
                 client_id: None,
@@ -771,9 +735,8 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "normal",
             "<S-Tab>",
             "previous-tab",
-            ActionArgs::None,
             Ok(Command::FocusTab(FocusTabArgs {
-                focus_target: TabTarget::Prev,
+                focus_target: TabTarget::Previous,
                 client_id: None,
             })),
         ),
@@ -781,7 +744,6 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "locked",
             "<C-l>",
             "unlock",
-            ActionArgs::None,
             Ok(Command::SetLockMode(LockModeArgs {
                 is_locked: false,
                 client_id: None,
@@ -791,119 +753,97 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
             "locked",
             "<C-p> m",
             "begin-pane-placement",
-            ActionArgs::None,
             ClientActionKind::BeginPanePlacement,
         ),
-        build_expected_binding(
-            "locked",
-            "<C-q>",
-            "quit",
-            ActionArgs::None,
-            Ok(Command::Quit),
-        ),
+        build_expected_binding("locked", "<C-q>", "quit", Ok(Command::Quit)),
         build_expected_client_binding(
             "pane-placement",
             "<Left>",
             "select-pane-target-left",
-            ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Left),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<Down>",
             "select-pane-target-down",
-            ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Down),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<Up>",
             "select-pane-target-up",
-            ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Up),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<Right>",
             "select-pane-target-right",
-            ActionArgs::None,
             ClientActionKind::SelectPaneTarget(Direction::Right),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<S-Left>",
             "select-pane-insertion-left",
-            ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Left),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<S-Down>",
             "select-pane-insertion-down",
-            ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Down),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<S-Up>",
             "select-pane-insertion-up",
-            ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Up),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<S-Right>",
             "select-pane-insertion-right",
-            ActionArgs::None,
             ClientActionKind::SelectPaneInsertion(Direction::Right),
         ),
         build_expected_client_binding(
             "pane-placement",
             "<Space>",
             "cycle-pane-placement-span",
-            ActionArgs::None,
             ClientActionKind::CyclePanePlacementSpan,
         ),
         build_expected_client_binding(
             "pane-placement",
             "<Tab>",
             "select-next-placement-tab",
-            ActionArgs::None,
             ClientActionKind::SelectNextPlacementTab,
         ),
         build_expected_client_binding(
             "pane-placement",
             "<S-Tab>",
             "select-previous-placement-tab",
-            ActionArgs::None,
             ClientActionKind::SelectPreviousPlacementTab,
         ),
         build_expected_client_binding(
             "pane-placement",
             "<CR>",
             "confirm-pane-placement",
-            ActionArgs::None,
             ClientActionKind::ConfirmPanePlacement,
         ),
         build_expected_client_binding(
             "pane-placement",
             "<Esc>",
             "cancel-pane-placement",
-            ActionArgs::None,
             ClientActionKind::CancelPanePlacement,
         ),
         build_expected_binding(
             "normal",
             "<C-g>",
             "mouse-select",
-            ActionArgs::None,
             Ok(Command::ToggleMouseSelect),
         ),
         build_expected_binding(
             "locked",
             "<C-g>",
             "mouse-select",
-            ActionArgs::None,
             Ok(Command::ToggleMouseSelect),
         ),
     ]
@@ -913,7 +853,7 @@ fn expected_default_bindings() -> Vec<ExpectedBinding> {
 fn default_binding_table_is_exact_and_resolves() {
     let client_config = ClientConfig::default();
     let registry = ActionRegistry::new();
-    let expected_binding_rows = expected_default_bindings();
+    let expected_binding_rows = list_expected_default_bindings();
 
     let binding_count: usize = client_config
         .keybindings
@@ -954,14 +894,8 @@ fn default_binding_table_is_exact_and_resolves() {
             "action bound to {}",
             expected_binding.key_sequence_text
         );
-        assert_eq!(
-            bound_action.action_arguments, expected_binding.action_arguments,
-            "action arguments bound to {}",
-            expected_binding.key_sequence_text
-        );
         let actual_dispatch = resolve_action(
             &bound_action.action_reference,
-            &bound_action.action_arguments,
             &registry,
             CLIENT_SPLIT_DIRECTION,
         );
@@ -977,7 +911,7 @@ fn default_binding_table_is_exact_and_resolves() {
                 actual_dispatch,
                 expected_binding
                     .resolved_dispatch
-                    .map(DispatchPlan::Command),
+                    .map(|command| DispatchPlan::Command(Box::new(command))),
                 "resolution of {}",
                 expected_binding.key_sequence_text
             );
@@ -1043,12 +977,11 @@ fn reserved_unlock_is_the_locked_mode_binding() {
         bound_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("unlock name is valid")
     );
-    assert_eq!(bound_action.action_arguments, ActionArgs::None);
 }
 
 #[test]
 fn prefix_labels_name_exactly_the_default_prefix_chords() {
-    let labels = default_prefix_labels(Leader::default());
+    let labels = build_default_prefix_labels(Leader::default());
     assert_eq!(labels.len(), 3);
     assert_eq!(
         labels
@@ -1176,7 +1109,7 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
     // A chord leader opens every leader binding with the leader chord, so
     // `<leader>p`, `<leader>s`, and `<leader>t` share an opening — no single
     // group label fits, and the hint bar shows the derived `+N` instead.
-    let space = default_prefix_labels(Leader::Chord(KeyChord::from_parts(
+    let space = build_default_prefix_labels(Leader::Chord(KeyChord::from_parts(
         ModFlags::NONE,
         Key::Named(NamedKey::Space),
     )));
@@ -1184,9 +1117,9 @@ fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
 
     // A modifier-run leader keeps `<leader>p`, `<leader>s`, and `<leader>t` at
     // distinct openings, so all three labels stand, moved onto Alt.
-    let alt = default_prefix_labels(Leader::Mods(ModFlags::ALT));
-    let alt_label = |ch| {
-        alt.get(&KeyChord::from_parts(ModFlags::ALT, Key::Char(ch)))
+    let alt = build_default_prefix_labels(Leader::Mods(ModFlags::ALT));
+    let alt_label = |character| {
+        alt.get(&KeyChord::from_parts(ModFlags::ALT, Key::Char(character)))
             .map(String::as_str)
     };
     assert_eq!(alt.len(), 3);

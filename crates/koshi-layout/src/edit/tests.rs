@@ -1,9 +1,9 @@
 //! Tests for structural edits: split (directional pane splits), stack (tabbed pane groups),
 //! and remove (delete pane from the layout tree).
 //!
-//! Tests verify that edits produce correct layout tree structure, maintain tiling (no gaps/overlaps),
-//! keep a stack's active member correct, and handle edge cases (removing last pane, missing
-//! targets).
+//! Tests verify that edits produce correct layout tree structure, maintain tiling (no
+//! gaps/overlaps), keep a stack's active member correct, and handle edge cases (removing last pane,
+//! missing targets).
 
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_test_support::layout_assert::check_exact_tiling;
@@ -52,7 +52,7 @@ fn find_parent_split_containing_pane(layout_tree: &LayoutNode, pane_id: PaneId) 
                     .iter()
                     .find_map(|child| {
                         child
-                            .contains_pane(pane_id)
+                            .has_pane(pane_id)
                             .then(|| find_parent_split_containing_pane(child, pane_id))
                     })
                     .expect("pane not found")
@@ -259,7 +259,8 @@ fn build_pane_sizing(gap_cell_count: u16) -> PaneSizing {
     }
 }
 
-/// Verifies that a solved layout completely tiles the layout area with no gaps, overlaps, or panes outside bounds.
+/// Verifies that a solved layout completely tiles the layout area with no gaps, overlaps, or panes
+/// outside bounds.
 fn assert_tiles(layout_tree: &LayoutNode, layout_area: Rect) {
     let layout_result = solve_layout(layout_tree, layout_area);
     check_exact_tiling(&layout_result.pane_rects, layout_area).unwrap();
@@ -312,8 +313,8 @@ fn removing_a_middle_pane_reflows_with_no_dead_region() {
 
 #[test]
 fn removing_a_siblingless_leaf_prunes_the_emptied_split() {
-    // A pane beside a column holding only a second pane: removing the second pane must not leave an empty
-    // split claiming dead space.
+    // A pane beside a column holding only a second pane: removing the second pane must not leave an
+    // empty split claiming dead space.
     let (left_pane_id, removed_pane_id) = (PaneId::new(), PaneId::new());
     let column = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
@@ -460,8 +461,9 @@ fn removing_the_active_member_lists_the_member_that_expands_into_its_place() {
         vec![build_leaf_node(left_pane_id), stack],
     ));
 
-    // The active pane held columns 40..80 over rows 0..23, with the collapsed pane's header on row 23.
-    // Removing the active pane expands the collapsed pane over the whole column; the left pane keeps its size.
+    // The active pane held columns 40..80 over rows 0..23, with the collapsed pane's header on row
+    // 23. Removing the active pane expands the collapsed pane over the whole column; the left pane
+    // keeps its size.
     let (removed_layout_tree, removal_outcome) = remove_pane(
         &layout_tree,
         build_layout_area(),
@@ -629,7 +631,7 @@ fn remove_pane_measures_the_freed_rect_against_the_given_min() {
     });
 
     // Under the default floor both panes fit, so `a` freed only its half.
-    let (_, default_floor_removal_info) = remove_pane(
+    let (_, default_floor_pane_removal) = remove_pane(
         &layout_tree,
         layout_area,
         left_pane_id,
@@ -637,7 +639,7 @@ fn remove_pane_measures_the_freed_rect_against_the_given_min() {
     )
     .unwrap();
     assert_eq!(
-        default_floor_removal_info.removed_pane_rect,
+        default_floor_pane_removal.removed_pane_rect,
         Rect::from_size_at_origin(Size {
             column_count: 6,
             row_count: 24
@@ -647,7 +649,7 @@ fn remove_pane_measures_the_freed_rect_against_the_given_min() {
     // An 8-column floor needs ten bordered columns per pane, so `b` is
     // suppressed and `a` owned the whole layout area — its freed rect is the full width.
     // Fails if remove_pane ignores `min`.
-    let (_, raised_floor_removal_info) = remove_pane(
+    let (_, raised_floor_pane_removal) = remove_pane(
         &layout_tree,
         layout_area,
         left_pane_id,
@@ -661,7 +663,7 @@ fn remove_pane_measures_the_freed_rect_against_the_given_min() {
     )
     .unwrap();
     assert_eq!(
-        raised_floor_removal_info.removed_pane_rect,
+        raised_floor_pane_removal.removed_pane_rect,
         Rect::from_size_at_origin(Size {
             column_count: 12,
             row_count: 24
@@ -699,7 +701,10 @@ fn removing_a_suppressed_pane_reports_a_zero_area_old_rect() {
         removed_layout_tree.list_leaf_pane_ids(),
         [first_pane_id, second_pane_id]
     );
-    assert_eq!(removal_outcome.removed_pane_rect, Rect::empty_at_origin());
+    assert_eq!(
+        removal_outcome.removed_pane_rect,
+        Rect::build_empty_at_origin()
+    );
     // a and b were already at their final floor-clamped sizes; losing the
     // already-invisible c changes nothing about them.
     assert!(removal_outcome.absorbing_pane_ids.is_empty());
@@ -880,8 +885,8 @@ fn a_non_active_stack_member_keeps_its_header_and_stays_selectable() {
     let stack = normalized
         .find_containing_stack_mut(inactive_pane_id)
         .unwrap();
-    let change = activate_stack_member(stack, inactive_pane_id).unwrap();
-    assert_eq!(change.newly_active_pane_id, inactive_pane_id);
+    assert!(activate_stack_member(stack, inactive_pane_id));
+    assert_eq!(stack.active_child_index, 1);
 }
 
 #[test]
@@ -1429,7 +1434,7 @@ fn a_removal_leaves_every_surviving_child_with_its_own_weight() {
     let widths: Vec<u16> = solve_layout(&removed_layout_tree, wide_layout_rect)
         .pane_rects
         .iter()
-        .map(|(_, rect)| rect.cell_size.column_count)
+        .map(|(_, rect)| rect.size.column_count)
         .collect();
     assert_eq!(widths, [25, 75]);
 }

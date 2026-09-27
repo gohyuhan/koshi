@@ -4,8 +4,8 @@
 //! A profile file is structural nodes holding config nodes. Structural
 //! vocabulary: `tab`, `horizontal` (children side by side, left to right),
 //! `vertical` (children top to bottom), `stack` (children share one
-//! rectangle, one expanded), `pane` (terminal), `plugin "name"` (plugin
-//! pane). Every setting is a child node — no properties: `pane { command
+//! rectangle, one expanded), `pane` (terminal). Every setting is a child
+//! node — no properties: `pane { command
 //! "nvim" "file"; cwd "~/proj"; env "K" "V"; size "60%"; focus }`.
 //! Sizing (`size` cells or `"N%"`, `weight`, `min`, `preferred`) is valid only
 //! on children of `horizontal`/`vertical`; `expanded` marks a stack's one
@@ -24,8 +24,7 @@ use kdl::{KdlDocument, KdlNode};
 use koshi_core::geometry::SplitDirection;
 use koshi_layout::size::{SizeConstraint, SizeWeight};
 use koshi_layout::template::{
-    CommandTemplate, LeafTemplate, PluginTemplate, ProfileTemplate, TabTemplate, TemplateNode,
-    TemplateSplit, TerminalTemplate,
+    CommandTemplate, ProfileTemplate, TabTemplate, TemplateNode, TemplateSplit, TerminalTemplate,
 };
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
@@ -219,44 +218,50 @@ impl ProfileDocumentWalker<'_> {
         let mut has_version_node = false;
         let mut tab_templates = Vec::new();
         let mut focused_tab_index: Option<usize> = None;
-        let mut starts_locked = false;
+        let mut should_start_locked = false;
         let mut has_lock_node = false;
-        for node in profile_document.nodes() {
-            match node.name().value() {
+        for kdl_node in profile_document.nodes() {
+            match kdl_node.name().value() {
                 "version" => {
                     if has_version_node {
-                        self.record_diagnostic(node.span(), "`version` is declared more than once");
+                        self.record_diagnostic(
+                            kdl_node.span(),
+                            "`version` is declared more than once",
+                        );
                     } else {
                         has_version_node = true;
-                        self.parse_version_node(node);
+                        self.parse_version_node(kdl_node);
                     }
                 }
                 "tab" => {
                     let tab_index = tab_templates.len();
-                    let (tab_template, is_tab_focused) = self.parse_tab_node(node);
+                    let (tab_template, is_tab_focused) = self.parse_tab_node(kdl_node);
                     tab_templates.push(tab_template);
                     if is_tab_focused {
                         match focused_tab_index {
                             None => focused_tab_index = Some(tab_index),
                             Some(_) => self.record_diagnostic(
-                                node.span(),
+                                kdl_node.span(),
                                 "another tab already carries `focus`; only one tab starts focused",
                             ),
                         }
                     }
                 }
                 "lock" => {
-                    let is_bare_marker = self.validate_marker(node, "lock");
+                    let is_bare_marker = self.validate_marker(kdl_node, "lock");
                     if has_lock_node {
-                        self.record_diagnostic(node.span(), "`lock` is declared more than once");
+                        self.record_diagnostic(
+                            kdl_node.span(),
+                            "`lock` is declared more than once",
+                        );
                     } else {
                         has_lock_node = true;
-                        starts_locked = is_bare_marker;
+                        should_start_locked = is_bare_marker;
                     }
                 }
                 other_node_name => {
                     self.record_diagnostic(
-                        node.span(),
+                        kdl_node.span(),
                         format_unknown_key(other_node_name, &["version", "tab", "lock"]),
                     );
                 }
@@ -278,7 +283,7 @@ impl ProfileDocumentWalker<'_> {
         Some(ProfileTemplate {
             tabs: tab_templates,
             focused_tab_index: focused_tab_index.unwrap_or(0),
-            is_locked: starts_locked,
+            is_locked: should_start_locked,
         })
     }
 
@@ -347,7 +352,6 @@ impl ProfileDocumentWalker<'_> {
                             &[
                                 "tab.focus",
                                 "tab.pane",
-                                "tab.plugin",
                                 "tab.horizontal",
                                 "tab.vertical",
                                 "tab.stack",
@@ -362,13 +366,10 @@ impl ProfileDocumentWalker<'_> {
             None => {
                 self.record_diagnostic(
                     tab_node.span(),
-                    "`tab` needs one layout node (`pane`, `plugin`, `horizontal`, \
-                     `vertical`, or `stack`)",
+                    "`tab` needs one layout node (`pane`, `horizontal`, `vertical`, or `stack`)",
                 );
                 ProfileSlot {
-                    template_node: TemplateNode::Leaf(LeafTemplate::Terminal(
-                        TerminalTemplate::default(),
-                    )),
+                    template_node: TemplateNode::Leaf(TerminalTemplate::default()),
                     slot_sizing: ProfileSizing::default(),
                     expanded_span: None,
                 }
@@ -407,7 +408,6 @@ impl ProfileDocumentWalker<'_> {
     ) -> ProfileSlot {
         match structural_node.name().value() {
             "pane" => self.parse_pane_node(structural_node, parent_context),
-            "plugin" => self.parse_plugin_node(structural_node, parent_context),
             "horizontal" => {
                 self.parse_split_node(structural_node, parent_context, SplitDirection::Horizontal)
             }
@@ -498,71 +498,11 @@ impl ProfileDocumentWalker<'_> {
         }
         self.record_leaf(&leaf_config);
         ProfileSlot {
-            template_node: TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate {
+            template_node: TemplateNode::Leaf(TerminalTemplate {
                 command: command_template,
                 working_directory,
                 environment_variables,
-            })),
-            slot_sizing: leaf_config.leaf_sizing,
-            expanded_span: leaf_config.expanded_span,
-        }
-    }
-
-    /// Parses a `plugin "name"` leaf: the name as its one argument, plus
-    /// optional sizing, `focus`, and (in a stack) `expanded` children. A name
-    /// that cannot be read is reported and becomes an empty string.
-    fn parse_plugin_node(
-        &mut self,
-        plugin_node: &KdlNode,
-        parent_context: ProfileNodeContext,
-    ) -> ProfileSlot {
-        let plugin_name = match plugin_node.entries() {
-            [plugin_argument] if plugin_argument.name().is_none() => {
-                match plugin_argument.value().as_string() {
-                    Some(plugin_name) if !plugin_name.is_empty() => Some(plugin_name.to_string()),
-                    _ => {
-                        self.record_diagnostic(
-                            plugin_argument.span(),
-                            "`plugin` takes one non-empty name string",
-                        );
-                        None
-                    }
-                }
-            }
-            _ => {
-                self.record_diagnostic(
-                    plugin_node.span(),
-                    "`plugin` takes exactly one name string, like `plugin \"session-manager\"`",
-                );
-                None
-            }
-        };
-        let mut leaf_config = ProfileLeafConfig::default();
-        if let Some(plugin_children) = plugin_node.children() {
-            for child_node in plugin_children.nodes() {
-                if !self.parse_leaf_config_node(child_node, parent_context, &mut leaf_config) {
-                    let setting_key = format!("plugin.{}", child_node.name().value());
-                    self.record_diagnostic(
-                        child_node.span(),
-                        format_unknown_key(
-                            &setting_key,
-                            &[
-                                "plugin.size",
-                                "plugin.weight",
-                                "plugin.min",
-                                "plugin.preferred",
-                                "plugin.focus",
-                                "plugin.expanded",
-                            ],
-                        ),
-                    );
-                }
-            }
-        }
-        self.record_leaf(&leaf_config);
-        let plugin_name = plugin_name.unwrap_or_default();
-        ProfileSlot {
-            template_node: TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate { plugin_name })),
+            }),
             slot_sizing: leaf_config.leaf_sizing,
             expanded_span: leaf_config.expanded_span,
         }
@@ -600,7 +540,6 @@ impl ProfileDocumentWalker<'_> {
                             &setting_key,
                             &[
                                 &format!("{split_name}.pane"),
-                                &format!("{split_name}.plugin"),
                                 &format!("{split_name}.horizontal"),
                                 &format!("{split_name}.vertical"),
                                 &format!("{split_name}.stack"),
@@ -641,8 +580,8 @@ impl ProfileDocumentWalker<'_> {
         }
     }
 
-    /// Parses `stack`: its own sizing children plus at least two leaf
-    /// members (`pane`/`plugin`), at most one marked `expanded`.
+    /// Parses `stack`: its own sizing children plus at least two `pane`
+    /// members, at most one marked `expanded`.
     fn parse_stack_node(
         &mut self,
         stack_node: &KdlNode,
@@ -662,7 +601,7 @@ impl ProfileDocumentWalker<'_> {
         if let Some(stack_children) = stack_node.children() {
             for child_node in stack_children.nodes() {
                 let child_node_name = child_node.name().value();
-                if child_node_name == "pane" || child_node_name == "plugin" {
+                if child_node_name == "pane" {
                     let leaf_index = self.tab_leaf_count;
                     let profile_slot =
                         self.parse_structural_node(child_node, ProfileNodeContext::Stack);
@@ -673,7 +612,7 @@ impl ProfileDocumentWalker<'_> {
                         child_node.span(),
                         format!(
                             "`{child_node_name}` cannot be a stack member; stack members are \
-                             `pane` or `plugin`"
+                             `pane`"
                         ),
                     );
                     // Parsed as a directional child: sizing on it and on its
@@ -689,7 +628,6 @@ impl ProfileDocumentWalker<'_> {
                             &format!("stack.{child_node_name}"),
                             &[
                                 "stack.pane",
-                                "stack.plugin",
                                 "stack.size",
                                 "stack.weight",
                                 "stack.min",
@@ -752,8 +690,8 @@ impl ProfileDocumentWalker<'_> {
         }
     }
 
-    /// Handles a config child shared by both leaf kinds: sizing, `focus`,
-    /// `expanded`. Sizing outside a `Directional` slot is reported and
+    /// Handles a `pane` config child: sizing, `focus`, `expanded`. Sizing
+    /// outside a `Directional` slot is reported and
     /// discarded. Returns `false` when the node is none of the three.
     fn parse_leaf_config_node(
         &mut self,
@@ -963,7 +901,7 @@ impl ProfileDocumentWalker<'_> {
         Some(cell_count)
     }
 
-    /// Parses one integer argument in `0..=max_cell_count` — the shared
+    /// Parses one integer argument in `0..=maximum_cell_count` — the shared
     /// shape of `weight`, `min`, and `preferred` values. A non-integer, a
     /// negative value, or a value above the limit is reported and returns
     /// `None`. Zero passes; each caller rejects it with its own message.
@@ -971,7 +909,7 @@ impl ProfileDocumentWalker<'_> {
         &mut self,
         sizing_node: &KdlNode,
         sizing_name: &str,
-        max_cell_count: u32,
+        maximum_cell_count: u32,
     ) -> Option<u32> {
         let sizing_argument = self.find_single_argument(sizing_node, sizing_name)?;
         match sizing_argument
@@ -979,11 +917,13 @@ impl ProfileDocumentWalker<'_> {
             .as_integer()
             .and_then(|integer_value| u32::try_from(integer_value).ok())
         {
-            Some(cell_count) if cell_count <= max_cell_count => Some(cell_count),
+            Some(cell_count) if cell_count <= maximum_cell_count => Some(cell_count),
             _ => {
                 self.record_diagnostic(
                     sizing_argument.span(),
-                    format!("`{sizing_name}` must be an integer between 1 and {max_cell_count}"),
+                    format!(
+                        "`{sizing_name}` must be an integer between 1 and {maximum_cell_count}"
+                    ),
                 );
                 None
             }
@@ -1190,8 +1130,5 @@ struct ProfileLeafConfig {
 /// Whether `node_name` is a structural layout node, as opposed to a config
 /// node.
 fn is_structural_node_name(node_name: &str) -> bool {
-    matches!(
-        node_name,
-        "pane" | "plugin" | "horizontal" | "vertical" | "stack"
-    )
+    matches!(node_name, "pane" | "horizontal" | "vertical" | "stack")
 }

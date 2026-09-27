@@ -197,10 +197,10 @@ fn decode_raw_rgba_rejects_invalid_dimensions_and_lengths() {
 }
 
 #[test]
-fn checked_lengths_reject_overflow_before_allocation() {
+fn an_oversized_side_is_rejected_before_the_byte_count_is_computed() {
     assert_eq!(
         compute_rgba_byte_count(GraphicsProtocol::Sixel, usize::MAX, 2)
-            .expect_err("dimension multiplication must be checked"),
+            .expect_err("a side past the limit must be rejected"),
         GraphicsError::ImageTooLarge {
             protocol: GraphicsProtocol::Sixel
         }

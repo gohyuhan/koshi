@@ -90,10 +90,10 @@ pub enum SupervisorRequestKind {
     Hello {
         /// The lowest supervisor-link protocol version the session server
         /// speaks.
-        min_protocol_version: u32,
+        minimum_protocol_version: u32,
         /// The highest supervisor-link protocol version the session server
         /// speaks.
-        max_protocol_version: u32,
+        maximum_protocol_version: u32,
         /// The secret the session server started this supervisor with.
         connection_token: ConnectionToken,
     },
@@ -162,13 +162,13 @@ pub enum SupervisorRequestKind {
 
 impl SupervisorRequestKind {
     /// The Hello this build opens a supervisor link with: the link versions it
-    /// speaks, lowest first, and `token`, the secret the session server started
+    /// speaks, lowest first, and `connection_token`, the secret the session server started
     /// the supervisor with. Every caller builds its Hello here.
     #[must_use]
     pub fn build_hello_request(connection_token: ConnectionToken) -> SupervisorRequestKind {
         SupervisorRequestKind::Hello {
-            min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-            max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+            maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
             connection_token,
         }
     }
@@ -357,7 +357,7 @@ impl SupervisorHandshake {
         self.0.get_agreed_protocol_version()
     }
 
-    /// The refusal for a request kind this build does not have, named `name`.
+    /// The refusal for a request kind this build does not have, named `request_kind_name`.
     ///
     /// A closed gate answers
     /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired), the
@@ -384,20 +384,21 @@ impl SupervisorHandshake {
     /// is not.
     ///
     /// `Ok(())` means the caller serves the request — a Hello is answered with
-    /// [`SupervisorResult::Hello`] carrying [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An `Err`
-    /// carries the refusal to send back, and the gate keeps the state it had.
+    /// [`SupervisorResult::Hello`] carrying
+    /// [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An `Err` carries the
+    /// refusal to send back, and the gate keeps the state it had.
     pub fn validate_request_kind(
         &mut self,
         request_kind: &SupervisorRequestKind,
     ) -> Result<(), IpcErrorPayload> {
         match request_kind {
             SupervisorRequestKind::Hello {
-                min_protocol_version,
-                max_protocol_version,
+                minimum_protocol_version,
+                maximum_protocol_version,
                 connection_token,
             } => self.0.validate_hello(
-                *min_protocol_version,
-                *max_protocol_version,
+                *minimum_protocol_version,
+                *maximum_protocol_version,
                 connection_token,
             ),
             request_kind => self
@@ -407,7 +408,7 @@ impl SupervisorHandshake {
     }
 }
 
-/// The address the supervisor holding `session`'s panes listens on: the string
+/// The address the supervisor holding `session_id`'s panes listens on: the string
 /// [`Connection::connect`](crate::transport::Connection::connect) takes.
 ///
 /// `supervisor_process_id` is the process id of that supervisor and is part of the
@@ -457,20 +458,20 @@ impl WireVariants for SupervisorRequestKind {
 }
 
 impl WireName for SupervisorRequestKind {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         self.get_request_kind_name()
     }
 }
 
 impl WireVariants for SupervisorResult {
     /// Every supervisor answer this build has: one entry per variant of
-    /// [`SupervisorResult`], spelled as its `wire_name` spells it.
+    /// [`SupervisorResult`], spelled as its `get_wire_name` spells it.
     const VARIANTS: &'static [&'static str] =
         &["Hello", "Spawned", "Panes", "Cwd", "Done", "Error"];
 }
 
 impl WireName for SupervisorResult {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         match self {
             SupervisorResult::Hello { .. } => "Hello",
             SupervisorResult::Spawned { .. } => "Spawned",
@@ -489,7 +490,7 @@ impl WireVariants for SupervisorEvent {
 }
 
 impl WireName for SupervisorEvent {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         self.get_event_name()
     }
 }

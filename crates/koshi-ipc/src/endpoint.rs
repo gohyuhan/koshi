@@ -15,17 +15,14 @@
 //!
 //! The same module holds the address helpers every writer and reader shares:
 //! [`compute_socket_address`](crate::endpoint::compute_socket_address) builds the control-socket
-//! address a session listens on, and
-//! [`remove_socket_file`](crate::endpoint::remove_socket_file) takes that
-//! address off the disk once the session is gone.
-//! [`compute_shared_socket_address`](crate::endpoint::compute_shared_socket_address) builds that
-//! address for a session other local users may reach,
+//! address a session listens on, and [`remove_socket_file`](crate::endpoint::remove_socket_file)
+//! takes that address off the disk once the session is gone.
 //! [`resolve_resume_file_path`](crate::endpoint::resolve_resume_file_path) names the file a session
 //! replacing its own process image leaves its state in, and
 //! [`resolve_advertisement_marker_path`](crate::endpoint::resolve_advertisement_marker_path),
 //! [`write_advertisement_marker`](crate::endpoint::write_advertisement_marker) and
-//! [`remove_advertisement_marker`](crate::endpoint::remove_advertisement_marker) handle the empty marker
-//! file that names such a session on Windows.
+//! [`remove_advertisement_marker`](crate::endpoint::remove_advertisement_marker) handle the empty
+//! marker file that names such a session on Windows.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -36,14 +33,17 @@ use serde::{Deserialize, Serialize};
 use crate::error::IpcError;
 use crate::protocol::ConnectionToken;
 
-/// The control-socket address a running `session` listens on: the string
+/// The control-socket address a running `session_id` listens on: the string
 /// [`Connection::connect`](crate::transport::Connection::connect) takes and
-/// the [`EndpointFile`]'s `socket` field carries.
+/// the [`EndpointFile`]'s `socket_address` field carries.
 ///
-/// On Unix this is a socket-file path, `session-<uuid>.sock` directly inside
-/// `runtime_directory` — the location [`validate_socket_address`](crate::validate::validate_socket_address)
-/// accepts. On Windows it is the pipe name `koshi-session-<uuid>`, inside the
-/// `koshi-` namespace that same check requires; `runtime_directory` goes unused
+/// On Unix this is a socket-file path, `session-<uuid>.sock` directly inside `runtime_directory` —
+/// the location [`validate_socket_address`](crate::validate::validate_socket_address) accepts.
+/// Passing a session's shared user directory as `runtime_directory` gives the address other local
+/// users reach, the location
+/// [`validate_shared_socket_address`](crate::validate::validate_shared_socket_address) accepts. On
+/// Windows it is the pipe name `koshi-session-<uuid>`, inside the `koshi-` namespace that same
+/// check requires; pipe names share one machine-wide namespace, and `runtime_directory` goes unused
 /// there.
 ///
 /// Every consumer derives the address through here, including the
@@ -64,23 +64,6 @@ pub fn compute_socket_address(runtime_directory: &Path, session_id: SessionId) -
     }
 }
 
-/// The control-socket address a running `session` listens on when other local
-/// users may reach it.
-///
-/// The same string [`compute_socket_address`] gives for `shared_user_directory`. On Unix this
-/// is a socket-file path, `session-<uuid>.sock` directly inside
-/// `shared_user_directory` — the location
-/// [`validate_shared_socket_address`](crate::validate::validate_shared_socket_address)
-/// accepts. On Windows it is the pipe name `koshi-session-<uuid>`: pipe names
-/// share one machine-wide namespace, and `shared_user_directory` goes unused there.
-#[must_use]
-pub fn compute_shared_socket_address(
-    shared_user_directory: &Path,
-    session_id: SessionId,
-) -> String {
-    compute_socket_address(shared_user_directory, session_id)
-}
-
 /// What a resume file's name ends in, after the session id. Every reader that
 /// walks a directory for resume files matches on this.
 pub const RESUME_SUFFIX: &str = ".resume";
@@ -93,7 +76,7 @@ pub const RESUME_SUFFIX: &str = ".resume";
 /// for the new socket before it gives up and reports the session gone.
 pub const RESTART_WINDOW_DURATION: Duration = Duration::from_secs(30);
 
-/// Where the resume file for `session` lives: `session-<uuid>.resume`,
+/// Where the resume file for `session_id` lives: `session-<uuid>.resume`,
 /// directly beside that session's endpoint file inside `runtime_directory`.
 ///
 /// A session server about to replace its own process image writes there the
@@ -106,7 +89,7 @@ pub fn resolve_resume_file_path(runtime_directory: &Path, session_id: SessionId)
     runtime_directory.join(format!("{session_id}{RESUME_SUFFIX}"))
 }
 
-/// Where the marker advertising `session` machine-wide lives:
+/// Where the marker advertising `session_id` machine-wide lives:
 /// `session-<uuid>`, with no extension, directly inside `shared_directory`.
 ///
 /// On Windows, a client lists these markers to learn which sessions listen
@@ -169,7 +152,7 @@ pub struct EndpointFile {
 }
 
 impl EndpointFile {
-    /// Where the endpoint file for `session` lives: `session-<uuid>.json`
+    /// Where the endpoint file for `session_id` lives: `session-<uuid>.json`
     /// directly inside `runtime_directory`.
     ///
     /// Callers resolve `runtime_directory` through `koshi_paths::resolve_runtime_directory()`.

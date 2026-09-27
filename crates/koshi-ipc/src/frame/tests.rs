@@ -16,7 +16,7 @@ fn build_frame_style(foreground_color: FrameColor) -> FrameStyle {
         foreground_color,
         background_color: FrameColor::Default,
         underline_color: None,
-        text_attributes: FrameAttrs {
+        text_attributes: FrameAttributes {
             is_bold: false,
             is_italic: false,
             is_reverse: false,
@@ -64,24 +64,22 @@ fn build_painted_frame() -> PaintedFrame {
                     pane_id: pane,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 4,
                             row_count: 3,
                         },
                     },
                     content_rect: Some(Rect {
                         origin: Point { column: 1, row: 1 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 2,
                             row_count: 1,
                         },
                     }),
-                    pane_kind: PaneKind::Terminal,
                     is_visible: true,
                     is_suppressed: false,
-                    is_dead: false,
                 }],
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 4,
                     row_count: 3,
                 },
@@ -90,7 +88,7 @@ fn build_painted_frame() -> PaintedFrame {
                 is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tab_snapshots: vec![FrameTabMeta {
+            tab_snapshots: vec![FrameTabMetadata {
                 tab_id: tab,
                 tab_name: "edit".to_string(),
                 tab_index: 0,
@@ -130,15 +128,14 @@ fn build_painted_frame() -> PaintedFrame {
             }],
             is_reverse_video: false,
             mouse_tracking: MouseTracking::ButtonMotion,
-            is_alt_scroll_enabled: false,
+            is_alternate_scroll_enabled: false,
             is_on_alt_screen: false,
             view_top_row_index: 7,
             selection_spans: Some(FrameSelection {
                 row_spans: vec![(0, 0, 1)],
             }),
             has_selection: true,
-            scrollback_meta: FrameScrollback {
-                is_truncated: false,
+            scrollback_metadata: FrameScrollback {
                 retained_line_count: 12,
             },
         }],
@@ -288,7 +285,7 @@ fn an_image_placement_without_availability_expects_its_record() {
 }
 
 #[test]
-fn image_chunk_bytes_use_base64_on_wire_and_read_old_number_lists() {
+fn image_chunk_bytes_use_base64_on_wire_and_refuse_number_lists() {
     let chunk = FrameImageChunk {
         image_transfer_id: 1,
         byte_offset: 0,
@@ -306,23 +303,17 @@ fn image_chunk_bytes_use_base64_on_wire_and_read_old_number_lists() {
         })
     );
 
-    let from_list: FrameImageChunk = serde_json::from_value(json!({
+    let number_list_error = serde_json::from_value::<FrameImageChunk>(json!({
         "image_transfer_id": 1,
         "byte_offset": 0,
         "is_last": true,
         "chunk_bytes": [0, 1, 2, 255, 4, 5, 6, 7]
     }))
-    .expect("the number-list image chunk decodes");
+    .expect_err("a number list is not base64 text");
 
-    assert_eq!(from_list, chunk);
     assert_eq!(
-        serde_json::to_value(from_list).expect("the decoded image chunk re-encodes"),
-        json!({
-            "image_transfer_id": 1,
-            "byte_offset": 0,
-            "is_last": true,
-            "chunk_bytes": "AAEC/wQFBgc="
-        })
+        number_list_error.to_string(),
+        "invalid type: sequence, expected bytes as a base64 string"
     );
 }
 
@@ -411,10 +402,10 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
     };
     let mut wrong_length = serde_json::to_value(&transfer).expect("the transfer encodes");
     wrong_length["image_byte_count"] = json!(4);
-    let error = serde_json::from_value::<FrameImageTransfer>(wrong_length)
+    let deserialize_error = serde_json::from_value::<FrameImageTransfer>(wrong_length)
         .expect_err("a transfer with a wrong byte count is refused");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image transfer byte length does not match its dimensions"
     );
 
@@ -424,9 +415,12 @@ fn a_chunked_image_header_and_empty_chunk_are_refused_exactly() {
         "is_last": true,
         "chunk_bytes": ""
     });
-    let error = serde_json::from_value::<FrameImageChunk>(empty_chunk)
+    let deserialize_error = serde_json::from_value::<FrameImageChunk>(empty_chunk)
         .expect_err("an empty image chunk is refused");
-    assert_eq!(error.to_string(), "image chunk must not be empty");
+    assert_eq!(
+        deserialize_error.to_string(),
+        "image chunk must not be empty"
+    );
 }
 
 #[test]
@@ -446,8 +440,10 @@ fn image_transfer_dimensions_accept_the_limits_and_refuse_the_next_value() {
     .expect("the exact graphics limits are accepted");
     assert_eq!(at_pixel_limit.image_byte_count, 67_108_864);
 
-    for (width, height, byte_len) in [(0, 1, 0), (16_385, 1, 65_540), (16_384, 1_025, 67_174_400)] {
-        let error = serde_json::from_value::<FrameImageTransfer>(json!({
+    for (width, height, expected_byte_count) in
+        [(0, 1, 0), (16_385, 1, 65_540), (16_384, 1_025, 67_174_400)]
+    {
+        let deserialize_error = serde_json::from_value::<FrameImageTransfer>(json!({
             "image_content_id": 1,
             "image_record": {
                 "protocol": "Kitty",
@@ -457,10 +453,13 @@ fn image_transfer_dimensions_accept_the_limits_and_refuse_the_next_value() {
                 "display": FrameImageDisplay::default(),
                 "anchor_cell": [0, 0]
             },
-            "image_byte_count": byte_len
+            "image_byte_count": expected_byte_count
         }))
         .expect_err("dimensions beyond the graphics limits are refused");
-        assert_eq!(error.to_string(), "image dimensions exceed graphics limits");
+        assert_eq!(
+            deserialize_error.to_string(),
+            "image dimensions exceed graphics limits"
+        );
     }
 }
 
@@ -498,18 +497,16 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                         "pane_id": "00000000-0000-0000-0000-000000000004",
                         "outer_rect": {
                             "origin": { "column": 0, "row": 0 },
-                            "cell_size": { "column_count": 4, "row_count": 3 }
+                            "size": { "column_count": 4, "row_count": 3 }
                         },
                         "content_rect": {
                             "origin": { "column": 1, "row": 1 },
-                            "cell_size": { "column_count": 2, "row_count": 1 }
+                            "size": { "column_count": 2, "row_count": 1 }
                         },
-                        "pane_kind": "Terminal",
                         "is_visible": true,
-                        "is_suppressed": false,
-                        "is_dead": false
+                        "is_suppressed": false
                     }],
-                    "effective_cell_size": { "column_count": 4, "row_count": 3 },
+                    "tab_size": { "column_count": 4, "row_count": 3 },
                     "stack_headers": [],
                     "layout_mode": "Tiled",
                     "is_every_pane_suppressed": false,
@@ -552,12 +549,12 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 }],
                 "is_reverse_video": false,
                 "mouse_tracking": "ButtonMotion",
-                "is_alt_scroll_enabled": false,
+                "is_alternate_scroll_enabled": false,
                 "is_on_alt_screen": false,
                 "view_top_row_index": 7,
                 "selection_spans": { "row_spans": [[0, 0, 1]] },
                 "has_selection": true,
-                "scrollback_meta": { "is_truncated": false, "retained_line_count": 12 }
+                "scrollback_metadata": { "retained_line_count": 12 }
             }],
             "client_snapshot": {
                 "client_id": "00000000-0000-0000-0000-000000000003",
@@ -865,7 +862,7 @@ fn a_dressed_cell_encodes_every_value_it_sets_and_nothing_it_does_not() {
             foreground_color: FrameColor::Indexed(1),
             background_color: FrameColor::Rgb(0, 0, 255),
             underline_color: Some(FrameColor::Indexed(3)),
-            text_attributes: FrameAttrs {
+            text_attributes: FrameAttributes {
                 is_bold: true,
                 is_italic: false,
                 is_reverse: true,

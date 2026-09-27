@@ -107,9 +107,9 @@ fn headless_takes_the_other_users_flag_beside_it() {
 #[test]
 fn the_other_users_flag_without_headless_is_a_usage_error() {
     // `--allow-other-users` requires `--headless`.
-    let error = parse_cli_error(&["koshi", "--allow-other-users"]);
+    let cli_error = parse_cli_error(&["koshi", "--allow-other-users"]);
 
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -169,9 +169,9 @@ fn attach_takes_a_server_and_the_name_to_save_it_under() {
 #[test]
 fn a_name_to_save_a_server_under_without_a_server_is_a_usage_error() {
     // `--save-as` is declared `requires = "remote"`.
-    let error = parse_cli_error(&["koshi", "attach", "--save-as", "work"]);
+    let cli_error = parse_cli_error(&["koshi", "attach", "--save-as", "work"]);
 
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -249,23 +249,23 @@ fn the_removed_attach_and_detach_root_flags_are_usage_errors() {
         ["koshi", "--detach"].as_slice(),
         ["koshi", "--detach-all"].as_slice(),
     ] {
-        let error = parse_cli_error(argv);
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
-        assert_eq!(error.exit_code(), 2);
+        let cli_error = parse_cli_error(argv);
+        assert_eq!(cli_error.kind(), ErrorKind::UnknownArgument);
+        assert_eq!(cli_error.exit_code(), 2);
     }
 }
 
 #[test]
 fn headless_conflicts_with_subcommands() {
-    let error = parse_cli_error(&["koshi", "--headless", "list-sessions"]);
-    assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    let cli_error = parse_cli_error(&["koshi", "--headless", "list-sessions"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ArgumentConflict);
 }
 
 #[test]
 fn the_removed_new_verb_is_a_usage_error() {
-    let error = parse_cli_error(&["koshi", "new"]);
-    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "new"]);
+    assert_eq!(cli_error.kind(), ErrorKind::InvalidSubcommand);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
@@ -317,8 +317,8 @@ fn kill_session_takes_an_optional_session() {
 
 #[test]
 fn kill_session_rejects_a_second_positional() {
-    let error = parse_cli_error(&["koshi", "kill-session", "work", "extra"]);
-    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    let cli_error = parse_cli_error(&["koshi", "kill-session", "work", "extra"]);
+    assert_eq!(cli_error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
@@ -340,7 +340,6 @@ fn flagless_subcommands_parse_to_their_variants() {
         ("lock", CliCommand::Lock { client_id: None }),
         ("unlock", CliCommand::Unlock { client_id: None }),
         ("toggle-lock", CliCommand::ToggleLock { client_id: None }),
-        ("plugin", CliCommand::Plugin),
         (
             "list-tabs",
             CliCommand::ListTabs {
@@ -626,9 +625,9 @@ fn the_debug_dumps_are_queries_and_map_to_no_action() {
 
 #[test]
 fn bare_keys_requires_a_subcommand() {
-    let error = parse_cli_error(&["koshi", "keys"]);
+    let cli_error = parse_cli_error(&["koshi", "keys"]);
     assert_eq!(
-        error.kind(),
+        cli_error.kind(),
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     );
 }
@@ -641,29 +640,18 @@ fn keys_list_parses_its_filters_and_format() {
             command: KeysCommand::List {
                 input_mode_name: None,
                 scope: None,
-                is_recommended: false,
                 output_format: OutputFormat::Table,
             }
         }
     );
     assert_eq!(
         parse_cli_command(&[
-            "koshi",
-            "keys",
-            "list",
-            "--mode",
-            "locked",
-            "--scope",
-            "user",
-            "--recommended",
-            "--format",
-            "json",
+            "koshi", "keys", "list", "--mode", "locked", "--scope", "user", "--format", "json",
         ]),
         CliCommand::Keys {
             command: KeysCommand::List {
                 input_mode_name: Some("locked".to_string()),
                 scope: Some(KeymapScope::User),
-                is_recommended: true,
                 output_format: OutputFormat::Json,
             }
         }
@@ -713,8 +701,8 @@ fn keys_mutation_verbs_do_not_exist() {
     // Keybindings mutate through `keybinding.kdl` only; the `keys` tree is
     // read-only introspection.
     for verb in ["set", "remove", "reset"] {
-        let error = parse_cli_error(&["koshi", "keys", verb]);
-        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "for {verb}");
+        let cli_error = parse_cli_error(&["koshi", "keys", verb]);
+        assert_eq!(cli_error.kind(), ErrorKind::InvalidSubcommand, "for {verb}");
     }
 }
 
@@ -793,8 +781,8 @@ fn list_sessions_parses_the_json_format() {
 
 #[test]
 fn format_rejects_an_unknown_value() {
-    let error = parse_cli_error(&["koshi", "list-sessions", "--format", "yaml"]);
-    assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    let cli_error = parse_cli_error(&["koshi", "list-sessions", "--format", "yaml"]);
+    assert_eq!(cli_error.kind(), ErrorKind::InvalidValue);
 }
 
 #[test]
@@ -859,19 +847,19 @@ fn inspect_parses_the_json_format() {
 
 #[test]
 fn inspect_requires_a_target() {
-    let error = parse_cli_error(&["koshi", "inspect"]);
+    let cli_error = parse_cli_error(&["koshi", "inspect"]);
     assert_eq!(
-        error.kind(),
+        cli_error.kind(),
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     );
-    assert_eq!(error.exit_code(), 2);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
 fn inspect_rejects_an_id_of_the_wrong_kind() {
     let tab_id = format!("tab-{}", build_fixed_test_uuid());
-    let error = parse_cli_error(&["koshi", "inspect", "pane", &tab_id]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    let cli_error = parse_cli_error(&["koshi", "inspect", "pane", &tab_id]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
 }
 
 // --- Action introspection ---
@@ -928,18 +916,18 @@ fn actions_explain_takes_an_action_name_and_a_format() {
 
 #[test]
 fn actions_requires_a_subcommand() {
-    let error = parse_cli_error(&["koshi", "actions"]);
+    let cli_error = parse_cli_error(&["koshi", "actions"]);
     assert_eq!(
-        error.kind(),
+        cli_error.kind(),
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     );
-    assert_eq!(error.exit_code(), 2);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
 fn actions_explain_requires_an_action() {
-    let error = parse_cli_error(&["koshi", "actions", "explain"]);
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    let cli_error = parse_cli_error(&["koshi", "actions", "explain"]);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -975,7 +963,6 @@ fn the_command_tree_lists_exactly_the_declared_subcommands() {
         "new-tab",
         "next-tab",
         "place-pane",
-        "plugin",
         "previous-tab",
         "remote",
         "resize-pane",
@@ -1172,7 +1159,6 @@ fn the_argument_free_verbs_take_no_arguments() {
         CliCommand::ResumeSupport
     );
     assert_eq!(parse_cli_command(&["koshi", "update"]), CliCommand::Update);
-    assert_eq!(parse_cli_command(&["koshi", "plugin"]), CliCommand::Plugin);
     assert_eq!(
         parse_cli_error(&["koshi", "resume-support", "extra"]).kind(),
         ErrorKind::UnknownArgument
@@ -1205,7 +1191,7 @@ fn the_grammar_takes_the_verbs_the_spawners_name() {
 }
 
 #[test]
-fn the_help_hides_the_self_run_subcommands_and_the_unwired_plugin_verb() {
+fn the_help_hides_the_self_run_subcommands() {
     let hidden: Vec<String> = Cli::command()
         .get_subcommands()
         .filter(|command| command.is_hide_set())
@@ -1215,7 +1201,6 @@ fn the_help_hides_the_self_run_subcommands_and_the_unwired_plugin_verb() {
     assert_eq!(
         hidden,
         [
-            "plugin",
             "serve-router",
             "serve-session",
             "serve-pty-supervisor",
@@ -1226,16 +1211,16 @@ fn the_help_hides_the_self_run_subcommands_and_the_unwired_plugin_verb() {
 
 #[test]
 fn an_unknown_subcommand_is_a_usage_error() {
-    let error = parse_cli_error(&["koshi", "explode"]);
-    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "explode"]);
+    assert_eq!(cli_error.kind(), ErrorKind::InvalidSubcommand);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
 fn an_unknown_flag_is_a_usage_error() {
-    let error = parse_cli_error(&["koshi", "--frobnicate"]);
-    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "--frobnicate"]);
+    assert_eq!(cli_error.kind(), ErrorKind::UnknownArgument);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
@@ -1256,9 +1241,9 @@ fn every_subcommand_answers_help() {
         .map(|command| command.get_name().to_string())
         .collect::<Vec<_>>()
     {
-        let error = parse_cli_error(&["koshi", &subcommand_name, "--help"]);
+        let cli_error = parse_cli_error(&["koshi", &subcommand_name, "--help"]);
         assert_eq!(
-            error.kind(),
+            cli_error.kind(),
             ErrorKind::DisplayHelp,
             "for subcommand {subcommand_name}"
         );
@@ -1382,9 +1367,9 @@ fn new_pane_parses_bare_and_with_every_flag() {
 
 #[test]
 fn new_pane_direction_and_stacked_conflict() {
-    let error = parse_cli_error(&["koshi", "new-pane", "--direction", "left", "--stacked"]);
-    assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "new-pane", "--direction", "left", "--stacked"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 /// With no `--direction`, `new-pane` splits toward the direction this
@@ -1500,9 +1485,9 @@ fn new_pane_tab_given_as_an_id_reaches_the_command_without_a_lookup() {
 #[test]
 fn new_pane_pane_and_tab_conflict() {
     let pane_flag = format!("pane-{}", build_fixed_test_uuid());
-    let error = parse_cli_error(&["koshi", "new-pane", "--pane", &pane_flag, "--tab", "logs"]);
-    assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "new-pane", "--pane", &pane_flag, "--tab", "logs"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
@@ -1591,9 +1576,9 @@ fn new_tab_carries_its_client_into_the_command_and_the_routing_target() {
 
 #[test]
 fn new_tab_client_value_must_read_as_a_client_id() {
-    let error = parse_cli_error(&["koshi", "new-tab", "--client", "amber-fox"]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "new-tab", "--client", "amber-fox"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
@@ -1745,9 +1730,9 @@ fn a_fullscreen_client_flag_is_a_routing_target() {
 
 #[test]
 fn an_invalid_direction_is_a_usage_error() {
-    let error = parse_cli_error(&["koshi", "new-pane", "--direction", "sideways"]);
-    assert_eq!(error.kind(), ErrorKind::InvalidValue);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "new-pane", "--direction", "sideways"]);
+    assert_eq!(cli_error.kind(), ErrorKind::InvalidValue);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
@@ -1828,9 +1813,9 @@ fn resize_pane_accepts_a_negative_size_in_both_spellings() {
 
 #[test]
 fn resize_pane_requires_a_direction() {
-    let error = parse_cli_error(&["koshi", "resize-pane", "--size", "2"]);
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "resize-pane", "--size", "2"]);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
@@ -1923,8 +1908,8 @@ fn input_takes_text_that_starts_with_a_dash() {
 
 #[test]
 fn input_requires_its_text() {
-    let error = parse_cli_error(&["koshi", "input"]);
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    let cli_error = parse_cli_error(&["koshi", "input"]);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 /// The text travels as typed. A carriage return — the byte the Enter key
@@ -1989,8 +1974,8 @@ fn move_tab_requires_an_index() {
             tab_reference: None,
         }
     );
-    let error = parse_cli_error(&["koshi", "move-tab"]);
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    let cli_error = parse_cli_error(&["koshi", "move-tab"]);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -2081,8 +2066,8 @@ fn tab_focus_commands_take_an_optional_client() {
 
 #[test]
 fn focus_pane_requires_a_pane_and_takes_an_optional_client() {
-    let error = parse_cli_error(&["koshi", "focus-pane"]);
-    assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    let cli_error = parse_cli_error(&["koshi", "focus-pane"]);
+    assert_eq!(cli_error.kind(), ErrorKind::MissingRequiredArgument);
 
     let pane_flag = format!("pane-{}", build_fixed_test_uuid());
     let client_flag = format!("client-{}", build_fixed_test_uuid());
@@ -2178,13 +2163,13 @@ fn run_without_a_command_is_a_usage_error() {
 
 #[test]
 fn run_rejects_a_command_not_behind_the_separator() {
-    let error = parse_cli_error(&["koshi", "run", "htop"]);
-    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    let cli_error = parse_cli_error(&["koshi", "run", "htop"]);
+    assert_eq!(cli_error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
 fn run_direction_and_stacked_conflict() {
-    let error = parse_cli_error(&[
+    let cli_error = parse_cli_error(&[
         "koshi",
         "run",
         "--direction",
@@ -2193,7 +2178,7 @@ fn run_direction_and_stacked_conflict() {
         "--",
         "htop",
     ]);
-    assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    assert_eq!(cli_error.kind(), ErrorKind::ArgumentConflict);
 }
 
 // --- Id parsing ---
@@ -2221,16 +2206,16 @@ fn ids_parse_prefixed_and_bare_forms() {
 #[test]
 fn an_id_of_the_wrong_kind_is_a_usage_error() {
     let tab_id = format!("tab-{}", build_fixed_test_uuid());
-    let error = parse_cli_error(&["koshi", "close-pane", "--pane", &tab_id]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "close-pane", "--pane", &tab_id]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 #[test]
 fn a_malformed_id_is_a_usage_error() {
-    let error = parse_cli_error(&["koshi", "close-pane", "--pane", "not-a-uuid"]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
-    assert_eq!(error.exit_code(), 2);
+    let cli_error = parse_cli_error(&["koshi", "close-pane", "--pane", "not-a-uuid"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
+    assert_eq!(cli_error.exit_code(), 2);
 }
 
 // --- Value parsers, called directly ---
@@ -2588,7 +2573,7 @@ fn action_subcommands_map_to_their_exact_commands() {
             vec!["koshi", "previous-tab"],
             "previous-tab",
             Command::FocusTab(FocusTabArgs {
-                focus_target: TabTarget::Prev,
+                focus_target: TabTarget::Previous,
                 client_id: None,
             }),
         ),
@@ -2710,16 +2695,24 @@ fn every_mapped_action_matches_its_seeded_command_kind() {
 
     for argv in argvs {
         let (action, mapped) = build_cli_action(argv);
-        let (_, metadata) = seeds
+        let (_, action_metadata) = seeds
             .iter()
             .find(|(seeded, _)| *seeded == action)
             .unwrap_or_else(|| panic!("action {action} is not in the seed table"));
-        let ActionHandlerReference::CoreCommand(expected_command_kind) = metadata.handler else {
+        let ActionHandlerReference::CoreCommand(expected_command_kind) = action_metadata.handler
+        else {
             panic!("action {action} is seeded with an unexpected handler");
         };
+        // `Command::NewPane(NewPaneArgs { .. })` prints `NewPane(...)`, and
+        // `CommandKind::NewPane` prints `NewPane`.
+        let mapped_debug_text = format!("{mapped:?}");
+        let mapped_variant_name = mapped_debug_text
+            .split(['(', ' '])
+            .next()
+            .expect("split yields at least one piece");
         assert_eq!(
-            mapped.get_command_kind(),
-            expected_command_kind,
+            mapped_variant_name,
+            format!("{expected_command_kind:?}"),
             "for {argv:?}"
         );
     }
@@ -2734,7 +2727,6 @@ fn non_action_subcommands_map_to_none() {
         &["koshi", "detach"],
         &["koshi", "doctor"],
         &["koshi", "config", "path"],
-        &["koshi", "plugin"],
         &["koshi", "actions", "list"],
         &[
             "koshi",
@@ -3151,9 +3143,9 @@ fn an_empty_session_or_tab_argument_is_a_usage_error() {
         vec!["koshi", "inspect", "tab", ""],
         vec!["koshi", "debug", "dump-layout", "--tab", ""],
     ] {
-        let error = parse_cli_error(&argv);
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "for {argv:?}");
-        assert_eq!(error.exit_code(), 2, "for {argv:?}");
+        let cli_error = parse_cli_error(&argv);
+        assert_eq!(cli_error.kind(), ErrorKind::ValueValidation, "for {argv:?}");
+        assert_eq!(cli_error.exit_code(), 2, "for {argv:?}");
     }
 }
 
@@ -3200,15 +3192,15 @@ fn input_sends_the_text_bytes_as_typed() {
 
 #[test]
 fn focus_tab_index_rejects_a_negative_number() {
-    let error = parse_cli_error(&["koshi", "focus-tab", "--index", "-1"]);
-    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    let cli_error = parse_cli_error(&["koshi", "focus-tab", "--index", "-1"]);
+    assert_eq!(cli_error.kind(), ErrorKind::UnknownArgument);
 }
 
 #[test]
 fn focus_tab_index_rejects_an_overflowing_number() {
     // One digit past `usize::MAX` (18446744073709551615 on a 64-bit target).
-    let error = parse_cli_error(&["koshi", "focus-tab", "--index", "18446744073709551616"]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    let cli_error = parse_cli_error(&["koshi", "focus-tab", "--index", "18446744073709551616"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -3247,7 +3239,7 @@ fn resize_pane_size_accepts_the_i16_boundaries() {
 
 #[test]
 fn resize_pane_size_rejects_i16_overflow() {
-    let error = parse_cli_error(&[
+    let cli_error = parse_cli_error(&[
         "koshi",
         "resize-pane",
         "--direction",
@@ -3255,19 +3247,19 @@ fn resize_pane_size_rejects_i16_overflow() {
         "--size",
         "32768",
     ]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
 }
 
 #[test]
 fn format_value_is_case_sensitive() {
-    let error = parse_cli_error(&["koshi", "list-sessions", "--format", "Table"]);
-    assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    let cli_error = parse_cli_error(&["koshi", "list-sessions", "--format", "Table"]);
+    assert_eq!(cli_error.kind(), ErrorKind::InvalidValue);
 }
 
 #[test]
 fn an_id_with_only_the_prefix_and_a_dash_is_rejected() {
-    let error = parse_cli_error(&["koshi", "close-pane", "--pane", "pane-"]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    let cli_error = parse_cli_error(&["koshi", "close-pane", "--pane", "pane-"]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -3277,8 +3269,8 @@ fn a_prefix_collision_without_a_separating_dash_is_rejected() {
     // fails and the whole original string is tried as a bare UUID, which it
     // is not.
     let pane_selector = format!("panes-{}", build_fixed_test_uuid());
-    let error = parse_cli_error(&["koshi", "close-pane", "--pane", &pane_selector]);
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    let cli_error = parse_cli_error(&["koshi", "close-pane", "--pane", &pane_selector]);
+    assert_eq!(cli_error.kind(), ErrorKind::ValueValidation);
 }
 
 #[test]
@@ -3375,7 +3367,7 @@ fn run_program_name_is_preserved_verbatim_for_non_ascii() {
 // --- Session and tab arguments: id or name, verb by verb ---
 
 /// The [`SessionReference`] the session-taking verb in `argv` parsed.
-fn parsed_session_ref(argv: &[&str]) -> SessionReference {
+fn parse_session_ref_argv(argv: &[&str]) -> SessionReference {
     match parse_cli_command(argv) {
         CliCommand::KillSession { session_reference }
         | CliCommand::ListTabs {
@@ -3398,7 +3390,7 @@ fn parsed_session_ref(argv: &[&str]) -> SessionReference {
 }
 
 /// The [`TabReference`] the tab-taking verb in `argv` parsed.
-fn parsed_tab_ref(argv: &[&str]) -> TabReference {
+fn parse_tab_ref_argv(argv: &[&str]) -> TabReference {
     match parse_cli_command(argv) {
         CliCommand::MoveTab { tab_reference, .. } | CliCommand::FocusTab { tab_reference, .. } => {
             tab_reference.expect("argv names a tab")
@@ -3426,7 +3418,7 @@ fn every_session_argument_parses_an_id_or_a_name() {
         let mut by_id = prefix.to_vec();
         by_id.push(&session_argument);
         assert_eq!(
-            parsed_session_ref(&by_id),
+            parse_session_ref_argv(&by_id),
             SessionReference::SessionId(SessionId::from_uuid(build_fixed_test_uuid())),
             "for {by_id:?}"
         );
@@ -3434,7 +3426,7 @@ fn every_session_argument_parses_an_id_or_a_name() {
         let mut by_name = prefix.to_vec();
         by_name.push("work");
         assert_eq!(
-            parsed_session_ref(&by_name),
+            parse_session_ref_argv(&by_name),
             SessionReference::SessionName("work".to_string()),
             "for {by_name:?}"
         );
@@ -3455,7 +3447,7 @@ fn every_tab_argument_parses_an_id_or_a_name() {
         let mut by_id = prefix.to_vec();
         by_id.push(&tab_argument);
         assert_eq!(
-            parsed_tab_ref(&by_id),
+            parse_tab_ref_argv(&by_id),
             TabReference::TabId(TabId::from_uuid(build_fixed_test_uuid())),
             "for {by_id:?}"
         );
@@ -3463,7 +3455,7 @@ fn every_tab_argument_parses_an_id_or_a_name() {
         let mut by_name = prefix.to_vec();
         by_name.push("logs");
         assert_eq!(
-            parsed_tab_ref(&by_name),
+            parse_tab_ref_argv(&by_name),
             TabReference::TabName("logs".to_string()),
             "for {by_name:?}"
         );
@@ -3615,8 +3607,8 @@ fn server_version_takes_a_session_by_name_or_by_id() {
 
 #[test]
 fn server_version_rejects_an_unknown_format() {
-    let error = parse_cli_error(&["koshi", "server-version", "--format", "yaml"]);
-    assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    let cli_error = parse_cli_error(&["koshi", "server-version", "--format", "yaml"]);
+    assert_eq!(cli_error.kind(), ErrorKind::InvalidValue);
 }
 
 #[test]

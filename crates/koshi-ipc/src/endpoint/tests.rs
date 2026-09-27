@@ -41,32 +41,6 @@ fn the_resolve_resume_file_path_sits_beside_the_endpoint_file_under_the_same_nam
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn the_compute_shared_socket_address_is_session_uuid_sock_inside_the_shared_user_dir() {
-    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
-    let session_id = SessionId::from_uuid(uuid);
-    assert_eq!(
-        compute_shared_socket_address(Path::new("/tmp/koshi/501"), session_id),
-        "/tmp/koshi/501/session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.sock"
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn the_compute_shared_socket_address_is_the_same_koshi_namespaced_pipe_name() {
-    let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
-    let session_id = SessionId::from_uuid(uuid);
-    assert_eq!(
-        compute_shared_socket_address(Path::new(r"C:\unused"), session_id),
-        "koshi-session-0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
-    );
-    assert_eq!(
-        compute_shared_socket_address(Path::new(r"C:\unused"), session_id),
-        compute_socket_address(Path::new(r"C:\other"), session_id)
-    );
-}
-
 #[test]
 fn the_resolve_advertisement_marker_path_is_session_uuid_directly_inside_the_shared_dir() {
     let uuid = Uuid::parse_str("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b").expect("valid uuid");
@@ -367,17 +341,6 @@ fn writing_the_advert_marker_into_a_missing_directory_names_the_marker() {
             .to_string()
             .starts_with("advert marker "),
         "the message names the marker, not an endpoint file: {advertisement_marker_error}"
-    );
-}
-
-#[test]
-fn the_compute_shared_socket_address_is_the_compute_socket_address_inside_the_shared_user_dir() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let session_id = SessionId::new();
-
-    assert_eq!(
-        compute_shared_socket_address(test_directory.path(), session_id),
-        compute_socket_address(test_directory.path(), session_id)
     );
 }
 

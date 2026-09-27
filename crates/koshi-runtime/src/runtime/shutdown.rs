@@ -2,8 +2,8 @@
 //!
 //! The event loop calls [`Server::shutdown`] once it exits. A quit with no
 //! issuing client — `kill-session` — group-kills immediately; every other
-//! ending group-kills gracefully. Stages 1–5 run here; stages 6 (restore the
-//! outer terminal) and 7 (flush logs) run after this returns, as the binary's
+//! ending group-kills gracefully. Stages 1–2 run here; stages 3 (restore the
+//! outer terminal) and 4 (flush logs) run after this returns, as the binary's
 //! cleanup guard and tracing guard drop in that order. The panic path does not
 //! come here — it takes the abrupt [`Server::kill_all_panes`].
 
@@ -17,40 +17,27 @@ use crate::server::Server;
 
 impl Server {
     /// Tear the process down in a fixed staged order:
-    /// 1. set the draining flag,
-    /// 2. stop the control socket and withdraw its endpoint file,
-    /// 3. plugin notification — a no-op, no plugin host is wired,
-    /// 4. group-kill immediately for a quit with no issuing client, otherwise
-    ///    graceful kill,
-    /// 5. session-snapshot persistence — a no-op, nothing writes session state
-    ///    to disk.
+    /// 1. stop the control socket and withdraw its endpoint file,
+    /// 2. group-kill immediately for a quit with no issuing client, otherwise
+    ///    graceful kill.
     ///
-    /// Stages 6–7 (restore terminal, flush logs) are left to the caller's
+    /// Stages 3–4 (restore terminal, flush logs) are left to the caller's
     /// guards, which drop in that order after this returns.
     pub fn shutdown(&mut self) {
-        // Stage 1 — record that teardown started. The event loop has already
-        // exited, so no further IPC or plugin command reaches dispatch.
-        self.is_draining = true;
-
-        // Stage 2 — stop answering the control socket, then remove the socket
+        // Stage 1 — stop answering the control socket, then remove the socket
         // file, the endpoint file and the advert that name this session.
         if let Some(ipc_server) = self.ipc_server.take() {
             ipc_server.shutdown();
         }
 
-        // Stage 3 — plugin notification: a no-op, no plugin host is wired.
-
-        // Stage 4 — a quit with no issuing client is immediate; every other
+        // Stage 2 — a quit with no issuing client is immediate; every other
         // ending keeps the graceful process-group window. Both paths reap
         // descendants.
         if self.should_shutdown_immediately {
             self.kill_all_panes();
         } else {
-            self.graceful_kill_all_panes();
+            self.kill_all_panes_gracefully();
         }
-
-        // Stage 5 — session-snapshot persistence: a no-op, nothing writes
-        // session state to disk.
     }
 
     /// Graceful-then-group-kill every live pane's child
@@ -60,10 +47,10 @@ impl Server {
     /// children are reaped or group-killed at the deadline; the total wait is
     /// one such window. A pane whose kill fails is skipped and the rest still
     /// run.
-    fn graceful_kill_all_panes(&self) {
+    fn kill_all_panes_gracefully(&self) {
         let kill_thread_handles: Vec<_> = self
-            .pty_handle_by_pane_id
-            .keys()
+            .live_pane_ids
+            .iter()
             .copied()
             .map(|pane_id| {
                 let pty_backend = Arc::clone(self.get_pty_backend());

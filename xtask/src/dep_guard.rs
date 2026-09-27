@@ -3,17 +3,13 @@
 //! The guard rejects these direct edges:
 //!
 //! - `koshi-core` to any name that starts with `koshi-`.
-//! - `koshi-plugin-manager` to `koshi-runtime`, `koshi-ipc`, or
-//!   `koshi-plugin-host`.
-//! - `koshi-plugin-api` to `koshi-client` or `koshi-renderer`.
-//! - Any workspace crate other than `koshi-plugin-host` to `wasmtime`.
 //! - Any workspace crate other than `koshi-pty` to `portable-pty`.
 //!
 //! The guard reads each workspace crate's declared dependencies in all kinds:
 //! normal, dev, build, optional, and target-specific. Cargo reports the
-//! package name for a renamed dependency, so `wt = { package = "wasmtime" }`
-//! is an edge to `wasmtime`. Transitive edges are not checked; for example,
-//! `koshi-runtime` -> `koshi-plugin-host` -> `wasmtime` passes.
+//! package name for a renamed dependency, so `pty = { package = "portable-pty" }`
+//! is an edge to `portable-pty`. Transitive edges are not checked; for example,
+//! `koshi-daemon` -> `koshi-pty` -> `portable-pty` passes.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
@@ -87,7 +83,7 @@ fn list_direct_dependencies(metadata: &Metadata) -> Vec<CrateDependencies> {
 
 /// Returns sorted, duplicate-free messages for forbidden edges in the crate dependency graph.
 /// Returns an empty vector when every edge is allowed.
-pub fn validate_dependency_edges(crate_dependencies: &[CrateDependencies]) -> Vec<String> {
+fn validate_dependency_edges(crate_dependencies: &[CrateDependencies]) -> Vec<String> {
     let mut violations = BTreeSet::new();
 
     for (crate_name, dependency_names) in crate_dependencies {
@@ -97,34 +93,6 @@ pub fn validate_dependency_edges(crate_dependencies: &[CrateDependencies]) -> Ve
                     crate_name,
                     dependency_name,
                     "koshi-core must not depend on internal crates",
-                ));
-            }
-            if crate_name == "koshi-plugin-manager"
-                && matches!(
-                    dependency_name.as_str(),
-                    "koshi-runtime" | "koshi-ipc" | "koshi-plugin-host"
-                )
-            {
-                violations.insert(format_forbidden_edge(
-                    crate_name,
-                    dependency_name,
-                    "koshi-plugin-manager must not depend on runtime/ipc/host",
-                ));
-            }
-            if crate_name == "koshi-plugin-api"
-                && matches!(dependency_name.as_str(), "koshi-client" | "koshi-renderer")
-            {
-                violations.insert(format_forbidden_edge(
-                    crate_name,
-                    dependency_name,
-                    "koshi-plugin-api must not depend on client/renderer",
-                ));
-            }
-            if dependency_name == "wasmtime" && crate_name != "koshi-plugin-host" {
-                violations.insert(format_forbidden_edge(
-                    crate_name,
-                    dependency_name,
-                    "wasmtime is owned only by koshi-plugin-host",
                 ));
             }
             if dependency_name == "portable-pty" && crate_name != "koshi-pty" {

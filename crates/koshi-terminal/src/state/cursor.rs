@@ -14,10 +14,9 @@ pub(crate) struct SavedCursor {
     /// The deferred-wrap latch at save time, restored with the position: a
     /// glyph parked at the effective horizontal right bound still wraps after
     /// a save/restore.
-    pub(in crate::state) pending_wrap: bool,
+    pub(in crate::state) is_wrap_pending: bool,
     /// Whether saved cursor coordinates are relative to the active margins.
-    #[serde(default)]
-    pub(in crate::state) origin: bool,
+    pub(in crate::state) is_origin_mode_enabled: bool,
     /// Snapshot of the active screen's `RenderState` (pen, charsets, GL slot)
     /// at save time, restored with the position. An app that changes the pen
     /// or a designation, saves, changes it again, then restores gets the
@@ -40,10 +39,9 @@ pub(crate) struct Cursor {
     /// there. The next printable glyph first wraps to the following line: a row
     /// that exactly fills the active width does not scroll until that glyph
     /// arrives. Any cursor-moving operation clears it.
-    pub(in crate::state) pending_wrap: bool,
+    pub(in crate::state) is_wrap_pending: bool,
     /// Whether CUP and related coordinates are relative to the active margins.
-    #[serde(default)]
-    pub(in crate::state) origin: bool,
+    pub(in crate::state) is_origin_mode_enabled: bool,
     /// Saved cursor position and style from DECSC/DECRC (xterm form) or
     /// SCOSC/SCORC (ANSI form). Each screen buffer keeps its own snapshot.
     pub(in crate::state) saved: Option<SavedCursor>,

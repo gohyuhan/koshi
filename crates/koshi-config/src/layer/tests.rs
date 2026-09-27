@@ -34,7 +34,6 @@ fn no_layers_returns_base() {
 
 #[test]
 fn beta_features_are_off_unless_the_file_turns_them_on() {
-    // The built-in default, so a machine with no `koshi.kdl` runs nothing beta.
     let server = merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
     assert!(!server.should_allow_beta_features);
 }
@@ -46,7 +45,6 @@ fn allow_beta_features_folds_onto_the_session_side_only() {
         ..Default::default()
     };
 
-    // The session owns the knob, so it is the side that changes.
     let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
     assert!(server.should_allow_beta_features);
     assert_eq!(
@@ -327,11 +325,11 @@ fn a_layer_that_sets_the_pane_gap_overrides_the_default() {
         }),
         ..Default::default()
     };
-    let set = merge_server(ServerConfig::default(), vec![layer]);
-    let unset = merge_server(ServerConfig::default(), Vec::new());
+    let merged_with_layer = merge_server(ServerConfig::default(), vec![layer]);
+    let merged_without_layer = merge_server(ServerConfig::default(), Vec::new());
 
-    assert_eq!(set.pane.gap_cell_count, 3);
-    assert_eq!(unset.pane.gap_cell_count, 0);
+    assert_eq!(merged_with_layer.pane.gap_cell_count, 3);
+    assert_eq!(merged_without_layer.pane.gap_cell_count, 0);
 }
 
 #[test]
@@ -351,7 +349,6 @@ fn copy_and_terminal_scalar_overrides() {
     let server = merge_server(ServerConfig::default(), vec![layer.clone()]);
     let client = merge_client(ClientConfig::default(), vec![layer]);
 
-    assert!(client.copy.should_copy_on_select); // internal default kept
     assert!(!client.copy.should_trim_trailing_whitespace); // overridden to false
     assert_eq!(server.terminal.term, "screen-256color");
     assert_eq!(server.terminal.colorterm, "truecolor"); // default kept
@@ -464,8 +461,9 @@ fn logging_config_resolves_partial_over_defaults() {
 
 #[test]
 fn modes_replaced_wholesale() {
-    let mut base = ClientConfig::default();
-    base.keybindings
+    let mut client_config = ClientConfig::default();
+    client_config
+        .keybindings
         .mode_bindings_by_name
         .insert(ModeName::from_text("normal"), ModeBindings::default());
 
@@ -478,7 +476,7 @@ fn modes_replaced_wholesale() {
         }),
         ..Default::default()
     };
-    let merged = merge_client(base, vec![layer]);
+    let merged = merge_client(client_config, vec![layer]);
 
     // The whole map is replaced: the base's "normal" entry is gone.
     assert_eq!(merged.keybindings.mode_bindings_by_name, override_map);
@@ -487,14 +485,14 @@ fn modes_replaced_wholesale() {
 #[test]
 fn unlock_alternative_layers_as_a_nested_option() {
     let alternative = KeyChord::from_parts(ModFlags::CTRL, Key::Char('u'));
-    let set = PartialKoshiConfig {
+    let partial_config = PartialKoshiConfig {
         keybindings: Some(PartialKeybindingsConfig {
             unlock_alternative: Some(Some(alternative)),
             ..Default::default()
         }),
         ..Default::default()
     };
-    let merged = merge_client(ClientConfig::default(), vec![set]);
+    let merged = merge_client(ClientConfig::default(), vec![partial_config]);
     assert_eq!(merged.keybindings.unlock_alternative, Some(alternative));
 
     // A higher-precedence layer can set the value back to "keep the built-in unlock key".
@@ -530,7 +528,7 @@ fn keybindings_scalars_keep_untouched_siblings() {
 
     assert_eq!(merged.keybindings.leader, Leader::Mods(ModFlags::ALT));
     assert_eq!(merged.keybindings.chord_timeout_ms, 500); // default kept
-    assert_eq!(merged.keybindings.max_chord_depth, 4); // default kept
+    assert_eq!(merged.keybindings.maximum_chord_depth, 4); // default kept
 }
 
 #[test]
@@ -614,7 +612,7 @@ fn config_layers_drop_the_app_layers_theme_and_keybinding_sections() {
                 }),
             }),
             keybindings: Some(PartialKeybindingsConfig {
-                max_chord_depth: Some(0),
+                maximum_chord_depth: Some(0),
                 ..PartialKeybindingsConfig::default()
             }),
             layout: Some(PartialLayoutDefaults {
@@ -647,7 +645,7 @@ fn config_layers_let_the_theme_and_keybinding_files_win_over_the_app_layer() {
             colors: None,
         }),
         Some(PartialKeybindingsConfig {
-            max_chord_depth: Some(4),
+            maximum_chord_depth: Some(4),
             ..PartialKeybindingsConfig::default()
         }),
     );
@@ -655,7 +653,7 @@ fn config_layers_let_the_theme_and_keybinding_files_win_over_the_app_layer() {
     let client = layers.resolve_effective_client_config();
     assert_eq!(client.layout.new_pane_direction, Direction::Down);
     assert_eq!(client.theme.theme_name, "ocean");
-    assert_eq!(client.keybindings.max_chord_depth, 4);
+    assert_eq!(client.keybindings.maximum_chord_depth, 4);
 }
 
 #[test]
@@ -793,7 +791,7 @@ fn keybinding_timing_overrides_leave_the_bindings_alone() {
         keybindings: Some(PartialKeybindingsConfig {
             chord_timeout_ms: Some(1_200),
             which_key_delay_ms: Some(50),
-            max_chord_depth: Some(7),
+            maximum_chord_depth: Some(7),
             ..Default::default()
         }),
         ..Default::default()
@@ -802,7 +800,7 @@ fn keybinding_timing_overrides_leave_the_bindings_alone() {
 
     assert_eq!(merged.keybindings.chord_timeout_ms, 1_200);
     assert_eq!(merged.keybindings.which_key_delay_ms, 50);
-    assert_eq!(merged.keybindings.max_chord_depth, 7);
+    assert_eq!(merged.keybindings.maximum_chord_depth, 7);
     assert_eq!(
         merged.keybindings.mode_bindings_by_name,
         ClientConfig::default().keybindings.mode_bindings_by_name

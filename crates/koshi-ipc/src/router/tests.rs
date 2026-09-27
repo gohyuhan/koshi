@@ -75,12 +75,12 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
         serialize_test_wire_message(&RouterRequest {
             request_id: 1,
             request_kind: RouterRequestKind::Hello {
-                min_protocol_version: 3,
-                max_protocol_version: 3,
+                minimum_protocol_version: 3,
+                maximum_protocol_version: 3,
                 connection_token: build_test_connection_token(),
             },
         }),
-        r#"{"request_id":1,"request_kind":{"Hello":{"min_protocol_version":3,"max_protocol_version":3,"connection_token":"k7QxSecret"}}}"#
+        r#"{"request_id":1,"request_kind":{"Hello":{"minimum_protocol_version":3,"maximum_protocol_version":3,"connection_token":"k7QxSecret"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -255,10 +255,10 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             request_id: Some(6),
             answer_result: RouterResult::Granted {
                 connection_token: build_test_connection_token(),
-                did_replace_active_grant: true,
+                has_replaced_active_grant: true,
             },
         }),
-        r#"{"request_id":6,"answer_result":{"Granted":{"connection_token":"k7QxSecret","did_replace_active_grant":true}}}"#
+        r#"{"request_id":6,"answer_result":{"Granted":{"connection_token":"k7QxSecret","has_replaced_active_grant":true}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
@@ -408,8 +408,8 @@ fn this_build_speaks_control_plane_version_three_only() {
 fn every_request_kind_names_itself_without_its_payload() {
     assert_eq!(
         RouterRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            minimum_protocol_version: 1,
+            maximum_protocol_version: 1,
             connection_token: build_test_connection_token(),
         }
         .get_request_kind_name(),
@@ -478,8 +478,8 @@ fn every_request_kind_names_itself_without_its_payload() {
 fn every_answer_names_itself_and_both_wire_lists_are_complete() {
     let kinds = [
         RouterRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            minimum_protocol_version: 1,
+            maximum_protocol_version: 1,
             connection_token: build_test_connection_token(),
         },
         RouterRequestKind::CreateSession {
@@ -526,7 +526,7 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         (
             RouterResult::Granted {
                 connection_token: build_test_connection_token(),
-                did_replace_active_grant: true,
+                has_replaced_active_grant: true,
             },
             "Granted",
         ),
@@ -563,19 +563,20 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
 
     for request_kind in &kinds {
         assert_eq!(
-            request_kind.wire_name(),
+            request_kind.get_wire_name(),
             request_kind.get_request_kind_name()
         );
     }
-    let request_kind_names: Vec<&str> = kinds.iter().map(RouterRequestKind::wire_name).collect();
+    let request_kind_names: Vec<&str> =
+        kinds.iter().map(RouterRequestKind::get_wire_name).collect();
     assert_eq!(request_kind_names, RouterRequestKind::VARIANTS);
 
     for (router_result, expected_wire_name) in &results {
-        assert_eq!(router_result.wire_name(), *expected_wire_name);
+        assert_eq!(router_result.get_wire_name(), *expected_wire_name);
     }
     let router_result_names: Vec<&str> = results
         .iter()
-        .map(|(router_result, _)| router_result.wire_name())
+        .map(|(router_result, _)| router_result.get_wire_name())
         .collect();
     assert_eq!(router_result_names, RouterResult::VARIANTS);
 }
@@ -712,13 +713,13 @@ fn printing_a_granted_answer_reveals_no_secret() {
         "{:?}",
         RouterResult::Granted {
             connection_token: build_test_connection_token(),
-            did_replace_active_grant: false,
+            has_replaced_active_grant: false,
         }
     );
 
     assert_eq!(
         printed,
-        "Granted { connection_token: ConnectionToken(***), did_replace_active_grant: false }"
+        "Granted { connection_token: ConnectionToken(***), has_replaced_active_grant: false }"
     );
 }
 
@@ -778,23 +779,16 @@ fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
     );
 }
 
-// A Hello from a build that predates the version field still decodes; the
-// absent field reads as an empty string.
 #[test]
-fn a_hello_without_a_version_field_decodes_with_an_empty_version() {
-    let response: RouterResponse = serde_json::from_str(
+fn a_hello_answer_without_a_build_version_is_refused() {
+    let decode_error = serde_json::from_str::<RouterResponse>(
         r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":3}}}"#,
     )
-    .expect("a version-less Hello decodes");
+    .expect_err("every router names its build");
+
     assert_eq!(
-        response,
-        RouterResponse {
-            request_id: Some(1),
-            answer_result: RouterResult::Hello {
-                protocol_version: 3,
-                build_version: String::new(),
-            },
-        }
+        decode_error.to_string(),
+        "missing field `build_version` at line 1 column 63"
     );
 }
 
@@ -847,8 +841,8 @@ fn a_hello_with_the_right_version_and_token_is_accepted() {
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         }),
         Ok(())
@@ -864,8 +858,8 @@ fn a_hello_built_here_names_this_builds_range() {
     assert_eq!(
         RouterRequestKind::build_hello_request(build_test_connection_token()),
         RouterRequestKind::Hello {
-            min_protocol_version: 3,
-            max_protocol_version: 3,
+            minimum_protocol_version: 3,
+            maximum_protocol_version: 3,
             connection_token: build_test_connection_token(),
         }
     );
@@ -878,8 +872,8 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         })
         .expect("the Hello is accepted");
@@ -906,8 +900,8 @@ fn a_caller_speaking_only_above_this_router_is_refused_naming_both_ranges() {
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: above,
-            max_protocol_version: above,
+            minimum_protocol_version: above,
+            maximum_protocol_version: above,
             connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
@@ -932,8 +926,8 @@ fn a_caller_reaching_above_this_router_settles_on_the_routers_highest() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION + 3,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION + 3,
             connection_token: build_test_connection_token(),
         })
         .expect("a range covering this router's is accepted");
@@ -959,8 +953,8 @@ fn an_unknown_kind_is_refused_by_name_once_the_gate_is_open() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         })
         .expect("the Hello is accepted");
@@ -982,8 +976,8 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: above,
-            max_protocol_version: above,
+            minimum_protocol_version: above,
+            maximum_protocol_version: above,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
@@ -1008,8 +1002,8 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
@@ -1032,8 +1026,8 @@ fn a_caller_speaking_only_below_this_router_is_refused_naming_both_ranges() {
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: below,
-            max_protocol_version: below,
+            minimum_protocol_version: below,
+            maximum_protocol_version: below,
             connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
@@ -1058,8 +1052,8 @@ fn a_caller_speaking_only_the_floor_settles_on_the_floor() {
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         }),
         Ok(())
@@ -1086,8 +1080,8 @@ fn a_second_hello_with_a_narrower_range_settles_the_version_again_from_that_rang
 
     assert_eq!(
         router_handshake.validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         }),
         Ok(())
@@ -1224,8 +1218,8 @@ fn a_restart_is_refused_before_a_hello_and_served_after_one() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         })
         .expect("the Hello is accepted");
@@ -1243,8 +1237,8 @@ fn a_refused_hello_leaves_the_gate_closed() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         })
         .expect_err("the Hello is refused");
@@ -1265,15 +1259,15 @@ fn a_good_hello_after_a_refusal_opens_the_gate() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         })
         .expect_err("the Hello is refused");
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         })
         .expect("the Hello is accepted");
@@ -1295,15 +1289,15 @@ fn a_refused_hello_on_an_open_gate_leaves_it_open() {
 
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         })
         .expect("the Hello is accepted");
     router_handshake
         .validate_request_kind(&RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         })
         .expect_err("the Hello is refused");
@@ -1342,7 +1336,7 @@ fn each_runtime_directory_gets_its_own_router_pipe_in_the_koshi_namespace() {
     assert_eq!(&pipe[..PREFIX.len()], PREFIX);
     assert_eq!(pipe.len(), PREFIX.len() + 16);
     assert_eq!(
-        pipe[PREFIX.len()..].trim_matches(|c: char| c.is_ascii_hexdigit()),
+        pipe[PREFIX.len()..].trim_matches(|character: char| character.is_ascii_hexdigit()),
         ""
     );
 }

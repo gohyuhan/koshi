@@ -340,7 +340,7 @@ fn a_cap_of_zero_rejects_every_sequence() {
             key_token: "a".to_string(),
             error_kind: KeyParseErrorKind::SequenceTooLong {
                 chord_count: 1,
-                max_chord_depth: 0,
+                maximum_chord_depth: 0,
             },
         })
     );
@@ -354,7 +354,7 @@ fn a_sequence_past_the_cap_is_rejected() {
             key_token: "abcde".to_string(),
             error_kind: KeyParseErrorKind::SequenceTooLong {
                 chord_count: 5,
-                max_chord_depth: 4,
+                maximum_chord_depth: 4,
             },
         })
     );
@@ -394,7 +394,7 @@ fn a_chord_leader_plus_one_chord_is_past_a_cap_of_one() {
             key_token: "<leader>a".to_string(),
             error_kind: KeyParseErrorKind::SequenceTooLong {
                 chord_count: 2,
-                max_chord_depth: 1,
+                maximum_chord_depth: 1,
             },
         })
     );
@@ -408,7 +408,7 @@ fn a_chord_leader_counts_toward_the_cap() {
             key_token: "<leader>abcd".to_string(),
             error_kind: KeyParseErrorKind::SequenceTooLong {
                 chord_count: 5,
-                max_chord_depth: 4,
+                maximum_chord_depth: 4,
             },
         })
     );
@@ -771,7 +771,7 @@ fn an_absurdly_long_sequence_reports_its_length_without_panicking() {
         parse_error.error_kind,
         KeyParseErrorKind::SequenceTooLong {
             chord_count: 1000,
-            max_chord_depth: 255,
+            maximum_chord_depth: 255,
         }
     );
 }
@@ -813,7 +813,7 @@ fn a_cap_at_the_largest_byte_value_still_rejects_one_more() {
         parse_error.error_kind,
         KeyParseErrorKind::SequenceTooLong {
             chord_count: 256,
-            max_chord_depth: 255,
+            maximum_chord_depth: 255,
         }
     );
     // Exactly 255 chords fits.

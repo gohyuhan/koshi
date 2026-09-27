@@ -19,7 +19,8 @@ fn build_cell_rect(column_index: u16, row_index: u16, column_count: u16, row_cou
     )
 }
 
-/// Constructs a test layout solution with the given pane rectangles, suppressed pane IDs, and stack headers.
+/// Constructs a test layout solution with the given pane rectangles, suppressed pane IDs, and stack
+/// headers.
 fn build_layout_solution(
     pane_rects: Vec<(PaneId, Rect)>,
     suppressed_pane_ids: Vec<PaneId>,
@@ -28,7 +29,7 @@ fn build_layout_solution(
     LayoutSolve {
         pane_rects,
         suppressed_pane_ids,
-        is_all_panes_suppressed: false,
+        is_every_pane_suppressed: false,
         stack_headers,
     }
 }
@@ -76,8 +77,11 @@ fn a_suppressed_pane_yields_none_even_with_a_nonempty_rect() {
 #[test]
 fn a_hidden_zero_area_pane_yields_none() {
     let pane_id = PaneId::new();
-    let layout_solution =
-        build_layout_solution(vec![(pane_id, Rect::empty_at_origin())], vec![], vec![]);
+    let layout_solution = build_layout_solution(
+        vec![(pane_id, Rect::build_empty_at_origin())],
+        vec![],
+        vec![],
+    );
 
     assert_eq!(list_content_rects(&layout_solution), vec![(pane_id, None)]);
 }
@@ -194,8 +198,8 @@ fn a_mixed_solve_maps_each_pane_by_its_state() {
     let layout_solution = build_layout_solution(
         vec![
             (visible_pane_id, build_cell_rect(0, 0, 10, 10)),
-            (suppressed_pane_id, Rect::empty_at_origin()),
-            (hidden_pane_id, Rect::empty_at_origin()),
+            (suppressed_pane_id, Rect::build_empty_at_origin()),
+            (hidden_pane_id, Rect::build_empty_at_origin()),
             (collapsed_pane_id, build_cell_rect(0, 0, 10, 1)),
         ],
         vec![suppressed_pane_id],

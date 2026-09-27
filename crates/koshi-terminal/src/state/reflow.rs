@@ -22,7 +22,7 @@ use super::{rebuild_cell_with_width, TerminalState};
 
 #[derive(Debug)]
 struct LogicalLine {
-    content: Vec<Cell>,
+    cells: Vec<Cell>,
     prompt_offsets: Vec<usize>,
 }
 
@@ -118,7 +118,7 @@ impl TerminalState {
             current_line_cells.extend(row_cells.into_iter().take(content_cell_count));
             if row_metadata.row_end == RowEnd::Hard {
                 lines.push(LogicalLine {
-                    content: std::mem::take(&mut current_line_cells),
+                    cells: std::mem::take(&mut current_line_cells),
                     prompt_offsets: std::mem::take(&mut prompt_offsets),
                 });
             }
@@ -127,7 +127,7 @@ impl TerminalState {
         // line, as does a prompt mark left on an empty tail.
         if !current_line_cells.is_empty() || !prompt_offsets.is_empty() {
             lines.push(LogicalLine {
-                content: current_line_cells,
+                cells: current_line_cells,
                 prompt_offsets,
             });
         }
@@ -141,7 +141,7 @@ impl TerminalState {
         for (line_index, line) in lines.into_iter().enumerate() {
             let start_row_index = rewrapped_rows.len();
             let mut line_rewrapped_rows =
-                rewrap_line(line.content, pty_size.column_count, background_style);
+                rewrap_line(line.cells, pty_size.column_count, background_style);
             if line_index == cursor_line {
                 let (row_index_within_line, column_index) =
                     locate_content_offset(&line_rewrapped_rows, cursor_offset);
@@ -159,7 +159,10 @@ impl TerminalState {
                     .iter()
                     .map(|(row_cells, row_metadata)| RewrappedRowShape {
                         cell_count: row_cells.len(),
-                        contributed_cell_count: rewrapped_row_content_len(row_cells, *row_metadata),
+                        contributed_cell_count: count_rewrapped_row_content_cells(
+                            row_cells,
+                            *row_metadata,
+                        ),
                     })
                     .collect(),
             });
@@ -197,7 +200,10 @@ impl TerminalState {
 
         while rewrapped_rows.len() < pty_size.row_count as usize {
             rewrapped_rows.push((
-                vec![Cell::blank_with(background_style); pty_size.column_count as usize],
+                vec![
+                    Cell::build_blank_with_style(background_style);
+                    pty_size.column_count as usize
+                ],
                 RowMetadata::default(),
             ));
         }
@@ -276,7 +282,7 @@ impl TerminalState {
 
 /// Re-wrap one logical line's content into `column_count`-wide rows. `column_count` of `0`
 /// wraps at one column. Empty content gives one empty [`RowEnd::Hard`] row.
-/// Every row's `prompt` is `false`.
+/// Every row's `has_prompt_mark` is `false`.
 ///
 /// `abcdef` at `column_count = 4` → `abcd` ([`RowEnd::Soft`]) then `ef`
 /// ([`RowEnd::Hard`]). A wide glyph whose base would land in a row's last
@@ -322,7 +328,7 @@ fn rewrap_line(
                 // The base would land in the last column: fill it with a
                 // spacer, end the row `SoftWide`, and start the next row
                 // with the glyph.
-                row_cells.push(Cell::blank_with(background_style));
+                row_cells.push(Cell::build_blank_with_style(background_style));
                 let full_row_cells = std::mem::replace(
                     &mut row_cells,
                     Vec::with_capacity(column_count.min(content_cells_iterator.len() + 1)),
@@ -348,21 +354,18 @@ fn rewrap_line(
     output_rows
 }
 
-/// The (row-within-line, column) where content offset `offset` lands among a
+/// The (row-within-line, column) where `content_offset` lands among a
 /// re-wrapped line's rows. A [`RowEnd::SoftWide`] row's spacer holds no
 /// offset. An offset past the content lands in the final row at a column
-/// past its cells, not clamped to the screen width. Empty `rows` gives
-/// `(0, 0)`.
+/// past its cells, not clamped to the screen width. Empty
+/// `row_cells_and_metadata` gives `(0, 0)`.
 fn locate_content_offset(
     row_cells_and_metadata: &[(Vec<Cell>, RowMetadata)],
     content_offset: usize,
 ) -> (usize, usize) {
     let mut remaining_content_offset = content_offset;
     for (row_index, (row_cells, row_metadata)) in row_cells_and_metadata.iter().enumerate() {
-        let contributed_cell_count = match row_metadata.row_end {
-            RowEnd::SoftWide => row_cells.len().saturating_sub(1),
-            RowEnd::Soft | RowEnd::Hard => row_cells.len(),
-        };
+        let contributed_cell_count = count_rewrapped_row_content_cells(row_cells, *row_metadata);
         if remaining_content_offset < contributed_cell_count
             || row_index + 1 == row_cells_and_metadata.len()
         {
@@ -375,7 +378,7 @@ fn locate_content_offset(
 
 /// Return the content cells represented by one re-wrapped row. A soft-wide
 /// row's final blank is a spacer for the wide glyph on the next row.
-fn rewrapped_row_content_len(row_cells: &[Cell], row_metadata: RowMetadata) -> usize {
+fn count_rewrapped_row_content_cells(row_cells: &[Cell], row_metadata: RowMetadata) -> usize {
     match row_metadata.row_end {
         RowEnd::SoftWide => row_cells.len().saturating_sub(1),
         RowEnd::Soft | RowEnd::Hard => row_cells.len(),

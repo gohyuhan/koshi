@@ -24,8 +24,8 @@ pub fn compute_oldest_event_time(
 }
 
 /// Keep the events recorded at or after `oldest_event_time` whose name contains
-/// `event_name_filter`. `event_name_filter` is matched ignoring case, so `pane` keeps `PaneCreated`.
-/// A `None` on either side drops nothing for that side. Order is unchanged.
+/// `event_name_filter`. `event_name_filter` is matched ignoring case, so `pane` keeps
+/// `PaneCreated`. A `None` on either side drops nothing for that side. Order is unchanged.
 ///
 /// Example: `filter_recent_events(recent_events, None, Some("tab"))` keeps `TabCreated` and
 /// `TabMoved` and drops `PaneCreated`.
@@ -106,9 +106,8 @@ pub fn render_recent_events(
 
 /// Every id the event named, space separated, or `-` when it named none.
 ///
-/// The ids keep this order: session, client, tab, pane, plugin, command,
-/// subscriber. Each prints its own kind, so `client-… tab-… pane-…` needs no
-/// column of its own to say which is which.
+/// The ids keep this order: session, client, tab, pane, command. Each prints its own
+/// kind, so `client-… tab-… pane-…` needs no column of its own to say which is which.
 fn render_event_identifier_cells(recent_event: &RecentEvent) -> String {
     let event_identifiers: Vec<String> = [
         recent_event
@@ -120,14 +119,8 @@ fn render_event_identifier_cells(recent_event: &RecentEvent) -> String {
         recent_event.tab_id.map(|tab_id| tab_id.to_string()),
         recent_event.pane_id.map(|pane_id| pane_id.to_string()),
         recent_event
-            .plugin_id
-            .map(|plugin_id| plugin_id.to_string()),
-        recent_event
             .command_id
             .map(|command_id| command_id.to_string()),
-        recent_event
-            .subscriber_id
-            .map(|subscriber_id| subscriber_id.to_string()),
     ]
     .into_iter()
     .flatten()

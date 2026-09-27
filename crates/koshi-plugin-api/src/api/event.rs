@@ -1,1 +1,0 @@
-//! Empty event module.

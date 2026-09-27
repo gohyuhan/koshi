@@ -6,26 +6,19 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
-use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::PaneLifecycleEvent;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_renderer::snapshot::{
-    ImagePlacementSnapshot, PlacementPaneSnapshot, PlacementTabSnapshot, PluginUiSnapshot,
-    TabSnapshot,
-};
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
 use koshi_session::session::state::{Session, Tab};
 use koshi_terminal::engine::TerminalEngine;
-use koshi_terminal::graphics::{
-    DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
-};
 use koshi_terminal::state::CursorShape;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -33,9 +26,11 @@ use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
 fn build_test_runtime() -> Server {
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let (tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    Server::from_runtime_parts(pty_backend, inbox_rx, tx.clone())
+    let (sender, inbox_receiver) = mpsc::channel::<RuntimeEvent>();
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(sender),
+    )));
+    Server::from_runtime_parts(pty_backend, inbox_receiver)
 }
 
 /// A session with one tab (single-pane layout), the pane registered, and one
@@ -63,7 +58,7 @@ fn build_session_with_client_reporting(
     );
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(pane_id, SystemTime::now()))
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("unique pane id");
     session.tabs.insert(
         tab_id,
@@ -153,7 +148,7 @@ fn build_snapshot_maps_session_tab_and_client() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .effective_cell_size,
+            .tab_size,
         Size {
             column_count: 80,
             row_count: 22
@@ -192,7 +187,6 @@ fn build_snapshot_maps_session_tab_and_client() {
         ))
     );
     assert!(!pane_slot.is_suppressed);
-    assert!(!pane_slot.is_dead);
 
     // Tab metadata: a single active tab at index 0.
     assert_eq!(render_snapshot.session_snapshot.tabs_metadata.len(), 1);
@@ -215,12 +209,6 @@ fn build_snapshot_maps_session_tab_and_client() {
         .expect("grid view");
     assert_eq!(grid_view.view_row_offset, 0);
     assert_eq!(grid_view.grid.get_grid_dimensions(), (24, 80));
-
-    // No plugin UI for a stock session.
-    assert_eq!(
-        render_snapshot.plugin_ui_snapshot,
-        PluginUiSnapshot::default()
-    );
 
     // No sequence pends before a prefix key is pressed.
 }
@@ -321,8 +309,7 @@ fn build_snapshot_carries_the_live_terminal_grid_and_cursor() {
 
     // Mode/scrollback passthroughs read from the engine.
     assert!(!pane_snapshot.is_reverse_video);
-    assert_eq!(pane_snapshot.scrollback_meta.retained_line_count, 0);
-    assert!(!pane_snapshot.scrollback_meta.is_truncated);
+    assert_eq!(pane_snapshot.scrollback_metadata.retained_line_count, 0);
 
     // A shell that never sent DECSCUSR has asked for no shape at all.
     assert_eq!(pane_snapshot.cursor_snapshot.shape, None);
@@ -416,7 +403,7 @@ fn a_frozen_snapshot_keeps_its_grid_when_the_engine_writes_again() {
         .process_pty_output(b"\rB");
 
     // Copy-on-write: frame 1's shared grid still shows the pre-write glyph — the
-    // later `active_grid_mut` cloned the buffer instead of mutating the frozen one.
+    // later `get_active_grid_mut` cloned the buffer instead of mutating the frozen one.
     let grid1 = &first_render_snapshot.pane_snapshots[0]
         .terminal_grid_view
         .as_ref()
@@ -540,107 +527,57 @@ fn native_image_fragments_keep_one_content_id_across_snapshot_placements() {
     );
 }
 
+/// The resources the placement preview limits count for `pane_output_bytes`
+/// written into one 80x24 pane: `(cell_count, image_count, image_byte_count)`.
+/// The pane is counted twice; the second count adds nothing.
+fn count_live_placement_pane_resources(pane_output_bytes: &[u8]) -> (u64, usize, u64) {
+    let mut server = build_test_runtime();
+    let (session, session_id, _tab_id, pane_id, _client_id) = build_session_with_client(Size {
+        column_count: 80,
+        row_count: 24,
+    });
+    server.session_by_id.insert(session_id, session);
+    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
+        column_count: 80,
+        row_count: 24,
+    });
+    let _ = terminal_engine.process_pty_output(pane_output_bytes);
+    server
+        .terminal_engine_by_pane_id
+        .insert(pane_id, terminal_engine);
+
+    let mut placement_resource_count = super::PlacementSnapshotResourceCount::default();
+    placement_resource_count.add_live_placement_pane_resources(&server, pane_id);
+    placement_resource_count.add_live_placement_pane_resources(&server, pane_id);
+    (
+        placement_resource_count.cell_count,
+        placement_resource_count.image_count,
+        placement_resource_count.image_byte_count,
+    )
+}
+
 #[test]
 fn placement_resource_count_shares_one_decoded_image_across_placements() {
-    let pane_id = PaneId::new();
-    let tab_id = TabId::new();
-    let image_record = Arc::new(ImageRecord {
-        protocol: GraphicsProtocol::Iterm2,
-        image: Arc::new(DecodedImage {
-            pixel_width: 2,
-            pixel_height: 2,
-            rgba_bytes: vec![255; 16],
-        }),
-        animation: None,
-        action: ImageAction::Display,
-        display: ImageDisplay::default(),
-        anchor: (0, 0),
-    });
-    let image_placement_snapshots = vec![
-        ImagePlacementSnapshot::with_content_id(1, 7, Arc::clone(&image_record), (0, 0), 1, 1)
-            .expect("first image placement"),
-        ImagePlacementSnapshot::with_content_id(2, 7, image_record, (1, 0), 1, 1)
-            .expect("second image placement"),
-    ];
-    let placement_tab_snapshot = PlacementTabSnapshot {
-        layout_tree: LayoutNode::Pane(pane_id),
-        tab_snapshot: TabSnapshot {
-            tab_id,
-            tab_name: "preview".to_string(),
-            pane_slots: Vec::new(),
-            effective_cell_size: Size {
-                column_count: 2,
-                row_count: 1,
-            },
-            stack_headers: Vec::new(),
-            layout_mode: LayoutMode::Tiled,
-            are_all_panes_suppressed: false,
-            gap_cell_count: 0,
-        },
-        pane_snapshots: vec![PlacementPaneSnapshot {
-            pane_id,
-            terminal_grid_view: None,
-            image_placement_snapshots,
-        }],
-    };
+    // One iTerm2 image split by `x` into two placements of the same decoded image.
+    let mut pane_output_bytes = b"\x1b]1337;File=inline=1;width=3;height=1;preserveAspectRatio=0:iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=\x07".to_vec();
+    pane_output_bytes.extend_from_slice(b"\x1b[1;2Hx");
 
     assert_eq!(
-        super::count_placement_snapshot_resources(&placement_tab_snapshot, None),
-        (0, 2, 16)
+        count_live_placement_pane_resources(&pane_output_bytes),
+        (1_920, 2, 4)
     );
 }
 
 #[test]
-fn placement_resource_count_distinguishes_same_local_id_from_different_images() {
-    let pane_id = PaneId::new();
-    let tab_id = TabId::new();
-    let build_image_record = |byte: u8| {
-        Arc::new(ImageRecord {
-            protocol: GraphicsProtocol::Iterm2,
-            image: Arc::new(DecodedImage {
-                pixel_width: 2,
-                pixel_height: 2,
-                rgba_bytes: vec![byte; 16],
-            }),
-            animation: None,
-            action: ImageAction::Display,
-            display: ImageDisplay::default(),
-            anchor: (0, 0),
-        })
-    };
-    let first_image_record = build_image_record(0);
-    let second_image_record = build_image_record(255);
-    let image_placement_snapshots = vec![
-        ImagePlacementSnapshot::with_content_id(1, 7, first_image_record, (0, 0), 1, 1)
-            .expect("first image placement"),
-        ImagePlacementSnapshot::with_content_id(2, 7, second_image_record, (1, 0), 1, 1)
-            .expect("second image placement"),
-    ];
-    let placement_tab_snapshot = PlacementTabSnapshot {
-        layout_tree: LayoutNode::Pane(pane_id),
-        tab_snapshot: TabSnapshot {
-            tab_id,
-            tab_name: "preview".to_string(),
-            pane_slots: Vec::new(),
-            effective_cell_size: Size {
-                column_count: 2,
-                row_count: 1,
-            },
-            stack_headers: Vec::new(),
-            layout_mode: LayoutMode::Tiled,
-            are_all_panes_suppressed: false,
-            gap_cell_count: 0,
-        },
-        pane_snapshots: vec![PlacementPaneSnapshot {
-            pane_id,
-            terminal_grid_view: None,
-            image_placement_snapshots,
-        }],
-    };
+fn placement_resource_count_adds_the_bytes_of_every_distinct_image() {
+    // Two Kitty transmissions of different 1x1 RGBA pixels, 4 bytes each.
+    let mut pane_output_bytes = b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec();
+    pane_output_bytes.extend_from_slice(b"\x1b[1;3H");
+    pane_output_bytes.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;AP8A/w==\x1b\\");
 
     assert_eq!(
-        super::count_placement_snapshot_resources(&placement_tab_snapshot, None),
-        (0, 2, 32)
+        count_live_placement_pane_resources(&pane_output_bytes),
+        (1_920, 2, 8)
     );
 }
 
@@ -686,7 +623,7 @@ fn effective_size_is_the_min_viewport_across_clients_not_the_requesters() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .effective_cell_size,
+            .tab_size,
         Size {
             column_count: 40,
             row_count: 8
@@ -712,10 +649,7 @@ fn placement_destination_size_includes_requesting_client_before_destination_view
     let destination_pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            destination_pane_id,
-            SystemTime::now(),
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(destination_pane_id))
         .expect("unique pane id");
     session.tabs.insert(
         destination_tab_id,
@@ -767,14 +701,14 @@ fn placement_destination_size_includes_requesting_client_before_destination_view
             .as_ref()
             .expect("cross-tab destination")
             .tab_snapshot
-            .effective_cell_size,
+            .tab_size,
         Size {
             column_count: 80,
             row_count: 20,
         }
     );
     assert_eq!(
-        crate::runtime::frame::wire_placement_snapshot(&placement_snapshot).validate(),
+        crate::runtime::frame::build_wire_placement_snapshot(&placement_snapshot).validate(),
         Ok(())
     );
 }
@@ -792,10 +726,7 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
     let second_pane = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            second_pane,
-            SystemTime::now(),
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(second_pane))
         .expect("unique pane id");
     session
         .tabs
@@ -835,7 +766,7 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .effective_cell_size,
+            .tab_size,
         Size {
             column_count: 0,
             row_count: 0
@@ -845,7 +776,7 @@ fn build_snapshot_for_a_starving_sole_viewer_suppresses_every_pane() {
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .are_all_panes_suppressed
+            .is_every_pane_suppressed
     );
     let slots: Vec<(PaneId, bool, bool, Option<Rect>)> = render_snapshot
         .session_snapshot
@@ -922,10 +853,7 @@ fn cross_tab_placement_snapshot_retains_a_suppressed_source_pane_for_transfer() 
     let destination_pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            destination_pane_id,
-            SystemTime::now(),
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(destination_pane_id))
         .expect("unique pane id");
     session.tabs.insert(
         destination_tab_id,
@@ -969,7 +897,7 @@ fn cross_tab_placement_snapshot_retains_a_suppressed_source_pane_for_transfer() 
         .expect("the moved pane needs content for the destination preview");
     assert_eq!(source_grid_view.grid.get_grid_dimensions(), (24, 80));
     assert_eq!(
-        crate::runtime::frame::wire_placement_snapshot(&placement_snapshot).validate(),
+        crate::runtime::frame::build_wire_placement_snapshot(&placement_snapshot).validate(),
         Ok(())
     );
     assert_eq!(placement_snapshot.source_tab_id, source_tab_id);
@@ -1022,7 +950,7 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .effective_cell_size,
+            .tab_size,
         Size {
             column_count: 40,
             row_count: 8
@@ -1031,7 +959,7 @@ fn build_snapshot_for_a_starving_viewer_solves_at_the_other_viewers_pane_area() 
 }
 
 #[test]
-fn an_exited_pane_is_marked_dead_but_stays_visible() {
+fn an_exited_pane_stays_laid_out_and_visible() {
     let mut server = build_test_runtime();
     let (mut session, session_id, _tab_id, pane_id, client_id) = build_session_with_client(Size {
         column_count: 80,
@@ -1055,9 +983,18 @@ fn an_exited_pane_is_marked_dead_but_stays_visible() {
         .session_snapshot
         .active_tab_snapshot
         .pane_slots[0];
-    assert!(pane_slot.is_dead);
-    // `dead` is orthogonal to visibility: an exited pane stays laid out.
+    assert_eq!(pane_slot.pane_id, pane_id);
     assert!(pane_slot.is_visible);
+    assert_eq!(
+        pane_slot.content_rect,
+        Some(Rect::from_origin_and_size(
+            Point { column: 1, row: 1 },
+            Size {
+                column_count: 78,
+                row_count: 20
+            },
+        ))
+    );
 }
 
 #[test]
@@ -1074,10 +1011,7 @@ fn tabs_metadata_covers_every_tab_in_index_order_with_the_viewed_tab_active() {
     let second_pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            second_pane_id,
-            SystemTime::now(),
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(second_pane_id))
         .expect("unique pane id");
     session.tabs.insert(
         second_tab_id,
@@ -1127,7 +1061,7 @@ fn tabs_metadata_is_ordered_by_index_not_by_tab_id() {
         let pane_id = PaneId::new();
         session
             .panes
-            .register_pane_record(PaneRecord::from_terminal_pane(pane_id, SystemTime::now()))
+            .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
             .expect("unique pane id");
         session.tabs.insert(
             tab_id,
@@ -1281,7 +1215,7 @@ fn snapshot_follows_live_output_when_the_client_has_not_scrolled() {
             .view_row_offset,
         0
     );
-    assert_eq!(pane_snapshot.scrollback_meta.retained_line_count, 3);
+    assert_eq!(pane_snapshot.scrollback_metadata.retained_line_count, 3);
 }
 
 #[test]
@@ -1317,7 +1251,7 @@ fn snapshot_carries_the_clients_scrolled_back_offset() {
             .view_row_offset,
         2
     );
-    assert_eq!(pane_snapshot.scrollback_meta.retained_line_count, 3);
+    assert_eq!(pane_snapshot.scrollback_metadata.retained_line_count, 3);
 }
 
 #[test]

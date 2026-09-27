@@ -3,15 +3,14 @@
 //! A resize permanently shifts cells between two siblings by updating their
 //! weights' `resize_delta`, then lets the solver re-derive geometry.
 //!
-//! The signed cell delta names the border by direction: `resize_layout(pane,
-//! Right, 5)` moves the pane's right border outward (the pane grows,
-//! the right neighbor donates), and `resize_layout(pane, Right, -5)` moves the
-//! same border inward (the pane donates, the right neighbor gains).
+//! The signed cell delta names the border by direction: a resize of `pane`
+//! toward `Right` by `5` moves the pane's right border outward (the pane
+//! grows, the right neighbor donates), and by `-5` moves the same border
+//! inward (the pane donates, the right neighbor gains).
 //!
 //! Panes inside a stack resize as a unit: the border that moves is the
 //! stack's outer one, never a border between two stack members.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::{Direction, Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -47,16 +46,6 @@ pub enum ResizeError {
     },
 }
 
-impl DomainError for ResizeError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
-}
-
 /// Moves `pane_id`'s border on the `direction` side by `cell_delta`: positive
 /// moves it outward (the pane grows and the adjacent sibling on that side
 /// donates the cells), negative moves it inward (the pane donates and that
@@ -70,6 +59,10 @@ impl DomainError for ResizeError {
 /// member are skipped. `tab_rect` is the rect the tree solves into; the
 /// donor's solved size above its floor bounds the move.
 ///
+/// `pane_sizing.minimum_size` is the per-pane content floor the donor's spare
+/// is measured against, and the donor's solved size excludes the
+/// [`PaneSizing::gap_cell_count`] beside it.
+///
 /// # Errors
 ///
 /// - [`ResizeError::PaneNotFound`] when `pane_id` is not in the tree.
@@ -77,27 +70,6 @@ impl DomainError for ResizeError {
 ///   that side.
 /// - [`ResizeError::MinimumSizeExceeded`] when the donating side would drop below its
 ///   floor.
-pub fn resize_layout(
-    layout_tree: &LayoutNode,
-    tab_rect: Rect,
-    pane_id: PaneId,
-    direction: Direction,
-    cell_delta: i16,
-) -> Result<LayoutNode, ResizeError> {
-    resize_layout_with_sizing(
-        layout_tree,
-        tab_rect,
-        pane_id,
-        direction,
-        cell_delta,
-        PaneSizing::default(),
-    )
-}
-
-/// Like [`resize_layout`] with an explicit [`PaneSizing`]: `pane_sizing.minimum_size` is the
-/// per-pane content floor the donor's spare is measured against, and the
-/// donor's solved size excludes the [`PaneSizing::gap_cell_count`] beside it.
-/// [`resize_layout`] passes [`PaneSizing::default`].
 pub fn resize_layout_with_sizing(
     layout_tree: &LayoutNode,
     tab_rect: Rect,
@@ -140,9 +112,9 @@ pub fn resize_layout_with_sizing(
     let donating_rect =
         compute_directional_child_rects(split_node, split_rect, pane_sizing)[donating_child_index];
     let donating_cell_count = if is_horizontal_split {
-        donating_rect.cell_size.column_count
+        donating_rect.size.column_count
     } else {
-        donating_rect.cell_size.row_count
+        donating_rect.size.row_count
     };
     let spare_cell_count = donating_cell_count.saturating_sub(compute_slot_floor(
         split_node,
@@ -225,8 +197,8 @@ fn find_resize_border(
 
 /// The rect the node at `pane_path` solves into, starting from `tab_rect`.
 ///
-/// A directional level takes the child rect [`directional_child_rects`]
-/// derives; a stacked level the child rect [`stacked_child_rects`] derives.
+/// A directional level takes the child rect [`compute_directional_child_rects`]
+/// derives; a stacked level the child rect [`compute_stacked_child_rects`] derives.
 fn compute_rect_at_path(
     layout_tree: &LayoutNode,
     tab_rect: Rect,

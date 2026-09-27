@@ -73,7 +73,7 @@ impl Server {
             let tab_state = session
                 .tabs
                 .values()
-                .find(|tab_state| tab_state.get_layout_tree().contains_pane(pane_id))?;
+                .find(|tab_state| tab_state.get_layout_tree().has_pane(pane_id))?;
             session.get_tab_cell_size(tab_state.get_tab_id())
         });
         let Some(engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
@@ -100,15 +100,15 @@ impl Server {
         &mut self,
         pane_id: PaneId,
         current_time: Instant,
-    ) -> bool {
+    ) {
         let Some(engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
-            return false;
+            return;
         };
         let terminal_advance_before = TerminalAdvanceBefore::capture_terminal_advance_state(engine);
         let Some((reply_bytes, shell_integration_facts)) =
             engine.expire_synchronized_output(current_time)
         else {
-            return false;
+            return;
         };
         self.finish_terminal_advance(
             pane_id,
@@ -116,7 +116,6 @@ impl Server {
             reply_bytes,
             shell_integration_facts,
         );
-        true
     }
 
     fn finish_terminal_advance(

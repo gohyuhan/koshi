@@ -5,7 +5,7 @@ use serde::Deserializer;
 
 /// Deserialize a byte sequence with a maximum length and error label.
 ///
-/// A sequence longer than `limit` returns a deserializer error before the extra byte is stored.
+/// A sequence longer than `byte_limit` returns a deserializer error before the extra byte is stored.
 pub struct BoundedBytesSeed {
     byte_limit: usize,
     error_label: &'static str,

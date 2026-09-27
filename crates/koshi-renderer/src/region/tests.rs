@@ -14,8 +14,8 @@ use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, HintBinding, PluginUiSnapshot, Reconnecting, RenderSnapshot,
-    SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, HintBinding, Reconnecting, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot, ViewerChrome,
 };
 
 /// A frame of one session named `one`, holding one tab named `first` with no
@@ -32,16 +32,16 @@ fn build_render_snapshot() -> RenderSnapshot {
                 tab_id,
                 tab_name: "first".to_string(),
                 pane_slots: Vec::new(),
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 80,
                     row_count: 24,
                 },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tabs_metadata: vec![TabMeta {
+            tabs_metadata: vec![TabMetadata {
                 tab_id,
                 tab_name: "first".to_string(),
                 tab_index: 0,
@@ -61,7 +61,6 @@ fn build_render_snapshot() -> RenderSnapshot {
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
@@ -85,7 +84,7 @@ fn build_keymap_hints() -> KeymapHints {
 
 #[test]
 fn core_regions_commit_exact_chrome_rectangles_and_revision() {
-    let committed_regions = CommittedRegions::core(
+    let committed_regions = CommittedRegions::build_core(
         Size {
             column_count: 80,
             row_count: 24,
@@ -213,9 +212,9 @@ fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
     });
     assert_eq!(
         zero_size_regions.region_rects,
-        vec![Rect::empty_at_origin(), Rect::empty_at_origin()]
+        vec![Rect::build_empty_at_origin(), Rect::build_empty_at_origin()]
     );
-    assert_eq!(zero_size_regions.pane_rect, Rect::empty_at_origin());
+    assert_eq!(zero_size_regions.pane_rect, Rect::build_empty_at_origin());
 }
 
 #[test]

@@ -1,7 +1,7 @@
-//! Stock (plugin-free) frame composition.
+//! Frame composition.
 //!
 //! [`render_frame`] paints one [`RenderSnapshot`] into a ratatui
-//! [`Buffer`] as three stock zones: a **tabline** (session name, the running
+//! [`Buffer`] as three zones: a **tabline** (session name, the running
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
 //! border highlighted), and the **statusline** — a koshi-owned row with
@@ -18,8 +18,7 @@
 //! for any pane, a centered "terminal too small" overlay replaces the pane
 //! render for that frame. When the pane area is larger than the size the
 //! layout was solved for, the layout is centered inside that pane area and the
-//! surrounding margin is filled with a dim letterbox. Nothing here draws
-//! plugin-contributed segments.
+//! surrounding margin is filled with a dim letterbox.
 
 use std::borrow::Cow;
 
@@ -39,8 +38,7 @@ use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineSty
 
 use crate::hit_test::{compute_placement_handle_rect, PLACEMENT_HANDLE_COLUMN_COUNT};
 use crate::images::{
-    compute_image_placeholder_rects, compute_selected_image_placeholder_rects,
-    draw_image_placeholders, ImagePlacementKey, ImageRenderMode,
+    compute_image_placeholder_rects, draw_image_placeholders, ImagePlacementKey, ImageRenderMode,
 };
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
@@ -53,10 +51,10 @@ use crate::theme::Theme;
 const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
 const PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT: usize = 12;
 
-/// Paint `render_snapshot` into `buffer` over `viewport_area` with the selected image mode.
+/// Paint `render_snapshot` into `screen_buffer` over `viewport_area`.
 ///
 /// It does nothing for a zero-size area. When the active tab has no room for any
-/// pane (`are_all_panes_suppressed`), it blanks `viewport_area`, draws a centered too-small
+/// pane (`is_every_pane_suppressed`), it blanks `viewport_area`, draws a centered too-small
 /// overlay, and returns, skipping the panes and both chrome rows.
 ///
 /// Otherwise paints in this order:
@@ -84,6 +82,18 @@ const PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT: usize = 12;
 /// and to [`get_cursor_position`]. For example, a left region of 20 columns on a
 /// `120x40` viewport leaves the pane rectangle at `x = 20`.
 ///
+/// `image_mode` `Placeholder` writes `terminal image unavailable` into visible
+/// image rectangles: a four-column image at `(12, 6)` shows `term` across its
+/// first four cells. `Native` keeps the pane cells beneath image pixels. In
+/// `Native` mode, `available_image_keys` names the image placements whose
+/// native bytes are ready, and every other image shows the unavailable-image
+/// text; `None` shows that text only over images whose record is missing.
+///
+/// `placement_status` fills the placement entry of the statusline. Every pane
+/// and collapsed stack header that `placement_target` names in the displayed
+/// tab takes the placement hover color: an insertion above `pane-123` colors
+/// `pane-123`'s border.
+///
 /// # Panics
 ///
 /// In a debug build, when `render_snapshot.client_snapshot.active_tab_id` is not
@@ -96,79 +106,12 @@ pub fn render_frame(
     hints: &KeymapHints,
     pending_key_sequence: Option<&KeySequence>,
     viewer_chrome: ViewerChrome,
-    viewport_area: RatatuiRect,
-    buffer: &mut Buffer,
-) {
-    render_frame_with_images(
-        render_snapshot,
-        committed_regions,
-        theme,
-        hints,
-        pending_key_sequence,
-        viewer_chrome,
-        ImageRenderMode::Placeholder,
-        viewport_area,
-        buffer,
-    );
-}
-
-/// Paint `render_snapshot` into `buffer` with a selected terminal-image mode.
-///
-/// `Placeholder` writes `terminal image unavailable` into visible image
-/// rectangles. `Native` keeps the pane cells beneath available image pixels
-/// and writes the same marker while a record is missing. A four-column image
-/// at `(12, 6)` in placeholder mode writes `term` across the first four cells.
-#[allow(clippy::too_many_arguments)]
-pub fn render_frame_with_images(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    theme: &Theme,
-    hints: &KeymapHints,
-    pending_key_sequence: Option<&KeySequence>,
-    viewer_chrome: ViewerChrome,
-    image_mode: ImageRenderMode,
-    viewport_area: RatatuiRect,
-    buffer: &mut Buffer,
-) {
-    render_frame_with_placement_target(
-        render_snapshot,
-        committed_regions,
-        theme,
-        hints,
-        pending_key_sequence,
-        viewer_chrome,
-        image_mode,
-        None,
-        None,
-        None,
-        viewport_area,
-        buffer,
-    );
-}
-
-/// Paint one frame with a selected set of native images and placement target.
-///
-/// In `Native` mode, `available_image_keys` names the image placements whose
-/// native bytes are ready, and every other image shows the unavailable-image
-/// text; `None` shows that text only over images whose record is missing.
-/// `placement_status` fills the placement entry of the statusline. Every pane
-/// and collapsed stack header that `placement_target` names in the displayed
-/// tab takes the placement hover color: an insertion above `pane-123` colors
-/// `pane-123`'s border.
-#[allow(clippy::too_many_arguments)]
-pub fn render_frame_with_placement_target(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    theme: &Theme,
-    hints: &KeymapHints,
-    pending_key_sequence: Option<&KeySequence>,
-    viewer_chrome: ViewerChrome,
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
     placement_status: Option<&PlacementStatus>,
     placement_target: Option<&PanePlacementTarget>,
     viewport_area: RatatuiRect,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
     if viewport_area.width == 0 || viewport_area.height == 0 {
         return;
@@ -188,15 +131,15 @@ pub fn render_frame_with_placement_target(
     // Reset every cell of `viewport_area` first, so a buffer carried over from the
     // previous frame keeps no cell in the tabline gap, the reserved statusline row,
     // or a pane interior this frame does not paint.
-    Clear.render(viewport_area, buffer);
+    Clear.render(viewport_area, screen_buffer);
 
     // No room for any pane: the whole frame becomes the too-small overlay.
     if render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .are_all_panes_suppressed
+        .is_every_pane_suppressed
     {
-        draw_too_small_overlay(viewport_area, buffer);
+        draw_too_small_overlay(viewport_area, screen_buffer);
         return;
     }
 
@@ -210,7 +153,7 @@ pub fn render_frame_with_placement_target(
         render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .effective_cell_size,
+            .tab_size,
     );
     let layout_origin = get_area_origin(effective_layout_rect);
 
@@ -220,49 +163,29 @@ pub fn render_frame_with_placement_target(
         viewer_chrome,
         placement_target,
         layout_origin,
-        buffer,
+        screen_buffer,
     );
-    draw_pane_contents(render_snapshot, layout_origin, buffer);
-    draw_placement_hover_tints(render_snapshot, viewer_chrome, layout_origin, buffer);
-    match image_mode {
-        ImageRenderMode::Placeholder => {
-            let placeholder_rects = compute_image_placeholder_rects(
-                render_snapshot,
-                committed_regions,
-                viewport_area,
-                false,
-            );
-            draw_image_placeholders(&placeholder_rects, buffer);
-        }
-        ImageRenderMode::Native => {
-            let placeholder_rects = match available_image_keys {
-                Some(available_image_keys) => compute_selected_image_placeholder_rects(
-                    render_snapshot,
-                    committed_regions,
-                    viewport_area,
-                    Some(available_image_keys),
-                ),
-                None => compute_image_placeholder_rects(
-                    render_snapshot,
-                    committed_regions,
-                    viewport_area,
-                    true,
-                ),
-            };
-            draw_image_placeholders(&placeholder_rects, buffer);
-        }
-    }
+    draw_pane_contents(render_snapshot, layout_origin, screen_buffer);
+    draw_placement_hover_tints(render_snapshot, viewer_chrome, layout_origin, screen_buffer);
+    let placeholder_rects = compute_image_placeholder_rects(
+        render_snapshot,
+        committed_regions,
+        viewport_area,
+        image_mode,
+        available_image_keys,
+    );
+    draw_image_placeholders(&placeholder_rects, screen_buffer);
     draw_stack_headers(
         render_snapshot,
         theme,
         viewer_chrome,
         placement_target,
         layout_origin,
-        buffer,
+        screen_buffer,
     );
 
     // The margin fills first; the tabline and statusline paint over it.
-    draw_letterbox(viewport_area, effective_layout_rect, theme, buffer);
+    draw_letterbox(viewport_area, effective_layout_rect, theme, screen_buffer);
 
     // The same tab-row facts hit-testing reads, so the tabline drawn is the
     // tabline classified.
@@ -270,7 +193,7 @@ pub fn render_frame_with_placement_target(
         .build_frame_layout(viewer_chrome)
         .get_tabline_inputs();
     if let Some(tabline_rect) = find_region_area(committed_regions, 0, viewport_area) {
-        draw_tabline(tabline_inputs, theme, tabline_rect, buffer);
+        draw_tabline(tabline_inputs, theme, tabline_rect, screen_buffer);
     }
 
     if let Some(statusline_rect) = find_region_area(committed_regions, 1, viewport_area) {
@@ -282,7 +205,7 @@ pub fn render_frame_with_placement_target(
             },
             theme,
             statusline_rect,
-            buffer,
+            screen_buffer,
         );
     }
 }
@@ -303,7 +226,7 @@ pub fn render_frame_with_placement_target(
 /// slot or no content snapshot; it is not visible or has no content area
 /// (suppressed, hidden, a collapsed stack member, or a slot of two or fewer
 /// columns or rows, whose content rect holds no cells); it has no terminal grid
-/// (a plugin pane, or a slot showing nothing this frame); its view is scrolled
+/// this frame; its view is scrolled
 /// back into history (no hardware cursor is placed while scrolled); or the
 /// application has hidden its cursor.
 ///
@@ -326,12 +249,11 @@ pub fn get_cursor_position(
         return None;
     }
     let content_rect = pane_slot.content_rect?;
-    if content_rect.cell_size.column_count == 0 || content_rect.cell_size.row_count == 0 {
+    if content_rect.size.column_count == 0 || content_rect.size.row_count == 0 {
         return None;
     }
 
     let pane_snapshot = find_pane_snapshot(render_snapshot, focused_pane_id)?;
-    // A pane with no grid — a plugin pane — places no cursor.
     let terminal_grid_view = pane_snapshot.terminal_grid_view.as_ref()?;
     // A view scrolled back into history shows no hardware cursor.
     if terminal_grid_view.view_row_offset > 0 {
@@ -343,20 +265,13 @@ pub fn get_cursor_position(
 
     // Map the pane-local cursor (column/row counted from the content area's own
     // top-left) to a screen cell. `content_rect` is the content rect in
-    // effective-layout space; `place_cell_rect` shifts it by the same letterbox
+    // tab-layout space; `place_cell_rect` shifts it by the same letterbox
     // offset `render_frame` centers with. The placed origin plus the local
-    // column/row is
-    // the screen position, clamped to the rect's last cell: a dead pane keeps a
-    // frozen col/row while its content rect shrinks, so the sum can land past
-    // the edge.
-    let effective_layout_rect = compute_content_rect(
-        compute_pane_area(committed_regions, viewport_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .effective_cell_size,
+    // column/row is the screen position, clamped to the rect's last cell.
+    let placed_content_rect = place_cell_rect(
+        content_rect,
+        compute_layout_origin(render_snapshot, committed_regions, viewport_area),
     );
-    let placed_content_rect = place_cell_rect(content_rect, get_area_origin(effective_layout_rect));
     let screen_column = (placed_content_rect.x + pane_snapshot.cursor_snapshot.column_index)
         .min(placed_content_rect.right().saturating_sub(1));
     let screen_row = (placed_content_rect.y + pane_snapshot.cursor_snapshot.row_index)
@@ -370,9 +285,9 @@ pub fn get_cursor_position(
 /// nothing — a plain shell never sends DECSCUSR, so its cursor stays whatever
 /// the user configured.
 ///
-/// `None` — meaning "leave the cursor as it is" — only when there is no focused
-/// terminal pane to speak for it: no focused pane at all, or a plugin pane,
-/// which has no terminal and so no opinion.
+/// `None` — meaning "leave the cursor as it is" — when the client has no
+/// focused pane, or the focused pane has no content snapshot or no terminal
+/// grid this frame.
 ///
 /// Companion to [`get_cursor_position`], which says where the cursor goes; this
 /// says what it looks like once it is there. The caller applies it to the outer
@@ -390,7 +305,7 @@ pub fn get_cursor_style(render_snapshot: &RenderSnapshot) -> Option<CursorStyle>
     let cursor_style = match pane_snapshot.cursor_snapshot.shape {
         Some(cursor_shape) => CursorStyle::Shaped {
             shape: cursor_shape,
-            blink: pane_snapshot.cursor_snapshot.is_blinking,
+            is_blinking: pane_snapshot.cursor_snapshot.is_blinking,
         },
         None => CursorStyle::UserDefault,
     };
@@ -427,7 +342,7 @@ fn draw_panes(
     viewer_chrome: ViewerChrome,
     placement_target: Option<&PanePlacementTarget>,
     layout_origin: Point,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
     let ViewerChrome {
         hovered_pane_id,
@@ -464,7 +379,7 @@ fn draw_panes(
         Block::new()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .render(pane_rect, buffer);
+            .render(pane_rect, screen_buffer);
 
         let pane_snapshot = find_pane_snapshot(render_snapshot, pane_slot.pane_id);
 
@@ -475,7 +390,7 @@ fn draw_panes(
         if !pane_label.is_empty() && pane_rect.width > 4 {
             let pane_label_line = Line::from(Span::styled(format!(" {pane_label} "), border_style));
             set_line_clipped(
-                buffer,
+                screen_buffer,
                 pane_rect.x + 2,
                 pane_rect.y,
                 &pane_label_line,
@@ -487,7 +402,12 @@ fn draw_panes(
             if let Some(handle_rect) = compute_placement_handle_rect(pane_slot.outer_rect) {
                 let handle_origin = place_cell_rect(handle_rect, layout_origin);
                 let handle_text = "⠿".repeat(usize::from(PLACEMENT_HANDLE_COLUMN_COUNT));
-                buffer.set_string(handle_origin.x, handle_origin.y, &handle_text, border_style);
+                screen_buffer.set_string(
+                    handle_origin.x,
+                    handle_origin.y,
+                    &handle_text,
+                    border_style,
+                );
             }
         }
 
@@ -503,7 +423,7 @@ fn draw_panes(
                 let scroll_line = Line::from(Span::styled(scroll_text, border_style));
                 let scroll_start_column = pane_rect.right() - 1 - scroll_text_width;
                 set_line_clipped(
-                    buffer,
+                    screen_buffer,
                     scroll_start_column,
                     pane_rect.bottom() - 1,
                     &scroll_line,
@@ -547,7 +467,7 @@ fn draw_placement_hover_tints(
     render_snapshot: &RenderSnapshot,
     viewer_chrome: ViewerChrome,
     layout_origin: Point,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
     if viewer_chrome.is_pane_placement_visible {
         return;
@@ -568,10 +488,11 @@ fn draw_placement_hover_tints(
         let Some(content_rect) = pane_slot.content_rect else {
             continue;
         };
-        let content_area = place_cell_rect(content_rect, layout_origin).intersection(buffer.area);
+        let content_area =
+            place_cell_rect(content_rect, layout_origin).intersection(screen_buffer.area);
         for row_index in content_area.top()..content_area.bottom() {
             for column_index in content_area.left()..content_area.right() {
-                buffer[(column_index, row_index)].set_bg(PLACEMENT_HOVER_TINT_COLOR);
+                screen_buffer[(column_index, row_index)].set_bg(PLACEMENT_HOVER_TINT_COLOR);
             }
         }
     }
@@ -580,9 +501,9 @@ fn draw_placement_hover_tints(
 /// Draw the "terminal too small" overlay: one centered, bold line telling the
 /// user to enlarge the window, shown when the tab has no room for any pane.
 ///
-/// Centered on the middle row of `area` and horizontally within it. A message
-/// wider than `area` is clipped at its right edge.
-fn draw_too_small_overlay(viewport_area: RatatuiRect, buffer: &mut Buffer) {
+/// Centered on the middle row of `viewport_area` and horizontally within it. A
+/// message wider than `viewport_area` is clipped at its right edge.
+fn draw_too_small_overlay(viewport_area: RatatuiRect, screen_buffer: &mut Buffer) {
     let too_small_message = Line::from(Span::styled(
         "Terminal too small — enlarge window",
         compute_too_small_overlay_style(),
@@ -592,7 +513,7 @@ fn draw_too_small_overlay(viewport_area: RatatuiRect, buffer: &mut Buffer) {
         viewport_area.x + viewport_area.width.saturating_sub(too_small_message_width) / 2;
     let message_row = viewport_area.y + viewport_area.height / 2;
     set_line_clipped(
-        buffer,
+        screen_buffer,
         too_small_message_start_column,
         message_row,
         &too_small_message,
@@ -605,10 +526,14 @@ fn draw_too_small_overlay(viewport_area: RatatuiRect, buffer: &mut Buffer) {
 /// Paint each visible terminal pane's cells into its content rect.
 ///
 /// For every visible pane slot that has a content rect and a terminal grid,
-/// draws the grid into that rect. Plugin panes (no grid) and panes with no
-/// content rect (suppressed, hidden, or a collapsed stack member) draw nothing.
+/// draws the grid into that rect. Panes with no grid or no content rect
+/// (suppressed, hidden, or a collapsed stack member) draw nothing.
 /// `layout_origin` shifts each content rect into the centered content area.
-fn draw_pane_contents(render_snapshot: &RenderSnapshot, layout_origin: Point, buffer: &mut Buffer) {
+fn draw_pane_contents(
+    render_snapshot: &RenderSnapshot,
+    layout_origin: Point,
+    screen_buffer: &mut Buffer,
+) {
     for pane_slot in &render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -631,7 +556,7 @@ fn draw_pane_contents(render_snapshot: &RenderSnapshot, layout_origin: Point, bu
             place_cell_rect(content_rect, layout_origin),
             pane_snapshot.is_reverse_video,
             pane_snapshot.selection_spans.as_ref(),
-            buffer,
+            screen_buffer,
         );
     }
 }
@@ -654,9 +579,9 @@ fn draw_grid(
     target_area: RatatuiRect,
     is_reverse_video: bool,
     selection_spans: Option<&SelectionSpans>,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
-    let clipped_area = target_area.intersection(buffer.area);
+    let clipped_area = target_area.intersection(screen_buffer.area);
     let (grid_row_count, grid_column_count) = terminal_grid.get_grid_dimensions();
     let visible_row_count = grid_row_count.min(clipped_area.height);
     let visible_column_count = grid_column_count.min(clipped_area.width);
@@ -679,17 +604,17 @@ fn draw_grid(
             });
             let cell_style = get_cell_style(cell.get_style(), is_reverse_video ^ is_selected);
             if cell_width >= 2 && column_index + 1 >= visible_column_count {
-                buffer[(screen_column, screen_row)]
+                screen_buffer[(screen_column, screen_row)]
                     .set_char(' ')
                     .set_style(cell_style);
                 continue;
             }
             if cell.list_combining_characters().is_empty() {
-                buffer[(screen_column, screen_row)]
+                screen_buffer[(screen_column, screen_row)]
                     .set_char(cell.get_character())
                     .set_style(cell_style);
             } else {
-                buffer[(screen_column, screen_row)]
+                screen_buffer[(screen_column, screen_row)]
                     .set_symbol(&get_cell_symbol(cell))
                     .set_style(cell_style);
             }
@@ -711,7 +636,7 @@ fn get_cell_symbol(cell: &Cell) -> String {
 /// Colors map directly, the terminal default becoming ratatui's reset. Each
 /// boolean attribute maps to its modifier; every underline variant collapses to
 /// a single underline, and overline and underline color have no ratatui modifier
-/// and are not drawn. `reverse_video` (DECSCNM) combines with the cell's own
+/// and are not drawn. `is_reverse_video` (DECSCNM) combines with the cell's own
 /// reverse by exclusive-or, so a screen-wide reverse cancels a cell already in
 /// reverse.
 fn get_cell_style(cell_style: CellStyle, is_reverse_video: bool) -> Style {
@@ -753,7 +678,9 @@ fn get_cell_color(cell_color: CellColor) -> Color {
     match cell_color {
         CellColor::Default => Color::Reset,
         CellColor::Indexed(color_index) => Color::Indexed(color_index),
-        CellColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        CellColor::Rgb(red_channel, green_channel, blue_channel) => {
+            Color::Rgb(red_channel, green_channel, blue_channel)
+        }
     }
 }
 
@@ -771,7 +698,7 @@ fn draw_stack_headers(
     viewer_chrome: ViewerChrome,
     placement_target: Option<&PanePlacementTarget>,
     layout_origin: Point,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
     let displayed_tab_id = render_snapshot.client_snapshot.active_tab_id;
     for stack_header in &render_snapshot
@@ -797,7 +724,7 @@ fn draw_stack_headers(
 
         // Fill the whole row first: the gap between the pane label and indicator
         // carries the strip background too.
-        buffer.set_style(header_rect, stack_header_style);
+        screen_buffer.set_style(header_rect, stack_header_style);
 
         let pane_label = format_pane_label(
             stack_header.pane_id,
@@ -806,7 +733,7 @@ fn draw_stack_headers(
         );
         let pane_label_line = Line::from(format!("▸ {pane_label}"));
         set_line_clipped(
-            buffer,
+            screen_buffer,
             header_rect.x,
             header_rect.y,
             &pane_label_line,
@@ -826,7 +753,7 @@ fn draw_stack_headers(
             .saturating_sub(indicator_width)
             .max(header_rect.x);
         set_line_clipped(
-            buffer,
+            screen_buffer,
             indicator_start_column,
             header_rect.y,
             &indicator_line,
@@ -921,7 +848,7 @@ fn get_pane_scroll(pane_snapshot: &PaneSnapshot) -> Option<(usize, usize)> {
         .map_or(0, |grid_view| grid_view.view_row_offset);
     (view_row_offset > 0).then_some((
         view_row_offset,
-        pane_snapshot.scrollback_meta.retained_line_count,
+        pane_snapshot.scrollback_metadata.retained_line_count,
     ))
 }
 
@@ -942,8 +869,8 @@ pub(crate) fn place_cell_rect(cell_rect: Rect, layout_origin: Point) -> RatatuiR
     RatatuiRect {
         x: cell_rect.origin.column + layout_origin.column,
         y: cell_rect.origin.row + layout_origin.row,
-        width: cell_rect.cell_size.column_count,
-        height: cell_rect.cell_size.row_count,
+        width: cell_rect.size.column_count,
+        height: cell_rect.size.row_count,
     }
 }
 
@@ -958,6 +885,23 @@ pub(crate) fn find_region_area(
         .region_rects
         .get(region_index)
         .map(|&region_rect| place_cell_rect(region_rect, get_area_origin(viewport_area)))
+}
+
+/// The buffer cell where the active tab's solved layout starts: the top-left of
+/// the layout's `tab_size` centered in the pane area that
+/// `committed_regions` leave inside `viewport_area`.
+pub(crate) fn compute_layout_origin(
+    render_snapshot: &RenderSnapshot,
+    committed_regions: &CommittedRegions,
+    viewport_area: RatatuiRect,
+) -> Point {
+    get_area_origin(compute_content_rect(
+        compute_pane_area(committed_regions, viewport_area),
+        render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .tab_size,
+    ))
 }
 
 /// Return the pane rectangle left by the committed regions in frame coordinates.
@@ -997,25 +941,25 @@ pub(crate) fn get_line_width(line: &Line<'_>) -> u16 {
 /// the laid-out frame — a resize left the frame's rows solved for a taller
 /// size — places chrome rows below it, and those rows are skipped.
 pub(crate) fn set_line_clipped(
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
     start_column: u16,
     row_index: u16,
     line: &Line<'_>,
     maximum_width: u16,
 ) {
-    if row_index < buffer.area.top() || row_index >= buffer.area.bottom() {
+    if row_index < screen_buffer.area.top() || row_index >= screen_buffer.area.bottom() {
         return;
     }
-    buffer.set_line(start_column, row_index, line, maximum_width);
+    screen_buffer.set_line(start_column, row_index, line, maximum_width);
 }
 
 /// The centered rect of the effective (solved) size within the pane area.
 ///
-/// A pane area larger than `effective` leaves a letterbox margin around the
+/// A pane area larger than `tab_size` leaves a letterbox margin around the
 /// rect. Each dimension is clamped to the pane area's own.
-pub fn compute_content_rect(pane_area: RatatuiRect, effective_cell_size: Size) -> RatatuiRect {
-    let column_count = effective_cell_size.column_count.min(pane_area.width);
-    let row_count = effective_cell_size.row_count.min(pane_area.height);
+pub fn compute_content_rect(pane_area: RatatuiRect, tab_size: Size) -> RatatuiRect {
+    let column_count = tab_size.column_count.min(pane_area.width);
+    let row_count = tab_size.row_count.min(pane_area.height);
     RatatuiRect {
         x: pane_area.x + (pane_area.width - column_count) / 2,
         y: pane_area.y + (pane_area.height - row_count) / 2,
@@ -1033,12 +977,12 @@ pub fn compute_content_rect(pane_area: RatatuiRect, effective_cell_size: Size) -
 /// painted area, and the part outside it is not a band. Each band is restyled
 /// in place, never blanked: [`render_frame`] clears every cell of `viewport_area`
 /// before this runs. [`Buffer::set_style`] clips to the buffer, so a viewport
-/// area larger than `buffer` writes only inside `buffer`.
+/// area larger than `screen_buffer` writes only inside `screen_buffer`.
 fn draw_letterbox(
     viewport_area: RatatuiRect,
     effective_layout_rect: RatatuiRect,
     theme: &Theme,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
     let effective_layout_rect = viewport_area.intersection(effective_layout_rect);
     if effective_layout_rect == viewport_area {
@@ -1080,7 +1024,7 @@ fn draw_letterbox(
         },
     ];
     for letterbox_band in letterbox_bands {
-        buffer.set_style(letterbox_band, letterbox_style);
+        screen_buffer.set_style(letterbox_band, letterbox_style);
     }
 }
 
@@ -1092,9 +1036,6 @@ use tabline::draw_tabline;
 // The statusline fills its row with the same bar background as the tabline.
 pub(crate) use style::compute_bar_style;
 pub(crate) use tabline::solve_tabline_layout;
-// The badge text, reachable from the sibling test modules.
-#[cfg(test)]
-pub(crate) use tabline::create_version_badge_text;
 
 #[cfg(test)]
 mod tests;

@@ -23,7 +23,7 @@ pub mod frame;
 pub mod input;
 pub mod layout;
 pub mod mouse;
-pub mod pty_forward;
+pub mod pty_inbox;
 pub mod pty_output;
 pub mod reload;
 pub(crate) mod render_schedule;

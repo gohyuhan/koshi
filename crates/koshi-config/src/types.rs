@@ -24,7 +24,7 @@ use koshi_core::action::ActionReference;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{ExtendedKeysMode, Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
-use koshi_core::resolve::{ActionArgs, DEFAULT_SCROLL_LINE_COUNT};
+use koshi_core::resolve::DEFAULT_SCROLL_LINE_COUNT;
 
 use crate::error::ColorParseError;
 use crate::key::Leader;
@@ -259,7 +259,7 @@ pub struct KeybindingsConfig {
     /// Milliseconds before the which-key continuation hint appears.
     pub which_key_delay_ms: u32,
     /// Maximum number of chords in one key sequence.
-    pub max_chord_depth: u8,
+    pub maximum_chord_depth: u8,
     /// The prefix that `<leader>` in a binding resolves to. A modifier run
     /// merges into the chord that follows it; a chord stands on its own.
     pub leader: Leader,
@@ -289,7 +289,7 @@ impl Default for KeybindingsConfig {
         Self {
             chord_timeout_ms: 500,
             which_key_delay_ms: 300,
-            max_chord_depth: 4,
+            maximum_chord_depth: 4,
             leader: Leader::default(),
             mode_bindings_by_name: build_default_mode_bindings(Leader::default()),
             unlock_alternative: None,
@@ -298,8 +298,8 @@ impl Default for KeybindingsConfig {
 }
 
 /// The name of an input mode (`normal`, `locked`, `resize`, …), stored as a
-/// plain string so plugins can register additional mode names beyond the
-/// built-in set.
+/// plain string. A keybinding file may name a mode outside the built-in set;
+/// conflict detection warns that mode as unregistered.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModeName(String);
 
@@ -321,20 +321,16 @@ impl Borrow<str> for ModeName {
     }
 }
 
-/// The action a key sequence triggers: the action reference plus the
-/// arguments bound at the binding site.
+/// The action a key sequence triggers.
 ///
-/// A user keybinding file binds a key to an action reference alone, so every
-/// binding it produces carries [`ActionArgs::None`]: an action choice with a
-/// fixed set of values lives in the action name (`new-pane-left`,
+/// A binding names an action and no arguments: an action choice with a fixed
+/// set of values lives in the action name (`new-pane-left`,
 /// `close-pane-tree`), and open-range values are reachable only through CLI
-/// commands. Plugin manifests may pair their own actions with arguments.
+/// commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAction {
     /// The action to resolve when the sequence fires.
     pub action_reference: ActionReference,
-    /// The arguments handed to action resolution alongside it.
-    pub action_arguments: ActionArgs,
 }
 
 /// The bindings for one input mode, keyed by the key sequence pressed.
@@ -374,10 +370,9 @@ pub struct ModeBindings {
 /// Tab, Enter, Esc, and Backspace. Pane operations — lifecycle, directional
 /// splits, and directional focus — live under the `<C-p>` prefix, resize under
 /// `<C-s>`, and tab lifecycle under `<C-t>`. Placement actions live in the
-/// `pane-placement` mode. Every binding is argless: an action choice with a fixed set
-/// of values is part of the action name (`new-pane-left`,
-/// `select-pane-target-left`), so any key here can be rebound from
-/// `keybinding.kdl`.
+/// `pane-placement` mode. An action choice with a fixed set of values is part
+/// of the action name (`new-pane-left`, `select-pane-target-left`), so any key
+/// here can be rebound from `keybinding.kdl`.
 pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
     let parse_default_key_sequence = |key_sequence_text: &str| {
         parse_sequence(key_sequence_text, leader, u8::MAX)
@@ -387,7 +382,6 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
     let build_bound_action = |action_name: &str| BoundAction {
         action_reference: ActionReference::from_core_action_name(action_name)
             .expect("default binding action name must satisfy the action-name grammar"),
-        action_arguments: ActionArgs::None,
     };
 
     let normal_mode_bindings: BTreeMap<KeySequence, BoundAction> = [
@@ -628,7 +622,7 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
 /// surface overrides, adds, or removes a binding under it, the group falls
 /// back to a derived `+N` marker.
 #[must_use]
-pub fn default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
+pub fn build_default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String> {
     let parse_opening_chord = |prefix_text: &str| {
         *parse_sequence(prefix_text, leader, u8::MAX)
             .expect("a built-in prefix must parse")
@@ -712,32 +706,16 @@ pub enum WheelScroll {
 /// Selection and clipboard behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyConfig {
-    /// Whether completing a selection copies it immediately. No `koshi.kdl`
-    /// key sets it, so it always holds its default.
-    pub should_copy_on_select: bool,
     /// Whether trailing whitespace is trimmed from copied text.
     pub should_trim_trailing_whitespace: bool,
-    /// Which clipboard backend receives copied text.
-    pub clipboard: ClipboardBackend,
 }
 
 impl Default for CopyConfig {
     fn default() -> Self {
         Self {
-            should_copy_on_select: true,
             should_trim_trailing_whitespace: true,
-            clipboard: ClipboardBackend::Osc52,
         }
     }
-}
-
-/// The clipboard backend copied text is written to. OSC 52 is the only
-/// backend koshi builds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ClipboardBackend {
-    /// Write to the outer terminal's clipboard via OSC 52.
-    #[default]
-    Osc52,
 }
 
 /// Terminal environment presented to child processes.

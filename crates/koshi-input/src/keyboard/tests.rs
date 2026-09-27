@@ -11,7 +11,7 @@ use crate::host::{KeyCode, KeyEventKind};
 struct KeyModifiers(Modifiers);
 
 impl KeyModifiers {
-    const NONE: Self = Self(Modifiers::empty());
+    const NONE: Self = Self(Modifiers::NONE);
     const SHIFT: Self = Self(Modifiers::SHIFT);
     const CONTROL: Self = Self(Modifiers::CONTROL);
     const ALT: Self = Self(Modifiers::ALT);
@@ -24,7 +24,7 @@ impl std::ops::BitOr for KeyModifiers {
     type Output = Self;
 
     fn bitor(self, right_key_modifiers: Self) -> Self::Output {
-        Self(self.0.combine_modifiers(right_key_modifiers.0))
+        Self(self.0 | right_key_modifiers.0)
     }
 }
 
@@ -1221,7 +1221,7 @@ fn every_host_modifier_bit_reaches_the_stored_bitmap() {
         KeyCode::Char('a'),
         host_modifiers,
     ));
-    assert_eq!(key_input.modifier_flags.bits(), 0b1111_1111);
+    assert_eq!(key_input.modifier_flags.get_bits(), 0b1111_1111);
 }
 
 #[test]

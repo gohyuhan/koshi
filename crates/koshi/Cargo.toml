@@ -4,46 +4,34 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-name = "koshi"
-path = "src/lib.rs"
-
-[[bin]]
-name = "koshi"
-path = "src/main.rs"
-
 [dependencies]
-koshi-client = { version = "0.4.0", path = "../koshi-client" }
-koshi-config = { version = "0.4.0", path = "../koshi-config" }
-koshi-core = { version = "0.4.0", path = "../koshi-core" }
-koshi-daemon = { version = "0.4.0", path = "../koshi-daemon" }
-koshi-link = { version = "0.4.0", path = "../koshi-link" }
-koshi-ipc = { version = "0.4.0", path = "../koshi-ipc" }
-koshi-layout = { version = "0.4.0", path = "../koshi-layout" }
-koshi-observability = { version = "0.4.0", path = "../koshi-observability" }
-koshi-paths = { version = "0.4.0", path = "../koshi-paths" }
-koshi-storage = { version = "0.4.0", path = "../koshi-storage" }
-tracing.workspace = true
 clap.workspace = true
-uuid.workspace = true
-serde_json.workspace = true
+flate2.workspace = true
+koshi-client.workspace = true
+koshi-config.workspace = true
+koshi-core.workspace = true
+koshi-daemon.workspace = true
+koshi-ipc.workspace = true
+koshi-layout.workspace = true
+koshi-link.workspace = true
+koshi-observability.workspace = true
+koshi-paths.workspace = true
+koshi-storage.workspace = true
+semver.workspace = true
 serde.workspace = true
-ureq = { version = "3.3.0", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip"] }
-semver = "1.0.28"
-flate2 = "1.1.9"
-tar = "0.4.46"
-# koshi only reads a deflate-compressed release zip, so drop zip's default
-# codec backends (bzip2, ppmd, lzma, zstd, xz) — that also removes their
-# non-permissive transitive licenses. `deflate-flate2` reuses the flate2
-# already pulled for tar.gz.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
-sha2 = "0.11.0"
+tracing.workspace = true
+ureq.workspace = true
+zip.workspace = true
 
-[target."cfg(unix)".dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
-koshi-pty = { version = "0.4.0", path = "../koshi-pty" }
-koshi-runtime = { version = "0.4.0", path = "../koshi-runtime" }
-koshi-test-support = { version = "0.4.0", path = "../koshi-test-support" }
+koshi-pty.workspace = true
+koshi-runtime.workspace = true
+koshi-test-support.workspace = true
+uuid.workspace = true

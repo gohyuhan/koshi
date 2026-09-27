@@ -14,16 +14,12 @@ const KEYS_DETAIL_HEADERS: &[&str] = &[
     "display_name",
     "description",
     "scope",
-    "args",
     "source",
     "continuous",
 ];
 
 /// Column headers for a `keys conflicts` finding row.
 const KEYS_CONFLICTS_HEADERS: &[&str] = &["severity", "finding"];
-
-/// Column headers for a `keys list --recommended` row.
-const KEYS_RECOMMENDED_HEADERS: &[&str] = &["key", "action", "plugin"];
 
 /// One effective binding as it appears in a `keys list` answer.
 #[derive(Serialize)]
@@ -65,8 +61,6 @@ struct KeyBindingDetail {
     description: String,
     /// How broad the action's effect is.
     scope: String,
-    /// The preset arguments bound with the action, `null` when none.
-    action_arguments: serde_json::Value,
     /// The layer that authored the winning entry.
     binding_source: String,
     /// Whether the action re-arms its prefix when fired from a multi-chord
@@ -170,23 +164,11 @@ pub fn render_keys_list(
     }
 }
 
-/// Render a `koshi keys list --recommended` answer. Plugin-recommended
-/// bindings come from installed plugin manifests; none exist until plugins
-/// do, so the listing is empty.
-#[must_use]
-pub fn render_keys_recommended(output_format: OutputFormat) -> String {
-    let recommended_key_bindings: Vec<KeyBindingSummary> = Vec::new();
-    match output_format {
-        OutputFormat::Json => render_json(&recommended_key_bindings),
-        OutputFormat::Table => render_table(KEYS_RECOMMENDED_HEADERS, Vec::new()),
-    }
-}
-
 /// Render a `koshi keys describe <key-sequence>` answer: one detail block
 /// per mode the sequence is bound in.
 ///
 /// # Errors
-/// The parser's message when `sequence` is not a valid key sequence; `Ok(None)`
+/// The parser's message when `key_sequence_text` is not a valid key sequence; `Ok(None)`
 /// when it parses but nothing is bound on it in any mode.
 pub fn render_keys_describe(
     keymap_view: &crate::keymap::KeymapView,
@@ -196,7 +178,7 @@ pub fn render_keys_describe(
     let parsed_key_sequence = koshi_config::key_sequence::parse_sequence(
         key_sequence_text,
         keymap_view.config.leader,
-        keymap_view.config.max_chord_depth,
+        keymap_view.config.maximum_chord_depth,
     )
     .map_err(|parse_error| parse_error.to_string())?;
 
@@ -221,27 +203,24 @@ pub fn render_keys_describe(
         let action_metadata = keymap_view
             .registry
             .find_action_metadata(&matched_binding.action_reference);
-        let action_arguments =
-            if matched_binding.action_arguments == koshi_core::resolve::ActionArgs::None {
-                serde_json::Value::Null
-            } else {
-                serde_json::to_value(&matched_binding.action_arguments)
-                    .expect("action args serialize: plain enums and strings")
-            };
         key_binding_details.push(KeyBindingDetail {
             key_sequence: parsed_key_sequence.to_string(),
             input_mode: mode_name.get_name().to_string(),
             action_reference: matched_binding.action_reference.to_string(),
-            display_name: action_metadata
-                .map_or(String::new(), |metadata| metadata.display_name.clone()),
-            description: action_metadata
-                .map_or(String::new(), |metadata| metadata.description.clone()),
+            display_name: action_metadata.map_or(String::new(), |action_metadata_entry| {
+                action_metadata_entry.display_name.clone()
+            }),
+            description: action_metadata.map_or(String::new(), |action_metadata_entry| {
+                action_metadata_entry.description.clone()
+            }),
             scope: action_metadata
-                .map_or("-", |metadata| format_scope_label(metadata.scope))
+                .map_or("-", |action_metadata_entry| {
+                    format_scope_label(action_metadata_entry.scope)
+                })
                 .to_string(),
-            action_arguments,
             binding_source,
-            is_continuous: action_metadata.is_some_and(|metadata| metadata.is_continuous),
+            is_continuous: action_metadata
+                .is_some_and(|action_metadata_entry| action_metadata_entry.is_continuous),
         });
     }
     if key_binding_details.is_empty() {
@@ -345,7 +324,9 @@ pub fn render_keys_validate(
 
 /// Whether a rendered validation answer reports a file a reload would apply.
 #[must_use]
-pub fn does_validation_apply(validation_outcome: &crate::keymap::KeymapValidationOutcome) -> bool {
+pub fn is_validation_applicable(
+    validation_outcome: &crate::keymap::KeymapValidationOutcome,
+) -> bool {
     match validation_outcome {
         crate::keymap::KeymapValidationOutcome::ParseFailed(_) => false,
         crate::keymap::KeymapValidationOutcome::Checked { is_applicable, .. } => *is_applicable,
@@ -371,17 +352,12 @@ fn render_key_detail_cells(key_binding_detail: &KeyBindingDetail) -> Vec<String>
         key_binding_detail.display_name.clone(),
         key_binding_detail.description.clone(),
         key_binding_detail.scope.clone(),
-        if key_binding_detail.action_arguments.is_null() {
-            "-".to_string()
-        } else {
-            key_binding_detail.action_arguments.to_string()
-        },
         key_binding_detail.binding_source.clone(),
         key_binding_detail.is_continuous.to_string(),
     ]
 }
 
-/// Append the findings table to `rendered`, or nothing when there are no
+/// Append the findings table to `rendered_output`, or nothing when there are no
 /// findings. The one table shape every keys-conflict renderer shares.
 fn append_conflict_table(rendered_output: &mut String, conflict_findings: &[ConflictFinding]) {
     if !conflict_findings.is_empty() {

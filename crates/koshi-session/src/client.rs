@@ -3,7 +3,7 @@
 //! A session accepts several clients at once. Focus, viewport and input modes
 //! live on each client; the session holds only this registry. Each client also
 //! carries what the server set at attach: its origin, its generated label and
-//! its colour.
+//! its color.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -20,14 +20,14 @@ use koshi_core::{
 use koshi_layout::mode::LayoutMode;
 use serde::{Deserialize, Serialize};
 
-/// The pane region of a client that reported none: the full `viewport` minus
+/// The pane region of a client that reported none: the full viewport minus
 /// one top tabline row and one bottom key-hint row. `80x24` → `80x22`; a
 /// viewport two rows tall or shorter gives `0` rows.
 #[must_use]
-pub const fn pane_viewport(viewport: Size) -> Size {
+pub const fn compute_default_pane_area_size(viewport_size: Size) -> Size {
     Size {
-        column_count: viewport.column_count,
-        row_count: viewport.row_count.saturating_sub(2),
+        column_count: viewport_size.column_count,
+        row_count: viewport_size.row_count.saturating_sub(2),
     }
 }
 
@@ -40,15 +40,13 @@ pub struct Client {
     client_id: ClientId,
     session_id: SessionId,
     attached_at: SystemTime,
-    viewport: Size,
+    viewport_size: Size,
     /// The client's measured terminal cell size in pixels.
-    #[serde(default)]
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
     /// The pane region this client reported for the tab it views. `None`
     /// when the client reported none.
-    #[serde(default)]
     pane_area: Option<PaneArea>,
-    active_tab: TabId,
+    active_tab_id: TabId,
     /// Where this client connected from, set by the server at attach.
     origin: ClientOrigin,
     /// This client's display name, `C-<adjective>-<noun>`, generated at
@@ -56,8 +54,8 @@ pub struct Client {
     label: String,
     /// Which palette entry paints this client's identity in the UI, chosen by
     /// the caller at attach.
-    colour: u8,
-    focus_by_tab: HashMap<TabId, PaneId>,
+    color_index: u8,
+    focused_pane_id_by_tab_id: HashMap<TabId, PaneId>,
     lock_mode: LockMode,
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
@@ -72,7 +70,7 @@ pub struct Client {
     /// This is the position alone. Whether the view is *held* there — showing the
     /// same text as output arrives, rather than following the newest line — is
     /// derived by [`is_view_held`](Self::is_view_held).
-    scroll_by_pane: HashMap<PaneId, usize>,
+    scroll_offset_by_pane_id: HashMap<PaneId, usize>,
     /// This client's highlighted text, keyed by the pane it is in — the whole of
     /// visual mode, since a highlight existing *is* being in visual mode for that
     /// pane and it clearing *is* leaving. A pane absent from the map has no
@@ -85,7 +83,7 @@ pub struct Client {
     ///
     /// Highlighting is per client: two clients viewing one pane select in it
     /// independently, and neither sees the other's highlight.
-    selection_by_pane: HashMap<PaneId, Selection>,
+    selection_by_pane_id: HashMap<PaneId, Selection>,
     /// The pane this client has zoomed in each tab: the one pane filling the tab
     /// while the others are hidden. A tab absent from the map (the default) is
     /// tiled for this client.
@@ -93,50 +91,50 @@ pub struct Client {
     /// Zoom is per client: one client zooming a pane leaves another's tiled view
     /// as it is. A zoom changes how this client solves the tab's tree; the tree
     /// itself stays unchanged.
-    zoom_by_tab: HashMap<TabId, PaneId>,
+    zoomed_pane_id_by_tab_id: HashMap<TabId, PaneId>,
     /// Generation of this client's committed geometry and view.
     #[serde(default)]
     placement_revision: u64,
 }
 
 impl Client {
-    /// A newly attached client viewing `active_tab` at `viewport`, with no
+    /// A newly attached client viewing `active_tab_id` at `viewport_size`, with no
     /// per-tab focus recorded yet and in [`LockMode::Normal`]. The caller
-    /// supplies `attached_at`, `origin`, `label` and `colour`; this never reads
+    /// supplies `attached_at`, `origin`, `label` and `color_index`; this never reads
     /// the clock itself.
     // Carries the whole of one attach: the client's identity (`client_id`,
-    // `session_id`, `origin`, `label`, `colour`) and its first view
-    // (`attached_at`, `viewport`, `pane_area`, `active_tab`).
+    // `session_id`, `origin`, `label`, `color_index`) and its first view
+    // (`attached_at`, `viewport_size`, `pane_area`, `active_tab_id`).
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_attachment(
         client_id: ClientId,
         session_id: SessionId,
         attached_at: SystemTime,
-        viewport: Size,
+        viewport_size: Size,
         pane_area: Option<PaneArea>,
-        active_tab: TabId,
+        active_tab_id: TabId,
         origin: ClientOrigin,
         label: String,
-        colour: u8,
+        color_index: u8,
     ) -> Self {
         Client {
             client_id,
             session_id,
             attached_at,
-            viewport,
+            viewport_size,
             cell_size: None,
             pane_area,
-            active_tab,
+            active_tab_id,
             origin,
             label,
-            colour,
-            focus_by_tab: HashMap::new(),
+            color_index,
+            focused_pane_id_by_tab_id: HashMap::new(),
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
-            scroll_by_pane: HashMap::new(),
-            selection_by_pane: HashMap::new(),
-            zoom_by_tab: HashMap::new(),
+            scroll_offset_by_pane_id: HashMap::new(),
+            selection_by_pane_id: HashMap::new(),
+            zoomed_pane_id_by_tab_id: HashMap::new(),
             placement_revision: 0,
         }
     }
@@ -194,14 +192,14 @@ impl Client {
 
     /// Which palette entry paints this client's identity.
     #[must_use]
-    pub fn get_color(&self) -> u8 {
-        self.colour
+    pub fn get_color_index(&self) -> u8 {
+        self.color_index
     }
 
     /// This client's current viewport size.
     #[must_use]
     pub fn get_viewport_size(&self) -> Size {
-        self.viewport
+        self.viewport_size
     }
 
     /// Return this client's measured terminal cell size in pixels.
@@ -210,13 +208,8 @@ impl Client {
         self.cell_size
     }
 
-    /// Record the pixel dimensions measured by this client.
-    pub fn update_cell_size(&mut self, size: koshi_core::geometry::PixelCellSize) {
-        self.cell_size = Some(size);
-    }
-
-    /// Replace this client's measured terminal cell dimensions, clearing the
-    /// value when the terminal has changed size and has no new measurement.
+    /// Replace this client's measured terminal cell size in pixels. `None`
+    /// clears it.
     pub fn replace_cell_size(&mut self, size: Option<koshi_core::geometry::PixelCellSize>) {
         self.cell_size = size;
     }
@@ -225,8 +218,8 @@ impl Client {
     /// closes (the session is quitting), this keeps naming the closed tab until
     /// the transport disconnects the client.
     #[must_use]
-    pub fn get_active_tab(&self) -> TabId {
-        self.active_tab
+    pub fn get_active_tab_id(&self) -> TabId {
+        self.active_tab_id
     }
 
     /// This client's lock mode.
@@ -238,14 +231,14 @@ impl Client {
     /// The pane this client has focused in `tab_id`, or `None` if it has not
     /// focused one there.
     #[must_use]
-    pub fn get_focused_pane(&self, tab_id: TabId) -> Option<PaneId> {
-        self.focus_by_tab.get(&tab_id).copied()
+    pub fn get_focused_pane_id(&self, tab_id: TabId) -> Option<PaneId> {
+        self.focused_pane_id_by_tab_id.get(&tab_id).copied()
     }
 
     /// Every focused pane this client remembers, keyed by tab id.
     #[must_use]
-    pub fn list_focused_panes(&self) -> &HashMap<TabId, PaneId> {
-        &self.focus_by_tab
+    pub fn list_focused_pane_ids(&self) -> &HashMap<TabId, PaneId> {
+        &self.focused_pane_id_by_tab_id
     }
 
     /// How `tab_id` is laid out **for this client**: zoomed on one pane, or
@@ -254,7 +247,7 @@ impl Client {
     /// same moment.
     #[must_use]
     pub fn get_layout_mode(&self, tab_id: TabId) -> LayoutMode {
-        self.zoom_by_tab
+        self.zoomed_pane_id_by_tab_id
             .get(&tab_id)
             .map_or(LayoutMode::Tiled, |&focused_pane_id| {
                 LayoutMode::Fullscreen { focused_pane_id }
@@ -263,26 +256,26 @@ impl Client {
 
     /// The pane this client has zoomed in `tab_id`, if any.
     #[must_use]
-    pub fn get_zoomed_pane(&self, tab_id: TabId) -> Option<PaneId> {
-        self.zoom_by_tab.get(&tab_id).copied()
+    pub fn get_zoomed_pane_id(&self, tab_id: TabId) -> Option<PaneId> {
+        self.zoomed_pane_id_by_tab_id.get(&tab_id).copied()
     }
 
     /// Every pane this client has zoomed, keyed by tab id. A tab with no entry is
     /// tiled for this client.
     #[must_use]
-    pub fn list_zoomed_panes(&self) -> &HashMap<TabId, PaneId> {
-        &self.zoom_by_tab
+    pub fn list_zoomed_pane_ids(&self) -> &HashMap<TabId, PaneId> {
+        &self.zoomed_pane_id_by_tab_id
     }
 
     /// Zoom `pane_id` for this client in `tab_id`: it fills the tab and the
     /// tab's other panes are hidden, for this client's view alone.
     pub fn zoom_pane(&mut self, tab_id: TabId, pane_id: PaneId) {
-        self.zoom_by_tab.insert(tab_id, pane_id);
+        self.zoomed_pane_id_by_tab_id.insert(tab_id, pane_id);
     }
 
     /// Leave zoom in `tab_id`: this client sees the tab tiled again.
     pub fn clear_zoom(&mut self, tab_id: TabId) {
-        self.zoom_by_tab.remove(&tab_id);
+        self.zoomed_pane_id_by_tab_id.remove(&tab_id);
     }
 
     /// Leave zoom in every tab where this client was zoomed on `pane_id`, so the
@@ -290,7 +283,8 @@ impl Client {
     ///
     /// Called when a pane is removed.
     pub fn clear_zoom_of_pane(&mut self, pane_id: PaneId) {
-        self.zoom_by_tab.retain(|_, zoomed| *zoomed != pane_id);
+        self.zoomed_pane_id_by_tab_id
+            .retain(|_, zoomed| *zoomed != pane_id);
     }
 
     /// Returns how many lines `pane_id` is scrolled above the live bottom.
@@ -298,7 +292,7 @@ impl Client {
     /// means three lines above the live bottom.
     #[must_use]
     pub fn get_scroll_offset(&self, pane_id: PaneId) -> usize {
-        self.scroll_by_pane
+        self.scroll_offset_by_pane_id
             .get(&pane_id)
             .copied()
             .unwrap_or_default()
@@ -308,9 +302,9 @@ impl Client {
     /// the entry, so the map holds only scrolled-up panes.
     pub fn set_scroll_offset(&mut self, pane_id: PaneId, offset: usize) {
         if offset == 0 {
-            self.scroll_by_pane.remove(&pane_id);
+            self.scroll_offset_by_pane_id.remove(&pane_id);
         } else {
-            self.scroll_by_pane.insert(pane_id, offset);
+            self.scroll_offset_by_pane_id.insert(pane_id, offset);
         }
     }
 
@@ -319,27 +313,27 @@ impl Client {
     /// sits at the live bottom.
     #[must_use]
     pub fn list_scroll_offsets(&self) -> &HashMap<PaneId, usize> {
-        &self.scroll_by_pane
+        &self.scroll_offset_by_pane_id
     }
 
     /// This client's highlight in `pane_id`, or `None` if it has none there.
     #[must_use]
     pub fn get_selection(&self, pane_id: PaneId) -> Option<Selection> {
-        self.selection_by_pane.get(&pane_id).copied()
+        self.selection_by_pane_id.get(&pane_id).copied()
     }
 
     /// Highlight `selection` in `pane_id` for this client, replacing any highlight
     /// it already had there. Other panes' highlights are untouched — each pane
     /// keeps its own.
     pub fn set_selection(&mut self, pane_id: PaneId, selection: Selection) {
-        self.selection_by_pane.insert(pane_id, selection);
+        self.selection_by_pane_id.insert(pane_id, selection);
     }
 
     /// Drop this client's highlight in `pane_id`, leaving visual mode for that
     /// pane. Clearing a pane with no highlight changes nothing. Other panes'
     /// highlights are untouched.
     pub fn clear_selection(&mut self, pane_id: PaneId) {
-        self.selection_by_pane.remove(&pane_id);
+        self.selection_by_pane_id.remove(&pane_id);
     }
 
     /// Whether this client's view of `pane_id` is **held**: showing the same text
@@ -363,7 +357,7 @@ impl Client {
     /// live again.
     #[must_use]
     pub fn is_view_held(&self, pane_id: PaneId) -> bool {
-        self.get_scroll_offset(pane_id) > 0 || self.selection_by_pane.contains_key(&pane_id)
+        self.get_scroll_offset(pane_id) > 0 || self.selection_by_pane_id.contains_key(&pane_id)
     }
 
     /// Update this client's lock mode.
@@ -391,43 +385,43 @@ impl Client {
     /// stays on. Every path that moves focus — a keybinding, a `focus-pane`
     /// command, focus repair after a close — runs through here.
     pub fn update_focused_pane(&mut self, tab_id: TabId, pane_id: PaneId) -> Option<PaneId> {
-        if let Some(zoomed) = self.zoom_by_tab.get_mut(&tab_id) {
+        if let Some(zoomed) = self.zoomed_pane_id_by_tab_id.get_mut(&tab_id) {
             *zoomed = pane_id;
         }
-        self.focus_by_tab.insert(tab_id, pane_id)
+        self.focused_pane_id_by_tab_id.insert(tab_id, pane_id)
     }
 
     /// Forget the pane this client focused in `tab_id`, and leave any zoom there:
     /// with no focused pane there is no pane for a zoom to show.
     pub fn remove_focused_pane(&mut self, tab_id: TabId) {
-        self.focus_by_tab.remove(&tab_id);
-        self.zoom_by_tab.remove(&tab_id);
+        self.focused_pane_id_by_tab_id.remove(&tab_id);
+        self.zoomed_pane_id_by_tab_id.remove(&tab_id);
     }
 
     /// Switch this client to viewing `tab_id`. The highlights it made in the
     /// tab it leaves stay where they are, and it finds them again on switching
     /// back.
-    pub fn update_active_tab(&mut self, tab_id: TabId) {
-        self.active_tab = tab_id;
+    pub fn update_active_tab_id(&mut self, tab_id: TabId) {
+        self.active_tab_id = tab_id;
     }
 
-    /// Update this client's viewport size.
-    pub fn update_viewport(&mut self, viewport: Size) {
-        self.viewport = viewport
+    /// Set this client's viewport size to `viewport_size`.
+    pub fn update_viewport_size(&mut self, viewport_size: Size) {
+        self.viewport_size = viewport_size
     }
 
     /// The pane region this client's tab is sized against, in cells. `None`
     /// when the client reported [`PaneArea::Starving`]; that client takes no
     /// part in any size minimum.
     ///
-    /// No report → [`pane_viewport`] of the viewport (`80x24` → `80x22`).
+    /// No report → [`compute_default_pane_area_size`] of the viewport (`80x24` → `80x22`).
     /// [`PaneArea::Reported`] → that size clamped per axis to the viewport
     /// (`200x50` reported on an `80x24` viewport → `80x24`).
     #[must_use]
     pub fn get_pane_area(&self) -> Option<Size> {
         match self.pane_area {
-            None => Some(pane_viewport(self.viewport)),
-            Some(PaneArea::Reported(size)) => Some(size.compute_minimum_axes(self.viewport)),
+            None => Some(compute_default_pane_area_size(self.viewport_size)),
+            Some(PaneArea::Reported(size)) => Some(size.compute_minimum_axes(self.viewport_size)),
             Some(PaneArea::Starving) => None,
         }
     }
@@ -508,7 +502,7 @@ impl ClientRegistry {
 
     /// How many clients are attached.
     #[must_use]
-    pub fn client_count(&self) -> usize {
+    pub fn count_clients(&self) -> usize {
         self.client_by_id.len()
     }
 

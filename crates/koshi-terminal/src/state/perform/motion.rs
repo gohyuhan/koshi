@@ -34,7 +34,7 @@ impl TerminalState {
     /// The horizontal bounds used by autowrap. A cursor inside the margins
     /// wraps within them; a cursor outside them wraps at the grid edge.
     pub(super) fn get_horizontal_wrap_bounds(&self) -> (u16, u16) {
-        self.get_horizontal_wrap_bounds_for_column(self.active_cursor().column)
+        self.get_horizontal_wrap_bounds_for_column(self.get_active_cursor().column)
     }
 
     /// The horizontal bounds used by autowrap for `column_index`.
@@ -61,7 +61,7 @@ impl TerminalState {
             .get_grid_dimensions()
             .0
             .saturating_sub(1);
-        if self.active_cursor().origin {
+        if self.get_active_cursor().is_origin_mode_enabled {
             self.get_scroll_region_bounds()
         } else {
             (0, last_grid_row_index)
@@ -76,7 +76,7 @@ impl TerminalState {
             .get_grid_dimensions()
             .1
             .saturating_sub(1);
-        if self.active_cursor().origin {
+        if self.get_active_cursor().is_origin_mode_enabled {
             self.get_horizontal_margin_bounds()
         } else {
             (0, last_grid_column_index)
@@ -85,7 +85,7 @@ impl TerminalState {
 
     /// The row and column offsets applied to CUP, HVP, and VPA under DECOM.
     pub(super) fn get_cursor_origin_offsets(&self) -> (u16, u16) {
-        if self.active_cursor().origin {
+        if self.get_active_cursor().is_origin_mode_enabled {
             let (top_row_index, _) = self.get_scroll_region_bounds();
             let (left_column_index, _) = self.get_horizontal_margin_bounds();
             (top_row_index, left_column_index)
@@ -103,7 +103,7 @@ impl TerminalState {
     /// at row 0, a DL with the cursor on row 0 — the departing rows
     /// `0..min(line_count, bottom_row_index + 1)`
     /// go into scrollback first, oldest first, each with its row end and prompt
-    /// mark. The alternate screen, and a delete with `first > 0`, feed nothing:
+    /// mark. The alternate screen, and a delete with `first_row_index > 0`, feed nothing:
     /// the removed lines are discarded.
     pub(in crate::state) fn delete_lines_into_scrollback(
         &mut self,
@@ -176,14 +176,14 @@ impl TerminalState {
             );
         }
         if is_full_width {
-            self.active_grid_mut().delete_lines(
+            self.get_active_grid_mut().delete_lines(
                 first_row_index,
                 bottom_row_index,
                 line_count,
                 fill_style,
             );
         } else {
-            self.active_grid_mut().delete_lines_in_columns(
+            self.get_active_grid_mut().delete_lines_in_columns(
                 first_row_index,
                 bottom_row_index,
                 line_count,
@@ -247,14 +247,14 @@ impl TerminalState {
             },
         );
         if is_full_width {
-            self.active_grid_mut().insert_lines(
+            self.get_active_grid_mut().insert_lines(
                 first_row_index,
                 bottom_row_index,
                 line_count,
                 fill_style,
             );
         } else {
-            self.active_grid_mut().insert_lines_in_columns(
+            self.get_active_grid_mut().insert_lines_in_columns(
                 first_row_index,
                 bottom_row_index,
                 line_count,
@@ -282,10 +282,10 @@ impl TerminalState {
     /// cursor stays and the region scrolls up one line; on any other row the
     /// cursor moves down, stopping at the last grid row. The column does not
     /// change.
-    pub(super) fn linefeed(&mut self) {
+    pub(in crate::state) fn apply_linefeed(&mut self) {
         let (top_row_index, bottom_row_index) = self.get_scroll_region_bounds();
-        if self.active_cursor().row == bottom_row_index {
-            let fill_style = self.active_render().style.get_background_fill_style();
+        if self.get_active_cursor().row == bottom_row_index {
+            let fill_style = self.get_active_render().style.get_background_fill_style();
             self.delete_lines_into_scrollback(top_row_index, bottom_row_index, 1, fill_style);
         } else {
             let last_grid_row_index = self
@@ -293,14 +293,14 @@ impl TerminalState {
                 .get_grid_dimensions()
                 .0
                 .saturating_sub(1);
-            if self.active_cursor().row < last_grid_row_index {
-                self.active_cursor_mut().row += 1;
+            if self.get_active_cursor().row < last_grid_row_index {
+                self.get_active_cursor_mut().row += 1;
             }
         }
     }
 
     /// Record `continued_row_end` on the row the line feed leaves behind, then
-    /// [`linefeed`](Self::linefeed).
+    /// [`apply_linefeed`](Self::apply_linefeed).
     ///
     /// The cursor moved down: its old row gets `continued_row_end`. The region scrolled: the
     /// cursor row is marked before the scroll, so a row leaving the top carries
@@ -309,15 +309,15 @@ impl TerminalState {
     /// [`RowEnd::Hard`]). The cursor neither moved nor scrolled (last grid row
     /// outside the region): no row is marked, since no row continues it.
     pub(super) fn wrap_linefeed(&mut self, continued_row_end: RowEnd) {
-        let previous_cursor_row_index = self.active_cursor().row;
+        let previous_cursor_row_index = self.get_active_cursor().row;
         let is_at_scroll_bottom = previous_cursor_row_index == self.get_scroll_region_bounds().1;
         if is_at_scroll_bottom {
-            self.active_grid_mut()
+            self.get_active_grid_mut()
                 .set_row_end(previous_cursor_row_index, continued_row_end);
         }
-        self.linefeed();
+        self.apply_linefeed();
 
-        let current_cursor_row_index = self.active_cursor().row;
+        let current_cursor_row_index = self.get_active_cursor().row;
         let continued_row_index = if current_cursor_row_index > previous_cursor_row_index {
             Some(previous_cursor_row_index)
         } else if is_at_scroll_bottom {
@@ -326,7 +326,7 @@ impl TerminalState {
             None
         };
         if let Some(continued_row_index) = continued_row_index {
-            self.active_grid_mut()
+            self.get_active_grid_mut()
                 .set_row_end(continued_row_index, continued_row_end);
         }
     }
@@ -334,13 +334,13 @@ impl TerminalState {
     /// Reverse index (RI): move the cursor up one line. At the scroll region's
     /// top margin the cursor stays and the region scrolls down one line; on row
     /// 0 outside a region the cursor stays. Clears the deferred-wrap latch.
-    pub(super) fn reverse_index(&mut self) {
+    pub(super) fn apply_reverse_index(&mut self) {
         let (top_row_index, bottom_row_index) = self.get_scroll_region_bounds();
-        if self.active_cursor().row == top_row_index {
-            let fill_style = self.active_render().style.get_background_fill_style();
+        if self.get_active_cursor().row == top_row_index {
+            let fill_style = self.get_active_render().style.get_background_fill_style();
             self.insert_lines_preserving_images(top_row_index, bottom_row_index, 1, fill_style);
-        } else if self.active_cursor().row > 0 {
-            self.active_cursor_mut().row -= 1;
+        } else if self.get_active_cursor().row > 0 {
+            self.get_active_cursor_mut().row -= 1;
         }
         self.clear_wrap_latch();
     }
@@ -349,13 +349,13 @@ impl TerminalState {
     /// screen's render state (DECSC / SCOSC) into the active screen's cursor.
     /// Each screen keeps its own snapshot.
     pub(super) fn save_cursor(&mut self) {
-        let cursor = *self.active_cursor();
-        let render = *self.active_render();
-        self.active_cursor_mut().saved = Some(SavedCursor {
+        let cursor = *self.get_active_cursor();
+        let render = *self.get_active_render();
+        self.get_active_cursor_mut().saved = Some(SavedCursor {
             row: cursor.row,
             column: cursor.column,
-            pending_wrap: cursor.pending_wrap,
-            origin: cursor.origin,
+            is_wrap_pending: cursor.is_wrap_pending,
+            is_origin_mode_enabled: cursor.is_origin_mode_enabled,
             render,
         });
     }
@@ -364,37 +364,37 @@ impl TerminalState {
     /// saved by [`save_cursor`](Self::save_cursor) (DECRC / SCORC), clamping the
     /// position into the current grid or active origin region. With no saved
     /// cursor, home the cursor, clear origin mode and the wrap latch, and reset
-    /// the render state to [`RenderState::fresh`]. The saved snapshot stays.
+    /// the render state to [`RenderState::new`]. The saved snapshot stays.
     pub(super) fn restore_cursor(&mut self) {
-        let saved_cursor = self.active_cursor().saved;
+        let saved_cursor = self.get_active_cursor().saved;
         let (grid_row_count, grid_column_count) = self.get_active_grid().get_grid_dimensions();
         if let Some(saved) = saved_cursor {
-            let (minimum_row_index, maximum_row_index) = if saved.origin {
+            let (minimum_row_index, maximum_row_index) = if saved.is_origin_mode_enabled {
                 self.get_scroll_region_bounds()
             } else {
                 (0, grid_row_count.saturating_sub(1))
             };
-            let (minimum_column_index, maximum_column_index) = if saved.origin {
+            let (minimum_column_index, maximum_column_index) = if saved.is_origin_mode_enabled {
                 self.get_horizontal_margin_bounds()
             } else {
                 (0, grid_column_count.saturating_sub(1))
             };
-            let cursor = self.active_cursor_mut();
-            cursor.origin = saved.origin;
+            let cursor = self.get_active_cursor_mut();
+            cursor.is_origin_mode_enabled = saved.is_origin_mode_enabled;
             cursor.row = saved.row.max(minimum_row_index).min(maximum_row_index);
             cursor.column = saved
                 .column
                 .max(minimum_column_index)
                 .min(maximum_column_index);
-            cursor.pending_wrap = saved.pending_wrap;
-            *self.active_render_mut() = saved.render;
+            cursor.is_wrap_pending = saved.is_wrap_pending;
+            *self.get_active_render_mut() = saved.render;
         } else {
-            let cursor = self.active_cursor_mut();
+            let cursor = self.get_active_cursor_mut();
             cursor.row = 0;
             cursor.column = 0;
-            cursor.origin = false;
-            cursor.pending_wrap = false;
-            *self.active_render_mut() = RenderState::fresh();
+            cursor.is_origin_mode_enabled = false;
+            cursor.is_wrap_pending = false;
+            *self.get_active_render_mut() = RenderState::new();
         }
     }
 
@@ -405,14 +405,14 @@ impl TerminalState {
     pub(super) fn move_cursor_to(&mut self, target_row_index: u16, target_column_index: u16) {
         let (minimum_row_index, maximum_row_index) = self.get_cursor_row_bounds();
         let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
-        let cursor = self.active_cursor_mut();
+        let cursor = self.get_active_cursor_mut();
         cursor.row = target_row_index
             .max(minimum_row_index)
             .min(maximum_row_index);
         cursor.column = target_column_index
             .max(minimum_column_index)
             .min(maximum_column_index);
-        cursor.pending_wrap = false;
+        cursor.is_wrap_pending = false;
     }
 
     /// Park the cursor on the effective horizontal right bound. With autowrap
@@ -421,23 +421,23 @@ impl TerminalState {
     /// overwrites the bound in place.
     pub(super) fn arm_wrap_latch(&mut self) {
         let (_, right_column_index) = self.get_horizontal_wrap_bounds();
-        let should_arm_wrap_latch = self.modes.autowrap;
-        let cursor = self.active_cursor_mut();
+        let should_arm_wrap_latch = self.modes.is_autowrap_enabled;
+        let cursor = self.get_active_cursor_mut();
         cursor.column = right_column_index;
-        cursor.pending_wrap = should_arm_wrap_latch;
+        cursor.is_wrap_pending = should_arm_wrap_latch;
     }
 
     /// Clear the active cursor's deferred-wrap latch: the next glyph prints at
     /// the cursor's column instead of wrapping first. Counterpart of
     /// [`arm_wrap_latch`](Self::arm_wrap_latch).
     pub(super) fn clear_wrap_latch(&mut self) {
-        self.active_cursor_mut().pending_wrap = false;
+        self.get_active_cursor_mut().is_wrap_pending = false;
     }
 
     /// Set a horizontal tab stop at the active cursor column. A column past the
     /// tab-stop table is a no-op.
     pub(super) fn set_tab_stop(&mut self) {
-        let cursor_column_index = self.active_cursor().column;
+        let cursor_column_index = self.get_active_cursor().column;
         if let Some(tab_stop) = self.tab_stops.get_mut(cursor_column_index as usize) {
             *tab_stop = true;
         }
@@ -446,7 +446,7 @@ impl TerminalState {
     /// Clear the horizontal tab stop at the active cursor column. A column past
     /// the tab-stop table is a no-op.
     pub(super) fn clear_tab_stop(&mut self) {
-        let cursor_column_index = self.active_cursor().column;
+        let cursor_column_index = self.get_active_cursor().column;
         if let Some(tab_stop) = self.tab_stops.get_mut(cursor_column_index as usize) {
             *tab_stop = false;
         }

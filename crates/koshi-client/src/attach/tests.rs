@@ -15,8 +15,8 @@
 //! viewer whose link broke: the pause each redial waits, that dialing again
 //! moves what the viewer paints, what the drain of the stretch with no link
 //! keeps and what it drops, and what a viewer that stopped dialing prints and
-//! exits with. It also covers the commands a fired binding's plan flattens
-//! into, and how a typed value reads as a session id or as a display name.
+//! exits with. It also covers how a typed value reads as a session id or as a
+//! display name.
 //! These tests also check that an accepted Enter swap updates the shown pane
 //! rectangles without a resize and that placement status shows pane ids instead
 //! of `/work/koshi` or `nvim`.
@@ -24,26 +24,24 @@
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::{Position, Size as RatatuiSize};
 
-use koshi_core::action::ActionReference;
 use koshi_core::command::{
     ClearSelectionArgs, CliExitCode, GridPosition, PanePlacementTarget, PlacePaneArgs,
     PlacementRevision, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
 };
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, PluginId, TabId};
+use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{
     Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags, NamedKey,
     TEXT_ONLY_KEY_CODEPOINT,
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
-use koshi_core::resolve::ActionArgs;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::frame::{FrameClient, FrameSession, FrameSlot, FrameTab, PaintedFrame};
@@ -63,8 +61,8 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot, MousePane,
-    PaneKind, PaneSlot, PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta,
-    SessionSnapshot, TabMeta, TabSnapshot,
+    PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SessionSnapshot, TabMetadata,
+    TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
@@ -73,9 +71,51 @@ use koshi_terminal::grid::state::Grid;
 use koshi_terminal::style::Style;
 
 use super::*;
+use crate::attach::paint::build_render_snapshot;
 use crate::tests::TEST_VIEWPORT_SIZE;
 use crate::{PlacementMode, PlacementModeLifetime};
 use koshi_test_support::fixtures::build_test_runtime_directory;
+
+impl<B: Backend> Screen<B> {
+    /// A screen that has drawn nothing yet, with no native image output and no
+    /// cell measurement.
+    fn from_terminal_and_viewport_size(terminal: Terminal<B>, viewport_size: Size) -> Self {
+        Self::with_graphics_support(
+            terminal,
+            viewport_size,
+            terminal::GraphicsSupport::Unsupported,
+            None,
+        )
+    }
+
+    /// Build the render snapshot `frame` carries and draw it with
+    /// [`Screen::draw_snapshot`].
+    fn draw_painted_frame(
+        &mut self,
+        client: &mut Client,
+        frame: Box<PaintedFrame>,
+    ) -> Option<MouseFrame> {
+        let snapshot = build_render_snapshot(&frame);
+        self.draw_snapshot(client, snapshot)
+    }
+
+    /// [`Screen::compute_next_image_wakeup_at`] at the current instant.
+    fn compute_next_image_wakeup(&self) -> Option<Duration> {
+        self.compute_next_image_wakeup_at(Instant::now())
+    }
+}
+
+/// [`report_terminal_size_with_cell_size`] with no cell measurement in hand.
+fn report_terminal_size(client: &mut Client, uplink: &mut Uplink) {
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    report_terminal_size_with_cell_size(client, uplink, &mut cell_size_query, None);
+}
+
+/// [`process_runtime_input_with_cell_size`] with a fresh terminal query state.
+fn process_runtime_input(client: &mut Client, uplink: &mut Uplink, runtime_event: RuntimeEvent) {
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    process_runtime_input_with_cell_size(client, uplink, &mut cell_size_query, runtime_event);
+}
 
 /// The smallest frame a session can paint: one empty tab, no panes, the client
 /// unlocked. [`classify_session_event`] reads the frame's variant and nothing inside it.
@@ -85,12 +125,9 @@ fn build_test_painted_frame() -> PaintedFrame {
 
 /// A normal painted frame carrying `viewport_size` in both its client and active-tab
 /// data.
-fn build_test_painted_frame_with_viewport(viewport_size: Size) -> PaintedFrame {
+fn build_test_painted_frame_with_viewport_size(viewport_size: Size) -> PaintedFrame {
     let mut painted_frame = build_test_painted_frame();
-    painted_frame
-        .session_snapshot
-        .active_tab_snapshot
-        .effective_cell_size = viewport_size;
+    painted_frame.session_snapshot.active_tab_snapshot.tab_size = viewport_size;
     painted_frame.client_snapshot.viewport_size = viewport_size;
     painted_frame
 }
@@ -108,7 +145,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
                 tab_id: active_tab_id,
                 tab_name: String::from("tab"),
                 pane_slots: Vec::new(),
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 80,
                     row_count: 24,
                 },
@@ -146,9 +183,13 @@ fn build_test_session_row(session_name: &str) -> SessionRow {
 
 #[test]
 fn no_running_session_leaves_nothing_to_attach_to() {
-    let error = parse_session_selection(&[], "").expect_err("an empty listing has no session");
-    assert_eq!(error.to_string(), "no koshi session is running");
-    assert_eq!(CliExitCode::from(&error), CliExitCode::SessionNotFound);
+    let selection_error =
+        parse_session_selection(&[], "").expect_err("an empty listing has no session");
+    assert_eq!(selection_error.to_string(), "no koshi session is running");
+    assert_eq!(
+        CliExitCode::from(&selection_error),
+        CliExitCode::SessionNotFound
+    );
 }
 
 #[test]
@@ -250,16 +291,19 @@ fn a_line_that_is_not_a_listed_number_is_refused() {
         build_test_session_row("c"),
     ];
     for typed_input in ["0", "4", "x"] {
-        let error = parse_session_selection(&session_rows, typed_input)
+        let selection_error = parse_session_selection(&session_rows, typed_input)
             .expect_err("the line names no listed row");
         assert_eq!(
-            error.to_string(),
+            selection_error.to_string(),
             format!(
                 "invalid arguments: `{typed_input}` is not one of the listed sessions; \
                  expected a number 1 to 3"
             )
         );
-        assert_eq!(CliExitCode::from(&error), CliExitCode::UsageOrConfig);
+        assert_eq!(
+            CliExitCode::from(&selection_error),
+            CliExitCode::UsageOrConfig
+        );
     }
 }
 
@@ -320,7 +364,7 @@ fn attaching_by_id_skips_the_selector_lookup() {
     let router = build_recording_router(runtime_directory.path());
     let session_id = SessionId::new();
 
-    let error = attach_session(runtime_directory.path(), session_id)
+    let attach_error = attach_session(runtime_directory.path(), session_id)
         .expect_err("no endpoint file advertises that session");
 
     let request_kind_names = router
@@ -335,8 +379,8 @@ fn attaching_by_id_skips_the_selector_lookup() {
         0,
         "the router was asked {request_kind_names:?}"
     );
-    let CliError::SessionNotFound { session_name } = error else {
-        panic!("expected SessionNotFound, got {error:?}");
+    let CliError::SessionNotFound { session_name } = attach_error else {
+        panic!("expected SessionNotFound, got {attach_error:?}");
     };
     assert_eq!(session_name, session_id.to_string());
 }
@@ -349,7 +393,7 @@ fn looking_up_a_name_asks_the_selector_lookup() {
     let runtime_directory = build_test_runtime_directory();
     let router = build_recording_router(runtime_directory.path());
 
-    let error = lookup_session_address(runtime_directory.path(), "quiet-lake")
+    let lookup_error = lookup_session_address(runtime_directory.path(), "quiet-lake")
         .expect_err("the stand-in router refuses the lookup");
 
     let request_kind_names = router
@@ -357,8 +401,8 @@ fn looking_up_a_name_asks_the_selector_lookup() {
         .expect("the list outlives every panic")
         .clone();
     assert_eq!(request_kind_names, vec!["Hello", "AttachLookup"]);
-    let CliError::IpcUnavailable { detail } = error else {
-        panic!("expected IpcUnavailable, got {error:?}");
+    let CliError::IpcUnavailable { detail } = lookup_error else {
+        panic!("expected IpcUnavailable, got {lookup_error:?}");
     };
     assert_eq!(
         detail,
@@ -520,21 +564,21 @@ fn build_remote_home() -> Home {
 #[test]
 fn a_death_reports_the_cause_and_how_to_reattach() {
     let session_id = SessionId::new();
-    let error = report_attachment_ending(
+    let ending_error = report_attachment_ending(
         &build_local_home(),
         AttachmentEnding::ConnectionDied,
         session_id,
     )
     .expect_err("a death is an error");
     assert_eq!(
-        error.to_string(),
+        ending_error.to_string(),
         format!(
             "the session ended unexpectedly\n  \
              run `koshi list-sessions`; if session {session_id} is still listed, \
              reattach with `koshi attach {session_id}`"
         )
     );
-    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
 }
 
 #[test]
@@ -542,14 +586,14 @@ fn a_death_on_another_machine_reports_the_way_back_to_that_machine() {
     // The local way back would send the user to their own machine, where the
     // session never ran, so the message names the saved server instead.
     let session_id = SessionId::new();
-    let error = report_attachment_ending(
+    let ending_error = report_attachment_ending(
         &build_remote_home(),
         AttachmentEnding::ConnectionDied,
         session_id,
     )
     .expect_err("a death is an error");
     assert_eq!(
-        error.to_string(),
+        ending_error.to_string(),
         format!(
             "the session ended unexpectedly\n  \
              run `koshi attach --remote work` to see that server's sessions; \
@@ -557,7 +601,7 @@ fn a_death_on_another_machine_reports_the_way_back_to_that_machine() {
              `koshi attach --remote work {session_id}`"
         )
     );
-    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
 }
 
 #[test]
@@ -568,11 +612,11 @@ fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
             server_address: "laptop.local:7654".to_string(),
         },
     };
-    let error =
+    let ending_error =
         report_attachment_ending(&remote_home, AttachmentEnding::ConnectionDied, session_id)
             .expect_err("a death is an error");
     assert_eq!(
-        error.to_string(),
+        ending_error.to_string(),
         format!(
             "the session ended unexpectedly\n  \
              run `koshi attach --remote laptop.local:7654` to see that server's sessions; \
@@ -588,14 +632,14 @@ fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_b
     let cause = CliError::Runtime {
         detail: "the token this server saved does not reach session 7".to_string(),
     };
-    let error = report_attachment_ending(
+    let ending_error = report_attachment_ending(
         &build_remote_home(),
         AttachmentEnding::LinkLost(Box::new(cause)),
         session_id,
     )
     .expect_err("a lost link is an error");
     assert_eq!(
-        error.to_string(),
+        ending_error.to_string(),
         format!(
             "the token this server saved does not reach session 7\n  \
              the session continues without you\n  \
@@ -604,7 +648,7 @@ fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_b
              `koshi attach --remote work {session_id}`"
         )
     );
-    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
 }
 
 #[test]
@@ -838,7 +882,6 @@ fn build_attached_response(
                 session_id,
                 session_name: String::from("session"),
                 tabs: Vec::new(),
-                panes: Vec::new(),
             },
             resume_token: None,
             pane_area,
@@ -893,7 +936,6 @@ fn spawn_restarted_session(
                                 session_id,
                                 session_name: String::from("session"),
                                 tabs: Vec::new(),
-                                panes: Vec::new(),
                             },
                             resume_token: None,
                             pane_area: None,
@@ -969,8 +1011,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
             .expect("the slot outlives every panic")
             .clone(),
         Some(IpcRequestKind::Attach {
-            viewport: get_terminal_viewport_size(),
-            event_filter: EventFilterSpec::All,
+            viewport_size: get_terminal_viewport_size(),
             resume_client_id: Some(client_id),
             resume_token: None,
             pane_area: Some(compute_core_pane_area(get_terminal_viewport_size())),
@@ -993,8 +1034,8 @@ fn attach_advertises_the_selected_native_protocol() {
         None,
         terminal::GraphicsSupport::Sixel {
             palette_color_count: 2,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
         None,
     );
@@ -1106,21 +1147,21 @@ fn another_local_users_restarting_session_is_not_waited_for() {
 #[test]
 fn a_restart_this_client_cannot_come_back_from_reports_the_death_it_reports_today() {
     let session_id = SessionId::new();
-    let error = report_attachment_ending(
+    let ending_error = report_attachment_ending(
         &build_local_home(),
         AttachmentEnding::Restarting,
         session_id,
     )
     .expect_err("a restart with no way back is an error");
     assert_eq!(
-        error.to_string(),
+        ending_error.to_string(),
         format!(
             "the session ended unexpectedly\n  \
              run `koshi list-sessions`; if session {session_id} is still listed, \
              reattach with `koshi attach {session_id}`"
         )
     );
-    assert_eq!(CliExitCode::from(&error), CliExitCode::RuntimeAction);
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
 }
 
 /// A test client on the stock settings — `scroll_line_count` 3, wheel scrolls scrollback,
@@ -1179,10 +1220,8 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                         row_count: band - 2,
                     },
                 )),
-                pane_kind: PaneKind::Terminal,
                 is_visible: true,
                 is_suppressed: false,
-                is_dead: false,
             }
         })
         .collect();
@@ -1195,16 +1234,16 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                 tab_id,
                 tab_name: String::from("one"),
                 pane_slots,
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: TEST_VIEWPORT_SIZE.column_count,
                     row_count: TEST_VIEWPORT_SIZE.row_count - 2,
                 },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tabs_metadata: vec![TabMeta {
+            tabs_metadata: vec![TabMetadata {
                 tab_id,
                 tab_name: String::from("one"),
                 tab_index: 0,
@@ -1221,7 +1260,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        committed_regions: CommittedRegions::core(TEST_VIEWPORT_SIZE, 0),
+        committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
     }
 }
 
@@ -1446,12 +1485,12 @@ fn ticks_in_opposite_directions_stay_two_scrolls() {
 fn two_alternate_scroll_runs_over_one_pane_sum_their_arrows() {
     let pane_id = PaneId::new();
     let alternate_scroll_actions = vec![
-        MouseAction::AltScrollArrows {
+        MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: false,
             arrow_count: 3,
         },
-        MouseAction::AltScrollArrows {
+        MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: false,
             arrow_count: 5,
@@ -1460,7 +1499,7 @@ fn two_alternate_scroll_runs_over_one_pane_sum_their_arrows() {
 
     assert_eq!(
         coalesce_mouse_actions(alternate_scroll_actions),
-        vec![MouseAction::AltScrollArrows {
+        vec![MouseAction::AlternateScrollArrows {
             pane_id,
             is_scrolling_up: false,
             arrow_count: 8,
@@ -1783,8 +1822,8 @@ fn build_top_border_resize_answer(pane_id: PaneId, applied_cell_count: u16) -> M
     }
 }
 
-/// The image record of a move of `pane_id`'s top border, `requested_cell_count` cells inward, written in
-/// round `request_id` and not yet answered.
+/// The image record of a move of `pane_id`'s top border, `requested_cell_count` cells inward,
+/// written in round `request_id` and not yet answered.
 fn build_sent_top_border_move(
     request_id: u64,
     pane_id: PaneId,
@@ -3260,7 +3299,7 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Resize {
-                viewport: bigger,
+                viewport_size: bigger,
                 pane_area: Some(compute_core_pane_area(bigger)),
                 cell_size: None,
             },
@@ -3513,7 +3552,7 @@ impl FailingBackend {
 impl Backend for FailingBackend {
     type Error = io::Error;
 
-    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    fn draw<'a, I>(&mut self, cell_updates: I) -> Result<(), Self::Error>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
@@ -3522,7 +3561,7 @@ impl Backend for FailingBackend {
             return Err(io::Error::other("the test backend rejected the draw"));
         }
         let mut drawn_buffer = self.drawn_buffer.lock().expect("the drawn buffer lock");
-        for (column_index, row_index, cell) in content {
+        for (column_index, row_index, cell) in cell_updates {
             drawn_buffer[(column_index, row_index)] = cell.clone();
         }
         Ok(())
@@ -3614,7 +3653,7 @@ fn wait_for_draw_count(draw_count: &AtomicUsize, expected_draw_count: usize) -> 
 
 /// A screen drawing into memory at [`TEST_VIEWPORT_SIZE`], 80 by 24 cells.
 fn build_test_screen() -> Screen<TestBackend> {
-    Screen::from_terminal_and_viewport(
+    Screen::from_terminal_and_viewport_size(
         Terminal::new(TestBackend::new(
             TEST_VIEWPORT_SIZE.column_count,
             TEST_VIEWPORT_SIZE.row_count,
@@ -3663,18 +3702,16 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                             row_count: TEST_VIEWPORT_SIZE.row_count - 2,
                         },
                     )),
-                    pane_kind: PaneKind::Terminal,
                     is_visible: true,
                     is_suppressed: false,
-                    is_dead: false,
                 }],
-                effective_cell_size: TEST_VIEWPORT_SIZE,
+                tab_size: TEST_VIEWPORT_SIZE,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tabs_metadata: vec![TabMeta {
+            tabs_metadata: vec![TabMetadata {
                 tab_id,
                 tab_name: String::from("tab"),
                 tab_index: 0,
@@ -3692,7 +3729,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                 shape: None,
             },
             terminal_grid_view: Some(GridView {
-                grid: Arc::new(Grid::blank(
+                grid: Arc::new(Grid::build_blank(
                     TEST_VIEWPORT_SIZE.row_count - 2,
                     TEST_VIEWPORT_SIZE.column_count,
                     Style::default(),
@@ -3707,8 +3744,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             view_top_row_index: 0,
             selection_spans: None,
             has_selection: false,
-            scrollback_meta: ScrollbackMeta {
-                is_truncated: false,
+            scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },
         }],
@@ -3721,13 +3757,12 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 /// A screen whose backend can fail its next buffer draw.
 fn build_failing_screen() -> Screen<FailingBackend> {
-    Screen::from_terminal_and_viewport(
+    Screen::from_terminal_and_viewport_size(
         Terminal::new(FailingBackend::from_terminal_size(TEST_VIEWPORT_SIZE))
             .expect("build a failing in-memory terminal"),
         TEST_VIEWPORT_SIZE,
@@ -3754,12 +3789,12 @@ fn a_screen_starts_with_the_compiled_in_region_solve() {
 
 #[test]
 fn a_new_viewport_commits_a_new_region_revision_with_the_build_test_painted_frame() {
-    let mut screen = Screen::from_terminal_and_viewport(
+    let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(TestBackend::new(100, 30)).expect("build an in-memory terminal"),
         TEST_VIEWPORT_SIZE,
     );
     let mut client = build_test_client();
-    client.set_viewport(Size {
+    client.set_viewport_size(Size {
         column_count: 100,
         row_count: 30,
     });
@@ -3767,7 +3802,7 @@ fn a_new_viewport_commits_a_new_region_revision_with_the_build_test_painted_fram
     let frame = screen
         .draw_painted_frame(
             &mut client,
-            Box::new(build_test_painted_frame_with_viewport(Size {
+            Box::new(build_test_painted_frame_with_viewport_size(Size {
                 column_count: 100,
                 row_count: 30,
             })),
@@ -3787,7 +3822,7 @@ fn a_new_viewport_commits_a_new_region_revision_with_the_build_test_painted_fram
 
 #[test]
 fn an_in_flight_frame_uses_its_own_viewport_for_region_geometry() {
-    let mut screen = Screen::from_terminal_and_viewport(
+    let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(TestBackend::new(120, 40)).expect("build an in-memory terminal"),
         TEST_VIEWPORT_SIZE,
     );
@@ -3796,12 +3831,12 @@ fn an_in_flight_frame_uses_its_own_viewport_for_region_geometry() {
         column_count: 120,
         row_count: 40,
     };
-    client.set_viewport(resized);
+    client.set_viewport_size(resized);
 
     let frame = screen
         .draw_painted_frame(&mut client, Box::new(build_test_painted_frame()))
         .expect("paint");
-    let expected_committed_regions = CommittedRegions::core(TEST_VIEWPORT_SIZE, 0);
+    let expected_committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
 
     assert_eq!(frame.committed_regions, expected_committed_regions);
     assert_eq!(screen.committed_regions, expected_committed_regions);
@@ -4060,9 +4095,9 @@ fn a_failed_paint_keeps_the_committed_placement_waiting_for_its_frame() {
 
 #[test]
 fn an_image_output_failure_keeps_the_committed_text_frame() {
-    let error = io::Error::new(io::ErrorKind::BrokenPipe, "image output closed");
+    let io_error = io::Error::new(io::ErrorKind::BrokenPipe, "image output closed");
     let paint_result: Result<bool, terminal::PaintError<io::Error>> =
-        Err(terminal::PaintError::Image(error));
+        Err(terminal::PaintError::Image(io_error));
 
     assert!(!is_frame_committed(paint_result));
 }
@@ -4082,9 +4117,9 @@ fn a_failed_native_frame_keeps_an_idle_retry_wakeup() {
     screen.pending_snapshot = Some(build_native_image_snapshot());
     screen.image_output_state.fail_frame_commit();
 
-    assert!(!screen.image_output_state.work_pending());
+    assert!(!screen.image_output_state.is_work_pending());
     assert_eq!(
-        screen.next_image_wakeup(),
+        screen.compute_next_image_wakeup(),
         Some(IMAGE_OUTPUT_STEP_DELAY_DURATION),
         "a retained snapshot must wake an idle attachment"
     );
@@ -4107,7 +4142,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
     assert_eq!(screen.draw_snapshot(&mut client, snapshot), None);
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while screen.image_output_state.work_pending() {
+    while screen.image_output_state.is_work_pending() {
         screen.refresh(&mut client, Some(active_tab_id));
         assert!(
             Instant::now() < deadline,
@@ -4124,7 +4159,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
             .native_retry_at
             .expect("a failed commit has a deadline");
         assert_eq!(
-            screen.next_image_wakeup_at(retry_at - expected_delay),
+            screen.compute_next_image_wakeup_at(retry_at - expected_delay),
             Some(expected_delay)
         );
         let refresh_outcome = screen.refresh_at(
@@ -4136,7 +4171,7 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
             refresh_outcome, None,
             "input events before the retry deadline must not retry the frame"
         );
-        assert!(!screen.image_output_state.work_pending());
+        assert!(!screen.image_output_state.is_work_pending());
         assert_eq!(screen.native_retry_delay, expected_delay);
         loop {
             let retry_at = screen.native_retry_at.expect("the retry remains scheduled");
@@ -4159,11 +4194,11 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
         .native_retry_at
         .expect("the capped retry has a deadline");
     assert_eq!(
-        screen.next_image_wakeup_at(retry_at - MAX_IMAGE_OUTPUT_RETRY_DELAY_DURATION),
+        screen.compute_next_image_wakeup_at(retry_at - MAX_IMAGE_OUTPUT_RETRY_DELAY_DURATION),
         Some(MAX_IMAGE_OUTPUT_RETRY_DELAY_DURATION)
     );
     screen.refresh_at(&mut client, Some(active_tab_id), retry_at);
-    while screen.image_output_state.work_pending() {
+    while screen.image_output_state.is_work_pending() {
         let retry_at = screen.native_retry_at.expect("the retry remains scheduled");
         screen.refresh_at(&mut client, Some(active_tab_id), retry_at);
         assert!(
@@ -4216,7 +4251,7 @@ fn a_pending_text_frame_does_not_schedule_an_image_wakeup() {
     let mut screen = build_test_screen();
     screen.pending_snapshot = Some(build_render_snapshot(&build_test_painted_frame()));
 
-    assert_eq!(screen.next_image_wakeup(), None);
+    assert_eq!(screen.compute_next_image_wakeup(), None);
 }
 
 #[test]
@@ -4241,7 +4276,7 @@ fn a_completed_native_image_is_committed_by_refresh() {
         "the first paint waits for native image preparation"
     );
     assert!(screen.pending_snapshot.is_some());
-    assert!(screen.next_image_wakeup().is_some());
+    assert!(screen.compute_next_image_wakeup().is_some());
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while screen.pending_snapshot.is_some() {
@@ -4254,7 +4289,7 @@ fn a_completed_native_image_is_committed_by_refresh() {
     }
 
     assert!(screen.last_snapshot.is_some());
-    assert_eq!(screen.next_image_wakeup(), None);
+    assert_eq!(screen.compute_next_image_wakeup(), None);
 }
 
 #[test]
@@ -4265,8 +4300,8 @@ fn native_images_return_after_scrolling_away_for_each_output_protocol() {
         terminal::GraphicsSupport::Iterm,
         terminal::GraphicsSupport::Sixel {
             palette_color_count: 256,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ];
 
@@ -4347,7 +4382,7 @@ fn wait_for_pending_native_frame(
         );
         std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
-    assert_eq!(screen.next_image_wakeup(), None);
+    assert_eq!(screen.compute_next_image_wakeup(), None);
 }
 
 #[test]
@@ -4630,7 +4665,7 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
         build_plain_mouse_pane(dragged_pane_id),
     ]);
     let active_tab_id = frame.client_snapshot.active_tab_id;
-    let screen_pane_content_rect = koshi_renderer::pane_content_rect(
+    let screen_pane_content_rect = koshi_renderer::find_pane_content_rect(
         frame.build_frame_layout(koshi_renderer::snapshot::ViewerChrome::default()),
         dragged_pane_id,
     )
@@ -4775,10 +4810,8 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         pane_id,
         outer_rect,
         content_rect: Some(outer_rect.compute_inner_with_border()),
-        pane_kind: PaneKind::Terminal,
         is_visible: true,
         is_suppressed: false,
-        is_dead: false,
     };
     initial_frame.session_snapshot.session_id = session_id;
     initial_frame
@@ -4893,7 +4926,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
     };
 
     let draw_count = Arc::new(AtomicUsize::new(0));
-    let mut screen = Screen::from_terminal_and_viewport(
+    let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(FailingBackend::from_terminal_size_with_draw_count(
             TEST_VIEWPORT_SIZE,
             Arc::clone(&draw_count),
@@ -5082,7 +5115,7 @@ fn placement_status_uses_pane_ids_instead_of_terminal_titles() {
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
-    render_snapshot.session_snapshot.tabs_metadata = vec![TabMeta {
+    render_snapshot.session_snapshot.tabs_metadata = vec![TabMetadata {
         tab_id: active_tab_id,
         tab_name: String::from("main"),
         tab_index: 0,
@@ -5107,8 +5140,7 @@ fn placement_status_uses_pane_ids_instead_of_terminal_titles() {
         view_top_row_index: 0,
         selection_spans: None,
         has_selection: false,
-        scrollback_meta: ScrollbackMeta {
-            is_truncated: false,
+        scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
     };
@@ -5160,7 +5192,7 @@ fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
         .expect("paint");
     let terminal_buffer_before_refresh = screen.terminal.backend().buffer().clone();
 
-    client.set_viewport(Size {
+    client.set_viewport_size(Size {
         column_count: 100,
         row_count: 30,
     });
@@ -5180,9 +5212,9 @@ fn a_viewer_only_refresh_waits_for_a_frame_after_resize() {
 /// The hint bar of what the screen last drew: the bottom row, trailing blanks
 /// removed.
 fn get_hint_row(screen: &Screen<TestBackend>) -> String {
-    let buffer = screen.terminal.backend().buffer();
-    let column_count = buffer.area.width as usize;
-    buffer
+    let screen_buffer = screen.terminal.backend().buffer();
+    let column_count = screen_buffer.area.width as usize;
+    screen_buffer
         .content()
         .chunks(column_count)
         .last()
@@ -5341,7 +5373,7 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
 fn a_pass_without_viewer_changes_skips_terminal_draw() {
     let mut client = build_test_client();
     let draw_count = Arc::new(AtomicUsize::new(0));
-    let mut screen = Screen::from_terminal_and_viewport(
+    let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(FailingBackend::from_terminal_size_with_draw_count(
             TEST_VIEWPORT_SIZE,
             Arc::clone(&draw_count),
@@ -5367,7 +5399,7 @@ fn a_pass_without_viewer_changes_skips_terminal_draw() {
 #[test]
 fn attachment_skips_a_redraw_after_paste_when_viewer_paint_is_unchanged() {
     let draw_count = Arc::new(AtomicUsize::new(0));
-    let mut screen = Screen::from_terminal_and_viewport(
+    let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(FailingBackend::from_terminal_size_with_draw_count(
             TEST_VIEWPORT_SIZE,
             Arc::clone(&draw_count),
@@ -5553,7 +5585,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         })
         .expect("the loop's channel takes it");
 
-    let viewport_before_blackout = client.get_viewport_size();
+    let viewport_size_before_blackout = client.get_viewport_size();
 
     assert!(
         drop_input_from_the_blackout(&incoming_rx, &mut cell_size_query),
@@ -5562,11 +5594,11 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
 
     assert_eq!(
         client.get_viewport_size(),
-        viewport_before_blackout,
+        viewport_size_before_blackout,
         "the resize was dropped with the rest; the new link reads the size itself"
     );
     assert_ne!(
-        viewport_before_blackout, resized,
+        viewport_size_before_blackout, resized,
         "the dropped resize named another size"
     );
     assert_eq!(
@@ -5776,18 +5808,18 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
 #[test]
 fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
     let (incoming_tx, incoming_rx) = mpsc::channel();
-    let chunk_len = MAX_INCOMING_IMAGE_BYTE_COUNT_PER_BATCH / 2 + 1;
+    let chunk_byte_count = MAX_INCOMING_IMAGE_BYTE_COUNT_PER_BATCH / 2 + 1;
     let first_chunk = koshi_ipc::frame::FrameImageChunk {
         image_transfer_id: 7,
         byte_offset: 0,
         is_last: false,
-        chunk_bytes: vec![1; chunk_len],
+        chunk_bytes: vec![1; chunk_byte_count],
     };
     let second_chunk = koshi_ipc::frame::FrameImageChunk {
         image_transfer_id: 7,
-        byte_offset: u64::try_from(chunk_len).expect("the chunk length fits an offset"),
+        byte_offset: u64::try_from(chunk_byte_count).expect("the chunk length fits an offset"),
         is_last: true,
-        chunk_bytes: vec![2; chunk_len],
+        chunk_bytes: vec![2; chunk_byte_count],
     };
     incoming_tx
         .send(Incoming::Frame {
@@ -5854,7 +5886,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
     let request = sent.try_recv().expect("the size was reported");
     assert_eq!(request.request_id, FIRST_POST_ATTACH_REQUEST_ID);
     let IpcRequestKind::Resize {
-        viewport: viewport_size,
+        viewport_size,
         pane_area,
         cell_size,
     } = request.request_kind
@@ -5909,10 +5941,10 @@ fn a_new_connection_reports_a_measured_cell_size() {
 #[test]
 fn the_redial_wait_doubles_to_eight_seconds_and_holds_there() {
     let initial_redial_wait = FIRST_REDIAL_WAIT_DURATION;
-    let doubled_redial_wait = next_redial_wait(initial_redial_wait);
-    let quadrupled_redial_wait = next_redial_wait(doubled_redial_wait);
-    let capped_redial_wait = next_redial_wait(quadrupled_redial_wait);
-    let repeated_capped_redial_wait = next_redial_wait(capped_redial_wait);
+    let doubled_redial_wait = compute_next_redial_wait(initial_redial_wait);
+    let quadrupled_redial_wait = compute_next_redial_wait(doubled_redial_wait);
+    let capped_redial_wait = compute_next_redial_wait(quadrupled_redial_wait);
+    let repeated_capped_redial_wait = compute_next_redial_wait(capped_redial_wait);
 
     assert_eq!(initial_redial_wait, Duration::from_secs(1));
     assert_eq!(doubled_redial_wait, Duration::from_secs(2));
@@ -5924,23 +5956,23 @@ fn the_redial_wait_doubles_to_eight_seconds_and_holds_there() {
 #[test]
 fn a_pause_ending_on_or_past_the_window_is_not_taken() {
     // The first pause always fits, so the ladder always dials at least once.
-    assert!(does_redial_pause_fit(
+    assert!(can_redial_pause_fit(
         Duration::ZERO,
         FIRST_REDIAL_WAIT_DURATION
     ));
 
     // 111 + 8 lands at 119 and fits; 112 + 8 lands exactly on 120 and does not.
-    assert!(does_redial_pause_fit(
+    assert!(can_redial_pause_fit(
         Duration::from_secs(111),
         Duration::from_secs(8)
     ));
-    assert!(!does_redial_pause_fit(
+    assert!(!can_redial_pause_fit(
         Duration::from_secs(112),
         Duration::from_secs(8)
     ));
 
     // A pause that would end long past the window is refused too.
-    assert!(!does_redial_pause_fit(
+    assert!(!can_redial_pause_fit(
         REDIAL_WINDOW_DURATION,
         FIRST_REDIAL_WAIT_DURATION
     ));
@@ -5953,9 +5985,9 @@ fn every_pause_the_ladder_hands_out_stays_inside_the_window() {
     let mut elapsed = Duration::ZERO;
     let mut wait = FIRST_REDIAL_WAIT_DURATION;
     let mut pauses = 0;
-    while does_redial_pause_fit(elapsed, wait) {
+    while can_redial_pause_fit(elapsed, wait) {
         elapsed += wait;
-        wait = next_redial_wait(wait);
+        wait = compute_next_redial_wait(wait);
         pauses += 1;
     }
 
@@ -6103,81 +6135,6 @@ fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives()
     );
 }
 
-/// A session to switch to, as the command a plan carries.
-fn build_switch_command() -> Command {
-    Command::SwitchSession(SwitchSessionArgs {
-        client_id: None,
-        session_id: SessionId::new(),
-    })
-}
-
-/// A plan that hands an action to a plugin. `core:lock` is only the name it
-/// carries; nothing here runs it.
-fn build_plugin_host_call() -> DispatchPlan {
-    DispatchPlan::PluginHostCall {
-        plugin_id: PluginId::new(),
-        action_reference: ActionReference::from_core_action_name("lock")
-            .expect("`lock` is a legal core action name"),
-        action_arguments: ActionArgs::None,
-    }
-}
-
-#[test]
-fn a_sequence_plan_flattens_into_its_commands_in_the_order_they_run() {
-    let first_switch_command = build_switch_command();
-    let second_switch_command = build_switch_command();
-    let third_switch_command = build_switch_command();
-    let plan = DispatchPlan::Sequence(vec![
-        DispatchPlan::Command(first_switch_command.clone()),
-        DispatchPlan::Sequence(vec![
-            DispatchPlan::Command(second_switch_command.clone()),
-            DispatchPlan::Command(third_switch_command.clone()),
-        ]),
-    ]);
-
-    assert_eq!(
-        build_commands(plan),
-        vec![
-            first_switch_command,
-            second_switch_command,
-            third_switch_command
-        ]
-    );
-}
-
-#[test]
-fn a_plugin_host_call_sends_no_command_from_this_side() {
-    // The plugin host runs on the session, so this side has nothing to send.
-    assert_eq!(
-        build_commands(build_plugin_host_call()),
-        Vec::<Command>::new()
-    );
-}
-
-#[test]
-fn a_sequence_holding_a_plugin_call_sends_only_the_commands_around_it() {
-    let command_before_plugin = build_switch_command();
-    let command_after_plugin = build_switch_command();
-    let plan = DispatchPlan::Sequence(vec![
-        DispatchPlan::Command(command_before_plugin.clone()),
-        build_plugin_host_call(),
-        DispatchPlan::Command(command_after_plugin.clone()),
-    ]);
-
-    assert_eq!(
-        build_commands(plan),
-        vec![command_before_plugin, command_after_plugin]
-    );
-}
-
-#[test]
-fn an_empty_sequence_plan_sends_nothing() {
-    assert_eq!(
-        build_commands(DispatchPlan::Sequence(Vec::new())),
-        Vec::<Command>::new()
-    );
-}
-
 #[test]
 fn a_session_id_reads_as_an_id_and_every_other_value_as_a_display_name() {
     let session_id = SessionId::new();
@@ -6225,15 +6182,18 @@ fn a_selector_reads_in_a_message_as_its_id_or_its_display_name() {
 #[test]
 fn a_number_too_large_to_parse_is_refused_like_any_other_line() {
     let session_rows = vec![build_test_session_row("a")];
-    let error = parse_session_selection(&session_rows, "99999999999999999999999999")
+    let selection_error = parse_session_selection(&session_rows, "99999999999999999999999999")
         .expect_err("a number past the end of `usize` names no listed row");
 
     assert_eq!(
-        error.to_string(),
+        selection_error.to_string(),
         "invalid arguments: `99999999999999999999999999` is not one of the listed \
          sessions; expected a number 1 to 1"
     );
-    assert_eq!(CliExitCode::from(&error), CliExitCode::UsageOrConfig);
+    assert_eq!(
+        CliExitCode::from(&selection_error),
+        CliExitCode::UsageOrConfig
+    );
 }
 
 #[test]
@@ -6271,10 +6231,8 @@ fn build_swapped_pane_frames(
         pane_id,
         outer_rect,
         content_rect: Some(outer_rect.compute_inner_with_border()),
-        pane_kind: PaneKind::Terminal,
         is_visible: true,
         is_suppressed: false,
-        is_dead: false,
     };
     let mut initial_frame = build_test_painted_frame();
     initial_frame
@@ -6362,7 +6320,7 @@ fn another_viewers_accepted_swap_slides_both_panes_to_their_new_rects() {
 
     let halfway_time = started_at + Duration::from_millis(80);
     assert_eq!(
-        screen.next_placement_animation_wakeup_at(halfway_time),
+        screen.compute_next_placement_animation_wakeup_at(halfway_time),
         Some(PLACEMENT_ANIMATION_FRAME_INTERVAL)
     );
     let halfway_mouse_frame = screen
@@ -6403,7 +6361,7 @@ fn another_viewers_accepted_swap_slides_both_panes_to_their_new_rects() {
 
     let end_time = started_at + PLACEMENT_ANIMATION_DURATION;
     assert_eq!(
-        screen.next_placement_animation_wakeup_at(end_time),
+        screen.compute_next_placement_animation_wakeup_at(end_time),
         Some(Duration::ZERO)
     );
     screen
@@ -6413,7 +6371,10 @@ fn another_viewers_accepted_swap_slides_both_panes_to_their_new_rects() {
         screen.shown_tab_snapshot.as_ref(),
         Some(&committed_tab_snapshot)
     );
-    assert_eq!(screen.next_placement_animation_wakeup_at(end_time), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(end_time),
+        None
+    );
     assert_eq!(
         screen.refresh_at(
             &mut client,
@@ -6446,7 +6407,10 @@ fn a_committed_frame_without_a_placement_notice_draws_the_new_rects_at_once() {
         screen.shown_tab_snapshot.as_ref(),
         Some(&committed_tab_snapshot)
     );
-    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(started_at),
+        None
+    );
 }
 
 #[test]
@@ -6471,7 +6435,10 @@ fn a_placement_notice_for_another_tab_draws_the_new_rects_at_once() {
         screen.shown_tab_snapshot.as_ref(),
         Some(&committed_tab_snapshot)
     );
-    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(started_at),
+        None
+    );
 }
 
 #[test]
@@ -6497,7 +6464,10 @@ fn reduced_motion_draws_another_viewers_accepted_placement_at_once() {
         screen.shown_tab_snapshot.as_ref(),
         Some(&committed_tab_snapshot)
     );
-    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(started_at),
+        None
+    );
 }
 
 #[test]
@@ -6529,7 +6499,7 @@ fn a_frame_for_another_tab_during_a_committed_placement_slide_draws_that_tab_at_
         Some(&other_active_tab_snapshot)
     );
     assert_eq!(
-        screen.next_placement_animation_wakeup_at(halfway_time),
+        screen.compute_next_placement_animation_wakeup_at(halfway_time),
         None
     );
 }
@@ -6594,7 +6564,7 @@ fn run_attachment_with_committed_swap_notice(
         Arc::clone(&draw_count),
     );
     let drawn_buffer = failing_backend.share_drawn_buffer();
-    let mut screen = Screen::from_terminal_and_viewport(
+    let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(failing_backend).expect("build an in-memory terminal"),
         TEST_VIEWPORT_SIZE,
     );
@@ -6740,7 +6710,10 @@ fn a_connection_reset_ends_a_committed_placement_slide_and_drops_waiting_notices
 
     screen.reset_connection();
 
-    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(started_at),
+        None
+    );
     screen.pending_snapshot = screen.last_snapshot.clone();
     screen
         .commit_pending_snapshot(&mut client, started_at)
@@ -6750,7 +6723,10 @@ fn a_connection_reset_ends_a_committed_placement_slide_and_drops_waiting_notices
         Some(&committed_tab_snapshot),
         "a notice from before the reset starts no slide"
     );
-    assert_eq!(screen.next_placement_animation_wakeup_at(started_at), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(started_at),
+        None
+    );
 }
 
 #[test]
@@ -6772,7 +6748,7 @@ fn a_placement_notice_whose_frame_keeps_every_rect_starts_no_slide() {
         Some(&initial_tab_snapshot)
     );
     assert_eq!(
-        screen.next_placement_animation_wakeup_at(started_at),
+        screen.compute_next_placement_animation_wakeup_at(started_at),
         None,
         "a frame with the rects already on screen schedules no slide repaint"
     );
@@ -6855,7 +6831,7 @@ fn a_placement_preview_ends_a_committed_placement_slide() {
         "the preview draws its own tab in place of the slide"
     );
     assert_eq!(
-        screen.next_placement_animation_wakeup_at(halfway_time),
+        screen.compute_next_placement_animation_wakeup_at(halfway_time),
         None
     );
 }
@@ -6989,7 +6965,10 @@ fn a_frame_at_newer_revisions_drops_the_preview_and_its_slide_while_the_placemen
 
     assert!(client.is_placement_confirmation_pending());
     assert_eq!(screen.placement_snapshot, None);
-    assert_eq!(screen.next_placement_animation_wakeup_at(frame_time), None);
+    assert_eq!(
+        screen.compute_next_placement_animation_wakeup_at(frame_time),
+        None
+    );
     assert_eq!(
         screen.shown_tab_snapshot.as_ref(),
         Some(&committed_tab_snapshot)
@@ -7026,7 +7005,7 @@ fn assert_committed_tab_change_starts_no_slide(
         "a committed frame with a changed {tab_change_name} draws at once"
     );
     assert_eq!(
-        screen.next_placement_animation_wakeup_at(started_at),
+        screen.compute_next_placement_animation_wakeup_at(started_at),
         None,
         "a committed frame with a changed {tab_change_name} schedules no slide"
     );
@@ -7035,7 +7014,7 @@ fn assert_committed_tab_change_starts_no_slide(
 #[test]
 fn a_committed_frame_with_another_tab_size_layout_mode_or_no_room_starts_no_slide() {
     assert_committed_tab_change_starts_no_slide("tab size", |tab_snapshot| {
-        tab_snapshot.effective_cell_size = Size {
+        tab_snapshot.tab_size = Size {
             column_count: 79,
             row_count: 24,
         };
@@ -7046,6 +7025,6 @@ fn a_committed_frame_with_another_tab_size_layout_mode_or_no_room_starts_no_slid
         };
     });
     assert_committed_tab_change_starts_no_slide("every pane suppressed", |tab_snapshot| {
-        tab_snapshot.are_all_panes_suppressed = true;
+        tab_snapshot.is_every_pane_suppressed = true;
     });
 }

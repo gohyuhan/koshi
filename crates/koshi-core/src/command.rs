@@ -6,24 +6,20 @@
 //! higher layers (the session runtime); this module only names *what* may be
 //! requested.
 //!
-//! Commands cross process boundaries (CLI IPC and plugins), so every variant
-//! and arg struct holds only serde-friendly types that mean the same thing in
-//! another process. No `Instant` — use `SystemTime` or epoch units for a
-//! timestamp. No raw OS handles, no `&mut` references, and command identity is
-//! never a free-form `String`.
+//! Commands cross process boundaries (CLI IPC), so every variant and arg struct
+//! holds only serde-friendly types that mean the same thing in another
+//! process: no `Instant`, no raw OS handles, no `&mut` references, and command
+//! identity is never a free-form `String`.
 
 use crate::event::{Event, RejectReason};
 use crate::geometry::Direction;
-use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
+use crate::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use crate::process::SpawnSpec;
-pub use crate::selection::{CopyTarget, GridPosition, Selection, SelectionKind};
+pub use crate::selection::{GridPosition, Selection, SelectionKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::SystemTime;
 
-/// A requested mutation the runtime can apply. One variant exists per command
-/// the action registry can dispatch; [`Command::get_command_kind`] maps each variant to
-/// its payload-free [`CommandKind`] discriminant.
+/// A requested mutation the runtime can apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     /// Split-create a pane; CLI `new-pane`.
@@ -56,8 +52,6 @@ pub enum Command {
     RunCommandPane(RunCommandPaneArgs),
     /// Selection and copy — the commands of visual mode.
     Visual(VisualCommand),
-    /// Plugin lifecycle management.
-    Plugin(PluginCommand),
     /// Toggle fullscreen for the focused pane.
     TogglePaneFullscreen,
     /// Move a tab to a new index.
@@ -66,7 +60,7 @@ pub enum Command {
     /// step.
     ///
     /// - `koshi move-pane --direction <direction>` sends it. A key bound to
-    ///   `core:move-pane` resolves to `ResolveError::ArgsMismatch` and sends
+    ///   `core:move-pane` resolves to `ResolveError::ArgumentsRequired` and sends
     ///   nothing.
     /// - It has no preview and no confirm step. Each command changes the
     ///   shared layout at once.
@@ -102,93 +96,49 @@ pub enum Command {
     SwitchSession(SwitchSessionArgs),
 }
 
-/// The payload-free discriminant of a [`Command`] — one unit variant per
-/// `Command` variant, in the same order.
+/// The [`Command`] a built-in action builds, named without its payload.
 ///
-/// The action registry ([`crate::action`]) routes a user-facing action to a
-/// core command by naming its `CommandKind`; the dispatcher then rebuilds the
-/// full typed `Command` from that kind plus resolved targets and args.
-/// [`Command::get_command_kind`] maps the other way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The action table ([`crate::action`]) names one per command-backed action.
+/// `koshi actions` prints the variant name as the action's dispatch label,
+/// e.g. `NewPane` for `core:new-pane-left`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
-    /// Discriminant of [`Command::NewPane`].
+    /// Names [`Command::NewPane`].
     NewPane,
-    /// Discriminant of [`Command::ClosePane`].
+    /// Names [`Command::ClosePane`].
     ClosePane,
-    /// Discriminant of [`Command::ResizePane`].
+    /// Names [`Command::ResizePane`].
     ResizePane,
-    /// Discriminant of [`Command::FocusPane`].
+    /// Names [`Command::FocusPane`].
     FocusPane,
-    /// Discriminant of [`Command::NewTab`].
+    /// Names [`Command::NewTab`].
     NewTab,
-    /// Discriminant of [`Command::CloseTab`].
+    /// Names [`Command::CloseTab`].
     CloseTab,
-    /// Discriminant of [`Command::FocusTab`].
+    /// Names [`Command::FocusTab`].
     FocusTab,
-    /// Discriminant of [`Command::WriteToPane`].
+    /// Names [`Command::WriteToPane`].
     WriteToPane,
-    /// Discriminant of [`Command::ToggleLockMode`].
+    /// Names [`Command::ToggleLockMode`].
     ToggleLockMode,
-    /// Discriminant of [`Command::SetLockMode`].
+    /// Names [`Command::SetLockMode`].
     SetLockMode,
-    /// Discriminant of [`Command::ToggleMouseSelect`].
+    /// Names [`Command::ToggleMouseSelect`].
     ToggleMouseSelect,
-    /// Discriminant of [`Command::RunCommandPane`].
+    /// Names [`Command::RunCommandPane`].
     RunCommandPane,
-    /// Discriminant of [`Command::Visual`].
-    Visual,
-    /// Discriminant of [`Command::Plugin`].
-    Plugin,
-    /// Discriminant of [`Command::TogglePaneFullscreen`].
+    /// Names [`Command::TogglePaneFullscreen`].
     TogglePaneFullscreen,
-    /// Discriminant of [`Command::MoveTab`].
+    /// Names [`Command::MoveTab`].
     MoveTab,
-    /// Discriminant of [`Command::MovePane`].
+    /// Names [`Command::MovePane`].
     MovePane,
-    /// Discriminant of [`Command::PlacePane`].
+    /// Names [`Command::PlacePane`].
     PlacePane,
-    /// Discriminant of [`Command::ScrollPane`].
+    /// Names [`Command::ScrollPane`].
     ScrollPane,
-    /// Discriminant of [`Command::Quit`].
+    /// Names [`Command::Quit`].
     Quit,
-    /// Discriminant of [`Command::Detach`].
-    Detach,
-    /// Discriminant of [`Command::DetachAll`].
-    DetachAll,
-    /// Discriminant of [`Command::SwitchSession`].
-    SwitchSession,
-}
-
-impl Command {
-    /// The payload-free [`CommandKind`] discriminant of this command.
-    #[must_use]
-    pub const fn get_command_kind(&self) -> CommandKind {
-        match self {
-            Command::NewPane(_) => CommandKind::NewPane,
-            Command::ClosePane(_) => CommandKind::ClosePane,
-            Command::ResizePane(_) => CommandKind::ResizePane,
-            Command::FocusPane(_) => CommandKind::FocusPane,
-            Command::NewTab(_) => CommandKind::NewTab,
-            Command::CloseTab(_) => CommandKind::CloseTab,
-            Command::FocusTab(_) => CommandKind::FocusTab,
-            Command::WriteToPane(_) => CommandKind::WriteToPane,
-            Command::ToggleLockMode(_) => CommandKind::ToggleLockMode,
-            Command::SetLockMode(_) => CommandKind::SetLockMode,
-            Command::ToggleMouseSelect => CommandKind::ToggleMouseSelect,
-            Command::RunCommandPane(_) => CommandKind::RunCommandPane,
-            Command::Visual(_) => CommandKind::Visual,
-            Command::Plugin(_) => CommandKind::Plugin,
-            Command::TogglePaneFullscreen => CommandKind::TogglePaneFullscreen,
-            Command::MoveTab(_) => CommandKind::MoveTab,
-            Command::MovePane(_) => CommandKind::MovePane,
-            Command::PlacePane(_) => CommandKind::PlacePane,
-            Command::ScrollPane(_) => CommandKind::ScrollPane,
-            Command::Quit => CommandKind::Quit,
-            Command::Detach(_) => CommandKind::Detach,
-            Command::DetachAll => CommandKind::DetachAll,
-            Command::SwitchSession(_) => CommandKind::SwitchSession,
-        }
-    }
 }
 
 /// Arguments for [`Command::NewPane`].
@@ -349,7 +299,7 @@ pub enum TabTarget {
     /// The next tab, wrapping around.
     Next,
     /// The previous tab, wrapping around.
-    Prev,
+    Previous,
     /// A zero-based tab index.
     Index(usize),
     /// A specific tab.
@@ -496,7 +446,8 @@ pub enum VisualCommand {
     SetSelection(SetSelectionArgs),
     /// Clear one pane's selection, leaving visual mode for that pane.
     ClearSelection(ClearSelectionArgs),
-    /// Copy the current selection to a clipboard target.
+    /// Copy one pane's selection to the issuing client's clipboard through
+    /// OSC 52.
     Copy(CopyArgs),
 }
 
@@ -530,8 +481,6 @@ pub struct ClearSelectionArgs {
 pub struct CopyArgs {
     /// The pane whose highlight is copied.
     pub pane_id: PaneId,
-    /// Where the copied text goes.
-    pub clipboard_target: CopyTarget,
     /// Whether blanks at the end of each copied row are dropped.
     ///
     /// A terminal row is padded to the pane's full width with blank cells: a
@@ -540,72 +489,11 @@ pub struct CopyArgs {
     pub should_trim_trailing_whitespace: bool,
 }
 
-/// Plugin lifecycle commands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PluginCommand {
-    /// Install a plugin from a source.
-    Install(InstallPluginArgs),
-    /// Remove an installed plugin.
-    Uninstall(UninstallPluginArgs),
-    /// Enable an installed plugin.
-    Enable(EnablePluginArgs),
-    /// Disable an installed plugin.
-    Disable(DisablePluginArgs),
-    /// Update a plugin to its latest version.
-    Update(UpdatePluginArgs),
-    /// Reload a plugin in place.
-    Reload(ReloadPluginArgs),
-}
-
-/// Arguments for [`PluginCommand::Install`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallPluginArgs {
-    /// Where to fetch the plugin from (path, URL, or registry ref).
-    pub plugin_source: String,
-}
-
-/// Arguments for [`PluginCommand::Uninstall`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UninstallPluginArgs {
-    /// The plugin to remove.
-    pub plugin_id: PluginId,
-}
-
-/// Arguments for [`PluginCommand::Enable`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EnablePluginArgs {
-    /// The plugin to enable.
-    pub plugin_id: PluginId,
-}
-
-/// Arguments for [`PluginCommand::Disable`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DisablePluginArgs {
-    /// The plugin to disable.
-    pub plugin_id: PluginId,
-}
-
-/// Arguments for [`PluginCommand::Update`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdatePluginArgs {
-    /// The plugin to update.
-    pub plugin_id: PluginId,
-}
-
-/// Arguments for [`PluginCommand::Reload`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReloadPluginArgs {
-    /// The plugin to reload.
-    pub plugin_id: PluginId,
-}
-
 // === Command envelope and source metadata ===
 //
-// Every command that crosses a boundary (keybinding dispatch, IPC socket,
-// plugin host call, internal lifecycle) travels inside one [`CommandEnvelope`].
-// The envelope carries the identity, origin, and timestamp; the [`Command`]
-// itself carries no provenance. `issued_at` is a `SystemTime`, never an
-// `Instant`.
+// Every command that crosses a boundary (keybinding dispatch, IPC socket)
+// travels inside one [`CommandEnvelope`]. The envelope carries the identity and
+// origin; the [`Command`] itself carries no provenance.
 
 /// Where a command came from. The runtime uses this to resolve focus context,
 /// enforce permissions, and attribute diagnostics.
@@ -613,7 +501,7 @@ pub struct ReloadPluginArgs {
 /// `ExternalCli` carries an optional session target and an optional target
 /// client: an external command with no explicit target acts through the
 /// session's sole attached client, and is rejected when several are attached
-/// and none is named. `Plugin` and `Internal` have no associated client.
+/// and none is named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandSource {
     /// A keybinding fired by an attached client.
@@ -654,20 +542,12 @@ pub enum CommandSource {
         #[serde(default)]
         target_client_id: Option<ClientId>,
     },
-    /// A command issued by a plugin.
-    Plugin {
-        /// The plugin that issued the command.
-        plugin_id: PluginId,
-    },
-    /// A command the runtime issued to itself (lifecycle, internal wiring).
-    Internal,
 }
 
 impl CommandSource {
     /// The client this source is attributed to, if any. `KeyBinding` and
     /// `Mouse` always name a client; `InSessionCli` names one when the issuing
-    /// pane was spawned for a client; `ExternalCli`, `Plugin`, and `Internal`
-    /// never do. `ExternalCli` never names a client here even when the
+    /// pane was spawned for a client; `ExternalCli` never does, even when the
     /// invocation named one — that client is a target the caller chose, read
     /// through [`Self::get_target_client_id`], not the issuer.
     #[must_use]
@@ -677,9 +557,7 @@ impl CommandSource {
                 Some(*client_id)
             }
             CommandSource::InSessionCli { client_id, .. } => *client_id,
-            CommandSource::ExternalCli { .. }
-            | CommandSource::Plugin { .. }
-            | CommandSource::Internal => None,
+            CommandSource::ExternalCli { .. } => None,
         }
     }
 
@@ -695,9 +573,7 @@ impl CommandSource {
             } => *target_client_id,
             CommandSource::KeyBinding { .. }
             | CommandSource::Mouse { .. }
-            | CommandSource::InSessionCli { .. }
-            | CommandSource::Plugin { .. }
-            | CommandSource::Internal => None,
+            | CommandSource::InSessionCli { .. } => None,
         }
     }
 
@@ -740,12 +616,6 @@ impl CommandSource {
             target_client_id,
         }
     }
-
-    /// Construct a [`CommandSource::Plugin`].
-    #[must_use]
-    pub const fn from_plugin(plugin_id: PluginId) -> Self {
-        CommandSource::Plugin { plugin_id }
-    }
 }
 
 /// Why a [`CommandEnvelope`] is not internally consistent.
@@ -757,10 +627,10 @@ pub enum CommandEnvelopeError {
 }
 
 impl std::fmt::Display for CommandEnvelopeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CommandEnvelopeError::ClientIdMismatch => {
-                f.write_str("envelope client_id does not match its source")
+                formatter.write_str("envelope client_id does not match its source")
             }
         }
     }
@@ -768,7 +638,7 @@ impl std::fmt::Display for CommandEnvelopeError {
 
 impl std::error::Error for CommandEnvelopeError {}
 
-/// One command crossing a boundary, with its identity, origin, and timestamp.
+/// One command crossing a boundary, with its identity and origin.
 ///
 /// `client_id` mirrors the client named by `command_source`; the two must agree.
 /// Deserialization is routed through `CommandEnvelopeWire`, which rejects any
@@ -784,22 +654,17 @@ pub struct CommandEnvelope {
     /// Client the command is attributed to; mirrors the command source's client when it
     /// names one, and is `None` for sources that do not.
     pub client_id: Option<ClientId>,
-    /// When the command was issued, as wall-clock time. The envelope crosses
-    /// process boundaries.
-    pub issued_at: SystemTime,
     /// The requested mutation.
     pub command: Command,
 }
 
 impl CommandEnvelope {
     /// Build an envelope, deriving `client_id` from `command_source`. The caller
-    /// supplies `command_id` and `issued_at`; this reads no clock and draws no random
-    /// value.
+    /// supplies `command_id`; this draws no random value.
     #[must_use]
     pub fn from_parts(
         command_id: CommandId,
         command_source: CommandSource,
-        issued_at: SystemTime,
         command: Command,
     ) -> Self {
         let client_id = command_source.get_client_id();
@@ -807,7 +672,6 @@ impl CommandEnvelope {
             command_id,
             command_source,
             client_id,
-            issued_at,
             command,
         }
     }
@@ -835,7 +699,6 @@ struct CommandEnvelopeWire {
     command_id: CommandId,
     command_source: CommandSource,
     client_id: Option<ClientId>,
-    issued_at: SystemTime,
     command: Command,
 }
 
@@ -847,7 +710,6 @@ impl TryFrom<CommandEnvelopeWire> for CommandEnvelope {
             command_id: wire.command_id,
             command_source: wire.command_source,
             client_id: wire.client_id,
-            issued_at: wire.issued_at,
             command: wire.command,
         }
         .validate_command_envelope()

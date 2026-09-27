@@ -146,12 +146,12 @@ fn render_layout_tree(
 
 /// One rectangle as `x,y colsxrows`.
 fn format_rect_cell(rectangle: Rect) -> String {
-    let Rect { origin, cell_size } = rectangle;
+    let Rect { origin, size } = rectangle;
     format!(
         "{},{} {}",
         origin.column,
         origin.row,
-        format_size_cell(cell_size)
+        format_size_cell(size)
     )
 }
 

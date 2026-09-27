@@ -48,57 +48,12 @@ pub fn validate_socket_address(
     socket_address: &str,
     runtime_directory: &Path,
 ) -> Result<(), IpcError> {
-    let build_untrusted_socket_error = |trust_failure_reason: String| IpcError::UntrustedSocket {
-        socket_address: socket_address.to_string(),
-        trust_failure_reason,
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        if Path::new(socket_address).parent() != Some(runtime_directory) {
-            return Err(build_untrusted_socket_error(
-                "not directly inside the koshi runtime directory".to_string(),
-            ));
-        }
-        let metadata = std::fs::symlink_metadata(runtime_directory).map_err(|io_error| {
-            build_untrusted_socket_error(format!("runtime directory is unreadable: {io_error}"))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(build_untrusted_socket_error(
-                "runtime directory is a symbolic link".to_string(),
-            ));
-        }
-        if !metadata.is_dir() {
-            return Err(build_untrusted_socket_error(
-                "runtime directory is not a directory".to_string(),
-            ));
-        }
-        let permission_mode = metadata.permissions().mode() & 0o777;
-        if permission_mode != 0o700 {
-            return Err(build_untrusted_socket_error(format!(
-                "runtime directory mode is {permission_mode:03o}, expected 700"
-            )));
-        }
-        let owner_user_id = metadata.uid();
-        let effective_user_id = unsafe { libc::geteuid() };
-        if owner_user_id != effective_user_id {
-            return Err(build_untrusted_socket_error(format!(
-                "runtime directory is owned by uid {owner_user_id}, expected {effective_user_id}"
-            )));
-        }
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        let _ = runtime_directory;
-        if !socket_address.starts_with("koshi-") {
-            return Err(build_untrusted_socket_error(
-                "pipe name is outside the koshi- namespace".to_string(),
-            ));
-        }
-        Ok(())
-    }
+    validate_socket_directory(
+        socket_address,
+        runtime_directory,
+        0o700,
+        "runtime directory",
+    )
 }
 
 /// Check that `socket_address` is a trustworthy place for a koshi control socket other
@@ -121,6 +76,29 @@ pub fn validate_shared_socket_address(
     socket_address: &str,
     shared_user_directory: &Path,
 ) -> Result<(), IpcError> {
+    validate_socket_directory(
+        socket_address,
+        shared_user_directory,
+        0o755,
+        "shared session directory",
+    )
+}
+
+/// Check that `socket_address` names a file directly inside `socket_directory`,
+/// and that `socket_directory`, read without following a symbolic link, is a
+/// directory owned by this user with permission bits exactly
+/// `expected_permission_mode`. On Windows, check that `socket_address` starts
+/// with `koshi-`; `socket_directory` is not read.
+///
+/// Each refusal is [`IpcError::UntrustedSocket`] naming `socket_address` and a
+/// reason that names the directory as `directory_description`, e.g.
+/// `runtime directory mode is 755, expected 700`.
+fn validate_socket_directory(
+    socket_address: &str,
+    socket_directory: &Path,
+    expected_permission_mode: u32,
+    directory_description: &str,
+) -> Result<(), IpcError> {
     let build_untrusted_socket_error = |trust_failure_reason: String| IpcError::UntrustedSocket {
         socket_address: socket_address.to_string(),
         trust_failure_reason,
@@ -129,44 +107,49 @@ pub fn validate_shared_socket_address(
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        if Path::new(socket_address).parent() != Some(shared_user_directory) {
-            return Err(build_untrusted_socket_error(
-                "not directly inside the koshi shared session directory".to_string(),
-            ));
-        }
-        let metadata = std::fs::symlink_metadata(shared_user_directory).map_err(|io_error| {
-            build_untrusted_socket_error(format!(
-                "shared session directory is unreadable: {io_error}"
-            ))
-        })?;
-        if metadata.file_type().is_symlink() {
-            return Err(build_untrusted_socket_error(
-                "shared session directory is a symbolic link".to_string(),
-            ));
-        }
-        if !metadata.is_dir() {
-            return Err(build_untrusted_socket_error(
-                "shared session directory is not a directory".to_string(),
-            ));
-        }
-        let permission_mode = metadata.permissions().mode() & 0o777;
-        if permission_mode != 0o755 {
+        if Path::new(socket_address).parent() != Some(socket_directory) {
             return Err(build_untrusted_socket_error(format!(
-                "shared session directory mode is {permission_mode:03o}, expected 755"
+                "not directly inside the koshi {directory_description}"
             )));
         }
-        let owner_user_id = metadata.uid();
+        let directory_metadata =
+            std::fs::symlink_metadata(socket_directory).map_err(|io_error| {
+                build_untrusted_socket_error(format!(
+                    "{directory_description} is unreadable: {io_error}"
+                ))
+            })?;
+        if directory_metadata.file_type().is_symlink() {
+            return Err(build_untrusted_socket_error(format!(
+                "{directory_description} is a symbolic link"
+            )));
+        }
+        if !directory_metadata.is_dir() {
+            return Err(build_untrusted_socket_error(format!(
+                "{directory_description} is not a directory"
+            )));
+        }
+        let permission_mode = directory_metadata.permissions().mode() & 0o777;
+        if permission_mode != expected_permission_mode {
+            return Err(build_untrusted_socket_error(format!(
+                "{directory_description} mode is {permission_mode:03o}, expected {expected_permission_mode:03o}"
+            )));
+        }
+        let owner_user_id = directory_metadata.uid();
         let effective_user_id = unsafe { libc::geteuid() };
         if owner_user_id != effective_user_id {
             return Err(build_untrusted_socket_error(format!(
-                "shared session directory is owned by uid {owner_user_id}, expected {effective_user_id}"
+                "{directory_description} is owned by uid {owner_user_id}, expected {effective_user_id}"
             )));
         }
         Ok(())
     }
     #[cfg(windows)]
     {
-        let _ = shared_user_directory;
+        let _ = (
+            socket_directory,
+            expected_permission_mode,
+            directory_description,
+        );
         if !socket_address.starts_with("koshi-") {
             return Err(build_untrusted_socket_error(
                 "pipe name is outside the koshi- namespace".to_string(),
@@ -198,10 +181,10 @@ pub fn reclaim_stale_socket(socket_address: &str) -> Result<(), IpcError> {
             #[cfg(unix)]
             match std::fs::remove_file(socket_address) {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
+                Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(io_error) => {
                     return Err(IpcError::Transport {
-                        error_detail: error.to_string(),
+                        error_detail: io_error.to_string(),
                     });
                 }
             }

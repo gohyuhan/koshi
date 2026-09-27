@@ -12,7 +12,6 @@ use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
 use koshi_core::action::ActionReference;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
-use koshi_core::resolve::ActionArgs;
 use tempfile::TempDir;
 
 use super::*;
@@ -515,7 +514,7 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
     let layer = load_keybindings_config(&config_file_path, &mut warnings).expect("the file loads");
     assert_eq!(layer.chord_timeout_ms, None);
     assert_eq!(layer.which_key_delay_ms, None);
-    assert_eq!(layer.max_chord_depth, None);
+    assert_eq!(layer.maximum_chord_depth, None);
     assert_eq!(layer.leader, None);
     assert_eq!(layer.unlock_alternative, None);
     assert_eq!(
@@ -528,7 +527,6 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
                     BoundAction {
                         action_reference: ActionReference::from_core_action_name("new-tab")
                             .expect("a core action name"),
-                        action_arguments: ActionArgs::None,
                     },
                 )]),
                 removed_key_sequences: BTreeSet::new(),
@@ -637,11 +635,11 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
 
     // The whole chain from text on disk: the reader `load_app_layer` uses, onto
     // the gate, into a function carrying the attribute. `load_app_layer` takes
-    // its directory from the platform, so the file goes to `load_app` here.
+    // its directory from the platform, so the file goes to `load_app_config` here.
     let test_directory = TempDir::new().unwrap();
     let config_file_path = test_directory.path().join("koshi.kdl");
 
-    fs::write(&config_file_path, "version 1\nallow-beta-features #true\n").unwrap();
+    fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").unwrap();
     let mut warnings = Vec::new();
     apply_beta_gate(
         load_app_config(&config_file_path, &mut warnings)
@@ -650,7 +648,7 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     assert_eq!(warnings, Vec::<String>::new());
     assert_eq!(mock_beta_entry_point(), 1);
 
-    fs::write(&config_file_path, "version 1\nallow-beta-features #false\n").unwrap();
+    fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").unwrap();
     let mut warnings = Vec::new();
     apply_beta_gate(
         load_app_config(&config_file_path, &mut warnings)
@@ -661,18 +659,18 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
 }
 
 #[test]
-fn build_logging_params_with_no_config_file_are_the_defaults() {
+fn build_logging_parameters_with_no_config_file_are_the_defaults() {
     let session_id = SessionId::new();
-    let logging_params = build_logging_params(None, session_id);
+    let logging_parameters = build_logging_parameters(None, session_id);
 
-    assert!(!logging_params.is_enabled);
-    assert_eq!(logging_params.log_level, LogLevel::Warning);
-    assert_eq!(logging_params.log_format, LogFormat::Pretty);
-    assert_eq!(logging_params.session_id, session_id);
+    assert!(!logging_parameters.is_enabled);
+    assert_eq!(logging_parameters.log_level, LogLevel::Warning);
+    assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
+    assert_eq!(logging_parameters.session_id, session_id);
 }
 
 #[test]
-fn build_logging_params_take_the_level_and_format_the_config_names() {
+fn build_logging_parameters_take_the_level_and_format_the_config_names() {
     let session_id = SessionId::new();
     let app_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
@@ -683,16 +681,16 @@ fn build_logging_params_take_the_level_and_format_the_config_names() {
         ..Default::default()
     };
 
-    let logging_params = build_logging_params(Some(&app_config), session_id);
+    let logging_parameters = build_logging_parameters(Some(&app_config), session_id);
 
-    assert!(logging_params.is_enabled);
-    assert_eq!(logging_params.log_level, LogLevel::Info);
-    assert_eq!(logging_params.log_format, LogFormat::Json);
-    assert_eq!(logging_params.session_id, session_id);
+    assert!(logging_parameters.is_enabled);
+    assert_eq!(logging_parameters.log_level, LogLevel::Info);
+    assert_eq!(logging_parameters.log_format, LogFormat::Json);
+    assert_eq!(logging_parameters.session_id, session_id);
 }
 
 #[test]
-fn build_logging_params_keep_the_defaults_for_every_field_the_config_leaves_out() {
+fn build_logging_parameters_keep_the_defaults_for_every_field_the_config_leaves_out() {
     let session_id = SessionId::new();
     let app_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
@@ -703,12 +701,12 @@ fn build_logging_params_keep_the_defaults_for_every_field_the_config_leaves_out(
         ..Default::default()
     };
 
-    let logging_params = build_logging_params(Some(&app_config), session_id);
+    let logging_parameters = build_logging_parameters(Some(&app_config), session_id);
 
-    assert!(logging_params.is_enabled);
-    assert_eq!(logging_params.log_level, LogLevel::Warning);
-    assert_eq!(logging_params.log_format, LogFormat::Pretty);
-    assert_eq!(logging_params.session_id, session_id);
+    assert!(logging_parameters.is_enabled);
+    assert_eq!(logging_parameters.log_level, LogLevel::Warning);
+    assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
+    assert_eq!(logging_parameters.session_id, session_id);
 }
 
 // --- The direction a pane-opening verb uses with no `--direction` ---

@@ -51,11 +51,11 @@ use crate::scrollback::Scrollback;
 ///
 /// History keeps a row's text without the default blanks that padded it out to
 /// the screen width. This cell stands in for each of those dropped blanks.
-static DEFAULT_PADDING_CELL: LazyLock<Cell> = LazyLock::new(Cell::blank);
+static DEFAULT_PADDING_CELL: LazyLock<Cell> = LazyLock::new(Cell::build_blank);
 
-/// The cell at `col` of `cells`, treating a row shorter than `cols` as if the
-/// blanks trimmed off its end were still there. `None` past `cols`, where the
-/// screen itself ends.
+/// The cell at `column_index` of `cells`, treating a row shorter than
+/// `column_count` as if the blanks trimmed off its end were still there. `None`
+/// past `column_count`, where the screen itself ends.
 ///
 /// A history row holding `hi` on an 80-column screen answers `h`, `i`, then a
 /// blank for columns 2 through 79, then `None`.
@@ -159,7 +159,7 @@ impl<'a> TextView<'a> {
         column_count
     }
 
-    /// The cells of row `row` and how it ended, or `None` if that row has been
+    /// The cells of row `row_index` and how it ended, or `None` if that row has been
     /// dropped from history or is past the bottom of the live screen.
     #[must_use]
     pub fn get_row(&self, row_index: u64) -> Option<(&'a [Cell], RowEnd)> {
@@ -182,8 +182,8 @@ impl<'a> TextView<'a> {
         }
     }
 
-    /// The cell at `row`/`col`, or `None` if the row is gone or the column is
-    /// past the screen width.
+    /// The cell at `row_index`/`column_index`, or `None` if the row is gone or
+    /// the column is past the screen width.
     ///
     /// A history row is stored without the default blanks that padded it out to
     /// the screen width. A column right of its text reads as one of those
@@ -194,7 +194,7 @@ impl<'a> TextView<'a> {
         get_cell_or_padding(cells, column_index, self.get_column_count())
     }
 
-    /// Whether `row` soft-wrapped into the row below it: the two rows hold one
+    /// Whether `row_index` soft-wrapped into the row below it: the two rows hold one
     /// logical line.
     ///
     /// A `hello world` that wrapped mid-word across two rows is one logical
@@ -206,7 +206,7 @@ impl<'a> TextView<'a> {
             .is_some_and(|(_, end)| matches!(end, RowEnd::Soft | RowEnd::SoftWide))
     }
 
-    /// Whether `row`/`col` is the blank last-column spacer left when a wide
+    /// Whether `row_index`/`column_index` is the blank last-column spacer left when a wide
     /// glyph wrapped whole onto the next row. The spacer carries layout only;
     /// it is not selectable text.
     #[must_use]
@@ -216,11 +216,11 @@ impl<'a> TextView<'a> {
         })
     }
 
-    /// The first row of the logical line containing `row`: walk up while the row
-    /// above wrapped into this one.
+    /// The first row of the logical line containing `row_index`: walk up while
+    /// the row above wrapped into this one.
     ///
     /// `ls` printing one long filename that wrapped over rows 10, 11, and 12:
-    /// `line_start(11)` is `10`.
+    /// `get_line_start_row_index(11)` is `10`.
     #[must_use]
     pub fn get_line_start_row_index(&self, row_index: u64) -> u64 {
         let mut start_row_index = row_index;
@@ -232,10 +232,10 @@ impl<'a> TextView<'a> {
         start_row_index
     }
 
-    /// The last row of the logical line containing `row`: walk down while this
-    /// row wraps into the next.
+    /// The last row of the logical line containing `row_index`: walk down while
+    /// this row wraps into the next.
     ///
-    /// For the wrapped filename above, `line_end(11)` is `12`.
+    /// For the wrapped filename above, `get_line_end_row_index(11)` is `12`.
     #[must_use]
     pub fn get_line_end_row_index(&self, row_index: u64) -> u64 {
         let mut end_row_index = row_index;
@@ -245,7 +245,7 @@ impl<'a> TextView<'a> {
         end_row_index
     }
 
-    /// Whether the cell at `row`/`col` ends a word.
+    /// Whether the cell at `row_index`/`column_index` ends a word.
     ///
     /// A cell holding one of [`WORD_SEPARATORS`] ends a word, and so does a
     /// column past the screen width. A column right of a history line's text
@@ -255,7 +255,7 @@ impl<'a> TextView<'a> {
             .is_none_or(|cell| WORD_SEPARATORS.contains(cell.get_character()))
     }
 
-    /// Whether `row`/`col` holds layout rather than text: the blank width-0
+    /// Whether `row_index`/`column_index` holds layout rather than text: the blank width-0
     /// right half of a wide (CJK/emoji) glyph, whose text lives entirely in its
     /// left half, or the spacer of [`is_wide_wrap_spacer`](Self::is_wide_wrap_spacer).
     /// A gone row or a column past the screen width is not layout.
@@ -266,7 +266,7 @@ impl<'a> TextView<'a> {
                 .is_some_and(|cell| cell.get_display_width() == 0)
     }
 
-    /// The cell before `row`/`col` in reading order, crossing a soft wrap to the
+    /// The cell before `row_index`/`column_index` in reading order, crossing a soft wrap to the
     /// end of the row above, or `None` at the very start of the text.
     ///
     /// Layout cells are skipped: one step crosses a whole wide glyph.
@@ -288,7 +288,7 @@ impl<'a> TextView<'a> {
         }
     }
 
-    /// The cell after `row`/`col` in reading order, crossing a soft wrap to the
+    /// The cell after `row_index`/`column_index` in reading order, crossing a soft wrap to the
     /// start of the row below, or `None` at the very end of the text. Skips
     /// layout cells, as [`find_previous_text_cell`](Self::find_previous_text_cell) does.
     fn find_next_text_cell(&self, row_index: u64, column_index: u16) -> Option<(u64, u16)> {
@@ -308,13 +308,13 @@ impl<'a> TextView<'a> {
         }
     }
 
-    /// The separator character at `row`/`col`, or `None` when the cell holds
-    /// part of a word, is the width-0 half of a wide glyph (the glyph's own
-    /// cell is the text there), or holds nothing.
+    /// The separator character at `row_index`/`column_index`, or `None` when
+    /// the cell holds part of a word, is the width-0 half of a wide glyph (the
+    /// glyph's own cell is the text there), or holds nothing.
     ///
     /// A gone row and a column past the screen width read as `Some(' ')`, the
     /// same answer [`is_separator`](Self::is_separator) gives them.
-    fn separator_char(&self, row_index: u64, column_index: u16) -> Option<char> {
+    fn find_separator_character(&self, row_index: u64, column_index: u16) -> Option<char> {
         let Some(cell) = self.get_cell(row_index, column_index) else {
             return Some(' ');
         };
@@ -326,11 +326,12 @@ impl<'a> TextView<'a> {
             .then(|| cell.get_character())
     }
 
-    /// Whether stepping onto `row`/`col` leaves the word being grown.
+    /// Whether stepping onto `row_index`/`column_index` leaves the word being
+    /// grown.
     ///
-    /// Growing a separator run of `run`, the walk leaves it at any cell that
-    /// does not hold that same character. Growing a word (`run` is `None`), the
-    /// walk leaves it at a separator.
+    /// Growing a separator run of `separator_run`, the walk leaves it at any
+    /// cell that does not hold that same character. Growing a word
+    /// (`separator_run` is `None`), the walk leaves it at a separator.
     fn is_word_boundary(
         &self,
         separator_run: Option<char>,
@@ -345,7 +346,7 @@ impl<'a> TextView<'a> {
         }
     }
 
-    /// The start of the word at `row`/`col`: step left while the cell there is
+    /// The start of the word at `row_index`/`column_index`: step left while the cell there is
     /// part of a word, and stop on the last one that was.
     ///
     /// `cargo build` with the pointer on the `i` of `build`: walking left hits
@@ -357,7 +358,7 @@ impl<'a> TextView<'a> {
     /// `(` next to `)` stays alone — each separator is its own run.
     #[must_use]
     pub fn get_word_start_position(&self, row_index: u64, column_index: u16) -> (u64, u16) {
-        let separator_run = self.separator_char(row_index, column_index);
+        let separator_run = self.find_separator_character(row_index, column_index);
         let (mut row_index, mut column_index) = (row_index, column_index);
         while let Some((previous_row_index, previous_column_index)) =
             self.find_previous_text_cell(row_index, column_index)
@@ -371,12 +372,13 @@ impl<'a> TextView<'a> {
         (row_index, column_index)
     }
 
-    /// The end of the word at `row`/`col`: the mirror of
-    /// [`word_start`](Self::get_word_start_position), stepping right — including the
-    /// separator-run rule for a start cell that is itself a separator.
+    /// The end of the word at `row_index`/`column_index`: the mirror of
+    /// [`get_word_start_position`](Self::get_word_start_position), stepping
+    /// right — including the separator-run rule for a start cell that is itself
+    /// a separator.
     #[must_use]
     pub fn get_word_end_position(&self, row_index: u64, column_index: u16) -> (u64, u16) {
-        let separator_run = self.separator_char(row_index, column_index);
+        let separator_run = self.find_separator_character(row_index, column_index);
         let (mut row_index, mut column_index) = (row_index, column_index);
         while let Some((next_row_index, next_column_index)) =
             self.find_next_text_cell(row_index, column_index)
@@ -403,7 +405,7 @@ impl<'a> TextView<'a> {
 /// `Block` reads the same cells; `Character`, `Word`, and `Line` differ only
 /// in the ends the caller chose.
 ///
-/// When `trim_trailing_whitespace` is true, trailing blanks are dropped from
+/// When `should_trim_trailing_whitespace` is true, trailing blanks are dropped from
 /// each finished line, but not from a soft-wrapped row, whose spaces continue
 /// onto the next row. When false, every selected blank is preserved.
 ///
@@ -487,7 +489,7 @@ pub fn serialize_selection_text(
     selected_text
 }
 
-/// A selection's two ends put into text order — `start` never comes after `end`.
+/// A selection's two ends put into text order — `start_position` never comes after `end_position`.
 ///
 /// A drag stores where it began and where the pointer is, in that order, and a
 /// drag up or leftward leaves the two ends reversed.

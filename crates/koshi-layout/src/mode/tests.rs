@@ -62,15 +62,15 @@ fn fullscreen_promotes_the_focused_pane_and_hides_the_rest() {
     assert_eq!(
         layout_result.pane_rects,
         [
-            (first_pane_id, Rect::empty_at_origin()),
+            (first_pane_id, Rect::build_empty_at_origin()),
             (second_pane_id, build_test_tab_rect()),
-            (third_pane_id, Rect::empty_at_origin()),
+            (third_pane_id, Rect::build_empty_at_origin()),
         ]
     );
     // Hidden panes are not suppressed; they can be toggled back. An overlay
     // should not be drawn over a pane that fits on screen.
     assert!(layout_result.suppressed_pane_ids.is_empty());
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
 }
 
 #[test]
@@ -204,8 +204,8 @@ fn fullscreen_promotes_a_collapsed_stack_member_without_touching_the_stack() {
     assert_eq!(
         layout_result.pane_rects,
         [
-            (first_pane_id, Rect::empty_at_origin()),
-            (second_pane_id, Rect::empty_at_origin()),
+            (first_pane_id, Rect::build_empty_at_origin()),
+            (second_pane_id, Rect::build_empty_at_origin()),
             (third_pane_id, build_test_tab_rect()),
         ]
     );
@@ -254,7 +254,7 @@ fn fullscreen_of_the_active_stack_member_round_trips_identically() {
     assert_eq!(
         fullscreen_layout_solution.pane_rects,
         [
-            (first_pane_id, Rect::empty_at_origin()),
+            (first_pane_id, Rect::build_empty_at_origin()),
             (second_pane_id, build_test_tab_rect())
         ]
     );
@@ -288,7 +288,7 @@ fn fullscreen_in_a_too_small_tab_suppresses_and_flags_the_overlay() {
         undersized_tab_rect,
     );
     assert_eq!(layout_result.suppressed_pane_ids, [first_pane_id]);
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
 }
 
 #[test]
@@ -318,7 +318,7 @@ fn fullscreen_suppresses_a_tab_that_fits_content_but_not_the_border() {
         undersized_tab_rect,
     );
     assert_eq!(suppressed_layout.suppressed_pane_ids, [first_pane_id]);
-    assert!(suppressed_layout.is_all_panes_suppressed);
+    assert!(suppressed_layout.is_every_pane_suppressed);
 
     let border_fitting_tab_rect = Rect::from_size_at_origin(Size {
         column_count: 4,
@@ -332,18 +332,16 @@ fn fullscreen_suppresses_a_tab_that_fits_content_but_not_the_border() {
         border_fitting_tab_rect,
     );
     assert!(visible_layout.suppressed_pane_ids.is_empty());
-    assert!(!visible_layout.is_all_panes_suppressed);
+    assert!(!visible_layout.is_every_pane_suppressed);
     assert_eq!(
         visible_layout.pane_rects,
         [
             (first_pane_id, border_fitting_tab_rect),
-            (second_pane_id, Rect::empty_at_origin())
+            (second_pane_id, Rect::build_empty_at_origin())
         ]
     );
     assert_eq!(
-        border_fitting_tab_rect
-            .compute_inner_with_border()
-            .cell_size,
+        border_fitting_tab_rect.compute_inner_with_border().size,
         Size {
             column_count: 2,
             row_count: 1,

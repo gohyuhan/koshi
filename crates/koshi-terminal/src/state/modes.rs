@@ -36,8 +36,8 @@ pub enum MouseEncoding {
 ///
 /// Blink is stored apart from the shape, in
 /// [`TerminalState::is_cursor_blink_enabled`](crate::state::TerminalState::is_cursor_blink_enabled).
-/// Two writers set it: DECSCUSR (`1` = blinking block, `2` = steady block)
-/// and `?12` (att610). The last one to arrive wins.
+/// Two writers set it: DECSCUSR (`1` = blinking block, `2` = steady block) and `?12` (att610). The
+/// last one to arrive wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
     /// A box filling the whole cell.
@@ -61,31 +61,30 @@ pub enum CursorShape {
 pub(crate) struct TerminalModes {
     /// `?2004` — bracketed paste: the input layer wraps pasted text in
     /// `ESC[200~`…`ESC[201~`.
-    pub(in crate::state) bracketed_paste: bool,
+    pub(in crate::state) is_bracketed_paste_enabled: bool,
     /// Which mouse events are reported; see [`MouseTracking`].
     pub(in crate::state) mouse_tracking: MouseTracking,
     /// How mouse reports are encoded; see [`MouseEncoding`].
     pub(in crate::state) mouse_encoding: MouseEncoding,
     /// `?1007` — alternate scroll: on the alternate screen, the mouse layer
     /// sends cursor arrow keys for wheel motion.
-    pub(in crate::state) alternate_scroll: bool,
+    pub(in crate::state) is_alternate_scroll_enabled: bool,
     /// `?7` (DECAWM) — autowrap. On (the default), a glyph printed into the
     /// effective right bound parks the cursor there and the next glyph wraps to
     /// a new line. Off, the next glyph overwrites the bound in place.
-    pub(in crate::state) autowrap: bool,
+    pub(in crate::state) is_autowrap_enabled: bool,
     /// `?1` (DECCKM) — application cursor keys: the input layer sends `ESC O A`
     /// for the arrow keys; off, it sends `ESC [ A`.
-    pub(in crate::state) application_cursor_keys: bool,
+    pub(in crate::state) is_application_cursor_keys_enabled: bool,
     /// `?69` (DECLRMM) — enables DECSLRM left/right margin setting and use.
-    #[serde(default)]
-    pub(in crate::state) declrmm: bool,
+    pub(in crate::state) is_left_right_margin_mode_enabled: bool,
     /// `?5` (DECSCNM) — reverse video: the renderer swaps foreground and
     /// background across the whole screen.
-    pub(in crate::state) reverse_video: bool,
+    pub(in crate::state) is_reverse_video_enabled: bool,
     /// `?12` (att610) — cursor blink: the renderer blinks the cursor cell.
     /// Written by `?12` and by DECSCUSR, whose value carries both shape and
     /// blink; the last of the two to arrive wins.
-    pub(in crate::state) cursor_blink: bool,
+    pub(in crate::state) is_cursor_blink_enabled: bool,
     /// DECSCUSR (`CSI Ps SP q`) — the shape the cursor is drawn as, or `None`
     /// while the pane has asked for no shape (at startup, and again after
     /// `CSI 0 SP q`). With `None`, the renderer keeps the user's own terminal
@@ -93,38 +92,31 @@ pub(crate) struct TerminalModes {
     pub(in crate::state) cursor_shape: Option<CursorShape>,
     /// `?80` — Sixel scrolling: a graphic at the bottom can scroll the image
     /// area into the primary screen's scroll region.
-    #[serde(default = "default_enabled_mode")]
-    pub(in crate::state) sixel_scrolling: bool,
+    pub(in crate::state) is_sixel_scrolling_enabled: bool,
     /// `?1070` — use private Sixel color registers for each graphic.
-    #[serde(default = "default_enabled_mode")]
-    pub(in crate::state) sixel_private_color_registers: bool,
+    pub(in crate::state) is_sixel_private_color_registers_enabled: bool,
     /// `?8452` — leave the cursor to the right of a Sixel graphic.
-    #[serde(default)]
-    pub(in crate::state) sixel_cursor_right: bool,
+    pub(in crate::state) is_sixel_cursor_right_enabled: bool,
 }
 
 impl Default for TerminalModes {
     fn default() -> Self {
         TerminalModes {
-            bracketed_paste: false,
+            is_bracketed_paste_enabled: false,
             mouse_tracking: MouseTracking::Off,
             mouse_encoding: MouseEncoding::Default,
-            alternate_scroll: false,
-            autowrap: true,
-            application_cursor_keys: false,
-            declrmm: false,
-            reverse_video: false,
-            cursor_blink: false,
+            is_alternate_scroll_enabled: false,
+            is_autowrap_enabled: true,
+            is_application_cursor_keys_enabled: false,
+            is_left_right_margin_mode_enabled: false,
+            is_reverse_video_enabled: false,
+            is_cursor_blink_enabled: false,
             cursor_shape: None,
-            sixel_scrolling: true,
-            sixel_private_color_registers: true,
-            sixel_cursor_right: false,
+            is_sixel_scrolling_enabled: true,
+            is_sixel_private_color_registers_enabled: true,
+            is_sixel_cursor_right_enabled: false,
         }
     }
-}
-
-fn default_enabled_mode() -> bool {
-    true
 }
 
 #[cfg(test)]

@@ -18,7 +18,6 @@
 use std::collections::{HashMap, HashSet};
 
 use koshi_core::command::PanePlacementAnchor;
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::{Direction, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -97,16 +96,6 @@ pub enum PlacementError {
         required_size: Size,
         available_size: Size,
     },
-}
-
-impl DomainError for PlacementError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// The two trees a cross-tab placement produces.
@@ -222,7 +211,7 @@ pub fn place_pane_across_tabs(
     destination_tab_rect: Rect,
     pane_sizing: PaneSizing,
 ) -> Result<CrossTabPlacement, PlacementError> {
-    if destination_tree.contains_pane(source_pane_id) {
+    if destination_tree.has_pane(source_pane_id) {
         return Err(PlacementError::PaneInBothTrees {
             pane_id: source_pane_id,
         });
@@ -235,7 +224,7 @@ pub fn place_pane_across_tabs(
             })?;
     match placement_target {
         PlacementTarget::Swap { target_pane_id } => {
-            if source_tree.contains_pane(*target_pane_id) {
+            if source_tree.has_pane(*target_pane_id) {
                 return Err(PlacementError::PaneInBothTrees {
                     pane_id: *target_pane_id,
                 });
@@ -356,7 +345,7 @@ fn find_group_anchor_path(
                 pane_id: group_pane_id,
             });
         }
-        if !destination_tree.contains_pane(group_pane_id) {
+        if !destination_tree.has_pane(group_pane_id) {
             return Err(PlacementError::TargetPaneNotFound {
                 pane_id: group_pane_id,
             });
@@ -444,7 +433,7 @@ fn expand_stacks_and_check_fit(
     if !is_layout_within_rect(&destination_tree, destination_tab_rect, pane_sizing) {
         return Err(PlacementError::DestinationTooSmall {
             required_size: compute_minimum_size(&destination_tree, pane_sizing),
-            available_size: destination_tab_rect.cell_size,
+            available_size: destination_tab_rect.size,
         });
     }
     Ok(destination_tree)
@@ -475,7 +464,7 @@ fn find_split_path_by_leaf_set(
     layout_tree: &LayoutNode,
     pane_ids: &[PaneId],
 ) -> Option<Vec<usize>> {
-    fn find_in_subtree(
+    fn find_split_in_subtree(
         layout_node: &LayoutNode,
         wanted_pane_ids: &[PaneId],
         node_path: &mut Vec<usize>,
@@ -492,7 +481,7 @@ fn find_split_path_by_leaf_set(
         };
         for (child_index, child_node) in split.children.iter().enumerate() {
             node_path.push(child_index);
-            if find_in_subtree(child_node, wanted_pane_ids, node_path) {
+            if find_split_in_subtree(child_node, wanted_pane_ids, node_path) {
                 return true;
             }
             node_path.pop();
@@ -503,7 +492,7 @@ fn find_split_path_by_leaf_set(
     let mut wanted_pane_ids = pane_ids.to_vec();
     wanted_pane_ids.sort_unstable();
     let mut node_path = Vec::new();
-    find_in_subtree(layout_tree, &wanted_pane_ids, &mut node_path).then_some(node_path)
+    find_split_in_subtree(layout_tree, &wanted_pane_ids, &mut node_path).then_some(node_path)
 }
 
 /// The leaf set of the outermost stacked split strictly above the node at

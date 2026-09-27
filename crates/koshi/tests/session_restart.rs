@@ -30,7 +30,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
@@ -46,8 +46,8 @@ use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::PaintedFrame;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult, WireMouseAction,
+    IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
+    WireMouseAction,
 };
 use koshi_ipc::router::{
     resolve_router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
@@ -89,6 +89,19 @@ const RECONNECT_WAIT_DURATION: Duration = Duration::from_secs(75);
 /// one the router generates.
 const SESSION_SERVER_NAME: &str = "workspace";
 
+/// The bytes of a resume file cut off inside its header: no build reads a
+/// header out of them.
+const UNREADABLE_RESUME_FILE_BYTES: &[u8] = b"{\"header\":{\"resume_format\":1}";
+
+/// The line the one fresh shell of a session that did not come back shows.
+const SESSION_NOT_RESTORED_NOTICE_TEXT: &str =
+    "[koshi] The session could not be restored after the restart. Its panes were closed, and this is a new shell.";
+
+/// The descriptor number a session server started by a test inherits a
+/// pseudoterminal master under.
+#[cfg(unix)]
+const INHERITED_TERMINAL_FILE_DESCRIPTOR: i32 = 20;
+
 /// The terminal size the attaching client reports in the tests that need a pane
 /// short enough for output to scroll off the top of it.
 const SHORT_ATTACH_VIEWPORT_SIZE: Size = Size {
@@ -107,12 +120,12 @@ const TALL_ATTACH_VIEWPORT_SIZE: Size = Size {
 /// the operating system's path-length cap. Removed when the test drops it.
 fn build_short_test_directory() -> TempDir {
     #[cfg(unix)]
-    let base = PathBuf::from("/tmp");
+    let base_directory = PathBuf::from("/tmp");
     #[cfg(windows)]
-    let base = std::env::temp_dir();
+    let base_directory = std::env::temp_dir();
     tempfile::Builder::new()
         .prefix("k")
-        .tempdir_in(base)
+        .tempdir_in(base_directory)
         .expect("a temporary directory")
 }
 
@@ -173,9 +186,9 @@ impl Drop for RunningRouter {
     }
 }
 
-/// The `koshi` binary at `binary_path`, set to keep its files under `test_home_directory` rather than
-/// in the developer's own directories, and stripped of the pane identity so it
-/// never reads the session a developer runs the test from.
+/// The `koshi` binary at `binary_path`, set to keep its files under `test_home_directory` rather
+/// than in the developer's own directories, and stripped of the pane identity so it never reads the
+/// session a developer runs the test from.
 ///
 /// Every variable the platform path resolvers read is pointed at
 /// `test_home_directory`, on every platform, so the config file this process
@@ -222,15 +235,23 @@ fn start_session_server(
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> RunningSession {
-    let mut child_process = start_koshi_process(
+    start_session_server_with_command(
         build_koshi_command(binary_path, test_home_directory)
             .arg("serve-session")
             .arg(session_id.to_string())
             .arg(SESSION_SERVER_NAME)
             .arg("--runtime-dir")
-            .arg(runtime_directory)
-            .stdout(Stdio::piped()),
-    );
+            .arg(runtime_directory),
+    )
+}
+
+/// Start `process_command`, a session server's whole command line, with its
+/// standard output piped, and wait for the ready line it prints once its
+/// control socket is bound.
+fn start_session_server_with_command(
+    process_command: &mut std::process::Command,
+) -> RunningSession {
+    let mut child_process = start_koshi_process(process_command.stdout(Stdio::piped()));
     let mut ready_output_reader = BufReader::new(
         child_process
             .stdout
@@ -345,7 +366,6 @@ fn submit_session_command(
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(Some(session_id), Some(client_id)),
-        SystemTime::now(),
         command,
     );
     match send_session_request(
@@ -461,8 +481,8 @@ fn wait_for_restarted_session_endpoint(
         if let Ok(loaded_endpoint) = EndpointFile::load_from_path(
             &EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
         ) {
-            if loaded_endpoint.connection_token.expose()
-                != endpoint_before_restart.connection_token.expose()
+            if loaded_endpoint.connection_token.expose_secret()
+                != endpoint_before_restart.connection_token.expose_secret()
             {
                 return loaded_endpoint;
             }
@@ -517,7 +537,7 @@ struct AttachedClientStream {
 }
 
 impl AttachedClientStream {
-    /// Join `session_id` as a viewing client at `viewport`, the way the
+    /// Join `session_id` as a viewing client at `viewport_size`, the way the
     /// attached client joins it: Hello, then Attach on the same connection.
     ///
     /// `resume` names the client record to come back as after the session
@@ -525,7 +545,7 @@ impl AttachedClientStream {
     fn attach_test_client(
         runtime_directory: &Path,
         session_id: SessionId,
-        viewport: Size,
+        viewport_size: Size,
         resume: Option<ClientId>,
     ) -> (AttachedClientStream, EndpointFile) {
         let (mut connection, endpoint_file) =
@@ -533,8 +553,7 @@ impl AttachedClientStream {
         let attach_request = IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
-                viewport,
-                event_filter: EventFilterSpec::All,
+                viewport_size,
                 resume_client_id: resume,
                 resume_token: None,
                 pane_area: None,
@@ -561,11 +580,11 @@ impl AttachedClientStream {
         assert_eq!(joined, session_id);
 
         let (mut session_event_reader, request_writer) = connection.split();
-        let (session_events_tx, session_events) = mpsc::channel();
+        let (session_events_sender, session_events) = mpsc::channel();
         std::thread::spawn(move || loop {
             let session_event_result = session_event_reader.recv::<SessionEvent>();
             let is_stream_ended = session_event_result.is_err();
-            if session_events_tx.send(session_event_result).is_err() || is_stream_ended {
+            if session_events_sender.send(session_event_result).is_err() || is_stream_ended {
                 return;
             }
         });
@@ -841,7 +860,7 @@ fn get_retained_line_count(painted_frame: &PaintedFrame, pane_id: PaneId) -> usi
         .iter()
         .find(|pane_snapshot| pane_snapshot.pane_id == pane_id)
         .unwrap_or_else(|| panic!("the frame carries no content for pane {pane_id}"))
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count
 }
 
@@ -1212,7 +1231,6 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(attached_client_stream.client_id),
-        SystemTime::now(),
         Command::WriteToPane(WriteToPaneArgs {
             pane_id: Some(input_pane_id),
             input_bytes: b"typed\r".to_vec(),
@@ -1521,7 +1539,7 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
             session_id
         ))
         .err()
-        .map(|error| error.kind()),
+        .map(|io_error| io_error.kind()),
         Some(std::io::ErrorKind::NotFound),
         "the state file is removed once the session came back from it"
     );
@@ -1783,8 +1801,8 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
         ))
         .expect("the session still advertises its socket")
         .connection_token
-        .expose(),
-        endpoint_before_restart.connection_token.expose()
+        .expose_secret(),
+        endpoint_before_restart.connection_token.expose_secret()
     );
     let mut expected_pane_lifecycles = vec![
         (seeded_pane_id, PaneLifecycle::Running),
@@ -2096,16 +2114,7 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
         },
         &koshi_runtime::resume::ResumeBody {
             session_by_id: std::collections::HashMap::new(),
-            terminal_state_by_pane_id: std::collections::HashMap::new(),
-            undecoded_bytes_by_pane_id: std::collections::HashMap::new(),
-            graphics_undecoded_bytes_by_pane_id: std::collections::HashMap::new(),
-            graphics_screen_continuation_by_pane_id: std::collections::HashMap::new(),
-            graphics_screen_wrapper_active_by_pane_id: std::collections::HashMap::new(),
-            graphics_tmux_continuation_by_pane_id: std::collections::HashMap::new(),
-            graphics_tmux_wrapper_active_by_pane_id: std::collections::HashMap::new(),
-            graphics_events_by_pane_id: std::collections::HashMap::new(),
-            graphics_transport_by_pane_id: std::collections::HashMap::new(),
-            synchronized_output_by_pane_id: std::collections::HashMap::new(),
+            carried_pane_state_by_pane_id: std::collections::HashMap::new(),
             carried_quit: None,
         },
     )
@@ -2241,4 +2250,211 @@ fn send_router_request(
         connection.recv().expect("the router answers the request");
     assert_eq!(router_response.request_id, Some(2));
     router_response.answer_result
+}
+
+/// `pane_id`'s rows in `painted_frame` joined into one line with every space
+/// dropped, so a line that wrapped across rows reads back whole.
+fn get_pane_text_without_spaces(painted_frame: &PaintedFrame, pane_id: PaneId) -> String {
+    get_pane_rows(painted_frame, pane_id)
+        .concat()
+        .replace(' ', "")
+}
+
+#[test]
+fn a_resume_file_whose_header_does_not_read_comes_back_as_one_fresh_shell_showing_the_notice() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let binary_path = copy_koshi_binary(test_home_directory.path());
+    let session_id = SessionId::new();
+    let resume_file_path = resolve_resume_file_path(runtime_directory.path(), session_id);
+    std::fs::write(&resume_file_path, UNREADABLE_RESUME_FILE_BYTES)
+        .expect("the cut-off resume file is placed");
+
+    let _session_server_process = start_session_server_with_command(
+        build_koshi_command(&binary_path, test_home_directory.path())
+            .arg("serve-session")
+            .arg(session_id.to_string())
+            .arg(SESSION_SERVER_NAME)
+            .arg("--runtime-dir")
+            .arg(runtime_directory.path())
+            .arg("--resume")
+            .arg(&resume_file_path),
+    );
+
+    let fresh_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
+    let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
+        runtime_directory.path(),
+        session_id,
+        TALL_ATTACH_VIEWPORT_SIZE,
+        None,
+    );
+    let notice_text_without_spaces = SESSION_NOT_RESTORED_NOTICE_TEXT.replace(' ', "");
+    let painted_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
+        get_pane_text_without_spaces(painted_frame, fresh_pane_id)
+            .starts_with(&notice_text_without_spaces)
+    });
+    assert!(
+        get_pane_text_without_spaces(&painted_frame, fresh_pane_id)
+            .starts_with(&notice_text_without_spaces),
+        "{}",
+        describe_painted_frame(&painted_frame)
+    );
+    assert!(
+        !resume_file_path.exists(),
+        "the resume file is taken off the disk"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ended_child_go() {
+    use std::os::unix::process::CommandExt;
+
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let binary_path = copy_koshi_binary(test_home_directory.path());
+    let session_id = SessionId::new();
+    let resume_file_path = resolve_resume_file_path(runtime_directory.path(), session_id);
+    std::fs::write(&resume_file_path, UNREADABLE_RESUME_FILE_BYTES)
+        .expect("the cut-off resume file is placed");
+    let terminal_master_file_descriptor = unsafe {
+        libc::open(
+            c"/dev/ptmx".as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
+    assert!(
+        terminal_master_file_descriptor >= 0,
+        "the pseudoterminal master opens"
+    );
+    assert_eq!(unsafe { libc::grantpt(terminal_master_file_descriptor) }, 0);
+    assert_eq!(
+        unsafe { libc::unlockpt(terminal_master_file_descriptor) },
+        0
+    );
+    let terminal_path = std::ffi::CString::new(
+        koshi_pty::portable::find_terminal_master_name(terminal_master_file_descriptor)
+            .expect("the master names its terminal"),
+    )
+    .expect("the terminal path holds no NUL byte");
+    let terminal_follower_file_descriptor = unsafe {
+        libc::open(
+            terminal_path.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    assert!(
+        terminal_follower_file_descriptor >= 0,
+        "the other end of the pseudoterminal opens"
+    );
+    let mut process_id_pipe_file_descriptors: [libc::c_int; 2] = [0; 2];
+    assert_eq!(
+        unsafe { libc::pipe(process_id_pipe_file_descriptors.as_mut_ptr()) },
+        0
+    );
+    let [process_id_read_file_descriptor, process_id_write_file_descriptor] =
+        process_id_pipe_file_descriptors;
+    for pipe_file_descriptor in process_id_pipe_file_descriptors {
+        assert_eq!(
+            unsafe { libc::fcntl(pipe_file_descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+    }
+    let mut process_command = build_koshi_command(&binary_path, test_home_directory.path());
+    process_command
+        .arg("serve-session")
+        .arg(session_id.to_string())
+        .arg(SESSION_SERVER_NAME)
+        .arg("--runtime-dir")
+        .arg(runtime_directory.path())
+        .arg("--resume")
+        .arg(&resume_file_path);
+    // The session server starts as the parent of a child that ends half a
+    // second later, and holds the master under
+    // `INHERITED_TERMINAL_FILE_DESCRIPTOR`. The child's process id goes down
+    // the pipe.
+    unsafe {
+        process_command.pre_exec(move || {
+            let ended_child_process_id = libc::fork();
+            if ended_child_process_id == 0 {
+                libc::close(terminal_master_file_descriptor);
+                libc::usleep(500_000);
+                libc::_exit(0);
+            }
+            if ended_child_process_id < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::write(
+                process_id_write_file_descriptor,
+                (&ended_child_process_id as *const libc::pid_t).cast(),
+                std::mem::size_of::<libc::pid_t>(),
+            );
+            if libc::dup2(
+                terminal_master_file_descriptor,
+                INHERITED_TERMINAL_FILE_DESCRIPTOR,
+            ) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let _session_server_process = start_session_server_with_command(&mut process_command);
+    unsafe {
+        libc::close(terminal_master_file_descriptor);
+        libc::close(process_id_write_file_descriptor);
+    }
+    let mut ended_child_process_id: libc::pid_t = 0;
+    assert_eq!(
+        unsafe {
+            libc::read(
+                process_id_read_file_descriptor,
+                (&mut ended_child_process_id as *mut libc::pid_t).cast(),
+                std::mem::size_of::<libc::pid_t>(),
+            )
+        },
+        std::mem::size_of::<libc::pid_t>() as isize,
+        "the ended child's process id arrives"
+    );
+
+    let release_deadline = Instant::now() + WAIT_DURATION;
+    loop {
+        let mut read_byte = [0u8; 1];
+        let read_byte_count = unsafe {
+            libc::read(
+                terminal_follower_file_descriptor,
+                read_byte.as_mut_ptr().cast(),
+                1,
+            )
+        };
+        let read_error_number = std::io::Error::last_os_error().raw_os_error();
+        let is_master_open = read_byte_count > 0
+            || (read_byte_count < 0
+                && matches!(read_error_number, Some(libc::EAGAIN) | Some(libc::EINTR)));
+        if !is_master_open {
+            break;
+        }
+        assert!(
+            Instant::now() < release_deadline,
+            "the inherited terminal is still open"
+        );
+        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    }
+    while unsafe { libc::kill(ended_child_process_id, 0) } == 0 {
+        assert!(
+            Instant::now() < release_deadline,
+            "the ended child {ended_child_process_id} was never reaped"
+        );
+        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    }
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "the ended child is gone, not merely unreachable"
+    );
+    unsafe {
+        libc::close(terminal_follower_file_descriptor);
+        libc::close(process_id_read_file_descriptor);
+    }
 }

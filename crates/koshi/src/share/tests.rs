@@ -37,14 +37,14 @@ fn parse_share_command(argv: &[&str]) -> ShareCommand {
 }
 
 /// A fixed session id so scope cells and JSON are exact.
-fn fixed_session_id() -> SessionId {
+fn build_fixed_session_id() -> SessionId {
     SessionId::from_uuid(
         Uuid::parse_str("0192f0c1-2345-7000-8000-000000000001").expect("literal UUID is valid"),
     )
 }
 
 /// The moment `seconds` after the Unix epoch.
-fn timestamp_at_seconds(elapsed_seconds: u64) -> SystemTime {
+fn build_timestamp_at_seconds(elapsed_seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(elapsed_seconds)
 }
 
@@ -260,7 +260,7 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
     let rendered_output = output::render_share_grant(
         &connection_token,
         "alice",
-        &TokenScope::Session(fixed_session_id()),
+        &TokenScope::Session(build_fixed_session_id()),
         true,
     ) + &output::render_remote_ready("alice", &RemoteReady::NoAddress);
 
@@ -280,7 +280,7 @@ fn a_revoke_names_every_grant_it_stopped() {
     assert_eq!(
         output::render_share_revoke(&[
             TokenScope::HostWide,
-            TokenScope::Session(fixed_session_id()),
+            TokenScope::Session(build_fixed_session_id()),
         ]),
         "the grant on host stopped working.\n\
          the grant on session-0192f0c1-2345-7000-8000-000000000001 stopped working.\n"
@@ -301,18 +301,18 @@ fn build_sample_token_entries() -> Vec<TokenEntry> {
         TokenEntry {
             identity: "alice".to_string(),
             scope: TokenScope::HostWide,
-            issued_at: timestamp_at_seconds(1_000),
-            expires_at: Some(timestamp_at_seconds(87_400)),
-            last_used_at: Some(timestamp_at_seconds(2_000)),
+            issued_at: build_timestamp_at_seconds(1_000),
+            expires_at: Some(build_timestamp_at_seconds(87_400)),
+            last_used_at: Some(build_timestamp_at_seconds(2_000)),
             revoked_at: None,
         },
         TokenEntry {
             identity: "bob".to_string(),
-            scope: TokenScope::Session(fixed_session_id()),
-            issued_at: timestamp_at_seconds(3_000),
+            scope: TokenScope::Session(build_fixed_session_id()),
+            issued_at: build_timestamp_at_seconds(3_000),
             expires_at: None,
             last_used_at: None,
-            revoked_at: Some(timestamp_at_seconds(4_000)),
+            revoked_at: Some(build_timestamp_at_seconds(4_000)),
         },
     ]
 }
@@ -828,13 +828,12 @@ impl StandInRouter {
 
     /// Answer one request, recording the scope of every `RevokeToken`.
     ///
-    /// `ListTokens` answers with the held entries. `RevokeToken` answers with
-    /// the scope of each held grant it stopped, by the rule
+    /// `ListTokens` answers with the held entries. `RevokeToken` answers with the scope of each
+    /// held grant it stopped, by the rule
     /// [`TokenStore::revoke_token_grants`](koshi_ipc::remote_tokens::TokenStore::revoke_token_grants)
-    /// uses: the identity matches, the grant still stands, and a named scope
-    /// matches exactly. A request that matches nothing answers `Revoked([])`,
-    /// which is what the router sends when a `--session` revoke finds no grant
-    /// scoped to that session.
+    /// uses: the identity matches, the grant still stands, and a named scope matches exactly. A
+    /// request that matches nothing answers `Revoked([])`, which is what the router sends when a
+    /// `--session` revoke finds no grant scoped to that session.
     fn submit_router_request(
         &mut self,
         router_request_kind: RouterRequestKind,
@@ -910,19 +909,19 @@ fn the_host_wide_warning_names_the_grant_and_what_stopping_both_costs() {
 }
 
 /// Run [`revoke_share_grants`] for `identity` narrowed to `session_scope`
-/// against `stand_in_router`, answering the confirm with `confirm_answer`, and
+/// against `stand_in_router`, answering the confirm with `is_confirmed`, and
 /// hand back each requested revoke scope.
 /// `RevokeToken` named.
 fn run_session_revoke(
     identity: &str,
     session_scope: TokenScope,
     mut stand_in_router: StandInRouter,
-    confirm_answer: bool,
+    is_confirmed: bool,
 ) -> Vec<Option<TokenScope>> {
     revoke_share_grants(
         identity,
         Some(&session_scope),
-        |_| confirm_answer,
+        |_| is_confirmed,
         |router_request_kind| stand_in_router.submit_router_request(router_request_kind),
     )
     .expect("the router answers");

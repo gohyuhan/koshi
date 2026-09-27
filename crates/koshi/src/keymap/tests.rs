@@ -9,7 +9,6 @@ use koshi_config::key_sequence::parse_sequence;
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
 use koshi_core::key::{KeySequence, ModFlags};
-use koshi_core::resolve::ActionArgs;
 
 use super::*;
 
@@ -33,7 +32,6 @@ fn build_partial_binding(
         BoundAction {
             action_reference: ActionReference::from_str(action_reference_text)
                 .expect("valid action reference"),
-            action_arguments: ActionArgs::None,
         },
     );
     let mut mode_bindings_by_name = BTreeMap::new();
@@ -198,7 +196,7 @@ fn an_admitted_user_layer_folds_its_timeout_and_depth_fields_onto_the_defaults()
         Some(PartialKeybindingsConfig {
             chord_timeout_ms: Some(750),
             which_key_delay_ms: Some(250),
-            max_chord_depth: Some(6),
+            maximum_chord_depth: Some(6),
             ..PartialKeybindingsConfig::default()
         }),
         None,
@@ -207,7 +205,7 @@ fn an_admitted_user_layer_folds_its_timeout_and_depth_fields_onto_the_defaults()
     assert!(!view.is_reverted_to_defaults);
     assert_eq!(view.config.chord_timeout_ms, 750);
     assert_eq!(view.config.which_key_delay_ms, 250);
-    assert_eq!(view.config.max_chord_depth, 6);
+    assert_eq!(view.config.maximum_chord_depth, 6);
 }
 
 #[test]

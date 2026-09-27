@@ -28,7 +28,7 @@ use crate::output;
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::router_client::{query_running_router_remote_connections, RemoteConnections};
-use koshi_observability::logging::session_log_path;
+use koshi_observability::logging::resolve_session_log_path;
 use koshi_paths::RuntimeDirectoryRule;
 
 /// What one check concluded.
@@ -130,10 +130,6 @@ const DOCTOR_CHECKS: &[DoctorCheck] = &[
         run_check: check_session_log_file,
     },
     DoctorCheck {
-        check_name: "plugins directory",
-        run_check: check_plugins_directory,
-    },
-    DoctorCheck {
         check_name: "router",
         run_check: check_router,
     },
@@ -193,9 +189,6 @@ pub struct DoctorContext {
     /// the message naming what is wrong when `KOSHI` is set and the rest of
     /// the in-session identity is missing or malformed.
     pub session_log_file: Result<Option<PathBuf>, String>,
-    /// `plugins` under the config directory, or `None` when this machine
-    /// reports no home directory.
-    pub plugins_directory: Option<PathBuf>,
     /// The machine-wide directory the shared session sockets live in:
     /// `koshi.kdl`'s `shared-sessions-dir` when it names one, else this
     /// platform's own. `None` when neither names one.
@@ -234,9 +227,6 @@ impl DoctorContext {
         let (runtime_directory, runtime_directory_rule) =
             koshi_paths::resolve_runtime_directory_with_rule().unzip();
         let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
-        let plugins_directory = config_directory
-            .as_ref()
-            .map(|config_directory| config_directory.join("plugins"));
         let server_config = koshi_link::config::load_current_server_config();
         let shared_directory = server_config
             .shared_sessions_directory
@@ -265,15 +255,15 @@ impl DoctorContext {
             log_directory: koshi_observability::logging::resolve_log_directory(),
             session_log_file: InSessionContext::from_env()
                 .map(|in_session_context| {
-                    in_session_context
-                        .map(|in_session_context| session_log_path(in_session_context.session_id))
+                    in_session_context.map(|in_session_context| {
+                        resolve_session_log_path(in_session_context.session_id)
+                    })
                 })
                 .map_err(|in_session_error| in_session_error.to_string()),
-            plugins_directory,
             shared_directory,
             shell: match &server_config.terminal.default_shell {
                 Some(program) => PathBuf::from(program),
-                None => SpawnSpec::default_shell(None, BTreeMap::new()).program,
+                None => SpawnSpec::build_default_shell(None, BTreeMap::new()).program,
             },
             shell_source: match &server_config.terminal.default_shell {
                 Some(_) => ShellSource::Config,
@@ -522,31 +512,6 @@ fn check_session_log_file(doctor_context: &DoctorContext) -> DoctorOutcome {
     }
 }
 
-fn check_plugins_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
-    let Some(plugins_directory) = doctor_context.plugins_directory.as_deref() else {
-        return build_no_home_directory_outcome("plugins");
-    };
-    let displayed_path = plugins_directory.display();
-    if !plugins_directory.exists() {
-        return match std::fs::symlink_metadata(plugins_directory) {
-            Ok(_) => DoctorOutcome::build_failure_outcome(
-                format!("{displayed_path} is there and koshi cannot read it as a directory"),
-                &format!("remove {displayed_path}, or point it at a directory"),
-            ),
-            Err(_) => {
-                DoctorOutcome::build_success_outcome(format!("{displayed_path} does not exist"))
-            }
-        };
-    }
-    if let Err(plugins_directory_error) = std::fs::read_dir(plugins_directory) {
-        return DoctorOutcome::build_failure_outcome(
-            format!("{displayed_path} cannot be read: {plugins_directory_error}"),
-            &format!("make sure you own {displayed_path}"),
-        );
-    }
-    DoctorOutcome::build_success_outcome(format!("{displayed_path} is readable"))
-}
-
 fn check_session_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
     if !doctor_context.is_other_user_access_allowed {
         let Some(runtime_directory) = doctor_context.runtime_directory.as_deref() else {
@@ -739,7 +704,7 @@ enum ShellAvailability {
 /// list, and a filesystem mounted without execute permission. It is made
 /// against this process's real user and group.
 #[cfg(unix)]
-fn user_may_execute(shell_path: &Path) -> bool {
+fn can_user_execute(shell_path: &Path) -> bool {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -766,7 +731,7 @@ fn inspect_shell_file(shell_path: &Path) -> ShellAvailability {
         return ShellAvailability::Missing;
     }
     #[cfg(unix)]
-    if !user_may_execute(shell_path) {
+    if !can_user_execute(shell_path) {
         return ShellAvailability::NotExecutable;
     }
     ShellAvailability::Runnable

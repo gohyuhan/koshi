@@ -31,7 +31,6 @@ use koshi_core::geometry::{Direction, Rect};
 use koshi_core::ids::{CommandId, PaneId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey, PendingKeySequence};
 use koshi_core::lock::LockMode;
-use koshi_core::resolve::ActionArgs;
 use koshi_ipc::placement::{PanePlacementSizing, PanePlacementSnapshot, PanePlacementTabSnapshot};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::neighbor::select_directional_neighbor;
@@ -500,7 +499,7 @@ impl Client {
     /// can wake for it. Prefix-only sequences carry no deadline and never wake
     /// it.
     #[must_use]
-    pub fn next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
+    pub fn compute_next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
         self.pending_key_sequence
             .as_ref()
             .and_then(|pending_key_sequence| pending_key_sequence.deadline)
@@ -533,7 +532,7 @@ impl Client {
     }
 
     /// Re-open the prefix of a sequence whose action the registry marks
-    /// `continuous`, so a repeated final chord repeats the action: `<C-p> r →`
+    /// `is_continuous`, so a repeated final chord repeats the action: `<C-p> r →`
     /// leaves `<C-p> r` open, and each further `→` resizes again.
     ///
     /// Only multi-chord sequences have a prefix to hold. The re-armed prefix
@@ -577,7 +576,7 @@ pub(crate) fn is_same_tab_placement_noop(
     }
     let layout_target = crate::terminal::build_layout_placement_target(placement_target);
     let source_tab_snapshot = &placement_snapshot.source_tab_snapshot;
-    let tab_rect = Rect::from_size_at_origin(source_tab_snapshot.effective_cell_size);
+    let tab_rect = Rect::from_size_at_origin(source_tab_snapshot.tab_size);
     let pane_sizing = PaneSizing {
         minimum_size: placement_snapshot.pane_sizing.minimum_size,
         gap_cell_count: placement_snapshot.pane_sizing.gap_cell_count,
@@ -617,7 +616,7 @@ pub(crate) fn build_placement_destinations(
         minimum_size: pane_sizing.minimum_size,
         gap_cell_count: pane_sizing.gap_cell_count,
     };
-    let tab_rect = Rect::from_size_at_origin(destination_tab_snapshot.effective_cell_size);
+    let tab_rect = Rect::from_size_at_origin(destination_tab_snapshot.tab_size);
     let layout_solve = solve_layout_with_mode(
         &destination_tab_snapshot.layout_tree,
         LayoutMode::Tiled,
@@ -739,8 +738,8 @@ fn find_smallest_insertion_span(
 
 /// Return the number of cells `insertion_span` covers: a 4x3 span covers `12`.
 fn compute_span_cell_count(insertion_span: &InsertionSpan) -> u32 {
-    u32::from(insertion_span.span_rect.cell_size.column_count)
-        * u32::from(insertion_span.span_rect.cell_size.row_count)
+    u32::from(insertion_span.span_rect.size.column_count)
+        * u32::from(insertion_span.span_rect.size.row_count)
 }
 
 /// Return the insertion anchor named by a placement target.
@@ -761,6 +760,5 @@ fn build_unlock_bound_action() -> BoundAction {
     BoundAction {
         action_reference: ActionReference::from_core_action_name("unlock")
             .expect("the reserved unlock action name satisfies the action-name grammar"),
-        action_arguments: ActionArgs::None,
     }
 }

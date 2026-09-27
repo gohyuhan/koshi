@@ -5,19 +5,19 @@ use super::*;
 #[test]
 fn terminal_modes_default_matches_the_documented_startup_state() {
     let modes = TerminalModes::default();
-    assert!(!modes.bracketed_paste);
+    assert!(!modes.is_bracketed_paste_enabled);
     assert_eq!(modes.mouse_tracking, MouseTracking::Off);
     assert_eq!(modes.mouse_encoding, MouseEncoding::Default);
-    assert!(!modes.alternate_scroll);
+    assert!(!modes.is_alternate_scroll_enabled);
     // Autowrap (DECAWM `?7`), Sixel scrolling, and private Sixel registers
     // start on; the other mode flags start off.
-    assert!(modes.autowrap);
-    assert!(modes.sixel_scrolling);
-    assert!(modes.sixel_private_color_registers);
-    assert!(!modes.sixel_cursor_right);
-    assert!(!modes.application_cursor_keys);
-    assert!(!modes.reverse_video);
-    assert!(!modes.cursor_blink);
+    assert!(modes.is_autowrap_enabled);
+    assert!(modes.is_sixel_scrolling_enabled);
+    assert!(modes.is_sixel_private_color_registers_enabled);
+    assert!(!modes.is_sixel_cursor_right_enabled);
+    assert!(!modes.is_application_cursor_keys_enabled);
+    assert!(!modes.is_reverse_video_enabled);
+    assert!(!modes.is_cursor_blink_enabled);
     assert_eq!(modes.cursor_shape, None);
 }
 
@@ -86,31 +86,31 @@ fn terminal_modes_default_serializes_to_the_resume_body_shape() {
     let json = serde_json::to_string(&TerminalModes::default()).expect("serializes");
     assert_eq!(
         json,
-        r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alternate_scroll":false,"autowrap":true,"application_cursor_keys":false,"declrmm":false,"reverse_video":false,"cursor_blink":false,"cursor_shape":null,"sixel_scrolling":true,"sixel_private_color_registers":true,"sixel_cursor_right":false}"#
+        r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"is_cursor_blink_enabled":false,"cursor_shape":null,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#
     );
 }
 
 #[test]
 fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
     let modes = TerminalModes {
-        bracketed_paste: true,
+        is_bracketed_paste_enabled: true,
         mouse_tracking: MouseTracking::AnyMotion,
         mouse_encoding: MouseEncoding::Sgr,
-        alternate_scroll: true,
-        autowrap: false,
-        application_cursor_keys: true,
-        declrmm: true,
-        reverse_video: true,
-        cursor_blink: true,
+        is_alternate_scroll_enabled: true,
+        is_autowrap_enabled: false,
+        is_application_cursor_keys_enabled: true,
+        is_left_right_margin_mode_enabled: true,
+        is_reverse_video_enabled: true,
+        is_cursor_blink_enabled: true,
         cursor_shape: Some(CursorShape::Bar),
-        sixel_scrolling: false,
-        sixel_private_color_registers: false,
-        sixel_cursor_right: true,
+        is_sixel_scrolling_enabled: false,
+        is_sixel_private_color_registers_enabled: false,
+        is_sixel_cursor_right_enabled: true,
     };
     let json = serde_json::to_string(&modes).expect("serializes");
     assert_eq!(
         json,
-        r#"{"bracketed_paste":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","alternate_scroll":true,"autowrap":false,"application_cursor_keys":true,"declrmm":true,"reverse_video":true,"cursor_blink":true,"cursor_shape":"Bar","sixel_scrolling":false,"sixel_private_color_registers":false,"sixel_cursor_right":true}"#
+        r#"{"is_bracketed_paste_enabled":true,"mouse_tracking":"AnyMotion","mouse_encoding":"Sgr","is_alternate_scroll_enabled":true,"is_autowrap_enabled":false,"is_application_cursor_keys_enabled":true,"is_left_right_margin_mode_enabled":true,"is_reverse_video_enabled":true,"is_cursor_blink_enabled":true,"cursor_shape":"Bar","is_sixel_scrolling_enabled":false,"is_sixel_private_color_registers_enabled":false,"is_sixel_cursor_right_enabled":true}"#
     );
     let read_back: TerminalModes = serde_json::from_str(&json).expect("reads back");
     assert_eq!(read_back, modes);
@@ -118,20 +118,20 @@ fn terminal_modes_with_every_value_flipped_round_trip_through_json() {
 
 #[test]
 fn a_terminal_modes_body_without_cursor_shape_reads_back_as_none() {
-    let serialized_modes_json = r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alternate_scroll":false,"autowrap":true,"application_cursor_keys":false,"reverse_video":false,"cursor_blink":false}"#;
+    let serialized_modes_json = r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"is_cursor_blink_enabled":false,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#;
     let read_back: TerminalModes = serde_json::from_str(serialized_modes_json).expect("reads back");
     assert_eq!(read_back, TerminalModes::default());
 }
 
 #[test]
 fn a_terminal_modes_body_missing_a_flag_is_rejected() {
-    let serialized_modes_json = r#"{"bracketed_paste":false,"mouse_tracking":"Off","mouse_encoding":"Default","alternate_scroll":false,"autowrap":true,"application_cursor_keys":false,"reverse_video":false,"cursor_shape":null}"#;
-    let error = serde_json::from_str::<TerminalModes>(serialized_modes_json)
-        .expect_err("cursor_blink is required");
+    let serialized_modes_json = r#"{"is_bracketed_paste_enabled":false,"mouse_tracking":"Off","mouse_encoding":"Default","is_alternate_scroll_enabled":false,"is_autowrap_enabled":true,"is_application_cursor_keys_enabled":false,"is_left_right_margin_mode_enabled":false,"is_reverse_video_enabled":false,"cursor_shape":null,"is_sixel_scrolling_enabled":true,"is_sixel_private_color_registers_enabled":true,"is_sixel_cursor_right_enabled":false}"#;
+    let deserialize_error = serde_json::from_str::<TerminalModes>(serialized_modes_json)
+        .expect_err("is_cursor_blink_enabled is required");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         format!(
-            "missing field `cursor_blink` at line 1 column {}",
+            "missing field `is_cursor_blink_enabled` at line 1 column {}",
             serialized_modes_json.len()
         )
     );
@@ -153,9 +153,10 @@ fn cursor_shape_serializes_as_its_variant_name() {
 
 #[test]
 fn an_unknown_cursor_shape_name_is_rejected() {
-    let error = serde_json::from_str::<CursorShape>(r#""Circle""#).expect_err("no such shape");
+    let deserialize_error =
+        serde_json::from_str::<CursorShape>(r#""Circle""#).expect_err("no such shape");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "unknown variant `Circle`, expected one of `Block`, `Underline`, `Bar` at line 1 column 8"
     );
 }

@@ -28,12 +28,11 @@ fn build_alt_chord(key_character: char) -> KeyChord {
     KeyChord::from_parts(ModFlags::ALT, Key::Char(key_character))
 }
 
-/// A core action bound with no preset arguments.
+/// A binding to the core action `action_name`.
 fn build_bound_action(action_name: &str) -> BoundAction {
     BoundAction {
         action_reference: ActionReference::from_core_action_name(action_name)
             .expect("a core action name satisfies the grammar"),
-        action_arguments: koshi_core::resolve::ActionArgs::None,
     }
 }
 
@@ -245,7 +244,6 @@ fn a_complete_binding_reports_an_exact_match_and_no_longer_sequence() {
         Some(BoundAction {
             action_reference: ActionReference::from_core_action_name("quit")
                 .expect("`core:quit` is a valid action name"),
-            action_arguments: koshi_core::resolve::ActionArgs::None,
         })
     );
     assert!(
@@ -450,12 +448,12 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
 
 #[test]
 fn a_binding_the_resolver_refuses_yields_no_hint() {
-    // `core:copy-selection` is registered without an implementation in this
-    // build, so the merge drops the binding and no hint carries it.
-    let key = KeySequence::from(build_control_chord('y'));
+    // `core:copy-selection` is not a registered action, so the merge drops the
+    // binding and no hint carries it.
+    let key_sequence = KeySequence::from(build_control_chord('y'));
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
-        BTreeMap::from([(key.clone(), build_bound_action("copy-selection"))]),
+        BTreeMap::from([(key_sequence.clone(), build_bound_action("copy-selection"))]),
         BTreeSet::new(),
     );
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
@@ -465,11 +463,11 @@ fn a_binding_the_resolver_refuses_yields_no_hint() {
         hints
             .hint_bindings
             .iter()
-            .find(|hint_binding| hint_binding.key_sequence == key),
+            .find(|hint_binding| hint_binding.key_sequence == key_sequence),
         None
     );
     assert_eq!(
-        hint_catalog.match_sequence(LockMode::Normal, &key),
+        hint_catalog.match_sequence(LockMode::Normal, &key_sequence),
         KeyMatch::default()
     );
 }
@@ -531,7 +529,7 @@ fn every_locked_entry_firing_unlock_is_pinned() {
 #[test]
 fn a_chord_depth_cap_of_one_drops_every_multi_chord_default() {
     let hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
-        max_chord_depth: 1,
+        maximum_chord_depth: 1,
         ..KeybindingsConfig::default()
     });
     let hints = hint_catalog.build_hints_for_mode(LockMode::Normal);
@@ -625,10 +623,10 @@ fn mark_reverted_to_defaults_changes_only_the_flag() {
 
 #[test]
 fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
-    let key = KeySequence::from(build_alt_chord('u'));
+    let key_sequence = KeySequence::from(build_alt_chord('u'));
     let hint_catalog = build_hint_catalog_with_user(
         "vim",
-        BTreeMap::from([(key.clone(), build_bound_action("quit"))]),
+        BTreeMap::from([(key_sequence.clone(), build_bound_action("quit"))]),
         BTreeSet::new(),
     );
 
@@ -638,12 +636,12 @@ fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
             hints
                 .hint_bindings
                 .iter()
-                .find(|hint_binding| hint_binding.key_sequence == key),
+                .find(|hint_binding| hint_binding.key_sequence == key_sequence),
             None,
             "{lock_mode:?} carries the binding from the unregistered mode"
         );
         assert_eq!(
-            hint_catalog.match_sequence(lock_mode, &key),
+            hint_catalog.match_sequence(lock_mode, &key_sequence),
             KeyMatch::default()
         );
     }
@@ -660,7 +658,7 @@ fn a_binding_in_a_mode_the_build_does_not_register_yields_no_hint() {
 #[test]
 fn a_chord_depth_cap_of_zero_drops_every_binding_and_keeps_the_escape_chord() {
     let hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
-        max_chord_depth: 0,
+        maximum_chord_depth: 0,
         ..KeybindingsConfig::default()
     });
 
@@ -706,13 +704,13 @@ fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
 
 #[test]
 fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
-    let key = KeySequence::from_first_and_rest(
+    let key_sequence = KeySequence::from_first_and_rest(
         KeybindingsConfig::RESERVED_UNLOCK,
         vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))],
     );
     let hint_catalog = build_hint_catalog_with_user(
         "locked",
-        BTreeMap::from([(key.clone(), build_bound_action("quit"))]),
+        BTreeMap::from([(key_sequence.clone(), build_bound_action("quit"))]),
         BTreeSet::new(),
     );
     let hints = hint_catalog.build_hints_for_mode(LockMode::Locked);
@@ -722,11 +720,11 @@ fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
         hints
             .hint_bindings
             .iter()
-            .find(|hint_binding| hint_binding.key_sequence == key),
+            .find(|hint_binding| hint_binding.key_sequence == key_sequence),
         None
     );
     assert_eq!(
-        hint_catalog.match_sequence(LockMode::Locked, &key),
+        hint_catalog.match_sequence(LockMode::Locked, &key_sequence),
         KeyMatch::default()
     );
     // The one-chord unlock stays live, and the dropped sequence opens nothing.

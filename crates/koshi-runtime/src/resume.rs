@@ -5,10 +5,10 @@
 //! the next image must take back into one JSON file —
 //! `session-<uuid>.resume`, beside the endpoint file.
 //!
-//! The **header** ([`ResumeHeader`]) names the session and every live pane. Its
-//! shape never changes: every field added to it carries `#[serde(default)]`, so
-//! a build that cannot read the body still reads the header and can close every
-//! descriptor and end every child.
+//! The **header** ([`ResumeHeader`]) names the session and every live pane.
+//! Every field added to it carries `#[serde(default)]`, so a build that cannot
+//! read the body still reads the header and takes every pane back. A header
+//! whose keys are not the field names below does not read.
 //!
 //! The **body** ([`ResumeBody`]) carries the fields that type names. Its shape
 //! does change, so
@@ -17,13 +17,17 @@
 //! anything outside that range. This build reads and writes format 4, which uses
 //! the declared field names in the saved records.
 //!
+//! Each pane's screen is one [`CarriedPaneState`] and is read on its own. A pane
+//! whose state does not read is left out of the body that
+//! [`read_resume_body`] hands back, and every other pane keeps its screen.
+//!
 //! Example: a server holding two panes writes
-//! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":51234,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"body":{…}}`.
-//! The next image reads the header, checks that descriptor 9 is still the
-//! master of `/dev/ttys009`, takes it and process 51234 back as that pane, then
-//! reads the body and puts the pane's screen back under it.
+//! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":51234,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
+//! The next image reads the header, checks that descriptor 9 is still the master of `/dev/ttys009`,
+//! takes it and process 51234 back as that pane, then reads the body and puts the pane's screen
+//! back under it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use koshi_core::ids::{PaneId, SessionId};
@@ -34,11 +38,9 @@ use koshi_terminal::engine::{
     GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport,
     MAX_GRAPHICS_EVENT_BATCH_COUNT, MAX_GRAPHICS_EVENT_COUNT,
 };
-use koshi_terminal::graphics::{
-    GraphicsError, MAX_GRAPHICS_CARRY_BYTE_COUNT, MAX_IMAGE_BYTE_COUNT,
-};
+use koshi_terminal::graphics::{GraphicsError, MAX_IMAGE_BYTE_COUNT};
 use koshi_terminal::state::TerminalState;
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
@@ -51,6 +53,19 @@ pub const RESUME_FORMAT: u32 = koshi_core::compat::RESUME_FORMAT.maximum_version
 
 /// The oldest resume-file format this build reads.
 pub const RESUME_FORMAT_MIN: u32 = koshi_core::compat::RESUME_FORMAT.minimum_version;
+
+/// The line a pane shows when the session came back but that pane's screen
+/// did not: the program in it keeps running on a blank screen.
+pub const SCREEN_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] This pane's screen could not be restored after the restart. The program in it is still running.\r\n";
+
+/// The line every pane shows when its session came back without its tabs and
+/// splits: each pane sits in a tab of its own on a blank screen, and the
+/// program in it keeps running.
+pub const LAYOUT_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session's layout could not be restored after the restart. Each pane now has its own tab, and the program in it is still running.\r\n";
+
+/// The line the one fresh shell shows when none of the session's panes came
+/// back.
+pub const SESSION_NOT_RESTORED_NOTICE_BYTES: &[u8] = b"[koshi] The session could not be restored after the restart. Its panes were closed, and this is a new shell.\r\n";
 
 /// One live pane, as the header names it: what the next image needs to take
 /// the pane back, or to shut it down when the body is unreadable.
@@ -116,83 +131,14 @@ pub struct ResumeHeader {
 
 /// The half of the resume file that [`RESUME_FORMAT`] numbers. Its fields below
 /// are what a session server hands the image replacing it.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct ResumeBody {
     /// Every session the writing process held, keyed by id. Each one owns its
     /// tabs, layout trees, pane records and attached clients.
     pub session_by_id: HashMap<SessionId, Session>,
-    /// Each pane's screen state, keyed by pane id: grids, scrollback, modes and
-    /// cursor. The parser that fed it is not carried;
-    /// `undecoded_bytes_by_pane_id` carries that parser's position.
-    pub terminal_state_by_pane_id: HashMap<PaneId, TerminalState>,
-    /// The bytes that put each pane's next parser where the last one stood,
-    /// keyed by pane id, exactly as
-    /// [`TerminalEngine::undecoded_terminal_bytes`](koshi_terminal::engine::TerminalEngine::undecoded_terminal_bytes)
-    /// reports them; a pane it reports nothing for has no entry. The next image
-    /// hands an entry to
-    /// [`TerminalEngine::from_terminal_state`](koshi_terminal::engine::TerminalEngine::from_terminal_state).
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default)]
-    pub undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>>,
-    /// The raw bytes that put each pane's graphics parser where the last one
-    /// stood, keyed by pane id. The next image uses this compatibility field
-    /// with [`TerminalEngine::from_terminal_state_with_graphics`](koshi_terminal::engine::TerminalEngine::from_terminal_state_with_graphics)
-    /// when no nested wrapper state is present.
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default, deserialize_with = "deserialize_graphics_undecoded")]
-    pub graphics_undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>>,
-    /// Whether each pane's graphics parser expects the next DCS to carry the
-    /// next GNU Screen passthrough fragment.
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default)]
-    pub graphics_screen_continuation_by_pane_id: HashMap<PaneId, bool>,
-    /// Whether each pane's carried graphics bytes are inside a GNU Screen
-    /// passthrough DCS string.
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default)]
-    pub graphics_screen_wrapper_active_by_pane_id: HashMap<PaneId, bool>,
-    /// Whether each pane's graphics parser expects the next DCS to carry the
-    /// next tmux passthrough fragment.
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default)]
-    pub graphics_tmux_continuation_by_pane_id: HashMap<PaneId, bool>,
-    /// Whether each pane's carried graphics bytes are inside an open tmux
-    /// passthrough DCS string.
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default)]
-    pub graphics_tmux_wrapper_active_by_pane_id: HashMap<PaneId, bool>,
-    /// Complete image records and recoverable image errors waiting for each
-    /// pane's terminal caller, keyed by pane id. The next image restores them
-    /// before it reads new PTY output.
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default, deserialize_with = "deserialize_graphics_events")]
-    pub graphics_events_by_pane_id: HashMap<PaneId, Vec<GraphicsEvent>>,
-    /// The complete graphics-parser state for each pane, including parser
-    /// state nested inside a split tmux or GNU Screen wrapper. The next image
-    /// restores it before reading new PTY output. A Screen-wrapped iTerm2
-    /// command split after `File=` is represented by `screen_inner_transport`
-    /// here.
-    ///
-    /// A body whose JSON carries no map for this field reads back as an empty
-    /// one.
-    #[serde(default)]
-    pub graphics_transport_by_pane_id: HashMap<PaneId, GraphicsTransportState>,
-    /// Open synchronized-output groups keyed by pane id.
-    #[serde(default)]
-    pub synchronized_output_by_pane_id: HashMap<PaneId, SynchronizedOutputTransport>,
+    /// Each pane's terminal, keyed by pane id. A pane with no entry comes back
+    /// with a blank screen.
+    pub carried_pane_state_by_pane_id: HashMap<PaneId, CarriedPaneState>,
     /// A quit that was applied and not yet carried out, and how it must be
     /// carried out.
     ///
@@ -203,10 +149,36 @@ pub struct ResumeBody {
     ///
     /// The kind travels with it: a caller that asked for a zero-grace teardown
     /// gets one from the next image too.
-    ///
-    /// A body whose JSON carries no value for this field reads back as `None`.
-    #[serde(default)]
     pub carried_quit: Option<CarriedQuit>,
+}
+
+/// One pane's terminal, as the writing process left it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CarriedPaneState {
+    /// The pane's screen state: grids, scrollback, modes and cursor. The parser
+    /// that fed it is not carried; `undecoded_bytes` carries that parser's
+    /// position.
+    pub terminal_state: TerminalState,
+    /// The bytes that put the pane's next parser where the last one stood,
+    /// exactly as
+    /// [`TerminalEngine::get_undecoded_terminal_bytes`](koshi_terminal::engine::TerminalEngine::get_undecoded_terminal_bytes)
+    /// reports them. The next image hands them to
+    /// [`TerminalEngine::from_carried_state`](koshi_terminal::engine::TerminalEngine::from_carried_state).
+    pub undecoded_bytes: Vec<u8>,
+    /// Complete image records and recoverable image errors waiting for the
+    /// pane's terminal caller. The next image restores them before it reads new
+    /// PTY output. At most [`MAX_GRAPHICS_EVENT_COUNT`] events and one
+    /// queue-full report after them, holding at most [`MAX_IMAGE_BYTE_COUNT`]
+    /// image bytes in all.
+    #[serde(deserialize_with = "deserialize_graphics_events")]
+    pub graphics_events: Vec<GraphicsEvent>,
+    /// The complete graphics-parser state, including parser state nested
+    /// inside a split tmux or GNU Screen wrapper. `None` while the graphics
+    /// parser sits in ground state. A Screen-wrapped iTerm2 command split after
+    /// `File=` is represented by `screen_inner_transport` here.
+    pub graphics_transport: Option<GraphicsTransportState>,
+    /// The pane's open synchronized-output group, if one is open.
+    pub synchronized_output: Option<SynchronizedOutputTransport>,
 }
 
 /// How a quit carried across an image swap must be carried out.
@@ -229,10 +201,31 @@ struct ResumeFile {
     raw_body: Box<RawValue>,
 }
 
+/// The body as it is read: the session-wide fields decoded, and each pane's
+/// state left as the raw JSON text it was written as.
+#[derive(Deserialize)]
+struct EncodedResumeBody {
+    session_by_id: HashMap<SessionId, Session>,
+    carried_pane_state_by_pane_id: EncodedPaneStates,
+    carried_quit: Option<CarriedQuit>,
+}
+
+/// Each pane's carried state as raw JSON text, keyed by pane id, and the keys
+/// that name no pane or name one pane more than once.
+#[derive(Default)]
+struct EncodedPaneStates {
+    /// The raw state of every pane whose key reads as a pane id and appears
+    /// once.
+    raw_pane_state_by_pane_id: HashMap<PaneId, Box<RawValue>>,
+    /// Every key that does not read as a pane id, or that appears more than
+    /// once, as it was written.
+    refused_pane_keys: Vec<String>,
+}
+
 /// The same two halves as [`ResumeFile`], borrowed for the write so no pane's
 /// grid or scrollback is copied on its way to the disk.
 #[derive(Debug, Serialize)]
-struct ResumeFileRef<'a> {
+struct ResumeFileReference<'a> {
     header: &'a ResumeHeader,
     raw_body: &'a ResumeBody,
 }
@@ -250,7 +243,7 @@ pub fn write_resume_file(
     header: &ResumeHeader,
     resume_body: &ResumeBody,
 ) -> Result<(), StorageError> {
-    let resume_file_bytes = serde_json::to_vec(&ResumeFileRef {
+    let resume_file_bytes = serde_json::to_vec(&ResumeFileReference {
         header,
         raw_body: resume_body,
     })
@@ -298,10 +291,19 @@ pub fn read_resume_header(
 /// Decode the raw `resume_body` [`read_resume_header`] handed back, given the `resume_format` the
 /// same header named.
 ///
+/// The sessions and the carried quit are read as one. Each pane's
+/// [`CarriedPaneState`] is read on its own: a pane whose state does not read,
+/// whose key is no pane id, or whose key appears twice is logged and left out
+/// of the body handed back, and every other pane keeps its state.
+///
+/// Before → after: a body carrying panes `A` and `B`, where `B`'s screen holds
+/// a Kitty placement no upload holds → a body carrying `A` alone, and one
+/// warning naming `B`.
+///
 /// # Errors
 /// Returns [`StorageError::Corrupt`] when `format` is outside
-/// `RESUME_FORMAT_MIN..=RESUME_FORMAT`, and when the body is not that format's
-/// shape.
+/// `RESUME_FORMAT_MIN..=RESUME_FORMAT`, and when the sessions, the carried quit
+/// or the map of pane states is not that format's shape.
 pub fn read_resume_body(
     resume_format: u32,
     resume_body: &RawValue,
@@ -313,160 +315,100 @@ pub fn read_resume_body(
             ),
         });
     }
-    serde_json::from_str(resume_body.get()).map_err(|parse_error| StorageError::Corrupt {
-        detail: format!("resume body is unreadable: {parse_error}"),
+    let encoded_resume_body: EncodedResumeBody =
+        serde_json::from_str(resume_body.get()).map_err(|parse_error| StorageError::Corrupt {
+            detail: format!("resume body is unreadable: {parse_error}"),
+        })?;
+    for refused_pane_key in &encoded_resume_body
+        .carried_pane_state_by_pane_id
+        .refused_pane_keys
+    {
+        tracing::warn!(
+            pane_key = %refused_pane_key,
+            "a carried pane state is keyed by no pane id or by one named twice; that pane comes back with a blank screen"
+        );
+    }
+    let mut carried_pane_state_by_pane_id = HashMap::new();
+    for (pane_id, raw_pane_state) in encoded_resume_body
+        .carried_pane_state_by_pane_id
+        .raw_pane_state_by_pane_id
+    {
+        match serde_json::from_str::<CarriedPaneState>(raw_pane_state.get()) {
+            Ok(carried_pane_state) => {
+                carried_pane_state_by_pane_id.insert(pane_id, carried_pane_state);
+            }
+            Err(parse_error) => tracing::warn!(
+                %pane_id,
+                %parse_error,
+                "a carried pane state could not be read; that pane comes back with a blank screen"
+            ),
+        }
+    }
+    Ok(ResumeBody {
+        session_by_id: encoded_resume_body.session_by_id,
+        carried_pane_state_by_pane_id,
+        carried_quit: encoded_resume_body.carried_quit,
     })
 }
 
-fn deserialize_graphics_events<'de, D>(
-    deserializer: D,
-) -> Result<HashMap<PaneId, Vec<GraphicsEvent>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserializer.deserialize_map(GraphicsEventsVisitor)
-}
-
-fn deserialize_graphics_undecoded<'de, D>(
-    deserializer: D,
-) -> Result<HashMap<PaneId, Vec<u8>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    deserializer.deserialize_map(GraphicsUndecodedVisitor)
-}
-
-struct GraphicsUndecodedVisitor;
-
-impl<'de> Visitor<'de> for GraphicsUndecodedVisitor {
-    type Value = HashMap<PaneId, Vec<u8>>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a map of pane ids to bounded graphics carry bytes")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut graphics_carry_bytes_by_pane_id = HashMap::new();
-        while let Some(pane_id) = map.next_key::<PaneId>()? {
-            if graphics_carry_bytes_by_pane_id.contains_key(&pane_id) {
-                return Err(de::Error::custom("duplicate graphics carry pane id"));
-            }
-            let graphics_carry_bytes = map.next_value_seed(GraphicsCarrySeed)?;
-            graphics_carry_bytes_by_pane_id.insert(pane_id, graphics_carry_bytes);
-        }
-        Ok(graphics_carry_bytes_by_pane_id)
-    }
-}
-
-struct GraphicsCarrySeed;
-
-impl<'de> DeserializeSeed<'de> for GraphicsCarrySeed {
-    type Value = Vec<u8>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+impl<'de> Deserialize<'de> for EncodedPaneStates {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(GraphicsCarryVisitor)
+        deserializer.deserialize_map(EncodedPaneStatesVisitor)
     }
 }
 
-struct GraphicsCarryVisitor;
+struct EncodedPaneStatesVisitor;
 
-impl<'de> Visitor<'de> for GraphicsCarryVisitor {
-    type Value = Vec<u8>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("bounded graphics carry bytes")
-    }
-
-    fn visit_seq<A>(self, mut graphics_carry_byte_sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let graphics_carry_size_hint = graphics_carry_byte_sequence.size_hint();
-        if graphics_carry_size_hint
-            .is_some_and(|byte_count| byte_count > MAX_GRAPHICS_CARRY_BYTE_COUNT)
-        {
-            return Err(de::Error::custom(format!(
-                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTE_COUNT} bytes"
-            )));
-        }
-        let mut graphics_carry_bytes = Vec::with_capacity(
-            graphics_carry_size_hint
-                .unwrap_or(0)
-                .min(MAX_GRAPHICS_CARRY_BYTE_COUNT),
-        );
-        while let Some(graphics_carry_byte) = graphics_carry_byte_sequence.next_element::<u8>()? {
-            if graphics_carry_bytes.len() == MAX_GRAPHICS_CARRY_BYTE_COUNT {
-                return Err(de::Error::custom(format!(
-                    "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTE_COUNT} bytes"
-                )));
-            }
-            graphics_carry_bytes.push(graphics_carry_byte);
-        }
-        Ok(graphics_carry_bytes)
-    }
-
-    fn visit_bytes<E>(self, graphics_carry_bytes: &[u8]) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        if graphics_carry_bytes.len() > MAX_GRAPHICS_CARRY_BYTE_COUNT {
-            return Err(E::custom(format!(
-                "graphics carry exceeds {MAX_GRAPHICS_CARRY_BYTE_COUNT} bytes"
-            )));
-        }
-        Ok(graphics_carry_bytes.to_vec())
-    }
-
-    fn visit_byte_buf<E>(self, graphics_carry_bytes: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        self.visit_bytes(&graphics_carry_bytes)
-    }
-}
-
-struct GraphicsEventsVisitor;
-
-impl<'de> Visitor<'de> for GraphicsEventsVisitor {
-    type Value = HashMap<PaneId, Vec<GraphicsEvent>>;
+impl<'de> Visitor<'de> for EncodedPaneStatesVisitor {
+    type Value = EncodedPaneStates;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a map of pane ids to bounded graphics event lists")
+        formatter.write_str("a map of pane ids to carried pane states")
     }
 
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    /// Keep every entry whose key reads as a pane id and appears once. A key
+    /// that reads as no pane id, and every entry of a key that appears more
+    /// than once, goes to `refused_pane_keys` instead.
+    fn visit_map<A>(self, mut map_access: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
-        let mut graphics_events_by_pane_id = HashMap::new();
-        while let Some(pane_id) = map.next_key::<PaneId>()? {
-            if graphics_events_by_pane_id.contains_key(&pane_id) {
-                return Err(de::Error::custom("duplicate graphics event pane id"));
+        let mut encoded_pane_states = EncodedPaneStates::default();
+        let mut repeated_pane_ids: HashSet<PaneId> = HashSet::new();
+        while let Some(pane_key) = map_access.next_key::<String>()? {
+            let raw_pane_state = map_access.next_value::<Box<RawValue>>()?;
+            let Ok(pane_id) =
+                serde_json::from_value::<PaneId>(serde_json::Value::String(pane_key.clone()))
+            else {
+                encoded_pane_states.refused_pane_keys.push(pane_key);
+                continue;
+            };
+            if repeated_pane_ids.contains(&pane_id)
+                || encoded_pane_states
+                    .raw_pane_state_by_pane_id
+                    .remove(&pane_id)
+                    .is_some()
+            {
+                repeated_pane_ids.insert(pane_id);
+                encoded_pane_states.refused_pane_keys.push(pane_key);
+                continue;
             }
-            let graphics_events = map.next_value_seed(GraphicsEventListSeed)?;
-            graphics_events_by_pane_id.insert(pane_id, graphics_events);
+            encoded_pane_states
+                .raw_pane_state_by_pane_id
+                .insert(pane_id, raw_pane_state);
         }
-        Ok(graphics_events_by_pane_id)
+        Ok(encoded_pane_states)
     }
 }
 
-struct GraphicsEventListSeed;
-
-impl<'de> DeserializeSeed<'de> for GraphicsEventListSeed {
-    type Value = Vec<GraphicsEvent>;
-
-    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(GraphicsEventListVisitor)
-    }
+fn deserialize_graphics_events<'de, D>(deserializer: D) -> Result<Vec<GraphicsEvent>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_seq(GraphicsEventListVisitor)
 }
 
 struct GraphicsEventListVisitor;

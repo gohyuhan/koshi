@@ -28,7 +28,7 @@
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, SwitchSessionArgs};
 use koshi_core::geometry::Size;
@@ -37,8 +37,7 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{
     resolve_router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
@@ -134,8 +133,8 @@ fn try_connect_to_router(runtime_directory: &Path) -> Option<Connection> {
     let hello = RouterRequest {
         request_id: 1,
         request_kind: RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token: endpoint.connection_token,
         },
     };
@@ -206,8 +205,8 @@ fn try_open_session_connection(
     let hello = IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: endpoint.connection_token,
             is_remote: false,
         },
@@ -227,8 +226,7 @@ fn attach_test_client(connection: &mut Connection, session_id: SessionId) -> Cli
     let request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Attach {
-            viewport: ATTACH_VIEWPORT_SIZE,
-            event_filter: EventFilterSpec::All,
+            viewport_size: ATTACH_VIEWPORT_SIZE,
             resume_client_id: None,
             resume_token: None,
             pane_area: None,
@@ -263,7 +261,6 @@ fn submit_session_command(connection: &mut Connection, client_id: ClientId, comm
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         command,
     );
     let request = IpcRequest {
@@ -280,7 +277,7 @@ fn submit_session_command(connection: &mut Connection, client_id: ClientId, comm
 /// frame or the read failure that ended it. Fails the test once [`WAIT_DURATION`] has
 /// passed with no ending.
 fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcError> {
-    let (ending_tx, ending_rx) = mpsc::channel();
+    let (ending_sender, ending_receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let ending = loop {
             match connection.recv::<SessionEvent>() {
@@ -293,9 +290,9 @@ fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcEr
                 Err(receive_error) => break Err(receive_error),
             }
         };
-        let _ = ending_tx.send(ending);
+        let _ = ending_sender.send(ending);
     });
-    ending_rx
+    ending_receiver
         .recv_timeout(WAIT_DURATION)
         .expect("the event stream ends")
 }

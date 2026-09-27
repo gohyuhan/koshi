@@ -16,6 +16,13 @@ use crate::style::{Color, Style};
 
 use super::*;
 
+impl SynchronizedOutputTransport {
+    /// The wall-clock deadline for releasing the open update.
+    fn get_deadline(&self) -> Option<SystemTime> {
+        self.deadline
+    }
+}
+
 /// The bytes the PTY reader hands the runtime in one go, so a scale test feeds
 /// the engine the same chunk size a running pane does.
 const READ_CHUNK_BYTE_COUNT: usize = 8192;
@@ -939,22 +946,19 @@ fn c1_synchronized_control_state_survives_process_swaps() {
     let first_synchronized_output_transport = engine
         .get_synchronized_output_transport_at(test_timestamp, wall_clock_timestamp)
         .expect("the split C1 begin has transport state");
-    let first_terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let first_graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
+    let first_terminal_undecoded_bytes = engine.get_undecoded_terminal_bytes().to_vec();
     let first_graphics_transport_state = engine.get_graphics_transport_state().unwrap_or_default();
     let first_graphics_events = engine.take_graphics_events();
     let first_terminal_state = engine.into_terminal_state();
-    let mut restored_engine =
-        TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            first_terminal_state,
-            &first_terminal_undecoded_bytes,
-            &first_graphics_undecoded_bytes,
-            &first_graphics_events,
-            first_graphics_transport_state,
-            Some(first_synchronized_output_transport),
-            test_timestamp,
-            wall_clock_timestamp,
-        );
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        first_terminal_state,
+        &first_terminal_undecoded_bytes,
+        &first_graphics_events,
+        first_graphics_transport_state,
+        Some(first_synchronized_output_transport),
+        test_timestamp,
+        wall_clock_timestamp,
+    );
 
     let _ = restored_engine.process_pty_output(b"26h\x1b[2J\x1b[HN\x9b?20");
     let committed_terminal_state = restored_engine.get_terminal_state().clone();
@@ -962,24 +966,21 @@ fn c1_synchronized_control_state_survives_process_swaps() {
     let second_synchronized_output_transport = restored_engine
         .get_synchronized_output_transport_at(test_timestamp, wall_clock_timestamp)
         .expect("the split C1 end has transport state");
-    let second_terminal_undecoded_bytes = restored_engine.undecoded_terminal_bytes().to_vec();
-    let second_graphics_undecoded_bytes = restored_engine.undecoded_graphics_bytes().to_vec();
+    let second_terminal_undecoded_bytes = restored_engine.get_undecoded_terminal_bytes().to_vec();
     let second_graphics_transport_state = restored_engine
         .get_graphics_transport_state()
         .unwrap_or_default();
     let second_graphics_events = restored_engine.take_graphics_events();
     let second_terminal_state = restored_engine.into_terminal_state();
-    let mut restored_engine =
-        TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            second_terminal_state,
-            &second_terminal_undecoded_bytes,
-            &second_graphics_undecoded_bytes,
-            &second_graphics_events,
-            second_graphics_transport_state,
-            Some(second_synchronized_output_transport),
-            test_timestamp,
-            wall_clock_timestamp,
-        );
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        second_terminal_state,
+        &second_terminal_undecoded_bytes,
+        &second_graphics_events,
+        second_graphics_transport_state,
+        Some(second_synchronized_output_transport),
+        test_timestamp,
+        wall_clock_timestamp,
+    );
 
     assert_eq!(
         restored_engine.get_terminal_state(),
@@ -1175,22 +1176,19 @@ fn synchronized_output_deadline_keeps_elapsed_process_swap_time() {
         synchronized_output_transport.get_deadline(),
         Some(wall_clock_timestamp + Duration::from_millis(110))
     );
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
+    let terminal_undecoded_bytes = engine.get_undecoded_terminal_bytes().to_vec();
     let graphics_transport_state = engine.get_graphics_transport_state().unwrap_or_default();
     let terminal_state = engine.into_terminal_state();
     let restored_timestamp = test_timestamp + Duration::from_secs(1);
-    let mut restored_engine =
-        TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            terminal_state,
-            &terminal_undecoded_bytes,
-            &graphics_undecoded_bytes,
-            &[],
-            graphics_transport_state,
-            Some(synchronized_output_transport),
-            restored_timestamp,
-            wall_clock_timestamp + Duration::from_millis(100),
-        );
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        terminal_state,
+        &terminal_undecoded_bytes,
+        &[],
+        graphics_transport_state,
+        Some(synchronized_output_transport),
+        restored_timestamp,
+        wall_clock_timestamp + Duration::from_millis(100),
+    );
 
     assert_eq!(
         restored_engine.get_next_synchronized_output_delay(restored_timestamp),
@@ -1262,31 +1260,30 @@ fn overlong_open_string_keeps_its_scanner_state_across_process_swap() {
 
     let mut uninterrupted_engine = build_test_terminal_engine();
     let _ = uninterrupted_engine.process_pty_output(&opening_string_bytes);
-    assert!(uninterrupted_engine.undecoded_terminal_bytes().is_empty());
+    assert!(uninterrupted_engine
+        .get_undecoded_terminal_bytes()
+        .is_empty());
 
     let mut carried_engine = build_test_terminal_engine();
     let _ = carried_engine.process_pty_output(&opening_string_bytes);
-    assert!(carried_engine.undecoded_terminal_bytes().is_empty());
+    assert!(carried_engine.get_undecoded_terminal_bytes().is_empty());
     let synchronized_output_transport = carried_engine
         .get_synchronized_output_transport_at(test_timestamp, wall_clock_timestamp)
         .expect("the open string has scanner transport state");
     assert_eq!(synchronized_output_transport.get_deadline(), None);
-    let graphics_undecoded_bytes = carried_engine.undecoded_graphics_bytes().to_vec();
     let graphics_transport_state = carried_engine
         .get_graphics_transport_state()
         .unwrap_or_default();
     let terminal_state = carried_engine.into_terminal_state();
-    let mut restored_engine =
-        TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            terminal_state,
-            &[],
-            &graphics_undecoded_bytes,
-            &[],
-            graphics_transport_state,
-            Some(synchronized_output_transport),
-            test_timestamp,
-            wall_clock_timestamp,
-        );
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        terminal_state,
+        &[],
+        &[],
+        graphics_transport_state,
+        Some(synchronized_output_transport),
+        test_timestamp,
+        wall_clock_timestamp,
+    );
 
     let _ = uninterrupted_engine.process_pty_output(string_suffix_bytes);
     let (_, _, has_advanced_terminal_state) = restored_engine
@@ -1320,22 +1317,19 @@ fn c1_string_end_and_split_utf8_stay_exact_across_two_process_swaps() {
     let first_synchronized_output_transport = carried_engine
         .get_synchronized_output_transport_at(test_timestamp, wall_clock_timestamp)
         .expect("the open APC has terminal-input transport state");
-    let first_graphics_undecoded_bytes = carried_engine.undecoded_graphics_bytes().to_vec();
     let first_graphics_transport_state = carried_engine
         .get_graphics_transport_state()
         .expect("the open APC has graphics transport state");
     let first_terminal_state = carried_engine.into_terminal_state();
-    let mut restored_engine =
-        TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            first_terminal_state,
-            &[],
-            &first_graphics_undecoded_bytes,
-            &[],
-            first_graphics_transport_state,
-            Some(first_synchronized_output_transport),
-            test_timestamp,
-            wall_clock_timestamp,
-        );
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        first_terminal_state,
+        &[],
+        &[],
+        first_graphics_transport_state,
+        Some(first_synchronized_output_transport),
+        test_timestamp,
+        wall_clock_timestamp,
+    );
 
     let c1_string_terminator = [0x9c];
     let _ = uninterrupted_engine.process_pty_output(&c1_string_terminator);
@@ -1349,24 +1343,21 @@ fn c1_string_end_and_split_utf8_stay_exact_across_two_process_swaps() {
     let second_synchronized_output_transport = restored_engine
         .get_synchronized_output_transport_at(test_timestamp, wall_clock_timestamp)
         .expect("the held UTF-8 prefix has transport state");
-    let second_terminal_undecoded_bytes = restored_engine.undecoded_terminal_bytes().to_vec();
-    let second_graphics_undecoded_bytes = restored_engine.undecoded_graphics_bytes().to_vec();
+    let second_terminal_undecoded_bytes = restored_engine.get_undecoded_terminal_bytes().to_vec();
     let second_graphics_transport_state = restored_engine
         .get_graphics_transport_state()
         .unwrap_or_default();
     let second_graphics_events = restored_engine.take_graphics_events();
     let second_terminal_state = restored_engine.into_terminal_state();
-    let mut restored_engine =
-        TerminalEngine::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            second_terminal_state,
-            &second_terminal_undecoded_bytes,
-            &second_graphics_undecoded_bytes,
-            &second_graphics_events,
-            second_graphics_transport_state,
-            Some(second_synchronized_output_transport),
-            test_timestamp,
-            wall_clock_timestamp,
-        );
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        second_terminal_state,
+        &second_terminal_undecoded_bytes,
+        &second_graphics_events,
+        second_graphics_transport_state,
+        Some(second_synchronized_output_transport),
+        test_timestamp,
+        wall_clock_timestamp,
+    );
 
     let final_utf8_byte = [0x90];
     let _ = uninterrupted_engine.process_pty_output(&final_utf8_byte);
@@ -1491,14 +1482,21 @@ fn a_split_utf8_prefix_survives_an_engine_replacement_before_each_protocol() {
                 PixelCellSize::from_pixel_dimensions(1, 1).expect("nonzero cell size"),
             );
             assert_eq!(engine.process_pty_output(b"\xe2\x94"), b"");
-            assert_eq!(engine.undecoded_terminal_bytes(), b"\xe2\x94");
-            assert_eq!(engine.undecoded_graphics_bytes(), b"\xe2\x94");
+            assert_eq!(engine.get_undecoded_terminal_bytes(), b"\xe2\x94");
+            let graphics_transport_state = engine
+                .get_graphics_transport_state()
+                .expect("the split UTF-8 prefix has graphics transport state");
+            assert_eq!(graphics_transport_state.carry_bytes, b"\xe2\x94");
 
             let terminal_state = engine.into_terminal_state();
-            let mut rebuilt_engine = TerminalEngine::from_terminal_state_with_graphics(
+            let mut rebuilt_engine = TerminalEngine::from_carried_state(
                 terminal_state,
                 b"\xe2\x94",
-                b"\xe2\x94",
+                &[],
+                graphics_transport_state,
+                None,
+                Instant::now(),
+                SystemTime::now(),
             );
             assert_eq!(rebuilt_engine.process_pty_output(&[0x90]), b"");
             assert_eq!(get_terminal_cell_character(&rebuilt_engine, 0, 0), '┐');
@@ -1704,7 +1702,7 @@ fn a_ten_thousand_column_line_wraps_without_panicking() {
 }
 
 #[test]
-fn many_line_feeds_cap_the_scrollback_and_tally_the_drops() {
+fn many_line_feeds_cap_the_scrollback_at_its_line_limit() {
     let mut engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 8,
         row_count: 2,
@@ -1715,7 +1713,7 @@ fn many_line_feeds_cap_the_scrollback_and_tally_the_drops() {
     let line_feed_bytes = vec![b'\n'; 12_000];
     let _ = engine.process_pty_output(&line_feed_bytes);
 
-    // The default 10 000-line cap holds; the overflow is dropped and tallied.
+    // The default 10 000-line cap holds; the overflow is dropped.
     assert_eq!(
         engine
             .get_terminal_state()
@@ -1727,8 +1725,8 @@ fn many_line_feeds_cap_the_scrollback_and_tally_the_drops() {
         engine
             .get_terminal_state()
             .get_scrollback()
-            .get_dropped_line_count(),
-        1_999
+            .get_total_pushed_line_count(),
+        11_999
     );
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -1740,7 +1738,7 @@ fn many_line_feeds_cap_the_scrollback_and_tally_the_drops() {
 
 /// Everything the state holds must survive being written out and read back:
 /// both screen buffers, both cursors and their saved snapshots, the pen, the
-/// modes, the scrollback with its truncation tallies, the title, and the
+/// modes, the scrollback with its line counts, the title, and the
 /// grapheme cluster still open at the cursor.
 #[test]
 fn a_driven_engine_state_survives_a_serde_round_trip() {
@@ -1762,7 +1760,7 @@ fn a_driven_engine_state_survives_a_serde_round_trip() {
     // Paint the alternate screen, then return to the primary.
     let _ = engine.process_pty_output(b"\x1b[?1049hALT\x1b[?1049l");
     // Ten line feeds on a three-row screen hand more rows to history than the
-    // four-line cap holds, so the oldest are dropped and tallied.
+    // four-line cap holds, so the oldest are dropped.
     let _ = engine.process_pty_output(b"\n\n\n\n\n\n\n\n\n\n");
     // A title, then a base character with a combining acute over it: the
     // cluster is still open when the state is taken apart.
@@ -1776,7 +1774,12 @@ fn a_driven_engine_state_survives_a_serde_round_trip() {
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 4);
     // The cursor sat on row 1, so the first feed descends and the other nine
     // each hand a row to history: nine pushed, four kept, five dropped.
-    assert_eq!(terminal_state.get_scrollback().get_dropped_line_count(), 5);
+    assert_eq!(
+        terminal_state
+            .get_scrollback()
+            .get_total_pushed_line_count(),
+        9
+    );
 
     let serialized_terminal_state =
         serde_json::to_string(&terminal_state).expect("the state writes out");
@@ -1794,7 +1797,7 @@ fn a_driven_engine_state_survives_a_serde_round_trip() {
 /// Take a terminal engine apart the way a process-image swap does and build the next
 /// engine from what crossed: the screen state and the bytes the parser held.
 fn rebuild_terminal_engine(terminal_engine: TerminalEngine) -> TerminalEngine {
-    let carried_undecoded_bytes = terminal_engine.undecoded_terminal_bytes().to_vec();
+    let carried_undecoded_bytes = terminal_engine.get_undecoded_terminal_bytes().to_vec();
     TerminalEngine::from_terminal_state(
         terminal_engine.into_terminal_state(),
         &carried_undecoded_bytes,
@@ -1809,7 +1812,7 @@ fn a_finished_chunk_leaves_the_parser_holding_nothing() {
 
     let _ = engine.process_pty_output(b"\x1b[31mab");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 }
 
 /// A working-directory report (OSC 7) cut in half is carried whole, so the pane
@@ -1828,7 +1831,7 @@ fn a_split_working_directory_report_is_carried_whole() {
         None
     );
     assert_eq!(
-        engine.undecoded_terminal_bytes(),
+        engine.get_undecoded_terminal_bytes(),
         b"\x1b]7;file://host/Users/yuhan/Proj"
     );
 
@@ -1863,7 +1866,7 @@ fn a_split_title_report_is_carried_whole() {
     let _ = engine.process_pty_output(b"\x1b]0;ti");
 
     assert_eq!(engine.get_terminal_state().get_title(), None);
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b]0;ti");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b]0;ti");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"tle\x07");
@@ -1884,7 +1887,7 @@ fn a_split_csi_is_carried_whole() {
     // SGR 31 (red foreground) cut off before its final `m`.
     let _ = engine.process_pty_output(b"\x1b[31");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[31");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[31");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"mZ");
@@ -1916,7 +1919,7 @@ fn a_split_code_point_is_carried_whole() {
     let _ = engine.process_pty_output(b"\xc3");
 
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\xc3");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\xc3");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"\xa9");
@@ -1940,7 +1943,7 @@ fn a_sequence_spread_over_three_chunks_is_carried_whole() {
     let _ = engine.process_pty_output(b"s");
     let _ = engine.process_pty_output(b"hi");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b]0;koshi");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b]0;koshi");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"\x07");
@@ -1959,7 +1962,7 @@ fn text_after_a_finished_sequence_is_not_carried() {
 
     let _ = engine.process_pty_output(b"\x1b]0;koshi\x07ab");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let restored_engine = rebuild_terminal_engine(engine);
 
@@ -1984,7 +1987,7 @@ fn a_sequence_holding_a_control_character_is_carried_without_repeating_it() {
     // A line feed between the parameter and the rest of the sequence.
     let _ = engine.process_pty_output(b"\x1b[1\n3");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[1\n3");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[1\n3");
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
         (1, 0)
@@ -2023,7 +2026,7 @@ fn a_split_device_control_string_carries_its_opening_bytes() {
     // A sixel image: `ESC P q` opens the string and the payload follows.
     let _ = engine.process_pty_output(b"\x1bPq#0;2;0;0;0");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1bPq");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1bPq");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2034,7 +2037,7 @@ fn a_split_device_control_string_carries_its_opening_bytes() {
     // opening bytes and does not grow with the image.
     let _ = engine.process_pty_output(b"#0~~@@");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1bPq");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1bPq");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
 
@@ -2062,7 +2065,7 @@ fn a_device_control_string_closed_by_the_eight_bit_terminator_is_not_carried() {
     // `ESC P q` opens the string, `0x9c` closes it, and `Z` follows it.
     let _ = engine.process_pty_output(b"\x1bPq#0~~\x9cZ");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2090,12 +2093,12 @@ fn a_cancelled_sequence_is_not_carried() {
     // SGR 31 abandoned mid-parameter by `CAN`.
     let _ = engine.process_pty_output(b"\x1b[31\x18");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     // The next chunk starts a fresh text run, and none of it is carried.
     let _ = engine.process_pty_output(b"Z");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2114,10 +2117,10 @@ fn plain_chunks_on_a_sequence_boundary_carry_nothing() {
 
     for _ in 0..64 {
         let _ = engine.process_pty_output(&[b'a'; READ_CHUNK_BYTE_COUNT]);
-        assert_eq!(engine.undecoded_terminal_bytes(), b"");
+        assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
         let _ = engine.process_pty_output(&[b'\n'; READ_CHUNK_BYTE_COUNT]);
-        assert_eq!(engine.undecoded_terminal_bytes(), b"");
+        assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     }
 }
 
@@ -2134,7 +2137,7 @@ fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
 
     let _ = engine.process_pty_output(clipboard_sequence_opening_bytes);
     assert_eq!(
-        engine.undecoded_terminal_bytes(),
+        engine.get_undecoded_terminal_bytes(),
         clipboard_sequence_opening_bytes
     );
 
@@ -2146,15 +2149,15 @@ fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
         let held_byte_count =
             clipboard_sequence_opening_bytes.len() + (chunk_round + 1) * READ_CHUNK_BYTE_COUNT;
         if held_byte_count <= MAX_UNDECODED_BYTE_COUNT {
-            assert_eq!(engine.undecoded_terminal_bytes().len(), held_byte_count);
+            assert_eq!(engine.get_undecoded_terminal_bytes().len(), held_byte_count);
         } else {
-            assert_eq!(engine.undecoded_terminal_bytes(), b"");
+            assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
         }
     }
 
     // The payload passed `MAX_UNDECODED_BYTE_COUNT`, so the carry is empty. The real
     // parser still swallows the body: no part of it printed.
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2165,7 +2168,7 @@ fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
     // sequence and the `Z` after it prints.
     let _ = engine.process_pty_output(b"\x07Z");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2215,7 +2218,7 @@ fn a_finished_device_control_string_is_not_carried() {
 
     let _ = engine.process_pty_output(b"\x1bPq#0~~\x1b\\");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"Z");
@@ -2238,13 +2241,13 @@ fn a_string_whose_body_the_parser_drops_carries_only_its_opening_bytes() {
         let mut engine = build_test_terminal_engine();
 
         let _ = engine.process_pty_output(string_opening_bytes);
-        assert_eq!(engine.undecoded_terminal_bytes(), string_opening_bytes);
+        assert_eq!(engine.get_undecoded_terminal_bytes(), string_opening_bytes);
 
         // A megabyte of body arriving one read at a time adds nothing.
         let string_body_bytes = vec![b'y'; 1024 * 1024];
         for body_chunk in string_body_bytes.chunks(READ_CHUNK_BYTE_COUNT) {
             let _ = engine.process_pty_output(body_chunk);
-            assert_eq!(engine.undecoded_terminal_bytes(), string_opening_bytes);
+            assert_eq!(engine.get_undecoded_terminal_bytes(), string_opening_bytes);
         }
 
         assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
@@ -2258,7 +2261,7 @@ fn a_string_whose_body_the_parser_drops_carries_only_its_opening_bytes() {
         let mut restored_engine = rebuild_terminal_engine(engine);
         let _ = restored_engine.process_pty_output(b"yyy\x1b\\Z");
 
-        assert_eq!(restored_engine.undecoded_terminal_bytes(), b"");
+        assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"");
         assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'Z');
         assert_eq!(
             restored_engine
@@ -2278,11 +2281,11 @@ fn a_split_application_program_command_opening_carries_both_of_its_bytes() {
 
     // The chunk ends on the escape byte alone.
     let _ = engine.process_pty_output(b"\x1b");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b");
 
     // The `_` and the start of a kitty graphics payload arrive next.
     let _ = engine.process_pty_output(b"_Ga=T,f=100;iVBORw0KGgo");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b_");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b_");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"AAANSUhEUg\x1b\\Z");
@@ -2304,7 +2307,7 @@ fn an_operating_system_command_past_the_limit_is_not_held() {
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\x1b]52;c;");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b]52;c;");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b]52;c;");
 
     // One chunk short of the limit, the whole sequence is still held.
     let under_limit_input_bytes = vec![b'A'; MAX_UNDECODED_BYTE_COUNT - READ_CHUNK_BYTE_COUNT];
@@ -2312,19 +2315,19 @@ fn an_operating_system_command_past_the_limit_is_not_held() {
         let _ = engine.process_pty_output(terminal_input_chunk);
     }
     assert_eq!(
-        engine.undecoded_terminal_bytes().len(),
+        engine.get_undecoded_terminal_bytes().len(),
         7 + MAX_UNDECODED_BYTE_COUNT - READ_CHUNK_BYTE_COUNT
     );
 
     // The next chunk passes the limit, and the carry drops to empty. The
     // buffer is released, not cleared, so the pane keeps no room for it.
     let _ = engine.process_pty_output(&[b'A'; READ_CHUNK_BYTE_COUNT]);
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(engine.undecoded_terminal_bytes.capacity(), 0);
 
     // More body changes nothing, and none of it prints.
     let _ = engine.process_pty_output(&[b'A'; READ_CHUNK_BYTE_COUNT]);
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(engine.undecoded_terminal_bytes.capacity(), 0);
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
     assert_eq!(
@@ -2335,7 +2338,7 @@ fn an_operating_system_command_past_the_limit_is_not_held() {
     // The terminator closes the sequence and the `Z` after it prints.
     let _ = engine.process_pty_output(b"\x07Z");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2350,7 +2353,7 @@ fn a_control_sequence_with_endless_parameters_is_not_held_past_the_limit() {
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\x1b[");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[");
 
     let parameter_digit_bytes = vec![b'1'; 2 * MAX_UNDECODED_BYTE_COUNT];
     for (chunk_round, terminal_input_chunk) in parameter_digit_bytes
@@ -2365,19 +2368,19 @@ fn a_control_sequence_with_endless_parameters_is_not_held_past_the_limit() {
             0
         };
         assert_eq!(
-            engine.undecoded_terminal_bytes().len(),
+            engine.get_undecoded_terminal_bytes().len(),
             expected_held_byte_count,
             "after chunk {chunk_round}"
         );
     }
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
 
     // `m` finishes it as an SGR koshi ignores; the `Z` after it prints.
     let _ = engine.process_pty_output(b"mZ");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2394,12 +2397,12 @@ fn a_swap_inside_a_sequence_past_the_limit_prints_the_rest_of_the_body() {
 
     let _ = engine.process_pty_output(b"\x1b]52;c;");
     let _ = engine.process_pty_output(&vec![b'A'; MAX_UNDECODED_BYTE_COUNT + 1]);
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"BC\x07Z");
 
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'B');
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 1), 'C');
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 2), 'Z');
@@ -2418,11 +2421,11 @@ fn an_empty_chunk_keeps_the_held_bytes() {
     let mut engine = build_test_terminal_engine();
 
     assert_eq!(engine.process_pty_output(b""), b"");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let _ = engine.process_pty_output(b"a\xc3");
     assert_eq!(engine.process_pty_output(b""), b"");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\xc3");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\xc3");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'a');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2431,7 +2434,7 @@ fn an_empty_chunk_keeps_the_held_bytes() {
 
     let _ = engine.process_pty_output(b"\xa9\x1b[3");
     assert_eq!(engine.process_pty_output(b""), b"");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[3");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[3");
     assert_eq!(get_terminal_cell_character(&engine, 0, 1), 'é');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2447,16 +2450,16 @@ fn a_four_byte_code_point_split_over_three_chunks_is_carried_whole() {
 
     // U+1F600 is 0xF0 0x9F 0x98 0x80.
     let _ = engine.process_pty_output(b"\xf0\x9f");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\xf0\x9f");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\xf0\x9f");
 
     let _ = engine.process_pty_output(b"\x98");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\xf0\x9f\x98");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\xf0\x9f\x98");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"\x80");
 
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(
         get_terminal_cell_character(&restored_engine, 0, 0),
         '\u{1f600}'
@@ -2476,10 +2479,10 @@ fn a_code_point_cut_short_by_an_escape_prints_a_replacement_and_holds_the_sequen
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\xc3");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\xc3");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\xc3");
 
     let _ = engine.process_pty_output(b"\x1b[31");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[31");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[31");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), '\u{fffd}');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2487,7 +2490,7 @@ fn a_code_point_cut_short_by_an_escape_prints_a_replacement_and_holds_the_sequen
     );
 
     let _ = engine.process_pty_output(b"mZ");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let cell = engine
         .get_terminal_state()
@@ -2507,11 +2510,11 @@ fn a_substituted_sequence_is_not_carried() {
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\x1b[31\x1a");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let _ = engine.process_pty_output(b"Z");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
@@ -2527,10 +2530,10 @@ fn a_repeated_escape_byte_holds_one_escape() {
 
     let _ = engine.process_pty_output(b"\x1b");
     let _ = engine.process_pty_output(b"\x1b");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b");
 
     let _ = engine.process_pty_output(b"[31mZ");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 
     let cell = engine
         .get_terminal_state()
@@ -2550,11 +2553,11 @@ fn an_operating_system_command_closed_by_the_string_terminator_is_not_carried() 
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\x1b]0;hi");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b]0;hi");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b]0;hi");
 
     let _ = engine.process_pty_output(b"\x1b\\Z");
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(engine.get_terminal_state().get_title(), Some("hi"));
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(
@@ -2572,12 +2575,12 @@ fn an_operating_system_command_cut_at_its_terminator_carries_only_the_escape() {
 
     let _ = engine.process_pty_output(b"\x1b]0;hi\x1b");
     assert_eq!(engine.get_terminal_state().get_title(), Some("hi"));
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"\\Z");
 
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(restored_engine.get_terminal_state().get_title(), Some("hi"));
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'Z');
     assert_eq!(
@@ -2595,15 +2598,15 @@ fn a_device_control_string_cut_before_its_final_byte_carries_its_opening() {
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\x1bP");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1bP");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1bP");
 
     let _ = engine.process_pty_output(b"q#0~~");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1bPq");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1bPq");
 
     let mut restored_engine = rebuild_terminal_engine(engine);
     let _ = restored_engine.process_pty_output(b"@@\x1b\\Z");
 
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'Z');
     assert_eq!(
         restored_engine
@@ -2624,7 +2627,7 @@ fn a_resize_keeps_the_held_bytes() {
         row_count: 2,
     });
 
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[3");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[3");
 }
 
 /// A control sequence the parser ignores dispatches nothing: the scan holds
@@ -2635,17 +2638,20 @@ fn an_ignored_control_sequence_is_held_until_the_next_escape_or_print() {
     let mut engine = build_test_terminal_engine();
 
     let _ = engine.process_pty_output(b"\x1b[3?m");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[3?m");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[3?m");
 
     let _ = engine.process_pty_output(b"\n");
-    assert_eq!(engine.undecoded_terminal_bytes(), b"\x1b[3?m\n");
+    assert_eq!(engine.get_undecoded_terminal_bytes(), b"\x1b[3?m\n");
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
         (1, 0)
     );
 
     let mut restored_engine = rebuild_terminal_engine(engine);
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"\x1b[3?m\n");
+    assert_eq!(
+        restored_engine.get_undecoded_terminal_bytes(),
+        b"\x1b[3?m\n"
+    );
     assert_eq!(
         restored_engine
             .get_terminal_state()
@@ -2654,7 +2660,7 @@ fn an_ignored_control_sequence_is_held_until_the_next_escape_or_print() {
     );
 
     let _ = restored_engine.process_pty_output(b"Z");
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"");
+    assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&restored_engine, 1, 0), 'Z');
     assert_eq!(
         restored_engine
@@ -2664,7 +2670,7 @@ fn an_ignored_control_sequence_is_held_until_the_next_escape_or_print() {
     );
 
     let _ = restored_engine.process_pty_output(b"\x1b[3?m\x1b[3");
-    assert_eq!(restored_engine.undecoded_terminal_bytes(), b"\x1b[3");
+    assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"\x1b[3");
 }
 
 /// The engine holds its OSC buffer inline, so its own size bounds how much one

@@ -2,6 +2,13 @@
 
 use super::*;
 
+impl OutputPaint {
+    /// Replace this paint's placement key with `placement_key`.
+    fn set_placement_key(&mut self, placement_key: ImagePlacementKey) {
+        self.placement_key = placement_key;
+    }
+}
+
 fn decode_sixel_output_unit(sixel_output_bytes: &[u8]) -> DecodedImage {
     let sixel_payload_bytes = sixel_output_bytes
         .strip_prefix(b"\x1bP")
@@ -94,7 +101,7 @@ fn build_iterm_worker_request(
             })
             .collect(),
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -122,8 +129,8 @@ fn oversized_sixel_tiles_cover_every_target_pixel_exactly_once() {
     );
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 256,
-        max_pixel_width: Some(128),
-        max_pixel_height: Some(128),
+        maximum_pixel_width: Some(128),
+        maximum_pixel_height: Some(128),
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).unwrap();
     let encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
@@ -132,11 +139,11 @@ fn oversized_sixel_tiles_cover_every_target_pixel_exactly_once() {
         output_kind,
         pixel_cell_size: cell_size,
         measured_pixel_cell_size: Some(cell_size),
-        cell_snapshot: Some(Arc::new(blank_snapshot(output_paint.target_area))),
+        cell_snapshot: Some(Arc::new(build_blank_snapshot(output_paint.target_area))),
         output_paints: vec![output_paint.clone()],
         encode_keys: vec![encode_key],
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let template_units = encode_sixel_template(
         &worker_request,
@@ -200,8 +207,8 @@ fn one_cell_sixel_tiles_use_bounded_stack_space() {
             let output_paint = build_output_paint([255, 0, 0, 255].repeat(64 * 64), 64, 64, 0);
             let output_kind = ImageOutputKind::Sixel {
                 palette_color_count: 256,
-                max_pixel_width: Some(1),
-                max_pixel_height: Some(1),
+                maximum_pixel_width: Some(1),
+                maximum_pixel_height: Some(1),
             };
             let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).unwrap();
             let encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
@@ -210,11 +217,11 @@ fn one_cell_sixel_tiles_use_bounded_stack_space() {
                 output_kind,
                 pixel_cell_size: cell_size,
                 measured_pixel_cell_size: Some(cell_size),
-                cell_snapshot: Some(Arc::new(blank_snapshot(output_paint.target_area))),
+                cell_snapshot: Some(Arc::new(build_blank_snapshot(output_paint.target_area))),
                 output_paints: vec![output_paint.clone()],
                 encode_keys: vec![encode_key],
                 kitty_paint_images: Vec::new(),
-                cancellation_token: Arc::new(AtomicBool::new(false)),
+                is_cancellation_requested: Arc::new(AtomicBool::new(false)),
             };
             let template_units = encode_sixel_template(
                 &worker_request,
@@ -269,8 +276,8 @@ fn maximum_visible_placements_reach_the_worker_without_drops() {
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
             palette_color_count: 256,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ] {
         let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
@@ -297,13 +304,13 @@ fn maximum_visible_placements_reach_the_worker_without_drops() {
                 ));
             }
         }
-        let mut output_state = ImageOutputState::disabled();
+        let mut output_state = ImageOutputState::from_output_kind(None);
         output_state.output_kind = Some(output_kind);
         let (sender, receiver) = mpsc::sync_channel(1);
         output_state.worker_request_sender = Some(sender);
         output_state.prepare_frame(
             &output_paints,
-            Some(Arc::new(blank_snapshot(Rect::new(0, 0, 64, 64)))),
+            Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 64, 64)))),
             Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
         );
         let actual_output_paints = receiver.try_recv().map(|worker_request| {
@@ -436,7 +443,7 @@ fn opaque_negative_z_image_is_kept_when_a_glyph_is_under_it() {
 fn iterm_partial_alpha_on_a_default_blank_preserves_rgba() {
     let output_paint = build_output_paint(vec![10, 20, 30, 128], 1, 1, 1);
     let output_paints = [output_paint];
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let image_plans =
         classify_image_plans(ImageOutputKind::Iterm, &cell_snapshot, &output_paints, None);
 
@@ -467,7 +474,7 @@ fn iterm_partial_alpha_on_a_default_blank_preserves_rgba() {
 fn iterm_zero_alpha_on_a_default_blank_preserves_rgba() {
     let output_paint = build_output_paint(vec![10, 20, 30, 0], 1, 1, 1);
     let output_paints = [output_paint];
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let image_plans =
         classify_image_plans(ImageOutputKind::Iterm, &cell_snapshot, &output_paints, None);
 
@@ -588,7 +595,7 @@ fn iterm_partial_images_compose_over_every_lower_alpha_layer() {
     let lower_output_paint = build_output_paint(vec![255, 0, 0, 128], 1, 1, 0);
     let upper_output_paint = build_output_paint(vec![0, 0, 255, 128], 1, 1, 1);
     let output_paints = [lower_output_paint, upper_output_paint];
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let image_plans = classify_image_plans(
         ImageOutputKind::Iterm,
@@ -605,7 +612,7 @@ fn iterm_partial_images_compose_over_every_lower_alpha_layer() {
         image_plans[1].image_compatibility,
         ImageCompatibility::default()
     );
-    assert!(image_plans[1].iterm_composition.uses_per_cell_composition);
+    assert!(image_plans[1].iterm_composition.needs_per_cell_composition);
     let worker_request =
         build_iterm_worker_request(Arc::clone(&cell_snapshot), &output_paints, Some(cell_size));
     let template_units = encode_iterm_template(
@@ -627,7 +634,7 @@ fn iterm_partial_lower_coverage_preserves_uncovered_default_pixels() {
     let mut upper_output_paint = build_output_paint(vec![0, 0, 255, 128, 0, 0, 0, 0], 2, 1, 1);
     upper_output_paint.target_area = Rect::new(0, 0, 2, 1);
     let output_paints = [lower_output_paint, upper_output_paint];
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 2, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 2, 1)));
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let image_plans = classify_image_plans(
         ImageOutputKind::Iterm,
@@ -711,13 +718,13 @@ fn iterm_per_cell_backgrounds_preserve_explicit_and_default_cells() {
 #[test]
 fn kitty_background_layer_boundary_is_exact_for_native_host_protocols() {
     let explicit_background_cells = build_solid_cell_snapshot(Rect::new(0, 0, 1, 1), [1, 2, 3]);
-    let default_background_cells = blank_snapshot(Rect::new(0, 0, 1, 1));
+    let default_background_cells = build_blank_snapshot(Rect::new(0, 0, 1, 1));
     for output_kind in [
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
             palette_color_count: 2,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ] {
         let measured_cell_size = output_kind
@@ -859,8 +866,8 @@ fn a_default_background_between_rgb_cells_is_incompatible() {
 fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let output_paint = build_output_paint(vec![255, 0, 0, 128], 1, 1, 0);
@@ -872,7 +879,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
         Rect::new(0, 0, 1, 1),
         [0, 0, 255],
     ));
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(output_kind);
     let red_key = {
         let mut encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
@@ -919,7 +926,7 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
         output_paints: vec![output_paint.clone()],
         encode_keys: vec![encode_key],
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let red_template_units = encode_sixel_template(
         &build_worker_request(Arc::clone(&red_cells), red_key),
@@ -959,13 +966,13 @@ fn sixel_partial_alpha_reencodes_when_the_cell_background_changes() {
 fn sixel_overlapping_partial_alpha_is_composed_over_the_lower_image() {
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let lower_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let upper_paint = build_output_paint(vec![0, 0, 255, 128], 1, 1, 1);
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let lower_key = build_output_encode_key(output_kind, cell_size, &lower_paint);
     let upper_key = build_output_encode_key(output_kind, cell_size, &upper_paint);
     let lower_image_plan = classify_output_paint(
@@ -1003,7 +1010,7 @@ fn sixel_overlapping_partial_alpha_is_composed_over_the_lower_image() {
         output_paints: vec![lower_paint.clone(), upper_paint.clone()],
         encode_keys: vec![lower_key, upper_key],
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let template_units = encode_sixel_template(
         &worker_request,
@@ -1026,8 +1033,8 @@ fn sixel_overlapping_partial_alpha_is_composed_over_the_lower_image() {
 fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pixels() {
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let lower_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
@@ -1037,7 +1044,7 @@ fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pix
     upper_output_paint.image_record = Arc::new(upper_image_record);
     let output_paints = [lower_output_paint, upper_output_paint];
 
-    let default_cells = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let default_cells = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let default_plans =
         classify_image_plans(output_kind, &default_cells, &output_paints, Some(cell_size));
     assert_eq!(
@@ -1069,7 +1076,7 @@ fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pix
             .map(|output_paint| build_output_encode_key(output_kind, cell_size, output_paint))
             .collect(),
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let template_units = encode_sixel_template(
         &worker_request,
@@ -1091,13 +1098,13 @@ fn sixel_terminal_background_requires_the_cell_background_under_opaque_lower_pix
 fn sixel_composition_revision_tracks_exact_cells_targets_and_pixels() {
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let layout_area = Rect::new(0, 0, 1, 1);
     let blank_cell_snapshot = Arc::new(build_solid_cell_snapshot(layout_area, [20, 30, 40]));
     let output_paint = build_output_paint(vec![255, 0, 0, 127], 1, 1, 0);
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
 
     assert_eq!(
         output_state.update_composition_revisions(
@@ -1182,8 +1189,8 @@ fn sixel_composition_revision_tracks_exact_cells_targets_and_pixels() {
 fn sixel_composition_ignores_cells_outside_every_image() {
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let layout_area = Rect::new(0, 0, 2, 1);
     let output_paint = build_output_paint(vec![255, 0, 0, 127], 1, 1, 0);
@@ -1201,7 +1208,7 @@ fn sixel_composition_ignores_cells_outside_every_image() {
             },
         ],
     ));
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
 
     assert_eq!(
         output_state.update_composition_revisions(
@@ -1228,8 +1235,8 @@ fn iterm_composition_revision_tracks_only_each_target_and_its_lower_images() {
     let mut outside_output_paint = build_output_paint(vec![0, 255, 0, 128], 1, 1, 0);
     outside_output_paint.target_area.x = 1;
     let output_paints = [target_output_paint.clone(), outside_output_paint.clone()];
-    let blank_cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 2, 1)));
-    let mut output_state = ImageOutputState::disabled();
+    let blank_cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 2, 1)));
+    let mut output_state = ImageOutputState::from_output_kind(None);
     let initial_revisions = output_state.update_composition_revisions(
         output_kind,
         &blank_cell_snapshot,
@@ -1285,8 +1292,8 @@ fn iterm_composition_revision_changes_with_an_intersecting_lower_image() {
     let output_kind = ImageOutputKind::Iterm;
     let lower_output_paint = build_output_paint(vec![255, 0, 0, 128], 1, 1, 0);
     let upper_output_paint = build_output_paint(vec![0, 0, 255, 128], 1, 1, 1);
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
-    let mut output_state = ImageOutputState::disabled();
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let mut output_state = ImageOutputState::from_output_kind(None);
     let initial_revisions = output_state.update_composition_revisions(
         output_kind,
         &cell_snapshot,
@@ -1323,8 +1330,8 @@ fn binary_alpha_sixel_output_can_keep_a_glyph_in_a_zero_bit() {
     let encode_key = build_output_encode_key(
         ImageOutputKind::Sixel {
             palette_color_count: 2,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
         PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size"),
         &output_paint,
@@ -1333,8 +1340,8 @@ fn binary_alpha_sixel_output_can_keep_a_glyph_in_a_zero_bit() {
     let image_plan = classify_output_paint(
         ImageOutputKind::Sixel {
             palette_color_count: 2,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
         &cell_snapshot,
         &HashSet::new(),
@@ -1352,18 +1359,18 @@ fn binary_alpha_sixel_output_can_keep_a_glyph_in_a_zero_bit() {
 fn output_state_keeps_i_term_available_without_a_pixel_cell_query() {
     let output_state = ImageOutputState::from_output_kind(Some(ImageOutputKind::Iterm));
 
-    assert_eq!(output_state.output_kind(), Some(ImageOutputKind::Iterm));
-    assert!(!output_state.work_pending());
+    assert_eq!(output_state.get_output_kind(), Some(ImageOutputKind::Iterm));
+    assert!(!output_state.is_work_pending());
 }
 
 #[test]
 fn disconnected_worker_settles_each_distinct_frame_as_unavailable() {
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
     let (sender, receiver) = mpsc::sync_channel(1);
     drop(receiver);
     output_state.worker_request_sender = Some(sender);
-    let cell_snapshot = Some(Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1))));
+    let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1))));
     let first_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let first_image_paint = ImagePaint::from_image_placement(
         first_output_paint.placement_key.0,
@@ -1380,7 +1387,7 @@ fn disconnected_worker_settles_each_distinct_frame_as_unavailable() {
         Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size")),
     ));
     assert_eq!(output_state.list_prepared_placement_keys(), []);
-    assert!(!output_state.work_pending());
+    assert!(!output_state.is_work_pending());
     output_state.commit_frame();
 
     let second_output_paint = build_output_paint(vec![0, 0, 255, 255], 1, 1, 0);
@@ -1398,7 +1405,7 @@ fn disconnected_worker_settles_each_distinct_frame_as_unavailable() {
         Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size")),
     ));
     assert_eq!(output_state.list_prepared_placement_keys(), []);
-    assert!(!output_state.work_pending());
+    assert!(!output_state.is_work_pending());
 }
 
 #[test]
@@ -1519,7 +1526,7 @@ fn scaled_tile_samples_from_the_visible_crop_origin() {
 #[test]
 fn worker_emits_one_complete_i_term_packet_for_one_opaque_pixel() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let output_kind = ImageOutputKind::Iterm;
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
@@ -1532,7 +1539,7 @@ fn worker_emits_one_complete_i_term_packet_for_one_opaque_pixel() {
         output_paints: vec![output_paint],
         encode_keys: vec![encode_key],
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let (sender, receiver) = mpsc::sync_channel(8);
 
@@ -1553,11 +1560,11 @@ fn worker_emits_one_complete_i_term_packet_for_one_opaque_pixel() {
 #[test]
 fn worker_emits_a_complete_bounded_sixel_tile() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
     let encode_key = build_output_encode_key(output_kind, cell_size, &output_paint);
@@ -1570,7 +1577,7 @@ fn worker_emits_a_complete_bounded_sixel_tile() {
         output_paints: vec![output_paint],
         encode_keys: vec![encode_key],
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let (sender, receiver) = mpsc::sync_channel(8);
 
@@ -1584,7 +1591,7 @@ fn worker_emits_a_complete_bounded_sixel_tile() {
     assert_eq!(output_unit.tile_offset, (0, 0));
     assert!(output_unit.output_bytes.starts_with(b"\x1bP"));
     assert!(output_unit.output_bytes.ends_with(b"\x1b\\"));
-    assert!(output_unit.output_bytes.len() <= MAX_SIXEL_TILE_BYTE_COUNT);
+    assert!(output_unit.output_bytes.len() <= MAX_SIXEL_CHUNK_BYTE_COUNT);
 }
 
 #[test]
@@ -1595,8 +1602,8 @@ fn worker_emits_shared_templates_in_original_paint_order() {
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
             palette_color_count: 2,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ] {
         let mut first_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
@@ -1612,14 +1619,14 @@ fn worker_emits_shared_templates_in_original_paint_order() {
             output_kind,
             pixel_cell_size: cell_size,
             measured_pixel_cell_size: Some(cell_size),
-            cell_snapshot: Some(Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)))),
+            cell_snapshot: Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)))),
             encode_keys: output_paints
                 .iter()
                 .map(|output_paint| build_output_encode_key(output_kind, cell_size, output_paint))
                 .collect(),
             output_paints,
             kitty_paint_images: Vec::new(),
-            cancellation_token: Arc::new(AtomicBool::new(false)),
+            is_cancellation_requested: Arc::new(AtomicBool::new(false)),
         };
         let (sender, receiver) = mpsc::sync_channel(16);
 
@@ -1676,8 +1683,8 @@ fn unavailable_paint_does_not_skip_independent_output() {
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
             palette_color_count: 2,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ] {
         for unavailable_first in [true, false] {
@@ -1697,7 +1704,7 @@ fn unavailable_paint_does_not_skip_independent_output() {
                 output_kind,
                 pixel_cell_size: cell_size,
                 measured_pixel_cell_size: Some(cell_size),
-                cell_snapshot: Some(Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)))),
+                cell_snapshot: Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)))),
                 encode_keys: output_paints
                     .iter()
                     .map(|output_paint| {
@@ -1706,7 +1713,7 @@ fn unavailable_paint_does_not_skip_independent_output() {
                     .collect(),
                 output_paints,
                 kitty_paint_images: Vec::new(),
-                cancellation_token: Arc::new(AtomicBool::new(false)),
+                is_cancellation_requested: Arc::new(AtomicBool::new(false)),
             };
             let (sender, receiver) = mpsc::sync_channel(16);
 
@@ -1752,7 +1759,7 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
             output_paint
         })
         .collect::<Vec<_>>();
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
     let worker_request = WorkerRequest {
         frame_generation: 1,
         output_kind,
@@ -1765,7 +1772,7 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
             .collect(),
         output_paints,
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let image_plans = classify_image_plans(
         output_kind,
@@ -1821,7 +1828,7 @@ fn worker_stops_before_unique_templates_exceed_the_frame_bound() {
 fn rejected_cumulative_worker_output_cancels_the_generation() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let placement_key = output_paint.placement_key;
-    let cancellation_token = Arc::new(AtomicBool::new(false));
+    let is_cancellation_requested = Arc::new(AtomicBool::new(false));
     let (sender, receiver) = mpsc::sync_channel(2);
     sender
         .send(WorkerMessage::Unit(OutputUnit {
@@ -1839,7 +1846,7 @@ fn rejected_cumulative_worker_output_cancels_the_generation() {
         })
         .expect("finish queues");
     drop(sender);
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
     output_state.frame_generation = 1;
     output_state.latest_output_paints = vec![output_paint];
@@ -1851,16 +1858,16 @@ fn rejected_cumulative_worker_output_cancels_the_generation() {
     output_state.worker_messages = Some(receiver);
     output_state.active_job = Some(ActiveJob {
         frame_generation: 1,
-        cancellation_token: Arc::clone(&cancellation_token),
+        is_cancellation_requested: Arc::clone(&is_cancellation_requested),
     });
 
     output_state.poll();
 
-    assert!(cancellation_token.load(Ordering::Acquire));
+    assert!(is_cancellation_requested.load(Ordering::Acquire));
     assert_eq!(output_state.output_unit_byte_count, 0);
     assert_eq!(output_state.output_units.len(), 0);
     assert!(output_state.is_ready);
-    assert!(!output_state.work_pending());
+    assert!(!output_state.is_work_pending());
 }
 
 #[test]
@@ -1894,8 +1901,8 @@ fn one_cell_sixel_output_may_exceed_one_transport_chunk() {
     output_paint.target_area = Rect::new(0, 0, 1, 1);
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: palette.len(),
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let cell_size =
         PixelCellSize::from_pixel_dimensions(image_pixel_width as u16, image_pixel_height as u16)
@@ -1906,11 +1913,11 @@ fn one_cell_sixel_output_may_exceed_one_transport_chunk() {
         output_kind,
         pixel_cell_size: cell_size,
         measured_pixel_cell_size: Some(cell_size),
-        cell_snapshot: Some(Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)))),
+        cell_snapshot: Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)))),
         output_paints: vec![output_paint.clone()],
         encode_keys: vec![encode_key],
         kitty_paint_images: Vec::new(),
-        cancellation_token: Arc::new(AtomicBool::new(false)),
+        is_cancellation_requested: Arc::new(AtomicBool::new(false)),
     };
     let template_units = encode_sixel_template(
         &worker_request,
@@ -1931,7 +1938,7 @@ fn one_cell_sixel_output_may_exceed_one_transport_chunk() {
     .expect("one-cell Sixel output encodes");
 
     assert_eq!(template_units.len(), 1);
-    assert!(template_units[0].output_bytes.len() > MAX_SIXEL_TILE_BYTE_COUNT);
+    assert!(template_units[0].output_bytes.len() > MAX_SIXEL_CHUNK_BYTE_COUNT);
     assert!(template_units[0].output_bytes.len() <= MAX_SIXEL_OUTPUT_BYTE_COUNT);
     assert_eq!(
         decode_sixel_output_unit(&template_units[0].output_bytes).rgba_bytes,
@@ -1953,7 +1960,7 @@ fn i_term_unit_output_has_exact_position_payload_and_cursor_restore() {
         output_bytes: Arc::from(&b"body"[..]),
     });
     let frame_output_bytes = output_state
-        .frame_output(Some(ratatui::layout::Position { x: 4, y: 5 }))
+        .build_frame_output(Some(ratatui::layout::Position { x: 4, y: 5 }))
         .expect("frame output writes");
     assert_eq!(frame_output_bytes, b"\x1b[1;1Hbody\x1b[6;5H");
 }
@@ -1963,8 +1970,8 @@ fn sixel_unit_output_has_exact_mode_boundaries_and_cursor_restore() {
     let output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
     let output_kind = ImageOutputKind::Sixel {
         palette_color_count: 2,
-        max_pixel_width: None,
-        max_pixel_height: None,
+        maximum_pixel_width: None,
+        maximum_pixel_height: None,
     };
     let mut output_state = ImageOutputState::from_output_kind(Some(output_kind));
     output_state.latest_output_paints = vec![output_paint];
@@ -1977,7 +1984,7 @@ fn sixel_unit_output_has_exact_mode_boundaries_and_cursor_restore() {
         output_bytes: Arc::from(&b"sixel"[..]),
     });
     let frame_output_bytes = output_state
-        .frame_output(Some(ratatui::layout::Position { x: 4, y: 5 }))
+        .build_frame_output(Some(ratatui::layout::Position { x: 4, y: 5 }))
         .expect("frame output writes");
     assert_eq!(
         frame_output_bytes,
@@ -1985,7 +1992,7 @@ fn sixel_unit_output_has_exact_mode_boundaries_and_cursor_restore() {
     );
 }
 
-fn blank_snapshot(area: Rect) -> ImageCellSnapshot {
+fn build_blank_snapshot(area: Rect) -> ImageCellSnapshot {
     ImageCellSnapshot::from_cell_states(
         area,
         vec![ImageCellState::default(); usize::from(area.width) * usize::from(area.height)],
@@ -1994,7 +2001,7 @@ fn blank_snapshot(area: Rect) -> ImageCellSnapshot {
 }
 
 fn build_kitty_output_state() -> (ImageOutputState, mpsc::Receiver<WorkerRequest>) {
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Kitty);
     let (sender, receiver) = mpsc::sync_channel(4);
     output_state.worker_request_sender = Some(sender);
@@ -2117,7 +2124,7 @@ fn a_failed_kitty_frame_frees_every_image_the_host_holds() {
 
 #[test]
 fn a_failed_iterm_frame_frees_no_kitty_image() {
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
 
     output_state.fail_frame_commit();
@@ -2133,8 +2140,8 @@ fn an_opaque_iterm_or_sixel_image_that_moves_reuses_its_encoded_output() {
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
             palette_color_count: 256,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ] {
         let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
@@ -2149,7 +2156,7 @@ fn an_opaque_iterm_or_sixel_image_that_moves_reuses_its_encoded_output() {
             )
         };
         let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell");
-        let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 8, 8)));
+        let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8)));
         let mut output_state = ImageOutputState::from_output_kind(Some(output_kind));
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2162,7 +2169,7 @@ fn an_opaque_iterm_or_sixel_image_that_moves_reuses_its_encoded_output() {
             std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
         }
         let first_frame_output_bytes = output_state
-            .frame_output(None)
+            .build_frame_output(None)
             .expect("the first frame writes");
         output_state.commit_frame();
         assert!(
@@ -2179,11 +2186,11 @@ fn an_opaque_iterm_or_sixel_image_that_moves_reuses_its_encoded_output() {
             "{output_kind:?} did not commit the moved frame"
         );
         assert!(
-            !output_state.work_pending(),
+            !output_state.is_work_pending(),
             "{output_kind:?} started another encode"
         );
         let moved_frame_output_bytes = output_state
-            .frame_output(None)
+            .build_frame_output(None)
             .expect("the moved frame writes");
         let rebased_frame_output_bytes = String::from_utf8(moved_frame_output_bytes)
             .expect("image output is ASCII")
@@ -2210,8 +2217,8 @@ fn a_partly_transparent_iterm_image_that_moves_encodes_again() {
         )
     };
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell");
-    let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 8, 8)));
-    let mut output_state = ImageOutputState::disabled();
+    let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8)));
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
     let (sender, requests) = mpsc::sync_channel(4);
     output_state.worker_request_sender = Some(sender);
@@ -2349,8 +2356,8 @@ fn a_failed_iterm_or_sixel_encode_retries_an_unchanged_frame() {
         ImageOutputKind::Iterm,
         ImageOutputKind::Sixel {
             palette_color_count: 256,
-            max_pixel_width: None,
-            max_pixel_height: None,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
         },
     ] {
         let source_output_paint = build_output_paint(vec![255, 0, 0, 255], 1, 1, 0);
@@ -2362,13 +2369,13 @@ fn a_failed_iterm_or_sixel_encode_retries_an_unchanged_frame() {
             source_output_paint.source_rect,
             source_output_paint.z_index,
         );
-        let mut output_state = ImageOutputState::disabled();
+        let mut output_state = ImageOutputState::from_output_kind(None);
         output_state.output_kind = Some(output_kind);
         let (sender, requests) = mpsc::sync_channel(4);
         output_state.worker_request_sender = Some(sender);
         let (worker_message_sender, worker_messages) = mpsc::sync_channel(4);
         output_state.worker_messages = Some(worker_messages);
-        let cell_snapshot = Arc::new(blank_snapshot(Rect::new(0, 0, 1, 1)));
+        let cell_snapshot = Arc::new(build_blank_snapshot(Rect::new(0, 0, 1, 1)));
         let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell");
 
         assert!(
@@ -2428,8 +2435,8 @@ fn an_unchanged_frame_after_a_commit_starts_no_work_and_commits_nothing() {
             )
         };
         let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("one-pixel cell");
-        let build_cell_snapshot = || Some(Arc::new(blank_snapshot(Rect::new(0, 0, 8, 8))));
-        let mut output_state = ImageOutputState::disabled();
+        let build_cell_snapshot = || Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
+        let mut output_state = ImageOutputState::from_output_kind(None);
         output_state.output_kind = Some(output_kind);
         let (sender, requests) = mpsc::sync_channel(4);
         output_state.worker_request_sender = Some(sender);
@@ -2459,7 +2466,7 @@ fn an_unchanged_frame_after_a_commit_starts_no_work_and_commits_nothing() {
             "{output_kind:?} started a job"
         );
         assert!(
-            !output_state.native_commit_pending(),
+            !output_state.is_native_commit_pending(),
             "{output_kind:?} commits again"
         );
         assert!(
@@ -2491,14 +2498,14 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
     let deadline = Instant::now() + Duration::from_secs(5);
     while !output_state.prepare_frame(
         &[build_placed_image_paint()],
-        Some(Arc::new(blank_snapshot(layout_area))),
+        Some(Arc::new(build_blank_snapshot(layout_area))),
         Some(cell_size),
     ) {
         assert!(Instant::now() < deadline, "the first frame did not settle");
         std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
     }
     let first_frame_output_bytes = output_state
-        .frame_output(None)
+        .build_frame_output(None)
         .expect("the first frame writes");
     output_state.commit_frame();
 
@@ -2517,9 +2524,12 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
         Some(Arc::new(glyph_under_image)),
         Some(cell_size),
     ));
-    assert!(!output_state.work_pending(), "the glyph started an encode");
     assert!(
-        output_state.native_commit_pending(),
+        !output_state.is_work_pending(),
+        "the glyph started an encode"
+    );
+    assert!(
+        output_state.is_native_commit_pending(),
         "the image is not written again"
     );
     assert!(
@@ -2527,7 +2537,7 @@ fn text_written_under_an_opaque_iterm_image_rewrites_it_without_encoding_again()
         "an unmoved image reset the screen"
     );
     let again = output_state
-        .frame_output(None)
+        .build_frame_output(None)
         .expect("the repaired frame writes");
     assert_eq!(again, first_frame_output_bytes);
 }
@@ -2577,7 +2587,7 @@ fn a_host_resize_transmits_every_kitty_image_again() {
 
 #[test]
 fn an_iterm_reset_clears_the_screen_and_a_kitty_reset_does_not() {
-    let mut iterm = ImageOutputState::disabled();
+    let mut iterm = ImageOutputState::from_output_kind(None);
     iterm.output_kind = Some(ImageOutputKind::Iterm);
     iterm.needs_screen_reset = true;
     let mut iterm_frame_reset_bytes = Vec::new();
@@ -2612,11 +2622,11 @@ fn a_kitty_paint_skips_the_alpha_scan_and_an_iterm_paint_runs_it() {
     assert!(!kitty.prepare_frame(&[build_placed_image_paint()], None, None));
     assert_eq!(kitty.latest_output_paints[0].alpha_stats, None);
 
-    let mut iterm = ImageOutputState::disabled();
+    let mut iterm = ImageOutputState::from_output_kind(None);
     iterm.output_kind = Some(ImageOutputKind::Iterm);
     let (sender, _requests) = mpsc::sync_channel(4);
     iterm.worker_request_sender = Some(sender);
-    let cell_snapshot = Some(Arc::new(blank_snapshot(Rect::new(0, 0, 8, 8))));
+    let cell_snapshot = Some(Arc::new(build_blank_snapshot(Rect::new(0, 0, 8, 8))));
     assert!(!iterm.prepare_frame(
         &[build_placed_image_paint()],
         cell_snapshot,
@@ -2658,7 +2668,7 @@ fn the_first_host_size_forgets_nothing() {
 
 #[test]
 fn an_iterm_host_resize_frees_no_kitty_image_and_clears_no_key() {
-    let mut output_state = ImageOutputState::disabled();
+    let mut output_state = ImageOutputState::from_output_kind(None);
     output_state.output_kind = Some(ImageOutputKind::Iterm);
     output_state.latest_encode_keys = vec![build_output_encode_key(
         ImageOutputKind::Iterm,

@@ -10,8 +10,7 @@ mod encoder;
 mod parser;
 
 pub use capabilities::{
-    iterm_feature_string_supports_file, iterm_feature_string_supports_sixel,
-    ITERM_CAPABILITIES_QUERY,
+    supports_iterm_file_feature, supports_iterm_sixel_feature, ITERM_CAPABILITIES_QUERY,
 };
 pub use encoder::{
     ItermEncodeError, ItermEncoder, ItermOutputOptions, MAX_ITERM_PACKET_BYTE_COUNT,

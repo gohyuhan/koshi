@@ -30,7 +30,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{error::InvalidTransitionError, pane::state::PaneKind};
+use crate::error::InvalidTransitionError;
 
 /// Where a pane sits between spawn and removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,12 +53,10 @@ pub enum PaneLifecycle {
 
 impl PaneLifecycle {
     /// Applies `lifecycle_event` to this state and returns the next state. Returns
-    /// [`InvalidTransition`] when the pair is not one of the six legal steps.
-    /// `pane_kind` fills in that error.
+    /// [`InvalidTransitionError`] when the pair is not one of the six legal steps.
     pub(crate) fn transition(
         self,
         lifecycle_event: PaneLifecycleEvent,
-        pane_kind: PaneKind,
     ) -> Result<Self, InvalidTransitionError> {
         match (self, lifecycle_event) {
             (PaneLifecycle::Spawning, PaneLifecycleEvent::ProcessStarted) => {
@@ -85,7 +83,6 @@ impl PaneLifecycle {
             _ => Err(InvalidTransitionError {
                 previous_lifecycle: self,
                 lifecycle_event,
-                pane_kind,
             }),
         }
     }

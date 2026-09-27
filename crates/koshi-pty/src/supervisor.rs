@@ -33,7 +33,7 @@ use koshi_ipc::supervisor::{
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 
-use crate::backend::state::{CarriedPtyPane, PtyBackend, PtyHandle, PtySink, UNOBSERVED_EXIT};
+use crate::backend::state::{CarriedPtyPane, PtyBackend, PtySink, UNOBSERVED_EXIT};
 use crate::error::PtyError;
 
 /// How long one request waits for its answer. A request not answered within
@@ -46,7 +46,7 @@ const ANSWER_WAIT_DURATION: Duration = Duration::from_secs(10);
 /// What this side keeps for one pane the supervisor holds.
 ///
 /// The supervisor is the authority on the pane itself.
-/// [`carried_panes`](SupervisorPtyBackend::list_carried_panes) reads these two
+/// [`list_carried_panes`](SupervisorPtyBackend::list_carried_panes) reads these two
 /// facts without a round trip.
 #[derive(Debug, Clone, Copy)]
 struct LivePane {
@@ -133,7 +133,7 @@ impl SupervisorPtyBackend {
                     "the supervisor at {supervisor_address} could not be reached: {io_error}"
                 ),
             })?;
-        let link_closer = connection.read_closer().ok();
+        let link_closer = connection.create_read_closer().ok();
         let (frame_reader, frame_writer) = connection.split();
         let (response_sender, response_receiver) = channel();
         start_link_reader_thread(frame_reader, response_sender, Arc::clone(&pty_sink));
@@ -265,11 +265,10 @@ impl SupervisorPtyBackend {
 
     /// Wait until no byte this backend took for a child is still queued.
     ///
-    /// [`write_pane_input`](PtyBackend::write_pane_input) sends the bytes to the supervisor and waits
-    /// for its answer. A write that has returned is already the supervisor's,
-    /// and this process queues nothing. The supervisor keeps running across an
-    /// image swap, and its own writer threads carry those bytes to the
-    /// terminals.
+    /// [`write_pane_input`](PtyBackend::write_pane_input) sends the bytes to the supervisor and
+    /// waits for its answer. A write that has returned is already the supervisor's, and this
+    /// process queues nothing. The supervisor keeps running across an image swap, and its own
+    /// writer threads carry those bytes to the terminals.
     ///
     /// # Errors
     /// Never returns an error. The signature matches
@@ -465,9 +464,7 @@ impl PtyBackend for SupervisorPtyBackend {
     /// launches `spawn_spec` inside it.
     ///
     /// The child runs in the supervisor's process, not this one, and its output
-    /// and exit arrive as events on the link. The returned handle is
-    /// [`PtyHandle::from_detached_pane_id`]: it carries no channels, and the caller starts
-    /// no relay thread for the pane.
+    /// and exit arrive as events on the link and go to the backend's sink.
     ///
     /// # Errors
     /// Returns [`PtyError::Spawn`] when the supervisor refuses, when it does
@@ -482,7 +479,7 @@ impl PtyBackend for SupervisorPtyBackend {
         pane_id: PaneId,
         spawn_spec: SpawnSpec,
         pty_size: PtySize,
-    ) -> Result<PtyHandle, PtyError> {
+    ) -> Result<(), PtyError> {
         debug_assert!(
             !self
                 .live_panes_by_id
@@ -519,7 +516,7 @@ impl PtyBackend for SupervisorPtyBackend {
                     pty_size,
                 },
             );
-        Ok(PtyHandle::from_detached_pane_id(pane_id))
+        Ok(())
     }
 
     /// Retune a pane's terminal, which its child sees as a window-size change.
@@ -627,7 +624,7 @@ fn build_unexpected_supervisor_result_error(
     PtyError::Io {
         detail: format!(
             "the supervisor answered {request_kind_name} with {}",
-            supervisor_result.wire_name()
+            supervisor_result.get_wire_name()
         ),
     }
 }
@@ -636,8 +633,8 @@ fn build_unexpected_supervisor_result_error(
 /// waiting on [`Link::response_receiver`] and each event to `pty_sink`.
 ///
 /// The thread ends when the link breaks, when a frame does not decode, or when
-/// no one holds the receiving end of `answers`. Ending drops `answers`: a
-/// caller waiting for an answer reads the link as closed. An event this build
+/// no one holds the receiving end of `response_sender`. Ending drops
+/// `response_sender`: a caller waiting for an answer reads the link as closed. An event this build
 /// has no name for is passed over, and the link keeps carrying the rest.
 ///
 /// A pane whose output chunk `pty_sink` refused takes nothing more, its exit included;

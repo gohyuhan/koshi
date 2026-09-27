@@ -49,12 +49,12 @@ fn compute_version_number(version_text: &str) -> u32 {
 
 impl TerminalState {
     /// Answer character and pixel size queries for the active pane.
-    pub(super) fn report_window_size(&mut self, params: &vte::Params) {
-        if params.len() != 1 {
+    pub(super) fn report_window_size(&mut self, csi_parameters: &vte::Params) {
+        if csi_parameters.len() != 1 {
             return;
         }
         let (row_count, column_count) = self.get_active_grid().get_grid_dimensions();
-        let device_reply_bytes = match get_first_parameter_number(params) {
+        let device_reply_bytes = match get_first_parameter_number(csi_parameters) {
             Some(18) => format!("\x1b[8;{row_count};{column_count}t"),
             Some(14) => {
                 let Some(pixel_cell_size) = self.cell_size else {
@@ -85,8 +85,8 @@ impl TerminalState {
     /// Reply to Primary Device Attributes (DA1, `CSI c` / `CSI 0 c`): queue
     /// `CSI ? 62 ; 22 c`, identifying a VT220-class terminal with the ANSI
     /// color extension (22). A nonzero parameter gets no reply.
-    pub(super) fn report_primary_device_attributes(&mut self, params: &vte::Params) {
-        if get_first_parameter_number(params).unwrap_or(0) != 0 {
+    pub(super) fn report_primary_device_attributes(&mut self, csi_parameters: &vte::Params) {
+        if get_first_parameter_number(csi_parameters).unwrap_or(0) != 0 {
             return;
         }
         self.device_query_replies.extend_from_slice(b"\x1b[?62;22c");
@@ -96,8 +96,8 @@ impl TerminalState {
     /// queue `CSI > 1 ; Pv ; 0 c` — terminal type 1 (VT220), firmware version
     /// `Pv` packed from this crate's version by [`compute_version_number`], and ROM
     /// cartridge number 0. A nonzero parameter gets no reply.
-    pub(super) fn report_secondary_device_attributes(&mut self, params: &vte::Params) {
-        if get_first_parameter_number(params).unwrap_or(0) != 0 {
+    pub(super) fn report_secondary_device_attributes(&mut self, csi_parameters: &vte::Params) {
+        if get_first_parameter_number(csi_parameters).unwrap_or(0) != 0 {
             return;
         }
         let package_version_number = compute_version_number(env!("CARGO_PKG_VERSION"));
@@ -110,7 +110,7 @@ impl TerminalState {
     /// coordinates relative to the active vertical and horizontal margins.
     fn get_reported_cursor_position(&self) -> (u16, u16) {
         let (cursor_row_index, cursor_column_index) = self.get_active_cursor_position();
-        if !self.active_cursor().origin {
+        if !self.get_active_cursor().is_origin_mode_enabled {
             return (cursor_row_index, cursor_column_index);
         }
         let top_row_index = self.get_scroll_region().map_or(0, |(top, _)| top);
@@ -125,8 +125,8 @@ impl TerminalState {
     /// status) queues the all-good `CSI 0 n`; `Ps = 6` (CPR, cursor position
     /// report) queues `CSI row ; column R` with the active cursor's 1-based
     /// position. Any other `Ps` gets no reply.
-    pub(super) fn report_device_status(&mut self, params: &vte::Params) {
-        match get_first_parameter_number(params).unwrap_or(0) {
+    pub(super) fn report_device_status(&mut self, csi_parameters: &vte::Params) {
+        match get_first_parameter_number(csi_parameters).unwrap_or(0) {
             5 => self.device_query_replies.extend_from_slice(b"\x1b[0n"),
             6 => {
                 let (cursor_row_index, cursor_column_index) = self.get_reported_cursor_position();
@@ -142,8 +142,8 @@ impl TerminalState {
     /// Reply to Tertiary Device Attributes (DA3, `CSI = c` / `CSI = 0 c`):
     /// queue the DECRPTUI unit-id report `DCS ! | 00000000 ST` — all-zero
     /// site code and serial number. A nonzero parameter gets no reply.
-    pub(super) fn report_tertiary_device_attributes(&mut self, params: &vte::Params) {
-        if get_first_parameter_number(params).unwrap_or(0) != 0 {
+    pub(super) fn report_tertiary_device_attributes(&mut self, csi_parameters: &vte::Params) {
+        if get_first_parameter_number(csi_parameters).unwrap_or(0) != 0 {
             return;
         }
         self.device_query_replies
@@ -167,8 +167,8 @@ impl TerminalState {
     ///   multiple-session operation.
     ///
     /// Any other `Ps` gets no reply.
-    pub(super) fn report_dec_device_status(&mut self, params: &vte::Params) {
-        match get_first_parameter_number(params).unwrap_or(0) {
+    pub(super) fn report_dec_device_status(&mut self, csi_parameters: &vte::Params) {
+        match get_first_parameter_number(csi_parameters).unwrap_or(0) {
             6 => {
                 let (cursor_row_index, cursor_column_index) = self.get_reported_cursor_position();
                 let device_reply_bytes = format!(
@@ -188,7 +188,7 @@ impl TerminalState {
             56 => self.device_query_replies.extend_from_slice(b"\x1b[?57;0n"),
             62 => self.device_query_replies.extend_from_slice(b"\x1b[0*{"),
             63 => {
-                let request_id = get_parameter_number_at(params, 1).unwrap_or(0);
+                let request_id = get_parameter_number_at(csi_parameters, 1).unwrap_or(0);
                 let device_reply_bytes = format!("\x1bP{request_id}!~0000\x1b\\");
                 self.device_query_replies
                     .extend_from_slice(device_reply_bytes.as_bytes());
@@ -202,8 +202,8 @@ impl TerminalState {
     /// Reply to Request Mode, DEC form (DECRQM, `CSI ? Ps $ p`): queue the
     /// DECRPM report `CSI ? Ps ; Pm $ y`, where `Pm` is the mode's state from
     /// [`get_dec_mode_state_number`](Self::get_dec_mode_state_number).
-    pub(super) fn report_dec_mode(&mut self, params: &vte::Params) {
-        let mode_number = get_first_parameter_number(params).unwrap_or(0);
+    pub(super) fn report_dec_mode(&mut self, csi_parameters: &vte::Params) {
+        let mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
         let mode_state_value = self.get_dec_mode_state_number(mode_number);
         let device_reply_bytes = format!("\x1b[?{mode_number};{mode_state_value}$y");
         self.device_query_replies
@@ -213,14 +213,14 @@ impl TerminalState {
     /// Reply to Request Mode, ANSI form (`CSI Ps $ p`): queue the report
     /// `CSI Ps ; 0 $ y`. No ANSI (non-`?`) mode is stored, so every query
     /// reports `0`, "not recognized".
-    pub(super) fn report_ansi_mode(&mut self, params: &vte::Params) {
-        let mode_number = get_first_parameter_number(params).unwrap_or(0);
+    pub(super) fn report_ansi_mode(&mut self, csi_parameters: &vte::Params) {
+        let mode_number = get_first_parameter_number(csi_parameters).unwrap_or(0);
         let device_reply_bytes = format!("\x1b[{mode_number};0$y");
         self.device_query_replies
             .extend_from_slice(device_reply_bytes.as_bytes());
     }
 
-    /// The DECRPM value for DEC private mode `mode`: `1` (set) or `2` (reset)
+    /// The DECRPM value for DEC private mode `mode_number`: `1` (set) or `2` (reset)
     /// read from the stored mode state, and `0` ("not recognized") for every
     /// mode that is not stored — including the ignored `?2`/`?3`/`?8` and the
     /// save/restore action `?1048`, which keeps no queryable state.
@@ -233,14 +233,14 @@ impl TerminalState {
     /// visibility.
     fn get_dec_mode_state_number(&self, mode_number: u16) -> u16 {
         match mode_number {
-            1 => compute_mode_state_number(self.modes.application_cursor_keys),
-            5 => compute_mode_state_number(self.modes.reverse_video),
-            6 => compute_mode_state_number(self.active_cursor().origin),
-            7 => compute_mode_state_number(self.modes.autowrap),
-            69 => compute_mode_state_number(self.modes.declrmm),
+            1 => compute_mode_state_number(self.modes.is_application_cursor_keys_enabled),
+            5 => compute_mode_state_number(self.modes.is_reverse_video_enabled),
+            6 => compute_mode_state_number(self.get_active_cursor().is_origin_mode_enabled),
+            7 => compute_mode_state_number(self.modes.is_autowrap_enabled),
+            69 => compute_mode_state_number(self.modes.is_left_right_margin_mode_enabled),
             9 => compute_mode_state_number(self.modes.mouse_tracking == MouseTracking::X10),
-            12 => compute_mode_state_number(self.modes.cursor_blink),
-            25 => compute_mode_state_number(self.active_cursor().is_visible),
+            12 => compute_mode_state_number(self.modes.is_cursor_blink_enabled),
+            25 => compute_mode_state_number(self.get_active_cursor().is_visible),
             47 | 1047 | 1049 => compute_mode_state_number(self.active_screen == Screen::Alternate),
             1000 => compute_mode_state_number(self.modes.mouse_tracking == MouseTracking::Normal),
             1002 => {
@@ -251,9 +251,9 @@ impl TerminalState {
             }
             1005 => compute_mode_state_number(self.modes.mouse_encoding == MouseEncoding::Utf8),
             1006 => compute_mode_state_number(self.modes.mouse_encoding == MouseEncoding::Sgr),
-            1007 => compute_mode_state_number(self.modes.alternate_scroll),
+            1007 => compute_mode_state_number(self.modes.is_alternate_scroll_enabled),
             1015 => compute_mode_state_number(self.modes.mouse_encoding == MouseEncoding::Urxvt),
-            2004 => compute_mode_state_number(self.modes.bracketed_paste),
+            2004 => compute_mode_state_number(self.modes.is_bracketed_paste_enabled),
             _ => 0,
         }
     }

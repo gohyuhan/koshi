@@ -471,14 +471,14 @@ fn a_standard_shasum_row_returns_the_archive_checksum() {
 #[test]
 fn a_missing_checksum_row_names_the_release_archive() {
     let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
-    let error = find_release_checksum(
+    let checksum_error = find_release_checksum(
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  other-file\n",
         archive_file_name,
     )
     .expect_err("an absent archive row must fail");
 
     assert_eq!(
-        error,
+        checksum_error,
         "checksums.txt has no row for release archive koshi-v0.5.0-linux-amd64.tar.gz"
     );
 }
@@ -489,11 +489,11 @@ fn duplicate_checksum_rows_name_the_release_archive() {
     let checksums_text = format!(
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {archive_file_name}\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {archive_file_name}\n"
     );
-    let error = find_release_checksum(&checksums_text, archive_file_name)
+    let checksum_error = find_release_checksum(&checksums_text, archive_file_name)
         .expect_err("duplicate archive rows must fail");
 
     assert_eq!(
-        error,
+        checksum_error,
         "checksums.txt has multiple rows for release archive koshi-v0.5.0-linux-amd64.tar.gz"
     );
 }
@@ -504,11 +504,11 @@ fn malformed_checksum_row_for_the_release_archive_is_rejected() {
     let checksums_text = format!(
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  {archive_file_name} extra\n"
     );
-    let error = find_release_checksum(&checksums_text, archive_file_name)
+    let checksum_error = find_release_checksum(&checksums_text, archive_file_name)
         .expect_err("an archive row with extra fields must fail");
 
     assert_eq!(
-        error,
+        checksum_error,
         "checksums.txt has a malformed row for release archive koshi-v0.5.0-linux-amd64.tar.gz"
     );
 }
@@ -517,11 +517,11 @@ fn malformed_checksum_row_for_the_release_archive_is_rejected() {
 fn invalid_checksum_for_the_release_archive_is_rejected() {
     let archive_file_name = "koshi-v0.5.0-linux-amd64.tar.gz";
     let checksums_text = format!("{}  {archive_file_name}\n", "z".repeat(64));
-    let error = find_release_checksum(&checksums_text, archive_file_name)
+    let checksum_error = find_release_checksum(&checksums_text, archive_file_name)
         .expect_err("a non-hex checksum must fail");
 
     assert_eq!(
-        error,
+        checksum_error,
         "checksums.txt has an invalid SHA-256 checksum for release archive koshi-v0.5.0-linux-amd64.tar.gz"
     );
 }
@@ -542,11 +542,11 @@ fn a_stream_over_the_byte_limit_is_rejected_without_copying_the_extra_byte() {
     let mut release_file_reader = b"abcd".as_slice();
     let mut copied_bytes = Vec::new();
 
-    let error = copy_stream_with_byte_limit(&mut release_file_reader, &mut copied_bytes, 3)
+    let copy_error = copy_stream_with_byte_limit(&mut release_file_reader, &mut copied_bytes, 3)
         .expect_err("a stream over the limit must fail");
 
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(error.to_string(), "download response exceeds 3 bytes");
+    assert_eq!(copy_error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(copy_error.to_string(), "download response exceeds 3 bytes");
     assert_eq!(copied_bytes, b"abc");
 }
 
@@ -578,7 +578,7 @@ fn matching_release_archive_checksum_is_accepted() {
 fn mismatched_release_archive_checksum_names_both_digests() {
     let archive_path = write_release_file(b"abc");
     let expected_checksum = "0000000000000000000000000000000000000000000000000000000000000000";
-    let error = extract_verified_release_binary(
+    let extract_error = extract_verified_release_binary(
         archive_path.as_ref(),
         "koshi.tar.gz",
         "koshi-v0.5.0-linux-amd64.tar.gz",
@@ -587,7 +587,7 @@ fn mismatched_release_archive_checksum_names_both_digests() {
     .expect_err("the changed checksum must fail before unpacking");
 
     assert_eq!(
-        error,
+        extract_error,
         "checksum mismatch for release archive koshi-v0.5.0-linux-amd64.tar.gz: expected 0000000000000000000000000000000000000000000000000000000000000000, computed ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }

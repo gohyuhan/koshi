@@ -2,7 +2,7 @@
 //! terminal to it.
 
 use koshi_link::error::CliError;
-use koshi_observability::logging::init_tracing;
+use koshi_observability::logging::initialize_tracing;
 
 /// Bare `koshi`: start or reuse the router, have it create a new session
 /// server in this terminal's directory, and attach this terminal to it.
@@ -19,7 +19,7 @@ pub fn run_default_client(profile: Option<&str>) -> Result<(), CliError> {
     // `--allow-other-users` flag.
     let session_id =
         koshi_link::router_client::request_new_session(&runtime_directory, profile, None)?;
-    let _ = init_tracing(koshi_link::config::build_logging_params(
+    let _ = initialize_tracing(koshi_link::config::build_logging_parameters(
         app_config_layer.as_ref(),
         session_id,
     ));
@@ -41,7 +41,7 @@ fn ensure_koshi_directories() {
         tracing::warn!("no home directory found; skipping config directory setup");
         return;
     };
-    match koshi_paths::ensure_directory(&config_directory) {
+    match std::fs::create_dir_all(&config_directory) {
         Ok(()) => tracing::info!(path = %config_directory.display(), "config directory ready"),
         Err(directory_error) => {
             tracing::warn!(path = %config_directory.display(), %directory_error, "could not create config directory");

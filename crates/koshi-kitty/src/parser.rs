@@ -48,7 +48,7 @@ pub fn parse_kitty_command(
     }
     Some(parsed_command.and_then(|_| {
         let prepared_payload_bytes =
-            prepare_animation_payload(control_header_bytes, encoded_payload_bytes, true)?;
+            prepare_animation_payload(control_header_bytes, encoded_payload_bytes)?;
         let control_body_bytes =
             control_header_bytes
                 .strip_prefix(b"G")
@@ -608,7 +608,7 @@ fn load_transfer_payload(
         }
     };
     let decoded_payload_bytes = if transfer_medium == b's' && source_byte_count.is_none() {
-        exact_shared_memory_payload(
+        extract_exact_shared_memory_payload(
             &transfer_source_bytes,
             media_format.unwrap_or(KittyFormat::Rgba),
             image_width_pixels,
@@ -634,7 +634,7 @@ fn load_transfer_payload(
     Ok(TransferData::DecodedPayloadBytes(decoded_payload_bytes))
 }
 
-fn exact_shared_memory_payload(
+fn extract_exact_shared_memory_payload(
     shared_memory_bytes: &[u8],
     media_format: KittyFormat,
     image_width_pixels: Option<u32>,
@@ -762,7 +762,6 @@ fn validate_transfer_controls(
 fn prepare_animation_payload(
     control_header_bytes: &[u8],
     encoded_payload_bytes: &[u8],
-    is_final_chunk: bool,
 ) -> Result<Vec<u8>, GraphicsError> {
     let kitty_control = parse_animation_control(control_header_bytes)?;
     let transfer_medium = kitty_control.transfer_medium.unwrap_or(b'd');
@@ -773,7 +772,7 @@ fn prepare_animation_payload(
         source_byte_offset: kitty_control.source_byte_offset,
         source_byte_count: kitty_control.source_byte_count,
         is_compressed: kitty_control.is_compressed == Some(true),
-        is_final_chunk,
+        is_final_chunk: true,
         media_format: kitty_control.media_format,
         image_width_pixels: kitty_control.image_width_pixels,
         image_height_pixels: kitty_control.image_height_pixels,
@@ -788,7 +787,9 @@ fn prepare_animation_payload(
     }
 }
 
-fn parse_animation_control(control_header_bytes: &[u8]) -> Result<KittyControl, GraphicsError> {
+pub(super) fn parse_animation_control(
+    control_header_bytes: &[u8],
+) -> Result<KittyControl, GraphicsError> {
     let control_body_bytes =
         control_header_bytes
             .strip_prefix(b"G")
@@ -1130,15 +1131,6 @@ fn load_shared_memory_payload(
     shared_memory_mapping_result
 }
 
-#[cfg(not(any(unix, windows)))]
-fn load_shared_memory_payload(
-    _shared_memory_name_bytes: &[u8],
-    _source_byte_offset: usize,
-    _source_byte_count: Option<usize>,
-) -> Result<Vec<u8>, GraphicsError> {
-    Err(build_external_source_error())
-}
-
 fn build_external_source_error() -> GraphicsError {
     GraphicsError::DecodeFailure {
         protocol: KITTY_PROTOCOL,
@@ -1195,11 +1187,8 @@ impl KittyAnimationTransfer {
         if chunk.has_more_chunks() {
             Ok(KittyAnimationTransferOutcome::Pending(self))
         } else {
-            let prepared_payload_bytes = prepare_animation_payload(
-                &self.control_header_bytes,
-                &self.encoded_payload_bytes,
-                true,
-            )?;
+            let prepared_payload_bytes =
+                prepare_animation_payload(&self.control_header_bytes, &self.encoded_payload_bytes)?;
             let control_body_bytes = self.control_header_bytes.strip_prefix(b"G").ok_or(
                 GraphicsError::InvalidHeader {
                     protocol: KITTY_PROTOCOL,

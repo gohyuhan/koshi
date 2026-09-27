@@ -17,8 +17,7 @@ use koshi_core::ids::PaneId;
 ///
 /// Spans `[0, 10)` and `[4, 10)` overlap by `6`; `[0, 5)` and `[5, 10)`
 /// overlap by `0`.
-#[must_use]
-pub fn compute_span_overlap(
+fn compute_span_overlap(
     first_span_start: u16,
     first_span_length: u16,
     second_span_start: u16,
@@ -90,15 +89,13 @@ pub fn select_directional_neighbor(
 /// The exclusive right edge of `rect`: `origin.column + column_count`,
 /// saturating at `u16::MAX`. `(40, 0, 80, 20)` gives `120`.
 pub(crate) fn compute_right_edge(rect: Rect) -> u16 {
-    rect.origin
-        .column
-        .saturating_add(rect.cell_size.column_count)
+    rect.origin.column.saturating_add(rect.size.column_count)
 }
 
 /// The exclusive bottom edge of `rect`: `origin.row + row_count`, saturating
 /// at `u16::MAX`. `(40, 0, 80, 20)` gives `20`.
 pub(crate) fn compute_bottom_edge(rect: Rect) -> u16 {
-    rect.origin.row.saturating_add(rect.cell_size.row_count)
+    rect.origin.row.saturating_add(rect.size.row_count)
 }
 
 /// The cells between `source_rect`'s edge in `direction` and
@@ -139,15 +136,15 @@ fn compute_perpendicular_overlap(
     match direction {
         Direction::Left | Direction::Right => compute_span_overlap(
             source_rect.origin.row,
-            source_rect.cell_size.row_count,
+            source_rect.size.row_count,
             candidate_rect.origin.row,
-            candidate_rect.cell_size.row_count,
+            candidate_rect.size.row_count,
         ),
         Direction::Up | Direction::Down => compute_span_overlap(
             source_rect.origin.column,
-            source_rect.cell_size.column_count,
+            source_rect.size.column_count,
             candidate_rect.origin.column,
-            candidate_rect.cell_size.column_count,
+            candidate_rect.size.column_count,
         ),
     }
 }

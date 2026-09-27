@@ -13,8 +13,7 @@ use koshi_ipc::frame::{
     MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT, MAX_FRAME_IMAGE_TRANSFER_COUNT,
 };
 use koshi_layout::mode::LayoutMode;
-use koshi_renderer::snapshot::PaneKind;
-use koshi_runtime::runtime::frame::wire_frame;
+use koshi_runtime::runtime::frame::build_wire_frame;
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
     SixelBackground,
@@ -147,9 +146,11 @@ fn shared_pixels_keep_each_placements_own_display_metadata() {
         cell_geometry: Some(image_cell_geometry),
         image_record: Some(image_record_header.clone()),
     };
-    let image_placement_snapshot =
-        image_placement_with_record(&frame_image_placement, Some(&cached_image_record))
-            .expect("placement");
+    let image_placement_snapshot = build_image_placement_snapshot_from_record(
+        &frame_image_placement,
+        Some(&cached_image_record),
+    )
+    .expect("placement");
     let display_image_record = image_placement_snapshot
         .clone_image_record()
         .expect("pixels");
@@ -191,7 +192,10 @@ fn placement_metadata_cannot_change_cached_pixel_dimensions() {
         image_record: Some(image_record_header),
     };
     assert_eq!(
-        image_placement_with_record(&frame_image_placement, Some(&cached_image_record)),
+        build_image_placement_snapshot_from_record(
+            &frame_image_placement,
+            Some(&cached_image_record)
+        ),
         None
     );
 }
@@ -220,7 +224,7 @@ fn build_test_style() -> Style {
 /// continuation half it occupies at width 0, and one default blank. The second
 /// row is all default blanks.
 fn build_test_grid() -> Grid {
-    let mut terminal_grid = Grid::blank(2, 4, Style::default());
+    let mut terminal_grid = Grid::build_blank(2, 4, Style::default());
     let accented_cell = terminal_grid
         .get_cell_mut(0, 0)
         .expect("the grid has a cell at (0, 0)");
@@ -264,8 +268,7 @@ fn build_content_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
             row_spans: vec![(0, 1, 2)],
         }),
         has_selection: true,
-        scrollback_meta: ScrollbackMeta {
-            is_truncated: true,
+        scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 500,
         },
     }
@@ -302,8 +305,7 @@ fn build_empty_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
         view_top_row_index: 0,
         selection_spans: None,
         has_selection: false,
-        scrollback_meta: ScrollbackMeta {
-            is_truncated: false,
+        scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
     }
@@ -328,40 +330,36 @@ fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
                         pane_id: content_pane_id,
                         outer_rect: Rect {
                             origin: Point { column: 0, row: 0 },
-                            cell_size: Size {
+                            size: Size {
                                 column_count: 6,
                                 row_count: 4,
                             },
                         },
                         content_rect: Some(Rect {
                             origin: Point { column: 1, row: 1 },
-                            cell_size: Size {
+                            size: Size {
                                 column_count: 4,
                                 row_count: 2,
                             },
                         }),
-                        pane_kind: PaneKind::Terminal,
                         is_visible: true,
                         is_suppressed: false,
-                        is_dead: false,
                     },
                     PaneSlot {
                         pane_id: empty_pane_id,
                         outer_rect: Rect {
                             origin: Point { column: 6, row: 0 },
-                            cell_size: Size {
+                            size: Size {
                                 column_count: 6,
                                 row_count: 4,
                             },
                         },
                         content_rect: None,
-                        pane_kind: PaneKind::Terminal,
                         is_visible: false,
                         is_suppressed: true,
-                        is_dead: true,
                     },
                 ],
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 12,
                     row_count: 4,
                 },
@@ -369,17 +367,17 @@ fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
                 layout_mode: LayoutMode::Fullscreen {
                     focused_pane_id: content_pane_id,
                 },
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
             tabs_metadata: vec![
-                TabMeta {
+                TabMetadata {
                     tab_id: active_tab_id,
                     tab_name: String::from("tab"),
                     tab_index: 0,
                     is_active: true,
                 },
-                TabMeta {
+                TabMetadata {
                     tab_id: secondary_tab_id,
                     tab_name: String::from("other"),
                     tab_index: 1,
@@ -400,7 +398,6 @@ fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
             lock_mode: LockMode::Locked,
             is_mouse_selection_enabled: true,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
@@ -411,7 +408,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         build_empty_pane_snapshot(PaneId::new()),
     ]);
     assert_eq!(
-        super::build_render_snapshot(&wire_frame(&expected_render_snapshot)),
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot)),
         expected_render_snapshot
     );
 }
@@ -422,7 +419,7 @@ fn a_frame_waits_for_the_complete_image_record() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let frame_bytes = wire_frame(&expected_render_snapshot);
+    let frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut cache = ImageCache::new();
 
     let initial_snapshot = cache
@@ -463,7 +460,7 @@ fn a_complete_cached_image_is_reused_by_the_next_frame() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let frame_bytes = wire_frame(&expected_render_snapshot);
+    let frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut cache = ImageCache::new();
     cache
         .adopt_painted_frame(Box::new(frame_bytes.clone()))
@@ -499,7 +496,7 @@ fn a_cached_record_cannot_hide_an_invalid_new_placement() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut cache = ImageCache::new();
     cache
         .adopt_painted_frame(Box::new(frame_bytes.clone()))
@@ -529,7 +526,7 @@ fn a_frame_redraws_only_after_every_missing_image_record_arrives() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     frame_bytes.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
@@ -596,7 +593,7 @@ fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut cache = ImageCache::new();
     cache
         .adopt_painted_frame(Box::new(frame_bytes.clone()))
@@ -633,7 +630,7 @@ fn a_returning_image_waits_for_its_new_connection_identity() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let initial_frame_bytes = wire_frame(&expected_render_snapshot);
+    let initial_frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut frame_without_image = initial_frame_bytes.clone();
     frame_without_image.pane_snapshots[0]
         .image_placement_snapshots
@@ -708,7 +705,7 @@ fn a_rejected_chunk_closes_its_transfer_and_allows_an_exact_restart() {
     ]);
     let mut cache = ImageCache::new();
     cache
-        .adopt_painted_frame(Box::new(wire_frame(&expected_render_snapshot)))
+        .adopt_painted_frame(Box::new(build_wire_frame(&expected_render_snapshot)))
         .expect("the placement frame reads");
     cache
         .start_image_transfer(build_image_transfer(1))
@@ -754,7 +751,7 @@ fn one_pane_cannot_repeat_a_terminal_image_placement_identity() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut repeated_image_placement =
         frame_bytes.pane_snapshots[0].image_placement_snapshots[0].clone();
     repeated_image_placement.image_content_id = 2;
@@ -790,7 +787,7 @@ fn an_image_cache_reset_discards_complete_and_incomplete_connection_state() {
     ]);
     let mut cache = ImageCache::new();
     cache
-        .adopt_painted_frame(Box::new(wire_frame(&expected_render_snapshot)))
+        .adopt_painted_frame(Box::new(build_wire_frame(&expected_render_snapshot)))
         .expect("the placement frame reads");
     cache
         .start_image_transfer(build_image_transfer(1))
@@ -822,7 +819,7 @@ fn an_image_chunk_with_a_wrong_offset_is_refused_exactly() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let frame_bytes = wire_frame(&expected_render_snapshot);
+    let frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut cache = ImageCache::new();
     cache
         .adopt_painted_frame(Box::new(frame_bytes))
@@ -855,7 +852,7 @@ fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     let mut cache = ImageCache::new();
     cache
         .adopt_painted_frame(Box::new(frame_bytes.clone()))
@@ -910,7 +907,7 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     frame_bytes.pane_snapshots[0].image_placement_snapshots = (0..MAX_FRAME_IMAGE_TRANSFER_COUNT)
         .map(|placement_index| FrameImagePlacement {
             cell_geometry: None,
@@ -964,7 +961,7 @@ fn one_painted_frame_accepts_at_most_4096_image_transfers() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     frame_bytes.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
@@ -1005,7 +1002,7 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     frame_bytes.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
@@ -1065,7 +1062,7 @@ fn stale_placement_image_transfers_are_drained_without_cache_mutation() {
     let mut image_cache = ImageCache::new();
 
     image_cache
-        .adopt_painted_frame(Box::new(wire_frame(&empty_render_snapshot)))
+        .adopt_painted_frame(Box::new(build_wire_frame(&empty_render_snapshot)))
         .expect("the base frame reads");
     image_cache.ignore_stale_placement_image_transfers();
 
@@ -1082,7 +1079,7 @@ fn stale_placement_image_transfers_are_drained_without_cache_mutation() {
 
     assert_eq!(
         image_cache
-            .adopt_painted_frame(Box::new(wire_frame(&image_render_snapshot)))
+            .adopt_painted_frame(Box::new(build_wire_frame(&image_render_snapshot)))
             .expect("the current frame reads"),
         None
     );
@@ -1103,7 +1100,7 @@ fn the_tabs_gap_arrives_with_the_frame() {
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = wire_frame(&expected_render_snapshot);
+    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
     frame_bytes
         .session_snapshot
         .active_tab_snapshot
@@ -1146,7 +1143,8 @@ fn a_soft_wrapped_row_arrives_still_soft_wrapped() {
         build_empty_pane_snapshot(PaneId::new()),
     ]);
 
-    let received_snapshot = super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+    let received_snapshot =
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     let received_grid_view = received_snapshot.pane_snapshots[0]
         .terminal_grid_view
@@ -1171,7 +1169,8 @@ fn a_highlight_scrolled_entirely_off_screen_arrives_as_no_highlight() {
         build_empty_pane_snapshot(PaneId::new()),
     ]);
 
-    let received_snapshot = super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+    let received_snapshot =
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(received_snapshot.pane_snapshots[0].selection_spans, None);
     assert!(received_snapshot.pane_snapshots[0].has_selection);
@@ -1184,7 +1183,7 @@ fn a_highlight_scrolled_entirely_off_screen_arrives_as_no_highlight() {
 #[test]
 fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     let (_events_sender, events_receiver) = std::sync::mpsc::sync_channel(8);
-    let mut client = crate::Client::from_client_id_and_viewport(
+    let mut client = crate::Client::from_client_id_and_viewport_size(
         ClientId::new(),
         Size {
             column_count: 20,
@@ -1210,7 +1209,12 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert!(client.is_mouse_selection_enabled());
 
-    let mouse_frame = koshi_renderer::snapshot::MouseFrame::from(render_snapshot);
+    let committed_regions = koshi_renderer::snapshot::CommittedRegions::build_core(
+        render_snapshot.client_snapshot.viewport_size,
+        0,
+    );
+    let mouse_frame =
+        koshi_renderer::snapshot::MouseFrame::from_snapshot(&render_snapshot, committed_regions);
     assert_eq!(mouse_frame.client_snapshot.active_tab_id, active_tab_id);
     assert_eq!(mouse_frame.client_snapshot.focused_pane_id, focused_pane_id);
 }
@@ -1247,7 +1251,7 @@ fn every_underline_style_reads_back_as_itself() {
         ]);
 
         let received_snapshot =
-            super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+            super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
         let received_grid_view = received_snapshot.pane_snapshots[0]
             .terminal_grid_view
@@ -1290,7 +1294,7 @@ fn every_cursor_shape_reads_back_as_itself() {
         ]);
 
         let received_snapshot =
-            super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+            super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
         assert_eq!(
             received_snapshot.pane_snapshots[0].cursor_snapshot.shape,
@@ -1306,7 +1310,7 @@ fn every_cursor_shape_reads_back_as_itself() {
 fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
     let mut content_pane_snapshot = build_content_pane_snapshot(PaneId::new());
     content_pane_snapshot.terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(1, 80, Style::default())),
+        grid: Arc::new(Grid::build_blank(1, 80, Style::default())),
         view_row_offset: 0,
     });
     let expected_render_snapshot = build_render_snapshot(vec![
@@ -1314,7 +1318,7 @@ fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
         build_empty_pane_snapshot(PaneId::new()),
     ]);
 
-    let frame_bytes = wire_frame(&expected_render_snapshot);
+    let frame_bytes = build_wire_frame(&expected_render_snapshot);
     let terminal_window = frame_bytes.pane_snapshots[0]
         .terminal_window
         .as_ref()
@@ -1347,7 +1351,8 @@ fn a_frame_carrying_no_panes_reads_back_with_no_panes() {
     ]);
     expected_render_snapshot.pane_snapshots = Vec::new();
 
-    let received_snapshot = super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+    let received_snapshot =
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(received_snapshot.pane_snapshots, Vec::<PaneSnapshot>::new());
     assert_eq!(received_snapshot, expected_render_snapshot);
@@ -1375,7 +1380,8 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
     expected_render_snapshot.pane_snapshots[0].pane_title =
         Some(String::from("~/work\u{7}\u{1b}]0;owned\u{7}"));
 
-    let received_snapshot = super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+    let received_snapshot =
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(
         received_snapshot.session_snapshot.session_name,
@@ -1413,7 +1419,8 @@ fn a_name_past_the_reported_text_cap_reads_back_cut_to_it() {
     expected_render_snapshot.session_snapshot.session_name =
         "a".repeat(reported_text_byte_limit + 1);
 
-    let received_snapshot = super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+    let received_snapshot =
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(
         received_snapshot.session_snapshot.session_name,
@@ -1440,7 +1447,8 @@ fn a_pane_cell_holding_a_control_character_reads_back_holding_it() {
         view_row_offset: 0,
     });
 
-    let received_snapshot = super::build_render_snapshot(&wire_frame(&expected_render_snapshot));
+    let received_snapshot =
+        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     let received_grid_view = received_snapshot.pane_snapshots[0]
         .terminal_grid_view

@@ -136,7 +136,7 @@ fn start_supervisor_process(
     command
         .arg("serve-pty-supervisor")
         .arg(session_id.to_string())
-        .arg(connection_token.expose())
+        .arg(connection_token.expose_secret())
         .arg("--runtime-dir")
         .arg(runtime_directory)
         .stdin(Stdio::null())

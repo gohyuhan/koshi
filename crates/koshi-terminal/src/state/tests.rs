@@ -1,6 +1,13 @@
 //! Unit tests for per-pane terminal state.
 
 use super::*;
+
+impl TerminalState {
+    /// Whether autowrap (DECAWM `?7`) is active. Default on.
+    pub(crate) fn is_autowrap_enabled(&self) -> bool {
+        self.modes.is_autowrap_enabled
+    }
+}
 use crate::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
 };
@@ -21,7 +28,7 @@ fn set_terminal_cell(
     cell_width: u8,
 ) {
     *terminal_state
-        .active_grid_mut()
+        .get_active_grid_mut()
         .get_cell_mut(row_index, column_index)
         .unwrap() = Cell::from_character(character, cell_width, Style::default());
 }
@@ -58,10 +65,13 @@ fn new_initializes_both_screens_to_blank_of_size() {
         column_count: 5,
         row_count: 3,
     });
-    assert_eq!(*terminal_state.primary, Grid::blank(3, 5, Style::default()));
+    assert_eq!(
+        *terminal_state.primary,
+        Grid::build_blank(3, 5, Style::default())
+    );
     assert_eq!(
         *terminal_state.alternate,
-        Grid::blank(3, 5, Style::default())
+        Grid::build_blank(3, 5, Style::default())
     );
 }
 
@@ -76,18 +86,18 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
         row: 0,
         column: 0,
         is_visible: true,
-        pending_wrap: false,
-        origin: false,
+        is_wrap_pending: false,
+        is_origin_mode_enabled: false,
         saved: None,
     };
     assert_eq!(terminal_state.primary_cursor, expected_cursor);
     assert_eq!(terminal_state.alternate_cursor, expected_cursor);
     assert_eq!(
-        terminal_state.active_render().charsets,
+        terminal_state.get_active_render().charsets,
         [Charset::default(); 4]
     );
-    assert_eq!(terminal_state.active_render().gl, 0);
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().gl, 0);
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
     assert_eq!(
         terminal_state.primary_render,
         terminal_state.alternate_render
@@ -97,24 +107,35 @@ fn new_starts_on_primary_with_default_cursor_style_and_no_title() {
 }
 
 #[test]
-fn state_without_shell_metadata_deserializes_as_prompt() {
+fn state_missing_any_field_the_writer_emits_is_refused() {
     let terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 5,
         row_count: 3,
     });
-    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    serialized_state
-        .as_object_mut()
+    let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    let serialized_field_names: Vec<String> = serialized_state
+        .as_object()
         .expect("state is an object")
-        .remove("shell_integration_state");
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(serialized_field_names.len(), 32);
 
-    let restored: TerminalState =
-        serde_json::from_value(serialized_state).expect("legacy state deserializes");
+    for serialized_field_name in serialized_field_names {
+        let mut incomplete_state = serialized_state.clone();
+        incomplete_state
+            .as_object_mut()
+            .expect("state is an object")
+            .remove(&serialized_field_name);
 
-    assert_eq!(
-        restored.shell_integration_state,
-        ShellIntegrationState::Prompt
-    );
+        let parse_error = serde_json::from_value::<TerminalState>(incomplete_state)
+            .expect_err("a state missing a written field is refused");
+
+        assert_eq!(
+            parse_error.to_string(),
+            format!("missing field `{serialized_field_name}`")
+        );
+    }
 }
 
 #[test]
@@ -143,8 +164,8 @@ fn state_round_trip_preserves_origin_and_horizontal_margins() {
 
     assert_eq!(restored.primary_horizontal_margins, Some((1, 5)));
     assert_eq!(restored.alternate_horizontal_margins, Some((2, 6)));
-    assert!(restored.modes.declrmm);
-    assert!(restored.primary_cursor.origin);
+    assert!(restored.modes.is_left_right_margin_mode_enabled);
+    assert!(restored.primary_cursor.is_origin_mode_enabled);
 }
 
 #[test]
@@ -220,28 +241,6 @@ fn state_round_trip_keeps_one_screen_stack_empty() {
 }
 
 #[test]
-fn state_without_keyboard_stacks_deserializes_with_no_flags() {
-    let mut terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 5,
-        row_count: 3,
-    });
-    process_terminal_bytes(&mut terminal_state, b"\x1b[>8u");
-    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    let serialized_fields = serialized_state
-        .as_object_mut()
-        .expect("state is an object");
-    serialized_fields.remove("primary_keyboard_stack");
-    serialized_fields.remove("alternate_keyboard_stack");
-
-    let mut restored: TerminalState =
-        serde_json::from_value(serialized_state).expect("legacy state deserializes");
-
-    assert_eq!(restored.get_keyboard_flags(), 0);
-    process_terminal_bytes(&mut restored, b"\x1b[?1049h");
-    assert_eq!(restored.get_keyboard_flags(), 0);
-}
-
-#[test]
 fn state_deserialization_rejects_reversed_horizontal_margins() {
     let terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 5,
@@ -282,7 +281,7 @@ fn state_deserialization_rejects_single_column_horizontal_margins() {
         row_count: 3,
     });
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    serialized_state["modes"]["declrmm"] = serde_json::json!(true);
+    serialized_state["modes"]["is_left_right_margin_mode_enabled"] = serde_json::json!(true);
     serialized_state["primary_horizontal_margins"] = serde_json::json!([2, 2]);
 
     let deserialization_error = serde_json::from_value::<TerminalState>(serialized_state)
@@ -300,7 +299,7 @@ fn state_deserialization_normalizes_single_column_full_width_margins() {
         row_count: 3,
     });
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    serialized_state["modes"]["declrmm"] = serde_json::json!(true);
+    serialized_state["modes"]["is_left_right_margin_mode_enabled"] = serde_json::json!(true);
     serialized_state["primary_horizontal_margins"] = serde_json::json!([0, 0]);
 
     let restored: TerminalState =
@@ -324,7 +323,7 @@ fn state_deserialization_clears_margins_when_declrmm_is_disabled() {
 
     assert_eq!(restored.primary_horizontal_margins, None);
     assert_eq!(restored.alternate_horizontal_margins, None);
-    assert!(!restored.modes.declrmm);
+    assert!(!restored.modes.is_left_right_margin_mode_enabled);
 }
 
 #[test]
@@ -334,7 +333,7 @@ fn state_deserialization_normalizes_full_width_horizontal_margins() {
         row_count: 3,
     });
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    serialized_state["modes"]["declrmm"] = serde_json::json!(true);
+    serialized_state["modes"]["is_left_right_margin_mode_enabled"] = serde_json::json!(true);
     serialized_state["primary_horizontal_margins"] = serde_json::json!([0, 4]);
     serialized_state["alternate_horizontal_margins"] = serde_json::json!([1, 3]);
 
@@ -343,78 +342,7 @@ fn state_deserialization_normalizes_full_width_horizontal_margins() {
 
     assert_eq!(restored.primary_horizontal_margins, None);
     assert_eq!(restored.alternate_horizontal_margins, Some((1, 3)));
-    assert!(restored.modes.declrmm);
-}
-
-#[test]
-fn state_without_origin_and_horizontal_margin_fields_deserializes() {
-    let mut terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 5,
-        row_count: 3,
-    });
-    process_terminal_bytes(&mut terminal_state, b"\x1b[?6h\x1b7");
-    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    let object = serialized_state
-        .as_object_mut()
-        .expect("state is an object");
-    object.remove("primary_horizontal_margins");
-    object.remove("alternate_horizontal_margins");
-    object
-        .get_mut("modes")
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("modes is an object")
-        .remove("declrmm");
-    for cursor_field_name in ["primary_cursor", "alternate_cursor"] {
-        let cursor_object = object
-            .get_mut(cursor_field_name)
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("cursor is an object");
-        cursor_object.remove("origin");
-        if let Some(saved_cursor_object) = cursor_object
-            .get_mut("saved")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            saved_cursor_object.remove("origin");
-        }
-    }
-
-    let restored: TerminalState =
-        serde_json::from_value(serialized_state).expect("legacy state deserializes");
-
-    assert_eq!(restored.primary_horizontal_margins, None);
-    assert_eq!(restored.alternate_horizontal_margins, None);
-    assert!(!restored.modes.declrmm);
-    assert!(!restored.primary_cursor.origin);
-    assert!(!restored.alternate_cursor.origin);
-    assert!(
-        !restored
-            .primary_cursor
-            .saved
-            .expect("saved cursor is retained")
-            .origin
-    );
-}
-
-#[test]
-fn state_without_image_fields_deserializes_with_empty_image_state() {
-    let terminal_state = TerminalState::from_pty_size(PtySize {
-        column_count: 5,
-        row_count: 3,
-    });
-    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    let object = serialized_state
-        .as_object_mut()
-        .expect("state is an object");
-    object.remove("primary_image_placements");
-    object.remove("primary_image_history");
-    object.remove("alternate_image_placements");
-    object.remove("next_image_placement_id");
-
-    let restored: TerminalState =
-        serde_json::from_value(serialized_state).expect("legacy state deserializes");
-
-    assert_eq!(restored.list_image_placements(), &[]);
-    assert_eq!(restored.next_image_placement_id, 1);
+    assert!(restored.modes.is_left_right_margin_mode_enabled);
 }
 
 #[test]
@@ -566,7 +494,7 @@ fn serialized_content_table_is_deduplicated_and_rebuilds_the_same_state() {
 }
 
 #[test]
-fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries() {
+fn serialized_content_table_rejects_duplicate_dangling_and_extra_entries() {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 8,
         row_count: 8,
@@ -585,58 +513,51 @@ fn serialized_content_table_rejects_duplicate_dangling_extra_and_inline_entries(
     terminal_state
         .apply_image_record(&image_record)
         .expect("the image fits");
-    let base = serde_json::to_value(&terminal_state).expect("state serializes");
-    let content = base["image_contents"][0].clone();
+    let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    let image_content = serialized_state["image_contents"][0].clone();
 
-    let mut duplicate = base.clone();
-    duplicate["image_contents"] = serde_json::json!([content.clone(), content.clone()]);
-    let error = serde_json::from_value::<TerminalState>(duplicate)
+    let mut duplicate = serialized_state.clone();
+    duplicate["image_contents"] = serde_json::json!([image_content.clone(), image_content.clone()]);
+    let deserialize_error = serde_json::from_value::<TerminalState>(duplicate)
         .expect_err("duplicate content identities must be rejected");
-    assert_eq!(error.to_string(), "image content identities must be unique");
+    assert_eq!(
+        deserialize_error.to_string(),
+        "image content identities must be unique"
+    );
 
-    let mut dangling = base.clone();
+    let mut dangling = serialized_state.clone();
     dangling["primary_image_placements"][0]["image_content_id"] = serde_json::json!(999);
-    let error = serde_json::from_value::<TerminalState>(dangling)
+    let deserialize_error = serde_json::from_value::<TerminalState>(dangling)
         .expect_err("a missing content identity must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement refers to missing content"
     );
 
-    let mut unreferenced_content_state = base.clone();
-    let mut unreferenced_image_content = content.clone();
+    let mut unreferenced_content_state = serialized_state.clone();
+    let mut unreferenced_image_content = image_content.clone();
     unreferenced_image_content["image_content_id"] = serde_json::json!(999);
     unreferenced_content_state["image_contents"] =
-        serde_json::json!([content.clone(), unreferenced_image_content]);
-    let error = serde_json::from_value::<TerminalState>(unreferenced_content_state)
+        serde_json::json!([image_content.clone(), unreferenced_image_content]);
+    let deserialize_error = serde_json::from_value::<TerminalState>(unreferenced_content_state)
         .expect_err("unreferenced content must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image content table contains unreferenced entries"
     );
 
-    let mut inline = base.clone();
-    inline["primary_image_placements"][0]["image_record"]["decoded_image"] =
-        content["decoded_image"].clone();
-    let error = serde_json::from_value::<TerminalState>(inline)
-        .expect_err("content-table records must not carry inline pixels");
-    assert_eq!(
-        error.to_string(),
-        "content-table image records cannot carry inline pixels"
-    );
-
-    let mut collision = base;
-    collision["next_image_content_id"] = content["image_content_id"].clone();
-    let error = serde_json::from_value::<TerminalState>(collision)
+    let mut collision = serialized_state;
+    collision["next_image_content_id"] = image_content["image_content_id"].clone();
+    let deserialize_error = serde_json::from_value::<TerminalState>(collision)
         .expect_err("the next content identity cannot collide");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "next image content identity collides with retained content"
     );
 }
 
 #[test]
-fn serialized_content_table_rejects_legacy_raster_fields_and_combined_count_overflow() {
+fn serialized_image_placements_require_a_raster_plan_and_a_bounded_combined_count() {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 8,
         row_count: 8,
@@ -655,41 +576,30 @@ fn serialized_content_table_rejects_legacy_raster_fields_and_combined_count_over
     terminal_state
         .apply_image_record(&image_record)
         .expect("the image fits");
-    let base = serde_json::to_value(&terminal_state).expect("state serializes");
-    let content = base["image_contents"][0].clone();
+    let serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    let mut planless_state = serialized_state.clone();
+    planless_state["primary_image_placements"][0]
+        .as_object_mut()
+        .expect("placement is an object")
+        .remove("plan");
+    let deserialize_error = serde_json::from_value::<TerminalState>(planless_state)
+        .expect_err("a placement must carry its raster plan");
+    assert_eq!(deserialize_error.to_string(), "missing field `plan`");
 
-    let mut legacy_plan = base.clone();
-    legacy_plan["primary_image_placements"][0]["plan"] = serde_json::Value::Null;
-    let error = serde_json::from_value::<TerminalState>(legacy_plan)
-        .expect_err("new-format placements must carry their validated plan");
-    assert_eq!(
-        error.to_string(),
-        "content-table image placements require a raster plan"
-    );
-
-    let mut legacy_raster = base.clone();
-    legacy_raster["primary_image_placements"][0]["raster"] = content["decoded_image"].clone();
-    let error = serde_json::from_value::<TerminalState>(legacy_raster)
-        .expect_err("new-format placements must not carry legacy raster data");
-    assert_eq!(
-        error.to_string(),
-        "content-table image placements cannot carry legacy raster fields"
-    );
-
-    let placement = base["primary_image_placements"][0].clone();
+    let placement = serialized_state["primary_image_placements"][0].clone();
     let mut placements = Vec::with_capacity(MAX_IMAGE_PLACEMENT_COUNT);
     for placement_id in 1..=MAX_IMAGE_PLACEMENT_COUNT {
         let mut placement = placement.clone();
         placement["image_placement_id"] = serde_json::json!(placement_id);
         placements.push(placement);
     }
-    let mut count_overflow = base;
+    let mut count_overflow = serialized_state;
     count_overflow["primary_image_placements"] = serde_json::Value::Array(placements);
     count_overflow["alternate_image_placements"] = serde_json::json!([placement]);
-    let error = serde_json::from_value::<TerminalState>(count_overflow)
+    let deserialize_error = serde_json::from_value::<TerminalState>(count_overflow)
         .expect_err("combined image placement lists must be bounded");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         format!(
             "image placement count {} exceeds the limit of {}",
             MAX_IMAGE_PLACEMENT_COUNT + 1,
@@ -699,14 +609,13 @@ fn serialized_content_table_rejects_legacy_raster_fields_and_combined_count_over
 }
 
 #[test]
-fn raw_image_state_deserialization_shares_one_byte_budget_across_all_fields() {
+fn raw_image_state_deserialization_charges_every_image_content_to_one_budget() {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 8,
         row_count: 8,
     });
     let image_record = build_image_record(
         ImageDisplay {
-            image_id: Some(7),
             requested_width: Some(ImageDimension::Cells(1)),
             requested_height: Some(ImageDimension::Cells(1)),
             should_move_cursor: false,
@@ -720,30 +629,27 @@ fn raw_image_state_deserialization_shares_one_byte_budget_across_all_fields() {
         .apply_image_record(&image_record)
         .expect("the image fits the grid");
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
-    let serialized_image_bytes = serialized_state["image_contents"][0]["decoded_image"].clone();
-    let mut placement = serialized_state["primary_image_placements"][0].clone();
-    placement
-        .as_object_mut()
-        .expect("placement is an object")
-        .remove("image_content_id");
-    placement["image_record"]["decoded_image"] = serialized_image_bytes.clone();
-    serialized_state["primary_image_placements"] = serde_json::json!([placement.clone()]);
-    serialized_state["primary_image_history"] = serde_json::json!([placement.clone()]);
-    serialized_state["alternate_image_placements"] = serde_json::json!([placement]);
-    let mut kitty = serialized_state["primary_image_placements"][0]["image_record"].clone();
-    kitty["action"] = serde_json::json!("Transmit");
-    serialized_state["kitty_images"] = serde_json::json!([kitty]);
+    let image_content = serialized_state["image_contents"][0].clone();
+    let image_contents = (1..=5)
+        .map(|raw_image_content_id| {
+            let mut numbered_image_content = image_content.clone();
+            numbered_image_content["image_content_id"] = serde_json::json!(raw_image_content_id);
+            numbered_image_content
+        })
+        .collect();
+    serialized_state["image_contents"] = serde_json::Value::Array(image_contents);
 
     let mut budget = images::ImageStateBudget::with_byte_limit(16);
     use serde::de::IntoDeserializer;
 
     let deserializer = serialized_state.into_deserializer();
-    let error = match RawTerminalStateFields::deserialize_with_budget(deserializer, &mut budget) {
-        Ok(_) => panic!("the fifth image payload must exceed the shared budget"),
-        Err(error) => error,
-    };
+    let deserialize_error =
+        match RawTerminalStateFields::deserialize_with_budget(deserializer, &mut budget) {
+            Ok(_) => panic!("the fifth 4-byte image content must exceed the 16-byte budget"),
+            Err(deserialize_error) => deserialize_error,
+        };
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image state RGBA data exceeds the remaining storage budget of 0 bytes"
     );
 }
@@ -1528,10 +1434,10 @@ fn serialized_primary_history_image_must_fit_the_primary_width() {
         serde_json::to_value(&terminal_state).expect("history state serializes");
     serialized_state["primary_image_history"][0]["anchor"] = serde_json::json!([0, 4]);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a history image outside the primary width must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement at primary row 0, column 4 with 1 columns exceeds the 4-column primary grid"
     );
 }
@@ -1565,10 +1471,10 @@ fn serialized_primary_history_image_must_fit_the_retained_row_range() {
         serde_json::to_value(&terminal_state).expect("history state serializes");
     serialized_state["primary_image_history"][0]["anchor"] = serde_json::json!([2, 0]);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a history image outside the retained rows must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement at primary row 2, column 0 with 1 columns by 1 rows exceeds retained primary rows 0 up to but not including 3"
     );
 }
@@ -1597,10 +1503,10 @@ fn serialized_primary_row_counter_must_leave_room_for_live_rows() {
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
     serialized_state["scrollback"]["total_pushed_line_count"] = serde_json::json!(u64::MAX);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a live-row range that overflows u64 must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "primary image row range at 18446744073709551615 with 2 live rows overflows u64"
     );
 }
@@ -1613,15 +1519,15 @@ fn serialized_scrollback_cannot_exceed_its_absolute_row_count() {
     });
     terminal_state
         .scrollback
-        .push_row(&[Cell::blank()], RowMetadata::default());
+        .push_row(&[Cell::build_blank()], RowMetadata::default());
 
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
     serialized_state["scrollback"]["total_pushed_line_count"] = serde_json::json!(0);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("retained rows must have nonnegative absolute row numbers");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "primary scrollback row count 1 exceeds total pushed count 0"
     );
 }
@@ -1940,14 +1846,14 @@ fn primary_multi_row_image_keeps_its_scale_when_text_reflows() {
         column_count: 4,
         row_count: 3,
     });
-    for (column, ch) in "abcd".chars().enumerate() {
-        set_terminal_cell(&mut terminal_state, 0, column as u16, ch, 1);
+    for (column, character) in "abcd".chars().enumerate() {
+        set_terminal_cell(&mut terminal_state, 0, column as u16, character, 1);
     }
-    for (column, ch) in "ef".chars().enumerate() {
-        set_terminal_cell(&mut terminal_state, 1, column as u16, ch, 1);
+    for (column, character) in "ef".chars().enumerate() {
+        set_terminal_cell(&mut terminal_state, 1, column as u16, character, 1);
     }
     terminal_state
-        .active_grid_mut()
+        .get_active_grid_mut()
         .set_row_end(0, RowEnd::Soft);
 
     let image_record = build_image_record(
@@ -2014,10 +1920,10 @@ fn malformed_serialized_image_placement_is_rejected_before_use() {
     placement["anchor"] = serde_json::json!([u16::MAX, 0]);
     placement["image_record"]["anchor"] = serde_json::json!([u16::MAX, 0]);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("an overflowing placement must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement coordinate extent does not fit in u16"
     );
 }
@@ -2052,10 +1958,10 @@ fn serialized_image_placement_outside_grid_is_rejected() {
     placement["anchor"] = serde_json::json!([7, 7]);
     placement["image_record"]["anchor"] = serde_json::json!([7, 7]);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("an out-of-grid placement must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement at row 7, column 7 with 2 columns by 2 rows exceeds the 8-row by 8-column grid"
     );
 }
@@ -2088,11 +1994,52 @@ fn duplicate_serialized_image_placement_identity_is_rejected() {
     serialized_state["primary_image_placements"] =
         serde_json::json!([placement.clone(), placement]);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("duplicate placement state must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement identities must be unique per screen"
+    );
+}
+
+#[test]
+fn a_serialized_kitty_placement_without_its_upload_is_rejected() {
+    let mut terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 8,
+        row_count: 8,
+    });
+    let mut image_record = build_image_record(
+        ImageDisplay {
+            image_id: Some(7),
+            requested_column_count: Some(1),
+            requested_row_count: Some(1),
+            should_move_cursor: false,
+            ..ImageDisplay::default()
+        },
+        (0, 0),
+        1,
+        1,
+    );
+    image_record.action = ImageAction::TransmitAndDisplay;
+    terminal_state
+        .apply_image_record(&image_record)
+        .expect("the image fits");
+
+    let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
+    assert_eq!(
+        serialized_state["kitty_images"]
+            .as_array()
+            .expect("the uploads serialize as a list")
+            .len(),
+        1
+    );
+    serialized_state["kitty_images"] = serde_json::json!([]);
+
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
+        .expect_err("a placement naming a missing upload must be rejected");
+    assert_eq!(
+        deserialize_error.to_string(),
+        "a Kitty image placement names an image id no retained upload holds"
     );
 }
 
@@ -2121,10 +2068,10 @@ fn serialized_image_placement_identity_cannot_repeat_across_screens() {
     let placement = serialized_state["primary_image_placements"][0].clone();
     serialized_state["alternate_image_placements"] = serde_json::json!([placement]);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a cross-screen identity collision must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "image placement identities must be unique across screens"
     );
 }
@@ -2162,10 +2109,10 @@ fn serialized_image_placement_count_is_bounded_before_state_use() {
             .collect(),
     );
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a placement-count overflow must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         format!(
             "image placement count {} exceeds the limit of {}",
             MAX_IMAGE_PLACEMENT_COUNT + 1,
@@ -2183,10 +2130,10 @@ fn serialized_image_placement_next_identity_must_be_nonzero() {
     let mut serialized_state = serde_json::to_value(&terminal_state).expect("state serializes");
     serialized_state["next_image_placement_id"] = serde_json::json!(0);
 
-    let error = serde_json::from_value::<TerminalState>(serialized_state)
+    let deserialize_error = serde_json::from_value::<TerminalState>(serialized_state)
         .expect_err("a zero next identity must be rejected");
     assert_eq!(
-        error.to_string(),
+        deserialize_error.to_string(),
         "next image placement identity must be nonzero"
     );
 }
@@ -2242,13 +2189,13 @@ fn active_grid_mut_follows_active_screen() {
         row_count: 2,
     });
     assert_eq!(
-        terminal_state.active_grid_mut(),
-        &Grid::blank(2, 4, Style::default())
+        terminal_state.get_active_grid_mut(),
+        &Grid::build_blank(2, 4, Style::default())
     );
     terminal_state.active_screen = Screen::Alternate;
     assert_eq!(
-        terminal_state.active_grid_mut(),
-        &Grid::blank(2, 4, Style::default())
+        terminal_state.get_active_grid_mut(),
+        &Grid::build_blank(2, 4, Style::default())
     );
 }
 
@@ -2264,11 +2211,11 @@ fn resize_reallocs_both_grids_to_new_size() {
     });
     assert_eq!(
         *terminal_state.primary,
-        Grid::blank(5, 10, Style::default())
+        Grid::build_blank(5, 10, Style::default())
     );
     assert_eq!(
         *terminal_state.alternate,
-        Grid::blank(5, 10, Style::default())
+        Grid::build_blank(5, 10, Style::default())
     );
 }
 
@@ -2311,25 +2258,25 @@ fn resize_pads_each_grid_with_its_own_screen_background() {
     // the primary fill.
     assert_eq!(
         terminal_state.primary.get_cell(0, 5),
-        Some(&Cell::blank_with(blue_fill))
+        Some(&Cell::build_blank_with_style(blue_fill))
     );
     assert_eq!(
         terminal_state.primary.get_cell(2, 3),
-        Some(&Cell::blank_with(blue_fill))
+        Some(&Cell::build_blank_with_style(blue_fill))
     );
     // The alternate crops in place: its untouched cells stay default and
     // only the grown region takes the alternate fill.
     assert_eq!(
         terminal_state.alternate.get_cell(0, 0),
-        Some(&Cell::blank())
+        Some(&Cell::build_blank())
     );
     assert_eq!(
         terminal_state.alternate.get_cell(0, 5),
-        Some(&Cell::blank_with(red_fill))
+        Some(&Cell::build_blank_with_style(red_fill))
     );
     assert_eq!(
         terminal_state.alternate.get_cell(2, 3),
-        Some(&Cell::blank_with(red_fill))
+        Some(&Cell::build_blank_with_style(red_fill))
     );
 }
 
@@ -2371,12 +2318,12 @@ fn resize_clears_a_pending_wrap_latched_to_the_old_edge() {
         column_count: 80,
         row_count: 24,
     });
-    terminal_state.primary_cursor.pending_wrap = true;
+    terminal_state.primary_cursor.is_wrap_pending = true;
     terminal_state.resize_terminal_state(PtySize {
         column_count: 10,
         row_count: 5,
     });
-    assert!(!terminal_state.primary_cursor.pending_wrap);
+    assert!(!terminal_state.primary_cursor.is_wrap_pending);
 }
 
 #[test]
@@ -2442,7 +2389,10 @@ fn resize_preserves_cell_contents_across_width_and_height_changes() {
             .get_character(),
         '!'
     );
-    assert_eq!(terminal_state.primary.get_cell(3, 5), Some(&Cell::blank()));
+    assert_eq!(
+        terminal_state.primary.get_cell(3, 5),
+        Some(&Cell::build_blank())
+    );
 }
 
 #[test]
@@ -2562,7 +2512,10 @@ fn resize_width_shrink_wraps_a_wide_glyph_whole() {
             .get_character(),
         'a'
     );
-    assert_eq!(terminal_state.primary.get_cell(0, 2), Some(&Cell::blank()));
+    assert_eq!(
+        terminal_state.primary.get_cell(0, 2),
+        Some(&Cell::build_blank())
+    );
     assert_eq!(terminal_state.primary.get_row_end(0), RowEnd::SoftWide);
     assert_eq!(
         terminal_state
@@ -2686,7 +2639,10 @@ fn resize_to_zero_cols_yields_a_zero_width_grid_without_panicking() {
         row_count: 2,
     });
     assert_eq!(terminal_state.primary.get_grid_dimensions(), (2, 4));
-    assert_eq!(terminal_state.primary.get_cell(0, 0), Some(&Cell::blank()));
+    assert_eq!(
+        terminal_state.primary.get_cell(0, 0),
+        Some(&Cell::build_blank())
+    );
 }
 
 #[test]
@@ -2705,7 +2661,9 @@ fn resize_alternate_screen_crops_without_touching_scrollback() {
             1,
         );
     }
-    terminal_state.active_grid_mut().set_prompt_mark(1, true);
+    terminal_state
+        .get_active_grid_mut()
+        .set_prompt_mark(1, true);
 
     terminal_state.resize_terminal_state(PtySize {
         column_count: 4,
@@ -2741,8 +2699,6 @@ fn new_starts_with_an_empty_scrollback() {
     });
     assert!(terminal_state.get_scrollback().is_empty());
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 0);
-    assert_eq!(terminal_state.get_scrollback().get_dropped_line_count(), 0);
-    assert_eq!(terminal_state.get_scrollback().get_dropped_byte_count(), 0);
 }
 
 /// A row of `line_text`, one default-styled cell per character — a scrollback line fixture.
@@ -2767,22 +2723,22 @@ fn get_grid_row_text(grid: &Grid, row_index: u16) -> String {
 
 /// A 3-wide, 2-row primary screen with live rows `L0`/`L1` and three retained
 /// history rows `h0`/`h1`/`h2` (oldest first).
-fn state_with_history() -> TerminalState {
+fn build_state_with_history() -> TerminalState {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 3,
         row_count: 2,
     });
-    for (col, ch) in "L0.".chars().enumerate() {
+    for (column_index, character) in "L0.".chars().enumerate() {
         *terminal_state
-            .active_grid_mut()
-            .get_cell_mut(0, col as u16)
-            .unwrap() = Cell::from_character(ch, 1, Style::default());
+            .get_active_grid_mut()
+            .get_cell_mut(0, column_index as u16)
+            .unwrap() = Cell::from_character(character, 1, Style::default());
     }
-    for (col, ch) in "L1.".chars().enumerate() {
+    for (column_index, character) in "L1.".chars().enumerate() {
         *terminal_state
-            .active_grid_mut()
-            .get_cell_mut(1, col as u16)
-            .unwrap() = Cell::from_character(ch, 1, Style::default());
+            .get_active_grid_mut()
+            .get_cell_mut(1, column_index as u16)
+            .unwrap() = Cell::from_character(character, 1, Style::default());
     }
     terminal_state
         .scrollback
@@ -2798,27 +2754,27 @@ fn state_with_history() -> TerminalState {
 
 #[test]
 fn scrolled_view_at_offset_zero_shares_the_live_buffer() {
-    let terminal_state = state_with_history();
+    let terminal_state = build_state_with_history();
     // Offset 0 follows live: the same Arc (no compose, no copy) and effective 0.
-    let (grid, effective) = terminal_state.scrolled_view(0);
+    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(0);
     assert!(Arc::ptr_eq(&grid, &terminal_state.get_active_grid_arc()));
-    assert_eq!(effective, 0);
+    assert_eq!(clamped_scroll_offset, 0);
 }
 
 #[test]
 fn scrolled_view_composes_history_above_the_live_screen() {
-    let terminal_state = state_with_history();
+    let terminal_state = build_state_with_history();
     // Offset 1: newest history row on top, top live row below.
-    let (grid, effective) = terminal_state.scrolled_view(1);
+    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(1);
     assert_eq!(grid.get_grid_dimensions(), (2, 3));
     assert_eq!(get_grid_row_text(&grid, 0), "h2.");
     assert_eq!(get_grid_row_text(&grid, 1), "L0.");
-    assert_eq!(effective, 1);
+    assert_eq!(clamped_scroll_offset, 1);
 }
 
 #[test]
 fn scrolled_view_keeps_a_history_row_prompt_mark() {
-    let mut terminal_state = state_with_history();
+    let mut terminal_state = build_state_with_history();
     terminal_state.scrollback.push_row(
         &build_line_cells("prompt"),
         RowMetadata {
@@ -2827,7 +2783,7 @@ fn scrolled_view_keeps_a_history_row_prompt_mark() {
         },
     );
 
-    let (grid, _) = terminal_state.scrolled_view(1);
+    let (grid, _) = terminal_state.get_scrolled_view(1);
 
     assert!(grid.has_prompt_mark(0));
     assert!(!grid.has_prompt_mark(1));
@@ -2835,26 +2791,26 @@ fn scrolled_view_keeps_a_history_row_prompt_mark() {
 
 #[test]
 fn scrolled_view_at_the_screen_height_shows_only_history() {
-    let terminal_state = state_with_history();
+    let terminal_state = build_state_with_history();
     // Offset 2 == the 2-row screen pixel_height: both rows come from history.
-    let (grid, effective) = terminal_state.scrolled_view(2);
+    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(2);
     assert_eq!(get_grid_row_text(&grid, 0), "h1.");
     assert_eq!(get_grid_row_text(&grid, 1), "h2.");
-    assert_eq!(effective, 2);
+    assert_eq!(clamped_scroll_offset, 2);
 }
 
 #[test]
 fn scrolled_view_clamps_an_over_scroll_to_the_oldest_line() {
-    let terminal_state = state_with_history();
+    let terminal_state = build_state_with_history();
     // Three history rows, screen height 2: offset 3 shows the oldest window,
     // and any larger offset clamps — grid and effective offset both — to that
     // same window rather than reading past.
-    let (grid, effective) = terminal_state.scrolled_view(3);
+    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(3);
     assert_eq!(get_grid_row_text(&grid, 0), "h0.");
     assert_eq!(get_grid_row_text(&grid, 1), "h1.");
-    assert_eq!(effective, 3);
+    assert_eq!(clamped_scroll_offset, 3);
 
-    let (over, over_effective) = terminal_state.scrolled_view(99);
+    let (over, over_effective) = terminal_state.get_scrolled_view(99);
     assert_eq!(get_grid_row_text(&over, 0), "h0.");
     assert_eq!(get_grid_row_text(&over, 1), "h1.");
     assert_eq!(over_effective, 3); // clamped to the retained count
@@ -2862,13 +2818,13 @@ fn scrolled_view_clamps_an_over_scroll_to_the_oldest_line() {
 
 #[test]
 fn scrolled_view_on_the_alternate_screen_reports_a_live_zero_offset() {
-    let mut terminal_state = state_with_history();
+    let mut terminal_state = build_state_with_history();
     terminal_state.active_screen = Screen::Alternate; // full-screen apps keep no scrollback
-    let (grid, effective) = terminal_state.scrolled_view(5);
+    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(5);
     // The alternate screen always shows live: the live Arc and a zero effective
     // offset, so the indicator and cursor never treat it as scrolled.
     assert!(Arc::ptr_eq(&grid, &terminal_state.get_active_grid_arc()));
-    assert_eq!(effective, 0);
+    assert_eq!(clamped_scroll_offset, 0);
 }
 
 #[test]
@@ -2877,9 +2833,9 @@ fn scrolled_view_with_empty_history_follows_live() {
         column_count: 3,
         row_count: 2,
     });
-    let (grid, effective) = terminal_state.scrolled_view(5);
+    let (grid, clamped_scroll_offset) = terminal_state.get_scrolled_view(5);
     assert!(Arc::ptr_eq(&grid, &terminal_state.get_active_grid_arc()));
-    assert_eq!(effective, 0);
+    assert_eq!(clamped_scroll_offset, 0);
 }
 
 #[test]
@@ -2901,7 +2857,7 @@ fn scrolled_view_pads_history_rows_with_the_blanks_that_were_trimmed() {
         .scrollback
         .push_row(&build_line_cells("ab"), RowMetadata::default());
 
-    let (grid, _) = terminal_state.scrolled_view(1);
+    let (grid, _) = terminal_state.get_scrolled_view(1);
     let padded = grid.get_cell(0, 2).unwrap();
     assert_eq!(padded.get_character(), ' ');
     assert_eq!(padded.get_style(), Style::default());
@@ -2918,11 +2874,12 @@ fn scrolled_view_keeps_a_history_rows_own_background() {
     });
     let mut red = Style::default();
     red.set_background_color(Color::Indexed(1));
-    terminal_state
-        .scrollback
-        .push_row(&vec![Cell::blank_with(red); 3], RowMetadata::default());
+    terminal_state.scrollback.push_row(
+        &vec![Cell::build_blank_with_style(red); 3],
+        RowMetadata::default(),
+    );
 
-    let (grid, _) = terminal_state.scrolled_view(1);
+    let (grid, _) = terminal_state.get_scrolled_view(1);
     for column_index in 0..3 {
         assert_eq!(
             grid.get_cell(0, column_index)
@@ -2940,7 +2897,7 @@ fn text_view_on_the_alternate_screen_reads_its_grid_alone() {
     // alternate screen is up, so the alternate's view must hold its own grid
     // alone: its top row is the first readable row, and the primary's history
     // rows read as gone.
-    let mut terminal_state = state_with_history();
+    let mut terminal_state = build_state_with_history();
     terminal_state.active_screen = Screen::Alternate;
 
     // Three rows were pushed into history, so the live top row is absolute
@@ -2983,7 +2940,7 @@ fn resize_blanks_a_wide_glyph_the_alternate_screen_cuts_in_half() {
     );
     assert_eq!(
         terminal_state.alternate.get_cell(0, 2),
-        Some(&Cell::blank())
+        Some(&Cell::build_blank())
     );
 }
 
@@ -2997,8 +2954,8 @@ fn resize_moves_the_alternate_cursor_up_by_the_rows_cropped_off_the_top() {
         row_count: 4,
     });
     terminal_state.active_screen = Screen::Alternate;
-    for (row, ch) in "abcd".chars().enumerate() {
-        set_terminal_cell(&mut terminal_state, row as u16, 0, ch, 1);
+    for (row, character) in "abcd".chars().enumerate() {
+        set_terminal_cell(&mut terminal_state, row as u16, 0, character, 1);
     }
     terminal_state.alternate_cursor.row = 2;
     terminal_state.alternate_cursor.column = 1;

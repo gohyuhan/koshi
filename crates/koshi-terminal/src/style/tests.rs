@@ -1,4 +1,4 @@
-//! Unit tests for `Style`, `Color`, `AttrFlags`, and `UnderlineStyle`.
+//! Unit tests for `Style`, `Color`, `AttributeFlags`, and `UnderlineStyle`.
 
 use super::*;
 
@@ -6,7 +6,7 @@ use super::*;
 /// declared. Asserting on this pins all nine at once, so a setter that also
 /// touches a flag it has no business touching fails here.
 fn read_attribute_values(
-    attribute_flags: AttrFlags,
+    attribute_flags: AttributeFlags,
 ) -> (
     bool,
     bool,
@@ -37,9 +37,9 @@ fn color_default_is_the_default_variant() {
 }
 
 #[test]
-fn attr_flags_default_is_all_false() {
+fn attribute_flags_default_is_all_false() {
     assert_eq!(
-        read_attribute_values(AttrFlags::default()),
+        read_attribute_values(AttributeFlags::default()),
         (
             false,
             false,
@@ -61,7 +61,7 @@ fn style_default_is_default_colors_and_no_attrs() {
         Style {
             foreground_color: Color::Default,
             background_color: Color::Default,
-            attributes: AttrFlags::default(),
+            attributes: AttributeFlags::default(),
             underline_color: None,
         }
     );
@@ -76,7 +76,7 @@ fn set_fg_sets_only_the_foreground() {
         Style {
             foreground_color: Color::Indexed(5),
             background_color: Color::Default,
-            attributes: AttrFlags::default(),
+            attributes: AttributeFlags::default(),
             underline_color: None,
         }
     );
@@ -91,7 +91,7 @@ fn set_bg_sets_only_the_background() {
         Style {
             foreground_color: Color::Default,
             background_color: Color::Rgb(1, 2, 3),
-            attributes: AttrFlags::default(),
+            attributes: AttributeFlags::default(),
             underline_color: None,
         }
     );
@@ -179,7 +179,7 @@ fn background_fill_style_keeps_only_the_background() {
         Style {
             foreground_color: Color::Default,
             background_color: Color::Indexed(4),
-            attributes: AttrFlags::default(),
+            attributes: AttributeFlags::default(),
             underline_color: None,
         }
     );
@@ -213,7 +213,7 @@ fn style_getters_return_each_set_field() {
 }
 
 #[test]
-fn attr_flags_getters_return_each_set_flag() {
+fn attribute_flags_getters_return_each_set_flag() {
     // A distinct on/off pattern per flag: any getter reading the wrong field
     // returns the mismatched value.
     let mut style = Style::default();
@@ -372,26 +372,29 @@ fn setting_a_flag_twice_then_clearing_it_once_turns_it_off() {
     style.set_bold(true);
     style.set_bold(true);
     style.set_bold(false);
-    assert_eq!(style.get_attributes(), AttrFlags::default());
+    assert_eq!(style.get_attributes(), AttributeFlags::default());
 }
 
 #[test]
 fn debug_lists_the_attributes_that_are_on() {
-    assert_eq!(format!("{:?}", AttrFlags::default()), "AttrFlags(none)");
+    assert_eq!(
+        format!("{:?}", AttributeFlags::default()),
+        "AttributeFlags(none)"
+    );
 
     let mut style = Style::default();
     style.set_bold(true);
     style.set_underline(UnderlineStyle::Single);
     assert_eq!(
         format!("{:?}", style.get_attributes()),
-        "AttrFlags(bold, underline)"
+        "AttributeFlags(bold, underline)"
     );
 
     let mut style = Style::default();
     style.set_underline(UnderlineStyle::Curly);
     assert_eq!(
         format!("{:?}", style.get_attributes()),
-        "AttrFlags(curly-underline)"
+        "AttributeFlags(curly-underline)"
     );
 
     let mut style = Style::default();
@@ -400,31 +403,32 @@ fn debug_lists_the_attributes_that_are_on() {
     style.set_underline(UnderlineStyle::Dashed);
     assert_eq!(
         format!("{:?}", style.get_attributes()),
-        "AttrFlags(italic, overline, dashed-underline)"
+        "AttributeFlags(italic, overline, dashed-underline)"
     );
 }
 
 #[test]
-fn attr_flags_serialize_as_the_packed_word() {
+fn attribute_flags_serialize_as_the_packed_word() {
     // `ESC[4;9m`: single underline (code 1 in bits 8-10) and strikethrough
     // (bit 6) — the 320 the type doc promises.
     let mut style = Style::default();
     style.set_underline(UnderlineStyle::Single);
     style.set_strike(true);
-    let attrs = style.get_attributes();
+    let attributes = style.get_attributes();
 
-    let serialized_attributes = serde_json::to_value(attrs).expect("attrs serialize");
+    let serialized_attributes = serde_json::to_value(attributes).expect("attrs serialize");
     assert_eq!(serialized_attributes, serde_json::json!(320));
-    let restored: AttrFlags =
+    let restored: AttributeFlags =
         serde_json::from_value(serialized_attributes).expect("attrs deserialize");
-    assert_eq!(restored, attrs);
+    assert_eq!(restored, attributes);
 }
 
 #[test]
 fn an_undefined_underline_code_deserializes_as_no_underline() {
     // Bits 8-10 hold 6: not a style `set_underline` ever writes. Every
     // getter reads it as `None`.
-    let attrs: AttrFlags = serde_json::from_value(serde_json::json!(6 << 8)).expect("deserializes");
+    let attrs: AttributeFlags =
+        serde_json::from_value(serde_json::json!(6 << 8)).expect("deserializes");
     assert_eq!(
         read_attribute_values(attrs),
         (
@@ -469,14 +473,14 @@ fn a_word_read_back_keeps_only_the_bits_the_getters_read() {
     // A spare bit and an undefined underline code both read as the default
     // through every getter, so a word carrying them equals the default.
     for word in [1u16 << 11, 1 << 15, 6 << 8, 7 << 8, 0xF800 | (7 << 8)] {
-        let attrs: AttrFlags =
+        let attrs: AttributeFlags =
             serde_json::from_value(serde_json::json!(word)).expect("deserializes");
         assert_eq!(
             read_attribute_values(attrs),
-            read_attribute_values(AttrFlags::default()),
+            read_attribute_values(AttributeFlags::default()),
             "word {word}"
         );
-        assert_eq!(attrs, AttrFlags::default(), "word {word}");
+        assert_eq!(attrs, AttributeFlags::default(), "word {word}");
     }
 
     // A defined word is kept whole: bold plus a single underline.
@@ -484,7 +488,7 @@ fn a_word_read_back_keeps_only_the_bits_the_getters_read() {
     style.set_bold(true);
     style.set_underline(UnderlineStyle::Single);
     let defined = style.get_attributes();
-    let read_back: AttrFlags =
+    let read_back: AttributeFlags =
         serde_json::from_value(serde_json::to_value(defined).expect("serializes"))
             .expect("deserializes");
     assert_eq!(read_back, defined);

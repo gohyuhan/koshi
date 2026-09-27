@@ -27,18 +27,15 @@ impl PaneRegistry {
 
     /// Registers a pane record, keyed by its id. Returns
     /// [`PaneRegistryError::DuplicateId`] when the id is already registered;
-    /// that error carries the rejected record's id and kind, and the existing
-    /// record stays unchanged.
+    /// that error carries the rejected record's id, and the existing record
+    /// stays unchanged.
     pub fn register_pane_record(
         &mut self,
         pane_record: PaneRecord,
     ) -> Result<(), PaneRegistryError> {
         let pane_id = pane_record.get_pane_id();
         if self.pane_record_by_id.contains_key(&pane_id) {
-            return Err(PaneRegistryError::DuplicateId {
-                pane_id,
-                pane_kind: *pane_record.get_pane_kind(),
-            });
+            return Err(PaneRegistryError::DuplicateId { pane_id });
         }
         self.pane_record_by_id.insert(pane_id, pane_record);
         Ok(())
@@ -72,14 +69,8 @@ impl PaneRegistry {
 
     /// Returns the count of registered pane records.
     #[must_use]
-    pub fn pane_record_count(&self) -> usize {
+    pub fn count_pane_records(&self) -> usize {
         self.pane_record_by_id.len()
-    }
-
-    /// Returns `true` when the registry holds one or more pane records.
-    #[must_use]
-    pub fn has_pane_records(&self) -> bool {
-        !self.pane_record_by_id.is_empty()
     }
 }
 

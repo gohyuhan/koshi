@@ -40,14 +40,14 @@ impl TerminalState {
         };
         let mut current_sixel_row_index = placement.anchor.0;
         if is_iterm_protocol {
-            let cursor = self.active_cursor_mut();
+            let cursor = self.get_active_cursor_mut();
             cursor.row = placement.image_record.anchor.0;
             cursor.column = placement.image_record.anchor.1;
-            cursor.pending_wrap = false;
+            cursor.is_wrap_pending = false;
         }
         for row_index in 0..placement.row_count {
             if is_iterm_protocol && row_index > 0 {
-                self.handle_image_linefeed();
+                self.apply_linefeed();
             }
             if row_index > 0 {
                 if let Some((scroll_region_top_row_index, scroll_region_bottom_row_index)) =
@@ -55,7 +55,7 @@ impl TerminalState {
                 {
                     if current_sixel_row_index == scroll_region_bottom_row_index {
                         let background_fill_style =
-                            self.active_render().style.get_background_fill_style();
+                            self.get_active_render().style.get_background_fill_style();
                         self.delete_lines_into_scrollback(
                             scroll_region_top_row_index,
                             scroll_region_bottom_row_index,
@@ -79,7 +79,7 @@ impl TerminalState {
                 };
                 target_row_index
             };
-            let background_fill_style = self.active_render().style.get_background_fill_style();
+            let background_fill_style = self.get_active_render().style.get_background_fill_style();
             let (active_grid, fragment_count_by_image_source_id) =
                 self.get_active_grid_and_fragment_count_by_image_source_id();
             if is_iterm_protocol {
@@ -127,9 +127,9 @@ impl TerminalState {
         if is_iterm_protocol {
             let column_count = self.get_active_grid().get_grid_dimensions().1;
             let end_column = u32::from(placement.anchor.1) + u32::from(placement.column_count);
-            let cursor = self.active_cursor_mut();
+            let cursor = self.get_active_cursor_mut();
             cursor.column = end_column.min(u32::from(column_count.saturating_sub(1))) as u16;
-            cursor.pending_wrap = end_column >= u32::from(column_count);
+            cursor.is_wrap_pending = end_column >= u32::from(column_count);
         }
         placement.anchor = (0, 0);
         self.native_images.push(NativeImageSource {
@@ -140,34 +140,12 @@ impl TerminalState {
         Ok(())
     }
 
-    fn handle_image_linefeed(&mut self) {
-        let (row_count, _) = self.get_active_grid().get_grid_dimensions();
-        let (scroll_region_top_row_index, scroll_region_bottom_row_index) = self
-            .get_scroll_region()
-            .unwrap_or((0, row_count.saturating_sub(1)));
-        if self.get_active_cursor_position().0 == scroll_region_bottom_row_index {
-            let background_fill_style = self.active_render().style.get_background_fill_style();
-            self.delete_lines_into_scrollback(
-                scroll_region_top_row_index,
-                scroll_region_bottom_row_index,
-                1,
-                background_fill_style,
-            );
-        } else {
-            let cursor = self.active_cursor_mut();
-            cursor.row = cursor
-                .row
-                .saturating_add(1)
-                .min(row_count.saturating_sub(1));
-        }
-    }
-
     pub(in crate::state) fn rebuild_native_fragment_count_by_image_source_id(&mut self) {
         let mut fragment_count_by_image_source_id = HashMap::new();
         for terminal_cell in self.list_native_cells() {
             #[cfg(test)]
             REBUILD_CELL_VISITS.with(|visits| visits.set(visits.get() + 1));
-            for image_fragment in terminal_cell.image_fragments() {
+            for image_fragment in terminal_cell.get_image_fragments() {
                 *fragment_count_by_image_source_id
                     .entry(image_fragment.image_source_id)
                     .or_insert(0) += 1;
@@ -302,7 +280,7 @@ impl TerminalState {
 
     pub(super) fn get_native_fragment_storage_byte_count(&self) -> usize {
         self.list_native_cells()
-            .map(Cell::image_fragment_storage_bytes)
+            .map(Cell::compute_image_fragment_storage_bytes)
             .sum()
     }
 
@@ -326,7 +304,7 @@ impl TerminalState {
             HashMap::new();
         for (row_index, grid_row_cells) in terminal_grid.list_rows().iter().enumerate() {
             for (column_index, terminal_cell) in grid_row_cells.iter().enumerate() {
-                for image_fragment in terminal_cell.image_fragments() {
+                for image_fragment in terminal_cell.get_image_fragments() {
                     let Some(native_image_source) = native_image_source_by_image_placement_id
                         .get(&image_fragment.image_source_id)
                     else {
@@ -362,17 +340,7 @@ impl TerminalState {
             .collect()
     }
 
-    pub(crate) fn restore_native_image_coverage(
-        &mut self,
-        has_cell_coverage: bool,
-    ) -> Result<(), String> {
-        if !has_cell_coverage
-            && self
-                .list_native_cells()
-                .any(|terminal_cell| !terminal_cell.image_fragments().is_empty())
-        {
-            return Err("native image fragments require the cell coverage format".to_owned());
-        }
+    pub(crate) fn restore_native_image_coverage(&mut self) -> Result<(), String> {
         for screen in [Screen::Primary, Screen::Alternate] {
             let screen_image_placements = match screen {
                 Screen::Primary => &mut self.primary_image_placements,
@@ -383,13 +351,6 @@ impl TerminalState {
                 if image_placement.image_record.protocol == GraphicsProtocol::Kitty {
                     physical_image_placements.push(image_placement);
                     continue;
-                }
-                if !has_cell_coverage {
-                    let active_grid = match screen {
-                        Screen::Primary => Arc::make_mut(&mut self.primary),
-                        Screen::Alternate => Arc::make_mut(&mut self.alternate),
-                    };
-                    attach_legacy_grid(active_grid, &image_placement);
                 }
                 image_placement.anchor = (0, 0);
                 self.native_images.push(NativeImageSource {
@@ -402,85 +363,15 @@ impl TerminalState {
                 Screen::Alternate => self.alternate_image_placements = physical_image_placements,
             }
         }
-        let live_top_row = self.scrollback.get_total_pushed_line_count();
-        let retained_history_start_row =
-            live_top_row.saturating_sub(self.scrollback.get_retained_line_count() as u64);
-        let mut scrollback_lines = self.scrollback.take_retained_lines();
-        let mut physical_history_placements = Vec::new();
-        for history_image_placement in std::mem::take(&mut self.primary_image_history) {
-            if history_image_placement.image_record.protocol == GraphicsProtocol::Kitty {
-                physical_history_placements.push(history_image_placement);
-                continue;
-            }
-            if has_cell_coverage {
-                return Err(
-                    "native image sources cannot be stored as history rectangles".to_owned(),
-                );
-            }
-            let mut image_placement = ImagePlacement::from_image_record(
-                history_image_placement.image_placement_id,
-                history_image_placement.image_record,
-                history_image_placement.image_content,
-                history_image_placement.plan,
-                history_image_placement.column_count,
-                history_image_placement.row_count,
-                history_image_placement.raster,
-            );
-            for row_index in 0..image_placement.row_count {
-                let absolute_row = history_image_placement
-                    .anchor
-                    .0
-                    .checked_add(u64::from(row_index))
-                    .ok_or("native history row overflows")?;
-                for column_index in 0..image_placement.column_count {
-                    let target_column_index =
-                        usize::from(history_image_placement.anchor.1 + column_index);
-                    let image_fragment = ImageCellFragment {
-                        image_source_id: image_placement.image_placement_id,
-                        source_row_index: image_placement.plan.geometry.cell_offset.row + row_index,
-                        source_column_index: image_placement.plan.geometry.cell_offset.column
-                            + column_index,
-                    };
-                    let is_overlay_protocol =
-                        image_placement.image_record.protocol == GraphicsProtocol::Sixel;
-                    if absolute_row < live_top_row {
-                        if let Some((row_cells, _)) = scrollback_lines.get_mut(
-                            usize::try_from(
-                                absolute_row
-                                    .checked_sub(retained_history_start_row)
-                                    .ok_or("native history precedes retained rows")?,
-                            )
-                            .map_err(|_| "native history index exceeds address space")?,
-                        ) {
-                            row_cells.resize_with(
-                                row_cells.len().max(target_column_index + 1),
-                                Cell::blank,
-                            );
-                            row_cells[target_column_index]
-                                .set_image_fragment(image_fragment, is_overlay_protocol);
-                        }
-                    } else if let Some(terminal_cell) = Arc::make_mut(&mut self.primary)
-                        .get_cell_mut(
-                            u16::try_from(absolute_row - live_top_row)
-                                .map_err(|_| "native history row exceeds grid range")?,
-                            u16::try_from(target_column_index)
-                                .map_err(|_| "native history column exceeds grid range")?,
-                        )
-                    {
-                        terminal_cell.set_image_fragment(image_fragment, is_overlay_protocol);
-                    }
-                }
-            }
-            image_placement.anchor = (0, 0);
-            self.native_images.push(NativeImageSource {
-                screen: Screen::Primary,
-                placement: image_placement,
-            });
+        if self
+            .primary_image_history
+            .iter()
+            .any(|history_image_placement| {
+                history_image_placement.image_record.protocol != GraphicsProtocol::Kitty
+            })
+        {
+            return Err("native image sources cannot be stored as history rectangles".to_owned());
         }
-        self.primary_image_history = physical_history_placements;
-        let retained_row_count = scrollback_lines.len() as u64;
-        self.scrollback
-            .replace_retained_lines(scrollback_lines.into_iter().collect(), retained_row_count);
         self.native_images
             .sort_by_key(|native_image_source| native_image_source.placement.image_placement_id);
         self.validate_native_fragments()?;
@@ -528,12 +419,12 @@ impl TerminalState {
         {
             for terminal_cell in row_cells {
                 fragment_storage_byte_count = fragment_storage_byte_count
-                    .saturating_add(terminal_cell.image_fragment_storage_bytes());
+                    .saturating_add(terminal_cell.compute_image_fragment_storage_bytes());
                 if fragment_storage_byte_count > MAX_IMAGE_STORAGE_BYTE_COUNT {
                     return Err("native image fragment storage exceeds its limit".to_owned());
                 }
                 let mut seen_image_placement_ids = HashSet::new();
-                for image_fragment in terminal_cell.image_fragments() {
+                for image_fragment in terminal_cell.get_image_fragments() {
                     let native_image_source = native_image_source_by_image_placement_id
                         .get(&image_fragment.image_source_id)
                         .ok_or("native image fragment has no source")?;
@@ -563,13 +454,13 @@ fn set_native_fragment(
 ) {
     let is_existing_fragment_replaced = is_overlay_protocol
         && terminal_cell
-            .image_fragments()
+            .get_image_fragments()
             .iter()
             .any(|existing_fragment| {
                 existing_fragment.image_source_id == image_fragment.image_source_id
             });
     if !is_overlay_protocol {
-        for existing_fragment in terminal_cell.image_fragments() {
+        for existing_fragment in terminal_cell.get_image_fragments() {
             let _ = decrement_native_fragment_count(
                 fragment_count_by_image_source_id,
                 existing_fragment.image_source_id,
@@ -602,13 +493,10 @@ pub(super) fn clear_native_fragments(
     terminal_cell: &mut Cell,
     fragment_count_by_image_source_id: &mut HashMap<u64, usize>,
 ) -> bool {
-    let mut has_removed_native_image_source = false;
-    for image_fragment in terminal_cell.image_fragments() {
-        has_removed_native_image_source |= decrement_native_fragment_count(
-            fragment_count_by_image_source_id,
-            image_fragment.image_source_id,
-        );
-    }
+    let has_removed_native_image_source = discard_native_fragment_references(
+        fragment_count_by_image_source_id,
+        std::iter::once(&*terminal_cell),
+    );
     terminal_cell.clear_image_fragments();
     has_removed_native_image_source
 }
@@ -619,7 +507,7 @@ pub(in crate::state) fn discard_native_fragment_references<'a>(
 ) -> bool {
     let mut has_removed_native_image_source = false;
     for terminal_cell in terminal_cells {
-        for image_fragment in terminal_cell.image_fragments() {
+        for image_fragment in terminal_cell.get_image_fragments() {
             has_removed_native_image_source |= decrement_native_fragment_count(
                 fragment_count_by_image_source_id,
                 image_fragment.image_source_id,
@@ -646,27 +534,6 @@ fn clear_wide_fragments(
     if let Some(wide_cell_column_index) = wide_cell_column_index {
         if let Some(terminal_cell) = terminal_grid.get_cell_mut(row_index, wide_cell_column_index) {
             let _ = clear_native_fragments(terminal_cell, fragment_count_by_image_source_id);
-        }
-    }
-}
-
-fn attach_legacy_grid(terminal_grid: &mut Grid, image_placement: &ImagePlacement) {
-    for row_index in 0..image_placement.row_count {
-        for column_index in 0..image_placement.column_count {
-            if let Some(terminal_cell) = terminal_grid.get_cell_mut(
-                image_placement.anchor.0 + row_index,
-                image_placement.anchor.1 + column_index,
-            ) {
-                terminal_cell.set_image_fragment(
-                    ImageCellFragment {
-                        image_source_id: image_placement.image_placement_id,
-                        source_row_index: image_placement.plan.geometry.cell_offset.row + row_index,
-                        source_column_index: image_placement.plan.geometry.cell_offset.column
-                            + column_index,
-                    },
-                    image_placement.image_record.protocol == GraphicsProtocol::Sixel,
-                );
-            }
         }
     }
 }

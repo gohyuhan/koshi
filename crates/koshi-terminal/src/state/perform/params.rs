@@ -4,29 +4,32 @@
 
 /// The first CSI parameter's primary value, or `None` when there are no
 /// parameters.
-pub(super) fn get_first_parameter_number(params: &vte::Params) -> Option<u16> {
-    get_parameter_number_at(params, 0)
+pub(super) fn get_first_parameter_number(csi_parameters: &vte::Params) -> Option<u16> {
+    get_parameter_number_at(csi_parameters, 0)
 }
 
-/// The `n`-th CSI parameter's primary value (0-based), or `None` when absent.
-pub(super) fn get_parameter_number_at(params: &vte::Params, parameter_index: usize) -> Option<u16> {
-    params
+/// The CSI parameter at `parameter_index`'s primary value (0-based), or `None` when absent.
+pub(super) fn get_parameter_number_at(
+    csi_parameters: &vte::Params,
+    parameter_index: usize,
+) -> Option<u16> {
+    csi_parameters
         .iter()
         .nth(parameter_index)
         .and_then(|parameter_values| parameter_values.first().copied())
 }
 
 /// A cursor-move distance: a missing argument or an explicit `0` both mean `1`.
-pub(super) fn get_cursor_move_count(params: &vte::Params) -> u16 {
-    get_first_parameter_number(params)
+pub(super) fn get_cursor_move_count(csi_parameters: &vte::Params) -> u16 {
+    get_first_parameter_number(csi_parameters)
         .filter(|&parameter_value| parameter_value != 0)
         .unwrap_or(1)
 }
 
 /// A 1-based CUP/HVP coordinate converted to 0-based: missing or `0` → `1`,
 /// then decremented, so the default lands on the top-left cell `(0, 0)`.
-pub(super) fn get_cursor_coordinate(params: &vte::Params, parameter_index: usize) -> u16 {
-    get_parameter_number_at(params, parameter_index)
+pub(super) fn get_cursor_coordinate(csi_parameters: &vte::Params, parameter_index: usize) -> u16 {
+    get_parameter_number_at(csi_parameters, parameter_index)
         .filter(|&parameter_value| parameter_value != 0)
         .unwrap_or(1)
         .saturating_sub(1)

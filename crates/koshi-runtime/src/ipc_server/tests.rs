@@ -21,13 +21,12 @@ use koshi_core::mouse::MouseTracking;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
-    EventFilterSpec, GraphicsCapabilities, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    GraphicsCapabilities, IpcRequest, WireMouseAction, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CursorSnapshot, ImagePlacementSnapshot, PaneSnapshot, PluginUiSnapshot,
-    RenderSnapshot, ScrollbackMeta, SessionSnapshot, TabSnapshot,
+    ClientSnapshot, CursorSnapshot, ImagePlacementSnapshot, PaneSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SessionSnapshot, TabSnapshot,
 };
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
@@ -54,15 +53,15 @@ const MINTED_CONNECTION_TOKEN: &str =
 /// [`IpcServer::start`] creates it private itself.
 fn build_test_runtime_directory(tag: &str) -> PathBuf {
     #[cfg(unix)]
-    let base = PathBuf::from("/tmp");
+    let base_directory = PathBuf::from("/tmp");
     #[cfg(windows)]
-    let base = std::env::temp_dir();
-    base.join(format!("koshi-serve-{}-{tag}", std::process::id()))
+    let base_directory = std::env::temp_dir();
+    base_directory.join(format!("koshi-serve-{}-{tag}", std::process::id()))
 }
 
 /// Remove a directory a test made, and everything inside it. A directory that
 /// is already gone is left alone.
-fn cleanup(runtime_directory: &Path) {
+fn remove_test_directory(runtime_directory: &Path) {
     let _ = std::fs::remove_dir_all(runtime_directory);
 }
 
@@ -71,21 +70,21 @@ fn cleanup(runtime_directory: &Path) {
 /// [`IpcServer::start`] creates it and this user's directory inside it.
 fn build_test_shared_directory(tag: &str) -> PathBuf {
     #[cfg(unix)]
-    let base = PathBuf::from("/tmp");
+    let base_directory = PathBuf::from("/tmp");
     #[cfg(windows)]
-    let base = std::env::temp_dir();
-    base.join(format!("koshi-shared-{}-{tag}", std::process::id()))
+    let base_directory = std::env::temp_dir();
+    base_directory.join(format!("koshi-shared-{}-{tag}", std::process::id()))
 }
 
 /// A stand-in for the dispatcher thread: drains the inbox, answers every
 /// submitted command with `Ok` echoing its id, and every discovery request
 /// with `overview`. Exits when every inbox sender is gone.
 fn spawn_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     overview: Option<SessionOverview>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             match event {
                 RuntimeEvent::Ipc {
                     envelope,
@@ -107,17 +106,16 @@ fn spawn_dispatcher(
 
 /// The structure a stand-in attach answers with: the session, named, with
 /// nothing in it.
-fn attached_structure(session_id: SessionId) -> AttachedSessionStructureSnapshot {
+fn build_attached_structure(session_id: SessionId) -> AttachedSessionStructureSnapshot {
     AttachedSessionStructureSnapshot {
         session_id,
         session_name: "attachable".to_string(),
         tabs: Vec::new(),
-        panes: Vec::new(),
     }
 }
 
 /// One image-bearing frame for an attached stream.
-fn image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> RenderSnapshot {
+fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> RenderSnapshot {
     let session_id = SessionId::new();
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
@@ -130,10 +128,10 @@ fn image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> Render
                 tab_id,
                 tab_name: String::from("tab"),
                 pane_slots: Vec::new(),
-                effective_cell_size: TEST_VIEWPORT_SIZE,
+                tab_size: TEST_VIEWPORT_SIZE,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
             tabs_metadata: Vec::new(),
@@ -165,8 +163,7 @@ fn image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> Render
             view_top_row_index: 0,
             selection_spans: None,
             has_selection: false,
-            scrollback_meta: ScrollbackMeta {
-                is_truncated: false,
+            scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },
         }],
@@ -179,12 +176,11 @@ fn image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> Render
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 /// One one-pixel image whose byte makes image record changes visible.
-fn image_record(red: u8) -> Arc<ImageRecord> {
+fn build_image_record(red: u8) -> Arc<ImageRecord> {
     Arc::new(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
@@ -202,15 +198,15 @@ fn image_record(red: u8) -> Arc<ImageRecord> {
 
 /// A dispatcher that accepts one attach and exposes its event queue sender.
 fn spawn_frame_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
 ) -> (JoinHandle<()>, Sender<Delivery>) {
-    let (events_tx, events_rx) = mpsc::channel();
+    let (events_sender, events_receiver) = mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let mut events = Some(events_rx);
+        let mut events = Some(events_receiver);
         let ending_notice = Arc::new(EndingNotice::default());
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             if let RuntimeEvent::IpcAttach {
                 response_sender, ..
             } = event
@@ -221,7 +217,7 @@ fn spawn_frame_dispatcher(
                 let _ = response_sender.send(Some(AttachAccepted {
                     client_id,
                     session_id,
-                    session_structure: attached_structure(session_id),
+                    session_structure: build_attached_structure(session_id),
                     deliveries: events,
                     ending_notice: Arc::clone(&ending_notice),
                     resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
@@ -230,7 +226,7 @@ fn spawn_frame_dispatcher(
             }
         }
     });
-    (handle, events_tx)
+    (handle, events_sender)
 }
 
 /// A stand-in dispatcher that accepts attaches: it answers every attach as
@@ -240,7 +236,7 @@ fn spawn_frame_dispatcher(
 /// a test reads exactly what an attached connection sent. Exits when every
 /// inbox sender is gone.
 fn spawn_attaching_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
 ) -> (JoinHandle<()>, Receiver<RuntimeEvent>) {
@@ -248,18 +244,18 @@ fn spawn_attaching_dispatcher(
     let handle = std::thread::spawn(move || {
         let mut queues = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             match event {
                 RuntimeEvent::IpcAttach {
                     response_sender, ..
                 } => {
-                    let (events_tx, events_rx) = mpsc::channel();
-                    queues.push(events_tx);
+                    let (events_sender, events_receiver) = mpsc::channel();
+                    queues.push(events_sender);
                     let _ = response_sender.send(Some(AttachAccepted {
                         client_id,
                         session_id,
-                        session_structure: attached_structure(session_id),
-                        deliveries: events_rx,
+                        session_structure: build_attached_structure(session_id),
+                        deliveries: events_receiver,
                         ending_notice: Arc::clone(&ending_notice),
                         resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
                         pane_area: None,
@@ -286,7 +282,7 @@ fn spawn_attaching_dispatcher(
 /// `ending_notice`, and drops everything else it drains. Exits when every
 /// inbox sender is gone.
 fn spawn_ending_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
     events: Receiver<Delivery>,
@@ -294,7 +290,7 @@ fn spawn_ending_dispatcher(
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut queue = Some(events);
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             if let RuntimeEvent::IpcAttach {
                 response_sender, ..
             } = event
@@ -305,7 +301,7 @@ fn spawn_ending_dispatcher(
                 let _ = response_sender.send(Some(AttachAccepted {
                     client_id,
                     session_id,
-                    session_structure: attached_structure(session_id),
+                    session_structure: build_attached_structure(session_id),
                     deliveries: events,
                     ending_notice: Arc::clone(&ending_notice),
                     resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
@@ -334,29 +330,29 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_restarting() {
     // report the session dead, instead of coming back on its new socket.
     use koshi_core::event::{Event, TabCreated};
 
-    use crate::runtime::bus::{EventBus, EventFilter, SUBSCRIBER_QUEUE_CAPACITY};
+    use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
 
     let client = ClientId::new();
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("restart-full-queue");
 
     let mut bus = EventBus::new();
-    let (_, events) = bus.subscribe(EventFilter::All);
+    let (_, events) = bus.subscribe();
     let tab = TabId::new();
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
         bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
     }
     // The announcement: publishing the restart raises the notice and puts the
     // event on a queue with no room left for it.
-    let notice = Arc::clone(bus.ending_notice());
+    let notice = Arc::clone(bus.get_ending_notice());
     bus.publish(&Event::Restarting);
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Restarting));
 
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+        spawn_ending_dispatcher(inbox_receiver, client, session, events, Arc::clone(&notice));
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_directory, session, client);
 
@@ -377,7 +373,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_is_restarting() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -388,29 +384,29 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_ended() {
     // instead of saying the session ended.
     use koshi_core::event::{Event, QuitCause, TabCreated};
 
-    use crate::runtime::bus::{EventBus, EventFilter, SUBSCRIBER_QUEUE_CAPACITY};
+    use crate::runtime::bus::{EventBus, SUBSCRIBER_QUEUE_CAPACITY};
 
     let client = ClientId::new();
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("quit-full-queue");
 
     let mut bus = EventBus::new();
-    let (_, events) = bus.subscribe(EventFilter::All);
+    let (_, events) = bus.subscribe();
     let tab = TabId::new();
     for _ in 0..SUBSCRIBER_QUEUE_CAPACITY {
         bus.publish(&Event::TabCreated(TabCreated { tab_id: tab }));
     }
     // The announcement: publishing the quit raises the notice and puts the
     // event on a queue with no room left for it.
-    let notice = Arc::clone(bus.ending_notice());
+    let notice = Arc::clone(bus.get_ending_notice());
     bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Quit));
 
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+        spawn_ending_dispatcher(inbox_receiver, client, session, events, Arc::clone(&notice));
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_directory, session, client);
 
@@ -431,7 +427,7 @@ fn a_client_whose_queue_is_full_is_still_told_the_session_ended() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -442,29 +438,29 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     // what it reads.
     use koshi_core::event::{Event, QuitCause, TabCreated};
 
-    use crate::runtime::bus::{EventBus, EventFilter};
+    use crate::runtime::bus::EventBus;
 
     let client = ClientId::new();
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("detach-then-quit");
 
     let mut bus = EventBus::new();
-    let (subscriber, events) = bus.subscribe(EventFilter::All);
+    let (subscriber, events) = bus.subscribe();
     bus.publish(&Event::TabCreated(TabCreated {
         tab_id: TabId::new(),
     }));
     // The detach closes the queue behind the frame it already holds; the
     // session ends right after.
     bus.unsubscribe(subscriber);
-    let notice = Arc::clone(bus.ending_notice());
+    let notice = Arc::clone(bus.get_ending_notice());
     bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Quit));
 
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+        spawn_ending_dispatcher(inbox_receiver, client, session, events, Arc::clone(&notice));
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_directory, session, client);
 
@@ -483,7 +479,7 @@ fn a_client_the_server_detached_reads_its_own_goodbye_when_the_session_ends() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -495,14 +491,14 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     // the client reads the quit alone.
     use koshi_core::event::{Event, PaneProcessExited, QuitCause};
 
-    use crate::runtime::bus::{EventBus, EventFilter};
+    use crate::runtime::bus::EventBus;
 
     let client = ClientId::new();
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("quit-behind-queue");
 
     let mut bus = EventBus::new();
-    let (_, events) = bus.subscribe(EventFilter::All);
+    let (_, events) = bus.subscribe();
     let pane = PaneId::new();
     bus.publish(&Event::PaneProcessExited(PaneProcessExited {
         pane_id: pane,
@@ -511,15 +507,15 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     }));
     // The announcement: the queue has room, so the quit is queued behind the
     // exit and the notice is raised as well.
-    let notice = Arc::clone(bus.ending_notice());
+    let notice = Arc::clone(bus.get_ending_notice());
     bus.publish(&Event::Quit(QuitCause::Requested));
     assert_eq!(notice.get_session_ending(), Some(SessionEnding::Quit));
 
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher =
-        spawn_ending_dispatcher(inbox_rx, client, session, events, Arc::clone(&notice));
+        spawn_ending_dispatcher(inbox_receiver, client, session, events, Arc::clone(&notice));
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
 
     let mut connection = attach_to(&runtime_directory, session, client);
 
@@ -538,7 +534,7 @@ fn a_client_reads_the_quit_frame_alone_when_the_events_that_ended_the_session_ar
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A served socket whose stand-in dispatcher accepts an attach as `client_id`,
@@ -555,11 +551,11 @@ fn serve_attachable(
 ) {
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, received_runtime_events) =
-        spawn_attaching_dispatcher(inbox_rx, client_id, session);
+        spawn_attaching_dispatcher(inbox_receiver, client_id, session);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     (
         server,
         session,
@@ -589,17 +585,16 @@ fn attach_to_with_graphics(
 ) -> Connection {
     let mut connection = connect_to(runtime_directory, session);
     connection
-        .send(&hello_for(runtime_directory, session))
+        .send(&build_hello_for(runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
-                viewport: TEST_VIEWPORT_SIZE,
-                event_filter: EventFilterSpec::All,
+                viewport_size: TEST_VIEWPORT_SIZE,
                 resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
@@ -615,7 +610,7 @@ fn attach_to_with_graphics(
         IpcResult::Attached {
             client_id,
             session_id: session,
-            session_structure: attached_structure(session),
+            session_structure: build_attached_structure(session),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -628,12 +623,12 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     let client = ClientId::new();
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-cell-size");
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     let mut connection = connect_to(&runtime_directory, session);
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let _: IpcResponse = connection.recv().expect("hello reply");
     let measurement =
@@ -642,8 +637,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
         .send(&IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
-                viewport: TEST_VIEWPORT_SIZE,
-                event_filter: EventFilterSpec::All,
+                viewport_size: TEST_VIEWPORT_SIZE,
                 resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
@@ -657,18 +651,20 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
         cell_size,
         response_sender,
         ..
-    } = inbox_rx.recv().expect("attach reaches the dispatcher")
+    } = inbox_receiver
+        .recv()
+        .expect("attach reaches the dispatcher")
     else {
         panic!("expected IpcAttach");
     };
     assert_eq!(cell_size, Some(measurement));
-    let (events_tx, events_rx) = mpsc::channel();
+    let (events_sender, events_receiver) = mpsc::channel();
     response_sender
         .send(Some(AttachAccepted {
             client_id: client,
             session_id: session,
-            session_structure: attached_structure(session),
-            deliveries: events_rx,
+            session_structure: build_attached_structure(session),
+            deliveries: events_receiver,
             ending_notice: Arc::new(EndingNotice::default()),
             resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
             pane_area: None,
@@ -680,23 +676,24 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
         .send(&IpcRequest {
             request_id: 3,
             request_kind: IpcRequestKind::Resize {
-                viewport: TEST_VIEWPORT_SIZE,
+                viewport_size: TEST_VIEWPORT_SIZE,
                 pane_area: None,
                 cell_size: Some(measurement),
             },
         })
         .expect("send resize");
-    let RuntimeEvent::Resize { cell_size, .. } =
-        inbox_rx.recv().expect("resize reaches the dispatcher")
+    let RuntimeEvent::Resize { cell_size, .. } = inbox_receiver
+        .recv()
+        .expect("resize reaches the dispatcher")
     else {
         panic!("expected Resize");
     };
     assert_eq!(cell_size, Some(measurement));
 
-    drop(events_tx);
+    drop(events_sender);
     drop(connection);
     server.shutdown();
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -704,17 +701,17 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     let runtime_directory = build_test_runtime_directory("unsupported-image-stream");
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
-    let server =
-        IpcServer::start(&runtime_directory, session_id, inbox_tx, None).expect("start serving");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+        .expect("start serving");
     let mut connection = attach_to_with_graphics(
         &runtime_directory,
         session_id,
         client_id,
         GraphicsCapabilities::default(),
     );
-    let snapshot = image_snapshot(client_id, image_record(1));
+    let snapshot = build_image_snapshot(client_id, build_image_record(1));
     events
         .send(Delivery::Frame(Box::new(snapshot.clone())))
         .expect("send the image frame");
@@ -725,7 +722,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     assert_eq!(
         connection.recv::<SessionEvent>().expect("read the frame"),
         SessionEvent::Painted {
-            frame: Box::new(wire_frame(&snapshot)),
+            frame: Box::new(build_wire_frame(&snapshot)),
         }
     );
     assert_eq!(
@@ -741,7 +738,7 @@ fn an_unsupported_terminal_receives_placement_geometry_and_no_pixel_events() {
     drop(events);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -749,10 +746,10 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     let runtime_directory = build_test_runtime_directory("cached-image-stream");
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
-    let server =
-        IpcServer::start(&runtime_directory, session_id, inbox_tx, None).expect("start serving");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+        .expect("start serving");
     let mut connection = attach_to_with_graphics(
         &runtime_directory,
         session_id,
@@ -763,8 +760,8 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
             supports_sixel: false,
         },
     );
-    let image_record = image_record(1);
-    let snapshot = image_snapshot(client_id, Arc::clone(&image_record));
+    let image_record = build_image_record(1);
+    let snapshot = build_image_snapshot(client_id, Arc::clone(&image_record));
     events
         .send(Delivery::Frame(Box::new(snapshot.clone())))
         .expect("send the first image frame");
@@ -776,7 +773,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
         .expect("send the event after both frames");
 
     let painted = SessionEvent::Painted {
-        frame: Box::new(wire_frame(&snapshot)),
+        frame: Box::new(build_wire_frame(&snapshot)),
     };
     assert_eq!(
         connection
@@ -789,7 +786,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
             .recv::<SessionEvent>()
             .expect("read the image start"),
         SessionEvent::ImageContentStart {
-            image_transfer: wire_image_transfer(1, &image_record),
+            image_transfer: build_wire_image_transfer(1, &image_record),
         }
     );
     assert_eq!(
@@ -824,7 +821,7 @@ fn a_kitty_terminal_receives_pixels_once_then_placement_only_frames() {
     drop(events);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -832,10 +829,10 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     let runtime_directory = build_test_runtime_directory("image-scroll-return");
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
-    let server =
-        IpcServer::start(&runtime_directory, session_id, inbox_tx, None).expect("start serving");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+        .expect("start serving");
     let mut connection = attach_to_with_graphics(
         &runtime_directory,
         session_id,
@@ -846,11 +843,11 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
             supports_sixel: false,
         },
     );
-    let first_record = image_record(1);
-    let visible = image_snapshot(client_id, Arc::clone(&first_record));
+    let first_record = build_image_record(1);
+    let visible = build_image_snapshot(client_id, Arc::clone(&first_record));
     let mut absent = visible.clone();
     absent.pane_snapshots[0].image_placement_snapshots.clear();
-    let changed_record = image_record(2);
+    let changed_record = build_image_record(2);
     let mut changed = visible.clone();
     changed.pane_snapshots[0].image_placement_snapshots[0] =
         ImagePlacementSnapshot::with_content_id(7, 1, Arc::clone(&changed_record), (0, 0), 1, 1)
@@ -871,7 +868,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
         (&absent, 0, None),
         (&changed, 3, Some(&changed_record)),
     ] {
-        let mut frame = wire_frame(snapshot);
+        let mut frame = build_wire_frame(snapshot);
         if let Some(placement) = frame
             .pane_snapshots
             .first_mut()
@@ -893,7 +890,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
                 .recv::<SessionEvent>()
                 .expect("read an image start"),
             SessionEvent::ImageContentStart {
-                image_transfer: wire_image_transfer(content_id, image_record),
+                image_transfer: build_wire_image_transfer(content_id, image_record),
             }
         );
         assert_eq!(
@@ -921,7 +918,7 @@ fn image_scroll_return_uses_a_new_identity_and_complete_transfer() {
     drop(events);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -947,14 +944,14 @@ fn any_native_terminal_receives_image_content() {
         let runtime_directory = build_test_runtime_directory(tag);
         let session_id = SessionId::new();
         let client_id = ClientId::new();
-        let (inbox_tx, inbox_rx) = mpsc::channel();
-        let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
-        let server = IpcServer::start(&runtime_directory, session_id, inbox_tx, None)
+        let (inbox_sender, inbox_receiver) = mpsc::channel();
+        let (dispatcher, events) = spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
+        let server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
             .expect("start serving");
         let mut connection =
             attach_to_with_graphics(&runtime_directory, session_id, client_id, graphics);
-        let image_record = image_record(1);
-        let snapshot = image_snapshot(client_id, Arc::clone(&image_record));
+        let image_record = build_image_record(1);
+        let snapshot = build_image_snapshot(client_id, Arc::clone(&image_record));
         events
             .send(Delivery::Frame(Box::new(snapshot.clone())))
             .expect("send the image frame");
@@ -962,7 +959,7 @@ fn any_native_terminal_receives_image_content() {
         assert_eq!(
             connection.recv::<SessionEvent>().expect("read the frame"),
             SessionEvent::Painted {
-                frame: Box::new(wire_frame(&snapshot)),
+                frame: Box::new(build_wire_frame(&snapshot)),
             }
         );
         assert_eq!(
@@ -970,7 +967,7 @@ fn any_native_terminal_receives_image_content() {
                 .recv::<SessionEvent>()
                 .expect("read the image start"),
             SessionEvent::ImageContentStart {
-                image_transfer: wire_image_transfer(1, &image_record),
+                image_transfer: build_wire_image_transfer(1, &image_record),
             }
         );
         assert_eq!(
@@ -991,15 +988,15 @@ fn any_native_terminal_receives_image_content() {
         drop(events);
         server.shutdown();
         dispatcher.join().expect("dispatcher exits");
-        cleanup(&runtime_directory);
+        remove_test_directory(&runtime_directory);
     }
 }
 
 #[test]
 fn two_placements_of_one_record_share_one_content_transfer() {
     let client_id = ClientId::new();
-    let image_record = image_record(1);
-    let mut snapshot = image_snapshot(client_id, Arc::clone(&image_record));
+    let image_record = build_image_record(1);
+    let mut snapshot = build_image_snapshot(client_id, Arc::clone(&image_record));
     snapshot.pane_snapshots[0].image_placement_snapshots.push(
         ImagePlacementSnapshot::with_content_id(8, 2, Arc::clone(&image_record), (0, 1), 1, 1)
             .expect("the second placement is valid"),
@@ -1026,10 +1023,10 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     let runtime_directory = build_test_runtime_directory("bounded-image-batches");
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, events) = spawn_frame_dispatcher(inbox_rx, client_id, session_id);
-    let server =
-        IpcServer::start(&runtime_directory, session_id, inbox_tx, None).expect("start serving");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher, events) = spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
+    let server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+        .expect("start serving");
     let mut connection = attach_to_with_graphics(
         &runtime_directory,
         session_id,
@@ -1040,14 +1037,14 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
             supports_sixel: false,
         },
     );
-    let mut snapshot = image_snapshot(client_id, image_record(1));
+    let mut snapshot = build_image_snapshot(client_id, build_image_record(1));
     snapshot.pane_snapshots[0].image_placement_snapshots = (1..=MAX_FRAME_IMAGE_TRANSFER_COUNT)
         .map(|placement_index| {
             let content_id = u64::try_from(placement_index).expect("the content identity fits");
             ImagePlacementSnapshot::with_content_id(
                 content_id,
                 content_id,
-                image_record((content_id % 251) as u8),
+                build_image_record((content_id % 251) as u8),
                 (0, 0),
                 1,
                 1,
@@ -1062,7 +1059,7 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     second_pane.image_placement_snapshots = vec![ImagePlacementSnapshot::with_content_id(
         1,
         last_image_content_id,
-        image_record((last_image_content_id % 251) as u8),
+        build_image_record((last_image_content_id % 251) as u8),
         (0, 0),
         1,
         1,
@@ -1076,7 +1073,7 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
         .send(Delivery::HostWrite(vec![9]))
         .expect("send the event after the image frame");
     let painted = SessionEvent::Painted {
-        frame: Box::new(wire_frame(&snapshot)),
+        frame: Box::new(build_wire_frame(&snapshot)),
     };
 
     assert_eq!(
@@ -1092,7 +1089,10 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
                 .recv::<SessionEvent>()
                 .expect("read an image start"),
             SessionEvent::ImageContentStart {
-                image_transfer: wire_image_transfer(image_content_id, &image_record(red)),
+                image_transfer: build_wire_image_transfer(
+                    image_content_id,
+                    &build_image_record(red)
+                ),
             }
         );
         assert_eq!(
@@ -1117,7 +1117,10 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
             .recv::<SessionEvent>()
             .expect("read the last image start"),
         SessionEvent::ImageContentStart {
-            image_transfer: wire_image_transfer(last_image_content_id, &image_record(last_red),),
+            image_transfer: build_wire_image_transfer(
+                last_image_content_id,
+                &build_image_record(last_red),
+            ),
         }
     );
     assert_eq!(
@@ -1146,17 +1149,17 @@ fn a_kitty_terminal_receives_more_than_4096_placements_in_bounded_batches() {
     drop(events);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn replacing_one_placement_record_assigns_a_new_content_identity() {
     let client_id = ClientId::new();
-    let first_record = image_record(1);
-    let initial_image_snapshot = image_snapshot(client_id, Arc::clone(&first_record));
+    let first_record = build_image_record(1);
+    let initial_image_snapshot = build_image_snapshot(client_id, Arc::clone(&first_record));
     let mut replacement_image_snapshot = initial_image_snapshot.clone();
     let pane_id = replacement_image_snapshot.pane_snapshots[0].pane_id;
-    let second_record = image_record(2);
+    let second_record = build_image_record(2);
     replacement_image_snapshot.pane_snapshots[0].image_placement_snapshots[0] =
         ImagePlacementSnapshot::with_content_id(7, 1, Arc::clone(&second_record), (0, 0), 1, 1)
             .expect("the replacement placement is valid");
@@ -1196,10 +1199,10 @@ fn replacing_one_placement_record_assigns_a_new_content_identity() {
 #[test]
 fn exhausted_content_id_space_resets_the_connection_cache_before_reuse() {
     let client_id = ClientId::new();
-    let initial_image_snapshot = image_snapshot(client_id, image_record(1));
+    let initial_image_snapshot = build_image_snapshot(client_id, build_image_record(1));
     let mut replacement_image_snapshot = initial_image_snapshot.clone();
     replacement_image_snapshot.pane_snapshots[0].image_placement_snapshots[0] =
-        ImagePlacementSnapshot::with_content_id(7, 1, image_record(2), (0, 0), 1, 1)
+        ImagePlacementSnapshot::with_content_id(7, 1, build_image_record(2), (0, 0), 1, 1)
             .expect("the replacement placement is valid");
     let mut cache = ConnectionImageCache::new();
     cache.next_image_content_id = u64::MAX;
@@ -1225,7 +1228,7 @@ fn exhausted_content_id_space_resets_the_connection_cache_before_reuse() {
 #[test]
 fn clearing_after_a_write_failure_resets_the_client_before_reusing_content_ids() {
     let client_id = ClientId::new();
-    let snapshot = image_snapshot(client_id, image_record(1));
+    let snapshot = build_image_snapshot(client_id, build_image_record(1));
     let mut cache = ConnectionImageCache::new();
 
     let before_clear = cache.prepare_image_frame(&snapshot);
@@ -1254,10 +1257,10 @@ fn serve(
 ) -> (IpcServer, SessionId, PathBuf, JoinHandle<()>) {
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher = spawn_dispatcher(inbox_rx, overview);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_receiver, overview);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     (server, session, runtime_directory, dispatcher)
 }
 
@@ -1271,12 +1274,12 @@ fn serve_shared(
     let runtime_directory = build_test_runtime_directory(tag);
     let shared_directory = build_test_shared_directory(tag);
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher = spawn_dispatcher(inbox_rx, None);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_receiver, None);
     let server = IpcServer::start(
         &runtime_directory,
         session,
-        inbox_tx,
+        inbox_sender,
         Some(OtherUsers {
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(move || is_enabled),
@@ -1296,11 +1299,11 @@ fn serve_shared(
 /// returned receiver before answering it with `Ok`. Every other event it drains
 /// is dropped. Exits when every inbox sender is gone.
 fn spawn_reporting_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
 ) -> (JoinHandle<()>, Receiver<CommandEnvelope>) {
     let (command_envelope_sender, command_envelope_receiver) = mpsc::channel();
     let handle = std::thread::spawn(move || {
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             if let RuntimeEvent::Ipc {
                 envelope,
                 response_sender,
@@ -1310,7 +1313,7 @@ fn spawn_reporting_dispatcher(
                     command_id: envelope.command_id,
                     emitted_events: Vec::new(),
                 });
-                if command_envelope_sender.send(envelope).is_err() {
+                if command_envelope_sender.send(*envelope).is_err() {
                     break;
                 }
             }
@@ -1332,10 +1335,10 @@ fn serve_reporting(
 ) {
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, received_command_envelopes) = spawn_reporting_dispatcher(inbox_rx);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher, received_command_envelopes) = spawn_reporting_dispatcher(inbox_receiver);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     (
         server,
         session,
@@ -1347,19 +1350,19 @@ fn serve_reporting(
 
 /// Open a control connection to `session`, send the Hello, read its answer, and
 /// hand back the connection ready for the next request.
-fn greeted(runtime_directory: &Path, session: SessionId) -> Connection {
+fn connect_greeted(runtime_directory: &Path, session: SessionId) -> Connection {
     let mut connection = connect_to(runtime_directory, session);
     connection
-        .send(&hello_for(runtime_directory, session))
+        .send(&build_hello_for(runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
     connection
 }
 
 /// Submit `envelope` on `connection` and hand back the envelope the dispatcher
 /// was given, after reading the reply the submission earns.
-fn submitted(
+fn submit_envelope(
     connection: &mut Connection,
     received_command_envelopes: &Receiver<CommandEnvelope>,
     envelope: CommandEnvelope,
@@ -1377,18 +1380,17 @@ fn submitted(
     dispatched
 }
 
-/// A deterministic envelope for submissions.
+/// An envelope for submissions, from an external CLI naming no session.
 fn build_test_command_envelope() -> CommandEnvelope {
     CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::Internal,
-        SystemTime::UNIX_EPOCH,
+        CommandSource::from_external_cli(None, None),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
 }
 
 /// The Hello that matches the endpoint file at `runtime_directory` for `session`.
-fn hello_for(runtime_directory: &Path, session: SessionId) -> IpcRequest {
+fn build_hello_for(runtime_directory: &Path, session: SessionId) -> IpcRequest {
     let endpoint = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
         runtime_directory,
         session,
@@ -1397,8 +1399,8 @@ fn hello_for(runtime_directory: &Path, session: SessionId) -> IpcRequest {
     IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: endpoint.connection_token,
             is_remote: false,
         },
@@ -1407,7 +1409,7 @@ fn hello_for(runtime_directory: &Path, session: SessionId) -> IpcRequest {
 
 /// The answer an accepted Hello earns: both sides speak this build's version,
 /// so they settle on it, and the answer names the build the session runs.
-fn hello_accepted() -> IpcResult {
+fn build_hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1428,23 +1430,23 @@ fn connect_to(runtime_directory: &Path, session: SessionId) -> Connection {
 /// returned receiver carries the tab each request named, so a test reads what
 /// crossed the boundary. Exits when every inbox sender is gone.
 fn spawn_layout_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     layout: Option<SessionLayout>,
 ) -> (JoinHandle<()>, Receiver<Option<TabId>>) {
-    let (asked_tx, asked_rx) = mpsc::channel();
+    let (asked_sender, asked_receiver) = mpsc::channel();
     let handle = std::thread::spawn(move || {
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             if let RuntimeEvent::IpcLayout {
                 tab_id,
                 response_sender,
             } = event
             {
-                let _ = asked_tx.send(tab_id);
+                let _ = asked_sender.send(tab_id);
                 let _ = response_sender.send(layout.clone());
             }
         }
     });
-    (handle, asked_rx)
+    (handle, asked_receiver)
 }
 
 /// A served socket whose stand-in dispatcher answers layout requests with
@@ -1461,15 +1463,15 @@ fn serve_layout(
 ) {
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let (dispatcher, asked) = spawn_layout_dispatcher(inbox_rx, layout);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (dispatcher, asked) = spawn_layout_dispatcher(inbox_receiver, layout);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     (server, session, runtime_directory, dispatcher, asked)
 }
 
 /// A tiny layout to answer a layout request with, distinguishable by its name.
-fn layout_named(session_name: &str) -> SessionLayout {
+fn build_layout_named(session_name: &str) -> SessionLayout {
     SessionLayout {
         session_id: SessionId::new(),
         session_name: session_name.to_string(),
@@ -1479,7 +1481,7 @@ fn layout_named(session_name: &str) -> SessionLayout {
 }
 
 /// A tiny overview to answer discovery with, distinguishable by its name.
-fn overview_named(session_name: &str) -> SessionOverview {
+fn build_overview_named(session_name: &str) -> SessionOverview {
     SessionOverview {
         session: SessionDiscovery {
             session_id: SessionId::new(),
@@ -1495,21 +1497,20 @@ fn overview_named(session_name: &str) -> SessionOverview {
 }
 
 #[test]
-fn a_control_connection_replaces_an_internal_source_with_an_external_cli_one() {
-    // The CLI-admission check lets every command through an `Internal` source.
-    // A peer presenting one on a control connection is stamped back to the
+fn a_control_connection_replaces_a_mouse_source_with_an_external_cli_one() {
+    // The CLI-admission check lets every command through a mouse source. A
+    // peer presenting one on a control connection is stamped back to the
     // source that connection carries.
     let (server, session, runtime_directory, dispatcher, received_command_envelopes) =
-        serve_reporting("stamp-internal");
-    let mut connection = greeted(&runtime_directory, session);
+        serve_reporting("stamp-mouse");
+    let mut connection = connect_greeted(&runtime_directory, session);
     let sent = CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::Internal,
-        SystemTime::UNIX_EPOCH,
+        CommandSource::from_mouse(ClientId::new()),
         Command::ToggleMouseSelect,
     );
 
-    let dispatched = submitted(&mut connection, &received_command_envelopes, sent.clone());
+    let dispatched = submit_envelope(&mut connection, &received_command_envelopes, sent.clone());
 
     assert_eq!(
         dispatched.command_source,
@@ -1522,23 +1523,22 @@ fn a_control_connection_replaces_an_internal_source_with_an_external_cli_one() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher joins");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn a_control_connection_cannot_present_another_clients_keybinding_source() {
     let (server, session, runtime_directory, dispatcher, received_command_envelopes) =
         serve_reporting("stamp-keybinding");
-    let mut connection = greeted(&runtime_directory, session);
+    let mut connection = connect_greeted(&runtime_directory, session);
     let victim = ClientId::new();
     let sent = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(victim),
-        SystemTime::UNIX_EPOCH,
         Command::ToggleMouseSelect,
     );
 
-    let dispatched = submitted(&mut connection, &received_command_envelopes, sent);
+    let dispatched = submit_envelope(&mut connection, &received_command_envelopes, sent);
 
     assert_eq!(
         dispatched.command_source,
@@ -1549,14 +1549,14 @@ fn a_control_connection_cannot_present_another_clients_keybinding_source() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher joins");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
     let (server, session, runtime_directory, dispatcher, received_command_envelopes) =
         serve_reporting("stamp-cli");
-    let mut connection = greeted(&runtime_directory, session);
+    let mut connection = connect_greeted(&runtime_directory, session);
     let client = ClientId::new();
     let in_session = CommandSource::from_in_session_cli(
         session,
@@ -1566,26 +1566,24 @@ fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
     );
     let external = CommandSource::from_external_cli(Some(session), Some(client));
 
-    let dispatched = submitted(
+    let dispatched = submit_envelope(
         &mut connection,
         &received_command_envelopes,
         CommandEnvelope::from_parts(
             CommandId::new(),
             in_session.clone(),
-            SystemTime::UNIX_EPOCH,
             Command::ToggleLockMode(ToggleLockModeArgs::default()),
         ),
     );
     assert_eq!(dispatched.command_source, in_session);
     assert_eq!(dispatched.client_id, Some(client));
 
-    let dispatched = submitted(
+    let dispatched = submit_envelope(
         &mut connection,
         &received_command_envelopes,
         CommandEnvelope::from_parts(
             CommandId::new(),
             external.clone(),
-            SystemTime::UNIX_EPOCH,
             Command::ToggleLockMode(ToggleLockModeArgs::default()),
         ),
     );
@@ -1595,7 +1593,7 @@ fn a_control_connection_keeps_the_two_cli_sources_a_koshi_invocation_sends() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher joins");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -1605,7 +1603,7 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
     let command_envelope = build_test_command_envelope();
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     connection
         .send(&IpcRequest {
@@ -1616,7 +1614,7 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
     assert_eq!(hello_reply.request_id, Some(1));
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     let submit_reply: IpcResponse = connection.recv().expect("submit reply");
     assert_eq!(submit_reply.request_id, Some(2));
@@ -1631,7 +1629,7 @@ fn a_submitted_command_round_trips_with_the_dispatchers_result() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A newer koshi asking for something this build has no name for is refused by
@@ -1644,10 +1642,10 @@ fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_s
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     // A well-framed request naming a kind added by some later koshi.
     connection
@@ -1690,7 +1688,7 @@ fn a_request_kind_this_build_lacks_is_refused_by_name_and_the_connection_keeps_s
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// An unfamiliar kind arriving before the Hello is answered the same way any
@@ -1721,7 +1719,7 @@ fn a_kind_this_build_lacks_before_hello_is_refused_as_hello_required() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A caller reaching higher than this build settles on this build's highest,
@@ -1740,8 +1738,8 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION + 5,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION + 5,
                 connection_token: endpoint.connection_token,
                 is_remote: false,
             },
@@ -1778,7 +1776,7 @@ fn a_caller_speaking_a_wider_range_settles_on_this_builds_highest() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A caller whose whole range sits above this build shares no version with it,
@@ -1798,8 +1796,8 @@ fn a_caller_sharing_no_version_is_refused_and_serves_nothing() {
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: above,
-                max_protocol_version: above + 2,
+                minimum_protocol_version: above,
+                maximum_protocol_version: above + 2,
                 connection_token: endpoint.connection_token,
                 is_remote: false,
             },
@@ -1838,7 +1836,7 @@ fn a_caller_sharing_no_version_is_refused_and_serves_nothing() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A peer that speaks only the protocol the last release spoke shares no
@@ -1863,8 +1861,8 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: previous_release_protocol_version,
-                max_protocol_version: previous_release_protocol_version,
+                minimum_protocol_version: previous_release_protocol_version,
+                maximum_protocol_version: previous_release_protocol_version,
                 connection_token: endpoint.connection_token,
                 is_remote: false,
             },
@@ -1912,7 +1910,7 @@ fn a_peer_speaking_the_previous_protocol_is_refused_and_the_session_keeps_servin
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// Every field the client's terminal reported crosses the attached
@@ -1957,7 +1955,7 @@ fn an_attached_connection_carries_every_field_of_the_key_input() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -1983,15 +1981,15 @@ fn a_request_before_hello_is_refused_and_the_connection_keeps_serving() {
 
     // The same connection still serves: a Hello opens it and a submit works.
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2003,8 +2001,8 @@ fn a_wrong_token_is_refused_as_bad_token() {
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: ConnectionToken::from_secret("not-the-secret"),
                 is_remote: false,
             },
@@ -2022,7 +2020,7 @@ fn a_wrong_token_is_refused_as_bad_token() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2034,10 +2032,10 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
 
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let restarted_dispatcher = spawn_dispatcher(inbox_rx, None);
-    let restarted =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving again");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let restarted_dispatcher = spawn_dispatcher(inbox_receiver, None);
+    let restarted = IpcServer::start(&runtime_directory, session, inbox_sender, None)
+        .expect("start serving again");
     let restarted_endpoint =
         EndpointFile::load_from_path(&endpoint_path).expect("endpoint file readable");
     assert_ne!(
@@ -2050,8 +2048,8 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: initial_endpoint.connection_token,
                 is_remote: false,
             },
@@ -2068,16 +2066,16 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
 
     let mut accepted_connection = connect_to(&runtime_directory, session);
     accepted_connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello with the new secret");
     let accepted: IpcResponse = accepted_connection.recv().expect("hello reply");
-    assert_eq!(accepted.answer_result, hello_accepted());
+    assert_eq!(accepted.answer_result, build_hello_accepted());
 
     drop(stale_connection);
     drop(accepted_connection);
     restarted.shutdown();
     restarted_dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2107,15 +2105,15 @@ fn a_detach_leaves_the_sessions_token_unchanged() {
 
     let mut connection = connect_to(&runtime_directory, session);
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello with the secret from before the detach");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2137,15 +2135,15 @@ fn a_malformed_frame_is_answered_and_the_connection_keeps_serving() {
 
     // The stream is still aligned: the same connection opens and serves.
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2159,13 +2157,13 @@ fn an_oversize_frame_closes_the_connection() {
 
     // A raw stream, so the length prefix can lie past the cap without a
     // payload behind it.
-    let mut raw_socket = raw_connect(&endpoint.socket_address);
+    let mut raw_socket = connect_raw(&endpoint.socket_address);
     let oversize = (koshi_ipc::transport::MAX_FRAME_BYTE_COUNT + 1).to_be_bytes();
     std::io::Write::write_all(&mut raw_socket, &oversize).expect("write oversize header");
 
     // The server closes: the next read finds the stream at end.
-    let mut buffer = [0u8; 1];
-    let closed = match std::io::Read::read(&mut raw_socket, &mut buffer) {
+    let mut probe_byte = [0u8; 1];
+    let closed = match std::io::Read::read(&mut raw_socket, &mut probe_byte) {
         Ok(0) => true,
         Ok(_) => false,
         Err(_) => true,
@@ -2177,13 +2175,13 @@ fn an_oversize_frame_closes_the_connection() {
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// Open the control socket as a raw byte stream, bypassing the framed
 /// [`Connection`], so a test can write a corrupt frame header.
 #[cfg(unix)]
-fn raw_connect(socket_address: &str) -> std::os::unix::net::UnixStream {
+fn connect_raw(socket_address: &str) -> std::os::unix::net::UnixStream {
     std::os::unix::net::UnixStream::connect(socket_address).expect("raw connect")
 }
 
@@ -2191,7 +2189,7 @@ fn raw_connect(socket_address: &str) -> std::os::unix::net::UnixStream {
 /// [`Connection`], so a test can write a corrupt frame header. The bare pipe
 /// name is served at `\\.\pipe\<name>`.
 #[cfg(windows)]
-fn raw_connect(socket_address: &str) -> std::fs::File {
+fn connect_raw(socket_address: &str) -> std::fs::File {
     std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -2234,7 +2232,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
         .send(&IpcRequest {
             request_id: 4,
             request_kind: IpcRequestKind::Resize {
-                viewport: resized,
+                viewport_size: resized,
                 pane_area: None,
                 cell_size: None,
             },
@@ -2269,7 +2267,6 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     };
     assert_eq!(envelope.command_id, command_envelope.command_id);
     assert_eq!(envelope.command, command_envelope.command);
-    assert_eq!(envelope.issued_at, command_envelope.issued_at);
     assert_eq!(
         envelope.command_source,
         CommandSource::from_key_binding(client),
@@ -2358,7 +2355,7 @@ fn an_attached_connection_forwards_input_unanswered_and_detaches_on_any_other_re
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2402,7 +2399,7 @@ fn a_request_kind_this_build_lacks_on_an_attached_connection_is_dropped_and_the_
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2441,7 +2438,7 @@ fn a_malformed_frame_on_an_attached_connection_is_dropped_and_the_stream_goes_on
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2452,10 +2449,10 @@ fn a_keyboard_request_before_an_attach_closes_the_connection() {
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -2479,7 +2476,7 @@ fn a_keyboard_request_before_an_attach_closes_the_connection() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2490,10 +2487,10 @@ fn a_mouse_round_before_an_attach_closes_the_connection() {
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -2516,17 +2513,17 @@ fn a_mouse_round_before_an_attach_closes_the_connection() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn discovery_answers_with_the_dispatchers_overview() {
     let (server, session, runtime_directory, dispatcher) =
-        serve("discovery", Some(overview_named("workspace")));
+        serve("discovery", Some(build_overview_named("workspace")));
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     connection
         .send(&IpcRequest {
@@ -2536,7 +2533,7 @@ fn discovery_answers_with_the_dispatchers_overview() {
         .expect("send discovery");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
     let discovery_reply: IpcResponse = connection.recv().expect("discovery reply");
     let IpcResult::Overview(overview) = discovery_reply.answer_result else {
         panic!(
@@ -2549,7 +2546,7 @@ fn discovery_answers_with_the_dispatchers_overview() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2558,10 +2555,10 @@ fn discovery_with_no_running_session_closes_the_connection() {
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -2580,7 +2577,7 @@ fn discovery_with_no_running_session_closes_the_connection() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2593,7 +2590,7 @@ fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher()
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     connection
         .send(&IpcRequest {
@@ -2603,7 +2600,7 @@ fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher()
         .expect("send recent-events request");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
     let events_reply: IpcResponse = connection.recv().expect("recent-events reply");
     assert_eq!(events_reply.request_id, Some(2));
     let IpcResult::RecentEvents(recent_events) = events_reply.answer_result else {
@@ -2623,18 +2620,18 @@ fn a_recent_events_request_answers_from_the_ring_without_asking_the_dispatcher()
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn a_layout_request_answers_with_the_dispatchers_layout_and_names_the_tab_asked_for() {
     let (server, session, runtime_directory, dispatcher, asked) =
-        serve_layout("layout-one-tab", Some(layout_named("workspace")));
+        serve_layout("layout-one-tab", Some(build_layout_named("workspace")));
     let requested_tab_id = TabId::new();
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     connection
         .send(&IpcRequest {
@@ -2646,7 +2643,7 @@ fn a_layout_request_answers_with_the_dispatchers_layout_and_names_the_tab_asked_
         .expect("send layout request");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
     let layout_reply: IpcResponse = connection.recv().expect("layout reply");
     assert_eq!(layout_reply.request_id, Some(2));
     let IpcResult::Layout(layout) = layout_reply.answer_result else {
@@ -2661,17 +2658,17 @@ fn a_layout_request_answers_with_the_dispatchers_layout_and_names_the_tab_asked_
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn a_layout_request_for_every_tab_names_no_tab_to_the_dispatcher() {
     let (server, session, runtime_directory, dispatcher, asked) =
-        serve_layout("layout-every-tab", Some(layout_named("workspace")));
+        serve_layout("layout-every-tab", Some(build_layout_named("workspace")));
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     connection
         .send(&IpcRequest {
@@ -2681,7 +2678,7 @@ fn a_layout_request_for_every_tab_names_no_tab_to_the_dispatcher() {
         .expect("send layout request");
 
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
     let layout_reply: IpcResponse = connection.recv().expect("layout reply");
     let IpcResult::Layout(layout) = layout_reply.answer_result else {
         panic!("expected a layout, got {:?}", layout_reply.answer_result);
@@ -2692,7 +2689,7 @@ fn a_layout_request_for_every_tab_names_no_tab_to_the_dispatcher() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2702,10 +2699,10 @@ fn a_layout_request_with_no_running_session_closes_the_connection() {
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -2724,7 +2721,7 @@ fn a_layout_request_with_no_running_session_closes_the_connection() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2755,24 +2752,24 @@ fn a_layout_request_on_an_attached_connection_ends_that_client_stream() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
     let runtime_directory = build_test_runtime_directory("no-dispatcher");
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    drop(inbox_rx);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    drop(inbox_receiver);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -2790,7 +2787,7 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
 
     drop(connection);
     server.shutdown();
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2825,7 +2822,7 @@ fn the_endpoint_file_lives_while_serving_and_both_files_go_at_shutdown() {
         panic!("nothing listens after shutdown");
     };
     assert_eq!(socket_address, endpoint.socket_address);
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2844,7 +2841,7 @@ fn dropping_the_server_without_shutdown_still_removes_both_files() {
         panic!("nothing listens after drop");
     };
     assert_eq!(socket_address, endpoint.socket_address);
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[cfg(unix)]
@@ -2866,7 +2863,7 @@ fn shutdown_returns_and_removes_the_endpoint_even_when_the_wake_cannot_connect()
         "endpoint file gone even though the accept loop could not be woken",
     );
     drop(dispatcher);
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[cfg(unix)]
@@ -2878,21 +2875,21 @@ fn a_leftover_socket_file_is_reclaimed_at_start() {
     let socket_address = compute_socket_address(&runtime_directory, session);
     std::fs::write(&socket_address, b"").expect("plant a leftover file at the socket path");
 
-    let (inbox_tx, _inbox_rx) = mpsc::channel();
-    let server = IpcServer::start(&runtime_directory, session, inbox_tx, None)
+    let (inbox_sender, _inbox_receiver) = mpsc::channel();
+    let server = IpcServer::start(&runtime_directory, session, inbox_sender, None)
         .expect("start reclaims the leftover and serves");
 
     server.shutdown();
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
 fn a_second_start_on_the_same_session_is_refused_while_serving() {
     let (server, session, runtime_directory, dispatcher) = serve("busy", None);
 
-    let (inbox_tx, _inbox_rx) = mpsc::channel();
+    let (inbox_sender, _inbox_receiver) = mpsc::channel();
     let Err(IpcError::SocketBusy { socket_address }) =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None)
+        IpcServer::start(&runtime_directory, session, inbox_sender, None)
     else {
         panic!("the live listener must refuse a second bind");
     };
@@ -2903,7 +2900,7 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2911,13 +2908,13 @@ fn a_runtime_directory_that_cannot_be_created_refuses_to_start() {
     // A file where the directory would go: creating the directory under it
     // fails, and the start stops before it binds anything.
     let blocker = build_test_runtime_directory("runtime-dir-blocked");
-    cleanup(&blocker);
+    remove_test_directory(&blocker);
     std::fs::write(&blocker, b"").expect("plant a file where the directory would go");
     let runtime_directory = blocker.join("session");
-    let (inbox_tx, _inbox_rx) = mpsc::channel();
+    let (inbox_sender, _inbox_receiver) = mpsc::channel();
 
     let Err(IpcError::Transport { error_detail }) =
-        IpcServer::start(&runtime_directory, SessionId::new(), inbox_tx, None)
+        IpcServer::start(&runtime_directory, SessionId::new(), inbox_sender, None)
     else {
         panic!("a runtime directory that cannot be created must refuse the start");
     };
@@ -2942,11 +2939,11 @@ fn a_start_whose_endpoint_file_cannot_be_written_leaves_nothing_listening() {
     let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session);
     let socket_address = compute_socket_address(&runtime_directory, session);
     std::fs::create_dir_all(&endpoint_path).expect("plant a directory where the file goes");
-    let (inbox_tx, _inbox_rx) = mpsc::channel();
+    let (inbox_sender, _inbox_receiver) = mpsc::channel();
 
     let Err(IpcError::EndpointFileWrite {
         endpoint_file_path, ..
-    }) = IpcServer::start(&runtime_directory, session, inbox_tx, None)
+    }) = IpcServer::start(&runtime_directory, session, inbox_sender, None)
     else {
         panic!("an endpoint file that cannot be written must refuse the start");
     };
@@ -2965,7 +2962,7 @@ fn a_start_whose_endpoint_file_cannot_be_written_leaves_nothing_listening() {
     };
     assert_eq!(named, socket_address);
 
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2982,7 +2979,7 @@ fn a_session_only_its_own_user_may_reach_binds_inside_the_runtime_directory() {
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -3006,8 +3003,8 @@ fn a_session_other_local_users_may_reach_keeps_its_endpoint_file_private() {
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
-    cleanup(&shared_directory);
+    remove_test_directory(&runtime_directory);
+    remove_test_directory(&shared_directory);
 }
 
 #[cfg(unix)]
@@ -3043,8 +3040,8 @@ fn the_socket_of_a_session_other_local_users_may_reach_is_open_to_every_local_us
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
-    cleanup(&shared_directory);
+    remove_test_directory(&runtime_directory);
+    remove_test_directory(&shared_directory);
 }
 
 #[cfg(windows)]
@@ -3060,8 +3057,8 @@ fn the_marker_naming_a_shared_session_lives_while_serving_and_goes_at_shutdown()
     dispatcher.join().expect("dispatcher exits");
 
     assert!(!marker.exists(), "marker gone after shutdown");
-    cleanup(&runtime_directory);
-    cleanup(&shared_directory);
+    remove_test_directory(&runtime_directory);
+    remove_test_directory(&shared_directory);
 }
 
 #[test]
@@ -3070,13 +3067,13 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
     let shared_directory = build_test_shared_directory("shared-attach");
     let session = SessionId::new();
     let client = ClientId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, _received_runtime_events) =
-        spawn_attaching_dispatcher(inbox_rx, client, session);
+        spawn_attaching_dispatcher(inbox_receiver, client, session);
     let server = IpcServer::start(
         &runtime_directory,
         session,
-        inbox_tx,
+        inbox_sender,
         Some(OtherUsers {
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(|| true),
@@ -3089,8 +3086,8 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
-    cleanup(&shared_directory);
+    remove_test_directory(&runtime_directory);
+    remove_test_directory(&shared_directory);
 }
 
 // --- Serving one connection from another local user ---
@@ -3124,7 +3121,7 @@ fn build_test_socket_address(tag: &str) -> String {
 fn serve_other_user(
     tag: &str,
     is_enabled: &Arc<AtomicBool>,
-    inbox_tx: Sender<RuntimeEvent>,
+    inbox_sender: Sender<RuntimeEvent>,
 ) -> (Connection, JoinHandle<()>, String) {
     let socket_address = build_test_socket_address(tag);
     remove_socket_file(&socket_address);
@@ -3139,7 +3136,7 @@ fn serve_other_user(
         serve_connection(
             connection,
             ConnectionToken::generate(),
-            &inbox_tx,
+            &inbox_sender,
             Peer::Local {
                 is_same_user: false,
                 is_other_user_access_allowed: true,
@@ -3154,12 +3151,12 @@ fn serve_other_user(
 
 /// The Hello another local user sends: this build's range and no token, which
 /// is all a user who cannot read the endpoint file has to present.
-fn other_user_hello() -> IpcRequest {
+fn build_other_user_hello() -> IpcRequest {
     IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret(""),
             is_remote: false,
         },
@@ -3169,15 +3166,14 @@ fn other_user_hello() -> IpcRequest {
 /// Say hello and attach as another local user on `caller`, checking both
 /// replies. The connection carries `client_id`'s event stream afterwards.
 fn attach_as_other_user(caller: &mut Connection, client_id: ClientId, session_id: SessionId) {
-    caller.send(&other_user_hello()).expect("send hello");
+    caller.send(&build_other_user_hello()).expect("send hello");
     let hello_response: IpcResponse = caller.recv().expect("hello reply");
-    assert_eq!(hello_response.answer_result, hello_accepted());
+    assert_eq!(hello_response.answer_result, build_hello_accepted());
     caller
         .send(&IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
-                viewport: TEST_VIEWPORT_SIZE,
-                event_filter: EventFilterSpec::All,
+                viewport_size: TEST_VIEWPORT_SIZE,
                 resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
@@ -3192,7 +3188,7 @@ fn attach_as_other_user(caller: &mut Connection, client_id: ClientId, session_id
         IpcResult::Attached {
             client_id,
             session_id,
-            session_structure: attached_structure(session_id),
+            session_structure: build_attached_structure(session_id),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         }
@@ -3202,14 +3198,15 @@ fn attach_as_other_user(caller: &mut Connection, client_id: ClientId, session_id
 #[test]
 fn another_local_user_keeps_being_served_while_the_setting_stays_on() {
     let is_enabled = Arc::new(AtomicBool::new(true));
-    let overview = overview_named("shared-session");
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher = spawn_dispatcher(inbox_rx, Some(overview.clone()));
-    let (mut caller, serving, socket_address) = serve_other_user("stays-on", &is_enabled, inbox_tx);
+    let overview = build_overview_named("shared-session");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_receiver, Some(overview.clone()));
+    let (mut caller, serving, socket_address) =
+        serve_other_user("stays-on", &is_enabled, inbox_sender);
 
-    caller.send(&other_user_hello()).expect("send hello");
+    caller.send(&build_other_user_hello()).expect("send hello");
     let ipc_response: IpcResponse = caller.recv().expect("hello reply");
-    assert_eq!(ipc_response.answer_result, hello_accepted());
+    assert_eq!(ipc_response.answer_result, build_hello_accepted());
 
     for request_id in [2, 3] {
         caller
@@ -3237,14 +3234,15 @@ fn another_local_user_keeps_being_served_while_the_setting_stays_on() {
 #[test]
 fn another_local_users_connection_is_cut_when_the_setting_goes_off() {
     let is_enabled = Arc::new(AtomicBool::new(true));
-    let overview = overview_named("shared-session");
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher = spawn_dispatcher(inbox_rx, Some(overview.clone()));
-    let (mut caller, serving, socket_address) = serve_other_user("goes-off", &is_enabled, inbox_tx);
+    let overview = build_overview_named("shared-session");
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher = spawn_dispatcher(inbox_receiver, Some(overview.clone()));
+    let (mut caller, serving, socket_address) =
+        serve_other_user("goes-off", &is_enabled, inbox_sender);
 
-    caller.send(&other_user_hello()).expect("send hello");
+    caller.send(&build_other_user_hello()).expect("send hello");
     let ipc_response: IpcResponse = caller.recv().expect("hello reply");
-    assert_eq!(ipc_response.answer_result, hello_accepted());
+    assert_eq!(ipc_response.answer_result, build_hello_accepted());
     caller
         .send(&IpcRequest {
             request_id: 2,
@@ -3286,11 +3284,11 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
     let client = ClientId::new();
     let session = SessionId::new();
     let is_enabled = Arc::new(AtomicBool::new(true));
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, received_runtime_events) =
-        spawn_attaching_dispatcher(inbox_rx, client, session);
+        spawn_attaching_dispatcher(inbox_receiver, client, session);
     let (mut caller, serving, socket_address) =
-        serve_other_user("attached-off", &is_enabled, inbox_tx);
+        serve_other_user("attached-off", &is_enabled, inbox_sender);
 
     attach_as_other_user(&mut caller, client, session);
 
@@ -3347,11 +3345,11 @@ fn a_withdrawn_local_user_is_detached_by_a_frame_this_build_cannot_read() {
     let client = ClientId::new();
     let session = SessionId::new();
     let is_enabled = Arc::new(AtomicBool::new(true));
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, received_runtime_events) =
-        spawn_attaching_dispatcher(inbox_rx, client, session);
+        spawn_attaching_dispatcher(inbox_receiver, client, session);
     let (mut caller, serving, socket_address) =
-        serve_other_user("attached-off-junk", &is_enabled, inbox_tx);
+        serve_other_user("attached-off-junk", &is_enabled, inbox_sender);
     attach_as_other_user(&mut caller, client, session);
 
     // The frame that arrives after the setting goes off is one this build
@@ -3383,11 +3381,11 @@ fn a_lost_connection_ends_an_attached_clients_reading_half() {
     let client = ClientId::new();
     let session = SessionId::new();
     let is_enabled = Arc::new(AtomicBool::new(true));
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, received_runtime_events) =
-        spawn_attaching_dispatcher(inbox_rx, client, session);
+        spawn_attaching_dispatcher(inbox_receiver, client, session);
     let (mut caller, serving, socket_address) =
-        serve_other_user("attached-lost", &is_enabled, inbox_tx);
+        serve_other_user("attached-lost", &is_enabled, inbox_sender);
     attach_as_other_user(&mut caller, client, session);
 
     // Nothing is queued for this client, so its writing half is blocked on an
@@ -3412,7 +3410,7 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
     let (server, session, runtime_directory, shared_directory, dispatcher) =
         serve_shared("shared-only", true);
     #[cfg(unix)]
-    let user_dir = {
+    let user_directory = {
         use std::os::unix::fs::MetadataExt;
 
         let uid = std::fs::metadata(&runtime_directory)
@@ -3423,9 +3421,9 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
     // Pipe names share one machine-wide namespace, so Windows advertises in
     // the shared directory itself.
     #[cfg(windows)]
-    let user_dir = shared_directory.clone();
+    let user_directory = shared_directory.clone();
 
-    let mut directory_entry_names: Vec<String> = std::fs::read_dir(&user_dir)
+    let mut directory_entry_names: Vec<String> = std::fs::read_dir(&user_directory)
         .expect("read the shared directory")
         .map(|directory_entry| {
             directory_entry
@@ -3446,8 +3444,8 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
-    cleanup(&shared_directory);
+    remove_test_directory(&runtime_directory);
+    remove_test_directory(&shared_directory);
 }
 
 #[test]
@@ -3487,12 +3485,12 @@ fn resolve_peer_gates_the_starting_user_always_and_the_other_users_by_the_settin
 /// an acceptance looks like on the socket and whether the session keeps
 /// serving after it. Exits when every inbox sender is gone.
 fn spawn_restart_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     verdict: Result<(), String>,
     overview: Option<SessionOverview>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             match event {
                 RuntimeEvent::IpcRestart { response_sender } => {
                     let _ = response_sender.send(verdict.clone());
@@ -3515,10 +3513,10 @@ fn serve_restartable(
 ) -> (IpcServer, SessionId, PathBuf, JoinHandle<()>) {
     let runtime_directory = build_test_runtime_directory(tag);
     let session = SessionId::new();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    let dispatcher = spawn_restart_dispatcher(inbox_rx, verdict, overview);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher = spawn_restart_dispatcher(inbox_receiver, verdict, overview);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
     (server, session, runtime_directory, dispatcher)
 }
 
@@ -3526,10 +3524,10 @@ fn serve_restartable(
 fn restart_over(runtime_directory: &Path, session: SessionId) -> (Connection, IpcResult) {
     let mut connection = connect_to(runtime_directory, session);
     connection
-        .send(&hello_for(runtime_directory, session))
+        .send(&build_hello_for(runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -3544,7 +3542,7 @@ fn restart_over(runtime_directory: &Path, session: SessionId) -> (Connection, Ip
 
 /// Ask for the session's description on an open connection and hand back the
 /// answer, so a test can show the session still serves after a refusal.
-fn discovery_over(connection: &mut Connection, request_id: u64) -> IpcResult {
+fn request_discovery(connection: &mut Connection, request_id: u64) -> IpcResult {
     connection
         .send(&IpcRequest {
             request_id,
@@ -3568,15 +3566,18 @@ fn an_accepted_restart_is_answered_restarting() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// The Hello gate covers the restart like every other kind, so a caller that
 /// never opened the connection cannot make the session replace its own image.
 #[test]
 fn a_restart_before_hello_is_refused_as_hello_required_and_the_connection_keeps_serving() {
-    let (server, session, runtime_directory, dispatcher) =
-        serve_restartable("restart-early", Ok(()), Some(overview_named("still-here")));
+    let (server, session, runtime_directory, dispatcher) = serve_restartable(
+        "restart-early",
+        Ok(()),
+        Some(build_overview_named("still-here")),
+    );
     let mut connection = connect_to(&runtime_directory, session);
 
     connection
@@ -3598,7 +3599,7 @@ fn a_restart_before_hello_is_refused_as_hello_required_and_the_connection_keeps_
 
     // The gate is still closed, so the same connection still answers.
     assert_eq!(
-        discovery_over(&mut connection, 10),
+        request_discovery(&mut connection, 10),
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
             message: "Discovery arrived before a Hello opened the connection".to_string(),
@@ -3608,7 +3609,7 @@ fn a_restart_before_hello_is_refused_as_hello_required_and_the_connection_keeps_
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A binary this machine could not run, written into `binary_directory`: on Unix a file
@@ -3649,7 +3650,7 @@ fn build_unrunnable_binary(binary_directory: &Path) -> (PathBuf, String) {
 fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serving() {
     let binary_directory = build_test_runtime_directory("restart-bad-binary-directory");
     let (executable_path, rejection_message) = build_unrunnable_binary(&binary_directory);
-    let overview = overview_named("still-here");
+    let overview = build_overview_named("still-here");
     let (server, session, runtime_directory, dispatcher) = serve_restartable(
         "restart-bad-binary",
         crate::server::is_binary_runnable(&executable_path),
@@ -3667,15 +3668,15 @@ fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_se
     );
     // Nothing was torn down, so the session answers the next request.
     assert_eq!(
-        discovery_over(&mut connection, 3),
+        request_discovery(&mut connection, 3),
         IpcResult::Overview(overview)
     );
 
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
-    cleanup(&binary_directory);
+    remove_test_directory(&runtime_directory);
+    remove_test_directory(&binary_directory);
 }
 
 /// A pane whose terminal exposes no descriptor cannot cross the swap, so the
@@ -3696,7 +3697,7 @@ fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_
         },
         exit_status: None,
     }];
-    let overview = overview_named("still-here");
+    let overview = build_overview_named("still-here");
     let (server, session, runtime_directory, dispatcher) = serve_restartable(
         "restart-no-fd",
         crate::server::can_carry_panes(&panes),
@@ -3716,14 +3717,14 @@ fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_
         }),
     );
     assert_eq!(
-        discovery_over(&mut connection, 3),
+        request_discovery(&mut connection, 3),
         IpcResult::Overview(overview)
     );
 
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -3764,7 +3765,7 @@ fn a_restart_on_an_attached_connection_detaches_that_client_and_restarts_nothing
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 // --- leaving ---
@@ -3773,10 +3774,10 @@ fn a_restart_on_an_attached_connection_detaches_that_client_and_restarts_nothing
 /// how many it counts. Fails the test rather than hanging if one never ends.
 fn wait_for_clients_to_leave(server: &IpcServer) -> usize {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while server.attached_connections() > 0 && std::time::Instant::now() < deadline {
+    while server.count_attached_connections() > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    server.attached_connections()
+    server.count_attached_connections()
 }
 
 /// Wait until `server` counts `want` attached clients' connections, and hand
@@ -3784,10 +3785,10 @@ fn wait_for_clients_to_leave(server: &IpcServer) -> usize {
 /// attach reply is written, so a caller that just read that reply polls here.
 fn wait_for_attached(server: &IpcServer, want: usize) -> usize {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while server.attached_connections() != want && std::time::Instant::now() < deadline {
+    while server.count_attached_connections() != want && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
-    server.attached_connections()
+    server.count_attached_connections()
 }
 
 #[test]
@@ -3816,7 +3817,7 @@ fn every_attached_clients_connection_is_counted_while_it_is_read() {
 
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -3906,7 +3907,7 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -3920,10 +3921,10 @@ fn a_control_connection_that_leaves_is_closed_with_no_answer() {
 
     let mut connection = connect_to(&runtime_directory, session);
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
@@ -3946,12 +3947,12 @@ fn a_control_connection_that_leaves_is_closed_with_no_answer() {
             .unwrap_err(),
         mpsc::RecvTimeoutError::Timeout,
     );
-    assert_eq!(server.attached_connections(), 0);
+    assert_eq!(server.count_attached_connections(), 0);
 
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 // --- rotating the token ---
@@ -3983,8 +3984,8 @@ fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: initial_endpoint.connection_token,
                 is_remote: false,
             },
@@ -4001,16 +4002,16 @@ fn a_rotated_token_is_advertised_and_the_one_before_it_is_refused() {
 
     let mut accepted_connection = connect_to(&runtime_directory, session);
     accepted_connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello with the rotated secret");
     let accepted: IpcResponse = accepted_connection.recv().expect("hello reply");
-    assert_eq!(accepted.answer_result, hello_accepted());
+    assert_eq!(accepted.answer_result, build_hello_accepted());
 
     drop(stale_connection);
     drop(accepted_connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -4029,10 +4030,10 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
 
     let mut connection = connect_to(&runtime_directory, session);
     connection
-        .send(&hello_for(&runtime_directory, session))
+        .send(&build_hello_for(&runtime_directory, session))
         .expect("send hello");
     let accepted: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(accepted.answer_result, hello_accepted());
+    assert_eq!(accepted.answer_result, build_hello_accepted());
 
     // Served, not merely accepted: what this connection sends reaches the
     // dispatcher again.
@@ -4041,8 +4042,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
         .send(&IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
-                viewport: TEST_VIEWPORT_SIZE,
-                event_filter: EventFilterSpec::All,
+                viewport_size: TEST_VIEWPORT_SIZE,
                 resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
@@ -4076,7 +4076,7 @@ fn rotating_the_token_takes_connections_again_after_the_intake_closed() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -4107,8 +4107,8 @@ fn a_rotation_that_cannot_advertise_the_fresh_token_refuses_the_one_before_it() 
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: initial_endpoint.connection_token,
                 is_remote: false,
             },
@@ -4126,7 +4126,7 @@ fn a_rotation_that_cannot_advertise_the_fresh_token_refuses_the_one_before_it() 
     drop(stale_connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 // --- closing the intake ---
@@ -4141,10 +4141,10 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     let runtime_directory = build_test_runtime_directory("intake-closed");
     // The test keeps an inbox sender of its own, so it can end this client's
     // writing thread once the intake refuses the detach that would.
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, received_runtime_events) =
-        spawn_attaching_dispatcher(inbox_rx, client, session);
-    let server = IpcServer::start(&runtime_directory, session, inbox_tx.clone(), None)
+        spawn_attaching_dispatcher(inbox_receiver, client, session);
+    let server = IpcServer::start(&runtime_directory, session, inbox_sender.clone(), None)
         .expect("start serving");
     let mut connection = attach_to(&runtime_directory, session, client);
     let taken = KeyChord::from_parts(ModFlags::CTRL, Key::Char('a'));
@@ -4192,17 +4192,17 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     drop(connection);
     // Closing this client's queue is what ends its writing thread, and the
     // dispatcher ends once every inbox sender is gone.
-    inbox_tx
+    inbox_sender
         .send(RuntimeEvent::ClientDetached {
             client_id: client,
             detached_at: SystemTime::now(),
             is_streamed: true,
         })
         .expect("the detach is queued");
-    drop(inbox_tx);
+    drop(inbox_sender);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -4218,7 +4218,7 @@ fn a_connection_accepted_after_the_intake_closes_is_not_served() {
     let mut connection = connect_to(&runtime_directory, session);
     // A send may fail as the accept loop drops the connection; the read that
     // follows reports end of stream either way.
-    let _ = connection.send(&hello_for(&runtime_directory, session));
+    let _ = connection.send(&build_hello_for(&runtime_directory, session));
     assert!(
         matches!(
             connection.recv::<IpcResponse>(),
@@ -4236,7 +4236,7 @@ fn a_connection_accepted_after_the_intake_closes_is_not_served() {
     drop(connection);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }
 
 /// A detach for `client_id`, to hand an intake something to carry.
@@ -4251,52 +4251,56 @@ fn detach_of(client_id: ClientId) -> RuntimeEvent {
 #[test]
 fn a_closed_intake_hands_nothing_over_until_it_reopens() {
     let intake = Intake::default();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let client = ClientId::new();
 
-    assert!(intake.hand_over_event(&inbox_tx, detach_of(client)));
+    assert!(intake.hand_over_event(&inbox_sender, detach_of(client)));
     intake.close_intake();
-    assert!(!intake.hand_over_event(&inbox_tx, detach_of(client)));
+    assert!(!intake.hand_over_event(&inbox_sender, detach_of(client)));
     // Closing an intake that is already closed leaves it closed.
     intake.close_intake();
-    assert!(!intake.hand_over_event(&inbox_tx, detach_of(client)));
+    assert!(!intake.hand_over_event(&inbox_sender, detach_of(client)));
     intake.reopen_intake();
-    assert!(intake.hand_over_event(&inbox_tx, detach_of(client)));
+    assert!(intake.hand_over_event(&inbox_sender, detach_of(client)));
 
     // The two the intake took, and neither of the two it refused.
     for _ in 0..2 {
-        let RuntimeEvent::ClientDetached { client_id, .. } =
-            inbox_rx.try_recv().expect("the event was handed over")
+        let RuntimeEvent::ClientDetached { client_id, .. } = inbox_receiver
+            .try_recv()
+            .expect("the event was handed over")
         else {
             panic!("expected ClientDetached");
         };
         assert_eq!(client_id, client);
     }
-    assert_eq!(inbox_rx.try_recv().unwrap_err(), mpsc::TryRecvError::Empty);
+    assert_eq!(
+        inbox_receiver.try_recv().unwrap_err(),
+        mpsc::TryRecvError::Empty
+    );
 }
 
 #[test]
 fn an_intake_hands_nothing_over_once_the_dispatcher_is_gone() {
     let intake = Intake::default();
-    let (inbox_tx, inbox_rx) = mpsc::channel();
-    drop(inbox_rx);
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    drop(inbox_receiver);
 
-    assert!(!intake.hand_over_event(&inbox_tx, detach_of(ClientId::new())));
+    assert!(!intake.hand_over_event(&inbox_sender, detach_of(ClientId::new())));
 }
 
 #[test]
 fn an_attached_clients_connection_is_counted_until_its_entry_is_dropped() {
     let intake = Arc::new(Intake::default());
-    assert_eq!(intake.attached_connections(), 0);
+    assert_eq!(intake.count_attached_connections(), 0);
 
     let first_attachment_guard = intake.record_attached_connection();
     let second_attachment_guard = intake.record_attached_connection();
-    assert_eq!(intake.attached_connections(), 2);
+    assert_eq!(intake.count_attached_connections(), 2);
 
     drop(first_attachment_guard);
-    assert_eq!(intake.attached_connections(), 1);
+    assert_eq!(intake.count_attached_connections(), 1);
     drop(second_attachment_guard);
-    assert_eq!(intake.attached_connections(), 0);
+    assert_eq!(intake.count_attached_connections(), 0);
 }
 
 /// A stand-in dispatcher that reports the `remote` flag of every attach it is
@@ -4304,7 +4308,7 @@ fn an_attached_clients_connection_is_counted_until_its_entry_is_dropped() {
 /// open so the writing threads stay blocked. Exits when every inbox sender is
 /// gone.
 fn spawn_origin_reporting_dispatcher(
-    inbox_rx: Receiver<RuntimeEvent>,
+    inbox_receiver: Receiver<RuntimeEvent>,
     client_id: ClientId,
     session_id: SessionId,
 ) -> (JoinHandle<()>, Receiver<bool>) {
@@ -4312,23 +4316,23 @@ fn spawn_origin_reporting_dispatcher(
     let handle = std::thread::spawn(move || {
         let mut queues = Vec::new();
         let ending_notice = Arc::new(EndingNotice::default());
-        while let Ok(event) = inbox_rx.recv() {
+        while let Ok(event) = inbox_receiver.recv() {
             match event {
                 RuntimeEvent::IpcAttach {
                     is_remote,
                     response_sender,
                     ..
                 } => {
-                    let (events_tx, events_rx) = mpsc::channel();
-                    queues.push(events_tx);
+                    let (events_sender, events_receiver) = mpsc::channel();
+                    queues.push(events_sender);
                     if remote_flag_sender.send(is_remote).is_err() {
                         break;
                     }
                     let _ = response_sender.send(Some(AttachAccepted {
                         client_id,
                         session_id,
-                        session_structure: attached_structure(session_id),
-                        deliveries: events_rx,
+                        session_structure: build_attached_structure(session_id),
+                        deliveries: events_receiver,
                         ending_notice: Arc::clone(&ending_notice),
                         resume_token: ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN),
                         pane_area: None,
@@ -4361,22 +4365,21 @@ fn attach_saying_remote(
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: endpoint.connection_token,
                 is_remote,
             },
         })
         .expect("send hello");
     let hello_reply: IpcResponse = connection.recv().expect("hello reply");
-    assert_eq!(hello_reply.answer_result, hello_accepted());
+    assert_eq!(hello_reply.answer_result, build_hello_accepted());
 
     connection
         .send(&IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
-                viewport: TEST_VIEWPORT_SIZE,
-                event_filter: EventFilterSpec::All,
+                viewport_size: TEST_VIEWPORT_SIZE,
                 resume_client_id: None,
                 resume_token: None,
                 pane_area: None,
@@ -4391,7 +4394,7 @@ fn attach_saying_remote(
         IpcResult::Attached {
             client_id,
             session_id: session,
-            session_structure: attached_structure(session),
+            session_structure: build_attached_structure(session),
             resume_token: Some(ConnectionToken::from_secret(MINTED_CONNECTION_TOKEN)),
             pane_area: None,
         },
@@ -4411,11 +4414,11 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     let client = ClientId::new();
     let session = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-origin");
-    let (inbox_tx, inbox_rx) = mpsc::channel();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher, received_remote_flags) =
-        spawn_origin_reporting_dispatcher(inbox_rx, client, session);
+        spawn_origin_reporting_dispatcher(inbox_receiver, client, session);
     let server =
-        IpcServer::start(&runtime_directory, session, inbox_tx, None).expect("start serving");
+        IpcServer::start(&runtime_directory, session, inbox_sender, None).expect("start serving");
 
     let local = attach_saying_remote(&runtime_directory, session, client, false);
     assert_eq!(
@@ -4435,5 +4438,5 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     drop(remote);
     server.shutdown();
     dispatcher.join().expect("dispatcher exits");
-    cleanup(&runtime_directory);
+    remove_test_directory(&runtime_directory);
 }

@@ -7,16 +7,16 @@ use crate::style::{Color, Style, UnderlineStyle};
 
 /// Apply an SGR (Select Graphic Rendition, `CSI … m`) sequence to `style`:
 /// update the pen colors and text attributes carried by subsequently printed
-/// cells. An empty `params` resets the pen (SGR `0`); the extended-color
+/// cells. An empty `csi_parameters` resets the pen (SGR `0`); the extended-color
 /// selectors `38`/`48`/`58` are parsed by [`parse_extended_color`]. An unknown code
 /// changes nothing.
-pub(super) fn apply_sgr(style: &mut Style, params: &vte::Params) {
-    if params.is_empty() {
+pub(super) fn apply_sgr(style: &mut Style, csi_parameters: &vte::Params) {
+    if csi_parameters.is_empty() {
         style.reset_style();
         return;
     }
 
-    let mut parameter_iterator = params.iter();
+    let mut parameter_iterator = csi_parameters.iter();
     while let Some(parameter_values) = parameter_iterator.next() {
         // Dispatch on the SGR code `parameter_values.first()`. `vte` stores an empty
         // parameter (`CSI ;m`) as `0`, which resets.
@@ -124,7 +124,8 @@ fn parse_extended_color<'a>(
     parameter_iterator: &mut impl Iterator<Item = &'a [u16]>,
 ) -> Option<Color> {
     if first_parameter_values.len() > 1 {
-        // Colon form: the selector is first_parameter_values[1]; its values follow in the same slice.
+        // Colon form: the selector is first_parameter_values[1]; its values follow in the same
+        // slice.
         match first_parameter_values[1] {
             // `38:5:n` and `38:5::n` (`vte` stores the empty slot as `0`): the
             // index is the last subparameter. `38:5` alone, or an index over

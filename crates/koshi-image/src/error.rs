@@ -1,6 +1,5 @@
 //! Errors reported while decoding or placing terminal images.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -119,18 +118,6 @@ pub enum GraphicsError {
         "{dropped_event_count} graphics events were dropped because the graphics event count or image-byte limit was reached"
     )]
     QueueFull { dropped_event_count: usize },
-}
-
-impl DomainError for GraphicsError {
-    /// Image decode failures belong to terminal emulation.
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Terminal
-    }
-
-    /// One rejected image does not stop the pane.
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// A failure that leaves terminal image state unchanged.

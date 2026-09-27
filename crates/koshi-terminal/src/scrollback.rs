@@ -3,9 +3,7 @@
 //!
 //! The buffer is capped on two axes: a maximum row count and a maximum byte
 //! count. When a push exceeds either cap the oldest rows are dropped from the
-//! front. The count and byte size of everything dropped are tallied, never the
-//! content itself. A snapshot reads the row tally as one boolean:
-//! `dropped_line_count() > 0` becomes `ScrollbackMeta::truncated`.
+//! front.
 
 use std::collections::VecDeque;
 
@@ -19,7 +17,7 @@ const DEFAULT_MAX_LINE_COUNT: usize = 10_000;
 /// Default scrollback byte cap: 32 MiB of retained text per pane.
 const DEFAULT_MAX_BYTE_COUNT: usize = 32 * 1024 * 1024;
 
-/// The cells history keeps of `row`: a [`RowEnd::Hard`] row without the
+/// The cells history keeps of `row_cells`: a [`RowEnd::Hard`] row without the
 /// trailing run of fully-default blanks, every other row whole.
 ///
 /// A 200-column hard row reading `README.md` keeps 9 cells. A styled blank —
@@ -91,7 +89,7 @@ impl Default for ScrollbackLimit {
 }
 
 /// The scrollback buffer for one pane: a `VecDeque` of rows (oldest at the
-/// front), bounded by line- and byte-count caps with truncation accounting.
+/// front), bounded by a line-count cap and a byte-count cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Scrollback {
     /// Retained rows, oldest at the front and newest at the back, each paired
@@ -108,16 +106,12 @@ pub struct Scrollback {
     /// push, replacement, eviction and clear.
     retained_byte_count: usize,
     /// Count of rows ever pushed into the buffer. It only grows:
-    /// [`clear`](Self::clear) does not reset it.
+    /// [`clear_scrollback`](Self::clear_scrollback) does not reset it.
     total_pushed_line_count: u64,
-    /// Count of rows dropped to honor the caps. It only grows.
-    dropped_line_count: u64,
-    /// Bytes dropped to honor the caps. It only grows.
-    dropped_byte_count: u64,
 }
 
 impl Scrollback {
-    /// An empty buffer bounded by `limit`.
+    /// An empty buffer bounded by `scrollback_limit`.
     pub fn from_scrollback_limit(scrollback_limit: ScrollbackLimit) -> Self {
         Scrollback {
             retained_lines: VecDeque::new(),
@@ -125,13 +119,11 @@ impl Scrollback {
             maximum_byte_count: scrollback_limit.maximum_byte_count,
             retained_byte_count: 0,
             total_pushed_line_count: 0,
-            dropped_line_count: 0,
-            dropped_byte_count: 0,
         }
     }
 
-    /// Append `row` as the newest line with `row_metadata`, then drop the oldest rows
-    /// from the front until both caps hold, tallying each drop. The byte cap
+    /// Append `row_cells` as the newest line with `row_metadata`, then drop the oldest rows
+    /// from the front until both caps hold. The byte cap
     /// never drops the sole remaining row: a single row larger than
     /// `maximum_byte_count` is retained on arrival. The line cap has no such guard; the
     /// row count always ends at or under `maximum_line_count`.
@@ -159,8 +151,8 @@ impl Scrollback {
     }
 
     /// Remove and return every retained row with its metadata, oldest at the
-    /// front, leaving the buffer empty with a zero byte total. The caps, the
-    /// dropped tallies, and [`total_pushed_line_count`](Self::total_pushed_line_count) keep their
+    /// front, leaving the buffer empty with a zero byte total. The caps and
+    /// [`total_pushed_line_count`](Self::total_pushed_line_count) keep their
     /// values. The caller passes the returned rows' count to
     /// [`replace_retained_lines`](Self::replace_retained_lines) as `retained_line_count_before`.
     pub(crate) fn take_retained_lines(&mut self) -> VecDeque<(Vec<Cell>, RowMetadata)> {
@@ -168,8 +160,8 @@ impl Scrollback {
         std::mem::take(&mut self.retained_lines)
     }
 
-    /// Replace every retained row with `lines`, each keeping its own metadata,
-    /// then apply both caps. Rows the caps evict are tallied as dropped.
+    /// Replace every retained row with `retained_lines`, each keeping its own metadata,
+    /// then apply both caps.
     /// [`total_pushed_line_count`](Self::total_pushed_line_count) grows by the count of retained
     /// rows (counted after eviction) exceeding `retained_line_count_before` and never
     /// decreases.
@@ -213,7 +205,7 @@ impl Scrollback {
             retained_line_count_after.saturating_sub(retained_line_count_before);
     }
 
-    /// Drop the oldest row, update `retained_byte_count` and the dropped tallies, and
+    /// Drop the oldest row, update `retained_byte_count`, and
     /// repeat while the row count exceeds `maximum_line_count`, or while `retained_byte_count`
     /// exceeds `maximum_byte_count` and more than one row remains.
     fn evict_oldest_lines_to_limits(&mut self, eviction_callback: &mut impl FnMut(&[Cell])) {
@@ -223,16 +215,13 @@ impl Scrollback {
             let (oldest_line_cells, _) = self.retained_lines.pop_front().unwrap();
             let oldest_line_byte_count = compute_line_byte_count(&oldest_line_cells);
             eviction_callback(&oldest_line_cells);
-
-            self.dropped_line_count += 1;
-            self.dropped_byte_count += oldest_line_byte_count as u64;
             self.retained_byte_count -= oldest_line_byte_count;
         }
     }
 
     /// Drop every retained row (xterm `CSI 3 J`, "erase saved lines") and zero
-    /// `retained_byte_count`. The dropped tallies and
-    /// [`get_total_pushed_line_count`](Self::get_total_pushed_line_count) keep their values.
+    /// `retained_byte_count`.
+    /// [`get_total_pushed_line_count`](Self::get_total_pushed_line_count) keeps its value.
     pub fn clear_scrollback(&mut self) {
         self.retained_lines.clear();
         self.retained_byte_count = 0;
@@ -258,23 +247,6 @@ impl Scrollback {
     pub fn get_total_pushed_line_count(&self) -> u64 {
         self.total_pushed_line_count
     }
-
-    /// Count of rows dropped to honor the caps.
-    pub fn get_dropped_line_count(&self) -> u64 {
-        self.dropped_line_count
-    }
-
-    /// Bytes dropped to honor the caps.
-    pub fn get_dropped_byte_count(&self) -> u64 {
-        self.dropped_byte_count
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SerializedLine {
-    CurrentRow((Vec<Cell>, RowMetadata)),
-    LegacyRow((Vec<Cell>, RowEnd)),
 }
 
 /// The stored form of a [`Scrollback`], as [`Deserialize`] reads it.
@@ -282,16 +254,13 @@ enum SerializedLine {
 /// `retained_byte_count` is not read: it is derived from `retained_lines` instead, so a stored
 /// total that does not match the rows cannot underflow the first eviction.
 /// The caps are applied to the rows that were read, so a stored buffer holding
-/// more than `maximum_line_count` rows loses its oldest ones at load and tallies them
-/// as dropped.
+/// more than `maximum_line_count` rows loses its oldest ones at load.
 #[derive(Deserialize)]
 struct ScrollbackFields {
-    retained_lines: VecDeque<SerializedLine>,
+    retained_lines: VecDeque<(Vec<Cell>, RowMetadata)>,
     maximum_line_count: usize,
     maximum_byte_count: usize,
     total_pushed_line_count: u64,
-    dropped_line_count: u64,
-    dropped_byte_count: u64,
 }
 
 impl<'de> Deserialize<'de> for Scrollback {
@@ -300,30 +269,12 @@ impl<'de> Deserialize<'de> for Scrollback {
         Deserializer: DeserializerTrait<'de>,
     {
         let serialized_fields = ScrollbackFields::deserialize(deserializer)?;
-        let retained_lines = serialized_fields
-            .retained_lines
-            .into_iter()
-            .map(|serialized_line| match serialized_line {
-                SerializedLine::CurrentRow((line_cells, row_metadata)) => {
-                    (line_cells, row_metadata)
-                }
-                SerializedLine::LegacyRow((line_cells, row_end)) => (
-                    line_cells,
-                    RowMetadata {
-                        row_end,
-                        has_prompt_mark: false,
-                    },
-                ),
-            })
-            .collect();
         let mut scrollback = Scrollback {
-            retained_lines,
+            retained_lines: serialized_fields.retained_lines,
             maximum_line_count: serialized_fields.maximum_line_count,
             maximum_byte_count: serialized_fields.maximum_byte_count,
             retained_byte_count: 0,
             total_pushed_line_count: serialized_fields.total_pushed_line_count,
-            dropped_line_count: serialized_fields.dropped_line_count,
-            dropped_byte_count: serialized_fields.dropped_byte_count,
         };
         scrollback.retained_byte_count = scrollback
             .retained_lines

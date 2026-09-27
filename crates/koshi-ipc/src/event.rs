@@ -18,8 +18,8 @@
 //!
 //! Five frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
-//! sends it when a client's queue overflowed and dropped an event the stream
-//! cannot skip, and it names how many events went missing.
+//! sends it after a client's queue overflowed, and it names how many deliveries
+//! went missing.
 //! [`MouseAnswer`](crate::event::SessionEvent::MouseAnswer) is the second: it
 //! answers one [`IpcRequestKind::Mouse`](crate::protocol::IpcRequestKind::Mouse)
 //! request and is addressed to the client that sent it.
@@ -81,7 +81,7 @@ pub enum SessionEvent {
         /// The request this refusal answers.
         request_id: u64,
         /// The typed refusal and its human-readable message.
-        error: IpcErrorPayload,
+        refusal: IpcErrorPayload,
     },
     /// A pane was created and registered.
     PaneCreated {
@@ -99,8 +99,6 @@ pub enum SessionEvent {
         exit_code: Option<i32>,
         /// The signal number that terminated the process; `None` when the
         /// process exited with a code. A Windows session server sends `None`.
-        /// A peer that sends no `signal` field is read as `None`.
-        #[serde(default)]
         signal: Option<i32>,
     },
     /// A pane's close transaction started.
@@ -185,10 +183,10 @@ pub enum SessionEvent {
     /// this connection; the session keeps running and the client may attach
     /// again.
     Detached,
-    /// The client's queue overflowed and dropped an event the stream cannot
-    /// skip.
+    /// The client's queue overflowed, and the client missed every delivery
+    /// until this frame.
     Resync {
-        /// How many events the client missed.
+        /// How many deliveries the client missed.
         dropped_event_count: u64,
     },
     /// What one round of mouse actions did. Sent once per
@@ -205,10 +203,8 @@ pub enum SessionEvent {
     /// Bytes for the terminal this client runs in, written to it verbatim.
     HostWrite {
         /// The bytes to write, in the order the session queued them. Written
-        /// as one base64 string: the two bytes `[104, 105]` are `"aGk="`. Read
-        /// from that string or from a list of numbers, the shape a session
-        /// server speaking session protocol 2 writes.
-        #[serde(with = "crate::bytes::base64_or_list")]
+        /// as one base64 string: the two bytes `[104, 105]` are `"aGk="`.
+        #[serde(with = "crate::bytes")]
         host_output_bytes: Vec<u8>,
     },
     /// The client drops this session and attaches to the named one.
@@ -292,7 +288,7 @@ impl WireVariants for SessionEvent {
 }
 
 impl WireName for SessionEvent {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         self.get_event_name()
     }
 }

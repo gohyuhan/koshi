@@ -12,7 +12,7 @@ pub fn render_sessions(session_rows: &[SessionRow], output_format: OutputFormat)
     render_listing(
         session_rows,
         SESSION_ROW_HEADERS,
-        session_row_cells,
+        format_session_row_cells,
         output_format,
     )
 }
@@ -31,7 +31,12 @@ pub fn render_session(session_discovery: &SessionDiscovery, output_format: Outpu
 /// Render a `list-tabs` answer.
 #[must_use]
 pub fn render_tabs(tab_rows: &[TabRow], output_format: OutputFormat) -> String {
-    render_listing(tab_rows, TAB_ROW_HEADERS, tab_row_cells, output_format)
+    render_listing(
+        tab_rows,
+        TAB_ROW_HEADERS,
+        format_tab_row_cells,
+        output_format,
+    )
 }
 
 /// Render an `inspect tab` answer.
@@ -43,7 +48,12 @@ pub fn render_tab(tab_discovery: &TabDiscovery, output_format: OutputFormat) -> 
 /// Render a `list-panes` answer.
 #[must_use]
 pub fn render_panes(pane_rows: &[PaneRow], output_format: OutputFormat) -> String {
-    render_listing(pane_rows, PANE_ROW_HEADERS, pane_row_cells, output_format)
+    render_listing(
+        pane_rows,
+        PANE_ROW_HEADERS,
+        format_pane_row_cells,
+        output_format,
+    )
 }
 
 /// Render an `inspect pane` answer.
@@ -63,7 +73,7 @@ pub fn render_clients(client_rows: &[ClientRow], output_format: OutputFormat) ->
     render_listing(
         client_rows,
         CLIENT_ROW_HEADERS,
-        client_row_cells,
+        format_client_row_cells,
         output_format,
     )
 }
@@ -144,7 +154,7 @@ fn render_listing<SerializableRow: Serialize>(
 }
 
 /// A single-record answer: `serializable_record` as a JSON object, or as one
-/// `field: value` line per header, valued by `field_values`.
+/// `field: value` line per header, valued by `render_field_values`.
 fn render_entity_record<SerializableRecord: Serialize>(
     serializable_record: &SerializableRecord,
     field_headers: &[&str],
@@ -159,16 +169,16 @@ fn render_entity_record<SerializableRecord: Serialize>(
     }
 }
 
-/// Column headers for [`SessionRow`] listings, matching [`session_row_cells`].
+/// Column headers for [`SessionRow`] listings, matching [`format_session_row_cells`].
 const SESSION_ROW_HEADERS: &[&str] = &["id", "name", "server"];
 
-/// Column headers for [`TabRow`] listings, matching [`tab_row_cells`].
+/// Column headers for [`TabRow`] listings, matching [`format_tab_row_cells`].
 const TAB_ROW_HEADERS: &[&str] = &["id", "name", "session", "session_name"];
 
-/// Column headers for [`PaneRow`] listings, matching [`pane_row_cells`].
+/// Column headers for [`PaneRow`] listings, matching [`format_pane_row_cells`].
 const PANE_ROW_HEADERS: &[&str] = &["id", "name", "tab", "tab_name", "session", "session_name"];
 
-/// Column headers for [`ClientRow`] listings, matching [`client_row_cells`].
+/// Column headers for [`ClientRow`] listings, matching [`format_client_row_cells`].
 const CLIENT_ROW_HEADERS: &[&str] = &["id", "session", "session_name"];
 
 /// Field names for an `inspect session`, matching [`render_session_fields`] order.
@@ -206,7 +216,7 @@ const CLIENT_HEADERS: &[&str] = &[
 /// One [`SessionRow`] as table cells, in [`SESSION_ROW_HEADERS`] order. The
 /// `server` cell is `local` for a session on this machine, else the saved
 /// server the session runs on.
-fn session_row_cells(session: &SessionRow) -> Vec<String> {
+fn format_session_row_cells(session: &SessionRow) -> Vec<String> {
     vec![
         session.session_id.to_string(),
         session.session_name.clone(),
@@ -218,7 +228,7 @@ fn session_row_cells(session: &SessionRow) -> Vec<String> {
 }
 
 /// One [`TabRow`] as table cells, in [`TAB_ROW_HEADERS`] order.
-fn tab_row_cells(tab: &TabRow) -> Vec<String> {
+fn format_tab_row_cells(tab: &TabRow) -> Vec<String> {
     vec![
         tab.tab_id.to_string(),
         tab.tab_name.clone(),
@@ -229,7 +239,7 @@ fn tab_row_cells(tab: &TabRow) -> Vec<String> {
 
 /// One [`PaneRow`] as table cells, in [`PANE_ROW_HEADERS`] order. A pane the
 /// child never titled prints `-`.
-fn pane_row_cells(pane: &PaneRow) -> Vec<String> {
+fn format_pane_row_cells(pane: &PaneRow) -> Vec<String> {
     vec![
         pane.pane_id.to_string(),
         format_optional_cell(pane.pane_name.as_ref()),
@@ -241,7 +251,7 @@ fn pane_row_cells(pane: &PaneRow) -> Vec<String> {
 }
 
 /// One [`ClientRow`] as table cells, in [`CLIENT_ROW_HEADERS`] order.
-fn client_row_cells(client: &ClientRow) -> Vec<String> {
+fn format_client_row_cells(client: &ClientRow) -> Vec<String> {
     vec![
         client.client_id.to_string(),
         client.session_id.to_string(),
@@ -336,8 +346,8 @@ pub(super) fn format_optional_time_cell(timestamp: Option<SystemTime>) -> String
 }
 
 /// A size as a cell: `<cols>x<rows>`.
-pub(super) fn format_size_cell(cell_size: Size) -> String {
-    format!("{}x{}", cell_size.column_count, cell_size.row_count)
+pub(super) fn format_size_cell(size: Size) -> String {
+    format!("{}x{}", size.column_count, size.row_count)
 }
 
 /// A pane state as a cell: its lowercase name, with the exit code appended

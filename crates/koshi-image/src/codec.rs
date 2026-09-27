@@ -215,7 +215,7 @@ pub(crate) fn decode_static_raster(
         reader
             .decode()
             .map(|decoded_image| decoded_image.into_rgba8())
-            .map_err(|error| map_image_error(protocol, error))
+            .map_err(|decode_error| map_image_error(protocol, decode_error))
     }))
     .map_err(|_| GraphicsError::DecodeFailure { protocol })??;
     let (pixel_width, pixel_height) = decoded_image.dimensions();
@@ -244,17 +244,17 @@ fn find_animated_raster_format(
     encoded_image_bytes: &[u8],
 ) -> Result<Option<&'static str>, GraphicsError> {
     match image_format {
-        image::ImageFormat::Gif => gif_has_multiple_frames(protocol, encoded_image_bytes)
+        image::ImageFormat::Gif => has_multiple_gif_frames(protocol, encoded_image_bytes)
             .map(|is_animated| is_animated.then_some("animated GIF")),
-        image::ImageFormat::Png => png_is_animated(protocol, encoded_image_bytes)
+        image::ImageFormat::Png => is_png_animated(protocol, encoded_image_bytes)
             .map(|is_animated| is_animated.then_some("animated PNG")),
-        image::ImageFormat::WebP => webp_is_animated(protocol, encoded_image_bytes)
+        image::ImageFormat::WebP => is_webp_animated(protocol, encoded_image_bytes)
             .map(|is_animated| is_animated.then_some("animated WebP")),
         _ => Ok(None),
     }
 }
 
-pub(crate) fn png_is_animated(
+pub(crate) fn is_png_animated(
     protocol: GraphicsProtocol,
     encoded_png_bytes: &[u8],
 ) -> Result<bool, GraphicsError> {
@@ -271,7 +271,7 @@ pub(crate) fn png_is_animated(
     .map_err(|_| GraphicsError::DecodeFailure { protocol })?
 }
 
-pub(crate) fn webp_is_animated(
+pub(crate) fn is_webp_animated(
     protocol: GraphicsProtocol,
     encoded_webp_bytes: &[u8],
 ) -> Result<bool, GraphicsError> {
@@ -288,7 +288,7 @@ pub(crate) fn webp_is_animated(
     .map_err(|_| GraphicsError::DecodeFailure { protocol })?
 }
 
-fn gif_has_multiple_frames(
+fn has_multiple_gif_frames(
     protocol: GraphicsProtocol,
     encoded_gif_bytes: &[u8],
 ) -> Result<bool, GraphicsError> {
@@ -442,8 +442,8 @@ pub fn validate_image_dimensions(
 
 /// Return `width * height * 4` after validating the image dimensions and byte limit.
 ///
-/// Returns the same dimension errors as [`validate_image_dimensions`] and `InvalidDimensions` when the
-/// RGBA byte count overflows or exceeds `MAX_IMAGE_BYTE_COUNT`.
+/// Returns the same dimension errors as [`validate_image_dimensions`] and `InvalidDimensions` when
+/// the RGBA byte count overflows or exceeds `MAX_IMAGE_BYTE_COUNT`.
 pub fn compute_rgba_byte_count(
     protocol: GraphicsProtocol,
     pixel_width: usize,

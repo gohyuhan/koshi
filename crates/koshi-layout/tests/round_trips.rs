@@ -13,11 +13,11 @@ use koshi_layout::size::SizeWeight;
 use koshi_layout::solver::{
     solve_layout, solve_layout_with_mode, solve_layout_with_sizing, PaneSizing,
 };
-use koshi_layout::template::{LeafTemplate, TemplateNode, TemplateSplit, TerminalTemplate};
+use koshi_layout::template::{TemplateNode, TemplateSplit, TerminalTemplate};
 
 /// A terminal leaf running the default shell.
 fn build_template_leaf() -> TemplateNode {
-    TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate::default()))
+    TemplateNode::Leaf(TerminalTemplate::default())
 }
 
 /// `horizontal(leaf, stacked(leaf collapsed, leaf expanded))`: three leaves,
@@ -149,13 +149,13 @@ fn fullscreen_gives_a_collapsed_stack_member_the_only_content_rect() {
     assert_eq!(
         layout_solution.pane_rects,
         vec![
-            (pane_ids[0], Rect::empty_at_origin()),
+            (pane_ids[0], Rect::build_empty_at_origin()),
             (pane_ids[1], build_tab_rect()),
-            (pane_ids[2], Rect::empty_at_origin()),
+            (pane_ids[2], Rect::build_empty_at_origin()),
         ]
     );
     assert!(layout_solution.stack_headers.is_empty());
-    assert!(!layout_solution.is_all_panes_suppressed);
+    assert!(!layout_solution.is_every_pane_suppressed);
 
     assert_eq!(
         list_content_rects(&layout_solution),
@@ -190,7 +190,7 @@ fn a_tab_below_the_pane_floor_suppresses_the_fullscreen_pane() {
         PaneSizing::default(),
     );
     assert_eq!(layout_solution.suppressed_pane_ids, vec![pane_ids[1]]);
-    assert!(layout_solution.is_all_panes_suppressed);
+    assert!(layout_solution.is_every_pane_suppressed);
     assert_eq!(
         list_content_rects(&layout_solution),
         vec![

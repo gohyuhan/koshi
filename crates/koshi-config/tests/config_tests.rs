@@ -26,7 +26,7 @@ use koshi_config::types::{
 /// # Panics
 /// Panics when the page cannot be read, carries no `## Full example` heading,
 /// or has no closed ```` ```kdl ```` block after that heading.
-fn full_example(page: &str) -> String {
+fn load_full_example(page: &str) -> String {
     let config_doc_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../config-docs")
         .join(page);
@@ -52,7 +52,7 @@ fn full_example(page: &str) -> String {
 
 #[test]
 fn koshi_example_parses_without_warnings() {
-    let config_source_text = full_example("koshi.md");
+    let config_source_text = load_full_example("koshi.md");
     let app_config =
         parse_app_config(Path::new("koshi.kdl"), &config_source_text).expect("koshi.kdl parses");
     assert!(
@@ -76,7 +76,7 @@ fn koshi_example_parses_without_warnings() {
 
 #[test]
 fn theme_example_parses_without_warnings() {
-    let config_source_text = full_example("theme.md");
+    let config_source_text = load_full_example("theme.md");
     let (theme, warnings) = parse_theme(Path::new("themes/default.kdl"), &config_source_text)
         .expect("theme file parses");
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
@@ -125,7 +125,7 @@ fn theme_example_parses_without_warnings() {
 
 #[test]
 fn keybinding_example_parses() {
-    let config_source_text = full_example("keybinding.md");
+    let config_source_text = load_full_example("keybinding.md");
     let layer = parse_keybindings(Path::new("keybinding.kdl"), &config_source_text)
         .expect("keybinding.kdl parses");
 
@@ -133,7 +133,7 @@ fn keybinding_example_parses() {
     // is the shipped default table, key for key.
     assert_eq!(layer.chord_timeout_ms, Some(500));
     assert_eq!(layer.which_key_delay_ms, Some(300));
-    assert_eq!(layer.max_chord_depth, Some(4));
+    assert_eq!(layer.maximum_chord_depth, Some(4));
     assert_eq!(layer.leader, Some(Leader::default()));
     assert_eq!(layer.unlock_alternative, None);
     assert_eq!(
@@ -144,7 +144,7 @@ fn keybinding_example_parses() {
 
 #[test]
 fn profile_example_parses() {
-    let config_source_text = full_example("profile.md");
+    let config_source_text = load_full_example("profile.md");
     let template =
         parse_profile(Path::new("profile/dev.kdl"), &config_source_text).expect("profile parses");
 

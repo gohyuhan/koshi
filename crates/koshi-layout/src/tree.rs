@@ -60,27 +60,15 @@ impl LayoutNode {
         }
     }
 
-    /// The first leaf pane in layout order, or `None` when this subtree
-    /// holds no pane at all.
-    pub(crate) fn find_first_leaf_pane_id(&self) -> Option<PaneId> {
-        match self {
-            Self::Pane(pane_id) => Some(*pane_id),
-            Self::Split(split) => split
-                .children
-                .iter()
-                .find_map(|child_node| child_node.find_first_leaf_pane_id()),
-        }
-    }
-
     /// `true` when some leaf of this subtree references `pane_id`.
     #[must_use]
-    pub fn contains_pane(&self, pane_id: PaneId) -> bool {
+    pub fn has_pane(&self, pane_id: PaneId) -> bool {
         match self {
             Self::Pane(candidate_pane_id) => *candidate_pane_id == pane_id,
             Self::Split(split) => split
                 .children
                 .iter()
-                .any(|child_node| child_node.contains_pane(pane_id)),
+                .any(|child_node| child_node.has_pane(pane_id)),
         }
     }
 
@@ -180,7 +168,6 @@ pub struct SplitNode {
     /// How the children divide this node's rectangle.
     pub direction: SplitDirection,
     /// The child subtrees, in layout order (left-to-right or top-to-bottom).
-    #[serde(deserialize_with = "children_from_wire")]
     pub children: Vec<LayoutNode>,
     /// Per-child size constraints, parallel to `children`.
     pub weights: Vec<SizeWeight>,
@@ -239,45 +226,6 @@ impl SplitNode {
             && child_index < self.children.len()
             && child_index != self.get_active_child_index()
     }
-}
-
-/// One entry of [`SplitNode::children`] as it arrives: the node itself, or
-/// the `{"node": …}` record a koshi before this one wrote.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ChildOnWire {
-    /// The node written directly.
-    Bare(LayoutNode),
-    /// The node inside a one-field record.
-    Wrapped {
-        /// The subtree the record holds.
-        node: LayoutNode,
-    },
-}
-
-/// Read [`SplitNode::children`] from either shape: a list of nodes, or a list
-/// of `{"node": …}` records. Both yield the same nodes, in the same order.
-/// Writing always uses the first shape.
-///
-/// Example — `[{"Pane":1}]` and `[{"node":{"Pane":1}}]` both read back as one
-/// [`LayoutNode::Pane`] holding pane `1`.
-///
-/// # Errors
-/// Returns whatever `deserializer` reports for an entry matching neither
-/// shape.
-fn children_from_wire<'de, D>(deserializer: D) -> Result<Vec<LayoutNode>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let child_records = Vec::<ChildOnWire>::deserialize(deserializer)?;
-    Ok(child_records
-        .into_iter()
-        .map(|child_record| match child_record {
-            ChildOnWire::Bare(layout_node) | ChildOnWire::Wrapped { node: layout_node } => {
-                layout_node
-            }
-        })
-        .collect())
 }
 
 #[cfg(test)]

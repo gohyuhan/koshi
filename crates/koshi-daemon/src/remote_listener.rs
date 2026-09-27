@@ -11,11 +11,11 @@
 //! reaches, which sessions a scope reaches, and where one named session
 //! listens. Carrying a connection's traffic never reaches the dispatcher.
 //!
-//! An admitted secret registers the connection with the router, and it stays
-//! registered until this listener reports it ended. A revoke shuts a registered
-//! connection's socket, attached or not. The router holds at most
-//! [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT) registrations and
-//! refuses the connections that arrive over that count.
+//! An admitted secret registers the connection with the router, and it stays registered until this
+//! listener reports it ended. A revoke shuts a registered connection's socket, attached or not. The
+//! router holds at most
+//! [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT)
+//! registrations and refuses the connections that arrive over that count.
 //!
 //! The TLS handshake, the frame the caller opens with, and the refusal naming
 //! both version ranges finish inside `ADMISSION_WINDOW_DURATION`, counted from the
@@ -30,8 +30,9 @@
 //! a session the secret holds no grant for, and a session another local user
 //! started produce the same bytes and the same work: no caller-supplied name
 //! reaches a socket connect, a wait, or a file until the admitted scope has
-//! been proven to cover it. Order is `admit` → `resolve` → `covers` →
-//! `started_by_this_router` → open.
+//! been proven to cover it. Order is `admit_remote_token` →
+//! `resolve_session_selector` → `is_allowed_for_session` →
+//! `is_session_started_by_this_router` → open.
 //!
 //! This listener carries the three remote frames and then one session server's
 //! own bytes. No path from it reaches the router's control plane, so
@@ -170,8 +171,8 @@ pub(crate) struct Bound {
     dispatcher_sender: Sender<Sender<RouterEvent>>,
 }
 
-/// Take the TLS port at `remote_listen_address`, presenting `certificate_file`, without serving on it
-/// yet.
+/// Take the TLS port at `remote_listen_address`, presenting `certificate_file`, without serving on
+/// it yet.
 ///
 /// Builds the TLS configuration, binds `remote_listen_address`, and starts the accept thread.
 /// That thread holds the port and accepts nobody until [`Bound::start_serving`] sends it
@@ -210,8 +211,8 @@ impl Bound {
     }
 }
 
-/// The TLS configuration this machine serves with: `cert`'s certificate and
-/// private key, and no client certificate asked for.
+/// The TLS configuration this machine serves with: `certificate_file`'s
+/// certificate and private key, and no client certificate asked for.
 fn build_server_config(certificate_file: &CertFile) -> io::Result<ServerConfig> {
     let certificate_chain = vec![CertificateDer::from(certificate_file.cert_der.clone())];
     let private_key =
@@ -374,7 +375,7 @@ enum Attempt {
 
 /// What one address has done inside the window it opened.
 struct RateWindow {
-    /// How many connections that address has opened since `opened`.
+    /// How many connections that address has opened since `window_started_at`.
     attempt_count: u32,
     /// When the first of them arrived.
     window_started_at: Instant,
@@ -504,14 +505,14 @@ fn serve_remote_connection(
         connection_token,
     ) = match read_client_frame(&mut reader, REMOTE_HELLO_MAX_BYTE_COUNT) {
         Opening::Frame(RemoteClientFrame::Hello {
-            min_remote_version,
-            max_remote_version,
-            min_protocol_version,
-            max_protocol_version,
+            minimum_remote_version,
+            maximum_remote_version,
+            minimum_protocol_version,
+            maximum_protocol_version,
             connection_token,
         }) => (
-            (min_remote_version, max_remote_version),
-            (min_protocol_version, max_protocol_version),
+            (minimum_remote_version, maximum_remote_version),
+            (minimum_protocol_version, maximum_protocol_version),
             connection_token,
         ),
         Opening::Frame(_) | Opening::Unreadable => {
@@ -708,15 +709,15 @@ fn build_bridged_hello(
     IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: minimum_protocol_version,
-            max_protocol_version: maximum_protocol_version,
+            minimum_protocol_version,
+            maximum_protocol_version,
             connection_token,
             is_remote: true,
         },
     }
 }
 
-/// Open the local connection to the session advertised at `endpoint_path` and
+/// Open the local connection to the session advertised at `session_endpoint_path` and
 /// send it the Hello carrying that session's endpoint token and `session_protocol_versions`.
 ///
 /// Hands back the connection's two raw halves and the handle that closes its
@@ -730,7 +731,7 @@ fn open_local_session_bridge(
 ) -> Option<(RawReader, RawWriter, ReadCloser)> {
     let session_endpoint = EndpointFile::load_from_path(session_endpoint_path).ok()?;
     let mut session_connection = Connection::connect(&session_endpoint.socket_address).ok()?;
-    let session_read_closer = session_connection.read_closer().ok()?;
+    let session_read_closer = session_connection.create_read_closer().ok()?;
     session_connection
         .send(&build_bridged_hello(
             session_endpoint.connection_token,
@@ -913,10 +914,9 @@ fn send_refusal(writer: &mut (impl Write + Deadlined)) {
 
 /// Read one frame: a 4-byte big-endian length, then that many bytes of JSON.
 ///
-/// The length is checked against `maximum_frame_byte_count` before the payload buffer is
-/// allocated. Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before admission and
-/// [`MAX_FRAME_BYTE_COUNT`] after it. A length over `maximum_frame_byte_count` is [`Opening::Closed`]
-/// and reads no payload.
+/// The length is checked against `maximum_frame_byte_count` before the payload buffer is allocated.
+/// Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before admission and [`MAX_FRAME_BYTE_COUNT`] after
+/// it. A length over `maximum_frame_byte_count` is [`Opening::Closed`] and reads no payload.
 fn read_client_frame<R: Read>(reader: &mut R, maximum_frame_byte_count: u32) -> Opening {
     let mut length_bytes = [0u8; 4];
     if reader.read_exact(&mut length_bytes).is_err() {

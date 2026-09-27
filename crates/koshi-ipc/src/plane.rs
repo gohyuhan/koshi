@@ -15,7 +15,7 @@
 //! 4. A Hello is answered with the version the two sides settled on. Every
 //!    other kind is refused until a Hello has opened the gate.
 //!
-//! [`next_request`](crate::plane::next_request) makes those four decisions
+//! [`read_next_request`](crate::plane::read_next_request) makes those four decisions
 //! and hands back what is left: a checked request for the caller's own
 //! dispatch, or the news that this connection is finished. What a request
 //! means stays with the caller: the router reports a delivered `Restarting`,
@@ -42,7 +42,7 @@ pub trait Gate {
     /// Hello has been accepted.
     fn get_agreed_protocol_version(&self) -> Option<u32>;
 
-    /// The refusal for a request kind this build does not have, named `name`.
+    /// The refusal for a request kind this build does not have, named `request_kind_name`.
     fn build_unknown_request_kind_error(&self, request_kind_name: &str) -> IpcErrorPayload;
 
     /// Check one incoming request kind against the connection's state.
@@ -54,7 +54,7 @@ pub trait Gate {
         request_kind: &Self::RequestKind,
     ) -> Result<(), IpcErrorPayload>;
 
-    /// Whether `request_kind` is the Hello that opens a connection. [`next_request`]
+    /// Whether `request_kind` is the Hello that opens a connection. [`read_next_request`]
     /// answers a Hello itself, with the settled version.
     fn is_hello(request_kind: &Self::RequestKind) -> bool;
 }
@@ -79,7 +79,7 @@ pub trait Plane {
     fn build_hello_response(agreed_protocol_version: u32, build_version: &str) -> Self::Response;
 }
 
-/// What a serve loop does next, after [`next_request`] has made every decision
+/// What a serve loop does next, after [`read_next_request`] has made every decision
 /// that is the same on every protocol.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RequestDisposition<RequestKind> {
@@ -112,7 +112,7 @@ pub enum RequestDisposition<RequestKind> {
 /// request. A malformed frame is answered before `is_admitted` is asked. The
 /// session server passes the live read of `allow-other-users` for a
 /// connection from another local user; a server whose peers cannot lose
-/// access passes [`is_always_admitted`].
+/// access passes `&|| true`.
 ///
 /// `build_version` is the answering program's own version, repeated in the Hello
 /// answer.
@@ -126,7 +126,7 @@ pub enum RequestDisposition<RequestKind> {
 /// and the same bytes before any Hello are answered here with
 /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired) and read as
 /// `RequestDisposition::Answered`.
-pub fn next_request<Protocol: Plane>(
+pub fn read_next_request<Protocol: Plane>(
     connection: &mut Connection,
     gate: &mut Protocol::Gate,
     build_version: &str,
@@ -189,14 +189,6 @@ pub fn next_request<Protocol: Plane>(
         request_id,
         request_kind,
     }
-}
-
-/// Always `true`: the `is_admitted` argument to [`next_request`] for a server
-/// whose peers cannot lose access while their connection is open. The router
-/// passes it.
-#[must_use]
-pub fn is_always_admitted() -> bool {
-    true
 }
 
 /// Send one answer this module built itself: [`RequestDisposition::Answered`]

@@ -2,25 +2,23 @@
 //!
 //! `EventBus::subscribe` registers a subscriber and hands back its id plus
 //! the receiving end of that subscriber's own bounded queue.
-//! `EventBus::publish` clones each event into every queue whose filter
-//! matches, `EventBus::try_send_frame` puts the frame the session composed
+//! `EventBus::publish` clones each event into every subscriber's queue, `EventBus::try_send_frame` puts the frame the session composed
 //! for one subscriber's client on that subscriber's own queue,
 //! `EventBus::try_send_answer` puts one round of mouse answers on it,
 //! `EventBus::try_send_host_write` puts bytes aimed at that subscriber's own
 //! terminal on it, and `EventBus::try_send_switch` puts the session that
 //! subscriber's client moves to on it. Delivery
 //! never blocks the dispatcher: a subscriber whose receiver was dropped is
-//! removed on the next publish, and an event that does not fit a subscriber's
-//! full queue is handled by its class.
+//! removed on the next publish.
 //!
-//! A dropped [`EventClass::Lossy`] event is logged and forgotten. A dropped
-//! [`EventClass::Critical`] event marks the subscriber desynced: it receives
-//! nothing at all — critical and lossy alike — while it counts the critical
-//! events it misses, until `EventBus::try_resync` puts a fresh
+//! An event that does not fit a subscriber's full queue marks the subscriber
+//! desynced: it receives nothing at all while it counts the events it misses,
+//! until `EventBus::try_resync` puts a fresh
 //! [`RenderSnapshot`] on its queue and returns it to live delivery. The
 //! snapshot rides the same queue as events, so the subscriber reads the
-//! backlog it already had, then the snapshot, then live events again. An
-//! answer, host write, or switch that does not fit marks the subscriber
+//! backlog it already had, then the snapshot, then live events again. A mouse
+//! answer, host write, session switch, placement preview, placement refusal,
+//! or placement command rejection that does not fit marks the subscriber
 //! desynced the same way; a frame that does not fit is dropped and the
 //! subscriber stays live.
 //!
@@ -33,66 +31,37 @@
 //! full.
 //!
 //! A subscriber in another process works in the wire spellings from
-//! `koshi-ipc` instead. The two conversions between them live here: the
-//! [`From`] impl on [`EventFilter`] reads the filter an attaching client sent,
-//! and [`wire_event`] turns one queue item into the frame that client is sent.
+//! `koshi-ipc` instead. [`build_wire_event`] turns one queue item into the
+//! frame that client is sent.
 
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 
-use koshi_core::event::{classify_event, Event, EventClass, SubscriberLagged};
+use koshi_core::event::{Event, SubscriberLagged};
 use koshi_core::ids::{CommandId, SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::protocol::EventFilterSpec;
 use koshi_renderer::snapshot::{
     Delivery, PlacementSnapshot, PlacementSnapshotError, PlacementSnapshotErrorCode, RenderSnapshot,
 };
 
 use crate::runtime::event::{EndingNotice, SessionEnding};
-use crate::runtime::frame::wire_frame;
+use crate::runtime::frame::build_wire_frame;
 
 /// How many undelivered items one subscriber's queue holds. Anything put on a
 /// full queue is dropped for that subscriber.
 pub(crate) const SUBSCRIBER_QUEUE_CAPACITY: usize = 1024;
 
-/// Which published events a subscriber receives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum EventFilter {
-    /// Every event.
-    #[default]
-    All,
-}
-
-impl EventFilter {
-    /// Whether `event` passes this filter.
-    fn is_event_allowed(self, _event: &Event) -> bool {
-        match self {
-            EventFilter::All => true,
-        }
-    }
-}
-
-impl From<EventFilterSpec> for EventFilter {
-    /// The filter an attaching client asked for, in the form the bus works in.
-    fn from(spec: EventFilterSpec) -> Self {
-        match spec {
-            EventFilterSpec::All => EventFilter::All,
-        }
-    }
-}
-
 /// Whether a subscriber is receiving events, or paused awaiting a snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryState {
-    /// Matching events are delivered as they are published.
+    /// Events are delivered as they are published.
     Live,
-    /// A critical event did not fit the queue; nothing is delivered until a
+    /// An event did not fit the queue; nothing is delivered until a
     /// snapshot lands, apart from the event that ends the stream.
     Desynced {
         /// How many deliveries the subscriber has missed: the one that paused
-        /// it, plus every [`EventClass::Critical`] event published since.
+        /// it, plus every event published since.
         dropped_event_count: u64,
     },
 }
@@ -110,15 +79,13 @@ enum QueueDeliveryStatus {
     Skipped,
 }
 
-/// One registered subscriber: its id, its filter, its delivery state, and the
-/// sending end of its queue.
+/// One registered subscriber: its id, its delivery state, and the sending end
+/// of its queue.
 #[derive(Debug)]
 struct Subscriber {
     /// Stable subscriber ID assigned at subscription, named in log lines about this
     /// subscriber.
     subscriber_id: SubscriberId,
-    /// Which events this subscriber receives.
-    filter: EventFilter,
     /// Whether this subscriber is receiving events or paused awaiting a
     /// snapshot.
     delivery_state: DeliveryState,
@@ -128,8 +95,8 @@ struct Subscriber {
 }
 
 /// Event fan-out hub: every published event is delivered to each live
-/// subscriber whose filter matches, over that subscriber's own bounded queue.
-#[derive(Debug, Default)]
+/// subscriber, over that subscriber's own bounded queue.
+#[derive(Debug)]
 pub(crate) struct EventBus {
     /// Live subscribers, in subscription order.
     subscribers: Vec<Subscriber>,
@@ -150,42 +117,39 @@ impl EventBus {
 
     /// Borrow what this bus and every attached client's writing thread share
     /// about the session's last frame.
-    pub(crate) fn ending_notice(&self) -> &Arc<EndingNotice> {
+    pub(crate) fn get_ending_notice(&self) -> &Arc<EndingNotice> {
         &self.ending_notice
     }
 
-    /// Register a subscriber for the events `filter` selects and hand back its
-    /// id plus the receiving end of its queue. The subscriber starts live.
+    /// Register a subscriber for every published event and hand back its id
+    /// plus the receiving end of its queue. The subscriber starts live.
     /// Dropping the receiver ends the subscription; the bus removes it on the
     /// next publish or delivery to it.
-    pub(crate) fn subscribe(&mut self, filter: EventFilter) -> (SubscriberId, Receiver<Delivery>) {
+    pub(crate) fn subscribe(&mut self) -> (SubscriberId, Receiver<Delivery>) {
         let (delivery_sender, delivery_receiver) = sync_channel(SUBSCRIBER_QUEUE_CAPACITY);
         let subscriber_id = SubscriberId::new();
         self.subscribers.push(Subscriber {
             subscriber_id,
-            filter,
             delivery_state: DeliveryState::Live,
             delivery_sender,
         });
         (subscriber_id, delivery_receiver)
     }
 
-    /// Deliver `event` to every live subscriber whose filter matches it, and
-    /// to every desynced one when `event` ends the stream. An event that ends
+    /// Deliver `event` to every live subscriber, and to every desynced one
+    /// when `event` ends the stream. An event that ends
     /// the stream raises the [`EndingNotice`] first, so a subscriber whose
     /// queue has no room for it is told over the notice instead.
     ///
-    /// A desynced subscriber receives nothing else, and counts what it misses
-    /// when that is [`EventClass::Critical`]. A live subscriber whose queue is
-    /// full misses a [`EventClass::Lossy`] event (logged as a warning) and
-    /// becomes desynced on a [`EventClass::Critical`] one. A desynced
-    /// subscriber whose queue is full misses the last frame too, and counts it.
+    /// A desynced subscriber receives nothing else, and counts what it misses.
+    /// A live subscriber whose queue is full misses the event and becomes
+    /// desynced. A desynced subscriber whose queue is full misses the last
+    /// frame too, and counts it.
     ///
     /// A subscriber whose receiver is gone is removed, and its id returned so
     /// the caller can drop whatever it keeps alongside the subscription. The
     /// returned list is empty on every publish that removes nobody.
     pub(crate) fn publish(&mut self, event: &Event) -> Vec<SubscriberId> {
-        let event_class = classify_event(event);
         // The stream's last frame, delivered whatever state the subscriber is
         // in: the client reading it leaves this socket. The notice carries it
         // to a client whose queue has no room left for it.
@@ -197,20 +161,15 @@ impl EventBus {
         if let Some(session_ending) = session_ending {
             self.ending_notice.raise_session_ending(session_ending);
         }
-        let ends_the_stream = session_ending.is_some();
+        let is_stream_ending = session_ending.is_some();
         let mut removed_subscriber_ids = Vec::new();
         self.subscribers.retain_mut(|subscriber| {
-            if !subscriber.filter.is_event_allowed(event) {
-                return true;
-            }
             if let DeliveryState::Desynced {
                 dropped_event_count,
             } = &mut subscriber.delivery_state
             {
-                if !ends_the_stream {
-                    if event_class == EventClass::Critical {
-                        *dropped_event_count += 1;
-                    }
+                if !is_stream_ending {
+                    *dropped_event_count += 1;
                     return true;
                 }
             }
@@ -220,33 +179,25 @@ impl EventBus {
             {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
-                    match (&mut subscriber.delivery_state, event_class) {
-                        (
-                            DeliveryState::Desynced {
-                                dropped_event_count,
-                            },
-                            _,
-                        ) => {
+                    match &mut subscriber.delivery_state {
+                        DeliveryState::Desynced {
+                            dropped_event_count,
+                        } => {
                             *dropped_event_count += 1;
                             tracing::warn!(
-                                subscriber = %subscriber.subscriber_id,
+                                subscriber_id = %subscriber.subscriber_id,
                                 event = event.get_event_name(),
                                 "last frame dropped; subscriber queue full"
                             );
                         }
-                        (DeliveryState::Live, EventClass::Lossy) => tracing::warn!(
-                            subscriber = %subscriber.subscriber_id,
-                            event = event.get_event_name(),
-                            "event dropped; subscriber queue full"
-                        ),
-                        (delivery_state @ DeliveryState::Live, EventClass::Critical) => {
+                        delivery_state @ DeliveryState::Live => {
                             *delivery_state = DeliveryState::Desynced {
                                 dropped_event_count: 1,
                             };
                             tracing::warn!(
-                                subscriber = %subscriber.subscriber_id,
+                                subscriber_id = %subscriber.subscriber_id,
                                 event = event.get_event_name(),
-                                "critical event dropped; subscriber desynced, awaiting snapshot"
+                                "event dropped; subscriber desynced, awaiting snapshot"
                             );
                         }
                     }
@@ -283,8 +234,8 @@ impl EventBus {
         self.find_subscriber_index(subscriber_id).is_some()
     }
 
-    /// Where `subscriber_id` sits in the subscription-ordered list, or `None` when `subscriber_id` is
-    /// not registered.
+    /// Where `subscriber_id` sits in the subscription-ordered list, or `None` when `subscriber_id`
+    /// is not registered.
     fn find_subscriber_index(&self, subscriber_id: SubscriberId) -> Option<usize> {
         self.subscribers
             .iter()
@@ -322,7 +273,6 @@ impl EventBus {
         let lag_report = SubscriberLagged {
             subscriber_id,
             dropped_event_count,
-            event_class: EventClass::Critical,
         };
         match subscriber.delivery_sender.try_send(Delivery::Snapshot {
             render_snapshot,
@@ -331,7 +281,7 @@ impl EventBus {
             Ok(()) => {
                 subscriber.delivery_state = DeliveryState::Live;
                 tracing::info!(
-                    subscriber = %subscriber_id,
+                    subscriber_id = %subscriber_id,
                     dropped_event_count,
                     "snapshot queued; subscriber resynced"
                 );
@@ -431,7 +381,7 @@ impl EventBus {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %subscriber_id,
+                    subscriber_id = %subscriber_id,
                     request_id,
                     "placement preview dropped; subscriber desynced, awaiting snapshot"
                 );
@@ -452,13 +402,13 @@ impl EventBus {
             subscriber_id,
             Delivery::PanePlacementRefused {
                 request_id,
-                error: placement_error,
+                refusal: placement_error,
             },
         ) {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %subscriber_id,
+                    subscriber_id = %subscriber_id,
                     request_id,
                     "placement refusal dropped; subscriber desynced, awaiting snapshot"
                 );
@@ -484,7 +434,7 @@ impl EventBus {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %subscriber_id,
+                    subscriber_id = %subscriber_id,
                     request_id,
                     "mouse answer dropped; subscriber desynced, awaiting snapshot"
                 );
@@ -509,7 +459,7 @@ impl EventBus {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %subscriber_id,
+                    subscriber_id = %subscriber_id,
                     "host write dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
@@ -533,8 +483,8 @@ impl EventBus {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %subscriber_id,
-                    session = %session_id,
+                    subscriber_id = %subscriber_id,
+                    session_id = %session_id,
                     "session switch dropped; subscriber desynced, awaiting snapshot"
                 );
                 false
@@ -559,7 +509,7 @@ impl EventBus {
             QueueDeliveryStatus::Sent => true,
             QueueDeliveryStatus::Dropped => {
                 tracing::warn!(
-                    subscriber = %subscriber_id,
+                    subscriber_id = %subscriber_id,
                     %command_id,
                     "placement command rejection dropped; subscriber desynced, awaiting snapshot"
                 );
@@ -567,14 +517,6 @@ impl EventBus {
             }
             QueueDeliveryStatus::Skipped => false,
         }
-    }
-
-    /// How many subscribers are registered. Counts subscribers whose receiver
-    /// is already gone but whose removal awaits the next publish or delivery.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn subscriber_count(&self) -> usize {
-        self.subscribers.len()
     }
 }
 
@@ -610,7 +552,7 @@ impl EventBus {
     clippy::wildcard_enum_match_arm,
     clippy::match_wildcard_for_single_variants
 )]
-pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
+pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
     match delivery {
         Delivery::Event(event) => match event {
             Event::PaneCreated(payload) => Some(SessionEvent::PaneCreated {
@@ -664,67 +606,49 @@ pub fn wire_event(delivery: &Delivery) -> Option<SessionEvent> {
             Event::Quit(_) => Some(SessionEvent::Quit),
             Event::Restarting => Some(SessionEvent::Restarting),
 
-            // PTY size and content damage: the client redraws from the next
-            // `Painted` frame.
-            Event::PtyResized(_) | Event::PaneOutputUpdated(_) => None,
+            // PTY size: the client redraws from the next `Painted` frame.
+            Event::PtyResized(_) => None,
             // Visibility: the `Painted` frame already shows which panes have
             // area.
-            Event::PaneSuppressed(_)
-            | Event::PaneResumed(_)
-            | Event::TerminalTooSmallEntered(_)
-            | Event::TerminalTooSmallExited(_) => None,
+            Event::TerminalTooSmallEntered(_) => None,
             Event::ConfigReloaded(_) => None,
-            // Per-client input state: the client holds its own mode, its own
-            // mouse-select mode, and the binding it matched.
-            Event::InputModeChanged(_)
-            | Event::MouseSelectChanged(_)
-            | Event::KeybindingMatched(_) => None,
-            // Typed input: these payloads carry pane text.
-            Event::PaneTyped(_) | Event::PaneEnterPressed(_) => None,
-            // Mouse input: the client produced it and sends it the other way.
-            Event::MousePressed(_)
-            | Event::MouseReleased(_)
-            | Event::MouseDragged(_)
-            | Event::MouseScrolled(_)
-            | Event::PaneMouseForwarded(_)
-            | Event::PluginMouseInput(_) => None,
+            // Per-client input state: the client holds its own mode and its
+            // own mouse-select mode.
+            Event::InputModeChanged(_) | Event::MouseSelectChanged(_) => None,
             // A shell's OSC 133 prompt reports.
             Event::PaneCommandStarted(_) | Event::PaneCommandFinished(_) => None,
-            // Drop counters and rejections: a subscriber that misses a
-            // critical event is told through `SessionEvent::Resync`.
-            Event::PaneScrollbackTruncated(_)
-            | Event::SubscriberLagged(_)
-            | Event::CommandRejected(_) => None,
-            // Selection and copy: both are client-local.
-            Event::SelectionChanged(_) | Event::Copied(_) => None,
-            Event::Plugin(_) => None,
+            // A selection is client-local.
+            Event::SelectionChanged(_) => None,
         },
         Delivery::Frame(render_snapshot) => Some(SessionEvent::Painted {
-            frame: Box::new(wire_frame(render_snapshot)),
+            frame: Box::new(build_wire_frame(render_snapshot)),
         }),
         Delivery::PanePlacementSnapshot {
             request_id,
             snapshot,
         } => Some(SessionEvent::PanePlacementSnapshot {
             request_id: *request_id,
-            snapshot: Box::new(crate::runtime::frame::wire_placement_snapshot(snapshot)),
+            snapshot: Box::new(crate::runtime::frame::build_wire_placement_snapshot(
+                snapshot,
+            )),
         }),
-        Delivery::PanePlacementRefused { request_id, error } => {
-            Some(SessionEvent::PanePlacementRefused {
-                request_id: *request_id,
-                error: koshi_ipc::protocol::IpcErrorPayload {
-                    code: match error.code {
-                        PlacementSnapshotErrorCode::NotFound => {
-                            koshi_ipc::protocol::IpcErrorCode::NotFound
-                        }
-                        PlacementSnapshotErrorCode::ResourceLimit => {
-                            koshi_ipc::protocol::IpcErrorCode::ResourceLimit
-                        }
-                    },
-                    message: error.message.clone(),
+        Delivery::PanePlacementRefused {
+            request_id,
+            refusal,
+        } => Some(SessionEvent::PanePlacementRefused {
+            request_id: *request_id,
+            refusal: koshi_ipc::protocol::IpcErrorPayload {
+                code: match refusal.code {
+                    PlacementSnapshotErrorCode::NotFound => {
+                        koshi_ipc::protocol::IpcErrorCode::NotFound
+                    }
+                    PlacementSnapshotErrorCode::ResourceLimit => {
+                        koshi_ipc::protocol::IpcErrorCode::ResourceLimit
+                    }
                 },
-            })
-        }
+                message: refusal.message.clone(),
+            },
+        }),
         Delivery::Snapshot { lag_report, .. } => Some(SessionEvent::Resync {
             dropped_event_count: lag_report.dropped_event_count,
         }),

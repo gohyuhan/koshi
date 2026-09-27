@@ -125,7 +125,7 @@ impl SpawnSpec {
     /// straight through; `arguments` is empty;
     /// `shell_kind` is [`ShellKind::from_program`] of the chosen program.
     #[must_use]
-    pub fn default_shell(
+    pub fn build_default_shell(
         working_directory: Option<PathBuf>,
         environment_variables: BTreeMap<String, String>,
     ) -> SpawnSpec {
@@ -157,8 +157,8 @@ impl SpawnSpec {
 }
 
 /// Pick the shell program path from an environment variable's value: the value
-/// when present and non-empty, else `fallback`. A set-but-empty variable
-/// (`SHELL=`) takes `fallback`.
+/// when present and non-empty, else `fallback_program`. A set-but-empty variable
+/// (`SHELL=`) takes `fallback_program`.
 fn resolve_shell_program(
     environment_value: Option<std::ffi::OsString>,
     fallback_program: &str,

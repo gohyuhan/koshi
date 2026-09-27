@@ -9,8 +9,8 @@
 //! session in the same instant.
 //!
 //! Scrollback rows never travel here. A pane sends the rows its window shows
-//! this frame and nothing else, plus the two numbers the scroll indicator is
-//! drawn from — [`is_truncated`](crate::frame::FrameScrollback::is_truncated) and
+//! this frame and nothing else, plus the one number the scroll indicator is
+//! drawn from:
 //! [`retained_line_count`](crate::frame::FrameScrollback::retained_line_count). A client
 //! scrolled 500 lines back over a 24-row pane receives those 24 rows, never the
 //! 500 above them.
@@ -19,7 +19,7 @@
 //! [`FrameRow::from_cells`](crate::frame::FrameRow::from_cells) folds each
 //! stretch of equal neighbouring cells into one
 //! [`FrameRun`](crate::frame::FrameRun): a blank 80-column row travels as a
-//! single run with `count == 80`, and
+//! single run with `repeat_count == 80`, and
 //! [`FrameRow::expand_cells`](crate::frame::FrameRow::expand_cells) expands the runs back
 //! into the same 80 cells.
 //!
@@ -42,7 +42,6 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::StackHeader;
-use koshi_pane::pane::state::PaneKind;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
@@ -58,8 +57,9 @@ pub const MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT: usize = 1_048_576;
 /// The largest number of image transfers accepted after one painted frame.
 pub const MAX_FRAME_IMAGE_TRANSFER_COUNT: usize = 4_096;
 
-/// Decode an image presentation value through an owned JSON value so the
-/// fallback works for transport input and for owned deserialization callers.
+/// Decode an image presentation value through an owned JSON value, falling
+/// back to `T::default()` when the value cannot be read. Reads from every
+/// `serde_json` entry point, `serde_json::from_value` included.
 fn deserialize_image_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -102,7 +102,7 @@ pub struct FrameSession {
     /// The tab this client is shown, solved and ready to draw.
     pub active_tab_snapshot: FrameTab,
     /// One entry per tab in the session, in display order.
-    pub tab_snapshots: Vec<FrameTabMeta>,
+    pub tab_snapshots: Vec<FrameTabMetadata>,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.
@@ -115,12 +115,12 @@ pub struct FrameTab {
     /// The solved layout: one [`FrameSlot`] per pane, giving outer and content
     /// rects and coarse status.
     pub pane_slots: Vec<FrameSlot>,
-    /// The viewport size the layout was solved for: the element-wise minimum
-    /// viewport across the clients viewing this tab. The
+    /// The size the tab's layout was solved for: the per-axis minimum pane
+    /// area across the clients viewing this tab. The
     /// [`pane_slots`](Self::pane_slots) rects live in this space with origin `(0, 0)`. A
     /// client whose own [`viewport_size`](FrameClient::viewport_size) is larger draws
     /// this layout centered and letterboxes the surrounding margin.
-    pub effective_cell_size: Size,
+    pub tab_size: Size,
     /// Header strips for stacked panes: the one-row title bar each collapsed
     /// stack member shows in place of its content.
     pub stack_headers: Vec<StackHeader>,
@@ -142,7 +142,7 @@ pub struct FrameTab {
 /// One tab's entry in the tab bar: enough to draw the tab list without its
 /// layout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameTabMeta {
+pub struct FrameTabMetadata {
     /// The tab's stable id.
     pub tab_id: TabId,
     /// The tab's display name.
@@ -159,9 +159,8 @@ pub struct FrameTabMeta {
 ///
 /// [`is_visible`](Self::is_visible) is true exactly when
 /// [`content_rect`](Self::content_rect) is `Some`, and an
-/// [`is_suppressed`](Self::is_suppressed) pane is not visible. [`is_dead`](Self::is_dead)
-/// is a separate axis: an exited pane stays laid out, drawn dimmed, until it is
-/// removed. `content_rect` is `None` for three distinct reasons — no room,
+/// [`is_suppressed`](Self::is_suppressed) pane is not visible. `content_rect` is
+/// `None` for three distinct reasons — no room,
 /// hidden, or a collapsed stack member — and [`is_suppressed`](Self::is_suppressed)
 /// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,14 +173,10 @@ pub struct FrameSlot {
     /// `None` when the pane shows no content (suppressed, hidden, or a
     /// collapsed stack member). Cells and the cursor are drawn here.
     pub content_rect: Option<Rect>,
-    /// Whether a terminal or a plugin backs this pane.
-    pub pane_kind: PaneKind,
     /// Whether the pane is currently shown.
     pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
     pub is_suppressed: bool,
-    /// Whether the pane's process has exited.
-    pub is_dead: bool,
 }
 
 /// One image placement carried with a pane's visible cells.
@@ -362,7 +357,7 @@ pub struct FrameImageChunk {
     /// Whether this chunk ends the transfer.
     pub is_last: bool,
     /// Raw RGBA bytes, encoded as base64 on the wire.
-    #[serde(with = "crate::bytes::base64_or_list")]
+    #[serde(with = "crate::bytes")]
     pub chunk_bytes: Vec<u8>,
 }
 
@@ -376,7 +371,7 @@ impl<'de> Deserialize<'de> for FrameImageChunk {
             image_transfer_id: u64,
             byte_offset: u64,
             is_last: bool,
-            #[serde(with = "crate::bytes::base64_or_list")]
+            #[serde(with = "crate::bytes")]
             chunk_bytes: Vec<u8>,
         }
 
@@ -469,16 +464,12 @@ pub struct FrameImageDisplay {
     /// The Kitty image z-index.
     pub z_index: i32,
     /// The parent Kitty image id for a relative placement.
-    #[serde(default)]
     pub relative_image_id: Option<u32>,
     /// The parent Kitty placement id for a relative placement.
-    #[serde(default)]
     pub relative_placement_id: Option<u32>,
     /// The horizontal cell offset from a relative parent placement.
-    #[serde(default)]
     pub relative_column_offset: i32,
     /// The vertical cell offset from a relative parent placement.
-    #[serde(default)]
     pub relative_row_offset: i32,
     /// The number of terminal columns requested by Kitty.
     pub requested_column_count: Option<u32>,
@@ -601,8 +592,8 @@ pub struct FramePane {
     pub pane_title: Option<String>,
     /// The cursor's position and look within the content area.
     pub cursor_snapshot: FrameCursor,
-    /// The visible terminal cells. `None` for a pane with no terminal content —
-    /// a plugin pane, or a slot showing nothing this frame.
+    /// The visible terminal cells. `None` for a slot showing nothing this
+    /// frame.
     pub terminal_window: Option<FrameWindow>,
     /// The complete image placements whose rectangles fit inside this pane's
     /// visible window. Empty when the pane has no image to draw.
@@ -617,7 +608,7 @@ pub struct FramePane {
     pub mouse_tracking: MouseTracking,
     /// Whether alternate-scroll mode (`?1007`) is on: on the alternate screen a
     /// wheel tick becomes cursor arrow keys.
-    pub is_alt_scroll_enabled: bool,
+    pub is_alternate_scroll_enabled: bool,
     /// Whether the pane is showing the alternate screen. The alternate screen
     /// keeps no scrollback and has no view to scroll.
     pub is_on_alt_screen: bool,
@@ -634,7 +625,7 @@ pub struct FramePane {
     /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
-    pub scrollback_meta: FrameScrollback,
+    pub scrollback_metadata: FrameScrollback,
 }
 
 /// The cursor's position within the content area, and how it is drawn.
@@ -683,8 +674,6 @@ pub struct FrameSelection {
 /// Scrollback state the scroll-position indicator is drawn from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameScrollback {
-    /// Whether the buffer reached its cap and dropped its oldest lines.
-    pub is_truncated: bool,
     /// How many scrollback lines are currently retained.
     pub retained_line_count: usize,
 }
@@ -841,12 +830,12 @@ pub struct FrameStyle {
     )]
     pub underline_color: Option<FrameColor>,
     /// The boolean text attributes and the underline style.
-    pub text_attributes: FrameAttrs,
+    pub text_attributes: FrameAttributes,
 }
 
 /// The SGR text attributes of one cell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameAttrs {
+pub struct FrameAttributes {
     /// Bold / increased intensity (SGR 1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_bold: bool,

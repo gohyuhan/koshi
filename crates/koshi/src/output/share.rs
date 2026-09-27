@@ -53,7 +53,7 @@ pub fn render_share_grant(
         ));
     }
     rendered_output.push_str("anyone holding this token can run anything you can.\n");
-    rendered_output.push_str(connection_token.expose());
+    rendered_output.push_str(connection_token.expose_secret());
     rendered_output.push('\n');
     rendered_output
 }
@@ -129,9 +129,9 @@ pub fn render_share_revoke(scopes: &[TokenScope]) -> String {
 }
 
 /// Render the warning a `share revoke --session` asks before it stops
-/// anything, when `identity` also holds a host-wide grant.
+/// anything, when `token_identity` also holds a host-wide grant.
 ///
-/// `session` is the session the revoke narrowed to. Names the wider grant that
+/// `session_scope` is the session the revoke narrowed to. Names the wider grant that
 /// reaches it, and what stopping both costs: a host-wide grant reaches every
 /// session on this machine, so stopping it stops them all.
 ///

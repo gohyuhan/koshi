@@ -1135,7 +1135,6 @@ dependencies = [
  "base64 0.23.1",
  "flate2",
  "image",
- "koshi-core",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1157,7 +1156,6 @@ dependencies = [
  "interprocess",
  "koshi-core",
  "koshi-layout",
- "koshi-pane",
  "koshi-storage",
  "libc",
  "rcgen",
@@ -1268,22 +1266,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "koshi-plugin-api"
-version = "0.4.0"
-
-[[package]]
-name = "koshi-plugin-host"
-version = "0.4.0"
-dependencies = [
- "koshi-core",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "koshi-plugin-manager"
-version = "0.4.0"
-
-[[package]]
 name = "koshi-pty"
 version = "0.4.0"
 dependencies = [
@@ -1304,7 +1286,6 @@ dependencies = [
  "koshi-config",
  "koshi-core",
  "koshi-layout",
- "koshi-pane",
  "koshi-terminal",
  "ratatui",
 ]
@@ -1364,7 +1345,6 @@ dependencies = [
 name = "koshi-storage"
 version = "0.4.0"
 dependencies = [
- "koshi-core",
  "tempfile",
  "thiserror 2.0.20",
 ]
@@ -1384,7 +1364,6 @@ dependencies = [
  "percent-encoding",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
  "unicode-segmentation",
  "unicode-width 0.2.2",
  "vte",

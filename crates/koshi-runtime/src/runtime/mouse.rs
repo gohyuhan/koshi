@@ -10,7 +10,7 @@
 //!   view of one pane;
 //! - [`forward_mouse_to_pane`](Server::forward_mouse_to_pane) hands an event to
 //!   the program in one pane as a mouse report;
-//! - [`write_alt_scroll_arrows`](Server::write_alt_scroll_arrows) sends cursor
+//! - [`write_alternate_scroll_arrows`](Server::write_alternate_scroll_arrows) sends cursor
 //!   arrows for the alternate-scroll translation of a wheel tick;
 //! - [`drag_resize`](Server::drag_resize) moves one pane border a number of
 //!   cells and reports how many it took.
@@ -39,8 +39,6 @@ use koshi_renderer::snapshot::ViewerChrome;
 use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
-use std::time::SystemTime;
-
 use crate::server::Server;
 
 impl Server {
@@ -55,7 +53,6 @@ impl Server {
         let mouse_command_envelope = CommandEnvelope::from_parts(
             CommandId::new(),
             CommandSource::from_mouse(client_id),
-            SystemTime::now(),
             mouse_command,
         );
         self.dispatch_reporting_spare(mouse_command_envelope)
@@ -67,7 +64,7 @@ impl Server {
         let _ = self.dispatch_mouse_command(client_id, Command::Visual(visual_command));
     }
 
-    /// Ask for `pane`'s `side` border to move `cells` cells in `step`'s
+    /// Ask for `pane_id`'s `border_side` border to move `requested_cell_count` cells in `resize_step`'s
     /// direction. `Err` carries the cells the donating pane can still give: `0`
     /// when it is already at its minimum size, and `0` for every rejection that
     /// is not a minimum-size refusal.
@@ -94,8 +91,8 @@ impl Server {
         }
     }
 
-    /// Move `pane`'s `side` border `count` cells and report how many were
-    /// actually taken. `step` is the direction: `1` grows `pane`, `-1` shrinks
+    /// Move `pane_id`'s `border_side` border `requested_cell_count` cells and report how many were
+    /// actually taken. `resize_step` is the direction: `1` grows `pane_id`, `-1` shrinks
     /// it.
     ///
     /// The whole distance travels in one [`Command::ResizePane`], which is
@@ -107,7 +104,7 @@ impl Server {
     /// for.
     ///
     /// Each round either takes cells or lowers what the next round asks for.
-    /// `applied` never passes `count`.
+    /// The returned count never passes `requested_cell_count`.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     pub fn drag_resize(
@@ -147,7 +144,7 @@ impl Server {
         applied_cell_count
     }
 
-    /// Move `client_id`'s koshi scrollback view of `pane_id` by `lines`, up into
+    /// Move `client_id`'s koshi scrollback view of `pane_id` by `scroll_line_count`, up into
     /// history or back down toward live output, and report the line its top row
     /// now shows.
     ///
@@ -159,7 +156,8 @@ impl Server {
     /// The returned line is the same number [`PaneSnapshot::view_top_row_index`] would
     /// carry for the next frame. `None` names a pane with no terminal.
     ///
-    /// [`PaneSnapshot::view_top_row_index`]: koshi_renderer::snapshot::PaneSnapshot::view_top_row_index
+    /// [`PaneSnapshot::view_top_row_index`]:
+    /// koshi_renderer::snapshot::PaneSnapshot::view_top_row_index
     pub fn scroll_pane_view(
         &mut self,
         client_id: ClientId,
@@ -194,7 +192,7 @@ impl Server {
             terminal_state
                 .get_scrollback()
                 .get_total_pushed_line_count()
-                .saturating_sub(terminal_state.effective_view_offset(scroll_offset) as u64),
+                .saturating_sub(terminal_state.compute_effective_view_offset(scroll_offset) as u64),
         )
     }
 
@@ -226,8 +224,7 @@ impl Server {
     /// Returns whether a report was handed to the pane's writer. It is `false`
     /// when the pane is gone, when its live tracking no longer asks for this
     /// event, when the layout no longer places the pane, and when the pane
-    /// refuses the bytes — so the caller records a gesture only for a press the
-    /// pane accepted.
+    /// refuses the bytes.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
@@ -286,7 +283,7 @@ impl Server {
     }
 
     /// Send `arrow_count` cursor arrow keys to `pane_id` for a wheel tick — the
-    /// alternate-scroll (`?1007`) translation. `up` sends up-arrows, otherwise
+    /// alternate-scroll (`?1007`) translation. `is_scrolling_up` sends up-arrows, otherwise
     /// down-arrows.
     ///
     /// The pane must still be on the alternate screen with alternate scroll on,
@@ -298,7 +295,7 @@ impl Server {
     /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
     ///
     /// An `arrow_count` of `0` writes nothing.
-    pub fn write_alt_scroll_arrows(
+    pub fn write_alternate_scroll_arrows(
         &mut self,
         pane_id: PaneId,
         is_scrolling_up: bool,
@@ -316,7 +313,7 @@ impl Server {
                 let terminal_state = terminal_engine.get_terminal_state();
                 (terminal_state.is_alternate_scroll_enabled()
                     && terminal_state.get_active_screen() == Screen::Alternate)
-                    .then(|| terminal_state.are_application_cursor_keys_enabled())
+                    .then(|| terminal_state.is_application_cursor_keys_enabled())
             })
         else {
             return;
@@ -379,12 +376,12 @@ impl Server {
                 } => {
                     let _ = self.forward_mouse_to_pane(client_id, pane_id, mouse_input);
                 }
-                WireMouseAction::AltScrollArrows {
+                WireMouseAction::AlternateScrollArrows {
                     pane_id,
                     is_scrolling_up,
                     arrow_count,
                 } => {
-                    self.write_alt_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                    self.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
                 }
                 WireMouseAction::Resize {
                     pane_id,

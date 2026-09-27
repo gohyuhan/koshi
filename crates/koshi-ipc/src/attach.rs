@@ -15,7 +15,6 @@
 
 use koshi_core::ids::{PaneId, SessionId, TabId};
 use koshi_layout::tree::LayoutNode;
-use koshi_pane::pane::state::PaneKind;
 use serde::{Deserialize, Serialize};
 
 /// One session's structure, as handed to a client on attach.
@@ -33,9 +32,6 @@ pub struct AttachedSessionStructureSnapshot {
     pub session_name: String,
     /// Every tab in the session, in display order.
     pub tabs: Vec<TabStructure>,
-    /// Every pane in the session, ordered by [`PaneId`]. A layout leaf names a
-    /// `PaneId`; the matching entry here says what backs it.
-    pub panes: Vec<PaneStructure>,
 }
 
 /// One tab: what to label it in the tab bar, how its panes are arranged, and
@@ -56,15 +52,6 @@ pub struct TabStructure {
     /// recovery walks the rest as panes close. Empty when nothing in the tab
     /// has been focused yet.
     pub focus_mru: Vec<PaneId>,
-}
-
-/// One pane: its id, and what backs it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneStructure {
-    /// The pane's stable id, matching its layout leaf.
-    pub pane_id: PaneId,
-    /// Whether a terminal or a plugin draws this pane.
-    pub pane_kind: PaneKind,
 }
 
 #[cfg(test)]

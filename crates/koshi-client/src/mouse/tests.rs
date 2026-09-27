@@ -19,7 +19,7 @@ use koshi_config::layer::{PartialKoshiConfig, PartialMouseConfig};
 use koshi_config::types::WheelScroll;
 use koshi_core::event::{Event, MouseSelectChanged};
 use koshi_core::geometry::{Point, Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::key::ModFlags;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseTracking};
@@ -31,7 +31,7 @@ use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry};
 use koshi_layout::solver::{solve_layout_with_mode, PaneSizing, StackHeader};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_renderer::snapshot::{
-    ClientSnapshot, CommittedRegions, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMeta,
+    ClientSnapshot, CommittedRegions, Delivery, MousePane, PaneSlot, SessionSnapshot, TabMetadata,
     TabSnapshot,
 };
 
@@ -92,11 +92,7 @@ fn build_plain_mouse_pane(pane_id: PaneId) -> MousePane {
 /// Two panes in an 80x24 viewport gives band rows 1..=11 and 12..=22, each with
 /// a one-cell border ring, so `get_content_cell(0)` lands inside the first pane's
 /// content and `get_content_cell(1)` inside the second's.
-fn build_mouse_frame(
-    panes: &[MousePane],
-    focused_pane_id: Option<PaneId>,
-    pane_kind: PaneKind,
-) -> MouseFrame {
+fn build_mouse_frame(panes: &[MousePane], focused_pane_id: Option<PaneId>) -> MouseFrame {
     let tab_id = TabId::new();
     let band = (TEST_VIEWPORT_SIZE.row_count - 2) / u16::try_from(panes.len()).expect("few panes");
     let pane_slots: Vec<PaneSlot> = panes
@@ -127,10 +123,8 @@ fn build_mouse_frame(
                         row_count: band - 2,
                     },
                 )),
-                pane_kind,
                 is_visible: true,
                 is_suppressed: false,
-                is_dead: false,
             }
         })
         .collect();
@@ -143,16 +137,16 @@ fn build_mouse_frame(
                 tab_id,
                 tab_name: "one".to_owned(),
                 pane_slots,
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: TEST_VIEWPORT_SIZE.column_count,
                     row_count: TEST_VIEWPORT_SIZE.row_count - 2,
                 },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tabs_metadata: vec![TabMeta {
+            tabs_metadata: vec![TabMetadata {
                 tab_id,
                 tab_name: "one".to_owned(),
                 tab_index: 0,
@@ -169,14 +163,14 @@ fn build_mouse_frame(
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        committed_regions: CommittedRegions::core(TEST_VIEWPORT_SIZE, 0),
+        committed_regions: CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0),
     }
 }
 
 /// A frame holding one plain terminal pane, focused.
 fn build_one_pane_mouse_frame(mouse_pane: MousePane) -> MouseFrame {
     let pane_id = mouse_pane.pane_id;
-    build_mouse_frame(&[mouse_pane], Some(pane_id), PaneKind::Terminal)
+    build_mouse_frame(&[mouse_pane], Some(pane_id))
 }
 
 /// A cell inside the content of the `pane_index`-th pane in a fixture frame.
@@ -217,19 +211,16 @@ fn build_mouse_placement_snapshot(
             pane_id: pane_slot.pane_id,
             outer_rect: pane_slot.outer_rect,
             content_rect: pane_slot.content_rect,
-            pane_kind: pane_slot.pane_kind,
             is_visible: pane_slot.is_visible,
             is_suppressed: pane_slot.is_suppressed,
-            is_dead: pane_slot.is_dead,
         })
         .collect();
-    placement_snapshot.source_tab_snapshot.effective_cell_size =
-        frame_tab_snapshot.effective_cell_size;
+    placement_snapshot.source_tab_snapshot.tab_size = frame_tab_snapshot.tab_size;
     placement_snapshot.source_tab_snapshot.stack_headers = frame_tab_snapshot.stack_headers;
     placement_snapshot.source_tab_snapshot.layout_mode = frame_tab_snapshot.layout_mode;
     placement_snapshot
         .source_tab_snapshot
-        .is_every_pane_suppressed = frame_tab_snapshot.are_all_panes_suppressed;
+        .is_every_pane_suppressed = frame_tab_snapshot.is_every_pane_suppressed;
     placement_snapshot.source_tab_snapshot.gap_cell_count = frame_tab_snapshot.gap_cell_count;
     placement_snapshot.source_tab_snapshot.pane_snapshots = placement_snapshot
         .source_tab_snapshot
@@ -274,10 +265,8 @@ fn build_cross_tab_mouse_placement_snapshot(
                 pane_id: destination_pane_id,
                 outer_rect: pane_slot.outer_rect,
                 content_rect: pane_slot.content_rect,
-                pane_kind: pane_slot.pane_kind,
                 is_visible: pane_slot.is_visible,
                 is_suppressed: pane_slot.is_suppressed,
-                is_dead: pane_slot.is_dead,
             },
         )
         .collect();
@@ -300,10 +289,10 @@ fn build_cross_tab_mouse_placement_snapshot(
                 .collect(),
         )),
         pane_slots: destination_pane_slots,
-        effective_cell_size: frame_tab_snapshot.effective_cell_size,
+        tab_size: frame_tab_snapshot.tab_size,
         stack_headers: Vec::new(),
         layout_mode: frame_tab_snapshot.layout_mode,
-        is_every_pane_suppressed: frame_tab_snapshot.are_all_panes_suppressed,
+        is_every_pane_suppressed: frame_tab_snapshot.is_every_pane_suppressed,
         gap_cell_count: frame_tab_snapshot.gap_cell_count,
         pane_snapshots: destination_pane_snapshots,
     };
@@ -418,9 +407,9 @@ fn the_ignore_setting_leaves_a_plain_pane_alone() {
 #[test]
 fn a_program_asking_for_the_mouse_gets_the_tick_forwarded() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.mouse_tracking = MouseTracking::Normal;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.mouse_tracking = MouseTracking::Normal;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let tick = build_mouse_wheel(ScrollDirection::Up, get_content_cell(&frame, 0));
 
     let decision = build_test_client()
@@ -441,9 +430,9 @@ fn x10_tracking_predates_the_wheel_so_the_tick_is_koshis() {
     // `?9` reports presses only. A wheel tick there is not the program's, so it
     // falls through to koshi's own scrollback.
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.mouse_tracking = MouseTracking::X10;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.mouse_tracking = MouseTracking::X10;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
 
     let decision = build_test_client()
         .handle_mouse_wheel(
@@ -465,10 +454,10 @@ fn x10_tracking_predates_the_wheel_so_the_tick_is_koshis() {
 #[test]
 fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.mouse_tracking = MouseTracking::Normal;
-    content.has_selection = true;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.mouse_tracking = MouseTracking::Normal;
+    mouse_pane.has_selection = true;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
 
     let decision = build_test_client()
         .handle_mouse_wheel(
@@ -489,12 +478,12 @@ fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
 }
 
 #[test]
-fn the_alternate_screen_with_alt_scroll_becomes_arrow_keys() {
+fn the_alternate_screen_with_alternate_scroll_becomes_arrow_keys() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.is_on_alternate_screen = true;
-    content.is_alternate_scroll_enabled = true;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.is_on_alternate_screen = true;
+    mouse_pane.is_alternate_scroll_enabled = true;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
 
     let up = build_test_client()
         .handle_mouse_wheel(
@@ -504,7 +493,7 @@ fn the_alternate_screen_with_alt_scroll_becomes_arrow_keys() {
         .expect("a wheel tick decides");
     assert_eq!(
         up.mouse_action,
-        Some(MouseAction::AltScrollArrows {
+        Some(MouseAction::AlternateScrollArrows {
             pane_id: pane,
             is_scrolling_up: true,
             arrow_count: 3,
@@ -519,7 +508,7 @@ fn the_alternate_screen_with_alt_scroll_becomes_arrow_keys() {
         .expect("a wheel tick decides");
     assert_eq!(
         down.mouse_action,
-        Some(MouseAction::AltScrollArrows {
+        Some(MouseAction::AlternateScrollArrows {
             pane_id: pane,
             is_scrolling_up: false,
             arrow_count: 3,
@@ -528,12 +517,12 @@ fn the_alternate_screen_with_alt_scroll_becomes_arrow_keys() {
 }
 
 #[test]
-fn alt_scroll_off_the_alternate_screen_is_not_arrow_keys() {
+fn alternate_scroll_off_the_alternate_screen_is_not_arrow_keys() {
     // `?1007` only translates the wheel while the alternate screen is up.
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.is_alternate_scroll_enabled = true;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.is_alternate_scroll_enabled = true;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
 
     let decision = build_test_client()
         .handle_mouse_wheel(
@@ -553,12 +542,12 @@ fn alt_scroll_off_the_alternate_screen_is_not_arrow_keys() {
 }
 
 #[test]
-fn a_horizontal_wheel_under_alt_scroll_sends_no_arrows() {
+fn a_horizontal_wheel_under_alternate_scroll_sends_no_arrows() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.is_on_alternate_screen = true;
-    content.is_alternate_scroll_enabled = true;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.is_on_alternate_screen = true;
+    mouse_pane.is_alternate_scroll_enabled = true;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
 
     let decision = build_test_client()
         .handle_mouse_wheel(
@@ -580,7 +569,6 @@ fn the_tick_targets_the_pane_under_the_pointer_not_the_focused_one() {
             build_plain_mouse_pane(other_pane_id),
         ],
         Some(focused_pane_id),
-        PaneKind::Terminal,
     );
 
     let decision = build_test_client()
@@ -629,33 +617,6 @@ fn a_tick_over_chrome_falls_through_to_the_focused_pane_and_hovers_nothing() {
             scroll_line_count: 3,
         })
     );
-}
-
-#[test]
-fn a_tick_over_chrome_with_a_plugin_pane_focused_decides_nothing() {
-    let focused_pane_id = PaneId::new();
-    let frame = build_mouse_frame(
-        &[build_plain_mouse_pane(focused_pane_id)],
-        Some(focused_pane_id),
-        PaneKind::Plugin {
-            plugin_id: PluginId::new(),
-        },
-    );
-
-    let decision = build_test_client()
-        .handle_mouse_wheel(
-            build_mouse_wheel(
-                ScrollDirection::Up,
-                Point {
-                    column: 40,
-                    row: TEST_VIEWPORT_SIZE.row_count - 1,
-                },
-            ),
-            &frame,
-        )
-        .expect("a wheel tick decides");
-
-    assert_eq!(decision.mouse_action, None, "a plugin pane runs no program");
 }
 
 #[test]
@@ -811,11 +772,7 @@ fn every_kind_but_the_wheel_is_left_to_the_session() {
 #[test]
 fn a_tick_over_chrome_with_nothing_focused_decides_nothing() {
     // A tab with no focusable pane leaves a tick over chrome with no target.
-    let frame = build_mouse_frame(
-        &[build_plain_mouse_pane(PaneId::new())],
-        None,
-        PaneKind::Terminal,
-    );
+    let frame = build_mouse_frame(&[build_plain_mouse_pane(PaneId::new())], None);
 
     let decision = build_test_client()
         .handle_mouse_wheel(
@@ -895,7 +852,7 @@ fn a_frame_with_no_room_falls_through_to_the_focused_pane() {
     frame
         .session_snapshot
         .active_tab_snapshot
-        .are_all_panes_suppressed = true;
+        .is_every_pane_suppressed = true;
 
     for screen_point in [
         Point { column: 40, row: 0 },
@@ -1002,8 +959,8 @@ fn build_mouse_motion(position: Point) -> MouseInput {
 
 /// An instant `second_count` seconds after `base`, so two presses never read as
 /// a double click.
-fn advance_time_by_seconds(base: Instant, second_count: u64) -> Instant {
-    base + Duration::from_secs(second_count)
+fn advance_time_by_seconds(start_instant: Instant, second_count: u64) -> Instant {
+    start_instant + Duration::from_secs(second_count)
 }
 
 /// The single `SetSelection` in `actions`, or `None` when it holds none.
@@ -1180,9 +1137,9 @@ fn a_press_names_the_line_the_frame_showed_on_that_row() {
     // the pane's top visible row is, so the press names that line plus the row
     // it landed on — whatever the pane's live view has done since.
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.view_top_row_index = 940;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.view_top_row_index = 940;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let mut viewer = build_test_client();
     let now = Instant::now();
 
@@ -1420,10 +1377,10 @@ fn alt_held_at_the_press_makes_a_block_whatever_the_run_of_clicks_was() {
 #[test]
 fn a_captured_drag_that_leaves_the_pane_still_reaches_it_and_the_release_ends_it() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
     // Button-event tracking reports presses, drags, and releases.
-    content.mouse_tracking = MouseTracking::ButtonMotion;
-    let frame = build_one_pane_mouse_frame(content);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&frame, 0);
     let mut viewer = build_test_client();
     let now = Instant::now();
@@ -1488,14 +1445,13 @@ fn a_bare_move_off_the_focused_panes_content_reaches_no_program() {
     // panes are drawn, the upper one is focused, and the pointer is in the
     // lower one.
     let focused_pane_id = PaneId::new();
-    let mut content = build_plain_mouse_pane(focused_pane_id);
+    let mut mouse_pane = build_plain_mouse_pane(focused_pane_id);
     // Any-event tracking asks for every move, so the position is the only thing
     // keeping this one out.
-    content.mouse_tracking = MouseTracking::AnyMotion;
+    mouse_pane.mouse_tracking = MouseTracking::AnyMotion;
     let frame = build_mouse_frame(
-        &[content, build_plain_mouse_pane(PaneId::new())],
+        &[mouse_pane, build_plain_mouse_pane(PaneId::new())],
         Some(focused_pane_id),
-        PaneKind::Terminal,
     );
     let inside = get_content_cell(&frame, 0);
     let outside = get_content_cell(&frame, 1);
@@ -1527,11 +1483,8 @@ fn mouse_routing_uses_the_region_solve_committed_with_the_frame() {
     let pane = PaneId::new();
     let mut watched = build_plain_mouse_pane(pane);
     watched.mouse_tracking = MouseTracking::AnyMotion;
-    let mut frame = build_mouse_frame(&[watched], Some(pane), PaneKind::Terminal);
-    frame
-        .session_snapshot
-        .active_tab_snapshot
-        .effective_cell_size = Size {
+    let mut frame = build_mouse_frame(&[watched], Some(pane));
+    frame.session_snapshot.active_tab_snapshot.tab_size = Size {
         column_count: 60,
         row_count: 22,
     };
@@ -1551,10 +1504,8 @@ fn mouse_routing_uses_the_region_solve_committed_with_the_frame() {
                 row_count: 20,
             },
         )),
-        pane_kind: PaneKind::Terminal,
         is_visible: true,
         is_suppressed: false,
-        is_dead: false,
     };
     frame.committed_regions = CommittedRegions::from_solved_regions(
         TEST_VIEWPORT_SIZE,
@@ -1690,9 +1641,9 @@ fn a_pane_swapping_to_the_alternate_screen_ends_the_selection_drag() {
 #[test]
 fn a_drag_held_past_the_top_edge_scrolls_the_view_back_into_history() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.view_top_row_index = 100;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.view_top_row_index = 100;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&frame, 0);
     let inner = frame.session_snapshot.active_tab_snapshot.pane_slots[0]
         .content_rect
@@ -1786,7 +1737,6 @@ fn a_border_press_starts_no_resize_when_the_viewer_turned_it_off() {
     let frame = build_mouse_frame(
         &[build_plain_mouse_pane(left), build_plain_mouse_pane(right)],
         Some(left),
-        PaneKind::Terminal,
     );
     // The shared divider between the two bands: the second pane's top edge.
     let divider = Point {
@@ -1881,7 +1831,6 @@ fn the_drag_anchor_only_walks_over_the_cells_the_session_accepted() {
     let frame = build_mouse_frame(
         &[build_plain_mouse_pane(left), build_plain_mouse_pane(right)],
         Some(left),
-        PaneKind::Terminal,
     );
     let divider = Point {
         column: 10,
@@ -1983,7 +1932,6 @@ fn releasing_a_highlight_copies_it_with_the_viewers_own_trim_setting() {
             find_copy_action(&actions).expect("the release is the copy"),
             CopyArgs {
                 pane_id: pane,
-                clipboard_target: CopyTarget::Osc52,
                 should_trim_trailing_whitespace: trim,
             },
             "trim {trim}"
@@ -1992,52 +1940,18 @@ fn releasing_a_highlight_copies_it_with_the_viewers_own_trim_setting() {
 }
 
 #[test]
-fn copy_on_select_off_releases_without_copying() {
-    let pane = PaneId::new();
-    let frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane));
-    let screen_point = get_content_cell(&frame, 0);
-    let mut viewer = build_test_client();
-    viewer.client_config.copy.should_copy_on_select = false;
-    let now = Instant::now();
-
-    viewer.handle_mouse(build_left_mouse_press(screen_point), &frame, now);
-    viewer.handle_mouse(
-        build_left_mouse_drag(Point {
-            column: screen_point.column + 4,
-            ..screen_point
-        }),
-        &frame,
-        advance_time_by_seconds(now, 1),
-    );
-    let actions = viewer.handle_mouse(
-        build_left_mouse_release(Point {
-            column: screen_point.column + 4,
-            ..screen_point
-        }),
-        &frame,
-        advance_time_by_seconds(now, 2),
-    );
-
-    assert_eq!(
-        find_copy_action(&actions),
-        None,
-        "the highlight stands, uncopied"
-    );
-}
-
-#[test]
 fn a_drag_held_past_the_bottom_edge_scrolls_on_the_clock() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.view_top_row_index = 100;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.view_top_row_index = 100;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&frame, 0);
     let inner = frame.session_snapshot.active_tab_snapshot.pane_slots[0]
         .content_rect
         .expect("a visible pane");
     let below = Point {
         column: screen_point.column,
-        row: inner.origin.row + inner.cell_size.row_count + 5,
+        row: inner.origin.row + inner.size.row_count + 5,
     };
     let mut viewer = build_test_client();
     let now = Instant::now();
@@ -2050,7 +1964,7 @@ fn a_drag_held_past_the_bottom_edge_scrolls_on_the_clock() {
     );
     let due = advance_time_by_seconds(now, 1) + Duration::from_millis(15);
     assert_eq!(
-        viewer.next_mouse_wakeup(advance_time_by_seconds(now, 1)),
+        viewer.compute_next_mouse_wakeup(advance_time_by_seconds(now, 1)),
         Some(Duration::from_millis(15)),
         "the pointer past the edge asks the loop to wake"
     );
@@ -2074,7 +1988,7 @@ fn a_drag_held_past_the_bottom_edge_scrolls_on_the_clock() {
     assert_eq!(
         command_args.selection.cursor,
         GridPosition {
-            row_index: 101 + u64::from(inner.cell_size.row_count - 1),
+            row_index: 101 + u64::from(inner.size.row_count - 1),
             column_index: screen_point.column - inner.origin.column,
         },
         "the moving end sits on the last row of the view the scroll revealed"
@@ -2084,16 +1998,16 @@ fn a_drag_held_past_the_bottom_edge_scrolls_on_the_clock() {
 #[test]
 fn a_scroll_that_moved_nothing_disarms_the_timer() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.view_top_row_index = 100;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.view_top_row_index = 100;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&frame, 0);
     let inner = frame.session_snapshot.active_tab_snapshot.pane_slots[0]
         .content_rect
         .expect("a visible pane");
     let below = Point {
         column: screen_point.column,
-        row: inner.origin.row + inner.cell_size.row_count + 5,
+        row: inner.origin.row + inner.size.row_count + 5,
     };
     let mut viewer = build_test_client();
     let now = Instant::now();
@@ -2112,7 +2026,7 @@ fn a_scroll_that_moved_nothing_disarms_the_timer() {
 
     assert_eq!(actions, Vec::new(), "nothing revealed, nothing to extend");
     assert_eq!(
-        viewer.next_mouse_wakeup(due),
+        viewer.compute_next_mouse_wakeup(due),
         None,
         "a firing that moved nothing disarms the timer"
     );
@@ -2148,7 +2062,6 @@ fn a_press_on_an_unfocused_pane_only_focuses_it() {
             build_plain_mouse_pane(other_pane_id),
         ],
         Some(focused_pane_id),
-        PaneKind::Terminal,
     );
     let mut viewer = build_test_client();
 
@@ -2178,7 +2091,6 @@ fn dragging_a_pane_focuses_the_source_and_hides_pointer_chrome() {
             build_plain_mouse_pane(dragged_pane_id),
         ],
         Some(focused_pane_id),
-        PaneKind::Terminal,
     );
     let active_tab_id = frame.client_snapshot.active_tab_id;
     let mut viewer = build_test_client();
@@ -2243,9 +2155,9 @@ fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
 #[test]
 fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.mouse_tracking = MouseTracking::ButtonMotion;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&frame, 0);
     let now = Instant::now();
 
@@ -2274,9 +2186,9 @@ fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
 #[test]
 fn shift_drag_selects_text_from_a_mouse_aware_program() {
     let pane = PaneId::new();
-    let mut content = build_plain_mouse_pane(pane);
-    content.mouse_tracking = MouseTracking::ButtonMotion;
-    let frame = build_one_pane_mouse_frame(content);
+    let mut mouse_pane = build_plain_mouse_pane(pane);
+    mouse_pane.mouse_tracking = MouseTracking::ButtonMotion;
+    let frame = build_one_pane_mouse_frame(mouse_pane);
     let screen_point = get_content_cell(&frame, 0);
     let to = Point {
         column: screen_point.column + 4,
@@ -2331,7 +2243,6 @@ fn ending_the_gestures_drops_all_four_and_leaves_the_pointer_and_the_strip_alone
             build_plain_mouse_pane(resized_pane_id),
         ],
         Some(hovered_pane_id),
-        PaneKind::Terminal,
     );
     let tab = frame.client_snapshot.active_tab_id;
     let screen_point = get_content_cell(&frame, 0);
@@ -2431,7 +2342,6 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
     let mut frame = build_mouse_frame(
         &[build_plain_mouse_pane(left), build_plain_mouse_pane(right)],
         Some(left),
-        PaneKind::Terminal,
     );
     frame.session_snapshot.active_tab_snapshot.gap_cell_count = 2;
     frame.session_snapshot.active_tab_snapshot.pane_slots[0].outer_rect =
@@ -2452,11 +2362,11 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
         );
 
     assert!(
-        border_has_neighbor(&frame, left, Direction::Right),
+        has_border_neighbor(&frame, left, Direction::Right),
         "the right pane starts 2 cells past column 39"
     );
     assert!(
-        border_has_neighbor(&frame, right, Direction::Left),
+        has_border_neighbor(&frame, right, Direction::Left),
         "the left pane ends 2 cells before column 42"
     );
 
@@ -2466,10 +2376,10 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
         .column = 43;
 
     assert!(
-        !border_has_neighbor(&frame, left, Direction::Right),
+        !has_border_neighbor(&frame, left, Direction::Right),
         "a 3-cell distance is not the tab's gap"
     );
-    assert!(!border_has_neighbor(&frame, right, Direction::Left));
+    assert!(!has_border_neighbor(&frame, right, Direction::Left));
 
     frame.session_snapshot.active_tab_snapshot.pane_slots[1]
         .outer_rect
@@ -2477,10 +2387,10 @@ fn a_neighbor_across_the_gap_counts_as_adjacent() {
         .column = 41;
 
     assert!(
-        !border_has_neighbor(&frame, left, Direction::Right),
+        !has_border_neighbor(&frame, left, Direction::Right),
         "a 1-cell distance is not the tab's gap"
     );
-    assert!(!border_has_neighbor(&frame, right, Direction::Left));
+    assert!(!has_border_neighbor(&frame, right, Direction::Left));
 }
 
 #[test]
@@ -2490,7 +2400,6 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
     let mut frame = build_mouse_frame(
         &[build_plain_mouse_pane(top), build_plain_mouse_pane(bottom)],
         Some(top),
-        PaneKind::Terminal,
     );
     frame.session_snapshot.active_tab_snapshot.gap_cell_count = 2;
     frame.session_snapshot.active_tab_snapshot.pane_slots[0].outer_rect =
@@ -2511,11 +2420,11 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
         );
 
     assert!(
-        border_has_neighbor(&frame, top, Direction::Down),
+        has_border_neighbor(&frame, top, Direction::Down),
         "the bottom pane starts 2 cells past row 19"
     );
     assert!(
-        border_has_neighbor(&frame, bottom, Direction::Up),
+        has_border_neighbor(&frame, bottom, Direction::Up),
         "the top pane ends 2 cells before row 22"
     );
 
@@ -2525,10 +2434,10 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
         .row = 23;
 
     assert!(
-        !border_has_neighbor(&frame, top, Direction::Down),
+        !has_border_neighbor(&frame, top, Direction::Down),
         "a 3-cell distance is not the tab's gap"
     );
-    assert!(!border_has_neighbor(&frame, bottom, Direction::Up));
+    assert!(!has_border_neighbor(&frame, bottom, Direction::Up));
 
     frame.session_snapshot.active_tab_snapshot.pane_slots[1]
         .outer_rect
@@ -2536,10 +2445,10 @@ fn a_neighbor_below_the_gap_counts_as_adjacent() {
         .row = 21;
 
     assert!(
-        !border_has_neighbor(&frame, top, Direction::Down),
+        !has_border_neighbor(&frame, top, Direction::Down),
         "a 1-cell distance is not the tab's gap"
     );
-    assert!(!border_has_neighbor(&frame, bottom, Direction::Up));
+    assert!(!has_border_neighbor(&frame, bottom, Direction::Up));
 }
 
 #[test]
@@ -2555,7 +2464,6 @@ fn ending_the_selection_leaves_the_other_three_gestures_alone() {
             build_plain_mouse_pane(captured_pane_id),
         ],
         Some(selection_pane_id),
-        PaneKind::Terminal,
     );
     let screen_point = get_content_cell(&frame, 0);
     let divider = Point {
@@ -2671,7 +2579,7 @@ fn the_wheel_decision_answers_nothing_for_an_event_that_is_not_a_wheel_tick() {
 fn a_viewer_with_no_selection_drag_asks_the_loop_for_no_wakeup() {
     let viewer = build_test_client();
 
-    assert_eq!(viewer.next_mouse_wakeup(Instant::now()), None);
+    assert_eq!(viewer.compute_next_mouse_wakeup(Instant::now()), None);
 }
 
 #[test]
@@ -2691,7 +2599,7 @@ fn a_scroll_step_already_due_asks_the_loop_to_wake_at_once() {
     viewer.handle_mouse(build_left_mouse_drag(above), &frame, now);
 
     assert_eq!(
-        viewer.next_mouse_wakeup(now + Duration::from_secs(1)),
+        viewer.compute_next_mouse_wakeup(now + Duration::from_secs(1)),
         Some(Duration::ZERO),
         "a step already behind the clock asks for no further wait"
     );
@@ -2707,7 +2615,6 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
             build_plain_mouse_pane(target_pane_id),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let active_tab_id = frame.client_snapshot.active_tab_id;
     let placement_snapshot = build_mouse_placement_snapshot(
@@ -2738,7 +2645,7 @@ fn plain_drag_swaps_and_shift_drag_inserts_at_the_same_pane() {
         .expect("the source pane has content");
     let source_point = Point {
         column: source_content_rect.origin.column + 1,
-        row: source_content_rect.origin.row + source_content_rect.cell_size.row_count - 1,
+        row: source_content_rect.origin.row + source_content_rect.size.row_count - 1,
     };
     let target_point = get_content_cell(&frame, 1);
     let target_outer_rect = frame.session_snapshot.active_tab_snapshot.pane_slots[1].outer_rect;
@@ -2832,7 +2739,6 @@ fn placement_target_uses_fixed_base_geometry_while_the_preview_moves_panes() {
             build_plain_mouse_pane(target_pane_id),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let active_tab_id = frame.client_snapshot.active_tab_id;
     let placement_snapshot = build_mouse_placement_snapshot(
@@ -2909,7 +2815,6 @@ fn cross_tab_mouse_target_uses_the_destination_pane_under_the_pointer() {
             build_plain_mouse_pane(PaneId::new()),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let source_tab_id = frame.client_snapshot.active_tab_id;
     let destination_tab_id = TabId::new();
@@ -2953,7 +2858,6 @@ fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
             build_plain_mouse_pane(collapsed_stack_pane_id),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let active_tab_id = frame.client_snapshot.active_tab_id;
     let stack_header_rect = Rect::from_origin_and_size(
@@ -3073,7 +2977,6 @@ fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_th
             build_plain_mouse_pane(collapsed_stack_pane_id),
         ],
         Some(plain_pane_id),
-        PaneKind::Terminal,
     );
     let active_tab_id = frame.client_snapshot.active_tab_id;
     frame.session_snapshot.active_tab_snapshot.stack_headers = vec![StackHeader {
@@ -3156,7 +3059,6 @@ fn a_pane_press_on_a_previewed_tab_picks_that_pane_without_focusing_it() {
             build_plain_mouse_pane(previewed_pane_id),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let previewed_tab_id = frame.client_snapshot.active_tab_id;
     let mut viewer = build_viewer_previewing_frame_tab(&frame, TabId::new(), source_pane_id, None);
@@ -3193,7 +3095,6 @@ fn a_press_on_the_source_pane_in_a_previewed_tab_keeps_its_tab_and_target() {
             build_plain_mouse_pane(PaneId::new()),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let placement_target = PanePlacementTarget::Split {
         destination_tab_id: frame.client_snapshot.active_tab_id,
@@ -3251,19 +3152,13 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
             build_plain_mouse_pane(remaining_pane_id),
         ],
         Some(source_pane_id),
-        PaneKind::Terminal,
     );
     let active_tab_id = frame.client_snapshot.active_tab_id;
     let pane_sizing = PaneSizing {
         gap_cell_count: 1,
         ..PaneSizing::default()
     };
-    let tab_rect = Rect::from_size_at_origin(
-        frame
-            .session_snapshot
-            .active_tab_snapshot
-            .effective_cell_size,
-    );
+    let tab_rect = Rect::from_size_at_origin(frame.session_snapshot.active_tab_snapshot.tab_size);
     let layout_solution =
         solve_layout_with_mode(&layout_tree, LayoutMode::Tiled, tab_rect, pane_sizing);
     for pane_slot in &mut frame.session_snapshot.active_tab_snapshot.pane_slots {
@@ -3280,8 +3175,8 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
                 row: pane_rect.origin.row.saturating_add(1),
             },
             Size {
-                column_count: pane_rect.cell_size.column_count.saturating_sub(2),
-                row_count: pane_rect.cell_size.row_count.saturating_sub(2),
+                column_count: pane_rect.size.column_count.saturating_sub(2),
+                row_count: pane_rect.size.row_count.saturating_sub(2),
             },
         ));
     }
@@ -3298,7 +3193,7 @@ fn shift_drag_into_a_group_gap_selects_the_group_anchor() {
         column: group_left_rect
             .origin
             .column
-            .saturating_add(group_left_rect.cell_size.column_count),
+            .saturating_add(group_left_rect.size.column_count),
         row: group_left_rect.origin.row.saturating_add(1),
     };
     let mut viewer = build_test_client();

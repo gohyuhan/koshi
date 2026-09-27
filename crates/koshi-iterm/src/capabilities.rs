@@ -10,16 +10,16 @@ pub const ITERM_CAPABILITIES_QUERY: &[u8] = b"\x1b]1337;Capabilities\x1b\\";
 /// for integer features, digits. The parser stops at the first non-alphanumeric
 /// byte, as required by the feature-reporting specification. Thus `F` is true,
 /// `Foo` is false, and `F;unknown` is true.
-pub fn iterm_feature_string_supports_file(feature_string: &[u8]) -> bool {
-    iterm_feature_string_supports(feature_string, b"F")
+pub fn supports_iterm_file_feature(feature_string: &[u8]) -> bool {
+    supports_iterm_feature(feature_string, b"F")
 }
 
 /// Return whether an iTerm2 feature string advertises the `SIXEL` feature.
-pub fn iterm_feature_string_supports_sixel(feature_string: &[u8]) -> bool {
-    iterm_feature_string_supports(feature_string, b"Sx")
+pub fn supports_iterm_sixel_feature(feature_string: &[u8]) -> bool {
+    supports_iterm_feature(feature_string, b"Sx")
 }
 
-fn iterm_feature_string_supports(feature_string: &[u8], requested_feature: &[u8]) -> bool {
+fn supports_iterm_feature(feature_string: &[u8], requested_feature: &[u8]) -> bool {
     let feature_prefix = feature_string
         .iter()
         .position(|feature_byte| !feature_byte.is_ascii_alphanumeric())

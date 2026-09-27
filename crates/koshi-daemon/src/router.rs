@@ -180,9 +180,9 @@ struct AdmittedRemoteConnection {
 
 /// How many remote connections this machine holds admitted at once.
 ///
-/// Each one keeps a socket handle in [`RemoteState::admitted_remote_connections`] and a thread in the
-/// listener. A connection arriving over this count is refused in the sentence
-/// every refusal carries, and nothing is registered for it.
+/// Each one keeps a socket handle in [`RemoteState::admitted_remote_connections`] and a thread in
+/// the listener. A connection arriving over this count is refused in the sentence every refusal
+/// carries, and nothing is registered for it.
 pub(crate) const MAX_LIVE_REMOTE_CONNECTION_COUNT: usize = 128;
 
 /// What the router holds for remote clients: where the listener binds, whether
@@ -196,7 +196,7 @@ struct RemoteState {
     /// operator's yes, or `None` when this machine has none.
     data_directory: Option<PathBuf>,
     /// Whether the listener is open.
-    listening: bool,
+    is_listening: bool,
     /// The remote connections this machine has admitted, whether they have
     /// attached to a session or not. Never longer than [`MAX_LIVE_REMOTE_CONNECTION_COUNT`].
     admitted_remote_connections: Vec<AdmittedRemoteConnection>,
@@ -207,12 +207,12 @@ struct RemoteState {
 }
 
 impl RemoteState {
-    /// End every admitted connection a secret in `hashes` opened, and drop it
+    /// End every admitted connection a secret in `token_hashes` opened, and drop it
     /// from the list.
     ///
     /// Each connection's socket is shut down in both directions, ending the
     /// thread reading it and its two bridge threads when it has attached. A
-    /// a new attach on a dropped record is refused.
+    /// new attach on a dropped record is refused.
     ///
     /// Called on a revoke and on a grant that replaces a standing one. An
     /// expiry calls nothing.
@@ -243,7 +243,7 @@ enum RouterExit {
 ///
 /// Takes the advisory lock first: another router already holding it means
 /// this call returns `Ok(())` having bound nothing, and the caller connects
-/// to that router instead. `wait_for_lock` waits up to `LOCK_HANDOVER_TIMEOUT_DURATION`
+/// to that router instead. `should_wait_for_lock` waits up to `LOCK_HANDOVER_TIMEOUT_DURATION`
 /// for that router to release it, and yields the same way once the wait runs
 /// out. With the lock held, the socket is bound, the endpoint file is written,
 /// the session list is rebuilt from what is already running, and the
@@ -255,7 +255,7 @@ enum RouterExit {
 /// the router holds untouched.
 pub fn run_router(
     runtime_directory: &Path,
-    wait_for_lock: bool,
+    should_wait_for_lock: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     koshi_paths::ensure_private_directory(runtime_directory)?;
 
@@ -274,7 +274,7 @@ pub fn run_router(
         .write(true)
         .truncate(false)
         .open(resolve_router_lock_path(runtime_directory))?;
-    if !take_router_lock(&lock_file, wait_for_lock)? {
+    if !take_router_lock(&lock_file, should_wait_for_lock)? {
         return Ok(());
     }
 
@@ -304,12 +304,12 @@ pub fn run_router(
     );
 
     let (router_events_sender, router_events_receiver) = mpsc::channel();
-    let shutting_down = Arc::new(AtomicBool::new(false));
+    let is_shutting_down = Arc::new(AtomicBool::new(false));
     let accept_thread = match start_router_accept_thread(
         listener,
         router_connection_token,
         router_events_sender.clone(),
-        &shutting_down,
+        &is_shutting_down,
     ) {
         Ok(handle) => handle,
         Err(accept_thread_error) => {
@@ -326,7 +326,7 @@ pub fn run_router(
         )
         .remote_listen,
         data_directory,
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -373,7 +373,7 @@ pub fn run_router(
         }
     }
 
-    shutting_down.store(true, Ordering::SeqCst);
+    is_shutting_down.store(true, Ordering::SeqCst);
     // The accept loop sits blocked in `accept`; a bare connection wakes it so
     // it observes the flag. The connection is held open across the join,
     // since on Windows a caller that drops before `accept` runs can leave
@@ -396,17 +396,17 @@ pub fn run_router(
 /// Take the router lock. `true` means this process holds it, and `false` that
 /// another router does.
 ///
-/// Without `wait_for_lock` one attempt decides it. With `wait_for_lock` the
+/// Without `should_wait_for_lock` one attempt decides it. With `should_wait_for_lock` the
 /// attempt is repeated every [`LOCK_HANDOVER_POLL_INTERVAL_DURATION`] for up to
 /// [`LOCK_HANDOVER_TIMEOUT_DURATION`], and a wait that runs out reads as another router
 /// holding it.
-fn take_router_lock(lock_file: &File, wait_for_lock: bool) -> std::io::Result<bool> {
+fn take_router_lock(lock_file: &File, should_wait_for_lock: bool) -> std::io::Result<bool> {
     let deadline = Instant::now() + LOCK_HANDOVER_TIMEOUT_DURATION;
     loop {
         match FileExt::try_lock(lock_file) {
             Ok(()) => return Ok(true),
             Err(TryLockError::WouldBlock) => {
-                if !wait_for_lock || Instant::now() >= deadline {
+                if !should_wait_for_lock || Instant::now() >= deadline {
                     return Ok(false);
                 }
                 std::thread::sleep(LOCK_HANDOVER_POLL_INTERVAL_DURATION);
@@ -468,7 +468,7 @@ fn open_remote_listener(
         }
     };
     bound_listener.start_serving(router_events_sender.clone());
-    remote_state.listening = true;
+    remote_state.is_listening = true;
 }
 
 /// This machine's certificate and its fingerprint, generating one when there is
@@ -507,7 +507,7 @@ fn load_or_create_certificate(data_directory: &Path) -> Result<(CertFile, String
     Ok((certificate_file, certificate_fingerprint))
 }
 
-/// Replace this process's running image with the binary at `exe`, serving the
+/// Replace this process's running image with the binary at `executable_path`, serving the
 /// same runtime directory. The call returns only when the exec failed, and
 /// hands back that error, on the terms
 /// [`exec_and_keep_ignoring_sigpipe`](crate::process::exec_and_keep_ignoring_sigpipe)
@@ -527,7 +527,7 @@ fn restart_by_exec(executable_path: &Path, runtime_directory: &Path) -> std::io:
     )
 }
 
-/// Start the binary at `exe` as a new router over the same runtime directory,
+/// Start the binary at `executable_path` as a new router over the same runtime directory,
 /// waiting for the lock this router still holds.
 ///
 /// The new router is detached with a process group of its own and no console,
@@ -551,9 +551,9 @@ fn start_router_accept_thread(
     listener: Listener,
     router_connection_token: ConnectionToken,
     router_events_sender: Sender<RouterEvent>,
-    shutting_down: &Arc<AtomicBool>,
+    is_shutting_down: &Arc<AtomicBool>,
 ) -> std::io::Result<JoinHandle<()>> {
-    let shutdown_flag = Arc::clone(shutting_down);
+    let shutdown_flag = Arc::clone(is_shutting_down);
     std::thread::Builder::new()
         .name("koshi-router-accept".to_string())
         .spawn(move || {
@@ -575,11 +575,11 @@ fn run_router_accept_loop(
     listener: &Listener,
     router_connection_token: &ConnectionToken,
     router_events_sender: &Sender<RouterEvent>,
-    shutting_down: &AtomicBool,
+    is_shutting_down: &AtomicBool,
 ) {
     transport::accept_until_shutdown(
         listener,
-        shutting_down,
+        is_shutting_down,
         ACCEPT_RETRY_DELAY_DURATION,
         |connection| {
             // The OS reports which user opened the connection, so a peer cannot
@@ -598,7 +598,7 @@ fn run_router_accept_loop(
 
 /// Serve one router connection until its peer hangs up or a fault closes it.
 ///
-/// [`plane::next_request`] makes every decision that is the same on every
+/// [`plane::read_next_request`] makes every decision that is the same on every
 /// koshi protocol — the framing faults, a request kind this build does not
 /// have, and the Hello. What is left crosses to the dispatcher and comes back
 /// as its answer.
@@ -618,11 +618,11 @@ fn serve_router_connection(
     process::block_sigpipe_on_this_thread();
     let mut gate = RouterHandshake::from_connection_token(router_connection_token);
     loop {
-        let (request_id, request_kind) = match plane::next_request::<ControlPlane>(
+        let (request_id, request_kind) = match plane::read_next_request::<ControlPlane>(
             &mut connection,
             &mut gate,
             BUILD_VERSION,
-            &plane::is_always_admitted,
+            &|| true,
         ) {
             RequestDisposition::Answered => continue,
             RequestDisposition::Stop => return,
@@ -677,7 +677,7 @@ fn ask_dispatcher(
 /// and the loop goes on, and a window that passes ends the loop with
 /// [`RouterExit::Idle`]. A delivered `Restarting` reply ends it with
 /// [`RouterExit::Restart`] instead, so the caller restarts this router into
-/// the binary at `exe`.
+/// the binary at `executable_path`.
 ///
 /// `router_events_sender` is the loop's own sender, handed to each session's reaper
 /// thread so a child's exit reaches here. `token_store` is the remote access
@@ -888,9 +888,9 @@ fn admit_remote_token(
     })
 }
 
-/// Whether this router started the session `entry` describes.
+/// Whether this router started the session `session_entry` describes.
 ///
-/// A session another local user started carries `pid` `0`; a session this
+/// A session another local user started carries `process_id` `0`; a session this
 /// router started carries the process id of its session server, which is never
 /// `0`.
 ///
@@ -935,11 +935,11 @@ fn list_remote_session_rows(
 /// connection numbered `remote_connection_id` still stands, its scope covers that session, and
 /// this router started it.
 ///
-/// Checks in this order, reading no caller-supplied name until the last step:
-/// the connection numbered `remote_connection_id` is still registered, `session_selector` names a session
-/// in the router's own in-memory list, `scope` covers that session, and
-/// [`is_session_started_by_this_router`] holds for it. No socket is opened, nothing is
-/// waited for, and no file is touched.
+/// Checks in this order, reading no caller-supplied name until the last step: the connection
+/// numbered `remote_connection_id` is still registered, `session_selector` names a session in the
+/// router's own in-memory list, `scope` covers that session, and
+/// [`is_session_started_by_this_router`] holds for it. No socket is opened, nothing is waited for,
+/// and no file is touched.
 ///
 /// `None` for all four failures: a connection a revoke dropped, a session selector
 /// naming no session, a session the scope does not cover, and a session another
@@ -978,15 +978,15 @@ fn locate_remote_session(
 /// presents once it has one, and how many connections from another machine
 /// this router holds admitted.
 ///
-/// `enabled` and `listening` are separate answers: an operator who said yes on
-/// a machine whose address something else holds reads `enabled: true` and
-/// `listening: false`.
+/// `is_remote_access_enabled` and `is_listening` are separate answers: an
+/// operator who said yes on a machine whose address something else holds reads
+/// `is_remote_access_enabled: true` and `is_listening: false`.
 fn build_remote_status_result(remote_state: &RemoteState) -> RouterResult {
     let data_directory = remote_state.data_directory.as_deref();
     RouterResult::RemoteStatus {
         remote_listen_address: remote_state.remote_listen_address.clone(),
         is_remote_access_enabled: data_directory.is_some_and(is_remote_enabled),
-        is_listening: remote_state.listening,
+        is_listening: remote_state.is_listening,
         certificate_fingerprint: data_directory
             .and_then(|data_directory| {
                 CertFile::load_from_path(&CertFile::resolve_certificate_file_path(data_directory))
@@ -1030,7 +1030,7 @@ fn enable_remote_access(
             Err(certificate_error) => return build_refused_result(certificate_error.to_string()),
         };
 
-    let bound_listener = if remote_state.listening {
+    let bound_listener = if remote_state.is_listening {
         None
     } else {
         match remote_listener::bind_remote_listener(
@@ -1060,7 +1060,7 @@ fn enable_remote_access(
 
     if let Some(bound_listener) = bound_listener {
         bound_listener.start_serving(router_events_sender.clone());
-        remote_state.listening = true;
+        remote_state.is_listening = true;
     }
     RouterResult::RemoteEnabled {
         remote_listen_address,
@@ -1145,7 +1145,7 @@ fn grant_token(
     remote_state.close_connections_for_token_hashes(&replaced_token_hashes);
     RouterResult::Granted {
         connection_token,
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
     }
 }
 
@@ -1196,7 +1196,7 @@ fn list_token_entries(token_store: Option<&Path>, scope: Option<&TokenScope>) ->
     }
 }
 
-/// Answer a restart request by checking the binary at `exe`. A binary that
+/// Answer a restart request by checking the binary at `executable_path`. A binary that
 /// cannot be read is refused; on Unix, one with no execute permission is
 /// refused too. Nothing is torn down either way.
 fn check_restart_binary(executable_path: &Path) -> RouterResult {
@@ -1350,7 +1350,7 @@ fn lookup_session_attachment(
 /// [`CliError::IpcUnavailable`] for a settled protocol version outside this
 /// build's range, a refusal, or an endpoint file this build cannot read — comes
 /// from a session that is still bound and serving.
-fn describes_a_session_that_is_gone(cli_error: &CliError) -> bool {
+fn is_session_gone_error(cli_error: &CliError) -> bool {
     matches!(cli_error, CliError::SessionNotFound { .. })
 }
 
@@ -1369,7 +1369,7 @@ fn list_session_overviews(
     for session_id in registry.keys().copied() {
         match ipc_client::fetch_session_overview(runtime_directory, session_id) {
             Ok(overview) => session_discoveries.push(overview.session),
-            Err(cli_error) if describes_a_session_that_is_gone(&cli_error) => {
+            Err(cli_error) if is_session_gone_error(&cli_error) => {
                 gone_session_ids.push(session_id)
             }
             Err(_) => {}
@@ -1431,7 +1431,7 @@ fn rebuild_session_registry(
                 );
             }
             (Ok(_), Err(session_overview_error))
-                if !describes_a_session_that_is_gone(&session_overview_error) => {}
+                if !is_session_gone_error(&session_overview_error) => {}
             _ => remove_session_from_registry(runtime_directory, &mut registry, session_id),
         }
     }
@@ -1459,7 +1459,7 @@ fn rebuild_session_registry(
     registry
 }
 
-/// True when a session in the list already carries `candidate` as its name.
+/// True when a session in the list already carries `candidate_session_name` as its name.
 fn is_session_name_taken(registry: &SessionRegistry, candidate_session_name: &str) -> bool {
     registry
         .values()

@@ -5,6 +5,17 @@ use crate::engine::TerminalEngine;
 use crate::graphics::ImageDisplay;
 use koshi_core::process::PtySize;
 
+/// The column count, row count and raster [`prepare_image_with_raster_plan`]
+/// gives for `image_record`.
+fn prepare_image_raster(
+    image_record: &ImageRecord,
+    pixel_cell_size: Option<PixelCellSize>,
+    grid_dimensions: (u16, u16),
+) -> Result<(u32, u32, Option<Arc<DecodedImage>>), ImagePlacementError> {
+    let prepared = prepare_image_with_raster_plan(image_record, pixel_cell_size, grid_dimensions)?;
+    Ok((prepared.column_count, prepared.row_count, prepared.raster))
+}
+
 fn build_terminal_engine() -> TerminalEngine {
     let mut engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 8,
@@ -12,6 +23,54 @@ fn build_terminal_engine() -> TerminalEngine {
     });
     engine.set_cell_size(PixelCellSize::from_pixel_dimensions(2, 3).expect("nonzero cell"));
     engine
+}
+
+#[test]
+fn a_cropped_source_scaled_to_the_image_size_rebuilds_the_cropped_raster() {
+    let mut engine = build_terminal_engine();
+    // A 4x6 image whose top-left 2x3 block is red and the rest blue. The
+    // placement crops the red block and scales it to two 2x3 columns, which
+    // gives a 4x6 raster: the image's own size, drawn all red.
+    assert_eq!(
+        engine.process_pty_output(
+            b"\x1b_Ga=T,f=32,s=4,v=6,x=0,y=0,w=2,h=3,c=2,q=2;/wAA//8AAP8AAP//AAD///8AAP//AAD/AAD//wAA////AAD//wAA/wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//\x1b\\"
+        ),
+        b""
+    );
+    let placement = &engine.get_terminal_state().list_image_placements()[0];
+    let red_raster = Some(Arc::new(DecodedImage {
+        pixel_width: 4,
+        pixel_height: 6,
+        rgba_bytes: [255, 0, 0, 255].repeat(24),
+    }));
+    assert_eq!(placement.raster, red_raster);
+    assert_eq!(
+        rebuild_raster_image(&placement.image_record, &placement.plan),
+        Ok(red_raster)
+    );
+}
+
+#[test]
+fn a_cropped_source_scaled_to_the_image_size_keeps_its_raster_across_state_restore() {
+    let mut engine = build_terminal_engine();
+    assert_eq!(
+        engine.process_pty_output(
+            b"\x1b_Ga=T,f=32,s=4,v=6,x=0,y=0,w=2,h=3,c=2,q=2;/wAA//8AAP8AAP//AAD///8AAP//AAD/AAD//wAA////AAD//wAA/wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//\x1b\\"
+        ),
+        b""
+    );
+    let serialized_terminal_state =
+        serde_json::to_value(engine.get_terminal_state()).expect("state serializes");
+    let restored_terminal_state: TerminalState =
+        serde_json::from_value(serialized_terminal_state).expect("state restores");
+    assert_eq!(
+        restored_terminal_state.list_image_placements()[0].raster,
+        Some(Arc::new(DecodedImage {
+            pixel_width: 4,
+            pixel_height: 6,
+            rgba_bytes: [255, 0, 0, 255].repeat(24),
+        }))
+    );
 }
 
 #[test]

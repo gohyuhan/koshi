@@ -34,7 +34,7 @@ impl TerminalState {
     /// Writes `self.alternate` directly, whichever screen is active. Called by
     /// the `?1049 h` entry and the `?1047 l`/`?1049 l` clearing exits.
     pub(super) fn reset_alternate_buffer(&mut self) {
-        let fill = self.active_render().style.get_background_fill_style();
+        let fill = self.get_active_render().style.get_background_fill_style();
         self.clear_alternate_image_placements();
         let alternate = Arc::make_mut(&mut self.alternate);
         let (row_count, column_count) = alternate.get_grid_dimensions();
@@ -48,8 +48,8 @@ impl TerminalState {
         self.alternate_cursor.row = 0;
         self.alternate_cursor.column = 0;
         self.alternate_cursor.is_visible = true;
-        self.alternate_cursor.pending_wrap = false;
-        self.alternate_cursor.origin = false;
+        self.alternate_cursor.is_wrap_pending = false;
+        self.alternate_cursor.is_origin_mode_enabled = false;
         self.alternate_cursor.saved = None;
     }
 
@@ -60,8 +60,8 @@ impl TerminalState {
         self.primary_cursor.saved = Some(SavedCursor {
             row: self.primary_cursor.row,
             column: self.primary_cursor.column,
-            pending_wrap: self.primary_cursor.pending_wrap,
-            origin: self.primary_cursor.origin,
+            is_wrap_pending: self.primary_cursor.is_wrap_pending,
+            is_origin_mode_enabled: self.primary_cursor.is_origin_mode_enabled,
             render: self.primary_render,
         });
     }

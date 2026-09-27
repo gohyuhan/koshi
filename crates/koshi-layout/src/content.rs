@@ -12,7 +12,7 @@ use koshi_core::ids::PaneId;
 
 use crate::solver::{is_content_visible, LayoutSolve};
 
-/// The content rect for every pane in `solve`, in solve order.
+/// The content rect for every pane in `solved_layout`, in solve order.
 ///
 /// Each entry is `(pane, Some(content_rect))` for a pane that shows content,
 /// or `(pane, None)` for one that does not; the caller keeps that pane's PTY

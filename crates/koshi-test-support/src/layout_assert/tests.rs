@@ -149,11 +149,11 @@ fn undersized_pane_fails_min_size() {
 }
 
 #[test]
-fn live_pane_refs_pass_when_all_leaf_panes_are_live() {
+fn live_pane_references_pass_when_all_leaf_panes_are_live() {
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let live_pane_ids = HashSet::from([first_pane_id, second_pane_id]);
-    check_live_pane_refs(&[first_pane_id, second_pane_id], &live_pane_ids).unwrap();
+    check_live_pane_references(&[first_pane_id, second_pane_id], &live_pane_ids).unwrap();
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn dead_pane_ref_is_detected() {
     let live_pane = PaneId::new();
     let dead_pane = PaneId::new();
     let live = HashSet::from([live_pane]);
-    let assertion_error = check_live_pane_refs(&[live_pane, dead_pane], &live).unwrap_err();
+    let assertion_error = check_live_pane_references(&[live_pane, dead_pane], &live).unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::DeadPaneReference { pane_id: dead_pane }
@@ -268,7 +268,7 @@ fn suppressed_panes_are_exempt() {
     let live = build_cell_rect(0, 0, 80, 24);
     let panes = vec![
         (PaneId::new(), live),
-        (PaneId::new(), Rect::empty_at_origin()),
+        (PaneId::new(), Rect::build_empty_at_origin()),
     ];
     // Empty pane adds no area, no overlap, no outside, and skips the floor.
     check_all_space_occupied(&panes, build_tab_rect()).unwrap();
@@ -453,14 +453,14 @@ fn a_pane_outside_the_tab_with_the_tab_area_passes_occupancy_and_fails_no_outsid
 
 #[test]
 fn an_empty_tab_with_no_panes_passes_occupancy() {
-    check_all_space_occupied(&[], Rect::empty_at_origin()).unwrap();
+    check_all_space_occupied(&[], Rect::build_empty_at_origin()).unwrap();
 }
 
 #[test]
 fn a_live_pane_on_an_empty_tab_fails_occupancy_with_zero_tab_area() {
     let panes = vec![(PaneId::new(), build_cell_rect(0, 0, 1, 1))];
     assert_eq!(
-        check_all_space_occupied(&panes, Rect::empty_at_origin()).unwrap_err(),
+        check_all_space_occupied(&panes, Rect::build_empty_at_origin()).unwrap_err(),
         LayoutAssertionError::SpaceNotFullyOccupied {
             tab_cell_area: 0,
             occupied_cell_area: 1,
@@ -532,14 +532,14 @@ fn a_pane_whose_edge_passes_u16_max_is_reported_not_wrapped() {
     // x + cols = 65_536 does not fit in u16. The check computes the edge in
     // u32 and reports the pane as outside; a u16 edge would wrap to column 0.
     let pane = PaneId::new();
-    let max_tab = build_cell_rect(0, 0, u16::MAX, u16::MAX);
+    let maximum_tab_rect = build_cell_rect(0, 0, u16::MAX, u16::MAX);
     let spill = build_cell_rect(u16::MAX - 1, 0, 2, 1);
     assert_eq!(
-        check_no_outside(&[(pane, spill)], max_tab).unwrap_err(),
+        check_no_outside(&[(pane, spill)], maximum_tab_rect).unwrap_err(),
         LayoutAssertionError::OutsideTab {
             pane_id: pane,
             pane_rect: spill,
-            tab_rect: max_tab,
+            tab_rect: maximum_tab_rect,
         }
     );
 }
@@ -585,18 +585,19 @@ fn an_empty_pane_placed_over_a_live_pane_does_not_overlap_it() {
 }
 
 #[test]
-fn live_pane_refs_pass_with_no_leaf_panes() {
-    check_live_pane_refs(&[], &HashSet::new()).unwrap();
-    check_live_pane_refs(&[], &HashSet::from([PaneId::new()])).unwrap();
+fn live_pane_references_pass_with_no_leaf_panes() {
+    check_live_pane_references(&[], &HashSet::new()).unwrap();
+    check_live_pane_references(&[], &HashSet::from([PaneId::new()])).unwrap();
 }
 
 #[test]
-fn live_pane_refs_report_the_first_dead_pane_in_slice_order() {
+fn live_pane_references_report_the_first_dead_pane_in_slice_order() {
     let live = PaneId::new();
     let first_dead = PaneId::new();
     let second_dead = PaneId::new();
     let assertion_error =
-        check_live_pane_refs(&[live, first_dead, second_dead], &HashSet::from([live])).unwrap_err();
+        check_live_pane_references(&[live, first_dead, second_dead], &HashSet::from([live]))
+            .unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::DeadPaneReference {
@@ -608,7 +609,7 @@ fn live_pane_refs_report_the_first_dead_pane_in_slice_order() {
 #[test]
 fn a_leaf_pane_listed_twice_passes_when_it_is_live() {
     let pane = PaneId::new();
-    check_live_pane_refs(&[pane, pane], &HashSet::from([pane])).unwrap();
+    check_live_pane_references(&[pane, pane], &HashSet::from([pane])).unwrap();
 }
 
 #[test]

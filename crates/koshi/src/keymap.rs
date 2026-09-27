@@ -83,7 +83,7 @@ pub fn load_keymap_view() -> KeymapView {
 }
 
 /// Build the view for one already-parsed user layer (`None` = defaults
-/// only). `user_file`/`file_error` pass through to the view. Reads no file:
+/// only). `user_file_path`/`file_error_message` pass through to the view. Reads no file:
 /// this is [`load_keymap_view`] without the file I/O.
 #[must_use]
 pub fn build_keymap_view_from_partial(
@@ -104,8 +104,8 @@ pub fn build_keymap_view_from_partial(
             if let Some(which_key_delay_ms) = partial_config.which_key_delay_ms {
                 config.which_key_delay_ms = which_key_delay_ms;
             }
-            if let Some(max_chord_depth) = partial_config.max_chord_depth {
-                config.max_chord_depth = max_chord_depth;
+            if let Some(maximum_chord_depth) = partial_config.maximum_chord_depth {
+                config.maximum_chord_depth = maximum_chord_depth;
             }
             if let Some(leader) = partial_config.leader {
                 config.leader = leader;
@@ -123,7 +123,7 @@ pub fn build_keymap_view_from_partial(
         &keymap_layers,
         config.leader,
         config.unlock_alternative,
-        config.max_chord_depth,
+        config.maximum_chord_depth,
         &registry,
     );
 
@@ -139,7 +139,7 @@ pub fn build_keymap_view_from_partial(
     let merged_keymap = merge_keymaps(
         &keymap_layers,
         config.unlock_alternative,
-        config.max_chord_depth,
+        config.maximum_chord_depth,
         &registry,
     );
     KeymapView {
@@ -206,7 +206,7 @@ fn parse_error_lines(parse_error: &KeybindingParseError) -> Vec<String> {
     }
 }
 
-/// A parse failure as one string, for the view's `file_error`.
+/// A parse failure as one string, for the view's `file_error_message`.
 fn render_parse_error(parse_error: &KeybindingParseError) -> String {
     parse_error_lines(parse_error).join("; ")
 }

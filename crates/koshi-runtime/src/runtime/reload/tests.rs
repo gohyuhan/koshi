@@ -7,6 +7,7 @@ use super::*;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::layer::{
     PartialColorPalette, PartialKeybindingsConfig, PartialPaneConfig, PartialScrollbackConfig,
     PartialTerminalConfig, PartialThemeConfig,
@@ -35,9 +36,10 @@ fn build_test_server() -> (Server, ClientId) {
 fn build_test_server_without_sessions() -> Server {
     let (event_sender, event_receiver) = mpsc::channel();
     Server::from_runtime_parts(
-        Arc::new(FakePtyBackend::new()),
+        Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+            InboxSink::from_event_sender(event_sender),
+        ))),
         event_receiver,
-        event_sender,
     )
 }
 
@@ -119,7 +121,7 @@ fn app_config_reload_drops_theme_and_keybinding_sections() {
             }),
         }),
         keybindings: Some(PartialKeybindingsConfig {
-            max_chord_depth: Some(0),
+            maximum_chord_depth: Some(0),
             ..PartialKeybindingsConfig::default()
         }),
         ..PartialKoshiConfig::default()

@@ -527,9 +527,9 @@ fn serve_supervisor_request(
             spawn_spec,
             pty_size,
         } => match pty_backend.spawn_pane(pane_id, spawn_spec, pty_size) {
-            // The handle carries no channels: this backend delivers through the
-            // sink, and the pane's own record holds the process id.
-            Ok(_pty_handle) => match pty_backend.get_child_process_id(pane_id) {
+            // The backend delivers through the sink, and the pane's own
+            // record holds the process id.
+            Ok(()) => match pty_backend.get_child_process_id(pane_id) {
                 Some(process_id) => SupervisorResult::Spawned { process_id },
                 None => {
                     build_refused_result(format!("pane {pane_id} opened but reports no process id"))
@@ -599,7 +599,7 @@ fn close_panes_that_ended(link_sink: &LinkSink, pty_backend: &PortablePtyBackend
 }
 
 /// Close one pane: let every send for it go, end its child under `kill_policy`,
-/// then remove_ended_pane it.
+/// then drop it from the ended panes.
 ///
 /// The sends go first. Closing a pane's terminal waits for its reader to carry
 /// that terminal to the end, and a reader parked in a send is not reading.
@@ -665,7 +665,7 @@ pub(crate) fn spawn_pty_supervisor(
     ))
     .arg(PTY_SUPERVISOR_SUBCOMMAND)
     .arg(session_id.to_string())
-    .arg(connection_token.expose())
+    .arg(connection_token.expose_secret())
     .arg(koshi_link::router_client::RUNTIME_DIRECTORY_FLAG)
     .arg(runtime_directory)
     .spawn()

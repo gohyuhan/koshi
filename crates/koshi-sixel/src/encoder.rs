@@ -1,7 +1,6 @@
 //! Bounded RGBA-to-Sixel encoding.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Write};
 use std::sync::Arc;
 
 use koshi_image::{
@@ -16,20 +15,14 @@ mod tests;
 /// The smallest configurable palette limit.
 pub const MIN_PALETTE_COLOR_COUNT: usize = 2;
 
-/// The largest Sixel palette supported by the encoder.
+/// The largest Sixel palette supported by the encoder, and the default limit.
 pub const MAX_PALETTE_COLOR_COUNT: usize = 256;
-
-/// The default maximum number of colors in an encoded palette.
-pub const DEFAULT_PALETTE_COLOR_COUNT: usize = MAX_PALETTE_COLOR_COUNT;
 
 /// The largest chunk returned by the encoder.
 pub const MAX_SIXEL_CHUNK_BYTE_COUNT: usize = 16 * 1024;
 
 /// The largest cumulative Sixel transfer emitted by the encoder.
 pub const MAX_SIXEL_OUTPUT_BYTE_COUNT: usize = MAX_GRAPHICS_TRANSFER_BYTE_COUNT;
-
-/// The largest chunk requested while encoding one Sixel tile.
-pub const MAX_SIXEL_TILE_BYTE_COUNT: usize = MAX_SIXEL_CHUNK_BYTE_COUNT;
 
 const HISTOGRAM_BUCKET_COUNT_PER_CHANNEL: usize = 32;
 const HISTOGRAM_BUCKET_COUNT: usize = HISTOGRAM_BUCKET_COUNT_PER_CHANNEL
@@ -45,7 +38,7 @@ pub struct SixelEncodeOptions {
 
 impl Default for SixelEncodeOptions {
     fn default() -> Self {
-        Self::with_maximum_palette_color_count(DEFAULT_PALETTE_COLOR_COUNT)
+        Self::with_maximum_palette_color_count(MAX_PALETTE_COLOR_COUNT)
     }
 }
 
@@ -121,21 +114,12 @@ pub enum SixelEncodeError {
     /// A caller supplied a zero-sized output chunk.
     #[error("Sixel output chunk size must be greater than zero")]
     ZeroChunkSize,
-    /// The output writer rejected a byte range.
-    #[error("writing Sixel output failed: {0}")]
-    Io(#[source] io::Error),
     /// An internal palette lookup could not find a visible pixel color.
     #[error("Sixel pixel color could not be mapped to the prepared palette")]
     PaletteMapping,
     /// Output generation has failed and this encoder cannot continue.
     #[error("Sixel encoder has failed and cannot continue")]
     EncoderFailed,
-}
-
-impl From<io::Error> for SixelEncodeError {
-    fn from(io_error: io::Error) -> Self {
-        SixelEncodeError::Io(io_error)
-    }
 }
 
 /// A prepared Sixel encoder with bounded incremental output.
@@ -242,41 +226,6 @@ impl SixelEncoder {
         ))
     }
 
-    /// Write all output in chunks of [`MAX_SIXEL_CHUNK_BYTE_COUNT`].
-    ///
-    /// Returns [`SixelEncodeError::Io`] when the writer rejects a chunk.
-    pub fn write_to<Writer: Write>(&mut self, writer: &mut Writer) -> Result<(), SixelEncodeError> {
-        while self.write_next_chunk(writer, MAX_SIXEL_CHUNK_BYTE_COUNT)? {}
-        Ok(())
-    }
-
-    /// Write one output chunk and advance only after `write_all` succeeds.
-    ///
-    /// A `maximum_byte_count` value of zero returns [`SixelEncodeError::ZeroChunkSize`].
-    /// A writer can report an error after writing part of the slice; the
-    /// pending bytes stay unchanged. Abort and discard the open transfer, then
-    /// restart with a new encoder instead of resuming this encoder, which would
-    /// emit an incomplete Sixel string.
-    pub fn write_next_chunk<Writer: Write>(
-        &mut self,
-        writer: &mut Writer,
-        maximum_byte_count: usize,
-    ) -> Result<bool, SixelEncodeError> {
-        let maximum_byte_count = resolve_chunk_byte_count(maximum_byte_count)?;
-        self.prepare_pending_output()?;
-        if self.pending_output_byte_offset == self.pending_output_bytes.len() {
-            return Ok(false);
-        }
-        let output_end_index = self.pending_output_byte_offset
-            + maximum_byte_count
-                .min(self.pending_output_bytes.len() - self.pending_output_byte_offset);
-        writer.write_all(
-            &self.pending_output_bytes[self.pending_output_byte_offset..output_end_index],
-        )?;
-        self.pending_output_byte_offset = output_end_index;
-        Ok(true)
-    }
-
     fn prepare_pending_output(&mut self) -> Result<(), SixelEncodeError> {
         if self.pending_output_byte_offset == self.pending_output_bytes.len() {
             self.pending_output_bytes.clear();
@@ -348,7 +297,7 @@ impl SixelEncoder {
                     self.background,
                     &self.palette,
                 )?;
-                if built_band.has_pixel_data() {
+                if built_band.has_pixel_data {
                     self.has_emitted_sixel = true;
                 } else if !self.has_emitted_sixel {
                     self.has_emitted_sixel = true;
@@ -388,12 +337,6 @@ impl SixelEncoder {
         self.pending_output_bytes.push(output_byte);
         self.generated_byte_count += 1;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inject_generation_failure_for_test(&mut self) {
-        self.is_generation_failed = true;
-        self.generation_error = Some(SixelEncodeError::PaletteMapping);
     }
 }
 
@@ -512,10 +455,6 @@ impl BandState {
             output_token_byte_offset: 0,
             has_pixel_data,
         }
-    }
-
-    fn has_pixel_data(&self) -> bool {
-        self.has_pixel_data
     }
 
     fn take_next_byte(&mut self) -> Option<u8> {

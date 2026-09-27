@@ -67,7 +67,8 @@ fn build_split_node_with_weights(
     LayoutNode::Split(split_node)
 }
 
-/// Verify that the solved panes fill the layout area completely with no gaps, overlaps, or spillage.
+/// Verify that the solved panes fill the layout area completely with no gaps, overlaps, or
+/// spillage.
 fn assert_tiles_exactly(layout_solve: &LayoutSolve, layout_area: Rect) {
     check_exact_tiling(&layout_solve.pane_rects, layout_area).unwrap();
 }
@@ -79,7 +80,7 @@ fn single_pane_fills_the_tab() {
     let layout_result = solve_layout(&LayoutNode::Pane(pane_id), layout_area);
     assert_eq!(layout_result.pane_rects, [(pane_id, layout_area)]);
     assert!(layout_result.suppressed_pane_ids.is_empty());
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
 }
 
 #[test]
@@ -153,7 +154,7 @@ fn three_way_split_sums_to_the_full_width() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [26, 27, 27]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -222,7 +223,7 @@ fn fixed_then_percent_then_flex_distribution() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [10, 50, 40]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -250,7 +251,7 @@ fn flex_weights_share_proportionally() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [60, 30]);
 }
@@ -275,7 +276,7 @@ fn missing_weights_fall_back_to_the_default_share() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [40, 40]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -307,7 +308,7 @@ fn an_out_of_range_percent_caps_at_the_whole_axis() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [39_996, 4]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -340,7 +341,7 @@ fn all_zero_flex_weights_solve_without_panicking() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [4, 76]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -370,7 +371,7 @@ fn resize_deltas_shift_cells_between_siblings() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [45, 35]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -398,7 +399,7 @@ fn all_fixed_underfill_gives_slack_to_the_last_child() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [10, 70]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -426,7 +427,7 @@ fn min_floor_is_honored_when_the_layout_fits() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     // The wide pane holds its declared min of 20; the two default siblings split the
     // remaining 10 down to their border-inclusive floor of 4.
@@ -464,7 +465,7 @@ fn min_primary_acts_as_a_floor() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [15, 5]);
 }
@@ -491,7 +492,7 @@ fn preferred_target_is_honored_when_slack_allows() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [30, 70]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -522,7 +523,7 @@ fn preferred_target_stops_at_the_donors_floor() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     // The donor gives down to its floor of 20; the target settles at 80.
     assert_eq!(column_widths, [80, 20]);
@@ -558,7 +559,7 @@ fn preferred_target_without_flexible_donors_stays_unmet() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [20, 20, 60]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -592,7 +593,7 @@ fn floors_outrank_fixed_sizes_when_no_flexible_donor_remains() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [20, 20]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -622,7 +623,7 @@ fn resize_deltas_clamp_at_zero_and_at_the_full_axis() {
     let grown_column_widths: Vec<u16> = grown
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(grown_column_widths, [76, 4]);
     assert_tiles_exactly(&grown, layout_area);
@@ -646,7 +647,7 @@ fn resize_deltas_clamp_at_zero_and_at_the_full_axis() {
     let shrunk_column_widths: Vec<u16> = shrunk
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(shrunk_column_widths, [4, 76]);
     assert_tiles_exactly(&shrunk, layout_area);
@@ -679,7 +680,7 @@ fn underfilled_percents_leave_the_remainder_to_flex() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [30, 30, 40]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -798,13 +799,13 @@ fn shrink_suppresses_trailing_panes_deterministically() {
         stable_layout_solution.suppressed_pane_ids,
         [suppressed_pane_id]
     );
-    assert!(!stable_layout_solution.is_all_panes_suppressed);
+    assert!(!stable_layout_solution.is_every_pane_suppressed);
     assert_eq!(
         stable_layout_solution.pane_rects,
         [
             (first_pane_id, build_cell_rect(0, 0, 4, 24)),
             (second_pane_id, build_cell_rect(4, 0, 5, 24)),
-            (suppressed_pane_id, Rect::empty_at_origin()),
+            (suppressed_pane_id, Rect::build_empty_at_origin()),
         ]
     );
     assert_tiles_exactly(&stable_layout_solution, layout_area);
@@ -854,7 +855,7 @@ fn a_larger_min_suppresses_a_pane_that_fits_at_the_default_floor() {
         raised_layout_solution.pane_rects,
         [
             (first_pane_id, build_cell_rect(0, 0, 12, 24)),
-            (second_pane_id, Rect::empty_at_origin())
+            (second_pane_id, Rect::build_empty_at_origin())
         ]
     );
 }
@@ -929,7 +930,7 @@ fn a_tab_grown_shrunk_to_nothing_then_regrown_returns_the_exact_first_solve() {
 
     // Shrink to a single cell: nothing fits, everything suppresses.
     let tiny_layout_solution = solve_layout(&layout_tree, build_cell_rect(0, 0, 1, 1));
-    assert!(tiny_layout_solution.is_all_panes_suppressed);
+    assert!(tiny_layout_solution.is_every_pane_suppressed);
     assert_eq!(
         tiny_layout_solution.suppressed_pane_ids,
         [left_pane_id, top_pane_id, bottom_pane_id]
@@ -952,12 +953,12 @@ fn all_panes_suppressed_is_flagged_for_the_overlay() {
         layout_result.suppressed_pane_ids,
         [first_pane_id, second_pane_id]
     );
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.pane_rects,
         [
-            (first_pane_id, Rect::empty_at_origin()),
-            (second_pane_id, Rect::empty_at_origin()),
+            (first_pane_id, Rect::build_empty_at_origin()),
+            (second_pane_id, Rect::build_empty_at_origin()),
         ]
     );
 }
@@ -986,13 +987,13 @@ fn cross_axis_too_small_suppresses_only_the_unfittable_subtree() {
         layout_result.suppressed_pane_ids,
         [top_pane_id, bottom_pane_id]
     );
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.pane_rects,
         [
             (left_pane_id, layout_area),
-            (top_pane_id, Rect::empty_at_origin()),
-            (bottom_pane_id, Rect::empty_at_origin())
+            (top_pane_id, Rect::build_empty_at_origin()),
+            (bottom_pane_id, Rect::build_empty_at_origin())
         ]
     );
     assert_tiles_exactly(&layout_result, layout_area);
@@ -1030,7 +1031,7 @@ fn stack_gives_the_active_child_everything_above_the_headers() {
     );
     // Collapsed members occupy a header strip, not suppression.
     assert!(layout_result.suppressed_pane_ids.is_empty());
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.stack_headers,
         [StackHeader {
@@ -1155,11 +1156,11 @@ fn a_stack_too_small_for_its_active_child_suppresses_as_one_unit() {
 
     let layout_result = solve_layout(&layout_tree, layout_area);
     assert_eq!(layout_result.suppressed_pane_ids, pane_ids);
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert!(layout_result.stack_headers.is_empty());
     let expected_pane_rects: Vec<(PaneId, Rect)> = pane_ids
         .iter()
-        .map(|&pane_id| (pane_id, Rect::empty_at_origin()))
+        .map(|&pane_id| (pane_id, Rect::build_empty_at_origin()))
         .collect();
     assert_eq!(layout_result.pane_rects, expected_pane_rects);
 }
@@ -1178,11 +1179,11 @@ fn an_out_of_bounds_active_index_still_suppresses_as_one_unit() {
 
     let layout_result = solve_layout(&layout_tree, layout_area);
     assert_eq!(layout_result.suppressed_pane_ids, pane_ids);
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert!(layout_result.stack_headers.is_empty());
     let expected_pane_rects: Vec<(PaneId, Rect)> = pane_ids
         .iter()
-        .map(|&pane_id| (pane_id, Rect::empty_at_origin()))
+        .map(|&pane_id| (pane_id, Rect::build_empty_at_origin()))
         .collect();
     assert_eq!(layout_result.pane_rects, expected_pane_rects);
 }
@@ -1200,7 +1201,7 @@ fn a_stack_narrower_than_its_members_suppresses_as_one_unit() {
         layout_result.suppressed_pane_ids,
         [first_pane_id, second_pane_id]
     );
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert!(layout_result.stack_headers.is_empty());
 }
 
@@ -1244,15 +1245,11 @@ fn border_inclusive_min_adds_one_cell_per_side() {
         row_count: 1,
     };
     assert_eq!(
-        compute_border_inclusive_minimum(content_minimum_size, true),
+        compute_border_inclusive_minimum(content_minimum_size),
         Size {
             column_count: 4,
             row_count: 3
         }
-    );
-    assert_eq!(
-        compute_border_inclusive_minimum(content_minimum_size, false),
-        content_minimum_size
     );
 }
 
@@ -1271,12 +1268,12 @@ fn a_layout_whose_content_mins_fit_but_borders_do_not_suppresses_trailing() {
 
     let layout_result = solve_layout(&layout_tree, layout_area);
     assert_eq!(layout_result.suppressed_pane_ids, [trailing_pane_id]);
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.pane_rects,
         [
             (leading_pane_id, build_cell_rect(0, 0, 7, 3)),
-            (trailing_pane_id, Rect::empty_at_origin())
+            (trailing_pane_id, Rect::build_empty_at_origin())
         ]
     );
 }
@@ -1298,7 +1295,7 @@ fn every_visible_pane_insets_to_at_least_the_content_floor() {
                 }
                 let content_rect = outer_pane_rect.compute_inner_with_border();
                 assert!(
-                    content_rect.cell_size.column_count >= 2 && content_rect.cell_size.row_count >= 1,
+                    content_rect.size.column_count >= 2 && content_rect.size.row_count >= 1,
                     "visible pane {outer_pane_rect:?} insets to {content_rect:?}, below the content floor",
                 );
             }
@@ -1311,13 +1308,13 @@ fn zero_area_tab_solves_every_pane_to_zero_without_panicking() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     let layout_result = solve_layout(
         &build_equal_split_node(SplitDirection::Horizontal, &[first_pane_id, second_pane_id]),
-        Rect::empty_at_origin(),
+        Rect::build_empty_at_origin(),
     );
     assert_eq!(
         layout_result.pane_rects,
         [
-            (first_pane_id, Rect::empty_at_origin()),
-            (second_pane_id, Rect::empty_at_origin()),
+            (first_pane_id, Rect::build_empty_at_origin()),
+            (second_pane_id, Rect::build_empty_at_origin()),
         ]
     );
 }
@@ -1351,7 +1348,7 @@ fn an_empty_directional_split_solves_to_no_panes_without_panicking() {
     let layout_result = solve_layout(&empty_layout_tree, build_cell_rect(0, 0, 80, 24));
     assert!(layout_result.pane_rects.is_empty());
     assert!(layout_result.suppressed_pane_ids.is_empty());
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
     assert_eq!(
         compute_minimum_size(&empty_layout_tree, build_pane_sizing(0)),
         Size {
@@ -1425,7 +1422,7 @@ fn a_fixed_child_is_raised_to_its_own_border_floor_by_a_flexible_donor() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [4, 16]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -1451,13 +1448,13 @@ fn a_declared_min_overlay_outranks_a_smaller_min_primary() {
     );
     let layout_area = build_cell_rect(0, 0, 30, 24);
 
-    // The overlay's 20 wins over the primary's 10, so the overlaid pane holds 20 and the flexible pane
-    // takes the rest.
+    // The overlay's 20 wins over the primary's 10, so the overlaid pane holds 20 and the flexible
+    // pane takes the rest.
     let layout_result = solve_layout(&layout_tree, layout_area);
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [20, 10]);
 }
@@ -1470,7 +1467,7 @@ fn fits_accepts_a_zero_rect_for_an_empty_split() {
     ));
     assert!(is_layout_within_rect(
         &empty_layout_tree,
-        Rect::empty_at_origin(),
+        Rect::build_empty_at_origin(),
         build_pane_sizing(0)
     ));
 }
@@ -1482,7 +1479,7 @@ fn border_inclusive_min_saturates_at_u16_max() {
         row_count: u16::MAX,
     };
     assert_eq!(
-        compute_border_inclusive_minimum(content_minimum_size, true),
+        compute_border_inclusive_minimum(content_minimum_size),
         Size {
             column_count: u16::MAX,
             row_count: u16::MAX,
@@ -1501,19 +1498,19 @@ fn a_single_pane_needs_three_rows_for_its_border() {
 
     let single_row_layout = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 1));
     assert_eq!(single_row_layout.suppressed_pane_ids, [pane_id]);
-    assert!(single_row_layout.is_all_panes_suppressed);
+    assert!(single_row_layout.is_every_pane_suppressed);
     assert_eq!(
         single_row_layout.pane_rects,
-        [(pane_id, Rect::empty_at_origin())]
+        [(pane_id, Rect::build_empty_at_origin())]
     );
 
     let two_row_layout = solve_layout(&layout_tree, build_cell_rect(0, 0, 80, 2));
     assert_eq!(two_row_layout.suppressed_pane_ids, [pane_id]);
-    assert!(two_row_layout.is_all_panes_suppressed);
+    assert!(two_row_layout.is_every_pane_suppressed);
 
     let three_column_layout = solve_layout(&layout_tree, build_cell_rect(0, 0, 3, 24));
     assert_eq!(three_column_layout.suppressed_pane_ids, [pane_id]);
-    assert!(three_column_layout.is_all_panes_suppressed);
+    assert!(three_column_layout.is_every_pane_suppressed);
 
     // Exactly the floor: four columns by three rows keeps the pane visible.
     let minimum_layout = solve_layout(&layout_tree, build_cell_rect(0, 0, 4, 3));
@@ -1522,7 +1519,7 @@ fn a_single_pane_needs_three_rows_for_its_border() {
         [(pane_id, build_cell_rect(0, 0, 4, 3))]
     );
     assert!(minimum_layout.suppressed_pane_ids.is_empty());
-    assert!(!minimum_layout.is_all_panes_suppressed);
+    assert!(!minimum_layout.is_every_pane_suppressed);
 }
 
 #[test]
@@ -1560,14 +1557,14 @@ fn a_two_by_two_cell_tab_suppresses_every_pane() {
             bottom_right_pane_id,
         ]
     );
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.pane_rects,
         [
-            (top_left_pane_id, Rect::empty_at_origin()),
-            (bottom_left_pane_id, Rect::empty_at_origin()),
-            (top_right_pane_id, Rect::empty_at_origin()),
-            (bottom_right_pane_id, Rect::empty_at_origin()),
+            (top_left_pane_id, Rect::build_empty_at_origin()),
+            (bottom_left_pane_id, Rect::build_empty_at_origin()),
+            (top_right_pane_id, Rect::build_empty_at_origin()),
+            (bottom_right_pane_id, Rect::build_empty_at_origin()),
         ]
     );
 }
@@ -1622,7 +1619,7 @@ fn far_more_panes_than_fit_suppress_every_trailing_one() {
 
     let layout_result = solve_layout(&layout_tree, layout_area);
     assert_eq!(layout_result.suppressed_pane_ids, pane_ids[20..].to_vec());
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
     // The kept twenty each take exactly their four-column floor, back to back.
     for (pane_index, &pane_id) in pane_ids.iter().take(20).enumerate() {
         let placed_pane_rect = layout_result
@@ -1797,7 +1794,7 @@ fn two_full_percent_children_over_the_total_share_donate_at_the_floor() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [96, 4]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -1835,7 +1832,8 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
     ));
     let layout_area = build_cell_rect(0, 0, 80, 24);
 
-    // The active pane is expanded over rows 0..22; the other panes sit on the two header rows below.
+    // The active pane is expanded over rows 0..22; the other panes sit on the two header rows
+    // below.
     let layout_before_activation = solve_layout(&layout_tree, layout_area);
     assert_eq!(
         layout_before_activation.pane_rects,
@@ -1864,12 +1862,7 @@ fn clicking_a_collapsed_members_header_strip_activates_it() {
     let stack_node = layout_tree
         .find_containing_stack_mut(clicked_pane_id)
         .expect("the pane lives in a stack");
-    let stack_focus_change = activate_stack_member(stack_node, clicked_pane_id).unwrap();
-    assert_eq!(
-        stack_focus_change.newly_active_pane_id,
-        second_collapsed_pane_id
-    );
-    assert_eq!(stack_focus_change.deactivated_pane_id, Some(active_pane_id));
+    assert!(activate_stack_member(stack_node, clicked_pane_id));
 
     // The selected pane holds the content region and the other panes sit on header strips.
     let layout_after_activation = solve_layout(&layout_tree, layout_area);
@@ -1944,9 +1937,7 @@ fn targeting_a_collapsed_stack_member_by_name_expands_it() {
     let stack_node = layout_tree
         .find_containing_stack_mut(collapsed_pane_id)
         .expect("the pane lives in a stack");
-    let stack_focus_change = activate_stack_member(stack_node, collapsed_pane_id).unwrap();
-    assert_eq!(stack_focus_change.newly_active_pane_id, collapsed_pane_id);
-    assert_eq!(stack_focus_change.deactivated_pane_id, Some(active_pane_id));
+    assert!(activate_stack_member(stack_node, collapsed_pane_id));
 
     let layout_after_activation = solve_layout(&layout_tree, layout_area);
     assert_eq!(
@@ -1993,7 +1984,7 @@ fn a_preferred_child_above_its_target_hands_the_surplus_to_a_flexible_sibling() 
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [20, 80]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2023,7 +2014,7 @@ fn a_preferred_child_keeps_its_surplus_when_no_flexible_sibling_can_take_it() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [40, 60]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2055,13 +2046,14 @@ fn a_floor_deficit_is_funded_by_the_flexible_sibling_before_the_fixed_one() {
     );
     let layout_area = build_cell_rect(0, 0, 100, 24);
 
-    // The fixed pane takes its 30 first, leaving the minimum and flexible panes 35 each. The minimum pane is 15 short of its
-    // floor of 50; the flexible pane pays all 15 and the fixed pane is untouched.
+    // The fixed pane takes its 30 first, leaving the minimum and flexible panes 35 each. The
+    // minimum pane is 15 short of its floor of 50; the flexible pane pays all 15 and the fixed pane
+    // is untouched.
     let layout_result = solve_layout(&layout_tree, layout_area);
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [50, 30, 20]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2100,7 +2092,7 @@ fn a_floor_deficit_takes_from_the_trailing_flexible_sibling_first() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [50, 33, 17]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2132,7 +2124,7 @@ fn a_collapsed_member_that_is_a_split_puts_only_its_first_leaf_on_the_strip() {
         layout_result.pane_rects,
         [
             (first_collapsed_pane_id, build_cell_rect(0, 0, 20, 1)),
-            (second_collapsed_pane_id, Rect::empty_at_origin()),
+            (second_collapsed_pane_id, Rect::build_empty_at_origin()),
             (active_pane_id, build_cell_rect(0, 1, 20, 9)),
         ]
     );
@@ -2156,7 +2148,7 @@ fn a_zero_rect_suppresses_every_pane_of_a_split() {
         build_cell_rect(0, 0, 0, 0),
     );
 
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.suppressed_pane_ids,
         [first_pane_id, second_pane_id]
@@ -2164,8 +2156,8 @@ fn a_zero_rect_suppresses_every_pane_of_a_split() {
     assert_eq!(
         layout_result.pane_rects,
         [
-            (first_pane_id, Rect::empty_at_origin()),
-            (second_pane_id, Rect::empty_at_origin()),
+            (first_pane_id, Rect::build_empty_at_origin()),
+            (second_pane_id, Rect::build_empty_at_origin()),
         ]
     );
 }
@@ -2181,7 +2173,7 @@ fn a_zero_rect_suppresses_every_pane_of_a_stack() {
         build_cell_rect(0, 0, 0, 0),
     );
 
-    assert!(layout_result.is_all_panes_suppressed);
+    assert!(layout_result.is_every_pane_suppressed);
     assert_eq!(
         layout_result.suppressed_pane_ids,
         [active_pane_id, collapsed_pane_id]
@@ -2189,8 +2181,8 @@ fn a_zero_rect_suppresses_every_pane_of_a_stack() {
     assert_eq!(
         layout_result.pane_rects,
         [
-            (active_pane_id, Rect::empty_at_origin()),
-            (collapsed_pane_id, Rect::empty_at_origin()),
+            (active_pane_id, Rect::build_empty_at_origin()),
+            (collapsed_pane_id, Rect::build_empty_at_origin()),
         ]
     );
     assert_eq!(layout_result.stack_headers, Vec::new());
@@ -2381,11 +2373,11 @@ fn a_suppressed_trailing_pane_gives_its_leading_gap_back() {
         [
             (first_pane_id, build_cell_rect(0, 0, 5, 24)),
             (second_pane_id, build_cell_rect(7, 0, 5, 24)),
-            (suppressed_pane_id, Rect::empty_at_origin()),
+            (suppressed_pane_id, Rect::build_empty_at_origin()),
         ]
     );
     assert_eq!(two_pane_layout.suppressed_pane_ids, [suppressed_pane_id]);
-    assert!(!two_pane_layout.is_all_panes_suppressed);
+    assert!(!two_pane_layout.is_every_pane_suppressed);
 
     // Nine columns hold one floor but not a second floor plus its gap, so a
     // alone survives and takes the whole axis with no gap reserved.
@@ -2398,8 +2390,8 @@ fn a_suppressed_trailing_pane_gives_its_leading_gap_back() {
         one_pane_layout.pane_rects,
         [
             (first_pane_id, build_cell_rect(0, 0, 9, 24)),
-            (second_pane_id, Rect::empty_at_origin()),
-            (suppressed_pane_id, Rect::empty_at_origin()),
+            (second_pane_id, Rect::build_empty_at_origin()),
+            (suppressed_pane_id, Rect::build_empty_at_origin()),
         ]
     );
     assert_eq!(
@@ -2475,11 +2467,11 @@ fn a_gap_wider_than_the_axis_keeps_only_the_first_pane() {
         layout_result.pane_rects,
         [
             (first_pane_id, build_cell_rect(0, 0, 8, 24)),
-            (second_pane_id, Rect::empty_at_origin())
+            (second_pane_id, Rect::build_empty_at_origin())
         ]
     );
     assert_eq!(layout_result.suppressed_pane_ids, [second_pane_id]);
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
 }
 
 #[test]
@@ -2561,12 +2553,12 @@ fn a_middle_child_dropped_for_its_height_gives_its_gap_to_the_survivors() {
     expected_pane_rects.extend(
         tall_pane_ids
             .iter()
-            .map(|&pane_id| (pane_id, Rect::empty_at_origin())),
+            .map(|&pane_id| (pane_id, Rect::build_empty_at_origin())),
     );
     expected_pane_rects.push((third_pane_id, build_cell_rect(61, 0, 59, 24)));
     assert_eq!(layout_result.pane_rects, expected_pane_rects);
     assert_eq!(layout_result.suppressed_pane_ids, tall_pane_ids);
-    assert!(!layout_result.is_all_panes_suppressed);
+    assert!(!layout_result.is_every_pane_suppressed);
 }
 
 #[test]
@@ -2592,7 +2584,7 @@ fn resize_deltas_that_overfill_are_trimmed_from_the_trailing_child() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [70, 10]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2619,7 +2611,7 @@ fn a_fixed_size_wider_than_the_axis_is_cut_to_the_axis_and_leaves_its_sibling_th
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [76, 4]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2646,7 +2638,7 @@ fn a_percent_share_that_floors_to_zero_cells_is_raised_to_the_border_floor() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [4, 46]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2677,7 +2669,7 @@ fn a_preferred_overlay_outranks_a_preferred_primary() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [30, 70]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2707,7 +2699,7 @@ fn a_preferred_target_below_the_border_floor_settles_at_the_floor() {
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [4, 96]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2751,14 +2743,14 @@ fn a_floor_deficit_taps_the_fixed_sibling_once_the_flexible_one_is_at_its_floor(
     );
     let layout_area = build_cell_rect(0, 0, 100, 24);
 
-    // The fixed pane takes its 30 first, leaving the minimum and flexible panes 35 each. The minimum pane is 35 short of its
-    // floor of 70: the flexible pane gives 31 down to its own floor of 4, and
-    // the fixed pane gives the last 4.
+    // The fixed pane takes its 30 first, leaving the minimum and flexible panes 35 each. The
+    // minimum pane is 35 short of its floor of 70: the flexible pane gives 31 down to its own floor
+    // of 4, and the fixed pane gives the last 4.
     let layout_result = solve_layout(&layout_tree, layout_area);
     let column_widths: Vec<u16> = layout_result
         .pane_rects
         .iter()
-        .map(|(_, pane_layout)| pane_layout.cell_size.column_count)
+        .map(|(_, pane_layout)| pane_layout.size.column_count)
         .collect();
     assert_eq!(column_widths, [70, 26, 4]);
     assert_tiles_exactly(&layout_result, layout_area);
@@ -2806,7 +2798,7 @@ fn min_size_of_a_stack_counts_one_header_row_per_collapsed_member() {
 #[test]
 fn cell_area_multiplies_columns_by_rows_without_overflow() {
     assert_eq!(compute_cell_area(build_cell_rect(0, 0, 40, 24)), 960);
-    assert_eq!(compute_cell_area(Rect::empty_at_origin()), 0);
+    assert_eq!(compute_cell_area(Rect::build_empty_at_origin()), 0);
     assert_eq!(
         compute_cell_area(build_cell_rect(0, 0, u16::MAX, u16::MAX)),
         4_294_836_225

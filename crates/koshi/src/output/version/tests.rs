@@ -14,7 +14,7 @@ fn build_session_id(unique_number: u128) -> SessionId {
 }
 
 /// Every state a server row can be in, against one router and three sessions.
-fn mixed_rows() -> Vec<ServerVersionRow> {
+fn build_mixed_rows() -> Vec<ServerVersionRow> {
     vec![
         ServerVersionRow {
             server_kind: ServerKind::Router,
@@ -66,7 +66,7 @@ fn the_version_json_carries_the_build_alone() {
 
 #[test]
 fn a_server_table_tells_every_state_apart() {
-    let rendered = render_server_versions(&mixed_rows(), OutputFormat::Table);
+    let rendered = render_server_versions(&build_mixed_rows(), OutputFormat::Table);
 
     assert_eq!(
         rendered,
@@ -80,7 +80,7 @@ fn a_server_table_tells_every_state_apart() {
 
 #[test]
 fn a_server_json_answer_keeps_every_state_apart() {
-    let rendered = render_server_versions(&mixed_rows(), OutputFormat::Json);
+    let rendered = render_server_versions(&build_mixed_rows(), OutputFormat::Json);
 
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&rendered).expect("the answer is JSON"),

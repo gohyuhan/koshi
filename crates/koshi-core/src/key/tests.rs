@@ -8,18 +8,18 @@ use super::*;
 #[test]
 fn none_is_empty_and_every_flag_is_a_distinct_bit() {
     assert!(ModFlags::NONE.is_empty());
-    assert_eq!(ModFlags::NONE.bits(), 0);
-    assert_eq!(ModFlags::CTRL.bits(), 1);
-    assert_eq!(ModFlags::ALT.bits(), 2);
-    assert_eq!(ModFlags::SHIFT.bits(), 4);
-    assert_eq!(ModFlags::SUPER.bits(), 8);
+    assert_eq!(ModFlags::NONE.get_bits(), 0);
+    assert_eq!(ModFlags::CTRL.get_bits(), 1);
+    assert_eq!(ModFlags::ALT.get_bits(), 2);
+    assert_eq!(ModFlags::SHIFT.get_bits(), 4);
+    assert_eq!(ModFlags::SUPER.get_bits(), 8);
     assert!(!ModFlags::CTRL.is_empty());
 }
 
 #[test]
 fn union_sets_both_bits() {
     let combined_modifier_flags = ModFlags::CTRL.union(ModFlags::SHIFT);
-    assert_eq!(combined_modifier_flags.bits(), 5);
+    assert_eq!(combined_modifier_flags.get_bits(), 5);
     assert_eq!(combined_modifier_flags, ModFlags::CTRL | ModFlags::SHIFT);
 }
 
@@ -469,15 +469,15 @@ fn build_key_input(key: Key, modifier_flags: KeyModifierFlags) -> KeyInput {
 
 #[test]
 fn every_reported_modifier_is_a_distinct_bit() {
-    assert_eq!(KeyModifierFlags::SHIFT.bits(), 1);
-    assert_eq!(KeyModifierFlags::ALT.bits(), 2);
-    assert_eq!(KeyModifierFlags::CTRL.bits(), 4);
-    assert_eq!(KeyModifierFlags::SUPER.bits(), 8);
-    assert_eq!(KeyModifierFlags::HYPER.bits(), 16);
-    assert_eq!(KeyModifierFlags::META.bits(), 32);
-    assert_eq!(KeyModifierFlags::CAPS_LOCK.bits(), 64);
-    assert_eq!(KeyModifierFlags::NUM_LOCK.bits(), 128);
-    assert_eq!(KeyModifierFlags::NONE.bits(), 0);
+    assert_eq!(KeyModifierFlags::SHIFT.get_bits(), 1);
+    assert_eq!(KeyModifierFlags::ALT.get_bits(), 2);
+    assert_eq!(KeyModifierFlags::CTRL.get_bits(), 4);
+    assert_eq!(KeyModifierFlags::SUPER.get_bits(), 8);
+    assert_eq!(KeyModifierFlags::HYPER.get_bits(), 16);
+    assert_eq!(KeyModifierFlags::META.get_bits(), 32);
+    assert_eq!(KeyModifierFlags::CAPS_LOCK.get_bits(), 64);
+    assert_eq!(KeyModifierFlags::NUM_LOCK.get_bits(), 128);
+    assert_eq!(KeyModifierFlags::NONE.get_bits(), 0);
 }
 
 #[test]
@@ -498,7 +498,7 @@ fn the_stored_bitmap_keeps_all_eight_bits() {
             "{one_modifier:?}"
         );
     }
-    assert_eq!(every_modifier_flags.bits(), 255);
+    assert_eq!(every_modifier_flags.get_bits(), 255);
 }
 
 #[test]

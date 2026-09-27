@@ -177,8 +177,7 @@ pub fn query_running_router_remote_connections(runtime_directory: &Path) -> Remo
 
 /// The build version the running router reports in its Hello answer.
 ///
-/// `Ok(None)` means no router is running. An empty string means the router
-/// answered but predates the version field. Sends nothing besides the Hello;
+/// `Ok(None)` means no router is running. Sends nothing besides the Hello;
 /// never starts a router.
 pub fn get_running_router_version(runtime_directory: &Path) -> Result<Option<String>, CliError> {
     let Some((mut connection, endpoint)) = connect_to_running_router(runtime_directory)? else {
@@ -275,8 +274,7 @@ fn exchange_router_request(
 /// router reports a build other than this one. Every answer that is not a
 /// refusal passes through unchanged.
 ///
-/// `router_version` is the build the router reported in its Hello, empty when
-/// the router predates that field.
+/// `router_version` is the build the router reported in its Hello.
 fn rewrite_router_result_for_build(
     router_result: RouterResult,
     router_version: &str,
@@ -292,15 +290,10 @@ fn rewrite_router_result_for_build(
             message: sanitized_refusal_message,
         });
     }
-    let running_router_description = if router_version.is_empty() {
-        "an older koshi that does not report its build".to_string()
-    } else {
-        format!("koshi {router_version}")
-    };
     RouterResult::Error(IpcErrorPayload {
         code: refusal.code,
         message: format!(
-            "{sanitized_refusal_message} — the running router is {running_router_description} \
+            "{sanitized_refusal_message} — the running router is koshi {router_version} \
              and this command is koshi {current_build_version}; the router serves its own build \
              until it restarts, which it does \
              once no session is left running"

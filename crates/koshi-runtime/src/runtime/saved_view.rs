@@ -115,9 +115,9 @@ impl SavedViewStore {
             connection_token_hash,
             expires_at,
             saved_view: SavedView {
-                active_tab_id: client.get_active_tab(),
-                focused_pane_id_by_tab_id: client.list_focused_panes().clone(),
-                zoomed_pane_id_by_tab_id: client.list_zoomed_panes().clone(),
+                active_tab_id: client.get_active_tab_id(),
+                focused_pane_id_by_tab_id: client.list_focused_pane_ids().clone(),
+                zoomed_pane_id_by_tab_id: client.list_zoomed_pane_ids().clone(),
                 scroll_offset_by_pane_id: client.list_scroll_offsets().clone(),
             },
         });

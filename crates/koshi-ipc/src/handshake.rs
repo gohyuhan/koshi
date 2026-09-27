@@ -172,7 +172,7 @@ impl VersionGate {
         Ok(())
     }
 
-    /// Check a request kind that is not a Hello, named `name`: served while
+    /// Check a request kind that is not a Hello, named `request_kind_name`: served while
     /// the gate is open, refused as
     /// [`HelloRequired`](IpcErrorCode::HelloRequired) while it is closed.
     pub(crate) fn validate_non_hello_request_kind(
@@ -185,7 +185,7 @@ impl VersionGate {
         Err(self.build_hello_required_error(request_kind_name))
     }
 
-    /// The refusal for a request kind this build does not have, named `name`.
+    /// The refusal for a request kind this build does not have, named `request_kind_name`.
     ///
     /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
     /// the same as any other kind arriving before a Hello; an unopened
@@ -208,7 +208,7 @@ impl VersionGate {
         }
     }
 
-    /// The refusal a closed gate answers the kind named `name` with.
+    /// The refusal a closed gate answers the kind named `request_kind_name` with.
     fn build_hello_required_error(&self, request_kind_name: &str) -> IpcErrorPayload {
         IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
@@ -287,7 +287,7 @@ impl Handshake {
         self.gate.get_agreed_protocol_version()
     }
 
-    /// The refusal for a request kind this build does not have, named `name`.
+    /// The refusal for a request kind this build does not have, named `request_kind_name`.
     ///
     /// A closed gate answers [`HelloRequired`](IpcErrorCode::HelloRequired),
     /// the same as any other kind arriving before a Hello; an unopened
@@ -321,24 +321,25 @@ impl Handshake {
     ///
     /// A second accepted Hello settles the version again from its own range.
     ///
-    /// `Ok(())` means the caller serves the request — a Hello is answered
-    /// with [`IpcResult::Hello`](crate::protocol::IpcResult::Hello) carrying
-    /// [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An `Err` carries the refusal to send back,
-    /// and the gate keeps the state it had.
+    /// `Ok(())` means the caller serves the request — a Hello is answered with
+    /// [`IpcResult::Hello`](crate::protocol::IpcResult::Hello) carrying
+    /// [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An `Err` carries the
+    /// refusal to send back, and the gate keeps the state it had.
     pub fn validate_request_kind(
         &mut self,
         request_kind: &IpcRequestKind,
     ) -> Result<(), IpcErrorPayload> {
         match request_kind {
             IpcRequestKind::Hello {
-                min_protocol_version,
-                max_protocol_version,
+                minimum_protocol_version,
+                maximum_protocol_version,
                 connection_token,
                 is_remote,
             } => {
-                let agreed_protocol_version = self
-                    .gate
-                    .negotiate_protocol_version(*min_protocol_version, *max_protocol_version)?;
+                let agreed_protocol_version = self.gate.negotiate_protocol_version(
+                    *minimum_protocol_version,
+                    *maximum_protocol_version,
+                )?;
                 match self.peer {
                     // Another user of this machine is asked for no token; the
                     // setting alone decides.

@@ -4,13 +4,13 @@
 use super::*;
 
 use crate::region::TablineInputs;
-use crate::snapshot::TabMeta;
+use crate::snapshot::TabMetadata;
 
 #[cfg(test)]
 mod tests;
 
 /// Draw the tabline from [`TablineInputs`] in `theme`'s colors.
-/// `tabline_area` is the row to paint into `buffer`.
+/// `tabline_area` is the row to paint into `screen_buffer`.
 ///
 /// The whole row is filled with the theme's bar background (black by default).
 /// The session name with the `[v…]` version badge sits on the left and the mode
@@ -21,13 +21,13 @@ mod tests;
 /// the side it went off.
 ///
 /// The block widths and per-tab cell spans come from [`solve_tabline_layout`], the
-/// same solve [`crate::hit_test()`] reads. A row outside `buf` paints nothing,
-/// and a zero-width or zero-height `area` paints nothing.
+/// same solve [`crate::resolve_hit_region()`] reads. A row outside `screen_buffer` paints
+/// nothing, and a zero-width or zero-height `tabline_area` paints nothing.
 pub(super) fn draw_tabline(
     tabline_inputs: TablineInputs<'_>,
     theme: &Theme,
     tabline_area: RatatuiRect,
-    buffer: &mut Buffer,
+    screen_buffer: &mut Buffer,
 ) {
     if tabline_area.width == 0 || tabline_area.height == 0 {
         return;
@@ -36,15 +36,15 @@ pub(super) fn draw_tabline(
     // background. The session name, badge, mode tag, and arrows set only a
     // foreground, so the fill stays their background; an inactive tab's two
     // blocks set their own background over it.
-    Clear.render(tabline_area, buffer);
-    buffer.set_style(tabline_area, compute_bar_style(theme));
+    Clear.render(tabline_area, screen_buffer);
+    screen_buffer.set_style(tabline_area, compute_bar_style(theme));
 
     let tabline_layout = solve_tabline_layout(tabline_inputs, tabline_area);
 
     // Right block: it owns the right edge whole.
     let right_block_line = build_right_block(tabline_inputs, theme);
     set_line_clipped(
-        buffer,
+        screen_buffer,
         tabline_layout.right_block_start_column,
         tabline_area.y,
         &right_block_line,
@@ -61,7 +61,7 @@ pub(super) fn draw_tabline(
             .saturating_sub(tabline_area.x),
     );
     set_line_clipped(
-        buffer,
+        screen_buffer,
         tabline_area.x,
         tabline_area.y,
         &session_line,
@@ -76,7 +76,7 @@ pub(super) fn draw_tabline(
             visible_tab_span.tab_metadata_index,
         );
         set_line_clipped(
-            buffer,
+            screen_buffer,
             visible_tab_span.start_column,
             tabline_area.y,
             &tab_line,
@@ -87,7 +87,7 @@ pub(super) fn draw_tabline(
     if let Some(left_scroll_arrow) = tabline_layout.left_scroll_arrow {
         let left_arrow_line = Line::from(Span::styled("◀", compute_scroll_arrow_style(theme)));
         set_line_clipped(
-            buffer,
+            screen_buffer,
             left_scroll_arrow.start_column,
             tabline_area.y,
             &left_arrow_line,
@@ -97,7 +97,7 @@ pub(super) fn draw_tabline(
     if let Some(right_scroll_arrow) = tabline_layout.right_scroll_arrow {
         let right_arrow_line = Line::from(Span::styled("▶", compute_scroll_arrow_style(theme)));
         set_line_clipped(
-            buffer,
+            screen_buffer,
             right_scroll_arrow.start_column,
             tabline_area.y,
             &right_arrow_line,
@@ -112,7 +112,7 @@ pub(crate) const TABLINE_ARROW_WIDTH: u16 = 1;
 /// The tabline's solved geometry for one frame: where the two anchored blocks
 /// sit, the windowed run of visible tabs, and the scroll arrows framing it.
 ///
-/// [`draw_tabline`] paints from it, and [`crate::hit_test()`] maps a click to a
+/// [`draw_tabline`] paints from it, and [`crate::resolve_hit_region()`] maps a click to a
 /// tab or arrow with it. Both read the same solve.
 pub(crate) struct TablineLayout {
     /// Cells the left session block occupies, measured from `tabline_area.x`.
@@ -429,7 +429,10 @@ fn build_session_line(session_name: &str, theme: &Theme, session_block_room: u16
 /// # Panics
 ///
 /// Panics when `tab_metadata_index` is not an index of `tabs_metadata`.
-fn get_tab_text_blocks(tabs_metadata: &[TabMeta], tab_metadata_index: usize) -> (String, String) {
+fn get_tab_text_blocks(
+    tabs_metadata: &[TabMetadata],
+    tab_metadata_index: usize,
+) -> (String, String) {
     let tab_metadata = &tabs_metadata[tab_metadata_index];
     (
         format!(" #{} ", tab_metadata.tab_index + 1),
@@ -444,7 +447,7 @@ fn get_tab_text_blocks(tabs_metadata: &[TabMeta], tab_metadata_index: usize) -> 
 ///
 /// Panics when `tab_metadata_index` is not an index of `tabs_metadata`.
 fn build_tab_line(
-    tabs_metadata: &[TabMeta],
+    tabs_metadata: &[TabMetadata],
     theme: &Theme,
     tab_metadata_index: usize,
 ) -> Line<'static> {

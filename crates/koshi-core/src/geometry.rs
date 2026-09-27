@@ -41,7 +41,7 @@ pub struct ImageCellGeometry {
 }
 
 impl ImageCellGeometry {
-    /// Whether a visible rectangle of `size` fits inside the complete image.
+    /// Whether a visible rectangle of `visible_size` fits inside the complete image.
     #[must_use]
     pub fn is_visible_size_contained(self, visible_size: Size) -> bool {
         visible_size.column_count > 0
@@ -118,13 +118,13 @@ pub enum PaneArea {
 /// ```
 ///
 /// `origin` is the top-left cell of the rectangle.
-/// `cell_size.column_count` is the width, and `cell_size.row_count` is the height.
+/// `size.column_count` is the width, and `size.row_count` is the height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rect {
     /// Top-left cell position.
     pub origin: Point,
     /// Width and height in cells.
-    pub cell_size: Size,
+    pub size: Size,
 }
 
 /// A cardinal direction, e.g. for focus movement.
@@ -168,22 +168,22 @@ pub enum SplitDirection {
 impl Rect {
     /// Construct a rect from an origin and size.
     #[must_use]
-    pub fn from_origin_and_size(origin: Point, cell_size: Size) -> Self {
-        Self { origin, cell_size }
+    pub fn from_origin_and_size(origin: Point, size: Size) -> Self {
+        Self { origin, size }
     }
 
     /// The rect of the given size anchored at the origin `(0, 0)`.
     #[must_use]
-    pub fn from_size_at_origin(cell_size: Size) -> Self {
+    pub fn from_size_at_origin(size: Size) -> Self {
         Self {
             origin: Point { column: 0, row: 0 },
-            cell_size,
+            size,
         }
     }
 
     /// The empty rect at the origin `(0, 0)` with zero size.
     #[must_use]
-    pub fn empty_at_origin() -> Self {
+    pub fn build_empty_at_origin() -> Self {
         Self::from_size_at_origin(Size {
             column_count: 0,
             row_count: 0,
@@ -193,19 +193,19 @@ impl Rect {
     /// `true` when the rect covers no cells (zero width or zero height).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.cell_size.column_count == 0 || self.cell_size.row_count == 0
+        self.size.column_count == 0 || self.size.row_count == 0
     }
 
     /// Exclusive right edge, `column + column_count`, computed in `u32`.
     #[must_use]
     fn get_right_edge(&self) -> u32 {
-        u32::from(self.origin.column) + u32::from(self.cell_size.column_count)
+        u32::from(self.origin.column) + u32::from(self.size.column_count)
     }
 
     /// Exclusive bottom edge, `row + row_count`, computed in `u32`.
     #[must_use]
     fn get_bottom_edge(&self) -> u32 {
-        u32::from(self.origin.row) + u32::from(self.cell_size.row_count)
+        u32::from(self.origin.row) + u32::from(self.size.row_count)
     }
 
     /// `true` when `point` lies within the half-open rect. An empty rect
@@ -218,7 +218,7 @@ impl Rect {
             && u32::from(point.row) < self.get_bottom_edge()
     }
 
-    /// The region of cells inside both `self` and `other`, or `None` when they
+    /// The region of cells inside both `self` and `other_rect`, or `None` when they
     /// share no cell.
     ///
     /// Each rect is half-open: `column` spans `[origin.column, origin.column +
@@ -249,7 +249,7 @@ impl Rect {
                     column: left_edge,
                     row: top_edge,
                 },
-                cell_size: Size {
+                size: Size {
                     column_count: (right_edge - u32::from(left_edge)) as u16,
                     row_count: (bottom_edge - u32::from(top_edge)) as u16,
                 },
@@ -271,12 +271,9 @@ impl Rect {
                 column: self.origin.column.saturating_add(border_cells),
                 row: self.origin.row.saturating_add(border_cells),
             },
-            cell_size: Size {
-                column_count: self
-                    .cell_size
-                    .column_count
-                    .saturating_sub(double_border_cells),
-                row_count: self.cell_size.row_count.saturating_sub(double_border_cells),
+            size: Size {
+                column_count: self.size.column_count.saturating_sub(double_border_cells),
+                row_count: self.size.row_count.saturating_sub(double_border_cells),
             },
         }
     }

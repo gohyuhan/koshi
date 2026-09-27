@@ -50,12 +50,15 @@ use koshi_core::process::{KillPolicy, PtySize};
 use koshi_ipc::endpoint::{resolve_resume_file_path, RESTART_WINDOW_DURATION};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
-use koshi_observability::logging::init_tracing;
-use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, PtyHandle, PtySink};
+use koshi_observability::logging::initialize_tracing;
+use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, PtySink};
 use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::resume::{self, ResumeBody, ResumeHeader, RESUME_FORMAT, RESUME_FORMAT_MIN};
+use koshi_runtime::resume::{
+    self, ResumeBody, ResumeHeader, RESUME_FORMAT, RESUME_FORMAT_MIN,
+    SESSION_NOT_RESTORED_NOTICE_BYTES,
+};
 use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::runtime::pty_forward::InboxSink;
+use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::{can_carry_panes, is_binary_runnable, RestartCheck, Server};
 use koshi_storage::error::StorageError;
 use serde::{Deserialize, Serialize};
@@ -144,6 +147,26 @@ const CLIENTS_LEFT_WAIT_DURATION: Duration = Duration::from_secs(1);
 /// runtime inbox.
 const CLIENTS_LEFT_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
 
+/// How long a resuming session server waits for the children it inherited to
+/// end: the children of the panes it did not take back, and every child once
+/// the terminals are closed when the resume header does not read.
+#[cfg(unix)]
+const INHERITED_CHILD_REAP_WAIT_DURATION: Duration = Duration::from_secs(1);
+
+/// How long that wait pauses between two checks for an ended child.
+#[cfg(unix)]
+const INHERITED_CHILD_REAP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
+
+/// The directory listing every descriptor this process holds open, one entry
+/// per descriptor number.
+#[cfg(target_os = "linux")]
+const OPEN_FILE_DESCRIPTOR_DIRECTORY: &str = "/proc/self/fd";
+
+/// The directory listing every descriptor this process holds open, one entry
+/// per descriptor number.
+#[cfg(all(unix, not(target_os = "linux")))]
+const OPEN_FILE_DESCRIPTOR_DIRECTORY: &str = "/dev/fd";
+
 /// The backend this session server drives its panes through.
 ///
 /// On Unix every pane is this process's own child on this process's own
@@ -153,7 +176,7 @@ const CLIENTS_LEFT_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
 /// this backend is the link to it.
 ///
 /// The swap reaches `pause_readers`, `resume_readers`, `flush_writers` and
-/// `carried_panes` through this concrete type, so the session server keeps it
+/// `list_carried_panes` through this concrete type, so the session server keeps it
 /// beside the `Arc<dyn PtyBackend>` the server holds.
 #[cfg(unix)]
 type PtyOwner = PortablePtyBackend;
@@ -265,9 +288,9 @@ pub fn run_session_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_config = koshi_link::config::load_app_layer();
     let logging_parameters =
-        koshi_link::config::build_logging_params(app_config.as_ref(), session_id);
+        koshi_link::config::build_logging_parameters(app_config.as_ref(), session_id);
     let (log_level, log_format) = (logging_parameters.log_level, logging_parameters.log_format);
-    let _ = init_tracing(logging_parameters);
+    let _ = initialize_tracing(logging_parameters);
     // The first line written, so a log file that exists at all already says
     // which level and format the session ran under.
     tracing::info!(
@@ -370,13 +393,8 @@ fn seed_initial_session(
     runtime_event_receiver: Receiver<RuntimeEvent>,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, Arc<PtyOwner>, IpcServer), Box<dyn std::error::Error>> {
-    let (mut session_server, pty_owner) = build_server_over_new_panes(
-        session_start,
-        app_config,
-        pty_sink,
-        runtime_event_receiver,
-        runtime_event_sender,
-    )?;
+    let (mut session_server, pty_owner) =
+        build_server_over_new_panes(session_start, app_config, pty_sink, runtime_event_receiver)?;
 
     let session_start_time = SystemTime::now();
     let profile_template_document =
@@ -419,20 +437,25 @@ fn seed_initial_session(
 
 /// Come up from the state the previous process image carried out.
 ///
-/// A body that reads gives the session back what [`ResumeBody`] carries, over
-/// the panes taken back from the header. A body that does not read ends every
-/// pane the header names and seeds one fresh shell under the same id and name,
-/// so the session id the router registered still answers.
+/// Every pane the header names is taken back from a descriptor and a process
+/// id, or from the helper process holding it, by [`build_from_carried_state`].
+/// A header that does not read names no pane: every terminal this process
+/// inherited is released by [`release_panes_without_header`], and one fresh
+/// shell showing [`SESSION_NOT_RESTORED_NOTICE_BYTES`] is seeded under the same
+/// id and name, so the session id the router registered still answers.
 ///
 /// The previous image let its panes go — on Unix by ending, on Windows by
-/// dropping its link — so every pane is taken back from a descriptor and a
-/// process id, or from the helper process holding it.
-/// [`resume_readers_and_rebuild`] is the other path: it rebuilds the same state
-/// over panes that were never released.
+/// dropping its link. [`resume_readers_and_rebuild`] is the other path: it
+/// rebuilds the same state over panes that were never released.
 ///
 /// The file is deleted on every way out of this call. It outlives the socket
 /// being bound. While it exists, the router leaves this session's
 /// advertisement in place through the swap.
+///
+/// # Errors
+/// Returns the failure of fresh panes that could not be opened, of a fresh
+/// shell that could not be started, and of a control socket that could not be
+/// bound.
 fn resume_from_file(
     resume_file_path: &Path,
     session_start: &mut SessionStart,
@@ -444,10 +467,20 @@ fn resume_from_file(
     let (resume_header, encoded_resume_body) = match resume::read_resume_header(resume_file_path) {
         Ok(resume_header_and_body) => resume_header_and_body,
         Err(resume_read_error) => {
-            // A header that does not read names no pane, so nothing can be
-            // taken back and nothing can be ended. The file goes with it.
+            tracing::error!(
+                %resume_read_error,
+                "the carried state names no pane that can be read; the session comes back with one shell"
+            );
+            release_panes_without_header(session_start, Arc::clone(&pty_sink));
             let _ = std::fs::remove_file(resume_file_path);
-            return Err(resume_read_error.into());
+            let (session_server, pty_owner) = seed_session_after_failed_restore(
+                session_start,
+                app_config,
+                pty_sink,
+                runtime_event_receiver,
+            )?;
+            let ipc_server = bind_session_socket(session_start, runtime_event_sender)?;
+            return Ok((session_server, pty_owner, ipc_server));
         }
     };
 
@@ -470,13 +503,25 @@ fn resume_from_file(
 /// Build the server, the panes and the bound socket the carried state names, as
 /// [`resume_from_file`] hands them on.
 ///
-/// `resume_body` is what reading the carried body gave. The panes come back only when
-/// that read worked and every pane the header names is taken back; either
-/// failure ends every pane the header names and seeds one fresh shell instead.
+/// Every pane the header names is taken back on its own by [`take_panes_back`].
+/// `resume_body` is what reading the carried body gave:
+///
+/// 1. A body that reads comes back through [`Server::resume`]: each pane taken
+///    back keeps its tab, its split and, when the body carries it, its screen.
+/// 2. A body that does not read comes back through
+///    [`Server::restore_panes_without_layout`]: each pane taken back sits in a
+///    tab of its own, in header order, on a blank screen.
+/// 3. A session left holding no running pane either way — or a helper process
+///    that cannot be reached — comes back as one fresh shell showing
+///    [`SESSION_NOT_RESTORED_NOTICE_BYTES`], under the same id and name.
+///
+/// Before → after: a header naming panes `A`, `B`, `C`, where `B`'s terminal
+/// is no longer the one the header recorded → `A` and `C` come back in their
+/// tabs and splits, and `B` closes as if its child had ended.
 ///
 /// # Errors
 /// Returns the failure of fresh panes that could not be opened, of a fresh
-/// session that could not be seeded, and of a control socket that could not be
+/// shell that could not be started, and of a control socket that could not be
 /// bound.
 fn build_from_carried_state(
     resume_header: &ResumeHeader,
@@ -487,70 +532,74 @@ fn build_from_carried_state(
     runtime_event_receiver: Receiver<RuntimeEvent>,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, Arc<PtyOwner>, IpcServer), Box<dyn std::error::Error>> {
-    let carried_session_state = match resume_body {
-        Ok(resume_body) => {
-            match take_panes_back(resume_header, Arc::clone(&pty_sink), session_start) {
-                Ok((pty_owner, pty_handle_by_pane_id)) => {
-                    Some((resume_body, pty_owner, pty_handle_by_pane_id))
-                }
-                Err(take_back_error) => {
-                    tracing::error!(
-                        %take_back_error,
-                        "the carried panes could not be taken back; the session comes back with one shell"
-                    );
-                    None
-                }
-            }
-        }
-        Err(resume_read_error) => {
-            tracing::error!(
-                %resume_read_error,
-                wrote = resume_header.resume_format,
-                reads_from = RESUME_FORMAT_MIN,
-                reads_to = RESUME_FORMAT,
-                "the carried state could not be read; the session comes back with one shell"
-            );
-            release_carried_panes(resume_header, session_start, Arc::clone(&pty_sink));
-            None
-        }
-    };
-
     // Either way the session comes back on the `koshi.kdl` that is on disk now.
-    let (session_server, pty_owner) = match carried_session_state {
-        Some((resume_body, pty_owner, pty_handle_by_pane_id)) => {
-            let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
-            let mut session_server = Server::resume(
-                pty_backend,
-                runtime_event_receiver,
-                runtime_event_sender.clone(),
-                resume_body,
-                pty_handle_by_pane_id,
-                build_carried_pty_sizes(resume_header),
+    let (session_server, pty_owner) = match take_panes_back(
+        resume_header,
+        Arc::clone(&pty_sink),
+        session_start,
+    ) {
+        Err(take_back_error) => {
+            tracing::error!(
+                %take_back_error,
+                "the carried panes could not be reached; the session comes back with one shell"
             );
-            session_server.load_startup_config(app_config);
-            start_reconnect_deadline(runtime_event_sender.clone());
-            (session_server, pty_owner)
-        }
-        None => {
-            let (mut session_server, pty_owner) = build_server_over_new_panes(
+            seed_session_after_failed_restore(
                 session_start,
                 app_config,
                 pty_sink,
                 runtime_event_receiver,
-                runtime_event_sender,
-            )?;
-            // The identity the router registered, and the one the socket below
-            // binds under, so the session id still answers.
-            session_server.bootstrap_session(
-                session_start.session_id,
-                session_start.session_name.clone(),
-                STARTING_VIEWPORT,
-                SystemTime::now(),
-                None,
-            )?;
+            )?
+        }
+        Ok((pty_owner, pty_size_by_pane_id)) => {
+            let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
+            let mut session_server = match resume_body {
+                Ok(resume_body) => {
+                    let mut session_server = Server::resume(
+                        pty_backend,
+                        runtime_event_receiver,
+                        resume_body,
+                        pty_size_by_pane_id,
+                    );
+                    session_server.load_startup_config(app_config);
+                    session_server
+                }
+                Err(resume_read_error) => {
+                    tracing::error!(
+                        %resume_read_error,
+                        wrote = resume_header.resume_format,
+                        reads_from = RESUME_FORMAT_MIN,
+                        reads_to = RESUME_FORMAT,
+                        "the carried layout could not be read; each pane comes back in a tab of its own"
+                    );
+                    let carried_pane_sizes: Vec<(PaneId, PtySize)> = resume_header
+                        .carried_panes
+                        .iter()
+                        .filter_map(|carried_pane| {
+                            pty_size_by_pane_id
+                                .get(&carried_pane.pane_id)
+                                .map(|pty_size| (carried_pane.pane_id, *pty_size))
+                        })
+                        .collect();
+                    let mut session_server =
+                        Server::from_runtime_parts(pty_backend, runtime_event_receiver);
+                    session_server.load_startup_config(app_config);
+                    session_server.restore_panes_without_layout(
+                        session_start.session_id,
+                        session_start.session_name.clone(),
+                        &carried_pane_sizes,
+                        SystemTime::now(),
+                    );
+                    session_server
+                }
+            };
+            if !session_server.has_active_panes() {
+                tracing::error!("no carried pane came back; the session comes back with one shell");
+                seed_shell_after_failed_restore(&mut session_server, session_start)?;
+            }
             (session_server, pty_owner)
         }
     };
+    start_reconnect_deadline(runtime_event_sender.clone());
 
     let ipc_server = bind_session_socket(session_start, runtime_event_sender)?;
     Ok((session_server, pty_owner, ipc_server))
@@ -595,7 +644,7 @@ fn open_session_panes(
             pty_sink,
             &[],
         )?;
-        session_start.supervisor_token = Some(supervisor_token.expose().to_string());
+        session_start.supervisor_token = Some(supervisor_token.expose_secret().to_string());
         session_start.supervisor_process_id = Some(supervisor_process_id);
         Ok(linked_pty_owner)
     }
@@ -605,7 +654,7 @@ fn open_session_panes(
 /// is on disk now.
 ///
 /// The server holds no session yet: the caller seeds one. Two callers reach it
-/// — a first run, and a resume whose carried state could not be read.
+/// — a first run, and a resume that brings none of the carried panes back.
 ///
 /// # Errors
 /// Returns the failure of panes that could not be opened.
@@ -614,129 +663,184 @@ fn build_server_over_new_panes(
     app_config: Option<PartialKoshiConfig>,
     pty_sink: Arc<dyn PtySink>,
     runtime_event_receiver: Receiver<RuntimeEvent>,
-    runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, Arc<PtyOwner>), Box<dyn std::error::Error>> {
     let pty_owner = open_session_panes(session_start, pty_sink)?;
     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
-    let mut session_server = Server::from_runtime_parts(
-        pty_backend,
-        runtime_event_receiver,
-        runtime_event_sender.clone(),
-    );
+    let mut session_server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
     session_server.load_startup_config(app_config);
     Ok((session_server, pty_owner))
 }
 
-/// The panes taken back after an image swap: the backend driving them, and one
-/// handle per pane for the rebuilt server to hold.
-type TakenBackPtyState = (Arc<PtyOwner>, HashMap<PaneId, PtyHandle>);
-
-/// Take every pane the resume header names back, and hand back the backend driving
-/// them with one handle each.
-///
-/// A pane's terminal descriptor crossed the swap open, so each pane is taken
-/// back from that descriptor and its child's process id by
-/// [`take_one_pane_back`].
-///
-/// When one pane cannot be taken back, every pane the header names is ended
-/// before the failure is returned, so the caller holds nothing half-owned.
+/// Open fresh panes, build the server driving them, and seed one fresh shell
+/// on it through [`seed_shell_after_failed_restore`].
 ///
 /// # Errors
-/// Returns whatever [`take_one_pane_back`] reports, the sentence naming a pane
-/// the carried state names twice, and the sentence naming a descriptor the
-/// carried state gives to two panes.
+/// Returns the failure of panes that could not be opened, and of a shell that
+/// could not be started.
+fn seed_session_after_failed_restore(
+    session_start: &mut SessionStart,
+    app_config: Option<PartialKoshiConfig>,
+    pty_sink: Arc<dyn PtySink>,
+    runtime_event_receiver: Receiver<RuntimeEvent>,
+) -> Result<(Server, Arc<PtyOwner>), Box<dyn std::error::Error>> {
+    let (mut session_server, pty_owner) =
+        build_server_over_new_panes(session_start, app_config, pty_sink, runtime_event_receiver)?;
+    seed_shell_after_failed_restore(&mut session_server, session_start)?;
+    Ok((session_server, pty_owner))
+}
+
+/// Seed one fresh shell on `session_server` under the id and name the router
+/// registered, and show [`SESSION_NOT_RESTORED_NOTICE_BYTES`] on its screen. A
+/// session `session_server` already holds under that id is replaced.
+///
+/// # Errors
+/// Returns the failure of a shell that could not be started.
+fn seed_shell_after_failed_restore(
+    session_server: &mut Server,
+    session_start: &SessionStart,
+) -> Result<(), Box<dyn std::error::Error>> {
+    session_server.bootstrap_session(
+        session_start.session_id,
+        session_start.session_name.clone(),
+        STARTING_VIEWPORT,
+        SystemTime::now(),
+        None,
+    )?;
+    let fresh_pane_ids: Vec<PaneId> = session_server
+        .list_sessions()
+        .get(&session_start.session_id)
+        .into_iter()
+        .flat_map(|session| session.panes.list_pane_records())
+        .map(|pane_record| pane_record.get_pane_id())
+        .collect();
+    for fresh_pane_id in fresh_pane_ids {
+        session_server.handle_pty_output(fresh_pane_id, SESSION_NOT_RESTORED_NOTICE_BYTES);
+    }
+    Ok(())
+}
+
+/// The panes taken back after an image swap: the backend driving them, and the
+/// size each one's terminal holds, keyed by pane.
+type TakenBackPtyState = (Arc<PtyOwner>, HashMap<PaneId, PtySize>);
+
+/// Take back every pane the resume header names that can be taken back, and
+/// hand back the backend driving them with the size each one's terminal holds.
+///
+/// A pane's terminal descriptor crossed the swap open, so each pane is taken
+/// back on its own from that descriptor and its child's process id by
+/// [`take_one_pane_back`]. A pane that cannot be taken back has its child's
+/// process group ended, and every other pane is still taken back.
+///
+/// The panes [`find_conflicting_carried_pane_indexes`] names are none of them
+/// taken back: each one's child is ended, and each descriptor they name is
+/// closed once when it names a pseudoterminal master.
+///
+/// Every child this ends is reaped once it has exited, inside one
+/// [`INHERITED_CHILD_REAP_WAIT_DURATION`] shared by all of them.
+///
+/// Before → after: a header naming `A(fd 7)`, `B(fd 9)`, `C(fd 7)` → `B` is
+/// taken back, `A`'s and `C`'s children are ended and reaped, and descriptor 7
+/// is closed.
+///
+/// Every path returns `Ok`.
 #[cfg(unix)]
 fn take_panes_back(
     resume_header: &ResumeHeader,
     pty_sink: Arc<dyn PtySink>,
     _session_start: &SessionStart,
 ) -> Result<TakenBackPtyState, Box<dyn std::error::Error>> {
-    header_names_each_pane_once(resume_header)?;
-
+    let conflicting_pane_indexes = find_conflicting_carried_pane_indexes(resume_header);
     let pty_owner = Arc::new(PortablePtyBackend::with_pty_sink(pty_sink));
-    let mut pty_handle_by_pane_id = HashMap::new();
-    // Which pane each descriptor was taken back on, so a number the header
-    // names twice is refused rather than owned by two panes and closed twice.
-    let mut pane_id_by_terminal_file_descriptor: HashMap<i32, PaneId> = HashMap::new();
+    let mut pty_size_by_pane_id = HashMap::new();
+    let mut closed_terminal_file_descriptors: HashSet<i32> = HashSet::new();
+    let mut ended_process_ids: Vec<u32> = Vec::new();
     for (pane_index, carried_pane) in resume_header.carried_panes.iter().enumerate() {
-        if let Some(terminal_file_descriptor) = carried_pane.terminal_fd {
-            if let Some(&earlier_pane_id) =
-                pane_id_by_terminal_file_descriptor.get(&terminal_file_descriptor)
+        if conflicting_pane_indexes.contains(&pane_index) {
+            tracing::warn!(
+                pane_id = %carried_pane.pane_id,
+                "the carried state names this pane in conflict with another; it is not taken back"
+            );
+            if end_carried_child(carried_pane.process_id) {
+                ended_process_ids.push(carried_pane.process_id);
+            }
+            if carried_pane
+                .terminal_fd
+                .is_some_and(|terminal_file_descriptor| {
+                    closed_terminal_file_descriptors.insert(terminal_file_descriptor)
+                })
             {
-                end_panes_after_failure(resume_header, pane_index + 1);
-                return Err(format!(
-                    "pane {} carried descriptor {terminal_file_descriptor}, which pane {earlier_pane_id} was already taken back \
-                     on, so it cannot be taken back",
-                    carried_pane.pane_id
-                )
-                .into());
+                close_carried_terminal(carried_pane);
             }
-        }
-        match take_one_pane_back(&pty_owner, carried_pane) {
-            Ok(pty_handle) => {
-                pty_handle_by_pane_id.insert(carried_pane.pane_id, pty_handle);
-                if let Some(terminal_file_descriptor) = carried_pane.terminal_fd {
-                    pane_id_by_terminal_file_descriptor
-                        .insert(terminal_file_descriptor, carried_pane.pane_id);
-                }
-            }
-            Err(take_back_error) => {
-                end_panes_after_failure(resume_header, pane_index + 1);
-                return Err(take_back_error);
-            }
-        }
-    }
-    Ok((pty_owner, pty_handle_by_pane_id))
-}
-
-/// Refuse a carried state that names one pane more than once, or gives two
-/// panes one child process id.
-///
-/// Every pane is taken back onto its own entry, keyed by pane id, so each id
-/// appears once. Every pane's child is waited on by that pane's own watcher, so
-/// each process id appears once as well. A process id of `0` names no child and
-/// may repeat.
-///
-/// Before → after: a header naming panes `A`, `B` → each is taken back. A
-/// header naming `A`, `A` → the sentence naming `A`, and no pane is touched. A
-/// header naming `A(pid 4821)`, `B(pid 4821)` → the sentence naming `B` and
-/// `A`, and no pane is touched.
-///
-/// # Errors
-/// Returns the sentence naming the pane the carried state names twice, or the
-/// pane whose process id an earlier pane already carries.
-fn header_names_each_pane_once(
-    resume_header: &ResumeHeader,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut named_pane_ids = HashSet::new();
-    let mut pane_id_by_process_id: HashMap<u32, PaneId> = HashMap::new();
-    for carried_pane in &resume_header.carried_panes {
-        if !named_pane_ids.insert(carried_pane.pane_id) {
-            return Err(format!(
-                "pane {} is named twice by the carried state, so it cannot be taken back",
-                carried_pane.pane_id
-            )
-            .into());
-        }
-        if carried_pane.process_id == 0 {
             continue;
         }
-        if let Some(earlier_pane_id) =
-            pane_id_by_process_id.insert(carried_pane.process_id, carried_pane.pane_id)
-        {
-            return Err(format!(
-                "pane {} carries process id {}, which pane {earlier_pane_id} already carries, so it \
-                 cannot be taken back",
-                carried_pane.pane_id, carried_pane.process_id
-            )
-            .into());
+        match take_one_pane_back(&pty_owner, carried_pane) {
+            Ok(()) => {
+                pty_size_by_pane_id.insert(carried_pane.pane_id, carried_pane.get_pty_size());
+            }
+            Err(take_back_error) => {
+                tracing::warn!(
+                    pane_id = %carried_pane.pane_id,
+                    %take_back_error,
+                    "a carried pane could not be taken back; it closes and the other panes come back"
+                );
+                if end_carried_child(carried_pane.process_id) {
+                    ended_process_ids.push(carried_pane.process_id);
+                }
+            }
         }
     }
-    Ok(())
+    let reap_deadline = Instant::now() + INHERITED_CHILD_REAP_WAIT_DURATION;
+    for ended_process_id in ended_process_ids {
+        if let Ok(waited_process_id) = libc::pid_t::try_from(ended_process_id) {
+            reap_ended_children(waited_process_id, reap_deadline);
+        }
+    }
+    Ok((pty_owner, pty_size_by_pane_id))
+}
+
+/// The index of every pane the resume header records in conflict with another.
+///
+/// A pane id named more than once, a process id other than `0` carried by more
+/// than one pane, and a descriptor carried by more than one pane each put every
+/// pane sharing it in the set. A process id of `0` names no child and may
+/// repeat.
+///
+/// Before → after: a header naming `A(pid 4821)`, `B(pid 4821)`, `C(pid 5000)`
+/// → `{0, 1}`. A header naming `A`, `A` → `{0, 1}`. A header naming `A(fd 7)`,
+/// `B(fd 9)` → `{}`.
+fn find_conflicting_carried_pane_indexes(resume_header: &ResumeHeader) -> HashSet<usize> {
+    let mut pane_indexes_by_pane_id: HashMap<PaneId, Vec<usize>> = HashMap::new();
+    let mut pane_indexes_by_process_id: HashMap<u32, Vec<usize>> = HashMap::new();
+    let mut pane_indexes_by_terminal_file_descriptor: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (pane_index, carried_pane) in resume_header.carried_panes.iter().enumerate() {
+        pane_indexes_by_pane_id
+            .entry(carried_pane.pane_id)
+            .or_default()
+            .push(pane_index);
+        if carried_pane.process_id != 0 {
+            pane_indexes_by_process_id
+                .entry(carried_pane.process_id)
+                .or_default()
+                .push(pane_index);
+        }
+        if let Some(terminal_file_descriptor) = carried_pane.terminal_fd {
+            pane_indexes_by_terminal_file_descriptor
+                .entry(terminal_file_descriptor)
+                .or_default()
+                .push(pane_index);
+        }
+    }
+    pane_indexes_by_pane_id
+        .into_values()
+        .chain(pane_indexes_by_process_id.into_values())
+        .chain(pane_indexes_by_terminal_file_descriptor.into_values())
+        .filter(|pane_indexes| pane_indexes.len() > 1)
+        .flatten()
+        .collect()
 }
 
 /// Take one pane back from the terminal descriptor and process id the header
-/// carried, and hand back the handle the rebuilt server holds it by.
+/// carried, onto `pty_backend`.
 ///
 /// What the number names is read before this process owns it, in two steps.
 ///
@@ -766,7 +870,7 @@ fn header_names_each_pane_once(
 fn take_one_pane_back(
     pty_backend: &Arc<PortablePtyBackend>,
     carried_pane: &resume::CarriedPane,
-) -> Result<PtyHandle, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::fd::{FromRawFd, OwnedFd};
 
     let terminal_file_descriptor = carried_pane.terminal_fd.ok_or_else(|| {
@@ -797,53 +901,14 @@ fn take_one_pane_back(
     // The descriptor crossed the swap open and names this process's own
     // pseudoterminal master, so it is this process's own from here.
     let terminal_file = unsafe { OwnedFd::from_raw_fd(terminal_file_descriptor) };
-    Ok(pty_backend.adopt(
+    pty_backend.adopt(
         carried_pane.pane_id,
         terminal_file,
         carried_pane.process_id,
         carried_pane.get_pty_size(),
         carried_pane.exit_status,
-    )?)
-}
-
-/// End every pane the resume header names after a failure, and close the terminals
-/// from `first_untouched_pane_index` onward.
-///
-/// Each child's whole process group is ended, which reaps its grandchildren
-/// too. `first_untouched_pane_index` is the first pane this process never took over. The panes
-/// before it belong to the backend, which closes them as it is dropped, apart
-/// from the one whose hand-over failed: its descriptor is left as it is —
-/// either the call that failed closed it, or this process never took it over
-/// and the number stays as the swap left it until this process ends. An
-/// `first_untouched_pane_index` of `0` is a failure before any pane was taken back, so every
-/// terminal the header names is closed here.
-///
-/// Each descriptor number is closed at most once, and a number a pane before
-/// `first_untouched_pane_index` also carries is not closed here at all.
-///
-/// Before → after: a header naming `A(fd 7)`, `B(fd 9)`, `C(fd 7)` with
-/// `first_untouched_pane_index` `2` → descriptor 7 stays open, since `A` holds it.
-#[cfg(unix)]
-fn end_panes_after_failure(resume_header: &ResumeHeader, first_untouched_pane_index: usize) {
-    for carried_pane in &resume_header.carried_panes {
-        let _ = end_carried_child(carried_pane.process_id);
-    }
-    let mut closed_terminal_file_descriptors: HashSet<i32> = resume_header.carried_panes
-        [..first_untouched_pane_index]
-        .iter()
-        .filter_map(|carried_pane| carried_pane.terminal_fd)
-        .collect();
-    for carried_pane in &resume_header.carried_panes[first_untouched_pane_index..] {
-        if carried_pane
-            .terminal_fd
-            .is_some_and(|terminal_file_descriptor| {
-                !closed_terminal_file_descriptors.insert(terminal_file_descriptor)
-            })
-        {
-            continue;
-        }
-        close_carried_terminal(carried_pane);
-    }
+    )?;
+    Ok(())
 }
 
 /// Close one carried pane's terminal descriptor.
@@ -863,7 +928,7 @@ fn close_carried_terminal(carried_pane: &resume::CarriedPane) {
     };
     if find_terminal_master_name(terminal_file_descriptor).is_none() {
         tracing::warn!(
-            pane = %carried_pane.pane_id,
+            pane_id = %carried_pane.pane_id,
             terminal_fd = terminal_file_descriptor,
             "the carried state named a descriptor that is no pseudoterminal master; it stays open"
         );
@@ -873,11 +938,14 @@ fn close_carried_terminal(carried_pane: &resume::CarriedPane) {
 }
 
 /// Take every pane the header names back by linking to the helper process
-/// holding them, and hand back the backend driving them with one handle each.
+/// holding them, and hand back the backend driving them with the size each
+/// one's terminal holds.
 ///
 /// The panes never moved: the helper process opened every pseudoconsole and
 /// still owns it. Linking names which panes this session claims, so the helper
-/// ends any it holds that this session does not.
+/// ends any it holds that this session does not, and reports any claimed pane
+/// it does not hold as ended. The panes
+/// [`find_conflicting_carried_pane_indexes`] names are not claimed.
 ///
 /// A link that cannot be made ends the panes over a link of its own. A helper
 /// process that answers neither keeps its panes until its own idle window ends
@@ -893,8 +961,6 @@ fn take_panes_back(
     pty_sink: Arc<dyn PtySink>,
     session_start: &SessionStart,
 ) -> Result<TakenBackPtyState, Box<dyn std::error::Error>> {
-    header_names_each_pane_once(resume_header)?;
-
     let supervisor_token = session_start.supervisor_token.as_deref().ok_or(
         "the secret of the link to the process holding the panes was not passed on, \
          so those panes cannot be reached",
@@ -903,11 +969,19 @@ fn take_panes_back(
         "the process id of the process holding the panes was not passed on, \
          so those panes cannot be reached",
     )?;
-    let claimed_pane_ids: Vec<PaneId> = resume_header
-        .carried_panes
-        .iter()
-        .map(|carried_pane| carried_pane.pane_id)
-        .collect();
+    let conflicting_pane_indexes = find_conflicting_carried_pane_indexes(resume_header);
+    let mut pty_size_by_pane_id = HashMap::new();
+    for (pane_index, carried_pane) in resume_header.carried_panes.iter().enumerate() {
+        if conflicting_pane_indexes.contains(&pane_index) {
+            tracing::warn!(
+                pane_id = %carried_pane.pane_id,
+                "the carried state names this pane in conflict with another; it is not claimed"
+            );
+            continue;
+        }
+        pty_size_by_pane_id.insert(carried_pane.pane_id, carried_pane.get_pty_size());
+    }
+    let claimed_pane_ids: Vec<PaneId> = pty_size_by_pane_id.keys().copied().collect();
     let pty_owner = match link_to_supervisor(
         session_start.session_id,
         supervisor_process_id,
@@ -920,29 +994,93 @@ fn take_panes_back(
         Err(link_error) => {
             // The link is the only way to reach the panes, so ending them is
             // tried once more over a link of its own.
-            release_carried_panes(resume_header, session_start, pty_sink);
+            release_panes_without_header(session_start, pty_sink);
             return Err(link_error.into());
         }
     };
-    let pty_handle_by_pane_id = claimed_pane_ids
-        .iter()
-        .map(|pane_id| (*pane_id, PtyHandle::from_detached_pane_id(*pane_id)))
-        .collect();
-    Ok((pty_owner, pty_handle_by_pane_id))
+    Ok((pty_owner, pty_size_by_pane_id))
 }
 
-/// End every pane the header names, so a carried state that cannot be read
-/// leaves no child running and no terminal open.
+/// Release every terminal this process inherited across the swap, when the
+/// resume header does not read.
 ///
-/// No pane was taken back here, so every terminal the header names is closed as
-/// well — which is [`end_panes_after_failure`] with no pane left untouched.
+/// Every open descriptor above standard error that names a pseudoterminal
+/// master is closed, which hangs up the program running in that terminal.
+/// Every child process of this one that has ended is then reaped, until none is
+/// left or [`INHERITED_CHILD_REAP_WAIT_DURATION`] runs out. A child still
+/// running when the wait runs out keeps running.
+///
+/// The caller holds no pane of its own: every pseudoterminal master this
+/// process holds is closed.
 #[cfg(unix)]
-fn release_carried_panes(
-    resume_header: &ResumeHeader,
-    _session_start: &SessionStart,
-    _pty_sink: Arc<dyn PtySink>,
-) {
-    end_panes_after_failure(resume_header, 0);
+fn release_panes_without_header(_session_start: &SessionStart, _pty_sink: Arc<dyn PtySink>) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    for open_file_descriptor in list_open_file_descriptors() {
+        if open_file_descriptor <= libc::STDERR_FILENO
+            || find_terminal_master_name(open_file_descriptor).is_none()
+        {
+            continue;
+        }
+        tracing::warn!(
+            terminal_fd = open_file_descriptor,
+            "a terminal the previous image carried is closed"
+        );
+        drop(unsafe { OwnedFd::from_raw_fd(open_file_descriptor) });
+    }
+    reap_ended_children(-1, Instant::now() + INHERITED_CHILD_REAP_WAIT_DURATION);
+}
+
+/// Every descriptor number this process holds open, read from
+/// [`OPEN_FILE_DESCRIPTOR_DIRECTORY`]. The list includes the descriptor the
+/// read itself held open, which is closed by the time the list comes back. A
+/// directory that cannot be read gives an empty list.
+#[cfg(unix)]
+fn list_open_file_descriptors() -> Vec<i32> {
+    let Ok(descriptor_entries) = std::fs::read_dir(OPEN_FILE_DESCRIPTOR_DIRECTORY) else {
+        tracing::warn!(
+            directory = OPEN_FILE_DESCRIPTOR_DIRECTORY,
+            "the open descriptors could not be listed; no carried terminal is closed"
+        );
+        return Vec::new();
+    };
+    descriptor_entries
+        .filter_map(Result::ok)
+        .filter_map(|descriptor_entry| descriptor_entry.file_name().to_str()?.parse().ok())
+        .collect()
+}
+
+/// Reap the ended children `waited_process_id` names, checking every
+/// [`INHERITED_CHILD_REAP_POLL_INTERVAL_DURATION`], until none is left or
+/// `reap_deadline` passes.
+///
+/// `waited_process_id` is a `waitpid` target: `-1` names every child of this
+/// process, and a positive id names that one child. An id that names no child
+/// of this process returns at once.
+///
+/// Before → after: `waited_process_id = 4821`, a child killed by `SIGKILL` →
+/// its exit status is collected and it is no longer a zombie.
+#[cfg(unix)]
+fn reap_ended_children(waited_process_id: libc::pid_t, reap_deadline: Instant) {
+    loop {
+        let mut wait_status: libc::c_int = 0;
+        let reaped_process_id =
+            unsafe { libc::waitpid(waited_process_id, &mut wait_status, libc::WNOHANG) };
+        if reaped_process_id > 0 {
+            continue;
+        }
+        if reaped_process_id < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if Instant::now() >= reap_deadline {
+            tracing::warn!("a child the previous image started is still running; it keeps running");
+            return;
+        }
+        std::thread::sleep(INHERITED_CHILD_REAP_POLL_INTERVAL_DURATION);
+    }
 }
 
 /// Record on `resume_header` the exit status each pane reports now.
@@ -953,7 +1091,7 @@ fn release_carried_panes(
 /// already carries is kept: this only fills in the ones that settled late.
 ///
 /// Before → after: pane 3's shell exits with code 7 after the header was built
-/// → the header carries `exit: Some(ExitCode(7))` instead of `None`, and the
+/// → the header carries `exit_status: Some(ExitCode(7))` instead of `None`, and the
 /// next image reports 7 rather than `-1`.
 fn refresh_carried_exits(resume_header: &mut ResumeHeader, carried_pty_panes: &[CarriedPtyPane]) {
     for carried_pty_pane in carried_pty_panes {
@@ -976,11 +1114,11 @@ fn refresh_carried_exits(resume_header: &mut ResumeHeader, carried_pty_panes: &[
 /// this process's own group, and a process id that does not fit a positive
 /// `i32` wraps to a negative number naming another group. Both are refused.
 ///
-/// Before → after: `pid = 4821` → that pane child's group is ended and `true`
-/// comes back. `pid = 0` or `pid = 3_000_000_000` → nothing is signalled and
-/// `false` comes back.
+/// Before → after: `process_id = 4821` → that pane child's group is ended and
+/// `true` comes back. `process_id = 0` or `process_id = 3_000_000_000` → nothing
+/// is signalled and `false` comes back.
 ///
-/// Hands back whether `killpg` was called on `pid`. A `killpg` that failed —
+/// Hands back whether `killpg` was called on `process_id`. A `killpg` that failed —
 /// the group is already gone, or a member may not be signalled — still hands
 /// back `true`.
 #[cfg(unix)]
@@ -993,24 +1131,18 @@ fn end_carried_child(process_id: u32) -> bool {
     true
 }
 
-/// End every pane the helper process holds, so a carried state that cannot be
-/// read leaves no child running and no terminal open.
+/// End every pane the helper process holds, and tell the helper to end itself,
+/// so the fresh session that follows starts a helper process of its own.
 ///
 /// Linking while claiming no pane is what ends them: the helper process ends
-/// every pane the session server does not claim. It is then told to end itself,
-/// so the fresh session that follows starts a helper process of its own.
+/// every pane the session server does not claim.
 ///
 /// This path and [`take_panes_back`] both build the helper's address from the
 /// identity the router started this process for and the helper's process id
-/// passed on beside it, so the two always name the same helper. The header
-/// names the panes, which the helper itself already knows, so nothing here
-/// reads it.
+/// passed on beside it, so the two always name the same helper. Nothing here
+/// reads the resume header.
 #[cfg(windows)]
-fn release_carried_panes(
-    _resume_header: &ResumeHeader,
-    session_start: &SessionStart,
-    pty_sink: Arc<dyn PtySink>,
-) {
+fn release_panes_without_header(session_start: &SessionStart, pty_sink: Arc<dyn PtySink>) {
     let Some(supervisor_token) = session_start.supervisor_token.as_deref() else {
         return;
     };
@@ -1031,7 +1163,7 @@ fn release_carried_panes(
 }
 
 /// Open the link to the helper process holding `session_id`'s panes, claiming
-/// `claimed` and no other pane.
+/// `claimed_pane_ids` and no other pane.
 ///
 /// `supervisor_process_id` is that helper's process id, which its address is derived
 /// from.
@@ -1221,7 +1353,7 @@ fn read_resume_support(executable_path: &Path) -> Result<ResumeSupport, String> 
     }
 }
 
-/// Read the first line `stdout` carries on a thread of its own, and hand back
+/// Read the first line `child_standard_output` carries on a thread of its own, and hand back
 /// the channel it arrives on. A stream that ends before a newline sends
 /// whatever it held.
 fn read_session_server_line(child_standard_output: std::process::ChildStdout) -> Receiver<String> {
@@ -1429,7 +1561,7 @@ fn swap_session_image(
     let client_leave_deadline = Instant::now() + CLIENTS_LEFT_WAIT_DURATION;
     loop {
         drain_runtime_event_inbox(&mut session_server, DetachPolicy::Skip);
-        let attached_client_count = ipc_server.attached_connections();
+        let attached_client_count = ipc_server.count_attached_connections();
         if attached_client_count == 0 {
             break;
         }
@@ -1617,10 +1749,10 @@ enum DetachPolicy {
 /// client what applying it produced.
 ///
 /// `detach_policy` says what a queued `ClientDetached` does. Every pass before the
-/// restart is announced takes [`Detaches::Apply`]: no client has been told
+/// restart is announced takes [`DetachPolicy::Apply`]: no client has been told
 /// anything yet, so a detach there is a client that really hung up, and the
 /// session keeps serving without it whether the swap starts or is abandoned.
-/// The passes after the announce take [`Detaches::Skip`]: every told client's
+/// The passes after the announce take [`DetachPolicy::Skip`]: every told client's
 /// connection ends as that client leaves, and the swap carries each record
 /// across so the client attaches again onto it. The grace window after the swap
 /// drops a record nobody claims. The last of those passes runs after
@@ -1639,7 +1771,7 @@ fn apply_queued_runtime_events(session_server: &mut Server, detach_policy: Detac
 /// states, and push no frames. A push builds each subscriber's whole frame, so
 /// a caller passing over the inbox repeatedly pushes once at the end.
 fn drain_runtime_event_inbox(session_server: &mut Server, detach_policy: DetachPolicy) {
-    while let Ok(runtime_event) = session_server.inbox_rx().try_recv() {
+    while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
         if matches!(
             (detach_policy, &runtime_event),
             (DetachPolicy::Skip, RuntimeEvent::ClientDetached { .. })
@@ -1655,8 +1787,8 @@ fn drain_runtime_event_inbox(session_server: &mut Server, detach_policy: DetachP
 ///
 /// The panes were never released: the backend still holds every one and every
 /// watcher is still on its child, so the readers pick up where they stopped and
-/// the rebuilt server takes [`PtyHandle::from_detached_pane_id`] handles over the panes that
-/// same backend drives.
+/// the rebuilt server drives every pane the header names through that same
+/// backend.
 ///
 /// The control socket is bound again here, and its fresh token is what every
 /// client that was told the session is restarting watches for. The caller has
@@ -1676,13 +1808,8 @@ fn resume_readers_and_rebuild(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
-    let mut rebuilt_session = resume_session_readers(
-        session_server,
-        pty_owner,
-        resume_header,
-        resume_body,
-        runtime_event_sender,
-    );
+    let mut rebuilt_session =
+        resume_session_readers(session_server, pty_owner, resume_header, resume_body);
 
     let bound_session_socket = bind_session_socket(session_start, runtime_event_sender);
     let _ = std::fs::remove_file(resolve_resume_file_path(
@@ -1712,13 +1839,8 @@ fn resume_readers_and_keep_socket(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
-    let mut rebuilt_session = resume_session_readers(
-        session_server,
-        pty_owner,
-        resume_header,
-        resume_body,
-        runtime_event_sender,
-    );
+    let mut rebuilt_session =
+        resume_session_readers(session_server, pty_owner, resume_header, resume_body);
 
     let token_rotation_result = session_socket.rotate_token();
     let _ = std::fs::remove_file(resolve_resume_file_path(
@@ -1737,27 +1859,14 @@ fn resume_session_readers(
     pty_owner: &Arc<PtyOwner>,
     resume_header: &ResumeHeader,
     resume_body: ResumeBody,
-    runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Server {
     pty_owner.resume_readers();
 
-    let pty_handle_by_pane_id = resume_header
-        .carried_panes
-        .iter()
-        .map(|carried_pane| {
-            (
-                carried_pane.pane_id,
-                PtyHandle::from_detached_pane_id(carried_pane.pane_id),
-            )
-        })
-        .collect();
     let pty_backend: Arc<dyn PtyBackend> = pty_owner.clone();
     let mut rebuilt_session = Server::resume(
         pty_backend,
-        session_server.into_inbox_rx(),
-        runtime_event_sender.clone(),
+        session_server.into_inbox_receiver(),
         resume_body,
-        pty_handle_by_pane_id,
         build_carried_pty_sizes(resume_header),
     );
     // The session comes back on the `koshi.kdl` that is on disk now.
@@ -1907,20 +2016,20 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
         // serving instead, so that client attaches and reads the quit rather
         // than finding a session that stopped answering. Its window empties
         // the set, so this waits at most that long.
-        if session_server.is_quit_requested() && !session_server.awaits_a_client() {
+        if session_server.is_quit_requested() && !session_server.is_awaiting_client() {
             return ServeOutcome::Ended;
         }
         let current_time = Instant::now();
-        let runtime_event = match session_server.next_render_wakeup(current_time) {
+        let runtime_event = match session_server.compute_next_render_wakeup(current_time) {
             Some(render_wakeup_timeout) => match session_server
-                .inbox_rx()
+                .get_inbox_receiver()
                 .recv_timeout(render_wakeup_timeout)
             {
                 Ok(runtime_event) => Some(runtime_event),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return ServeOutcome::Ended,
             },
-            None => match session_server.inbox_rx().recv() {
+            None => match session_server.get_inbox_receiver().recv() {
                 Ok(runtime_event) => Some(runtime_event),
                 Err(_) => return ServeOutcome::Ended,
             },
@@ -1932,7 +2041,7 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
                 .is_break();
         }
         // Apply anything else already queued before building one frame.
-        while let Ok(runtime_event) = session_server.inbox_rx().try_recv() {
+        while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
             should_quit |= session_server
                 .handle_runtime_event(runtime_event)
                 .is_break();
@@ -1944,7 +2053,8 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
         if session_server.poll_render(Instant::now()) {
             session_server.push_frames();
         }
-        if (should_quit || session_server.is_quit_requested()) && !session_server.awaits_a_client()
+        if (should_quit || session_server.is_quit_requested())
+            && !session_server.is_awaiting_client()
         {
             return ServeOutcome::Ended;
         }

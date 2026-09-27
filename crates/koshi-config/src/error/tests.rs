@@ -1,5 +1,5 @@
 //! Tests for config domain errors: the version check and its diagnostic,
-//! the parse-diagnostic conversion, error messages, and classification.
+//! the parse-diagnostic conversion, and error messages.
 
 use super::*;
 
@@ -136,16 +136,6 @@ fn parse_conversion_without_sub_diagnostics_uses_the_kdl_display() {
     };
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(parse_error_detail, "Failed to parse KDL document");
-}
-
-#[test]
-fn config_errors_classify_as_recoverable_config_problems() {
-    let validation_error = ConfigError::Validation {
-        config_key: "scrollback".to_string(),
-        validation_detail: "x".to_string(),
-    };
-    assert_eq!(validation_error.category(), DomainCategory::Config);
-    assert_eq!(validation_error.get_severity(), Severity::Recoverable);
 }
 
 #[test]

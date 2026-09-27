@@ -14,7 +14,7 @@ use koshi_core::ids::PaneId;
 use koshi_layout::focus::FocusCandidates;
 use koshi_pane::{pane::lifecycle::PaneLifecycle, registry::PaneRegistry};
 
-use crate::session::{policy::EmptyTabPolicy, state::Tab};
+use crate::session::state::Tab;
 
 /// The outcome of focus recovery: where focus should go now, or why it cannot
 /// go to a pane.
@@ -29,9 +29,6 @@ pub enum FocusRepairResult {
     /// is [`PaneLifecycle::Removed`] or missing from the registry. The caller
     /// shows the terminal-too-small overlay.
     TerminalTooSmall,
-    /// The tab's layout holds no panes at all. Carries `empty_tab_policy` for
-    /// the caller to apply — close the tab.
-    EmptyTab(EmptyTabPolicy),
 }
 
 /// Pick the pane that inherits focus after the focused pane in `tab` is gone.
@@ -51,16 +48,13 @@ pub enum FocusRepairResult {
 /// `Spawning`, `Running`, dead (`Exited`) or `Closing` pane all stay eligible:
 /// each is a visible, focusable placeholder until it is removed.
 ///
-/// When no pane is eligible, the tab's layout picks the verdict: a layout that
-/// still holds panes yields [`FocusRepairResult::TerminalTooSmall`]; a layout
-/// with no panes left yields [`FocusRepairResult::EmptyTab`] carrying
-/// `empty_tab_policy`.
+/// When no pane is eligible, the verdict is
+/// [`FocusRepairResult::TerminalTooSmall`].
 #[must_use]
 pub fn repair_focus(
     tab: &Tab,
     pane_registry: &PaneRegistry,
     ranked_focus_candidates: FocusCandidates,
-    empty_tab_policy: EmptyTabPolicy,
 ) -> FocusRepairResult {
     let is_eligible_pane = |pane_id: PaneId| {
         ranked_focus_candidates
@@ -88,9 +82,6 @@ pub fn repair_focus(
 
     match focus_pane_id {
         Some(pane_id) => FocusRepairResult::Focused(pane_id),
-        None if tab.get_layout_tree().list_leaf_pane_ids().is_empty() => {
-            FocusRepairResult::EmptyTab(empty_tab_policy)
-        }
         None => FocusRepairResult::TerminalTooSmall,
     }
 }

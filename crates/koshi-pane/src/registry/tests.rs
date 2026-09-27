@@ -5,20 +5,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::ids::{PaneId, PluginId};
+use koshi_core::ids::PaneId;
 use koshi_core::process::{ShellKind, SpawnSpec};
 
 use super::PaneRegistry;
 use crate::error::PaneRegistryError;
 use crate::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
-use crate::pane::policy::{PaneClosePolicy, PaneExitPolicy};
-use crate::pane::state::{PaneKind, PaneRecord};
+use crate::pane::policy::PaneClosePolicy;
+use crate::pane::state::PaneRecord;
 
-/// A terminal pane record for `pane_id` with `close_policy = Force` and
-/// `created_at = UNIX_EPOCH`.
+/// A terminal pane record for `pane_id` with `close_policy = Force`.
 fn build_terminal_pane_record(pane_id: PaneId) -> PaneRecord {
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record.close_policy = PaneClosePolicy::Force;
     pane_record
 }
@@ -27,8 +25,7 @@ fn build_terminal_pane_record(pane_id: PaneId) -> PaneRecord {
 fn a_new_registry_is_empty() {
     let registry = PaneRegistry::new();
 
-    assert!(!registry.has_pane_records());
-    assert_eq!(registry.pane_record_count(), 0);
+    assert_eq!(registry.count_pane_records(), 0);
     assert_eq!(registry.list_pane_records().count(), 0);
 }
 
@@ -46,8 +43,7 @@ fn an_inserted_record_can_be_looked_up() {
         .register_pane_record(build_terminal_pane_record(pane_id))
         .expect("first insert");
 
-    assert!(registry.has_pane_records());
-    assert_eq!(registry.pane_record_count(), 1);
+    assert_eq!(registry.count_pane_records(), 1);
     assert_eq!(
         registry.get_pane_record_by_id(pane_id),
         Some(&build_terminal_pane_record(pane_id))
@@ -72,13 +68,10 @@ fn inserting_a_duplicate_pane_id_is_rejected_and_keeps_the_original() {
 
     assert_eq!(
         rejected_registration,
-        Err(PaneRegistryError::DuplicateId {
-            pane_id,
-            pane_kind: PaneKind::Terminal
-        })
+        Err(PaneRegistryError::DuplicateId { pane_id })
     );
     // The first pane record is untouched: a rejected insert never overwrites.
-    assert_eq!(registry.pane_record_count(), 1);
+    assert_eq!(registry.count_pane_records(), 1);
     assert_eq!(
         registry
             .get_pane_record_by_id(pane_id)
@@ -87,57 +80,6 @@ fn inserting_a_duplicate_pane_id_is_rejected_and_keeps_the_original() {
             .as_deref(),
         Some(Path::new("/original"))
     );
-}
-
-#[test]
-fn a_duplicate_insert_reports_the_pane_kind_of_the_record_it_turned_away() {
-    let mut registry = PaneRegistry::new();
-    let pane_id = PaneId::new();
-    let plugin_id = PluginId::new();
-    registry
-        .register_pane_record(build_terminal_pane_record(pane_id))
-        .expect("first insert");
-
-    let rejected_registration = registry.register_pane_record(PaneRecord::from_pane_kind(
-        pane_id,
-        PaneKind::Plugin { plugin_id },
-        SystemTime::UNIX_EPOCH,
-    ));
-
-    // The error carries the kind of the rejected pane record, not the kind of the
-    // pane record already registered.
-    assert_eq!(
-        rejected_registration,
-        Err(PaneRegistryError::DuplicateId {
-            pane_id,
-            pane_kind: PaneKind::Plugin { plugin_id }
-        })
-    );
-    assert_eq!(registry.pane_record_count(), 1);
-    assert_eq!(
-        registry.get_pane_record_by_id(pane_id),
-        Some(&build_terminal_pane_record(pane_id))
-    );
-}
-
-#[test]
-fn a_duplicate_pane_id_error_is_recoverable_and_classified_by_pane_kind() {
-    // The error's domain follows the clashing pane's kind.
-    let terminal_error = PaneRegistryError::DuplicateId {
-        pane_id: PaneId::new(),
-        pane_kind: PaneKind::Terminal,
-    };
-    assert_eq!(terminal_error.category(), DomainCategory::Terminal);
-    assert_eq!(terminal_error.get_severity(), Severity::Recoverable);
-
-    let plugin_error = PaneRegistryError::DuplicateId {
-        pane_id: PaneId::new(),
-        pane_kind: PaneKind::Plugin {
-            plugin_id: PluginId::new(),
-        },
-    };
-    assert_eq!(plugin_error.category(), DomainCategory::Plugin);
-    assert_eq!(plugin_error.get_severity(), Severity::Recoverable);
 }
 
 #[test]
@@ -151,7 +93,7 @@ fn removing_a_record_deletes_it() {
     let removed_record = registry.remove_pane_record(pane_id);
 
     assert_eq!(removed_record, Some(build_terminal_pane_record(pane_id)));
-    assert!(!registry.has_pane_records());
+    assert_eq!(registry.count_pane_records(), 0);
     assert_eq!(registry.get_pane_record_by_id(pane_id), None);
     // Removing an absent pane ID is a no-op, not an error.
     assert_eq!(registry.remove_pane_record(pane_id), None);
@@ -174,7 +116,7 @@ fn removing_one_record_leaves_the_others_in_place() {
         Some(build_terminal_pane_record(removed_pane_id))
     );
 
-    assert_eq!(registry.pane_record_count(), 1);
+    assert_eq!(registry.count_pane_records(), 1);
     assert_eq!(
         registry.get_pane_record_by_id(retained_pane_id),
         Some(&build_terminal_pane_record(retained_pane_id))
@@ -256,7 +198,7 @@ fn list_yields_every_record_in_pane_id_order() {
         .collect();
 
     assert_eq!(listed_records, expected_records);
-    assert_eq!(registry.pane_record_count(), 3);
+    assert_eq!(registry.count_pane_records(), 3);
 }
 
 #[test]
@@ -272,7 +214,7 @@ fn a_removed_pane_id_can_be_registered_again() {
     registry
         .register_pane_record(build_terminal_pane_record(pane_id))
         .expect("reinsert");
-    assert_eq!(registry.pane_record_count(), 1);
+    assert_eq!(registry.count_pane_records(), 1);
     assert_eq!(
         registry.get_pane_record_by_id(pane_id),
         Some(&build_terminal_pane_record(pane_id))
@@ -284,7 +226,7 @@ fn a_pane_record_survives_a_serde_round_trip() {
     let mut environment_variables = BTreeMap::new();
     environment_variables.insert("EDITOR".to_owned(), "nvim".to_owned());
 
-    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new(), SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(PaneId::new());
     pane_record.spawn_spec = Some(SpawnSpec {
         program: PathBuf::from("/bin/bash"),
         arguments: vec!["-l".to_owned()],
@@ -296,7 +238,6 @@ fn a_pane_record_survives_a_serde_round_trip() {
     pane_record.close_policy = PaneClosePolicy::Graceful {
         timeout_duration: Duration::from_secs(3),
     };
-    pane_record.exit_policy = PaneExitPolicy::CloseOnExit;
     // Drive to `Exited { exit_code: Some(0), .. }` through legal events.
     pane_record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
@@ -315,22 +256,6 @@ fn a_pane_record_survives_a_serde_round_trip() {
 }
 
 #[test]
-fn a_plugin_pane_kind_survives_a_serde_round_trip() {
-    let pane_record = PaneRecord::from_pane_kind(
-        PaneId::new(),
-        PaneKind::Plugin {
-            plugin_id: PluginId::new(),
-        },
-        SystemTime::UNIX_EPOCH,
-    );
-
-    let record_json = serde_json::to_string(&pane_record).expect("serialize");
-    let restored_record: PaneRecord = serde_json::from_str(&record_json).expect("deserialize");
-
-    assert_eq!(pane_record, restored_record);
-}
-
-#[test]
 fn an_empty_registry_serializes_as_an_empty_records_map() {
     assert_eq!(
         serde_json::to_string(&PaneRegistry::new()).expect("serialize"),
@@ -341,33 +266,27 @@ fn an_empty_registry_serializes_as_an_empty_records_map() {
 #[test]
 fn a_registry_survives_a_serde_round_trip() {
     let mut registry = PaneRegistry::new();
-    let terminal_pane_id = PaneId::new();
-    let plugin_pane_id = PaneId::new();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
     registry
-        .register_pane_record(build_terminal_pane_record(terminal_pane_id))
-        .expect("insert terminal");
+        .register_pane_record(build_terminal_pane_record(first_pane_id))
+        .expect("insert first");
     registry
-        .register_pane_record(PaneRecord::from_pane_kind(
-            plugin_pane_id,
-            PaneKind::Plugin {
-                plugin_id: PluginId::new(),
-            },
-            SystemTime::UNIX_EPOCH,
-        ))
-        .expect("insert plugin");
+        .register_pane_record(PaneRecord::from_terminal_pane(second_pane_id))
+        .expect("insert second");
 
     let registry_json = serde_json::to_string(&registry).expect("serialize");
     let restored_registry: PaneRegistry =
         serde_json::from_str(&registry_json).expect("deserialize");
 
     assert_eq!(restored_registry, registry);
-    assert_eq!(restored_registry.pane_record_count(), 2);
+    assert_eq!(restored_registry.count_pane_records(), 2);
     assert_eq!(
-        restored_registry.get_pane_record_by_id(terminal_pane_id),
-        registry.get_pane_record_by_id(terminal_pane_id)
+        restored_registry.get_pane_record_by_id(first_pane_id),
+        registry.get_pane_record_by_id(first_pane_id)
     );
     assert_eq!(
-        restored_registry.get_pane_record_by_id(plugin_pane_id),
-        registry.get_pane_record_by_id(plugin_pane_id)
+        restored_registry.get_pane_record_by_id(second_pane_id),
+        registry.get_pane_record_by_id(second_pane_id)
     );
 }

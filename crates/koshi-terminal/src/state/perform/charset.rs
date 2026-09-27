@@ -9,7 +9,7 @@ impl TerminalState {
     /// The charset selected into GL: the active screen's `G0`–`G3` slot named
     /// by its `gl`. Every printed byte is translated through it.
     fn get_active_charset(&self) -> Charset {
-        let render = self.active_render();
+        let render = self.get_active_render();
         render.charsets[render.gl]
     }
 
@@ -35,7 +35,7 @@ impl TerminalState {
             b'A' => Charset::Uk,
             _ => Charset::Ascii,
         };
-        self.active_render_mut().charsets[charset_slot_index] = charset;
+        self.get_active_render_mut().charsets[charset_slot_index] = charset;
     }
 }
 

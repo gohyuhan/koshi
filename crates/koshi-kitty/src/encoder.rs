@@ -15,16 +15,16 @@ use thiserror::Error;
 const KITTY_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Kitty;
 
 /// The largest compressed byte slice in one Kitty graphics chunk.
-pub const KITTY_IMAGE_CHUNK_BYTE_COUNT: usize = 3_072;
+const KITTY_IMAGE_CHUNK_BYTE_COUNT: usize = 3_072;
 
 /// The largest number of Kitty graphics chunks emitted by one advance.
-pub const KITTY_IMAGE_CHUNK_COUNT_PER_STEP: usize = 16;
+const KITTY_IMAGE_CHUNK_COUNT_PER_STEP: usize = 16;
 
 /// The largest number of raw RGBA bytes compressed by one advance.
-pub const KITTY_COMPRESSION_INPUT_BYTE_COUNT_PER_STEP: usize = 262_144;
+const KITTY_COMPRESSION_INPUT_BYTE_COUNT_PER_STEP: usize = 262_144;
 
 /// The scratch output capacity used by one compression pass.
-pub const KITTY_COMPRESSION_OUTPUT_BYTE_COUNT: usize = 65_536;
+const KITTY_COMPRESSION_OUTPUT_BYTE_COUNT: usize = 65_536;
 
 /// Kitty placement fields written by the placement command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,24 +177,6 @@ impl KittyUpload {
             is_compression_complete: false,
             has_started_transmission: false,
         })
-    }
-
-    /// Return whether one complete Kitty chunk batch was written.
-    #[must_use]
-    pub fn has_started_transmission(&self) -> bool {
-        self.has_started_transmission
-    }
-
-    /// Return the shared decoded image retained by the upload.
-    #[must_use]
-    pub fn get_decoded_image(&self) -> &Arc<DecodedImage> {
-        &self.decoded_image
-    }
-
-    /// Return the nonzero Kitty image number used by the upload.
-    #[must_use]
-    pub fn get_image_number(&self) -> u32 {
-        self.image_number
     }
 
     /// Return whether compression and transmission reached their ends.
@@ -407,25 +389,6 @@ pub fn write_kitty_image_delete<W: Write>(
         return Err(KittyOutputError::InvalidImageNumber);
     }
     write!(writer, "\x1b_Ga=d,d=N,I={image_number},q=2;\x1b\\")?;
-    Ok(())
-}
-
-/// Write a Kitty command that deletes one placement and retains image data.
-pub fn write_kitty_placement_delete<W: Write>(
-    writer: &mut W,
-    image_number: u32,
-    placement_id: u32,
-) -> Result<(), KittyOutputError> {
-    if image_number == 0 {
-        return Err(KittyOutputError::InvalidImageNumber);
-    }
-    if placement_id == 0 {
-        return Err(KittyOutputError::InvalidPlacementId);
-    }
-    write!(
-        writer,
-        "\x1b_Ga=d,d=n,I={image_number},p={placement_id},q=2;\x1b\\"
-    )?;
     Ok(())
 }
 

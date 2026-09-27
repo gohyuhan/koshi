@@ -14,27 +14,27 @@ pub fn render_doctor(check_rows: &[DoctorCheckRow], output_format: OutputFormat)
         OutputFormat::Json => render_json(&check_rows),
         OutputFormat::Table => render_table(
             DOCTOR_HEADERS,
-            check_rows.iter().map(doctor_row_cells).collect(),
+            check_rows.iter().map(format_doctor_row_cells).collect(),
         ),
     }
 }
 
-/// Column headers for doctor answers, matching [`doctor_row_cells`].
+/// Column headers for doctor answers, matching [`format_doctor_row_cells`].
 const DOCTOR_HEADERS: &[&str] = &["check", "verdict", "reason", "help"];
 
 /// One [`DoctorCheckRow`] as table cells, in [`DOCTOR_HEADERS`] order. A row with
 /// no help prints `-` in that column.
-fn doctor_row_cells(check_row: &DoctorCheckRow) -> Vec<String> {
+fn format_doctor_row_cells(check_row: &DoctorCheckRow) -> Vec<String> {
     vec![
         check_row.check_name.to_string(),
-        verdict_cell(check_row.outcome.verdict).to_string(),
+        format_verdict_cell(check_row.outcome.verdict).to_string(),
         check_row.outcome.reason.clone(),
         format_optional_cell(check_row.outcome.help.as_ref()),
     ]
 }
 
 /// The verdict cell: `"ok"`, `"warn"` or `"fail"`.
-fn verdict_cell(verdict: Verdict) -> &'static str {
+fn format_verdict_cell(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Ok => "ok",
         Verdict::Warn => "warn",

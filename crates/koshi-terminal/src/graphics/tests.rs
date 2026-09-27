@@ -1,5 +1,8 @@
 //! Tests for bounded Sixel, kitty, and iTerm2 image decoding.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+
 use super::*;
 
 impl GraphicsParser {
@@ -57,7 +60,7 @@ fn build_red_png_bytes() -> Vec<u8> {
     png_bytes
 }
 
-fn png_with_dimensions(image_pixel_width: u32, image_pixel_height: u32) -> Vec<u8> {
+fn build_png_with_dimensions(image_pixel_width: u32, image_pixel_height: u32) -> Vec<u8> {
     let mut png_bytes = build_red_png_bytes();
     png_bytes[16..20].copy_from_slice(&image_pixel_width.to_be_bytes());
     png_bytes[20..24].copy_from_slice(&image_pixel_height.to_be_bytes());
@@ -347,6 +350,31 @@ fn wrap_screen(inner_graphics_bytes: &[u8]) -> Vec<u8> {
     screen_wrapped_bytes.extend_from_slice(inner_graphics_bytes);
     screen_wrapped_bytes.extend_from_slice(b"\x1b\\");
     screen_wrapped_bytes
+}
+
+/// Carry `terminal_engine` into a new engine the way a session process-image
+/// swap does: the VTE parser bytes, the graphics transport state, the queued
+/// graphics events, and any open synchronized-output group move to an engine
+/// around the same screen.
+fn swap_terminal_engine(mut terminal_engine: TerminalEngine) -> TerminalEngine {
+    let swapped_at = std::time::Instant::now();
+    let terminal_undecoded_bytes = terminal_engine.get_undecoded_terminal_bytes().to_vec();
+    let graphics_transport_state = terminal_engine
+        .get_graphics_transport_state()
+        .unwrap_or_default();
+    let synchronized_output_transport =
+        terminal_engine.get_synchronized_output_transport(swapped_at);
+    let graphics_events = terminal_engine.take_graphics_events();
+    let terminal_state = terminal_engine.into_terminal_state();
+    TerminalEngine::from_carried_state(
+        terminal_state,
+        &terminal_undecoded_bytes,
+        &graphics_events,
+        graphics_transport_state,
+        synchronized_output_transport,
+        swapped_at,
+        std::time::SystemTime::now(),
+    )
 }
 
 fn get_only_graphics_event(
@@ -1245,9 +1273,9 @@ fn cancelling_a_split_screen_transfer_clears_nested_state() {
     assert!(parser
         .decode_completed_graphics_events(&wrap_screen(&inner_iterm_bytes[..split_byte_index]))
         .is_empty());
-    assert!(parser.is_screen_continuation());
+    assert!(parser.is_screen_continuation);
     assert!(parser.decode_completed_graphics_events(b"\x18").is_empty());
-    assert!(!parser.is_screen_continuation());
+    assert!(!parser.is_screen_continuation);
     assert!(parser.screen_inner_parser.is_none());
 
     let graphics_event =
@@ -1265,9 +1293,9 @@ fn cancelling_a_split_tmux_transfer_clears_nested_state() {
     assert!(parser
         .decode_completed_graphics_events(&wrap_tmux(&inner_iterm_bytes[..split_byte_index]))
         .is_empty());
-    assert!(parser.is_tmux_continuation());
+    assert!(parser.is_tmux_continuation);
     assert!(parser.decode_completed_graphics_events(b"\x1a").is_empty());
-    assert!(!parser.is_tmux_continuation());
+    assert!(!parser.is_tmux_continuation);
     assert!(parser.tmux_inner_parser.is_none());
 
     let graphics_event =
@@ -1438,13 +1466,18 @@ fn chunked_clipboard_data_is_consumed_as_complete_runs() {
         parser.graphics_sequence_byte_count,
         b"\x1b]52;c;".len() + CLIPBOARD_PAYLOAD_BYTE_COUNT
     );
-    assert_eq!(parser.get_graphics_carry_bytes(), Some([].as_slice()));
+    assert_eq!(
+        parser
+            .get_graphics_transport_state()
+            .map(|graphics_transport_state| graphics_transport_state.is_carryable),
+        Some(false)
+    );
     assert_eq!(parser.feed_discard_bytes(b"\x07"), None);
 
     let terminator_scan = parser.process_graphics_operations_with_offsets(b"\x07");
     assert_eq!(terminator_scan.completed_graphics_events, []);
     assert_eq!(terminator_scan.terminal_inert_ranges, []);
-    assert_eq!(parser.get_graphics_carry_bytes(), None);
+    assert_eq!(parser.get_graphics_transport_state(), None);
 }
 
 #[test]
@@ -1474,7 +1507,7 @@ fn ordinary_control_string_data_is_consumed_as_complete_runs() {
             parser.process_graphics_operations_with_offsets(control_string_terminator);
         assert_eq!(terminator_scan.completed_graphics_events, []);
         assert_eq!(terminator_scan.terminal_inert_ranges, []);
-        assert_eq!(parser.get_graphics_carry_bytes(), None);
+        assert_eq!(parser.get_graphics_transport_state(), None);
     }
 }
 
@@ -1493,7 +1526,7 @@ fn discarded_string_bulk_scan_stays_silent_past_the_graphics_limit() {
 
     assert_eq!(graphics_scan.terminal_inert_ranges, []);
     assert_eq!(graphics_scan.completed_graphics_events, []);
-    assert_eq!(parser.get_graphics_carry_bytes(), None);
+    assert_eq!(parser.get_graphics_transport_state(), None);
 }
 
 #[test]
@@ -1544,9 +1577,13 @@ fn finishing_an_incomplete_utf8_character_discards_its_carry() {
     let mut parser = GraphicsParser::default();
 
     assert!(parser.decode_completed_graphics_events(b"\xe2").is_empty());
-    assert_eq!(parser.get_graphics_carry_bytes(), Some(&b"\xe2"[..]));
+    assert_eq!(
+        parser
+            .get_graphics_transport_state()
+            .map(|graphics_transport_state| graphics_transport_state.carry_bytes),
+        Some(b"\xe2".to_vec())
+    );
     assert!(parser.finish_graphics_stream().is_empty());
-    assert_eq!(parser.get_graphics_carry_bytes(), None);
     assert!(parser.get_graphics_transport_state().is_none());
 
     assert_eq!(
@@ -1623,7 +1660,7 @@ fn oversized_ignored_strings_remain_silent_after_an_engine_swap() {
         );
 
         let mut resumed_graphics_parser = GraphicsParser::default();
-        resumed_graphics_parser.restore_graphics_carry_state(&[], graphics_transport_state);
+        resumed_graphics_parser.restore_graphics_transport_state(graphics_transport_state);
         assert!(resumed_graphics_parser
             .decode_completed_graphics_events(b"\x1b\\")
             .is_empty());
@@ -1847,7 +1884,7 @@ fn a_hostile_iterm_size_is_only_a_hint() {
 
 #[test]
 fn a_raster_dimension_limit_returns_image_too_large_before_decode() {
-    let oversized_png_bytes = png_with_dimensions(4097, 4097);
+    let oversized_png_bytes = build_png_with_dimensions(4097, 4097);
 
     assert_eq!(
         decode_raster(GraphicsProtocol::Iterm2, &oversized_png_bytes),
@@ -2063,11 +2100,14 @@ fn restarting_preserves_the_graphics_queue_overflow_report() {
     let completed_graphics_events = engine.take_graphics_events();
     let terminal_state_before_restart = engine.get_terminal_state().clone();
 
-    let mut resumed_terminal_engine = TerminalEngine::from_terminal_state_with_graphics_and_events(
+    let mut resumed_terminal_engine = TerminalEngine::from_carried_state(
         terminal_state_before_restart,
         b"",
-        b"",
         &completed_graphics_events,
+        GraphicsTransportState::default(),
+        None,
+        std::time::Instant::now(),
+        std::time::SystemTime::now(),
     );
 
     assert_eq!(
@@ -2416,7 +2456,7 @@ fn a_kitty_transfer_that_exceeds_the_carry_budget_is_abandoned_after_an_engine_s
     );
 
     let mut resumed_graphics_parser = GraphicsParser::default();
-    resumed_graphics_parser.restore_graphics_carry_state(&[], graphics_transport_state);
+    resumed_graphics_parser.restore_graphics_transport_state(graphics_transport_state);
     for (chunk_index, kitty_base64_chunk) in kitty_base64_chunks
         .iter()
         .enumerate()
@@ -2504,7 +2544,7 @@ fn an_active_kitty_chunk_that_exceeds_the_carry_budget_is_drained_after_an_engin
         .get_graphics_transport_state()
         .expect("the oversized active chunk has transport state");
     let mut resumed_graphics_parser = GraphicsParser::default();
-    resumed_graphics_parser.restore_graphics_carry_state(&[], graphics_transport_state);
+    resumed_graphics_parser.restore_graphics_transport_state(graphics_transport_state);
     let mut remaining_active_chunk_bytes =
         kitty_base64_chunks[carry_budget_chunk_index][prefix_byte_count..].to_vec();
     remaining_active_chunk_bytes.extend_from_slice(b"\x1b\\");
@@ -2559,7 +2599,7 @@ fn an_open_graphics_sequence_that_exceeds_the_carry_budget_is_drained_after_an_e
     );
 
     let mut resumed_graphics_parser = GraphicsParser::default();
-    resumed_graphics_parser.restore_graphics_carry_state(&[], graphics_transport_state);
+    resumed_graphics_parser.restore_graphics_transport_state(graphics_transport_state);
 
     assert_eq!(
         resumed_graphics_parser.decode_completed_graphics_events(b"\x1b\\"),
@@ -2593,7 +2633,7 @@ fn an_iterm_transfer_that_exceeds_the_carry_budget_is_abandoned_after_an_engine_
     );
 
     let mut resumed_graphics_parser = GraphicsParser::default();
-    resumed_graphics_parser.restore_graphics_carry_state(&[], graphics_transport_state);
+    resumed_graphics_parser.restore_graphics_transport_state(graphics_transport_state);
     assert!(resumed_graphics_parser
         .decode_completed_graphics_events(b"\x1b]1337;FilePart=AAAA\x07")
         .is_empty());
@@ -2654,14 +2694,7 @@ fn a_chunked_kitty_transfer_survives_an_engine_swap() {
     });
 
     let _ = engine.process_pty_output(first_kitty_chunk.as_bytes());
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine = TerminalEngine::from_terminal_state_with_graphics(
-        terminal_state,
-        &terminal_undecoded_bytes,
-        &graphics_undecoded_bytes,
-    );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(final_kitty_chunk.as_bytes());
 
     let graphics_event_record = resumed_terminal_engine
@@ -2693,23 +2726,9 @@ fn a_chunked_kitty_transfer_survives_two_engine_swaps() {
     });
 
     let _ = engine.process_pty_output(first_kitty_chunk.as_bytes());
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine = TerminalEngine::from_terminal_state_with_graphics(
-        terminal_state,
-        &terminal_undecoded_bytes,
-        &graphics_undecoded_bytes,
-    );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(second_kitty_chunk.as_bytes());
-    let terminal_undecoded_bytes = resumed_terminal_engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = resumed_terminal_engine.undecoded_graphics_bytes().to_vec();
-    let terminal_state = resumed_terminal_engine.into_terminal_state();
-    let mut final_terminal_engine = TerminalEngine::from_terminal_state_with_graphics(
-        terminal_state,
-        &terminal_undecoded_bytes,
-        &graphics_undecoded_bytes,
-    );
+    let mut final_terminal_engine = swap_terminal_engine(resumed_terminal_engine);
     let _ = final_terminal_engine.process_pty_output(third_kitty_chunk.as_bytes());
     let _ = final_terminal_engine.process_pty_output(final_kitty_chunk.as_bytes());
 
@@ -2743,14 +2762,7 @@ fn chunked_kitty_transfer_carry_survives_an_unrelated_escape() {
 
     let _ = engine.process_pty_output(first_kitty_chunk.as_bytes());
     let _ = engine.process_pty_output(b"\x1b[2J");
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine = TerminalEngine::from_terminal_state_with_graphics(
-        terminal_state,
-        &terminal_undecoded_bytes,
-        &graphics_undecoded_bytes,
-    );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(final_kitty_chunk.as_bytes());
 
     let graphics_event_record = resumed_terminal_engine
@@ -2783,14 +2795,7 @@ fn an_iterm_multipart_transfer_survives_an_engine_swap() {
     });
 
     let _ = engine.process_pty_output(first_iterm_chunk.as_bytes());
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine = TerminalEngine::from_terminal_state_with_graphics(
-        terminal_state,
-        &terminal_undecoded_bytes,
-        &graphics_undecoded_bytes,
-    );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(final_iterm_chunk.as_bytes());
 
     let graphics_event_record = resumed_terminal_engine
@@ -2814,19 +2819,7 @@ fn a_screen_transfer_survives_an_engine_swap() {
     });
 
     let _ = engine.process_pty_output(&first_screen_chunk);
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let is_screen_continuation = engine.is_graphics_screen_continuation();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine =
-        TerminalEngine::from_terminal_state_with_graphics_and_events_and_screen(
-            terminal_state,
-            &terminal_undecoded_bytes,
-            &graphics_undecoded_bytes,
-            &[],
-            is_screen_continuation,
-            false,
-        );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(&final_screen_chunk);
 
     let graphics_event_record = resumed_terminal_engine
@@ -2850,23 +2843,12 @@ fn a_c1_screen_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
 
     let _ = engine.process_pty_output(&first_screen_chunk);
     let _ = engine.process_pty_output(&[0x90]);
-    assert!(engine.is_graphics_screen_continuation());
-    assert!(engine.is_graphics_screen_wrapper_active());
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
     let graphics_transport_state = engine
         .get_graphics_transport_state()
         .expect("the split wrapper has transport state");
+    assert!(graphics_transport_state.is_screen_continuation);
     assert!(graphics_transport_state.screen_inner_transport.is_some());
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine =
-        TerminalEngine::from_terminal_state_with_graphics_and_events_and_wrappers(
-            terminal_state,
-            &terminal_undecoded_bytes,
-            &graphics_undecoded_bytes,
-            &[],
-            graphics_transport_state,
-        );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let mut final_screen_chunk = inner_iterm_bytes[split_byte_index..].to_vec();
     final_screen_chunk.extend_from_slice(b"\x1b\\");
     let _ = resumed_terminal_engine.process_pty_output(&final_screen_chunk);
@@ -2892,21 +2874,7 @@ fn a_tmux_transfer_survives_an_engine_swap() {
     });
 
     let _ = engine.process_pty_output(&first_tmux_chunk);
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let is_tmux_continuation = engine.is_graphics_tmux_continuation();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine =
-        TerminalEngine::from_terminal_state_with_graphics_and_events_and_wrappers(
-            terminal_state,
-            &terminal_undecoded_bytes,
-            &graphics_undecoded_bytes,
-            &[],
-            GraphicsTransportState {
-                is_tmux_continuation,
-                ..GraphicsTransportState::default()
-            },
-        );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(&final_tmux_chunk);
 
     let graphics_event_record = resumed_terminal_engine
@@ -2930,23 +2898,12 @@ fn a_c1_tmux_wrapper_with_an_inner_transfer_survives_an_engine_swap() {
 
     let _ = engine.process_pty_output(&first_tmux_chunk);
     let _ = engine.process_pty_output(&[0x90]);
-    assert!(engine.is_graphics_tmux_continuation());
-    assert!(engine.is_graphics_tmux_wrapper_active());
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
     let graphics_transport_state = engine
         .get_graphics_transport_state()
         .expect("the split wrapper has transport state");
+    assert!(graphics_transport_state.is_tmux_continuation);
     assert!(graphics_transport_state.tmux_inner_transport.is_some());
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine =
-        TerminalEngine::from_terminal_state_with_graphics_and_events_and_wrappers(
-            terminal_state,
-            &terminal_undecoded_bytes,
-            &graphics_undecoded_bytes,
-            &[],
-            graphics_transport_state,
-        );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let mut final_tmux_chunk = b"tmux;".to_vec();
     final_tmux_chunk.extend_from_slice(&inner_iterm_bytes[split_byte_index..]);
     final_tmux_chunk.extend_from_slice(b"\x1b\\");
@@ -2976,6 +2933,7 @@ fn nested_passthrough_wrappers_survive_an_engine_swap() {
     let graphics_transport_state = engine
         .get_graphics_transport_state()
         .expect("the nested wrappers have transport state");
+    assert!(graphics_transport_state.is_tmux_continuation);
     assert!(graphics_transport_state.tmux_inner_transport.is_some());
     assert!(graphics_transport_state
         .tmux_inner_transport
@@ -2983,17 +2941,7 @@ fn nested_passthrough_wrappers_survive_an_engine_swap() {
         .expect("the tmux parser")
         .screen_inner_transport
         .is_some());
-    let terminal_undecoded_bytes = engine.undecoded_terminal_bytes().to_vec();
-    let graphics_undecoded_bytes = engine.undecoded_graphics_bytes().to_vec();
-    let terminal_state = engine.into_terminal_state();
-    let mut resumed_terminal_engine =
-        TerminalEngine::from_terminal_state_with_graphics_and_events_and_wrappers(
-            terminal_state,
-            &terminal_undecoded_bytes,
-            &graphics_undecoded_bytes,
-            &[],
-            graphics_transport_state,
-        );
+    let mut resumed_terminal_engine = swap_terminal_engine(engine);
     let _ = resumed_terminal_engine.process_pty_output(&final_nested_chunk);
 
     let graphics_event_record = resumed_terminal_engine
@@ -3019,4 +2967,46 @@ fn passthrough_wrapper_nesting_stays_bounded() {
             protocol: GraphicsProtocol::Sixel,
         })]
     );
+}
+
+#[test]
+fn a_graphics_transport_state_round_trips_and_refuses_any_missing_field() {
+    let graphics_transport_state = GraphicsTransportState {
+        carry_bytes: b"\x1b_Gf=32".to_vec(),
+        is_screen_continuation: true,
+        screen_inner_transport: Some(Box::new(GraphicsTransportState::default())),
+        ..GraphicsTransportState::default()
+    };
+    let graphics_transport_json =
+        serde_json::to_value(&graphics_transport_state).expect("the transport state encodes");
+
+    assert_eq!(
+        serde_json::from_value::<GraphicsTransportState>(graphics_transport_json.clone())
+            .expect("the transport state decodes"),
+        graphics_transport_state
+    );
+    for field_name in [
+        "carry_bytes",
+        "is_carryable",
+        "graphics_abandonment",
+        "is_screen_continuation",
+        "screen_inner_transport",
+        "is_tmux_continuation",
+        "tmux_inner_transport",
+    ] {
+        let mut incomplete_transport_json = graphics_transport_json.clone();
+        incomplete_transport_json
+            .as_object_mut()
+            .expect("the transport state is an object")
+            .remove(field_name)
+            .expect("the writer emits every field");
+
+        let decode_error =
+            serde_json::from_value::<GraphicsTransportState>(incomplete_transport_json)
+                .expect_err("a transport state missing a field is refused");
+        assert_eq!(
+            decode_error.to_string(),
+            format!("missing field `{field_name}`")
+        );
+    }
 }

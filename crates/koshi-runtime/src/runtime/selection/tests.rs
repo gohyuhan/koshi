@@ -8,12 +8,13 @@ use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_client::mouse::MouseAction;
 use koshi_client::Client as ViewerClient;
 use koshi_config::layer::{PartialCopyConfig, PartialKoshiConfig};
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, CopyArgs, CopyTarget, GridPosition,
-    NewPaneArgs, NewTabArgs, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
+    Command, CommandEnvelope, CommandResult, CommandSource, CopyArgs, GridPosition, NewPaneArgs,
+    NewTabArgs, Selection, SelectionKind, SetSelectionArgs, VisualCommand,
 };
 use koshi_core::event::{Event, SelectionChanged};
 use koshi_core::geometry::{Direction, Point, Size};
@@ -25,15 +26,14 @@ use koshi_renderer::snapshot::{MouseFrame, ViewerChrome};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
 
-use crate::runtime::bus::EventFilter;
-
 /// A runtime with one bootstrapped 80x24 client, its viewer half, and its
 /// single pane.
 fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
-    let fake_pty_backend = Arc::new(FakePtyBackend::new());
     let (event_sender, event_receiver) = mpsc::channel();
-    let mut runtime_server =
-        Server::from_runtime_parts(fake_pty_backend, event_receiver, event_sender);
+    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(event_sender),
+    )));
+    let mut runtime_server = Server::from_runtime_parts(fake_pty_backend, event_receiver);
     let client_id = runtime_server
         .bootstrap_local(
             SessionId::new(),
@@ -45,8 +45,8 @@ fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
         )
         .expect("bootstrap");
     let pane_id = *runtime_server
-        .pty_handle_by_pane_id
-        .keys()
+        .live_pane_ids
+        .iter()
         .next()
         .expect("one pane");
     let viewer = build_viewer_for_client(&mut runtime_server, client_id);
@@ -55,13 +55,13 @@ fn build_selection_runtime() -> (Server, ViewerClient, PaneId) {
 
 /// The viewer half for `client`, on the stock settings.
 fn build_viewer_for_client(runtime_server: &mut Server, client_id: ClientId) -> ViewerClient {
-    ViewerClient::from_client_id_and_viewport(
+    ViewerClient::from_client_id_and_viewport_size(
         client_id,
         Size {
             column_count: 80,
             row_count: 24,
         },
-        runtime_server.subscribe(client_id, EventFilter::All),
+        runtime_server.subscribe(client_id),
         TerminalCleanupGuard::new(),
     )
 }
@@ -94,7 +94,7 @@ fn process_mouse_input(
     now: Instant,
 ) {
     viewer.apply_events();
-    let mouse_frame = MouseFrame::from(
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
         runtime
             .build_snapshot(viewer.get_client_id())
             .expect("snapshot"),
@@ -105,7 +105,7 @@ fn process_mouse_input(
 
 /// Fire the selection drag's scroll timer, as the binary's loop does.
 fn expire_mouse_scroll(runtime_server: &mut Server, viewer: &mut ViewerClient, now: Instant) {
-    let mouse_frame = MouseFrame::from(
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
         runtime_server
             .build_snapshot(viewer.get_client_id())
             .expect("snapshot"),
@@ -153,12 +153,12 @@ fn apply_mouse_actions(
                     viewer.note_press_forwarded(pane_id, mouse_button);
                 }
             }
-            MouseAction::AltScrollArrows {
+            MouseAction::AlternateScrollArrows {
                 pane_id,
                 is_scrolling_up,
                 arrow_count,
             } => {
-                runtime_server.write_alt_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                runtime_server.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
             }
             MouseAction::Resize {
                 pane_id,
@@ -179,7 +179,6 @@ fn apply_mouse_actions(
                 let envelope = CommandEnvelope::from_parts(
                     CommandId::new(),
                     CommandSource::from_mouse(client_id),
-                    SystemTime::now(),
                     command,
                 );
                 let _ = runtime_server.submit_command(envelope);
@@ -197,7 +196,7 @@ fn feed_terminal_output(runtime_server: &mut Server, pane_id: PaneId, output_byt
 /// draws at.
 fn get_pane_content_origin(runtime_server: &Server, client_id: ClientId, pane_id: PaneId) -> Point {
     let snapshot = runtime_server.build_snapshot(client_id).expect("snapshot");
-    koshi_renderer::pane_content_rect(
+    koshi_renderer::find_pane_content_rect(
         snapshot.build_frame_layout(ViewerChrome::default()),
         pane_id,
     )
@@ -229,12 +228,12 @@ fn get_last_pane_content_column_index(
     pane_id: PaneId,
 ) -> u16 {
     let snapshot = runtime_server.build_snapshot(client_id).expect("snapshot");
-    koshi_renderer::pane_content_rect(
+    koshi_renderer::find_pane_content_rect(
         snapshot.build_frame_layout(ViewerChrome::default()),
         pane_id,
     )
     .expect("content rect")
-    .cell_size
+    .size
     .column_count
         - 1
 }
@@ -279,7 +278,6 @@ fn enable_mouse_selection(runtime_server: &mut Server, client_id: ClientId) {
     let _ = runtime_server.submit_command(CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::ToggleMouseSelect,
     ));
 }
@@ -326,15 +324,10 @@ fn get_selection(
 
 /// Split the focused pane rightward and return the new pane's id.
 fn split_pane_rightward(runtime_server: &mut Server, client_id: ClientId) -> PaneId {
-    let existing_pane_ids: Vec<PaneId> = runtime_server
-        .pty_handle_by_pane_id
-        .keys()
-        .copied()
-        .collect();
+    let existing_pane_ids: Vec<PaneId> = runtime_server.live_pane_ids.iter().copied().collect();
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::NewPane(NewPaneArgs {
             source_pane_id: None,
             tab_id: None,
@@ -347,8 +340,8 @@ fn split_pane_rightward(runtime_server: &mut Server, client_id: ClientId) -> Pan
     );
     let _ = runtime_server.dispatch(envelope);
     *runtime_server
-        .pty_handle_by_pane_id
-        .keys()
+        .live_pane_ids
+        .iter()
         .find(|pane_id| !existing_pane_ids.contains(pane_id))
         .expect("a new pane")
 }
@@ -1097,7 +1090,7 @@ fn a_drag_past_the_bottom_edge_scrolls_and_keeps_extending() {
 
     // The drag armed the scroll rather than scrolling on the event itself.
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.get_current_time()),
+        viewer.compute_next_mouse_wakeup(clock.get_current_time()),
         Some(Duration::from_millis(15)),
         "a pointer past the bottom last column arms the scroll timer"
     );
@@ -1158,7 +1151,7 @@ fn a_pointer_back_inside_the_pane_stops_the_scrolling() {
         clock.advance_one_second(),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.get_current_time()),
+        viewer.compute_next_mouse_wakeup(clock.get_current_time()),
         Some(Duration::from_millis(15)),
         "the overshoot arms the scroll"
     );
@@ -1172,7 +1165,7 @@ fn a_pointer_back_inside_the_pane_stops_the_scrolling() {
         clock.advance_one_second(),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.get_current_time()),
+        viewer.compute_next_mouse_wakeup(clock.get_current_time()),
         None,
         "a pointer inside the pane does not scroll"
     );
@@ -1201,7 +1194,7 @@ fn a_wakeup_is_asked_for_only_while_a_drag_is_held_past_an_edge() {
     let now = clock.advance_one_second();
 
     assert_eq!(
-        viewer.next_mouse_wakeup(now),
+        viewer.compute_next_mouse_wakeup(now),
         None,
         "an idle client asks for no wakeup"
     );
@@ -1221,7 +1214,7 @@ fn a_wakeup_is_asked_for_only_while_a_drag_is_held_past_an_edge() {
         clock.advance_one_second(),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.advance_one_second()),
+        viewer.compute_next_mouse_wakeup(clock.advance_one_second()),
         None,
         "a drag inside the pane asks for no wakeup"
     );
@@ -1237,7 +1230,7 @@ fn a_wakeup_is_asked_for_only_while_a_drag_is_held_past_an_edge() {
         clock.advance_one_second(),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.advance_one_second()),
+        viewer.compute_next_mouse_wakeup(clock.advance_one_second()),
         Some(Duration::ZERO),
         "a drag past the last column asks the loop to wake, and a second on is overdue"
     );
@@ -1336,7 +1329,7 @@ fn a_drag_beyond_the_last_column_clamps_to_the_edge() {
         }
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.get_current_time()),
+        viewer.compute_next_mouse_wakeup(clock.get_current_time()),
         None,
         "a sideways overshoot does not scroll"
     );
@@ -1412,7 +1405,6 @@ fn switching_tabs_ends_the_drag_and_keeps_the_highlight() {
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         Command::NewTab(NewTabArgs::default()),
     );
     let _ = runtime_server.dispatch(envelope);
@@ -1899,7 +1891,7 @@ fn two_clients_selecting_in_one_pane_never_see_each_others_highlight() {
     let tab_id = runtime_server
         .get_client_mut(first_client_id)
         .expect("first client")
-        .get_active_tab();
+        .get_active_tab_id();
     let second_client_id = ClientId::new();
     let mut bob_client = koshi_session::client::Client::from_attachment(
         second_client_id,
@@ -2038,7 +2030,7 @@ fn a_drag_past_a_corner_scrolls_and_clamps_the_column() {
         "clamped to the first column"
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.get_current_time()),
+        viewer.compute_next_mouse_wakeup(clock.get_current_time()),
         Some(Duration::from_millis(15)),
         "and the vertical overshoot still arms the scroll"
     );
@@ -2243,7 +2235,7 @@ fn a_held_drag_stops_firing_once_there_is_nowhere_left_to_scroll() {
     );
     let now = clock.advance_one_second();
     assert_eq!(
-        viewer.next_mouse_wakeup(now),
+        viewer.compute_next_mouse_wakeup(now),
         Some(Duration::ZERO),
         "the overshoot arms the scroll, and a second on it is overdue"
     );
@@ -2255,7 +2247,7 @@ fn a_held_drag_stops_firing_once_there_is_nowhere_left_to_scroll() {
         now + Duration::from_millis(15),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(now + Duration::from_millis(15)),
+        viewer.compute_next_mouse_wakeup(now + Duration::from_millis(15)),
         None,
         "a firing that moved nothing disarms the timer"
     );
@@ -2268,7 +2260,7 @@ fn a_held_drag_stops_firing_once_there_is_nowhere_left_to_scroll() {
         clock.advance_one_second(),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(clock.advance_one_second()),
+        viewer.compute_next_mouse_wakeup(clock.advance_one_second()),
         Some(Duration::ZERO),
         "the next drag event arms it again"
     );
@@ -2288,7 +2280,7 @@ fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
             format!("line{line_number}\r\n").as_bytes(),
         );
     }
-    runtime_server.scroll_to_top(client_id, pane_id);
+    runtime_server.scroll_up(client_id, pane_id, usize::MAX);
 
     let start_point = get_pane_screen_cell(&runtime_server, client_id, pane_id, 0, 5);
     process_mouse_input(
@@ -2311,7 +2303,7 @@ fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
     );
     let now = clock.advance_one_second();
     assert_eq!(
-        viewer.next_mouse_wakeup(now),
+        viewer.compute_next_mouse_wakeup(now),
         Some(Duration::ZERO),
         "the overshoot arms the scroll, and a second on it is overdue"
     );
@@ -2322,7 +2314,7 @@ fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
         now + Duration::from_millis(15),
     );
     assert_eq!(
-        viewer.next_mouse_wakeup(now + Duration::from_millis(15)),
+        viewer.compute_next_mouse_wakeup(now + Duration::from_millis(15)),
         None,
         "already at the oldest line, so the firing disarms the timer"
     );
@@ -2964,8 +2956,9 @@ fn a_press_on_a_scrolled_view_highlights_the_history_line_the_user_saw() {
     runtime_server.scroll_up(client_id, pane_id, 10);
 
     // The frame the viewer is looking at, taken before the output arrives.
-    let painted_mouse_frame =
-        MouseFrame::from(runtime_server.build_snapshot(client_id).expect("snapshot"));
+    let painted_mouse_frame = crate::runtime::tests::build_mouse_frame(
+        runtime_server.build_snapshot(client_id).expect("snapshot"),
+    );
     let screen_point = get_pane_screen_cell(&runtime_server, client_id, pane_id, 0, 0);
 
     // Eight more lines land while the pointer is on its way down.
@@ -3020,7 +3013,6 @@ fn dispatch_mouse_command(
     runtime_server.dispatch(CommandEnvelope::from_parts(
         command_id,
         CommandSource::from_mouse(client_id),
-        SystemTime::now(),
         command,
     ))
 }
@@ -3028,12 +3020,12 @@ fn dispatch_mouse_command(
 /// How many rows `pane`'s content area has.
 fn get_content_row_count(runtime_server: &Server, client_id: ClientId, pane_id: PaneId) -> u16 {
     let snapshot = runtime_server.build_snapshot(client_id).expect("snapshot");
-    koshi_renderer::pane_content_rect(
+    koshi_renderer::find_pane_content_rect(
         snapshot.build_frame_layout(ViewerChrome::default()),
         pane_id,
     )
     .expect("content rect")
-    .cell_size
+    .size
     .row_count
 }
 
@@ -3048,11 +3040,11 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
     let client_id = viewer.get_client_id();
     feed_terminal_output(&mut runtime_server, pane_id, b"hello world");
 
-    let set = CommandId::new();
+    let set_command_id = CommandId::new();
     let set_result = dispatch_mouse_command(
         &mut runtime_server,
         client_id,
-        set,
+        set_command_id,
         Command::Visual(VisualCommand::SetSelection(SetSelectionArgs {
             pane_id,
             selection: Selection {
@@ -3073,7 +3065,7 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
     assert_eq!(
         set_result,
         CommandResult::Ok {
-            command_id: set,
+            command_id: set_command_id,
             emitted_events: vec![Event::SelectionChanged(SelectionChanged {
                 client_id,
                 pane_id,
@@ -3090,7 +3082,6 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
             copy,
             Command::Visual(VisualCommand::Copy(CopyArgs {
                 pane_id,
-                clipboard_target: CopyTarget::Osc52,
                 should_trim_trailing_whitespace: true,
             })),
         ),
@@ -3107,18 +3098,14 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
     let expected_clipboard_text = format!("hello world{}", "\n".repeat(blank_rows));
     assert_eq!(
         runtime_server.take_host_writes(client_id),
-        Some(crate::runtime::clipboard::osc52_copy(
+        Some(crate::runtime::clipboard::encode_osc52_copy(
             &expected_clipboard_text
         ))
     );
 }
 
 #[test]
-fn a_copy_goes_to_the_clipboard_its_own_command_names() {
-    // The viewer fills the target in from its own `copy.clipboard` setting, so
-    // the session writes where the command says and never re-reads a setting of
-    // its own. Koshi builds no native backend, so a copy naming one writes
-    // nothing.
+fn a_copy_writes_the_highlighted_text_to_the_outer_terminal_as_osc52() {
     let (mut runtime_server, viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     feed_terminal_output(&mut runtime_server, pane_id, b"hello");
@@ -3134,48 +3121,25 @@ fn a_copy_goes_to_the_clipboard_its_own_command_names() {
             column_index: 4,
         },
     };
-    let set = CommandId::new();
+    let set_command_id = CommandId::new();
     assert_eq!(
         dispatch_mouse_command(
             &mut runtime_server,
             client_id,
-            set,
+            set_command_id,
             Command::Visual(VisualCommand::SetSelection(SetSelectionArgs {
                 pane_id,
                 selection: highlight,
             })),
         ),
         CommandResult::Ok {
-            command_id: set,
+            command_id: set_command_id,
             emitted_events: vec![Event::SelectionChanged(SelectionChanged {
                 client_id,
                 pane_id,
                 selection: Some(highlight),
             })],
         }
-    );
-
-    let to_native = CommandId::new();
-    assert_eq!(
-        dispatch_mouse_command(
-            &mut runtime_server,
-            client_id,
-            to_native,
-            Command::Visual(VisualCommand::Copy(CopyArgs {
-                pane_id,
-                clipboard_target: CopyTarget::Native,
-                should_trim_trailing_whitespace: true,
-            })),
-        ),
-        CommandResult::Ok {
-            command_id: to_native,
-            emitted_events: Vec::new(),
-        }
-    );
-    assert_eq!(
-        runtime_server.take_host_writes(client_id),
-        None,
-        "a copy to the native clipboard queues no escape for the outer terminal"
     );
 
     let to_osc52 = CommandId::new();
@@ -3186,7 +3150,6 @@ fn a_copy_goes_to_the_clipboard_its_own_command_names() {
             to_osc52,
             Command::Visual(VisualCommand::Copy(CopyArgs {
                 pane_id,
-                clipboard_target: CopyTarget::Osc52,
                 should_trim_trailing_whitespace: true,
             })),
         ),
@@ -3249,7 +3212,9 @@ fn a_drag_ends_when_its_pane_swaps_to_the_alternate_screen() {
     feed_terminal_output(&mut runtime_server, pane_id, b"\x1b[?1049h");
 
     let screen_point = get_pane_screen_cell(&runtime_server, client_id, pane_id, 8, 0);
-    let mouse_frame = MouseFrame::from(runtime_server.build_snapshot(client_id).expect("snapshot"));
+    let mouse_frame = crate::runtime::tests::build_mouse_frame(
+        runtime_server.build_snapshot(client_id).expect("snapshot"),
+    );
     let mouse_actions = viewer.handle_mouse(
         build_mouse_drag(screen_point),
         &mouse_frame,

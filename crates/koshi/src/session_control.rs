@@ -11,20 +11,6 @@ use koshi_core::ids::parse_prefixed_uuid;
 use koshi_link::discovery::{self, Discovered};
 use koshi_link::error::CliError;
 use koshi_link::ipc_client;
-use koshi_link::router_client::request_new_session;
-
-/// The `koshi --headless` entry point: asks for a session with nothing
-/// attached to it. Forwards to `request_new_session`.
-///
-/// `allow_other_users` is the `--allow-other-users` flag typed beside
-/// `--headless`.
-pub fn request_headless_session(
-    runtime_directory: &Path,
-    profile_name: Option<&str>,
-    should_allow_other_users: Option<bool>,
-) -> Result<SessionId, CliError> {
-    request_new_session(runtime_directory, profile_name, should_allow_other_users)
-}
 
 /// End the session named by `session_reference`, or the only running session when
 /// absent. An id goes straight to that session; a name is resolved against

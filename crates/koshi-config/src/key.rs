@@ -17,7 +17,6 @@
 
 use std::fmt;
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::key::{fold_uppercase_character, Key, KeyChord, ModFlags, NamedKey};
 use thiserror::Error;
 
@@ -29,16 +28,6 @@ pub struct KeyParseError {
     pub key_token: String,
     /// Why it failed.
     pub error_kind: KeyParseErrorKind,
-}
-
-impl DomainError for KeyParseError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Config
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// The reason a key token failed to parse.
@@ -107,12 +96,12 @@ pub enum KeyParseErrorKind {
     #[error("the leader's modifiers need a key after them")]
     DanglingLeaderMods,
     /// A sequence with more chords than the configured cap.
-    #[error("the sequence has {chord_count} chords; the cap is {max_chord_depth}")]
+    #[error("the sequence has {chord_count} chords; the cap is {maximum_chord_depth}")]
     SequenceTooLong {
         /// The number of chords written.
         chord_count: usize,
-        /// The configured `max_chord_depth`.
-        max_chord_depth: u8,
+        /// The configured `maximum_chord_depth`.
+        maximum_chord_depth: u8,
     },
 }
 
@@ -380,10 +369,10 @@ impl Default for Leader {
 }
 
 impl fmt::Display for Leader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Mods(modifier_flags) => write!(f, "{modifier_flags}"),
-            Self::Chord(key_chord) => write!(f, "{key_chord}"),
+            Self::Mods(modifier_flags) => write!(formatter, "{modifier_flags}"),
+            Self::Chord(key_chord) => write!(formatter, "{key_chord}"),
         }
     }
 }

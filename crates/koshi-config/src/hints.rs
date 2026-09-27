@@ -20,7 +20,7 @@ use std::time::Duration;
 use crate::conflict::{build_keymap_layers, KeymapLayer};
 use crate::key::Leader;
 use crate::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
-use crate::types::{default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
+use crate::types::{build_default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
 use koshi_core::action::ActionReference;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
@@ -105,14 +105,14 @@ impl KeymapHintCatalog {
 
     /// Resolve the hint catalog from `layers` and the effective keybinding
     /// config. Reads `chord_timeout_ms`, `unlock_alternative`,
-    /// `max_chord_depth` and `leader`; `modes` is not read, `layers` carries
+    /// `maximum_chord_depth` and `leader`; `modes` is not read, `layers` carries
     /// the bindings.
     ///
     /// Folds the layers with [`merge_keymaps`]: a binding that does not fire
-    /// yields no hint — its action unregistered or registered without an
-    /// implementation in this build, a locked-mode sequence of two or more
-    /// chords holding the unlock chord, or a sequence longer than
-    /// `max_chord_depth`. In locked mode every entry firing `core:unlock` is
+    /// yields no hint — its action unregistered, its arguments unresolvable,
+    /// a locked-mode sequence of two or more chords holding the unlock
+    /// chord, or a sequence longer than
+    /// `maximum_chord_depth`. In locked mode every entry firing `core:unlock` is
     /// flagged pinned; the hint bar sorts pinned hints before unpinned ones
     /// in the same modifier group.
     pub fn from_parts(
@@ -127,7 +127,7 @@ impl KeymapHintCatalog {
         let merged = merge_keymaps(
             layers,
             config.unlock_alternative,
-            config.max_chord_depth,
+            config.maximum_chord_depth,
             registry,
         );
 
@@ -164,7 +164,7 @@ impl KeymapHintCatalog {
             unlock_chord,
             hint_bindings_by_mode_name,
             removed_key_sequences_by_mode_name,
-            prefix_labels: Arc::new(default_prefix_labels(config.leader)),
+            prefix_labels: Arc::new(build_default_prefix_labels(config.leader)),
             is_reverted_to_defaults: false,
         }
     }

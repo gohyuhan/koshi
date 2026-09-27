@@ -50,10 +50,6 @@ use crate::region::{solve_core_regions, TablineInputs};
 /// that produces it: `koshi_config::hints`.
 pub use koshi_config::hints::{HintBinding, KeymapHints};
 
-/// What a pane runs, as [`PaneSlot::pane_kind`] reports it. Re-exported from
-/// `koshi_pane::pane::state`.
-pub use koshi_pane::pane::state::PaneKind;
-
 /// One frozen frame: the full read-only view the renderer draws from.
 ///
 /// The renderer joins [`pane_snapshots`](Self::pane_snapshots) to the
@@ -69,9 +65,6 @@ pub struct RenderSnapshot {
     pub pane_snapshots: Vec<PaneSnapshot>,
     /// The viewing client's own state (viewport, focus, lock mode).
     pub client_snapshot: ClientSnapshot,
-    /// Plugin-contributed UI (statusline/tabline segments, notifications,
-    /// overlays). Empty for a stock, plugin-free Koshi.
-    pub plugin_ui_snapshot: PluginUiSnapshot,
 }
 
 /// A read-only placement preview built from one client's view.
@@ -216,9 +209,10 @@ impl CommittedRegions {
     }
 
     /// Build a committed region value whose solve is the compiled-in tabline
-    /// and statusline solve for `viewport`, tagged with `input_revision`.
+    /// and statusline solve for `viewport_size`, tagged with
+    /// `region_input_revision`.
     #[must_use]
-    pub fn core(viewport_size: Size, region_input_revision: u64) -> Self {
+    pub fn build_core(viewport_size: Size, region_input_revision: u64) -> Self {
         Self::from_solved_regions(
             viewport_size,
             solve_core_regions(viewport_size),
@@ -262,7 +256,7 @@ pub enum Delivery {
         /// The request this refusal answers.
         request_id: u64,
         /// The typed refusal.
-        error: PlacementSnapshotError,
+        refusal: PlacementSnapshotError,
     },
     /// What one round of mouse actions did, for the client that asked for the
     /// round.
@@ -467,34 +461,6 @@ impl MouseFrame {
             committed_regions,
         }
     }
-
-    /// Build the mouse frame with the exact region solve that was painted.
-    #[must_use]
-    pub fn from_snapshot_with_regions(
-        render_snapshot: RenderSnapshot,
-        committed_regions: CommittedRegions,
-    ) -> Self {
-        Self {
-            mouse_panes: render_snapshot
-                .pane_snapshots
-                .iter()
-                .map(MousePane::from)
-                .collect(),
-            session_snapshot: render_snapshot.session_snapshot,
-            client_snapshot: render_snapshot.client_snapshot,
-            committed_regions,
-        }
-    }
-}
-
-impl From<RenderSnapshot> for MouseFrame {
-    /// Takes the frame by value and uses the compiled-in region solve for the
-    /// client's viewport, at input revision `0`.
-    fn from(render_snapshot: RenderSnapshot) -> Self {
-        let committed_regions =
-            CommittedRegions::core(render_snapshot.client_snapshot.viewport_size, 0);
-        Self::from_snapshot_with_regions(render_snapshot, committed_regions)
-    }
 }
 
 /// One pane as a mouse event reads it: which pane, which line its top visible
@@ -546,13 +512,13 @@ pub struct SessionSnapshot {
     /// The tab currently shown, solved and ready to draw.
     pub active_tab_snapshot: TabSnapshot,
     /// Lightweight entry per tab for the tab bar (index, name, active marker).
-    pub tabs_metadata: Vec<TabMeta>,
+    pub tabs_metadata: Vec<TabMetadata>,
 }
 
 /// One tab's entry in the tab bar: enough to draw the tab list without its full
 /// layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TabMeta {
+pub struct TabMetadata {
     /// The tab's stable id.
     pub tab_id: TabId,
     /// The tab's display name.
@@ -573,14 +539,14 @@ pub struct TabSnapshot {
     /// The solved layout: one [`PaneSlot`] per pane, giving outer and content
     /// rects and coarse status.
     pub pane_slots: Vec<PaneSlot>,
-    /// The viewport size the layout was solved for: the tab's effective size,
-    /// the element-wise minimum viewport across the clients viewing this tab.
+    /// The size the tab's layout was solved for: the per-axis minimum pane
+    /// area across the clients viewing this tab.
     /// The [`pane_slots`](Self::pane_slots) rects live in this space with
     /// origin `(0, 0)`. A client whose own
     /// [`viewport_size`](ClientSnapshot::viewport_size)
     /// is larger draws this layout centered and letterboxes the surrounding
     /// margin; a client at exactly this size draws it edge to edge.
-    pub effective_cell_size: Size,
+    pub tab_size: Size,
     /// Header strips for stacked panes (title bars for collapsed stack members).
     pub stack_headers: Vec<StackHeader>,
     /// Whether **this snapshot's client** sees the tab tiled, or sees a single
@@ -589,9 +555,9 @@ pub struct TabSnapshot {
     pub layout_mode: LayoutMode,
     /// True when every pane is suppressed because the tab has no room to draw —
     /// the renderer fills the whole frame with the "terminal too small" overlay.
-    pub are_all_panes_suppressed: bool,
+    pub is_every_pane_suppressed: bool,
     /// Blank cells between two panes that meet along a horizontal or
-    /// vertical split, in the [`effective_cell_size`](Self::effective_cell_size) space.
+    /// vertical split, in the [`tab_size`](Self::tab_size) space.
     pub gap_cell_count: u16,
 }
 
@@ -602,9 +568,7 @@ pub struct TabSnapshot {
 /// The builder keeps these fields consistent: [`is_visible`](Self::is_visible)
 /// is true exactly when [`content_rect`](Self::content_rect) is `Some` (the pane has a
 /// content area to draw), and an [`is_suppressed`](Self::is_suppressed) pane is not
-/// visible. [`is_dead`](Self::is_dead) is an orthogonal axis: it does not by itself
-/// change visibility — an exited pane stays laid out, drawn like any other,
-/// until it is removed. `content_rect` is `None` for three distinct reasons — no room,
+/// visible. `content_rect` is `None` for three distinct reasons — no room,
 /// hidden, or a collapsed stack member — and [`is_suppressed`](Self::is_suppressed)
 /// marks the no-room case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,15 +584,10 @@ pub struct PaneSlot {
     /// The renderer draws cells and places the cursor here and never re-computes
     /// the inset.
     pub content_rect: Option<Rect>,
-    /// Whether the pane runs a terminal or a plugin.
-    pub pane_kind: PaneKind,
     /// Whether the pane is currently shown.
     pub is_visible: bool,
     /// Whether the pane is suppressed for lack of room.
     pub is_suppressed: bool,
-    /// Whether the pane's process has exited. The renderer paints an exited
-    /// pane the same as a live one.
-    pub is_dead: bool,
 }
 
 /// One pane's content: what the renderer paints inside the matching
@@ -653,8 +612,8 @@ pub struct PaneSnapshot {
     pub pane_title: Option<String>,
     /// The cursor's position and visibility within the content area.
     pub cursor_snapshot: CursorSnapshot,
-    /// The visible terminal cells. `None` for a pane with no terminal content
-    /// (a plugin pane, or a slot showing nothing this frame).
+    /// The visible terminal cells. `None` for a pane that shows nothing this
+    /// frame.
     pub terminal_grid_view: Option<GridView>,
     /// The image placements whose rectangles fit inside this view. A remote
     /// viewer can hold the rectangle before its image record arrives. Their
@@ -690,7 +649,7 @@ pub struct PaneSnapshot {
     /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
     /// Scrollback state for the scroll-position indicator.
-    pub scrollback_meta: ScrollbackMeta,
+    pub scrollback_metadata: ScrollbackMetadata,
 }
 
 /// Which cells of a pane are highlighted this frame, as a column range per
@@ -712,7 +671,7 @@ pub struct SelectionSpans {
 }
 
 impl SelectionSpans {
-    /// The highlighted column range on `row`, or `None` if it has none.
+    /// The highlighted column range on `row_index`, or `None` if it has none.
     #[must_use]
     pub fn find_row_span(&self, row_index: u16) -> Option<(u16, u16)> {
         self.row_spans
@@ -755,7 +714,7 @@ pub enum CursorStyle {
         /// The requested shape.
         shape: CursorShape,
         /// Whether the requested cursor blinks.
-        blink: bool,
+        is_blinking: bool,
     },
 }
 
@@ -871,7 +830,7 @@ impl ImagePlacementSnapshot {
     /// Returns `None` when an identity or dimension is zero, or the placement
     /// has an anchor plus a row or column count greater than `u16::MAX + 1`.
     #[must_use]
-    pub fn unavailable(
+    pub fn build_unavailable(
         placement_id: ImagePlacementId,
         image_content_id: u64,
         anchor_cell: (u16, u16),
@@ -1030,12 +989,9 @@ fn is_valid_image_record(image_record: &ImageRecord) -> bool {
 
 /// A pane's scrollback state. The renderer draws
 /// [`retained_line_count`](Self::retained_line_count) as the total in the
-/// scroll-position indicator and paints nothing from
-/// [`is_truncated`](Self::is_truncated).
+/// scroll-position indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScrollbackMeta {
-    /// Whether the buffer reached its cap and dropped its oldest lines.
-    pub is_truncated: bool,
+pub struct ScrollbackMetadata {
     /// How many scrollback lines are currently retained.
     pub retained_line_count: usize,
 }
@@ -1068,41 +1024,6 @@ pub struct ClientSnapshot {
     /// so both can be on at once. The viewer also reads it off a painted frame
     /// to decide whether a press in a mouse-aware pane begins a highlight.
     pub is_mouse_selection_enabled: bool,
-}
-
-/// Plugin-contributed UI for one frame. All slots are empty for a stock,
-/// plugin-free Koshi.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PluginUiSnapshot {
-    /// Segments injected into the statusline slots.
-    pub statusline_segments: Vec<Segment>,
-    /// Segments injected into the tabline slots.
-    pub tabline_segments: Vec<Segment>,
-    /// Transient notifications / toasts to draw.
-    pub notifications: Vec<NotificationView>,
-    /// Floating overlays to draw above the layout.
-    pub overlays: Vec<OverlayView>,
-}
-
-/// A plugin-contributed statusline or tabline segment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Segment {
-    /// The segment's rendered text.
-    pub rendered_text: String,
-}
-
-/// A plugin-contributed notification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotificationView {
-    /// The notification's rendered text.
-    pub rendered_text: String,
-}
-
-/// A plugin-contributed floating overlay.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayView {
-    /// The overlay's rendered text.
-    pub rendered_text: String,
 }
 
 #[cfg(test)]

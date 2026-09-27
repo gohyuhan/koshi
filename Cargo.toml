@@ -1,36 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/koshi",
-    "crates/koshi-client",
-    "crates/koshi-core",
-    "crates/koshi-daemon",
-    "crates/koshi-runtime",
-    "crates/koshi-session",
-    "crates/koshi-layout",
-    "crates/koshi-link",
-    "crates/koshi-pane",
-    "crates/koshi-pty",
-    "crates/koshi-terminal",
-    "crates/koshi-image",
-    "crates/koshi-kitty",
-    "crates/koshi-iterm",
-    "crates/koshi-sixel",
-    "crates/koshi-renderer",
-    "crates/koshi-input",
-    "crates/koshi-config",
-    "crates/koshi-beta",
-    "crates/koshi-macro",
-    "crates/koshi-plugin-api",
-    "crates/koshi-plugin-host",
-    "crates/koshi-plugin-manager",
-    "crates/koshi-ipc",
-    "crates/koshi-storage",
-    "crates/koshi-observability",
-    "crates/koshi-paths",
-    "crates/koshi-test-support",
-    "xtask",
-]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.4.0"
@@ -38,31 +8,86 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+# Workspace crates
+koshi = { path = "crates/koshi" }
+koshi-beta = { path = "crates/koshi-beta" }
+koshi-client = { path = "crates/koshi-client" }
+koshi-config = { path = "crates/koshi-config" }
+koshi-core = { path = "crates/koshi-core" }
+koshi-daemon = { path = "crates/koshi-daemon" }
+koshi-image = { path = "crates/koshi-image" }
+koshi-input = { path = "crates/koshi-input" }
+koshi-ipc = { path = "crates/koshi-ipc" }
+koshi-iterm = { path = "crates/koshi-iterm" }
+koshi-kitty = { path = "crates/koshi-kitty" }
+koshi-layout = { path = "crates/koshi-layout" }
+koshi-link = { path = "crates/koshi-link" }
+koshi-macro = { path = "crates/koshi-macro" }
+koshi-observability = { path = "crates/koshi-observability" }
+koshi-pane = { path = "crates/koshi-pane" }
+koshi-paths = { path = "crates/koshi-paths" }
+koshi-pty = { path = "crates/koshi-pty" }
+koshi-renderer = { path = "crates/koshi-renderer" }
+koshi-runtime = { path = "crates/koshi-runtime" }
+koshi-session = { path = "crates/koshi-session" }
+koshi-sixel = { path = "crates/koshi-sixel" }
+koshi-storage = { path = "crates/koshi-storage" }
+koshi-terminal = { path = "crates/koshi-terminal" }
+koshi-test-support = { path = "crates/koshi-test-support" }
+
+# Third-party crates
 base64 = "0.23.1"
+cargo_metadata = "0.23.1"
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"
+directories = "6.0.0"
+flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
 fs4 = "1.1.0"
+getrandom = "0.4.3"
+image = { version = "0.25.10", default-features = false }
+interprocess = "2.4.2"
+kdl = "6.7.1"
 libc = "0.2.189"
+miette = "7.6.0"
+nix = "0.28.0"
+percent-encoding = "2.3.2"
+portable-pty = "0.9.0"
 proptest = "1.11.0"
+quote = "1.0.45"
 ratatui = { version = "0.30.2", default-features = false }
 rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs"] }
+rustix = { version = "1.1.4", default-features = false }
 rustls = { version = "0.23.45", default-features = false, features = [
   "aws_lc_rs",
   "logging",
   "prefer-post-quantum",
   "std",
 ] }
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
+sha2 = "0.11.0"
+signal-hook = "0.3.18"
 subtle = "2.6.1"
+syn = { version = "2.0.117", features = ["full"] }
+tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
-uuid = { version = "1.24.0", features = ["v7", "serde"] }
-windows-sys = { version = "0.61", features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_System_Memory",
-  "Win32_System_SystemInformation",
-  "Win32_System_Threading",
+tracing-subscriber = { version = "0.3.23", features = ["json"] }
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
+ureq = { version = "3.3.0", default-features = false, features = [
+  "gzip",
+  "rustls-no-provider",
+  "rustls-webpki-roots",
 ] }
+uuid = { version = "1.24.0", features = ["serde", "v7"] }
+vte = { version = "0.15.0", default-features = false }
+widestring = "1.2.1"
+windows-sys = "0.61.2"
+# koshi only reads a deflate-compressed release zip, so drop zip's default
+# codec backends (bzip2, ppmd, lzma, zstd, xz) — that also removes their
+# non-permissive transitive licenses. `deflate-flate2` reuses the flate2
+# already pulled for tar.gz.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }

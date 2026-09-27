@@ -4,9 +4,9 @@
 //! pane is closed. Tests verify the three rankings — nearest center distance, largest absorbed
 //! area, and layout order — with ties going to the earlier pane in layout order.
 //!
-//! **Stack activation** tests verify that focus can cycle forward/backward through a stack's
-//! members (collapsing the prior and expanding the new), and that the deepest stack containing
-//! a pane can be located and then activated by ID.
+//! **Stack activation** tests verify that activating a member expands it and collapses the
+//! prior one, and that the deepest stack containing a pane can be located and then activated
+//! by ID.
 
 use koshi_core::geometry::{Point, Size};
 
@@ -100,7 +100,7 @@ fn zero_area_panes_are_never_candidates() {
     let (visible_pane_id, hidden_pane_id) = (PaneId::new(), PaneId::new());
     let removed_pane_rect = build_cell_rect(0, 0, 40, 24);
     let surviving_pane_rects = [
-        (hidden_pane_id, Rect::empty_at_origin()),
+        (hidden_pane_id, Rect::build_empty_at_origin()),
         (visible_pane_id, build_cell_rect(0, 0, 80, 24)),
     ];
 
@@ -167,7 +167,7 @@ fn survivors_that_are_all_hidden_or_collapsed_yield_empty_candidates() {
 
     let (hidden_pane_id, collapsed_pane_id) = (PaneId::new(), PaneId::new());
     let surviving_pane_rects = [
-        (hidden_pane_id, Rect::empty_at_origin()),
+        (hidden_pane_id, Rect::build_empty_at_origin()),
         (collapsed_pane_id, build_cell_rect(0, 0, 80, 1)),
     ];
     let headers = [StackHeader {
@@ -202,7 +202,8 @@ fn a_zero_area_removed_rect_ranks_neighbors_by_distance_to_its_origin() {
 
     // The zero rect's center is (0, 0): `near` (center column 20) beats
     // `far` (center column 60). Nothing overlaps a zero-area rect.
-    let candidates = compute_focus_candidates(Rect::empty_at_origin(), &surviving_pane_rects, &[]);
+    let candidates =
+        compute_focus_candidates(Rect::build_empty_at_origin(), &surviving_pane_rects, &[]);
     assert_eq!(
         candidates,
         FocusCandidates {
@@ -247,9 +248,7 @@ fn activate_by_id_expands_the_target_and_collapses_the_prior() {
     let mut stack =
         SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id, third_pane_id], 0);
 
-    let change = activate_stack_member(&mut stack, third_pane_id).unwrap();
-    assert_eq!(change.newly_active_pane_id, third_pane_id);
-    assert_eq!(change.deactivated_pane_id, Some(first_pane_id));
+    assert!(activate_stack_member(&mut stack, third_pane_id));
     assert_eq!(stack.active_child_index, 2);
     assert_eq!(list_collapsed_child_flags(&stack), [true, true, false]);
 }
@@ -260,8 +259,8 @@ fn activating_the_active_member_or_a_stranger_changes_nothing() {
     let mut stack = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
     let original_stack = stack.clone();
 
-    assert_eq!(activate_stack_member(&mut stack, first_pane_id), None);
-    assert_eq!(activate_stack_member(&mut stack, PaneId::new()), None);
+    assert!(!activate_stack_member(&mut stack, first_pane_id));
+    assert!(!activate_stack_member(&mut stack, PaneId::new()));
     assert_eq!(stack, original_stack);
 }
 
@@ -275,7 +274,7 @@ fn directional_splits_refuse_stack_focus_ops() {
             crate::tree::LayoutNode::Pane(second_pane_id),
         ],
     );
-    assert_eq!(activate_stack_member(&mut split_node, second_pane_id), None);
+    assert!(!activate_stack_member(&mut split_node, second_pane_id));
 }
 
 #[test]
@@ -299,16 +298,8 @@ fn activating_a_pane_nested_in_a_split_member_expands_that_member() {
         active_child_index: 0,
     };
 
-    // The nested pane sits inside the second member; the member expands and
-    // reports its first leaf as the newly active pane.
-    let change = activate_stack_member(&mut stack, nested_pane_id).unwrap();
-    assert_eq!(
-        change,
-        StackFocusChange {
-            newly_active_pane_id: second_pane_id,
-            deactivated_pane_id: Some(first_pane_id),
-        }
-    );
+    // The nested pane sits inside the second member; the member expands.
+    assert!(activate_stack_member(&mut stack, nested_pane_id));
     assert_eq!(stack.active_child_index, 1);
     assert_eq!(list_collapsed_child_flags(&stack), [true, false]);
 }
@@ -320,17 +311,10 @@ fn an_out_of_range_active_index_counts_as_the_last_member() {
     stack.active_child_index = 7;
 
     // Index 7 clamps to the last member, so the second pane is already active.
-    assert_eq!(activate_stack_member(&mut stack, second_pane_id), None);
+    assert!(!activate_stack_member(&mut stack, second_pane_id));
     assert_eq!(stack.active_child_index, 7);
 
-    let change = activate_stack_member(&mut stack, first_pane_id).unwrap();
-    assert_eq!(
-        change,
-        StackFocusChange {
-            newly_active_pane_id: first_pane_id,
-            deactivated_pane_id: Some(second_pane_id),
-        }
-    );
+    assert!(activate_stack_member(&mut stack, first_pane_id));
     assert_eq!(stack.active_child_index, 0);
     assert_eq!(list_collapsed_child_flags(&stack), [false, true]);
 }
@@ -353,8 +337,8 @@ fn the_deepest_stack_holding_a_pane_is_found_for_activation() {
     let containing_stack = layout_tree
         .find_containing_stack_mut(nested_pane_id)
         .expect("the nested pane lives in a stack");
-    let change = activate_stack_member(containing_stack, nested_pane_id).unwrap();
-    assert_eq!(change.newly_active_pane_id, nested_pane_id);
+    assert!(activate_stack_member(containing_stack, nested_pane_id));
+    assert_eq!(containing_stack.active_child_index, 1);
     assert!(layout_tree
         .find_containing_stack_mut(first_pane_id)
         .is_none());
@@ -387,13 +371,11 @@ fn stack_with_an_empty_middle_member(
 }
 
 #[test]
-fn activating_away_from_a_member_with_no_pane_deactivates_nothing() {
+fn activating_away_from_a_member_with_no_pane_expands_the_target() {
     let (first_pane_id, last_pane_id) = (PaneId::new(), PaneId::new());
     let mut stack = stack_with_an_empty_middle_member(first_pane_id, last_pane_id, 1);
 
-    let change = activate_stack_member(&mut stack, last_pane_id).unwrap();
-    assert_eq!(change.newly_active_pane_id, last_pane_id);
-    assert_eq!(change.deactivated_pane_id, None);
+    assert!(activate_stack_member(&mut stack, last_pane_id));
     assert_eq!(stack.active_child_index, 2);
     assert_eq!(list_collapsed_child_flags(&stack), [true, true, false]);
 }

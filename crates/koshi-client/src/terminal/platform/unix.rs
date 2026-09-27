@@ -29,8 +29,8 @@ pub(crate) struct TerminalDevice {
 impl TerminalDevice {
     /// Open the controlling terminal and its event source.
     pub(crate) fn open_terminal_device() -> io::Result<(Self, EventSource)> {
-        let input_stream = terminal_input()?;
-        let output_stream = terminal_output()?;
+        let input_stream = open_terminal_input()?;
+        let output_stream = open_terminal_output()?;
         let terminal_file = input_stream.try_clone()?;
         let size_stream = output_stream.try_clone()?;
         let original_termios = termios::tcgetattr(&terminal_file)?;
@@ -245,7 +245,7 @@ impl Waker {
     }
 }
 
-fn terminal_input() -> io::Result<File> {
+fn open_terminal_input() -> io::Result<File> {
     if io::stdin().is_terminal() {
         duplicate_file(rustix::stdio::stdin())
     } else {
@@ -257,7 +257,7 @@ fn terminal_input() -> io::Result<File> {
 ///
 /// The pixel fields are `None` when the terminal reports them as `0`.
 pub(crate) fn read_window_size() -> io::Result<WindowSize> {
-    read_terminal_window_size(&terminal_output()?)
+    read_terminal_window_size(&open_terminal_output()?)
 }
 
 /// Read one terminal's window size through `TIOCGWINSZ`.
@@ -271,7 +271,7 @@ fn read_terminal_window_size(terminal_file: &File) -> io::Result<WindowSize> {
     })
 }
 
-fn terminal_output() -> io::Result<File> {
+fn open_terminal_output() -> io::Result<File> {
     if io::stdout().is_terminal() {
         duplicate_file(rustix::stdio::stdout())
     } else {

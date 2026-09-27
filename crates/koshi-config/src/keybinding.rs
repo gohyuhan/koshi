@@ -31,7 +31,6 @@ use std::str::FromStr;
 use kdl::{KdlDocument, KdlNode};
 use koshi_core::action::ActionReference;
 use koshi_core::key::KeySequence;
-use koshi_core::resolve::ActionArgs;
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 
@@ -39,9 +38,7 @@ use crate::error::{validate_config_schema_version, ConfigParseDiagnostic};
 use crate::key::{parse_chord, parse_leader, Leader};
 use crate::key_sequence::parse_sequence;
 use crate::layer::PartialKeybindingsConfig;
-use crate::parser::format_unknown_key;
-use crate::parser::parse_kdl;
-use crate::parser::parse_version_argument;
+use crate::parser::{format_unknown_key, parse_kdl, parse_version_argument};
 use crate::types::{BoundAction, ModeBindings, ModeName};
 
 #[cfg(test)]
@@ -97,9 +94,9 @@ impl KeybindingDiagnostic {
     }
 }
 
-/// Parses `source` — the already-read contents of the keybinding file at
-/// `path` — into a [`PartialKeybindingsConfig`]. Does no file I/O: discovery
-/// and reading happen in the caller.
+/// Parses `keybinding_source_text` — the already-read contents of the keybinding file at
+/// `keybinding_path` — into a [`PartialKeybindingsConfig`]. Does no file I/O: discovery and reading
+/// happen in the caller.
 ///
 /// # Errors
 /// [`KeybindingParseError::Syntax`] when the text is not valid KDL;
@@ -138,7 +135,7 @@ struct KeybindingDocumentWalker<'a> {
 }
 
 impl KeybindingDocumentWalker<'_> {
-    /// Records one schema violation at `span`.
+    /// Records one schema violation at `diagnostic_span`.
     fn record_diagnostic(
         &mut self,
         diagnostic_span: SourceSpan,
@@ -162,24 +159,24 @@ impl KeybindingDocumentWalker<'_> {
         let mut partial_keybindings_config = PartialKeybindingsConfig::default();
         let mut seen_setting_names: BTreeSet<&str> = BTreeSet::new();
 
-        for node in document.nodes() {
-            let node_name = node.name().value();
+        for kdl_node in document.nodes() {
+            let node_name = kdl_node.name().value();
             match node_name {
                 "version" | "chord-timeout-ms" | "which-key-delay-ms" | "max-chord-depth"
                 | "leader" | "unlock-alternative" => {
                     if !seen_setting_names.insert(node_name) {
                         self.record_diagnostic(
-                            node.span(),
+                            kdl_node.span(),
                             format!("`{node_name}` is declared more than once"),
                         );
                         continue;
                     }
-                    self.parse_setting_node(node, &mut partial_keybindings_config);
+                    self.parse_setting_node(kdl_node, &mut partial_keybindings_config);
                 }
                 "mode" => {} // second pass
                 unknown_node_name => {
                     self.record_diagnostic(
-                        node.span(),
+                        kdl_node.span(),
                         format_unknown_key(
                             unknown_node_name,
                             &[
@@ -205,9 +202,9 @@ impl KeybindingDocumentWalker<'_> {
         let leader = partial_keybindings_config.leader.unwrap_or_default();
 
         let mut mode_bindings_by_name: BTreeMap<ModeName, ModeBindings> = BTreeMap::new();
-        for node in document.nodes() {
-            if node.name().value() == "mode" {
-                self.parse_mode_block(node, &leader, &mut mode_bindings_by_name);
+        for kdl_node in document.nodes() {
+            if kdl_node.name().value() == "mode" {
+                self.parse_mode_block(kdl_node, &leader, &mut mode_bindings_by_name);
             }
         }
         if !mode_bindings_by_name.is_empty() {
@@ -221,44 +218,48 @@ impl KeybindingDocumentWalker<'_> {
     /// supported schema version.
     fn parse_setting_node(
         &mut self,
-        node: &KdlNode,
+        kdl_node: &KdlNode,
         partial_keybindings_config: &mut PartialKeybindingsConfig,
     ) {
-        match node.name().value() {
-            "version" => match parse_version_argument(node) {
+        match kdl_node.name().value() {
+            "version" => match parse_version_argument(kdl_node) {
                 Ok(schema_version) => {
                     if let Err(version_error) = validate_config_schema_version(schema_version) {
-                        self.record_diagnostic(node.span(), version_error.to_string());
+                        self.record_diagnostic(kdl_node.span(), version_error.to_string());
                     }
                 }
                 Err((diagnostic_span, detail)) => self.record_diagnostic(diagnostic_span, detail),
             },
             "chord-timeout-ms" => {
-                if let Some(integer_value) = self.parse_integer_argument(node, u64::from(u32::MAX))
+                if let Some(integer_value) =
+                    self.parse_integer_argument(kdl_node, u64::from(u32::MAX))
                 {
                     partial_keybindings_config.chord_timeout_ms =
                         Some(u32::try_from(integer_value).expect("bounded"));
                 }
             }
             "which-key-delay-ms" => {
-                if let Some(integer_value) = self.parse_integer_argument(node, u64::from(u32::MAX))
+                if let Some(integer_value) =
+                    self.parse_integer_argument(kdl_node, u64::from(u32::MAX))
                 {
                     partial_keybindings_config.which_key_delay_ms =
                         Some(u32::try_from(integer_value).expect("bounded"));
                 }
             }
             "max-chord-depth" => {
-                if let Some(integer_value) = self.parse_integer_argument(node, u64::from(u8::MAX)) {
-                    partial_keybindings_config.max_chord_depth =
+                if let Some(integer_value) =
+                    self.parse_integer_argument(kdl_node, u64::from(u8::MAX))
+                {
+                    partial_keybindings_config.maximum_chord_depth =
                         Some(u8::try_from(integer_value).expect("bounded"));
                 }
             }
             "leader" => {
-                if node.children().is_some() {
-                    self.record_diagnostic(node.span(), "`leader` takes no children");
+                if kdl_node.children().is_some() {
+                    self.record_diagnostic(kdl_node.span(), "`leader` takes no children");
                     return;
                 }
-                if let Some((leader_text, diagnostic_span)) = self.parse_string_argument(node) {
+                if let Some((leader_text, diagnostic_span)) = self.parse_string_argument(kdl_node) {
                     match parse_leader(leader_text) {
                         Ok(leader) => partial_keybindings_config.leader = Some(leader),
                         Err(parse_error) => {
@@ -268,11 +269,14 @@ impl KeybindingDocumentWalker<'_> {
                 }
             }
             "unlock-alternative" => {
-                if node.children().is_some() {
-                    self.record_diagnostic(node.span(), "`unlock-alternative` takes no children");
+                if kdl_node.children().is_some() {
+                    self.record_diagnostic(
+                        kdl_node.span(),
+                        "`unlock-alternative` takes no children",
+                    );
                     return;
                 }
-                if let Some((chord_text, diagnostic_span)) = self.parse_string_argument(node) {
+                if let Some((chord_text, diagnostic_span)) = self.parse_string_argument(kdl_node) {
                     match parse_chord(chord_text) {
                         Ok(chord) => {
                             partial_keybindings_config.unlock_alternative = Some(Some(chord))
@@ -293,17 +297,17 @@ impl KeybindingDocumentWalker<'_> {
     /// keeping the first block's bindings.
     fn parse_mode_block(
         &mut self,
-        node: &KdlNode,
+        kdl_node: &KdlNode,
         leader: &Leader,
         mode_bindings_by_name: &mut BTreeMap<ModeName, ModeBindings>,
     ) {
-        let Some((mode_name_text, _)) = self.parse_string_argument(node) else {
+        let Some((mode_name_text, _)) = self.parse_string_argument(kdl_node) else {
             return;
         };
         let mode_name = ModeName::from_text(mode_name_text);
         if mode_bindings_by_name.contains_key(&mode_name) {
             self.record_diagnostic(
-                node.span(),
+                kdl_node.span(),
                 format!("duplicate `mode \"{mode_name_text}\"` block; one block per mode"),
             );
             return;
@@ -311,7 +315,7 @@ impl KeybindingDocumentWalker<'_> {
 
         let mut bound_action_by_key_sequence: BTreeMap<KeySequence, BoundAction> = BTreeMap::new();
         let mut removed_key_sequences: BTreeSet<KeySequence> = BTreeSet::new();
-        if let Some(children) = node.children() {
+        if let Some(children) = kdl_node.children() {
             for child in children.nodes() {
                 match child.name().value() {
                     "bind" => {
@@ -336,20 +340,21 @@ impl KeybindingDocumentWalker<'_> {
         );
     }
 
-    /// Parses one `bind "<seq>" "<action>"` node into `keys`, with
-    /// [`ActionArgs::None`] as the arguments. Reports a violation when the
-    /// parsed sequence is already a key of `keys`, keeping the first binding.
+    /// Parses one `bind "<seq>" "<action>"` node into
+    /// `bound_action_by_key_sequence`. Reports a violation when the parsed
+    /// sequence is already a key of `bound_action_by_key_sequence`, keeping the
+    /// first binding.
     fn parse_binding_node(
         &mut self,
-        node: &KdlNode,
+        kdl_node: &KdlNode,
         leader: &Leader,
         bound_action_by_key_sequence: &mut BTreeMap<KeySequence, BoundAction>,
     ) {
-        if node.children().is_some() {
-            self.record_diagnostic(node.span(), "`bind` takes no children");
+        if kdl_node.children().is_some() {
+            self.record_diagnostic(kdl_node.span(), "`bind` takes no children");
             return;
         }
-        let (key_argument, action_argument) = match node.entries() {
+        let (key_argument, action_argument) = match kdl_node.entries() {
             [key_entry, action_entry]
                 if key_entry.name().is_none() && action_entry.name().is_none() =>
             {
@@ -357,7 +362,7 @@ impl KeybindingDocumentWalker<'_> {
             }
             _ => {
                 self.record_diagnostic(
-                    node.span(),
+                    kdl_node.span(),
                     "`bind` takes exactly two string arguments: a key sequence and an action \
                      reference",
                 );
@@ -368,7 +373,7 @@ impl KeybindingDocumentWalker<'_> {
             key_argument.value().as_string(),
             action_argument.value().as_string(),
         ) else {
-            self.record_diagnostic(node.span(), "`bind` arguments must be strings");
+            self.record_diagnostic(kdl_node.span(), "`bind` arguments must be strings");
             return;
         };
 
@@ -392,33 +397,29 @@ impl KeybindingDocumentWalker<'_> {
         };
         if bound_action_by_key_sequence.contains_key(&key_sequence) {
             self.record_diagnostic(
-                node.span(),
+                kdl_node.span(),
                 format!("`{key_sequence_text}` is already bound in this mode; one action per key"),
             );
             return;
         }
-        bound_action_by_key_sequence.insert(
-            key_sequence,
-            BoundAction {
-                action_reference,
-                action_arguments: ActionArgs::None,
-            },
-        );
+        bound_action_by_key_sequence.insert(key_sequence, BoundAction { action_reference });
     }
 
-    /// Parses one `remove "<seq>"` node into `removed`. Reports a violation
-    /// when the parsed sequence is already in `removed`.
+    /// Parses one `remove "<seq>"` node into `removed_key_sequences`. Reports
+    /// a violation when the parsed sequence is already in
+    /// `removed_key_sequences`.
     fn parse_removal_node(
         &mut self,
-        node: &KdlNode,
+        kdl_node: &KdlNode,
         leader: &Leader,
         removed_key_sequences: &mut BTreeSet<KeySequence>,
     ) {
-        if node.children().is_some() {
-            self.record_diagnostic(node.span(), "`remove` takes no children");
+        if kdl_node.children().is_some() {
+            self.record_diagnostic(kdl_node.span(), "`remove` takes no children");
             return;
         }
-        let Some((key_sequence_text, diagnostic_span)) = self.parse_string_argument(node) else {
+        let Some((key_sequence_text, diagnostic_span)) = self.parse_string_argument(kdl_node)
+        else {
             return;
         };
         let key_sequence = match parse_sequence(key_sequence_text, *leader, u8::MAX) {
@@ -430,31 +431,35 @@ impl KeybindingDocumentWalker<'_> {
         };
         if !removed_key_sequences.insert(key_sequence) {
             self.record_diagnostic(
-                node.span(),
+                kdl_node.span(),
                 format!("duplicate `remove \"{key_sequence_text}\"`"),
             );
         }
     }
 
     /// Reads a node's single unnamed non-negative integer argument, at most
-    /// `max`. Reports and returns `None` on any other shape, a child block
+    /// `maximum_integer_value`. Reports and returns `None` on any other shape, a child block
     /// included.
-    fn parse_integer_argument(&mut self, node: &KdlNode, max_integer_value: u64) -> Option<u64> {
-        if node.children().is_some() {
+    fn parse_integer_argument(
+        &mut self,
+        kdl_node: &KdlNode,
+        maximum_integer_value: u64,
+    ) -> Option<u64> {
+        if kdl_node.children().is_some() {
             self.record_diagnostic(
-                node.span(),
-                format!("`{}` takes no children", node.name().value()),
+                kdl_node.span(),
+                format!("`{}` takes no children", kdl_node.name().value()),
             );
             return None;
         }
-        let argument_entry = match node.entries() {
+        let argument_entry = match kdl_node.entries() {
             [argument_entry] if argument_entry.name().is_none() => argument_entry,
             _ => {
                 self.record_diagnostic(
-                    node.span(),
+                    kdl_node.span(),
                     format!(
                         "`{}` takes exactly one integer argument",
-                        node.name().value()
+                        kdl_node.name().value()
                     ),
                 );
                 return None;
@@ -465,13 +470,13 @@ impl KeybindingDocumentWalker<'_> {
             .as_integer()
             .and_then(|integer_value| u64::try_from(integer_value).ok());
         match integer_value {
-            Some(integer_value) if integer_value <= max_integer_value => Some(integer_value),
+            Some(integer_value) if integer_value <= maximum_integer_value => Some(integer_value),
             _ => {
                 self.record_diagnostic(
                     argument_entry.span(),
                     format!(
-                        "`{}` must be an integer from 0 to {max_integer_value}",
-                        node.name().value()
+                        "`{}` must be an integer from 0 to {maximum_integer_value}",
+                        kdl_node.name().value()
                     ),
                 );
                 None
@@ -483,18 +488,18 @@ impl KeybindingDocumentWalker<'_> {
     /// and returns `None` on any other shape. Does not look at children: a
     /// `mode` node carries a block, and each scalar setting rejects children
     /// in its own arm.
-    fn parse_string_argument<'node>(
+    fn parse_string_argument<'kdl_node>(
         &mut self,
-        node: &'node KdlNode,
-    ) -> Option<(&'node str, SourceSpan)> {
-        let argument_entry = match node.entries() {
+        kdl_node: &'kdl_node KdlNode,
+    ) -> Option<(&'kdl_node str, SourceSpan)> {
+        let argument_entry = match kdl_node.entries() {
             [argument_entry] if argument_entry.name().is_none() => argument_entry,
             _ => {
                 self.record_diagnostic(
-                    node.span(),
+                    kdl_node.span(),
                     format!(
                         "`{}` takes exactly one string argument",
-                        node.name().value()
+                        kdl_node.name().value()
                     ),
                 );
                 return None;
@@ -505,7 +510,7 @@ impl KeybindingDocumentWalker<'_> {
             None => {
                 self.record_diagnostic(
                     argument_entry.span(),
-                    format!("`{}` argument must be a string", node.name().value()),
+                    format!("`{}` argument must be a string", kdl_node.name().value()),
                 );
                 None
             }

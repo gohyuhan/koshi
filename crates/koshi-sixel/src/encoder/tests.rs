@@ -2,7 +2,14 @@
 
 use super::*;
 
-use std::io::{self, Write};
+impl SixelEncoder {
+    /// Mark palette generation as failed with [`SixelEncodeError::PaletteMapping`].
+    fn inject_generation_failure_for_test(&mut self) {
+        self.is_generation_failed = true;
+        self.generation_error = Some(SixelEncodeError::PaletteMapping);
+    }
+}
+
 use std::sync::Arc;
 
 fn build_test_image(
@@ -211,27 +218,6 @@ fn emits_bounded_chunks_and_preserves_all_bytes() {
 }
 
 #[test]
-fn write_to_emits_the_same_bytes_as_chunked_output() {
-    let rgba_bytes = [255, 0, 0, 255].repeat(14);
-    let expected_output = encode_sixel_image(2, 7, &rgba_bytes, [0, 0, 0]);
-    let mut sixel_encoder = SixelEncoder::from_image(build_test_image(2, 7, rgba_bytes), [0, 0, 0])
-        .expect("image encodes");
-    let mut recording_writer = RecordingWriter {
-        written_bytes: Vec::new(),
-    };
-
-    sixel_encoder
-        .write_to(&mut recording_writer)
-        .expect("writer accepts output");
-
-    assert_eq!(recording_writer.written_bytes, expected_output);
-    assert_eq!(
-        sixel_encoder.take_next_chunk(1).expect("finished encoder"),
-        None
-    );
-}
-
-#[test]
 fn generation_failure_is_sticky_after_header_output() {
     let mut sixel_encoder =
         SixelEncoder::from_image(build_test_image(1, 1, vec![255, 0, 0, 255]), [0, 0, 0])
@@ -258,21 +244,6 @@ fn generation_failure_is_sticky_after_header_output() {
             .take_next_chunk(1)
             .expect_err("failed encoder remains failed"),
     );
-
-    let mut recording_writer = RecordingWriter {
-        written_bytes: Vec::new(),
-    };
-    assert_encoder_failed_error(
-        sixel_encoder
-            .write_next_chunk(&mut recording_writer, 1)
-            .expect_err("failed encoder rejects writes"),
-    );
-    assert!(recording_writer.written_bytes.is_empty());
-    assert_encoder_failed_error(
-        sixel_encoder
-            .write_to(&mut recording_writer)
-            .expect_err("failed encoder rejects complete writes"),
-    );
 }
 
 #[test]
@@ -289,45 +260,6 @@ fn rejects_zero_chunk_size() {
     }
 }
 
-#[test]
-fn writer_failure_preserves_first_and_partial_chunks() {
-    let mut sixel_encoder =
-        SixelEncoder::from_image(build_test_image(1, 1, vec![255, 0, 0, 255]), [0, 0, 0])
-            .expect("image encodes");
-    let mut always_fail_writer = AlwaysFailWriter;
-    let encode_error = sixel_encoder
-        .write_to(&mut always_fail_writer)
-        .expect_err("first write fails");
-    assert_io_error_kind(encode_error, io::ErrorKind::BrokenPipe);
-
-    let mut sixel_encoder =
-        SixelEncoder::from_image(build_test_image(1, 1, vec![255, 0, 0, 255]), [0, 0, 0])
-            .expect("image encodes");
-    let mut partial_writer = PartialFailWriter {
-        written_bytes: Vec::new(),
-    };
-    let encode_error = sixel_encoder
-        .write_next_chunk(&mut partial_writer, 4)
-        .expect_err("partial write fails");
-    assert_io_error_kind(encode_error, io::ErrorKind::BrokenPipe);
-    assert_eq!(partial_writer.written_bytes, b"\x1bP");
-
-    let mut retry_writer = RecordingWriter {
-        written_bytes: Vec::new(),
-    };
-    assert!(sixel_encoder
-        .write_next_chunk(&mut retry_writer, 4)
-        .expect("retry writes the pending bytes"));
-    assert_eq!(retry_writer.written_bytes, b"\x1bP7;");
-}
-
-fn assert_io_error_kind(encode_error: SixelEncodeError, expected_io_kind: io::ErrorKind) {
-    match encode_error {
-        SixelEncodeError::Io(io_error) => assert_eq!(io_error.kind(), expected_io_kind),
-        unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
-    }
-}
-
 fn assert_palette_mapping_error(encode_error: SixelEncodeError) {
     match encode_error {
         SixelEncodeError::PaletteMapping => {}
@@ -339,52 +271,5 @@ fn assert_encoder_failed_error(encode_error: SixelEncodeError) {
     match encode_error {
         SixelEncodeError::EncoderFailed => {}
         unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
-    }
-}
-
-struct AlwaysFailWriter;
-
-impl Write for AlwaysFailWriter {
-    fn write(&mut self, _requested_bytes: &[u8]) -> io::Result<usize> {
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer failed"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-struct PartialFailWriter {
-    written_bytes: Vec<u8>,
-}
-
-impl Write for PartialFailWriter {
-    fn write(&mut self, requested_bytes: &[u8]) -> io::Result<usize> {
-        let written_byte_count = requested_bytes.len().min(2);
-        self.written_bytes
-            .extend_from_slice(&requested_bytes[..written_byte_count]);
-        Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "partial writer failure",
-        ))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-struct RecordingWriter {
-    written_bytes: Vec<u8>,
-}
-
-impl Write for RecordingWriter {
-    fn write(&mut self, requested_bytes: &[u8]) -> io::Result<usize> {
-        self.written_bytes.extend_from_slice(requested_bytes);
-        Ok(requested_bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }

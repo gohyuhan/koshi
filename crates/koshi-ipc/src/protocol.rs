@@ -56,13 +56,15 @@ pub const MIN_PROTOCOL_VERSION: u32 = SESSION_PROTOCOL.minimum_version;
 /// 2; a caller speaking 5 to 6 and the same build settle on nothing.
 #[must_use]
 pub fn compute_agreed_protocol_version(
-    caller_min_protocol_version: u32,
-    caller_max_protocol_version: u32,
-    build_min_protocol_version: u32,
-    build_max_protocol_version: u32,
+    caller_minimum_protocol_version: u32,
+    caller_maximum_protocol_version: u32,
+    build_minimum_protocol_version: u32,
+    build_maximum_protocol_version: u32,
 ) -> Option<u32> {
-    let highest_protocol_version = caller_max_protocol_version.min(build_max_protocol_version);
-    let lowest_protocol_version = caller_min_protocol_version.max(build_min_protocol_version);
+    let highest_protocol_version =
+        caller_maximum_protocol_version.min(build_maximum_protocol_version);
+    let lowest_protocol_version =
+        caller_minimum_protocol_version.max(build_minimum_protocol_version);
     (lowest_protocol_version <= highest_protocol_version).then_some(highest_protocol_version)
 }
 
@@ -75,10 +77,10 @@ pub fn compute_agreed_protocol_version(
 ///
 /// The secret leaves this type in two ways, and only two:
 ///
-/// - `Serialize` and [`expose`](Self::expose) write the **real secret**, for
+/// - `Serialize` and [`expose_secret`](Self::expose_secret) write the **real secret**, for
 ///   the endpoint file and the socket. `serde_json::to_string(&hello)` on the
 ///   Hello [`hello`](IpcRequestKind::build_hello_request) builds yields
-///   `{"Hello":{"min_protocol_version":4,"max_protocol_version":4,
+///   `{"Hello":{"minimum_protocol_version":4,"maximum_protocol_version":4,
 ///   "connection_token":"k7Qx…","is_remote":false}}`, secret included.
 /// - `Debug` and `Display` write `***`. A token that reaches a log line, a
 ///   trace, or an error dump reveals nothing.
@@ -111,7 +113,7 @@ impl ConnectionToken {
 
     /// The secret itself, as plain text.
     #[must_use]
-    pub fn expose(&self) -> &str {
+    pub fn expose_secret(&self) -> &str {
         &self.0
     }
 }
@@ -158,15 +160,18 @@ pub type IpcRequest<RequestKind = IpcRequestKind> = Envelope<RequestKind>;
 /// not have.
 pub type IncomingRequest = IpcRequest<MaybeKnown<IpcRequestKind>>;
 
-/// Native image protocols the terminal attached to one client proved it can
-/// receive.
-///
-/// Each field defaults to `false`, so a client that does not report this
-/// record receives placement metadata without pixel transfers. New protocol
-/// fields can be added without changing the attach shape.
+/// The field names [`GraphicsCapabilities`] reads, named in the error for a
+/// retired field name.
 const GRAPHICS_CAPABILITY_FIELD_NAMES: &[&str] =
     &["supports_kitty", "supports_iterm", "supports_sixel"];
 
+/// Native image protocols the terminal attached to one client proved it can
+/// receive.
+///
+/// Each field defaults to `false`: a client that does not report this record
+/// receives placement metadata without pixel transfers. A field this build
+/// does not know is ignored. The retired names `kitty`, `iterm` and `sixel`
+/// are refused as unknown fields.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct GraphicsCapabilities {
     /// The terminal answered the Kitty graphics protocol query with `OK`.
@@ -203,11 +208,11 @@ impl<'de> Deserialize<'de> for GraphicsCapabilitiesField {
                 formatter.write_str("a graphics capability field name")
             }
 
-            fn visit_str<ErrorType>(self, value: &str) -> Result<Self::Value, ErrorType>
+            fn visit_str<ErrorType>(self, field_name: &str) -> Result<Self::Value, ErrorType>
             where
                 ErrorType: de::Error,
             {
-                Ok(match value {
+                Ok(match field_name {
                     "supports_kitty" => GraphicsCapabilitiesField::SupportsKitty,
                     "supports_iterm" => GraphicsCapabilitiesField::SupportsIterm,
                     "supports_sixel" => GraphicsCapabilitiesField::SupportsSixel,
@@ -239,7 +244,10 @@ impl<'de> Deserialize<'de> for GraphicsCapabilities {
                 formatter.write_str("a graphics capability object")
             }
 
-            fn visit_map<MapType>(self, mut map: MapType) -> Result<Self::Value, MapType::Error>
+            fn visit_map<MapType>(
+                self,
+                mut map_access: MapType,
+            ) -> Result<Self::Value, MapType::Error>
             where
                 MapType: MapAccess<'de>,
             {
@@ -247,25 +255,25 @@ impl<'de> Deserialize<'de> for GraphicsCapabilities {
                 let mut supports_iterm = None;
                 let mut supports_sixel = None;
 
-                while let Some(field) = map.next_key::<GraphicsCapabilitiesField>()? {
+                while let Some(field) = map_access.next_key::<GraphicsCapabilitiesField>()? {
                     match field {
                         GraphicsCapabilitiesField::SupportsKitty => {
                             if supports_kitty.is_some() {
                                 return Err(de::Error::duplicate_field("supports_kitty"));
                             }
-                            supports_kitty = Some(map.next_value()?);
+                            supports_kitty = Some(map_access.next_value()?);
                         }
                         GraphicsCapabilitiesField::SupportsIterm => {
                             if supports_iterm.is_some() {
                                 return Err(de::Error::duplicate_field("supports_iterm"));
                             }
-                            supports_iterm = Some(map.next_value()?);
+                            supports_iterm = Some(map_access.next_value()?);
                         }
                         GraphicsCapabilitiesField::SupportsSixel => {
                             if supports_sixel.is_some() {
                                 return Err(de::Error::duplicate_field("supports_sixel"));
                             }
-                            supports_sixel = Some(map.next_value()?);
+                            supports_sixel = Some(map_access.next_value()?);
                         }
                         GraphicsCapabilitiesField::RetiredKitty => {
                             return Err(de::Error::unknown_field(
@@ -286,7 +294,7 @@ impl<'de> Deserialize<'de> for GraphicsCapabilities {
                             ));
                         }
                         GraphicsCapabilitiesField::Unknown => {
-                            let _: IgnoredAny = map.next_value()?;
+                            let _: IgnoredAny = map_access.next_value()?;
                         }
                     }
                 }
@@ -345,21 +353,20 @@ pub enum IpcRequestKind {
     /// a `remote` of `true` stays set from then on.
     Hello {
         /// The lowest protocol version the caller speaks.
-        min_protocol_version: u32,
+        minimum_protocol_version: u32,
         /// The highest protocol version the caller speaks.
-        max_protocol_version: u32,
+        maximum_protocol_version: u32,
         /// The secret read from the endpoint file.
         connection_token: ConnectionToken,
         /// Whether the connection this Hello opens carries a caller on
         /// another machine. The router sets it on the local connection it
-        /// opens for a remote caller. Absent means `false`. It changes nothing
-        /// about whether the Hello is accepted. The server records it as the
-        /// origin of every client attached on this connection.
-        #[serde(default)]
+        /// opens for a remote caller. It changes nothing about whether the
+        /// Hello is accepted. The server records it as the origin of every
+        /// client attached on this connection.
         is_remote: bool,
     },
     /// Join the session as a viewing client: the server mints the client,
-    /// registers it for the events `event_filter` selects, and answers with
+    /// registers it for every event the session publishes, and answers with
     /// [`IpcResult::Attached`].
     ///
     /// The caller names no identity of its own. Who the client is, what it may
@@ -367,25 +374,19 @@ pub enum IpcRequestKind {
     Attach {
         /// The caller's terminal size in cells, which the server records as
         /// the client's viewport.
-        viewport: Size,
-        /// Which of the session's events the client receives.
-        event_filter: EventFilterSpec,
+        viewport_size: Size,
         /// The client record to come back as, named by a caller re-attaching
         /// after the session replaced its own process image. The server hands
         /// that record back when it still holds it, the tab that record was
         /// viewing still exists, and no connection is streaming for it, and
-        /// mints a fresh client in every other case. Absent on a first attach,
-        /// and from a caller that predates this field.
-        #[serde(default)]
+        /// mints a fresh client in every other case. `None` on a first attach.
         resume_client_id: Option<ClientId>,
         /// The token the session handed this caller at its last attach,
         /// presented to get that attach's view back: the active tab, the
         /// focused pane of each tab, the zoomed pane of each tab, and the
-        /// scroll offset of each pane. Absent on a first attach, and from a
-        /// caller that predates this field. A token the session does not
-        /// hold, and a token older than 120 seconds, attach with a fresh view
-        /// instead of failing.
-        #[serde(default)]
+        /// scroll offset of each pane. `None` on a first attach. A token the
+        /// session does not hold, and a token older than 120 seconds, attach
+        /// with a fresh view instead of failing.
         resume_token: Option<ConnectionToken>,
         /// The pane region the caller draws the tab's panes in, which the
         /// server records on the client. Absent, the server sizes the
@@ -412,7 +413,7 @@ pub enum IpcRequestKind {
     /// The attached client's terminal changed size.
     Resize {
         /// The client's new terminal size in cells.
-        viewport: Size,
+        viewport_size: Size,
         /// The pane region the client draws the tab's panes in at the new
         /// size; `None` replaces any earlier report.
         #[serde(default)]
@@ -484,8 +485,8 @@ impl IpcRequestKind {
     #[must_use]
     pub fn build_hello_request(connection_token: ConnectionToken) -> IpcRequestKind {
         IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token,
             is_remote: false,
         }
@@ -546,7 +547,7 @@ pub enum WireMouseAction {
     },
     /// Send `arrow_count` cursor arrow keys to `pane_id` — the alternate-scroll
     /// (`?1007`) translation of a wheel tick on the alternate screen.
-    AltScrollArrows {
+    AlternateScrollArrows {
         /// The pane whose program receives the arrows.
         pane_id: PaneId,
         /// Up-arrows, or down-arrows.
@@ -569,16 +570,6 @@ pub enum WireMouseAction {
     /// Run the command through the session's command door, attributed to this
     /// client's mouse.
     Command(Box<Command>),
-}
-
-/// Which of the session's events an attaching client asks for.
-///
-/// This is the wire spelling only. The server maps it to the filter its event
-/// hub works in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EventFilterSpec {
-    /// Every event the session publishes.
-    All,
 }
 
 /// One message answering an [`IpcRequest`].
@@ -609,8 +600,6 @@ pub enum IpcResult {
         /// both speak.
         protocol_version: u32,
         /// The build version of the answering session server, e.g. `0.3.0`.
-        /// Empty when the session server predates this field.
-        #[serde(default)]
         build_version: String,
     },
     /// Answers [`IpcRequestKind::Attach`]: the client is registered and its
@@ -618,16 +607,14 @@ pub enum IpcResult {
     /// this frame is the last one written before the event stream starts.
     Attached {
         /// The id the server minted for this client. A second attach mints a
-        /// new one, unless its `resume` named a record the server handed back.
+        /// new one, unless its `resume_client_id` named a record the server handed back.
         client_id: ClientId,
         /// The session the client joined.
         session_id: SessionId,
         /// What the session contains right now, built for this reply.
         session_structure: AttachedSessionStructureSnapshot,
         /// The fresh secret this attach minted, presented on the next attach
-        /// to get this attach's view back. `None` from a session server that
-        /// predates this field.
-        #[serde(default)]
+        /// to get this attach's view back.
         resume_token: Option<ConnectionToken>,
         /// The pane region the server holds for this client, exactly as the
         /// attach reported it.
@@ -744,14 +731,14 @@ impl WireVariants for IpcRequestKind {
 }
 
 impl WireName for IpcRequestKind {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         self.get_request_kind_name()
     }
 }
 
 impl WireVariants for IpcResult {
     /// Every answer this build has: one entry per variant of [`IpcResult`],
-    /// spelled as [`WireName::wire_name`] spells it.
+    /// spelled as [`WireName::get_wire_name`] spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Attached",
@@ -765,7 +752,7 @@ impl WireVariants for IpcResult {
 }
 
 impl WireName for IpcResult {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         match self {
             IpcResult::Hello { .. } => "Hello",
             IpcResult::Attached { .. } => "Attached",

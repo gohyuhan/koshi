@@ -10,7 +10,7 @@
 /// ASCII characters, or 170 three-byte characters such as `日`.
 pub const MAX_REPORTED_TEXT_BYTE_COUNT: usize = 512;
 
-/// Whether [`sanitize_reported_text`] removes `c`.
+/// Whether [`sanitize_reported_text`] removes `character`.
 ///
 /// Five classes are removed:
 ///

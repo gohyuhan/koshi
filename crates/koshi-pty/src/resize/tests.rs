@@ -11,7 +11,6 @@ use koshi_core::geometry::Size;
 use koshi_core::process::{KillPolicy, SpawnSpec};
 
 use super::*;
-use crate::backend::state::PtyHandle;
 use crate::error::PtyError;
 
 /// A content rect at the origin with the given size.
@@ -64,7 +63,7 @@ impl PtyBackend for RecordingBackend {
         _pane_id: PaneId,
         _spawn_spec: SpawnSpec,
         _pty_size: PtySize,
-    ) -> Result<PtyHandle, PtyError> {
+    ) -> Result<(), PtyError> {
         unreachable!("resize tests never spawn")
     }
 

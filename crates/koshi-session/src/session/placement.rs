@@ -12,7 +12,7 @@ use koshi_layout::placement::CrossTabPlacement;
 use thiserror::Error;
 
 use crate::session::state::{Session, Tab};
-use crate::session::tab_ops::close_empty_tab_after_transfer;
+use crate::session::tab_ops::close_and_refocus_tab;
 
 /// A checked placement could not be installed because its tabs or source pane
 /// no longer match the prepared trees.
@@ -92,18 +92,15 @@ pub fn commit_cross_tab_placement(
     {
         return Err(PlacementCommitError::PaneOwnershipConflict);
     }
-    if session.clients.get_client_by_id(acting_client_id).is_none() {
-        return Err(PlacementCommitError::ActingClientNotFound);
-    }
     let acting_previous_tab_id = session
         .clients
         .get_client_by_id(acting_client_id)
-        .map(|client| client.get_active_tab())
+        .map(|client| client.get_active_tab_id())
         .ok_or(PlacementCommitError::ActingClientNotFound)?;
     let acting_previous_pane_id = session
         .clients
         .get_client_by_id(acting_client_id)
-        .and_then(|client| client.get_focused_pane(destination_tab_id));
+        .and_then(|client| client.get_focused_pane_id(destination_tab_id));
 
     let source_pane_ids_before: HashSet<PaneId> =
         source_leaf_pane_ids_before.iter().copied().collect();
@@ -142,19 +139,19 @@ pub fn commit_cross_tab_placement(
     if all_pane_ids_before != all_pane_ids_after {
         return Err(PlacementCommitError::PaneOwnershipConflict);
     }
-    let source_tab_will_close = prepared_placement.source_tree.is_none();
+    let is_source_tab_closing = prepared_placement.source_tree.is_none();
 
     let affected_client_ids: Vec<ClientId> = session
         .clients
         .list_attached_clients()
         .filter(|client| {
             client.get_client_id() == acting_client_id
-                || client.get_active_tab() == source_tab_id
-                || client.get_active_tab() == destination_tab_id
-                || client.get_focused_pane(source_tab_id).is_some()
-                || client.get_focused_pane(destination_tab_id).is_some()
-                || client.get_zoomed_pane(source_tab_id).is_some()
-                || client.get_zoomed_pane(destination_tab_id).is_some()
+                || client.get_active_tab_id() == source_tab_id
+                || client.get_active_tab_id() == destination_tab_id
+                || client.get_focused_pane_id(source_tab_id).is_some()
+                || client.get_focused_pane_id(destination_tab_id).is_some()
+                || client.get_zoomed_pane_id(source_tab_id).is_some()
+                || client.get_zoomed_pane_id(destination_tab_id).is_some()
         })
         .map(|client| client.get_client_id())
         .collect();
@@ -191,7 +188,7 @@ pub fn commit_cross_tab_placement(
 
     if let Some(acting_client) = session.clients.get_client_mut_by_id(acting_client_id) {
         acting_client.clear_zoom(destination_tab_id);
-        acting_client.update_active_tab(destination_tab_id);
+        acting_client.update_active_tab_id(destination_tab_id);
         acting_client.update_focused_pane(destination_tab_id, source_pane_id);
     }
     if acting_previous_tab_id != destination_tab_id {
@@ -213,7 +210,7 @@ pub fn commit_cross_tab_placement(
         destination_tab.record_focus_mru(source_pane_id);
     }
 
-    if !source_tab_will_close {
+    if !is_source_tab_closing {
         repair_client_tab_focus(
             session,
             acting_client_id,
@@ -240,7 +237,7 @@ pub fn commit_cross_tab_placement(
             &destination_pane_ids_after,
             &mut events,
         );
-        if !source_tab_will_close {
+        if !is_source_tab_closing {
             repair_client_tab_focus(
                 session,
                 client_id,
@@ -255,13 +252,13 @@ pub fn commit_cross_tab_placement(
             destination_tab_id,
             &destination_pane_ids_after,
         );
-        if !source_tab_will_close {
+        if !is_source_tab_closing {
             clear_invalid_client_zoom(session, client_id, source_tab_id, &source_pane_ids_after);
         }
     }
 
-    if source_tab_will_close {
-        events.extend(close_empty_tab_after_transfer(session, source_tab_id));
+    if is_source_tab_closing {
+        events.extend(close_and_refocus_tab(session, source_tab_id, None));
     }
 
     Ok(events)
@@ -277,12 +274,12 @@ fn repair_client_tab_focus(
     let should_clear_zoom = session
         .clients
         .get_client_by_id(client_id)
-        .and_then(|client| client.get_zoomed_pane(tab_id))
+        .and_then(|client| client.get_zoomed_pane_id(tab_id))
         .is_some_and(|pane_id| !valid_pane_ids.contains(&pane_id));
     let Some(previous_pane_id) = session
         .clients
         .get_client_by_id(client_id)
-        .and_then(|client| client.get_focused_pane(tab_id))
+        .and_then(|client| client.get_focused_pane_id(tab_id))
     else {
         return;
     };
@@ -342,7 +339,7 @@ fn clear_invalid_client_zoom(
     let should_clear_zoom = session
         .clients
         .get_client_by_id(client_id)
-        .and_then(|client| client.get_zoomed_pane(tab_id))
+        .and_then(|client| client.get_zoomed_pane_id(tab_id))
         .is_some_and(|pane_id| !valid_pane_ids.contains(&pane_id));
     if should_clear_zoom {
         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {

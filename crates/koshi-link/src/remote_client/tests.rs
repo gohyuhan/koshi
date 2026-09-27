@@ -587,11 +587,11 @@ type SharedWrittenByteBufferHandle = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
 /// Build a link reading `server_frame_bytes` as the bytes the server sent,
 /// together with the buffer this side's own writes go into.
 fn build_remote_link(server_frame_bytes: Vec<u8>) -> (RemoteLink, SharedWrittenByteBufferHandle) {
-    use koshi_ipc::transport::frame_halves;
+    use koshi_ipc::transport::build_frame_halves;
 
     let written_bytes: SharedWrittenByteBufferHandle =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (reader, writer) = frame_halves(
+    let (reader, writer) = build_frame_halves(
         Box::new(ServerFrameByteStream(std::io::Cursor::new(
             server_frame_bytes,
         ))),

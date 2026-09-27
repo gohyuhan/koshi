@@ -90,9 +90,9 @@ pub enum RouterRequestKind {
     /// from its own range, and a refused one leaves the gate as it was.
     Hello {
         /// The lowest control-plane protocol version the caller speaks.
-        min_protocol_version: u32,
+        minimum_protocol_version: u32,
         /// The highest control-plane protocol version the caller speaks.
-        max_protocol_version: u32,
+        maximum_protocol_version: u32,
         /// The secret read from the router's endpoint file.
         connection_token: ConnectionToken,
     },
@@ -165,13 +165,13 @@ pub enum RouterRequestKind {
 impl RouterRequestKind {
     /// The Hello this build opens a router connection with: the control-plane
     /// versions it speaks, [`MIN_ROUTER_PROTOCOL_VERSION`] then
-    /// [`ROUTER_PROTOCOL_VERSION`], and `token` read from the router's
+    /// [`ROUTER_PROTOCOL_VERSION`], and `connection_token` read from the router's
     /// endpoint file.
     #[must_use]
     pub fn build_hello_request(connection_token: ConnectionToken) -> RouterRequestKind {
         RouterRequestKind::Hello {
-            min_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            max_protocol_version: ROUTER_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
+            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
             connection_token,
         }
     }
@@ -239,9 +239,7 @@ pub enum RouterResult {
         /// The version both sides use on this connection: the highest they
         /// both speak.
         protocol_version: u32,
-        /// The build version of the answering router, e.g. `0.3.0`. Empty
-        /// when the router predates this field.
-        #[serde(default)]
+        /// The build version of the answering router, e.g. `0.3.0`.
         build_version: String,
     },
     /// Answers [`RouterRequestKind::CreateSession`]: where the new session
@@ -263,7 +261,7 @@ pub enum RouterResult {
         connection_token: ConnectionToken,
         /// Whether a grant the identity already held on this scope stopped
         /// working.
-        did_replace_active_grant: bool,
+        has_replaced_active_grant: bool,
     },
     /// Answers [`RouterRequestKind::RevokeToken`]: the scope of every grant
     /// this call stopped, empty when the identity held none.
@@ -280,9 +278,9 @@ pub enum RouterResult {
         /// Whether the operator has switched remote access on. This is the
         /// answer they gave, which outlives any one run.
         is_remote_access_enabled: bool,
-        /// Whether this router is holding the port right now. `enabled` with
-        /// this `false` means the answer was given and the port could not be
-        /// taken this start — something else is on the address.
+        /// Whether this router is holding the port right now. `is_remote_access_enabled` with this
+        /// `false` means the answer was given and the port could not be taken this start —
+        /// something else is on the address.
         is_listening: bool,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters, or `None` when no certificate has been generated.
@@ -360,7 +358,7 @@ impl RouterHandshake {
         self.0.get_agreed_protocol_version()
     }
 
-    /// The refusal for a request kind this build does not have, named `name`.
+    /// The refusal for a request kind this build does not have, named `request_kind_name`.
     ///
     /// A closed gate answers
     /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired), the
@@ -386,22 +384,22 @@ impl RouterHandshake {
     /// [`HelloRequired`](crate::protocol::IpcErrorCode::HelloRequired) while it
     /// is not.
     ///
-    /// `Ok(())` means the caller serves the request — a Hello is answered
-    /// with [`RouterResult::Hello`] carrying [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An
-    /// `Err` carries the refusal to send back, and the gate keeps the state it
-    /// had.
+    /// `Ok(())` means the caller serves the request — a Hello is answered with
+    /// [`RouterResult::Hello`] carrying
+    /// [`get_agreed_protocol_version`](Self::get_agreed_protocol_version). An `Err` carries the
+    /// refusal to send back, and the gate keeps the state it had.
     pub fn validate_request_kind(
         &mut self,
         request_kind: &RouterRequestKind,
     ) -> Result<(), IpcErrorPayload> {
         match request_kind {
             RouterRequestKind::Hello {
-                min_protocol_version,
-                max_protocol_version,
+                minimum_protocol_version,
+                maximum_protocol_version,
                 connection_token,
             } => self.0.validate_hello(
-                *min_protocol_version,
-                *max_protocol_version,
+                *minimum_protocol_version,
+                *maximum_protocol_version,
                 connection_token,
             ),
             request_kind => self
@@ -480,14 +478,14 @@ impl WireVariants for RouterRequestKind {
 }
 
 impl WireName for RouterRequestKind {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         self.get_request_kind_name()
     }
 }
 
 impl WireVariants for RouterResult {
     /// Every control-plane answer this build has: one entry per variant of
-    /// [`RouterResult`], spelled as its `wire_name` spells it.
+    /// [`RouterResult`], spelled as its `get_wire_name` spells it.
     const VARIANTS: &'static [&'static str] = &[
         "Hello",
         "Created",
@@ -504,7 +502,7 @@ impl WireVariants for RouterResult {
 }
 
 impl WireName for RouterResult {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         match self {
             RouterResult::Hello { .. } => "Hello",
             RouterResult::Created(_) => "Created",

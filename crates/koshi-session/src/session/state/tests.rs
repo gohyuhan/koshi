@@ -56,7 +56,7 @@ fn build_empty_session() -> Session {
 }
 
 #[test]
-fn tab_viewport_takes_the_per_axis_minimum_across_viewers() {
+fn tab_size_takes_the_per_axis_minimum_across_viewers() {
     let tab = TabId::new();
     let other_tab = TabId::new();
     let mut session = Session::from_identity_and_client_registry(
@@ -74,7 +74,7 @@ fn tab_viewport_takes_the_per_axis_minimum_across_viewers() {
 
     // Full-viewport minimum is 40×5; reserving two chrome rows leaves 40×3.
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 40,
             row_count: 3
@@ -83,7 +83,7 @@ fn tab_viewport_takes_the_per_axis_minimum_across_viewers() {
 }
 
 #[test]
-fn tab_viewport_is_none_without_a_attach_viewer() {
+fn tab_size_is_none_without_an_attached_viewer() {
     let tab = TabId::new();
     let session = Session::from_identity_and_client_registry(
         SessionId::new(),
@@ -92,7 +92,7 @@ fn tab_viewport_is_none_without_a_attach_viewer() {
         ClientRegistry::new(),
     );
 
-    assert_eq!(session.get_tab_viewport(tab), None);
+    assert_eq!(session.get_tab_size(tab), None);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn an_old_session_record_reads_a_zero_placement_revision() {
 }
 
 #[test]
-fn tab_viewport_with_exactly_one_viewer_returns_its_own_reserved_size() {
+fn tab_size_with_exactly_one_viewer_returns_its_own_reserved_size() {
     let tab = TabId::new();
     let mut session = Session::from_identity_and_client_registry(
         SessionId::new(),
@@ -152,7 +152,7 @@ fn tab_viewport_with_exactly_one_viewer_returns_its_own_reserved_size() {
     // With one viewer the result is that viewer's own size minus the two
     // chrome rows.
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 100,
             row_count: 28
@@ -161,7 +161,7 @@ fn tab_viewport_with_exactly_one_viewer_returns_its_own_reserved_size() {
 }
 
 #[test]
-fn tab_viewport_saturates_rather_than_panics_below_the_chrome_rows() {
+fn tab_size_saturates_rather_than_panics_below_the_chrome_rows() {
     // A viewport with fewer rows than the two reserved chrome rows saturates
     // the row count at `0`.
     let tab = TabId::new();
@@ -175,7 +175,7 @@ fn tab_viewport_saturates_rather_than_panics_below_the_chrome_rows() {
     attach_viewer(&mut session, tab, 80, 1);
 
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 0
@@ -184,7 +184,7 @@ fn tab_viewport_saturates_rather_than_panics_below_the_chrome_rows() {
 }
 
 #[test]
-fn tab_viewport_leaves_a_starving_viewer_out() {
+fn tab_size_leaves_a_starving_viewer_out() {
     let tab = TabId::new();
     let mut session = build_empty_session();
 
@@ -194,7 +194,7 @@ fn tab_viewport_leaves_a_starving_viewer_out() {
     // Only the viewer that reported a pane area counts: 80x24 minus the two
     // chrome rows.
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 22
@@ -203,7 +203,7 @@ fn tab_viewport_leaves_a_starving_viewer_out() {
 }
 
 #[test]
-fn tab_viewport_with_a_zero_reported_area_is_zero() {
+fn tab_size_with_a_zero_reported_area_is_zero() {
     let tab = TabId::new();
     let mut session = build_empty_session();
 
@@ -220,7 +220,7 @@ fn tab_viewport_with_a_zero_reported_area_is_zero() {
     );
 
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 0,
             row_count: 0
@@ -229,18 +229,18 @@ fn tab_viewport_with_a_zero_reported_area_is_zero() {
 }
 
 #[test]
-fn tab_viewport_is_none_when_every_viewer_is_starving() {
+fn tab_size_is_none_when_every_viewer_is_starving() {
     let tab = TabId::new();
     let mut session = build_empty_session();
 
     attach_viewer_with_pane_area(&mut session, tab, 80, 24, Some(PaneArea::Starving));
     attach_viewer_with_pane_area(&mut session, tab, 80, 24, Some(PaneArea::Starving));
 
-    assert_eq!(session.get_tab_viewport(tab), None);
+    assert_eq!(session.get_tab_size(tab), None);
 }
 
 #[test]
-fn tab_viewport_takes_the_minimum_of_a_reported_and_an_unreported_attach_viewer() {
+fn tab_size_takes_the_minimum_of_a_reported_and_an_unreported_attach_viewer() {
     let tab = TabId::new();
     let mut session = build_empty_session();
 
@@ -258,7 +258,7 @@ fn tab_viewport_takes_the_minimum_of_a_reported_and_an_unreported_attach_viewer(
 
     // 60x30 reported against 80x22 from the unreported viewer.
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 60,
             row_count: 22
@@ -267,7 +267,7 @@ fn tab_viewport_takes_the_minimum_of_a_reported_and_an_unreported_attach_viewer(
 }
 
 #[test]
-fn tab_viewport_takes_the_element_wise_minimum_of_two_reports() {
+fn tab_size_takes_the_element_wise_minimum_of_two_reports() {
     let tab = TabId::new();
     let mut session = build_empty_session();
 
@@ -294,7 +294,7 @@ fn tab_viewport_takes_the_element_wise_minimum_of_two_reports() {
 
     // The narrower report gives the columns, the shorter one gives the rows.
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 60,
             row_count: 20
@@ -303,7 +303,7 @@ fn tab_viewport_takes_the_element_wise_minimum_of_two_reports() {
 }
 
 #[test]
-fn tab_viewport_does_not_depend_on_where_the_starving_viewer_attached() {
+fn tab_size_does_not_depend_on_where_the_starving_viewer_attached() {
     let tab = TabId::new();
 
     let mut starving_first = build_empty_session();
@@ -315,14 +315,14 @@ fn tab_viewport_does_not_depend_on_where_the_starving_viewer_attached() {
     attach_viewer_with_pane_area(&mut starving_second, tab, 80, 24, Some(PaneArea::Starving));
 
     assert_eq!(
-        starving_first.get_tab_viewport(tab),
+        starving_first.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 22
         })
     );
     assert_eq!(
-        starving_second.get_tab_viewport(tab),
+        starving_second.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 22
@@ -331,14 +331,14 @@ fn tab_viewport_does_not_depend_on_where_the_starving_viewer_attached() {
 }
 
 #[test]
-fn detaching_a_starving_viewer_leaves_tab_viewport_unchanged() {
+fn detaching_a_starving_viewer_leaves_tab_size_unchanged() {
     let tab = TabId::new();
     let mut session = build_empty_session();
     attach_viewer(&mut session, tab, 80, 24);
     let starving =
         attach_viewer_with_pane_area(&mut session, tab, 80, 24, Some(PaneArea::Starving));
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 22
@@ -348,7 +348,7 @@ fn detaching_a_starving_viewer_leaves_tab_viewport_unchanged() {
     session.detach_client(starving);
 
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 22
@@ -357,7 +357,7 @@ fn detaching_a_starving_viewer_leaves_tab_viewport_unchanged() {
 }
 
 #[test]
-fn detaching_the_smallest_viewer_lets_tab_viewport_grow() {
+fn detaching_the_smallest_viewer_lets_tab_size_grow() {
     let tab = TabId::new();
     let mut session = build_empty_session();
     let smallest = attach_viewer_with_pane_area(
@@ -372,7 +372,7 @@ fn detaching_the_smallest_viewer_lets_tab_viewport_grow() {
     );
     attach_viewer(&mut session, tab, 120, 40);
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 60,
             row_count: 30
@@ -382,7 +382,7 @@ fn detaching_the_smallest_viewer_lets_tab_viewport_grow() {
     session.detach_client(smallest);
 
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 120,
             row_count: 38
@@ -456,7 +456,7 @@ fn attach_client_returns_the_client_it_displaced_on_reattach() {
             row_count: 10
         })
     );
-    assert_eq!(session.clients.client_count(), 1);
+    assert_eq!(session.clients.count_clients(), 1);
 }
 
 #[test]
@@ -530,7 +530,7 @@ fn detach_client_returns_the_exact_record_it_removed() {
             .map(Client::get_client_id),
         None
     );
-    assert_eq!(session.clients.client_count(), 0);
+    assert_eq!(session.clients.count_clients(), 0);
 }
 
 #[test]
@@ -638,7 +638,7 @@ fn detaching_the_last_client_of_a_starting_session_leaves_it_starting() {
         removed.map(|client| client.get_client_id()),
         Some(client_id)
     );
-    assert_eq!(session.clients.client_count(), 0);
+    assert_eq!(session.clients.count_clients(), 0);
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Starting);
 }
 
@@ -677,7 +677,7 @@ fn completing_a_stop_twice_leaves_the_session_stopped() {
 
 /// Drive `session` to `Detaching`: create its first tab, attach one viewer of
 /// `tab`, then detach it.
-fn detached_session(tab: TabId) -> Session {
+fn build_detached_session(tab: TabId) -> Session {
     let mut session = build_empty_session();
     session
         .update_lifecycle(SessionLifecycleEvent::FirstTabCreated)
@@ -690,7 +690,7 @@ fn detached_session(tab: TabId) -> Session {
 
 #[test]
 fn request_session_stop_moves_a_detaching_session_to_stopping() {
-    let mut session = detached_session(TabId::new());
+    let mut session = build_detached_session(TabId::new());
 
     session.request_session_stop();
 
@@ -700,7 +700,7 @@ fn request_session_stop_moves_a_detaching_session_to_stopping() {
 #[test]
 fn complete_session_stop_on_a_detaching_session_leaves_it_detaching() {
     // `StopCompleted` is legal only from `Stopping`; `Detaching` rejects it.
-    let mut session = detached_session(TabId::new());
+    let mut session = build_detached_session(TabId::new());
 
     session.complete_session_stop();
 
@@ -717,7 +717,7 @@ fn attaching_a_client_to_a_stopped_session_registers_it_without_reviving_it() {
 
     let client_id = attach_viewer_with_pane_area(&mut session, tab, 80, 24, None);
 
-    assert_eq!(session.clients.client_count(), 1);
+    assert_eq!(session.clients.count_clients(), 1);
     assert_eq!(
         session
             .clients
@@ -729,31 +729,31 @@ fn attaching_a_client_to_a_stopped_session_registers_it_without_reviving_it() {
 }
 
 #[test]
-fn tab_viewport_counts_a_client_only_once_it_switches_onto_the_tab() {
+fn tab_size_counts_a_client_only_once_it_switches_onto_the_tab() {
     let tab = TabId::new();
     let other_tab = TabId::new();
     let mut session = build_empty_session();
     let client_id = attach_viewer_with_pane_area(&mut session, other_tab, 100, 30, None);
-    assert_eq!(session.get_tab_viewport(tab), None);
+    assert_eq!(session.get_tab_size(tab), None);
 
     session
         .clients
         .get_client_mut_by_id(client_id)
         .expect("the viewer is attached")
-        .update_active_tab(tab);
+        .update_active_tab_id(tab);
 
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 100,
             row_count: 28
         })
     );
-    assert_eq!(session.get_tab_viewport(other_tab), None);
+    assert_eq!(session.get_tab_size(other_tab), None);
 }
 
 #[test]
-fn tab_viewport_clamps_a_report_larger_than_the_viewport() {
+fn tab_size_clamps_a_report_larger_than_the_viewport() {
     let tab = TabId::new();
     let mut session = build_empty_session();
 
@@ -771,7 +771,7 @@ fn tab_viewport_clamps_a_report_larger_than_the_viewport() {
     // A report is clamped per axis to the viewport, and it replaces the
     // two-chrome-row default outright: 80x24, not 80x22.
     assert_eq!(
-        session.get_tab_viewport(tab),
+        session.get_tab_size(tab),
         Some(Size {
             column_count: 80,
             row_count: 24
@@ -790,10 +790,10 @@ fn an_empty_session_survives_a_serde_round_trip() {
     assert_eq!(read_back.session_name, "s");
     assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
     assert_eq!(*read_back.get_lifecycle(), SessionLifecycle::Starting);
-    assert!(!read_back.start_locked);
+    assert!(!read_back.should_start_locked);
     assert_eq!(read_back.tabs.len(), 0);
-    assert_eq!(read_back.panes.pane_record_count(), 0);
-    assert_eq!(read_back.clients.client_count(), 0);
+    assert_eq!(read_back.panes.count_pane_records(), 0);
+    assert_eq!(read_back.clients.count_clients(), 0);
 }
 
 /// A whole session must survive being written out and read back: its identity
@@ -842,7 +842,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     for pane in [pane_one, pane_two, pane_three, pane_four] {
         session
             .panes
-            .register_pane_record(PaneRecord::from_terminal_pane(pane, SystemTime::UNIX_EPOCH))
+            .register_pane_record(PaneRecord::from_terminal_pane(pane))
             .expect("each pane id is registered once");
     }
 
@@ -939,7 +939,6 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     assert_eq!(recovered_one.get_tab_index(), 0);
     assert_eq!(*recovered_one.get_layout_tree(), tab_one_layout);
     assert_eq!(recovered_one.list_focus_mru(), [pane_two].as_slice());
-    assert_eq!(*recovered_one.get_lifecycle(), TabLifecycle::Creating);
     let recovered_two = decoded_session
         .tabs
         .get(&tab_two)
@@ -950,7 +949,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         LayoutNode::Pane(pane_four)
     );
 
-    assert_eq!(decoded_session.panes.pane_record_count(), 4);
+    assert_eq!(decoded_session.panes.count_pane_records(), 4);
     for pane in [pane_one, pane_two, pane_three, pane_four] {
         let pane_record = decoded_session
             .panes
@@ -960,7 +959,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         assert_eq!(*pane_record.get_lifecycle(), PaneLifecycle::Spawning);
     }
 
-    assert_eq!(decoded_session.clients.client_count(), 2);
+    assert_eq!(decoded_session.clients.count_clients(), 2);
     let recovered_zoomed_client = decoded_session
         .clients
         .get_client_by_id(zoomed_client_id)
@@ -972,7 +971,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
     );
     assert_eq!(recovered_zoomed_client.get_origin(), ClientOrigin::Local);
     assert_eq!(recovered_zoomed_client.get_label(), "C-brave-otter");
-    assert_eq!(recovered_zoomed_client.get_color(), 3);
+    assert_eq!(recovered_zoomed_client.get_color_index(), 3);
     assert_eq!(
         recovered_zoomed_client.get_viewport_size(),
         Size {
@@ -980,22 +979,22 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
             row_count: 30
         }
     );
-    assert_eq!(recovered_zoomed_client.get_active_tab(), tab_one);
+    assert_eq!(recovered_zoomed_client.get_active_tab_id(), tab_one);
     assert_eq!(recovered_zoomed_client.get_lock_mode(), LockMode::Locked);
     assert!(recovered_zoomed_client.is_mouse_selection_enabled());
     assert_eq!(
-        recovered_zoomed_client.get_focused_pane(tab_one),
+        recovered_zoomed_client.get_focused_pane_id(tab_one),
         Some(pane_two)
     );
     assert_eq!(
-        recovered_zoomed_client.get_focused_pane(tab_two),
+        recovered_zoomed_client.get_focused_pane_id(tab_two),
         Some(pane_four)
     );
     assert_eq!(
-        recovered_zoomed_client.get_zoomed_pane(tab_one),
+        recovered_zoomed_client.get_zoomed_pane_id(tab_one),
         Some(pane_two)
     );
-    assert_eq!(recovered_zoomed_client.get_zoomed_pane(tab_two), None);
+    assert_eq!(recovered_zoomed_client.get_zoomed_pane_id(tab_two), None);
     assert_eq!(recovered_zoomed_client.get_scroll_offset(pane_two), 7);
     assert_eq!(recovered_zoomed_client.get_scroll_offset(pane_three), 0);
     assert_eq!(
@@ -1009,7 +1008,7 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
         .get_client_by_id(tiled_client_id)
         .expect("the second client is carried");
     assert_eq!(recovered_tiled_client.get_label(), "C-calm-heron");
-    assert_eq!(recovered_tiled_client.get_color(), 5);
+    assert_eq!(recovered_tiled_client.get_color_index(), 5);
     assert_eq!(
         recovered_tiled_client.get_viewport_size(),
         Size {
@@ -1017,15 +1016,15 @@ fn a_session_with_tabs_panes_and_clients_survives_a_serde_round_trip() {
             row_count: 24
         }
     );
-    assert_eq!(recovered_tiled_client.get_active_tab(), tab_two);
+    assert_eq!(recovered_tiled_client.get_active_tab_id(), tab_two);
     assert_eq!(recovered_tiled_client.get_lock_mode(), LockMode::Normal);
     assert!(!recovered_tiled_client.is_mouse_selection_enabled());
     assert_eq!(
-        recovered_tiled_client.get_focused_pane(tab_one),
+        recovered_tiled_client.get_focused_pane_id(tab_one),
         Some(pane_one)
     );
-    assert_eq!(recovered_tiled_client.get_focused_pane(tab_two), None);
-    assert_eq!(recovered_tiled_client.get_zoomed_pane(tab_one), None);
+    assert_eq!(recovered_tiled_client.get_focused_pane_id(tab_two), None);
+    assert_eq!(recovered_tiled_client.get_zoomed_pane_id(tab_one), None);
     assert_eq!(recovered_tiled_client.get_scroll_offset(pane_three), 3);
     assert_eq!(recovered_tiled_client.get_scroll_offset(pane_two), 0);
 }
@@ -1052,9 +1051,9 @@ fn a_stored_session_carrying_a_config_snapshot_key_still_reads() {
     assert_eq!(read_back.session_name, "carried");
     assert_eq!(read_back.created_at, SystemTime::UNIX_EPOCH);
     assert_eq!(*read_back.get_lifecycle(), SessionLifecycle::Starting);
-    assert!(!read_back.start_locked);
+    assert!(!read_back.should_start_locked);
     assert!(read_back.tabs.is_empty());
-    assert!(!read_back.panes.has_pane_records());
+    assert_eq!(read_back.panes.count_pane_records(), 0);
     assert!(!read_back.clients.has_clients());
 }
 
@@ -1091,7 +1090,7 @@ fn attaching_a_client_to_a_stopping_session_registers_it_without_reviving_it() {
     let displaced = session.attach_client(client);
 
     assert_eq!(displaced.map(|client| client.get_client_id()), None);
-    assert_eq!(session.clients.client_count(), 1);
+    assert_eq!(session.clients.count_clients(), 1);
     assert_eq!(
         session
             .clients

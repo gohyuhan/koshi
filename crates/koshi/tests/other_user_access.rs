@@ -202,7 +202,7 @@ fn write_test_config(home: &Path, config_text: &str) {
 
 /// A `koshi.kdl` with the switch on, sharing sessions through `shared_directory_base`.
 #[cfg(unix)]
-fn switched_on_config(shared_directory_base: &Path) -> String {
+fn build_switched_on_config(shared_directory_base: &Path) -> String {
     format!(
         "version 1\nallow-other-users #true\nshared-sessions-dir \"{}\"\n",
         shared_directory_base.display()
@@ -432,7 +432,7 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
     };
 
     let shared_directory_base = build_test_shared_directory_base();
-    let config_text = switched_on_config(shared_directory_base.path());
+    let config_text = build_switched_on_config(shared_directory_base.path());
 
     let owner_home = build_test_home_directory();
     write_test_config(owner_home.path(), &config_text);
@@ -590,7 +590,7 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     let home = build_test_home_directory();
     write_test_config(
         home.path(),
-        &switched_on_config(shared_directory_base.path()),
+        &build_switched_on_config(shared_directory_base.path()),
     );
     let runtime_directory = resolve_runtime_directory_under_home(home.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
@@ -798,7 +798,6 @@ fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() 
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(Some(session_id), None),
-        std::time::SystemTime::now(),
         Command::Quit,
     );
     connection
@@ -832,8 +831,8 @@ fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
         session_id,
     );
 
-    // The Hello is checked inside `open_windows_session_connection`, which fails the test on any other
-    // answer.
+    // The Hello is checked inside `open_windows_session_connection`, which fails the test on any
+    // other answer.
     let _connection = open_windows_session_connection(&endpoint_file);
 }
 

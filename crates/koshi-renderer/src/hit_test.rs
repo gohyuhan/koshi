@@ -3,7 +3,7 @@
 //! A decoded mouse event carries a cell coordinate in the client's own screen
 //! space (`(0, 0)` top-left, `column` rightward, `row` downward). Before koshi can act
 //! on a click — focus a pane, drag a border, forward to a program — it must know
-//! *what* that cell sits on. [`hit_test`] answers that from one frame's
+//! *what* that cell sits on. [`resolve_hit_region`] answers that from one frame's
 //! [`FrameLayout`] — including its committed region solve — returning a
 //! [`HitRegion`] label.
 //! It only classifies; it never changes state and never forwards anything.
@@ -32,7 +32,7 @@ use crate::render::{
 use crate::snapshot::FrameLayout;
 
 /// The UI region under a client-local screen cell, as classified by
-/// [`hit_test`].
+/// [`resolve_hit_region`].
 ///
 /// Every variant names a region the renderer draws this frame.
 /// [`None`](HitRegion::None) is a cell on none of them.
@@ -88,14 +88,14 @@ pub enum HitRegion {
     None,
 }
 
-/// Classify the client-local screen cell `at` against the frame `frame`.
+/// Classify the client-local screen cell `screen_point` against `frame_layout`.
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
 /// pane content beneath it: the committed tabline and statusline regions are
 /// tested before the pane area, and the pane area is centered inside the
 /// committed pane rectangle with a letterbox margin that hits nothing.
 #[must_use]
-pub fn hit_test(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion {
+pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion {
     let viewport_area = compute_viewport_area(frame_layout);
     if viewport_area.width == 0 || viewport_area.height == 0 {
         return HitRegion::None;
@@ -104,7 +104,7 @@ pub fn hit_test(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion
     let active_tab_snapshot = &frame_layout.session_snapshot.active_tab_snapshot;
     // No room for any pane: the frame draws only the too-small overlay, no
     // chrome row and no pane.
-    if active_tab_snapshot.are_all_panes_suppressed {
+    if active_tab_snapshot.is_every_pane_suppressed {
         return HitRegion::None;
     }
 
@@ -124,12 +124,12 @@ pub fn hit_test(frame_layout: FrameLayout<'_>, screen_point: Point) -> HitRegion
     // left by the committed regions. A cell outside it is letterbox margin.
     let effective_layout_rect = compute_content_rect(
         compute_frame_pane_area(frame_layout, viewport_area),
-        active_tab_snapshot.effective_cell_size,
+        active_tab_snapshot.tab_size,
     );
     if !is_screen_point_inside(effective_layout_rect, screen_point) {
         return HitRegion::None;
     }
-    // Shift into effective-layout space, where the slot and header rects live.
+    // Shift into tab-layout space, where the slot and header rects live.
     let layout_point = Point {
         column: screen_point.column - effective_layout_rect.x,
         row: screen_point.row - effective_layout_rect.y,
@@ -193,7 +193,7 @@ pub fn is_placement_handle_cell(outer_rect: Rect, screen_point: Point) -> bool {
 #[must_use]
 pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
     let minimum_column_count = PLACEMENT_HANDLE_COLUMN_COUNT.saturating_add(2);
-    (outer_rect.cell_size.column_count >= minimum_column_count).then(|| {
+    (outer_rect.size.column_count >= minimum_column_count).then(|| {
         Rect::from_origin_and_size(
             Point {
                 column: outer_rect.origin.column.saturating_add(1),
@@ -207,7 +207,7 @@ pub fn compute_placement_handle_rect(outer_rect: Rect) -> Option<Rect> {
     })
 }
 
-/// Classify a cell on the tabline row at column `x`: a scroll arrow, the tab
+/// Classify a cell on the tabline row at `column`: a scroll arrow, the tab
 /// whose ribbon spans it, or [`Tabline`](HitRegion::Tabline) off all of them.
 fn classify_tabline_region(
     frame_layout: FrameLayout<'_>,
@@ -247,21 +247,21 @@ fn classify_tabline_region(
 /// when the pane is not drawn this frame.
 ///
 /// This is the region a program's own grid maps onto — its cells inside the
-/// border. It reads the frame the same way [`hit_test`] does: the layout
+/// border. It reads the frame the same way [`resolve_hit_region`] does: the layout
 /// centered in the committed pane rectangle, with a letterbox margin around it.
 #[must_use]
-pub fn pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
+pub fn find_pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) -> Option<Rect> {
     let viewport_area = compute_viewport_area(frame_layout);
     if viewport_area.width == 0 || viewport_area.height == 0 {
         return None;
     }
     let active_tab_snapshot = &frame_layout.session_snapshot.active_tab_snapshot;
-    if active_tab_snapshot.are_all_panes_suppressed {
+    if active_tab_snapshot.is_every_pane_suppressed {
         return None;
     }
     let effective_layout_rect = compute_content_rect(
         compute_frame_pane_area(frame_layout, viewport_area),
-        active_tab_snapshot.effective_cell_size,
+        active_tab_snapshot.tab_size,
     );
     let pane_slot = active_tab_snapshot
         .pane_slots
@@ -273,13 +273,13 @@ pub fn pane_content_rect(frame_layout: FrameLayout<'_>, pane_id: PaneId) -> Opti
             column: effective_layout_rect.x + content_rect.origin.column,
             row: effective_layout_rect.y + content_rect.origin.row,
         },
-        content_rect.cell_size,
+        content_rect.size,
     ))
 }
 
 /// The 1-based cell inside `pane_id`'s content that client-local screen cell
-/// `at` falls on, or [`None`] when `at` is outside that pane's content or the
-/// pane is not drawn this frame.
+/// `screen_point` falls on, or [`None`] when `screen_point` is outside that
+/// pane's content or the pane is not drawn this frame.
 ///
 /// A mouse report addresses the program's own grid, whose top-left content cell
 /// is `(1, 1)`, so the caller forwards these coordinates straight into the pane.
@@ -289,7 +289,7 @@ pub fn compute_pane_local_cell(
     pane_id: PaneId,
     screen_point: Point,
 ) -> Option<(u16, u16)> {
-    let content_rect = pane_content_rect(frame_layout, pane_id)?;
+    let content_rect = find_pane_content_rect(frame_layout, pane_id)?;
     if !content_rect.is_point_inside(screen_point) {
         return None;
     }
@@ -300,21 +300,22 @@ pub fn compute_pane_local_cell(
 }
 
 /// The 0-based cell inside `pane_id`'s content that client-local screen cell
-/// `at` falls on, with a cell outside that content pulled to the nearest edge.
-/// [`None`] when the pane is not drawn this frame.
+/// `screen_point` falls on, with a cell outside that content pulled to the
+/// nearest edge. [`None`] when the pane is not drawn this frame.
 ///
-/// On a pane whose content spans columns 10–49, `at.column = 70` gives column
-/// `39`, the pane's last, and `at.column = 3` gives column `0`, its first.
+/// On a pane whose content spans columns 10–49, `screen_point.column = 70`
+/// gives column `39`, the pane's last, and `screen_point.column = 3` gives
+/// column `0`, its first.
 #[must_use]
 pub fn compute_clamped_pane_cell(
     frame_layout: FrameLayout<'_>,
     pane_id: PaneId,
     screen_point: Point,
 ) -> Option<(u16, u16)> {
-    let content_rect = pane_content_rect(frame_layout, pane_id)?;
+    let content_rect = find_pane_content_rect(frame_layout, pane_id)?;
     let right_column =
-        content_rect.origin.column + content_rect.cell_size.column_count.saturating_sub(1);
-    let bottom_row = content_rect.origin.row + content_rect.cell_size.row_count.saturating_sub(1);
+        content_rect.origin.column + content_rect.size.column_count.saturating_sub(1);
+    let bottom_row = content_rect.origin.row + content_rect.size.row_count.saturating_sub(1);
     Some((
         screen_point
             .column
@@ -324,11 +325,11 @@ pub fn compute_clamped_pane_cell(
     ))
 }
 
-/// The metadata index of the first tab currently visible in `frame`'s committed
+/// The metadata index of the first tab currently visible in `frame_layout`'s committed
 /// tabline window, or [`None`] when no tabline is drawn this frame — a zero-size
 /// viewport, or every pane suppressed for want of room.
 ///
-/// It resolves the same window the renderer draws and [`hit_test`] classifies.
+/// It resolves the same window the renderer draws and [`resolve_hit_region`] classifies.
 #[must_use]
 pub fn find_first_visible_tab_index(frame_layout: FrameLayout<'_>) -> Option<usize> {
     let viewport_area = compute_viewport_area(frame_layout);
@@ -338,7 +339,7 @@ pub fn find_first_visible_tab_index(frame_layout: FrameLayout<'_>) -> Option<usi
     if frame_layout
         .session_snapshot
         .active_tab_snapshot
-        .are_all_panes_suppressed
+        .is_every_pane_suppressed
     {
         return None;
     }
@@ -422,7 +423,7 @@ fn compute_statusline_area(
     }
 }
 
-/// Whether `at` is inside the half-open ratatui rectangle `area`.
+/// Whether `screen_point` is inside the half-open ratatui rectangle `screen_rect`.
 fn is_screen_point_inside(screen_rect: RatatuiRect, screen_point: Point) -> bool {
     screen_point.column >= screen_rect.x
         && screen_point.row >= screen_rect.y
@@ -430,13 +431,13 @@ fn is_screen_point_inside(screen_rect: RatatuiRect, screen_point: Point) -> bool
         && u32::from(screen_point.row) < u32::from(screen_rect.y) + u32::from(screen_rect.height)
 }
 
-/// The side of `rect`'s one-cell border ring that `point` lies on. `point` is
-/// assumed to be within `rect` but not within its inner content area. A corner
-/// cell resolves to its vertical side, so a border drag on a corner reads as the
-/// left or right edge.
+/// The side of `outer_rect`'s one-cell border ring that `screen_point` lies on.
+/// `screen_point` must be within `outer_rect` but not within its inner content
+/// area. A corner cell resolves to its vertical side: a border drag on a corner
+/// reads as the left or right edge.
 fn get_border_side(outer_rect: Rect, screen_point: Point) -> Direction {
-    let right_column = outer_rect.origin.column + outer_rect.cell_size.column_count - 1;
-    let bottom_row = outer_rect.origin.row + outer_rect.cell_size.row_count - 1;
+    let right_column = outer_rect.origin.column + outer_rect.size.column_count - 1;
+    let bottom_row = outer_rect.origin.row + outer_rect.size.row_count - 1;
     if screen_point.column == outer_rect.origin.column {
         Direction::Left
     } else if screen_point.column == right_column {

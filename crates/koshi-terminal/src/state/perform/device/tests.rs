@@ -369,7 +369,7 @@ fn decrqm_reports_the_active_mouse_encoding_and_only_it() {
 
 #[test]
 fn decrqm_reports_the_remaining_stored_flags() {
-    // ?1 DECCKM, ?5 DECSCNM, ?12 cursor blink, ?1007 alt scroll: default
+    // ?1 DECCKM, ?5 DECSCNM, ?12 cursor blink, ?1007 alternate scroll: default
     // reset, set after their DECSET.
     assert_eq!(collect_device_replies_for(b"\x1b[?1$p"), b"\x1b[?1;2$y");
     assert_eq!(

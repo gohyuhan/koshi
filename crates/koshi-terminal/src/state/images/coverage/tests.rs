@@ -442,7 +442,7 @@ fn iterm_width_is_scaled_to_the_cells_right_of_the_cursor() {
         }
     );
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 5));
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     assert_eq!(terminal_state.scrollback.get_total_pushed_line_count(), 0);
 }
 
@@ -460,7 +460,7 @@ fn iterm_height_cap_has_exact_cursor_scrollback_and_source_rows() {
     );
 
     assert_eq!(terminal_state.get_active_cursor_position(), (3, 1));
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     assert_eq!(terminal_state.scrollback.get_total_pushed_line_count(), 251);
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 251);
     assert_eq!(
@@ -652,7 +652,7 @@ fn sixel_overlays_keep_both_sources_and_text_clears_both_image_portions() {
 
 #[test]
 fn updating_one_sixel_source_preserves_sibling_sources_and_paint_order() {
-    let mut cell = Cell::blank();
+    let mut cell = Cell::build_blank();
     let first_image_fragment = ImageCellFragment {
         image_source_id: 11,
         source_row_index: 0,
@@ -674,14 +674,14 @@ fn updating_one_sixel_source_preserves_sibling_sources_and_paint_order() {
     cell.set_image_fragment(updated_first_image_fragment, true);
 
     assert_eq!(
-        cell.image_fragments(),
+        cell.get_image_fragments(),
         [updated_first_image_fragment, second_image_fragment]
     );
 }
 
 #[test]
 fn native_fragment_storage_counts_each_persistent_allocation() {
-    let mut cell = Cell::blank();
+    let mut cell = Cell::build_blank();
     let image_fragment_size_bytes = std::mem::size_of::<ImageCellFragment>();
     let first_image_fragment = ImageCellFragment {
         image_source_id: 11,
@@ -699,18 +699,18 @@ fn native_fragment_storage_counts_each_persistent_allocation() {
         source_column_index: 0,
     };
 
-    assert_eq!(cell.image_fragment_storage_bytes(), 0);
+    assert_eq!(cell.compute_image_fragment_storage_bytes(), 0);
     cell.set_image_fragment(first_image_fragment, true);
-    let one_fragment_storage_byte_count = cell.image_fragment_storage_bytes();
+    let one_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
     assert!(one_fragment_storage_byte_count > 0);
     cell.set_image_fragment(second_image_fragment, true);
-    let two_fragment_storage_byte_count = cell.image_fragment_storage_bytes();
+    let two_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
     assert_eq!(
         two_fragment_storage_byte_count - one_fragment_storage_byte_count,
         cell.get_image_fragment_capacity() * image_fragment_size_bytes
     );
     cell.set_image_fragment(third_image_fragment, true);
-    let three_fragment_storage_byte_count = cell.image_fragment_storage_bytes();
+    let three_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
     assert_eq!(
         three_fragment_storage_byte_count - one_fragment_storage_byte_count,
         cell.get_image_fragment_capacity() * image_fragment_size_bytes
@@ -724,14 +724,14 @@ fn native_fragment_storage_counts_each_persistent_allocation() {
         true,
     );
     assert_eq!(
-        cell.image_fragment_storage_bytes(),
+        cell.compute_image_fragment_storage_bytes(),
         three_fragment_storage_byte_count
     );
 }
 
 #[test]
 fn native_fragment_overlays_reuse_capacity_and_keep_exact_order() {
-    let mut cell = Cell::blank();
+    let mut cell = Cell::build_blank();
     for image_source_id in 1..=MAX_IMAGE_PLACEMENT_COUNT as u64 {
         cell.set_image_fragment(
             ImageCellFragment {
@@ -743,9 +743,9 @@ fn native_fragment_overlays_reuse_capacity_and_keep_exact_order() {
         );
     }
 
-    assert_eq!(cell.image_fragments().len(), MAX_IMAGE_PLACEMENT_COUNT);
+    assert_eq!(cell.get_image_fragments().len(), MAX_IMAGE_PLACEMENT_COUNT);
     assert_eq!(
-        cell.image_fragments(),
+        cell.get_image_fragments(),
         (1..=MAX_IMAGE_PLACEMENT_COUNT as u64)
             .map(|image_source_id| ImageCellFragment {
                 image_source_id,
@@ -754,22 +754,25 @@ fn native_fragment_overlays_reuse_capacity_and_keep_exact_order() {
             })
             .collect::<Vec<_>>()
     );
-    let mut single_fragment_cell = Cell::blank();
-    single_fragment_cell.set_image_fragment(cell.image_fragments()[0], true);
-    let cell_image_fragment_storage_byte_count = cell.image_fragment_storage_bytes();
+    let mut single_fragment_cell = Cell::build_blank();
+    single_fragment_cell.set_image_fragment(cell.get_image_fragments()[0], true);
+    let cell_image_fragment_storage_byte_count = cell.compute_image_fragment_storage_bytes();
     assert_eq!(
         cell_image_fragment_storage_byte_count,
-        single_fragment_cell.image_fragment_storage_bytes()
+        single_fragment_cell.compute_image_fragment_storage_bytes()
             + cell.get_image_fragment_capacity() * std::mem::size_of::<ImageCellFragment>()
     );
 
     let restored_cell: Cell =
         serde_json::from_value(serde_json::to_value(&cell).expect("the cell serializes"))
             .expect("the cell restores");
-    assert_eq!(restored_cell.image_fragments(), cell.image_fragments());
     assert_eq!(
-        restored_cell.image_fragment_storage_bytes(),
-        single_fragment_cell.image_fragment_storage_bytes()
+        restored_cell.get_image_fragments(),
+        cell.get_image_fragments()
+    );
+    assert_eq!(
+        restored_cell.compute_image_fragment_storage_bytes(),
+        single_fragment_cell.compute_image_fragment_storage_bytes()
             + restored_cell.get_image_fragment_capacity()
                 * std::mem::size_of::<ImageCellFragment>()
     );
@@ -891,7 +894,7 @@ fn scrolling_with_one_image_in_long_history_does_not_rebuild_coverage() {
     });
     terminal_state
         .set_cell_size(koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).unwrap());
-    let blank_row = [Cell::blank()];
+    let blank_row = [Cell::build_blank()];
     for _ in 0..5_000 {
         terminal_state
             .scrollback
@@ -948,7 +951,7 @@ fn native_sixel_at_the_right_edge_does_not_overflow_cell_coordinates() {
     });
     terminal_state
         .set_cell_size(koshi_core::geometry::PixelCellSize::from_pixel_dimensions(1, 1).unwrap());
-    terminal_state.active_cursor_mut().column = u16::MAX - 1;
+    terminal_state.get_active_cursor_mut().column = u16::MAX - 1;
     let image_record = build_image_record(GraphicsProtocol::Sixel, 2, 1, (0, u16::MAX - 1));
 
     assert_eq!(
@@ -1021,11 +1024,11 @@ fn checkerboard_coverage_has_five_thousand_distinct_visible_runs() {
         )),
         Ok(())
     );
-    let active_grid = terminal_state.active_grid_mut();
+    let active_grid = terminal_state.get_active_grid_mut();
     for row_index in 0..100 {
         for column_index in 0..100 {
             if (row_index + column_index) % 2 == 0 {
-                *active_grid.get_cell_mut(row_index, column_index).unwrap() = Cell::blank();
+                *active_grid.get_cell_mut(row_index, column_index).unwrap() = Cell::build_blank();
             }
         }
     }

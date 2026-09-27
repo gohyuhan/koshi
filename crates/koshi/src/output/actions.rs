@@ -49,14 +49,11 @@ struct ActionDetail {
     examples: Vec<String>,
 }
 
-/// Render a `koshi actions list` answer over the supported actions in the
-/// static table. Coming-soon actions are omitted until the runtime implements
-/// them.
+/// Render a `koshi actions list` answer over every action in the static table.
 #[must_use]
 pub fn render_actions_list(output_format: OutputFormat) -> String {
     let summaries: Vec<ActionSummary> = build_core_action_seeds()
         .iter()
-        .filter(|(_, metadata)| metadata.action_status == ActionStatus::Available)
         .map(build_action_summary)
         .collect();
     match output_format {
@@ -68,20 +65,16 @@ pub fn render_actions_list(output_format: OutputFormat) -> String {
     }
 }
 
-/// Render a `koshi actions explain <action>` answer, or `None` when no
-/// supported action matches `action` (accepted as a bare name or a full `core:`
-/// reference). Coming-soon actions are hidden, so they resolve to `None` the
-/// same as an unknown name.
+/// Render a `koshi actions explain <action>` answer, or `None` when no action
+/// matches `action_name` (accepted as a bare name or a full `core:`
+/// reference).
 #[must_use]
 pub fn render_action_explain(action_name: &str, output_format: OutputFormat) -> Option<String> {
     let seeds = build_core_action_seeds();
-    let (action_reference, metadata) = seeds.iter().find(|(candidate, _)| {
+    let (action_reference, action_metadata) = seeds.iter().find(|(candidate, _)| {
         candidate.action_name.get_name() == action_name || candidate.to_string() == action_name
     })?;
-    if metadata.action_status != ActionStatus::Available {
-        return None;
-    }
-    let action_detail = build_action_detail(action_reference, metadata);
+    let action_detail = build_action_detail(action_reference, action_metadata);
     Some(match output_format {
         OutputFormat::Json => render_json(&action_detail),
         OutputFormat::Table => render_fields(
@@ -160,7 +153,6 @@ pub(super) fn format_scope_label(action_scope: ActionScope) -> &'static str {
         ActionScope::PaneSession => "pane-session",
         ActionScope::Client => "client",
         ActionScope::Tab => "tab",
-        ActionScope::Global => "global",
     }
 }
 
@@ -174,15 +166,12 @@ pub(super) fn format_target_label(target_kind: TargetKind) -> &'static str {
     }
 }
 
-/// The dispatch route an action uses: the core command's name, `client` for a
-/// viewer-local action, `plugin-host` for a plugin call, or `sequence` for a
-/// macro.
+/// The dispatch route an action uses: the core command's name, or `client` for
+/// a viewer-local action.
 pub(super) fn format_command_label(action_handler: &ActionHandlerReference) -> String {
     match action_handler {
         ActionHandlerReference::CoreCommand(command_kind) => format!("{command_kind:?}"),
         ActionHandlerReference::CoreClient(_) => "client".to_string(),
-        ActionHandlerReference::PluginHostCall(_) => "plugin-host".to_string(),
-        ActionHandlerReference::Sequence(_) => "sequence".to_string(),
     }
 }
 

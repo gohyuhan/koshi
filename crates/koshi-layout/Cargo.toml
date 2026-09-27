@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+koshi-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-koshi-core = { version = "0.4.0", path = "../koshi-core" }
 
 [dev-dependencies]
+koshi-test-support.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
-koshi-test-support = { version = "0.4.0", path = "../koshi-test-support" }

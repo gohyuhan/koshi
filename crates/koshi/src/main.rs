@@ -89,7 +89,7 @@ fn parse_cli_arguments() -> Cli {
 /// socket does not serve yet reports IPC unavailable.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
-    // entry point reads. It runs before any verb dispatches, so one
+    // entry point reads, before any verb dispatches. One
     // `allow-beta-features` answer covers the CLI verbs and the interactive
     // launch alike.
     let app_config_layer = config::load_app_layer();
@@ -304,7 +304,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         // The session is created and left running with nothing attached. Its
         // id prints as `[SESSION ID]: <id>` on standard output.
         let runtime_directory = ipc_client::resolve_runtime_directory()?;
-        let session_id = session_control::request_headless_session(
+        let session_id = koshi_link::router_client::request_new_session(
             &runtime_directory,
             cli.profile_name.as_deref(),
             cli.should_allow_other_users.then_some(true),
@@ -317,7 +317,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         // The update offer runs before the terminal enters raw mode, and reads
         // its answer from plain standard input. A failure never blocks the
         // launch.
-        updater::maybe_prompt_startup_update();
+        updater::prompt_startup_update();
         return koshi_client::app::run_default_client(cli.profile_name.as_deref());
     }
 
@@ -400,15 +400,10 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         };
     }
 
-    if !is_action {
-        return Err(CliError::IpcUnavailable {
-            detail: "this command is not served over the control socket yet".to_string(),
-        });
-    }
     let cli_command = cli
         .command
         .as_ref()
-        .expect("an action verb is always a parsed subcommand");
+        .expect("every verb that is not an action returned above");
 
     // With `--remote` the target is picked from the sessions on the named
     // machine; the pane identity on this one is not read.
@@ -422,7 +417,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
                     in_session_context.expect("an in-session route needs the pane identity");
                 let (_, action_command) = cli_command
                     .build_action_command(&resolved_targets, new_pane_direction)
-                    .expect("checked to be an action verb above");
+                    .expect("every verb that is not an action returned above");
                 ipc_client::submit_in_session_command(&in_session_context, action_command)?
             }
             Route::External {
@@ -431,7 +426,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             } => {
                 let (_, action_command) = cli_command
                     .build_action_command(&resolved_targets, new_pane_direction)
-                    .expect("checked to be an action verb above");
+                    .expect("every verb that is not an action returned above");
                 ipc_client::submit_external_command(
                     session_id,
                     cli_command.get_source_client_id(),
@@ -612,7 +607,7 @@ fn run_discovery(command: &CliCommand, remote_server: Option<&str>) -> Result<()
 
     // Every discovery query other than an `inspect` is a listing.
     let is_listing = !matches!(command, CliCommand::Inspect { .. });
-    match discovered_sessions.incomplete_listing() {
+    match discovered_sessions.find_incomplete_listing_error() {
         Some(incomplete_listing_error) if is_listing => Err(incomplete_listing_error),
         _ => Ok(()),
     }
@@ -650,7 +645,7 @@ fn run_dump_state(output_format: OutputFormat) -> Result<(), CliError> {
         "{}",
         output::render_dump_state(&discovered_sessions.sessions, output_format)
     );
-    match discovered_sessions.incomplete_listing() {
+    match discovered_sessions.find_incomplete_listing_error() {
         Some(incomplete_listing_error) => Err(incomplete_listing_error),
         None => Ok(()),
     }
@@ -694,7 +689,7 @@ fn run_dump_layout(
     };
     print!("{}", output::render_layouts(&layouts, output_format));
 
-    match discovered_sessions.incomplete_listing() {
+    match discovered_sessions.find_incomplete_listing_error() {
         Some(incomplete_listing_error) => Err(incomplete_listing_error),
         None => Ok(()),
     }
@@ -744,7 +739,7 @@ fn run_debug_events(
         output::render_recent_events(&session_events, output_format)
     );
 
-    match discovered_sessions.incomplete_listing() {
+    match discovered_sessions.find_incomplete_listing_error() {
         Some(incomplete_listing_error) => Err(incomplete_listing_error),
         None => Ok(()),
     }
@@ -781,13 +776,8 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
         KeysCommand::List {
             input_mode_name,
             scope,
-            is_recommended,
             output_format,
         } => {
-            if *is_recommended {
-                print!("{}", output::render_keys_recommended(*output_format));
-                return Ok(());
-            }
             let keymap_view = keymap::load_keymap_view();
             warn_keymap_reverted(&keymap_view);
             print!(
@@ -847,7 +837,7 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
                 "{}",
                 output::render_keys_validate(&validation_outcome, *output_format)
             );
-            if output::does_validation_apply(&validation_outcome) {
+            if output::is_validation_applicable(&validation_outcome) {
                 Ok(())
             } else {
                 Err(CliError::InvalidKeymapFile {

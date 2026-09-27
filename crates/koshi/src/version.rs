@@ -181,8 +181,8 @@ fn list_server_version_rows_in_runtime_directory(
         None,
         router_client::get_running_router_version(runtime_directory),
     )];
-    // The two sources never overlap: `foreign_sessions` drops every id
-    // `advertised_sessions` reports, so no session earns two rows.
+    // The two sources never overlap: `list_foreign_sessions` drops every id
+    // `list_advertised_sessions` reports, so no session earns two rows.
     let mut session_ids = ipc_client::list_advertised_sessions(runtime_directory);
     session_ids.extend(
         ipc_client::resolve_shared_sessions_base_directory()

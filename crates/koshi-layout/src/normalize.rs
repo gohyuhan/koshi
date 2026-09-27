@@ -25,7 +25,7 @@ use crate::tree::{LayoutNode, SplitNode};
 
 /// Normalize `layout_tree` against `live_pane_ids`, the set of panes still alive.
 ///
-/// A leaf not in `live_panes` is dropped wherever it sits in the tree. A
+/// A leaf not in `live_pane_ids` is dropped wherever it sits in the tree. A
 /// leaf in it is kept, including a pane held open after its process exited.
 ///
 /// Returns `None` when no live pane remains. Normalizing the returned tree
@@ -201,7 +201,7 @@ fn compute_merged_size_weights(
     merge_scale: u128,
 ) -> Option<Vec<SizeWeight>> {
     if merge_factor == 1 {
-        return scaled_flex(&normalized_child.size_weight, merge_scale)
+        return compute_scaled_flex(&normalized_child.size_weight, merge_scale)
             .map(|size_weight| vec![size_weight]);
     }
     let LayoutNode::Split(inner_split) = &normalized_child.layout_node else {
@@ -247,8 +247,8 @@ fn compute_mergeable_weight_sum(
     (total_inner_flex_weight > 0).then_some(total_inner_flex_weight)
 }
 
-/// The flex share of `weight` when its primary is `Flex` with no `min`, no
-/// `preferred`, and a zero `resize_delta`. `None` in every other case.
+/// The flex share of `weight` when its primary is `Flex` with no `minimum_cell_count`, no
+/// `preferred_cell_count`, and a zero `resize_delta`. `None` in every other case.
 fn get_plain_flex_weight(weight: &SizeWeight) -> Option<FlexWeight> {
     match weight.primary_constraint {
         SizeConstraint::Flex(flex_weight_share)
@@ -262,10 +262,10 @@ fn get_plain_flex_weight(weight: &SizeWeight) -> Option<FlexWeight> {
     }
 }
 
-/// A plain flex weight holding `weight`'s share multiplied by `scale`.
+/// A plain flex weight holding `weight`'s share multiplied by `merge_scale`.
 /// `None` when `weight` is not a plain flex share, the product overflows
 /// `u128`, or the product exceeds `FlexWeight::MAX`.
-fn scaled_flex(weight: &SizeWeight, merge_scale: u128) -> Option<SizeWeight> {
+fn compute_scaled_flex(weight: &SizeWeight, merge_scale: u128) -> Option<SizeWeight> {
     let flex_weight_share = get_plain_flex_weight(weight)?;
     let rescaled_flex_weight =
         FlexWeight::try_from(u128::from(flex_weight_share).checked_mul(merge_scale)?).ok()?;
@@ -274,10 +274,10 @@ fn scaled_flex(weight: &SizeWeight, merge_scale: u128) -> Option<SizeWeight> {
     )))
 }
 
-/// Clamp a weight into the ranges the validated constructors enforce:
-/// `Flex(0)`, `Fixed(0)`, `Min(0)`, and `Preferred(0)` become `1`,
-/// `Percent` clamps to 1–100, and a zero `min` or `preferred` overlay
-/// becomes `None`. `resize_delta` passes through.
+/// Clamp a weight into its valid ranges:
+/// `Flex(0)`, `Fixed(0)`, `Minimum(0)`, and `Preferred(0)` become `1`,
+/// `Percent` clamps to 1–100, and a zero `minimum_cell_count` or
+/// `preferred_cell_count` overlay becomes `None`. `resize_delta` passes through.
 fn canonicalize_size_weight(size_weight: SizeWeight) -> SizeWeight {
     let canonical_primary_constraint = match size_weight.primary_constraint {
         SizeConstraint::Flex(0) => SizeConstraint::Flex(1),

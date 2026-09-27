@@ -8,6 +8,24 @@ use super::*;
 use crate::solver::{solve_layout, solve_layout_with_sizing, MIN_PANE_SIZE};
 use crate::tree::{LayoutNode, SplitNode};
 
+/// [`resize_layout_with_sizing`] with [`PaneSizing::default`].
+fn resize_layout(
+    layout_tree: &LayoutNode,
+    tab_rect: Rect,
+    pane_id: PaneId,
+    direction: Direction,
+    cell_delta: i16,
+) -> Result<LayoutNode, ResizeError> {
+    resize_layout_with_sizing(
+        layout_tree,
+        tab_rect,
+        pane_id,
+        direction,
+        cell_delta,
+        PaneSizing::default(),
+    )
+}
+
 fn build_layout_area() -> Rect {
     Rect::from_size_at_origin(Size {
         column_count: 80,
@@ -97,7 +115,7 @@ fn compute_solved_pane_size(layout_tree: &LayoutNode, layout_area: Rect, pane_id
         .find(|&(candidate_pane_id, _)| candidate_pane_id == pane_id)
         .expect("pane is in the layout")
         .1
-        .cell_size
+        .size
 }
 
 /// Verifies that the layout tiles the layout area correctly: all cells are occupied,

@@ -2,9 +2,7 @@
 //!
 //! A [`Selection`] is what
 //! [`SetSelectionArgs`](crate::command::SetSelectionArgs) carries and what
-//! [`SelectionChanged`](crate::event::SelectionChanged) reports. A
-//! [`CopyTarget`] is what [`CopyArgs`](crate::command::CopyArgs) names and what
-//! [`Copied`](crate::event::Copied) repeats.
+//! [`SelectionChanged`](crate::event::SelectionChanged) reports.
 //!
 //! These types cross process boundaries, so each one holds only serde-friendly
 //! types that mean the same thing in another process.
@@ -94,15 +92,4 @@ pub struct Selection {
     pub anchor: GridPosition,
     /// The end that follows the pointer.
     pub cursor: GridPosition,
-}
-
-/// Which clipboard a copy targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CopyTarget {
-    /// OSC 52 (a terminal escape sequence for setting the clipboard) to the
-    /// outer terminal — the default, dependency-free option.
-    Osc52,
-    /// The native operating-system clipboard. Koshi has no backend for it; a
-    /// copy to this target writes nothing.
-    Native,
 }

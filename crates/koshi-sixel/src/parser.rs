@@ -156,20 +156,6 @@ pub struct SixelPaletteChange {
     rgb_color: [u8; 3],
 }
 
-impl SixelPaletteChange {
-    /// Return the edited register number.
-    #[must_use]
-    pub fn get_register_number(&self) -> u8 {
-        self.register_number
-    }
-
-    /// Return the edited RGB color.
-    #[must_use]
-    pub fn get_rgb_color(&self) -> [u8; 3] {
-        self.rgb_color
-    }
-}
-
 /// The 256 Sixel RGB registers used when resolving an indexed image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SixelPalette {
@@ -294,12 +280,6 @@ impl IndexedImage {
     #[must_use]
     pub fn get_height_pixels(&self) -> u32 {
         self.height_pixels
-    }
-
-    /// Return the normalized `(vertical, horizontal)` pixel aspect ratio.
-    #[must_use]
-    pub fn get_pixel_aspect_ratio(&self) -> (u32, u32) {
-        (self.pixel_aspect_vertical, self.pixel_aspect_horizontal)
     }
 
     /// Resolve register indices and background cells into RGBA pixels.
@@ -614,7 +594,7 @@ impl SixelParser {
 
     /// Finish the payload and return its indexed image and protocol metadata.
     ///
-    /// Returns `indexed_image() == None` when the payload has no image extent, or an
+    /// Returns `get_indexed_image() == None` when the payload has no image extent, or an
     /// error when the header, command, or image dimensions are incomplete or
     /// invalid, or when bounded storage cannot be allocated.
     pub fn finish_payload(mut self) -> Result<SixelGraphic, GraphicsError> {
@@ -632,7 +612,8 @@ impl SixelParser {
     }
 
     fn parse_header(&mut self) -> Result<(), GraphicsError> {
-        let header_parameters = parse_sixel_header_parameters(&self.header_bytes, 3)?;
+        let header_parameters =
+            parse_sixel_parameters(&self.header_bytes, 3, build_invalid_header_error())?;
         let macro_aspect_parameter = header_parameters.first().copied().unwrap_or(0);
         if macro_aspect_parameter > 9 {
             return Err(build_invalid_command_error());
@@ -655,7 +636,11 @@ impl SixelParser {
                 self.canvas.set_repeat_count(repeat_count)?;
             }
             SixelCommand::Raster => {
-                let raster_parameters = parse_sixel_parameters(&command_parameter_bytes, 4)?;
+                let raster_parameters = parse_sixel_parameters(
+                    &command_parameter_bytes,
+                    4,
+                    build_invalid_command_error(),
+                )?;
                 self.canvas.set_raster_geometry(
                     raster_parameters.first().copied().unwrap_or(0),
                     raster_parameters.get(1).copied().unwrap_or(0),
@@ -759,9 +744,6 @@ impl SixelCanvas {
         declared_width_pixels: u32,
         declared_height_pixels: u32,
     ) -> Result<(), GraphicsError> {
-        if self.has_started_pixel_data {
-            return Err(build_invalid_command_error());
-        }
         let raster_vertical_aspect = if raster_vertical_aspect == 0 {
             1
         } else {
@@ -782,7 +764,8 @@ impl SixelCanvas {
     }
 
     fn set_register_color(&mut self, command_parameter_bytes: &[u8]) -> Result<(), GraphicsError> {
-        let color_parameter_values = parse_sixel_parameters(command_parameter_bytes, 5)?;
+        let color_parameter_values =
+            parse_sixel_parameters(command_parameter_bytes, 5, build_invalid_command_error())?;
         if color_parameter_values.is_empty() || color_parameter_values[0] > 255 {
             return Err(build_invalid_command_error());
         }
@@ -1043,33 +1026,13 @@ impl SixelCanvas {
     }
 }
 
+/// Splits `;`-separated decimal parameters; an empty field reads as `0`.
+/// More than `maximum_sixel_parameter_count` fields returns
+/// `excess_parameter_error`.
 fn parse_sixel_parameters(
     sixel_parameter_bytes: &[u8],
     maximum_sixel_parameter_count: usize,
-) -> Result<Vec<u32>, GraphicsError> {
-    if sixel_parameter_bytes.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut sixel_parameter_values = Vec::new();
-    sixel_parameter_values
-        .try_reserve(maximum_sixel_parameter_count.min(5))
-        .map_err(|_| build_decode_failure_error())?;
-    for parameter_slice in sixel_parameter_bytes.split(|parameter_byte| *parameter_byte == b';') {
-        if sixel_parameter_values.len() == maximum_sixel_parameter_count {
-            return Err(build_invalid_command_error());
-        }
-        sixel_parameter_values.push(if parameter_slice.is_empty() {
-            0
-        } else {
-            parse_decimal_number(parameter_slice)?
-        });
-    }
-    Ok(sixel_parameter_values)
-}
-
-fn parse_sixel_header_parameters(
-    sixel_parameter_bytes: &[u8],
-    maximum_sixel_parameter_count: usize,
+    excess_parameter_error: GraphicsError,
 ) -> Result<Vec<u32>, GraphicsError> {
     if sixel_parameter_bytes.is_empty() {
         return Ok(Vec::new());
@@ -1080,7 +1043,7 @@ fn parse_sixel_header_parameters(
         .map_err(|_| build_decode_failure_error())?;
     for parameter_slice in sixel_parameter_bytes.split(|parameter_byte| *parameter_byte == b';') {
         if sixel_parameter_values.len() == maximum_sixel_parameter_count {
-            return Err(build_invalid_header_error());
+            return Err(excess_parameter_error);
         }
         sixel_parameter_values.push(if parameter_slice.is_empty() {
             0
@@ -1095,7 +1058,8 @@ fn parse_repeat_count(command_parameter_bytes: &[u8]) -> Result<u32, GraphicsErr
     if command_parameter_bytes.is_empty() {
         return Ok(1);
     }
-    let repeat_parameters = parse_sixel_parameters(command_parameter_bytes, 1)?;
+    let repeat_parameters =
+        parse_sixel_parameters(command_parameter_bytes, 1, build_invalid_command_error())?;
     if repeat_parameters.len() != 1 {
         return Err(build_invalid_command_error());
     }

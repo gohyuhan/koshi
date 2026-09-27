@@ -98,11 +98,12 @@ pub struct AppConfigFile {
     pub parse_warnings: Vec<String>,
 }
 
-/// Parses `koshi.kdl` `source` into its override layer, the theme it names, and
-/// one warning per skipped field, skipped duplicate section, and unknown key.
+/// Parses the `koshi.kdl` text `config_source_text` into its override layer,
+/// the theme it names, and one warning per skipped field, skipped duplicate
+/// section, and unknown key.
 ///
 /// # Errors
-/// Returns [`ConfigError::Parse`] when `source` is not valid KDL.
+/// Returns [`ConfigError::Parse`] when `config_source_text` is not valid KDL.
 ///
 /// Returns [`ConfigError::Validation`] when `version` is missing, repeated,
 /// carries a `{ … }` block, is not a single integer from `0` to `4294967295`,
@@ -262,10 +263,11 @@ pub fn parse_app_config(
     })
 }
 
-/// Stores a parsed top-level field in `parsed_value_slot`. On `Err`, leaves `parsed_value_slot`
-/// untouched and pushes one warning naming the field and the reason.
+/// Stores a parsed top-level field in `field_value_slot`. On `Err`, leaves
+/// `field_value_slot` untouched and pushes one warning naming the field and
+/// the reason.
 ///
-/// `field_name` is the top-level node's name (`remote-listen`). A `parsed_value` of
+/// `field_name` is the top-level node's name (`remote-listen`). A `field_parse_result` of
 /// `Err("must not be empty")` pushes ``ignored `remote-listen`: must not be
 /// empty``.
 fn set_top_level_field<FieldValue>(

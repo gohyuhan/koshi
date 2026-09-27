@@ -64,7 +64,7 @@ impl ModFlags {
     pub const SUPER: Self = Self(1 << 3);
 
     /// The raw bit pattern.
-    pub const fn bits(self) -> u8 {
+    pub const fn get_bits(self) -> u8 {
         self.0
     }
 
@@ -73,12 +73,12 @@ impl ModFlags {
         self.0 == 0
     }
 
-    /// True when every modifier in `other` is held.
+    /// True when every modifier in `required_modifiers` is held.
     pub const fn has_all_modifiers(self, required_modifiers: Self) -> bool {
         self.0 & required_modifiers.0 == required_modifiers.0
     }
 
-    /// True when at least one modifier in `other` is held.
+    /// True when at least one modifier in `candidate_modifiers` is held.
     pub const fn has_shared_modifier(self, candidate_modifiers: Self) -> bool {
         self.0 & candidate_modifiers.0 != 0
     }
@@ -100,18 +100,18 @@ impl std::ops::BitOr for ModFlags {
 impl fmt::Display for ModFlags {
     /// Writes the modifier prefix run in canonical `C-A-S-D-` order, empty when
     /// no modifier is held.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.has_all_modifiers(Self::CTRL) {
-            f.write_str("C-")?;
+            formatter.write_str("C-")?;
         }
         if self.has_all_modifiers(Self::ALT) {
-            f.write_str("A-")?;
+            formatter.write_str("A-")?;
         }
         if self.has_all_modifiers(Self::SHIFT) {
-            f.write_str("S-")?;
+            formatter.write_str("S-")?;
         }
         if self.has_all_modifiers(Self::SUPER) {
-            f.write_str("D-")?;
+            formatter.write_str("D-")?;
         }
         Ok(())
     }
@@ -167,7 +167,7 @@ pub enum NamedKey {
     /// Down arrow.
     Down,
     /// Function key `F1` through `F24`.
-    F(#[serde(deserialize_with = "function_key_number")] u8),
+    F(#[serde(deserialize_with = "deserialize_function_key_number")] u8),
 }
 
 /// The lowest and highest function key a terminal names.
@@ -175,7 +175,7 @@ const FIRST_FUNCTION_KEY: u8 = 1;
 const LAST_FUNCTION_KEY: u8 = 24;
 
 /// Decode a [`NamedKey::F`] number, refusing one no function key carries.
-fn function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Error>
+fn deserialize_function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -191,24 +191,24 @@ where
 
 impl fmt::Display for NamedKey {
     /// Writes the single canonical spelling the chord parser accepts for this key.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Enter => f.write_str("CR"),
-            Self::Tab => f.write_str("Tab"),
-            Self::Backspace => f.write_str("BS"),
-            Self::Esc => f.write_str("Esc"),
-            Self::Space => f.write_str("Space"),
-            Self::Insert => f.write_str("Insert"),
-            Self::Delete => f.write_str("Del"),
-            Self::Home => f.write_str("Home"),
-            Self::End => f.write_str("End"),
-            Self::PageUp => f.write_str("PageUp"),
-            Self::PageDown => f.write_str("PageDown"),
-            Self::Left => f.write_str("Left"),
-            Self::Right => f.write_str("Right"),
-            Self::Up => f.write_str("Up"),
-            Self::Down => f.write_str("Down"),
-            Self::F(function_key_number) => write!(f, "F{function_key_number}"),
+            Self::Enter => formatter.write_str("CR"),
+            Self::Tab => formatter.write_str("Tab"),
+            Self::Backspace => formatter.write_str("BS"),
+            Self::Esc => formatter.write_str("Esc"),
+            Self::Space => formatter.write_str("Space"),
+            Self::Insert => formatter.write_str("Insert"),
+            Self::Delete => formatter.write_str("Del"),
+            Self::Home => formatter.write_str("Home"),
+            Self::End => formatter.write_str("End"),
+            Self::PageUp => formatter.write_str("PageUp"),
+            Self::PageDown => formatter.write_str("PageDown"),
+            Self::Left => formatter.write_str("Left"),
+            Self::Right => formatter.write_str("Right"),
+            Self::Up => formatter.write_str("Up"),
+            Self::Down => formatter.write_str("Down"),
+            Self::F(function_key_number) => write!(formatter, "F{function_key_number}"),
         }
     }
 }
@@ -224,10 +224,10 @@ pub enum Key {
 }
 
 impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Char(character) => write!(f, "{character}"),
-            Self::Named(named_key) => write!(f, "{named_key}"),
+            Self::Char(character) => write!(formatter, "{character}"),
+            Self::Named(named_key) => write!(formatter, "{named_key}"),
         }
     }
 }
@@ -306,13 +306,13 @@ impl fmt::Display for KeyChord {
     /// named key (e.g. `Tab`, `Left`), or the key is the literal `<`
     /// character (`<<>`). Any other character with no modifiers is written
     /// bare: `n`, `-`, `>`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let is_bracketed =
             !self.modifier_flags.is_empty() || matches!(self.key, Key::Named(_) | Key::Char('<'));
         if is_bracketed {
-            write!(f, "<{}{}>", self.modifier_flags, self.key)
+            write!(formatter, "<{}{}>", self.modifier_flags, self.key)
         } else {
-            write!(f, "{}", self.key)
+            write!(formatter, "{}", self.key)
         }
     }
 }
@@ -352,12 +352,12 @@ impl From<KeyChord> for KeySequence {
 
 impl fmt::Display for KeySequence {
     /// Writes each chord's canonical text form, space-separated.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (chord_index, chord) in self.0.iter().enumerate() {
             if chord_index > 0 {
-                f.write_str(" ")?;
+                formatter.write_str(" ")?;
             }
-            write!(f, "{chord}")?;
+            write!(formatter, "{chord}")?;
         }
         Ok(())
     }
@@ -414,7 +414,7 @@ impl KeyModifierFlags {
 
     /// The raw bit pattern. Every one of the eight bits names a modifier.
     #[must_use]
-    pub const fn bits(self) -> u8 {
+    pub const fn get_bits(self) -> u8 {
         self.0
     }
 

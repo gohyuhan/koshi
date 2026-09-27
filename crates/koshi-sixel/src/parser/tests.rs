@@ -2,6 +2,13 @@
 
 use super::*;
 
+impl IndexedImage {
+    /// The normalized `(vertical, horizontal)` pixel aspect ratio.
+    fn get_pixel_aspect_ratio(&self) -> (u32, u32) {
+        (self.pixel_aspect_vertical, self.pixel_aspect_horizontal)
+    }
+}
+
 fn parse_sixel_payload(sixel_payload_bytes: &[u8]) -> SixelGraphic {
     parse_sixel_result(sixel_payload_bytes).expect("Sixel payload is valid")
 }
@@ -411,8 +418,8 @@ fn redefined_register_resolves_prior_pixels_with_final_color() {
         1
     );
     let palette_change = sixel_graphic.get_palette_changes().list_palette_changes()[0];
-    assert_eq!(palette_change.get_register_number(), 1);
-    assert_eq!(palette_change.get_rgb_color(), [0, 0, 255]);
+    assert_eq!(palette_change.register_number, 1);
+    assert_eq!(palette_change.rgb_color, [0, 0, 255]);
 
     let resolved_image = resolve_sixel_payload(b"7;1q#1;2;100;0;0#1@#1;2;0;0;100", [0, 0, 0]);
     assert_eq!(resolved_image.rgba_bytes, [0, 0, 255, 255]);
@@ -439,7 +446,7 @@ fn hls_color_definitions_convert_to_rgb() {
     let sixel_graphic = parse_sixel_payload(b"q#1;1;0;50;100#1@");
 
     assert_eq!(
-        sixel_graphic.get_palette_changes().list_palette_changes()[0].get_rgb_color(),
+        sixel_graphic.get_palette_changes().list_palette_changes()[0].rgb_color,
         [0, 0, 255]
     );
 }
@@ -490,7 +497,7 @@ fn split_streams_preserve_header_commands_and_data() {
         (3, 2)
     );
     assert_eq!(
-        sixel_graphic.get_palette_changes().list_palette_changes()[0].get_rgb_color(),
+        sixel_graphic.get_palette_changes().list_palette_changes()[0].rgb_color,
         [255, 0, 0]
     );
 }

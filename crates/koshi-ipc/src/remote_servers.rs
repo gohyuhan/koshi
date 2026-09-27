@@ -8,12 +8,11 @@
 //! types the name or the address.
 //!
 //! The whole set lives in one JSON file —
-//! [`resolve_server_store_path`](crate::remote_servers::resolve_server_store_path) — inside the private
-//! koshi data directory. The file carries the format number
-//! [`SERVER_STORE_FORMAT`](crate::remote_servers::SERVER_STORE_FORMAT), and a
-//! file carrying any other number is refused. Writes go through
-//! [`koshi_storage::atomic::write_atomic`]: a reader finds the old content
-//! or the new, never a half-written middle.
+//! [`resolve_server_store_path`](crate::remote_servers::resolve_server_store_path) — inside the
+//! private koshi data directory. The file carries the format number
+//! [`SERVER_STORE_FORMAT`](crate::remote_servers::SERVER_STORE_FORMAT), and a file carrying any
+//! other number is refused. Writes go through [`koshi_storage::atomic::write_atomic`]: a reader
+//! finds the old content or the new, never a half-written middle.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -22,7 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
-use crate::remote_state::{find_format_mismatch, write_owner_only};
+use crate::remote_state::{
+    build_unreadable_remote_file_error, find_format_mismatch, write_remote_file,
+};
 
 /// The format number this build writes into every saved-server file, and the
 /// only one it reads back.
@@ -98,15 +99,16 @@ impl ServerStore {
     /// readable store, or whose format number is not
     /// [`SERVER_STORE_FORMAT`] is [`IpcError::RemoteFileUnreadable`].
     pub fn load_server_store_from_path(server_store_path: &Path) -> Result<ServerStore, IpcError> {
-        let build_unreadable_server_store_error =
-            |error_detail: String| IpcError::RemoteFileUnreadable {
-                remote_file: RemoteFile::SavedServers,
-                remote_file_path: server_store_path.display().to_string(),
+        let build_unreadable_server_store_error = |error_detail: String| {
+            build_unreadable_remote_file_error(
+                RemoteFile::SavedServers,
+                server_store_path,
                 error_detail,
-            };
+            )
+        };
         let server_store_bytes = match std::fs::read(server_store_path) {
             Ok(server_store_bytes) => server_store_bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(ServerStore::new())
             }
             Err(io_error) => return Err(build_unreadable_server_store_error(io_error.to_string())),
@@ -133,13 +135,7 @@ impl ServerStore {
     ///
     /// Any failure along the way is [`IpcError::RemoteFileWrite`].
     pub fn write_server_store_to_path(&self, server_store_path: &Path) -> Result<(), IpcError> {
-        write_owner_only(server_store_path, self).map_err(|error_detail| {
-            IpcError::RemoteFileWrite {
-                remote_file: RemoteFile::SavedServers,
-                remote_file_path: server_store_path.display().to_string(),
-                error_detail,
-            }
-        })
+        write_remote_file(RemoteFile::SavedServers, server_store_path, self)
     }
 
     /// The server `server_reference` names.
@@ -208,10 +204,10 @@ impl ServerStore {
         Ok(())
     }
 
-    /// Whether `name` is free to give to the server at `address`.
+    /// Whether `server_name` is free to give to the server at `server_address`.
     ///
-    /// True when no record other than the one at `address` answers to `name`,
-    /// by its own name or by its own address. The record at `address` may keep
+    /// True when no record other than the one at `server_address` answers to `server_name`,
+    /// by its own name or by its own address. The record at `server_address` may keep
     /// a name it already holds.
     #[must_use]
     pub fn is_server_name_free(&self, server_name: &str, server_address: &str) -> bool {
@@ -219,7 +215,7 @@ impl ServerStore {
             .is_none()
     }
 
-    /// The record other than the one at `address` that answers to `name`, by
+    /// The record other than the one at `server_address` that answers to `server_name`, by
     /// its own name or by its own address. `None` when no record does, and the
     /// first of them when several do.
     fn find_server_holding_name(
@@ -275,8 +271,8 @@ impl ServerStore {
 
     /// Put `certificate_fingerprint` on the server `server_reference` names.
     ///
-    /// Nothing changes when no record answers to `arg`, and nothing changes
-    /// when more than one does.
+    /// Nothing changes when no record answers to `server_reference`, and
+    /// nothing changes when more than one does.
     ///
     /// The store is not written; the caller does that.
     pub fn pin_certificate_fingerprint(
@@ -294,8 +290,8 @@ impl ServerStore {
 
     /// Stamp the last-used time of the server `server_reference` names with `last_used_at`.
     ///
-    /// Nothing changes when no record answers to `arg`, and nothing changes
-    /// when more than one does.
+    /// Nothing changes when no record answers to `server_reference`, and
+    /// nothing changes when more than one does.
     ///
     /// The store is not written; the caller does that.
     pub fn mark_server_used(&mut self, server_reference: &str, last_used_at: SystemTime) {
@@ -373,9 +369,9 @@ pub struct ServerNameTakenError {
 }
 
 impl std::fmt::Display for ServerNameTakenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
-            f,
+            formatter,
             "the name {} already belongs to {}; run `koshi remote forget {}` first, \
              or pick another name",
             self.server_name, self.server_address, self.server_name
@@ -383,7 +379,7 @@ impl std::fmt::Display for ServerNameTakenError {
     }
 }
 
-/// Where the saved-server store lives: `remote/servers` under `data_dir`.
+/// Where the saved-server store lives: `remote/servers` under `data_directory`.
 ///
 /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
 #[must_use]
@@ -392,7 +388,7 @@ pub fn resolve_server_store_path(data_directory: &Path) -> PathBuf {
 }
 
 /// Where the lock that guards a change to the saved-server store lives:
-/// `remote/servers.lock` under `data_dir`.
+/// `remote/servers.lock` under `data_directory`.
 ///
 /// A writer holds this file's advisory lock from the read that starts its
 /// change to the write that ends it. [`ServerStore::write_server_store_to_path`] renames a new file

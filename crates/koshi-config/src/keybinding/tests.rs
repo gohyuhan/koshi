@@ -94,7 +94,7 @@ mode "locked" {
 
     assert_eq!(partial.chord_timeout_ms, Some(750));
     assert_eq!(partial.which_key_delay_ms, Some(300));
-    assert_eq!(partial.max_chord_depth, Some(5));
+    assert_eq!(partial.maximum_chord_depth, Some(5));
     assert_eq!(
         partial.leader,
         Some(Leader::Chord(KeyChord::from_parts(
@@ -118,7 +118,6 @@ mode "locked" {
         new_tab.action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
-    assert_eq!(new_tab.action_arguments, ActionArgs::None);
     // `<leader> w` under a chord leader is the leader chord then `w`.
     let close = &normal.bound_action_by_key_sequence[&build_two_chord_sequence(
         KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
@@ -128,7 +127,6 @@ mode "locked" {
         close.action_reference,
         ActionReference::from_str("core:close-pane").unwrap()
     );
-    assert_eq!(close.action_arguments, ActionArgs::None);
     assert_eq!(
         normal.removed_key_sequences,
         [build_single_chord_sequence(
@@ -646,7 +644,7 @@ fn integer_settings_accept_their_widest_values() {
         "max-chord-depth 255\nchord-timeout-ms 4294967295\nwhich-key-delay-ms 0",
     )
     .expect("boundary values parse");
-    assert_eq!(partial.max_chord_depth, Some(u8::MAX));
+    assert_eq!(partial.maximum_chord_depth, Some(u8::MAX));
     assert_eq!(partial.chord_timeout_ms, Some(u32::MAX));
     assert_eq!(partial.which_key_delay_ms, Some(0));
 }

@@ -14,7 +14,7 @@ pub struct Style {
     /// Background color.
     background_color: Color,
     /// Boolean text attributes (bold, italic, …).
-    attributes: AttrFlags,
+    attributes: AttributeFlags,
     /// Underline color (SGR `58`). `None`, the default restored by SGR `59`,
     /// follows the foreground color.
     underline_color: Option<Color>,
@@ -29,13 +29,14 @@ impl Style {
 
     /// Set or clear the bold attribute (SGR `1` / `22`).
     pub fn set_bold(&mut self, is_bold: bool) {
-        self.attributes.set_attribute_bit(AttrFlags::BOLD, is_bold);
+        self.attributes
+            .set_attribute_bit(AttributeFlags::BOLD, is_bold);
     }
 
     /// Set or clear the italic attribute (SGR `3` / `23`).
     pub fn set_italic(&mut self, is_italic: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::ITALIC, is_italic);
+            .set_attribute_bit(AttributeFlags::ITALIC, is_italic);
     }
 
     /// Set the underline style (SGR `4` single / `21` double / `24` none).
@@ -46,7 +47,7 @@ impl Style {
     /// Set or clear the reverse-video attribute (SGR `7` / `27`).
     pub fn set_reverse(&mut self, is_reverse: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::REVERSE, is_reverse);
+            .set_attribute_bit(AttributeFlags::REVERSE, is_reverse);
     }
 
     /// Set the background color (SGR `40`-`47` / `100`-`107` / `48`, or `49`
@@ -64,31 +65,31 @@ impl Style {
     /// Set or clear the faint (decreased-intensity) attribute (SGR `2` / `22`).
     pub fn set_faint(&mut self, is_faint: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::FAINT, is_faint);
+            .set_attribute_bit(AttributeFlags::FAINT, is_faint);
     }
 
     /// Set or clear the blink attribute (SGR `5`/`6` / `25`).
     pub fn set_blink(&mut self, is_blinking: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::BLINK, is_blinking);
+            .set_attribute_bit(AttributeFlags::BLINK, is_blinking);
     }
 
     /// Set or clear the conceal (hidden) attribute (SGR `8` / `28`).
     pub fn set_conceal(&mut self, is_concealed: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::CONCEAL, is_concealed);
+            .set_attribute_bit(AttributeFlags::CONCEAL, is_concealed);
     }
 
     /// Set or clear the strikethrough attribute (SGR `9` / `29`).
     pub fn set_strike(&mut self, is_strikethrough: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::STRIKE, is_strikethrough);
+            .set_attribute_bit(AttributeFlags::STRIKE, is_strikethrough);
     }
 
     /// Set or clear the overline attribute (SGR `53` / `55`).
     pub fn set_overline(&mut self, is_overlined: bool) {
         self.attributes
-            .set_attribute_bit(AttrFlags::OVERLINE, is_overlined);
+            .set_attribute_bit(AttributeFlags::OVERLINE, is_overlined);
     }
 
     /// Set the underline color (SGR `58`), or pass `None` for the default that
@@ -117,7 +118,7 @@ impl Style {
     }
 
     /// The boolean text attributes (bold, italic, reverse, …).
-    pub fn get_attributes(&self) -> AttrFlags {
+    pub fn get_attributes(&self) -> AttributeFlags {
         self.attributes
     }
 
@@ -149,7 +150,7 @@ pub enum Color {
 /// dropped, and an underline code of `6` or `7` — which names no style —
 /// becomes `0`. Two words that every getter reads the same way are equal.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct AttrFlags(#[serde(deserialize_with = "deserialize_defined_attribute_bits")] u16);
+pub struct AttributeFlags(#[serde(deserialize_with = "deserialize_defined_attribute_bits")] u16);
 
 /// Deserialize an attribute word, keeping only the bits the getters read.
 ///
@@ -158,15 +159,16 @@ pub struct AttrFlags(#[serde(deserialize_with = "deserialize_defined_attribute_b
 fn deserialize_defined_attribute_bits<'de, DeserializerType: Deserializer<'de>>(
     deserializer: DeserializerType,
 ) -> Result<u16, DeserializerType::Error> {
-    let attribute_word = u16::deserialize(deserializer)? & AttrFlags::DEFINED_MASK;
-    let underline_code = (attribute_word & AttrFlags::UNDERLINE_MASK) >> AttrFlags::UNDERLINE_SHIFT;
+    let attribute_word = u16::deserialize(deserializer)? & AttributeFlags::DEFINED_MASK;
+    let underline_code =
+        (attribute_word & AttributeFlags::UNDERLINE_MASK) >> AttributeFlags::UNDERLINE_SHIFT;
     if UnderlineStyle::from_underline_code(underline_code) == UnderlineStyle::None {
-        return Ok(attribute_word & !AttrFlags::UNDERLINE_MASK);
+        return Ok(attribute_word & !AttributeFlags::UNDERLINE_MASK);
     }
     Ok(attribute_word)
 }
 
-impl AttrFlags {
+impl AttributeFlags {
     /// Bold / increased intensity (SGR 1).
     const BOLD: u16 = 1 << 0;
     /// Italic (SGR 3).
@@ -191,7 +193,7 @@ impl AttrFlags {
     /// underline code. The five above them are spare.
     const DEFINED_MASK: u16 = 0x07FF;
 
-    /// Whether the single-bit `bit` is set.
+    /// Whether the single-bit `attribute_bit` is set.
     fn has_attribute_bit(self, attribute_bit: u16) -> bool {
         self.0 & attribute_bit != 0
     }
@@ -260,12 +262,12 @@ impl AttrFlags {
     }
 }
 
-impl fmt::Debug for AttrFlags {
+impl fmt::Debug for AttributeFlags {
     /// Lists the attributes that are on, booleans first in declaration order,
-    /// then the underline style. Default flags print `AttrFlags(none)`; bold
-    /// with a single underline prints `AttrFlags(bold, underline)`; a curly
-    /// underline alone prints `AttrFlags(curly-underline)`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// then the underline style. Default flags print `AttributeFlags(none)`; bold
+    /// with a single underline prints `AttributeFlags(bold, underline)`; a curly
+    /// underline alone prints `AttributeFlags(curly-underline)`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut active_attribute_names: Vec<&str> = [
             ("bold", Self::BOLD),
             ("italic", Self::ITALIC),
@@ -291,7 +293,11 @@ impl fmt::Debug for AttrFlags {
         if active_attribute_names.is_empty() {
             active_attribute_names.push("none");
         }
-        write!(f, "AttrFlags({})", active_attribute_names.join(", "))
+        write!(
+            formatter,
+            "AttributeFlags({})",
+            active_attribute_names.join(", ")
+        )
     }
 }
 
@@ -316,7 +322,7 @@ pub enum UnderlineStyle {
 }
 
 impl UnderlineStyle {
-    /// This style's 3-bit code, as stored in [`AttrFlags`]. The codes are the
+    /// This style's 3-bit code, as stored in [`AttributeFlags`]. The codes are the
     /// `4:n` subparameter numbers: `None` is 0, `Curly` is 3.
     fn get_underline_code(self) -> u16 {
         match self {
@@ -329,7 +335,7 @@ impl UnderlineStyle {
         }
     }
 
-    /// The style a 3-bit `code` names: `1`-`5` give `Single` through `Dashed`;
+    /// The style a 3-bit `underline_code` names: `1`-`5` give `Single` through `Dashed`;
     /// `0`, `6`, and `7` give `None`.
     fn from_underline_code(underline_code: u16) -> Self {
         match underline_code {

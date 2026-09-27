@@ -6,22 +6,15 @@
 
 use super::*;
 
-use koshi_core::command::CopyTarget;
 use koshi_core::event::{
-    CommandRejected, ConfigReloaded, Copied, EventClass, InputModeChanged, KeybindingMatched,
-    LayoutChanged, MouseDragged, MousePressed, MouseReleased, MouseScrolled, MouseSelectChanged,
-    PaneClosing, PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneEnterPressed,
-    PaneFocused, PaneMouseForwarded, PaneOutputUpdated, PaneProcessExited, PaneRemoved,
-    PaneResumed, PaneScrollbackTruncated, PaneSuppressed, PaneTyped, PluginBroken, PluginDisabled,
-    PluginDoctorCompleted, PluginEnabled, PluginInstalled, PluginLoadFailed, PluginMouseInput,
-    PluginReloaded, PluginUninstalled, PluginUnloaded, PluginUpdated, PtyResized, RejectReason,
-    SelectionChanged, SubmittedLinePayload, SubscriberLagged, TabClosed, TabCreated, TabFocused,
-    TabMoved, TerminalTooSmallCause, TerminalTooSmallEntered, TerminalTooSmallExited, TypedPayload,
+    ConfigReloaded, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneClosing,
+    PaneCommandFinished, PaneCommandStarted, PaneCreated, PaneFocused, PaneProcessExited,
+    PaneRemoved, PtyResized, SelectionChanged, TabClosed, TabCreated, TabFocused, TabMoved,
+    TerminalTooSmallCause, TerminalTooSmallEntered,
 };
-use koshi_core::geometry::{PaneArea, Point, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
+use koshi_core::geometry::{PaneArea, Size};
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
-use koshi_core::mouse::{MouseButton, ScrollDirection};
 use koshi_core::process::PtySize;
 
 use koshi_core::log::LogLevel;
@@ -36,18 +29,6 @@ fn capture_event_logs(runtime_events: &[Event]) -> String {
         log_event(runtime_event);
     }
     captured_logs.contents()
-}
-
-/// A `PaneTyped` carrying the printable character `'x'`.
-fn build_typed_character_event() -> Event {
-    Event::PaneTyped(PaneTyped {
-        pane_id: PaneId::new(),
-        tab_id: TabId::new(),
-        session_id: SessionId::new(),
-        client_id: ClientId::new(),
-        typed_payload: TypedPayload::SafePublic('x'),
-        accepted_at: std::time::SystemTime::UNIX_EPOCH,
-    })
 }
 
 #[test]
@@ -142,141 +123,6 @@ fn config_reload_is_logged_at_info_naming_its_session() {
 // The rejection line is written where the rejection is built, in
 // `koshi-runtime`; the event writes nothing.
 #[test]
-fn command_rejected_writes_nothing_because_the_rejection_itself_is_logged() {
-    let log_output = capture_event_logs(&[Event::CommandRejected(CommandRejected {
-        command_id: CommandId::new(),
-        rejection_reason: RejectReason::MinSize,
-    })]);
-
-    assert_eq!(
-        log_output, "",
-        "the rejection would be logged twice: {log_output}"
-    );
-}
-
-#[test]
-fn subscriber_lag_is_a_warning_carrying_the_drop_count() {
-    let subscriber_id = SubscriberId::new();
-
-    let log_output = capture_event_logs(&[Event::SubscriberLagged(SubscriberLagged {
-        subscriber_id,
-        dropped_event_count: 12,
-        event_class: EventClass::Lossy,
-    })]);
-
-    assert_eq!(
-        log_output.lines().count(),
-        1,
-        "expected exactly one line: {log_output}"
-    );
-    assert!(log_output.contains(r#""level":"WARN""#), "{log_output}");
-    assert!(
-        log_output.contains(r#""message":"subscriber queue overflowed; events dropped""#),
-        "{log_output}"
-    );
-    assert!(
-        log_output.contains(&format!(r#""subscriber_id":"{subscriber_id}""#)),
-        "{log_output}"
-    );
-    assert!(log_output.contains(r#""dropped_count":12"#), "{log_output}");
-    assert!(
-        log_output.contains(r#""event_class":"Lossy""#),
-        "{log_output}"
-    );
-}
-
-#[test]
-fn plugin_install_is_info_and_a_failed_load_is_a_warning() {
-    let plugin_id = PluginId::new();
-
-    let installed_plugin_log_output =
-        capture_event_logs(&[Event::Plugin(PluginEvent::Installed(PluginInstalled {
-            plugin_id,
-        }))]);
-    assert_eq!(
-        installed_plugin_log_output.lines().count(),
-        1,
-        "expected exactly one line: {installed_plugin_log_output}"
-    );
-    assert!(
-        installed_plugin_log_output.contains(r#""level":"INFO""#),
-        "{installed_plugin_log_output}"
-    );
-    assert!(
-        installed_plugin_log_output.contains(r#""message":"plugin installed""#),
-        "{installed_plugin_log_output}"
-    );
-    assert!(
-        installed_plugin_log_output.contains(&format!(r#""plugin_id":"{plugin_id}""#)),
-        "{installed_plugin_log_output}"
-    );
-
-    let failed_plugin_log_output =
-        capture_event_logs(&[Event::Plugin(PluginEvent::LoadFailed(PluginLoadFailed {
-            plugin_id,
-            failure_reason: "wasm module has no `koshi` export".to_string(),
-        }))]);
-    assert_eq!(
-        failed_plugin_log_output.lines().count(),
-        1,
-        "expected exactly one line: {failed_plugin_log_output}"
-    );
-    assert!(
-        failed_plugin_log_output.contains(r#""level":"WARN""#),
-        "{failed_plugin_log_output}"
-    );
-    assert!(
-        failed_plugin_log_output
-            .contains(r#""message":"plugin failed to load; continuing without it""#),
-        "{failed_plugin_log_output}"
-    );
-    assert!(
-        failed_plugin_log_output.contains(&format!(r#""plugin_id":"{plugin_id}""#)),
-        "{failed_plugin_log_output}"
-    );
-    assert!(
-        failed_plugin_log_output
-            .contains(r#""failure_reason":"wasm module has no `koshi` export""#),
-        "{failed_plugin_log_output}"
-    );
-}
-
-// The line carries the byte count and the target, never the copied text.
-#[test]
-fn copied_records_the_byte_count_and_target_only() {
-    let client_id = ClientId::new();
-    let pane_id = PaneId::new();
-
-    let log_output = capture_event_logs(&[Event::Copied(Copied {
-        client_id,
-        pane_id,
-        clipboard_target: CopyTarget::Osc52,
-        byte_count: 41,
-    })]);
-
-    assert_eq!(
-        log_output.lines().count(),
-        1,
-        "expected exactly one line: {log_output}"
-    );
-    assert!(log_output.contains(r#""level":"INFO""#), "{log_output}");
-    assert!(log_output.contains(r#""message":"copied""#), "{log_output}");
-    assert!(
-        log_output.contains(&format!(r#""client_id":"{client_id}""#)),
-        "{log_output}"
-    );
-    assert!(
-        log_output.contains(&format!(r#""pane_id":"{pane_id}""#)),
-        "{log_output}"
-    );
-    assert!(log_output.contains(r#""byte_count":41"#), "{log_output}");
-    assert!(
-        log_output.contains(r#""clipboard_target":"Osc52""#),
-        "{log_output}"
-    );
-}
-
-#[test]
 fn input_mode_change_is_info_naming_the_mode_now_in_effect() {
     let client_id = ClientId::new();
 
@@ -328,7 +174,7 @@ fn mouse_select_change_is_info_naming_the_state_now_in_effect() {
     assert!(log_output.contains(r#""is_enabled":true"#), "{log_output}");
 }
 
-// Every written event is `info` or `warn`. `CommandRejected` writes nothing.
+// Every written event is `info` or `warn`.
 #[test]
 fn no_event_is_ever_logged_as_an_error() {
     let log_output = capture_event_logs(&[
@@ -339,27 +185,14 @@ fn no_event_is_ever_logged_as_an_error() {
         Event::ConfigReloaded(ConfigReloaded {
             session_id: SessionId::new(),
         }),
-        Event::CommandRejected(CommandRejected {
-            command_id: CommandId::new(),
-            rejection_reason: RejectReason::TargetGone,
-        }),
-        Event::SubscriberLagged(SubscriberLagged {
-            subscriber_id: SubscriberId::new(),
-            dropped_event_count: 1,
-            event_class: EventClass::Critical,
-        }),
-        Event::Plugin(PluginEvent::LoadFailed(PluginLoadFailed {
-            plugin_id: PluginId::new(),
-            failure_reason: "unreadable".to_string(),
-        })),
         Event::Quit(QuitCause::Requested),
         Event::Restarting,
     ]);
 
     assert_eq!(
         log_output.lines().count(),
-        6,
-        "expected six lines: {log_output}"
+        4,
+        "expected four lines: {log_output}"
     );
     assert!(
         !log_output.contains(r#""level":"ERROR""#),
@@ -387,10 +220,6 @@ fn restarting_is_info_saying_the_session_swaps_its_image() {
 #[test]
 fn events_that_fire_faster_than_a_person_acts_write_nothing() {
     let log_output = capture_event_logs(&[
-        // Terminal content ticking over as a pane prints.
-        Event::PaneOutputUpdated(PaneOutputUpdated {
-            pane_id: PaneId::new(),
-        }),
         // One per pane per frame while a window edge is dragged.
         Event::PtyResized(PtyResized {
             pane_id: PaneId::new(),
@@ -398,20 +227,6 @@ fn events_that_fire_faster_than_a_person_acts_write_nothing() {
                 column_count: 80,
                 row_count: 24,
             },
-        }),
-        // One per keystroke, and it carries the character.
-        build_typed_character_event(),
-        // One per keystroke that resolves to a command.
-        Event::KeybindingMatched(KeybindingMatched {
-            client_id: ClientId::new(),
-            command_id: CommandId::new(),
-        }),
-        // One per wheel notch.
-        Event::MouseScrolled(MouseScrolled {
-            client_id: ClientId::new(),
-            pane_id: Some(PaneId::new()),
-            position: Point { column: 4, row: 9 },
-            direction: ScrollDirection::Down,
         }),
         // Announces the close that `PaneRemoved` completes.
         Event::PaneClosing(PaneClosing {
@@ -568,7 +383,7 @@ fn a_pane_exit_is_info_only_when_the_program_exited_zero() {
     }
 }
 
-// `prior_pane` and `prior_tab` are on the events and are not written.
+// `previous_pane_id` and `previous_tab_id` are on the events and are not written.
 #[test]
 fn each_focus_and_tab_lifecycle_fact_writes_its_own_message_and_ids() {
     let client_id = ClientId::new();
@@ -703,10 +518,10 @@ fn a_tab_move_records_the_slot_it_left_and_the_slot_it_landed_on() {
     );
 }
 
-// Entering writes the size, the pane area and the cause; leaving writes the
-// size. An absent pane area is written as the string `None`.
+// Entering writes the size, the pane area and the cause. An absent pane area
+// is written as the string `None`.
 #[test]
-fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
+fn terminal_too_small_writes_the_size_the_pane_area_and_the_cause() {
     let client_id = ClientId::new();
 
     let entered = capture_event_logs(&[Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
@@ -753,30 +568,6 @@ fn the_too_small_pair_says_which_way_it_went_and_the_size_it_happened_at() {
     assert!(
         entered_without_area.contains(r#""pane_area":"None""#),
         "{entered_without_area}"
-    );
-
-    let exited = capture_event_logs(&[Event::TerminalTooSmallExited(TerminalTooSmallExited {
-        client_id,
-        viewport_size: Size {
-            column_count: 80,
-            row_count: 24,
-        },
-    })]);
-    assert_eq!(
-        exited.lines().count(),
-        1,
-        "expected exactly one line: {exited}"
-    );
-    assert!(exited.contains(r#""level":"INFO""#), "{exited}");
-    assert!(
-        exited.contains(r#""message":"terminal big enough again; panes shown""#),
-        "{exited}"
-    );
-    assert!(exited.contains(r#""column_count":80"#), "{exited}");
-    assert!(exited.contains(r#""row_count":24"#), "{exited}");
-    assert!(
-        exited.contains(&format!(r#""client_id":"{client_id}""#)),
-        "{exited}"
     );
 }
 
@@ -976,96 +767,9 @@ fn at_the_warning_cutoff_only_a_failed_exit_and_the_quit_it_caused_are_written()
     assert_eq!(clean_exit_log, "", "{clean_exit_log}");
 }
 
-// Each plugin event writes its own message. `LoadFailed` and `Broken` are
-// warnings; the rest are info.
-#[test]
-fn each_plugin_lifecycle_fact_writes_its_own_message_at_its_own_level() {
-    let plugin_id = PluginId::new();
-    let plugin_event_cases = [
-        (
-            Event::Plugin(PluginEvent::Uninstalled(PluginUninstalled { plugin_id })),
-            "INFO",
-            "plugin uninstalled",
-        ),
-        (
-            Event::Plugin(PluginEvent::Enabled(PluginEnabled { plugin_id })),
-            "INFO",
-            "plugin enabled",
-        ),
-        (
-            Event::Plugin(PluginEvent::Disabled(PluginDisabled { plugin_id })),
-            "INFO",
-            "plugin disabled",
-        ),
-        (
-            Event::Plugin(PluginEvent::Updated(PluginUpdated { plugin_id })),
-            "INFO",
-            "plugin updated",
-        ),
-        (
-            Event::Plugin(PluginEvent::Reloaded(PluginReloaded { plugin_id })),
-            "INFO",
-            "plugin reloaded",
-        ),
-        (
-            Event::Plugin(PluginEvent::Unloaded(PluginUnloaded { plugin_id })),
-            "INFO",
-            "plugin unloaded",
-        ),
-        (
-            Event::Plugin(PluginEvent::DoctorCompleted(PluginDoctorCompleted {
-                plugin_id,
-            })),
-            "INFO",
-            "plugin diagnostic completed",
-        ),
-        (
-            Event::Plugin(PluginEvent::Broken(PluginBroken {
-                plugin_id,
-                failure_reason: "manifest names no entry point".to_string(),
-            })),
-            "WARN",
-            "plugin marked broken and disabled",
-        ),
-    ];
-
-    for (plugin_event, expected_log_level, expected_log_message) in plugin_event_cases {
-        let log_output = capture_event_logs(std::slice::from_ref(&plugin_event));
-        assert_eq!(
-            log_output.lines().count(),
-            1,
-            "{expected_log_message}: {log_output}"
-        );
-        assert!(
-            log_output.contains(&format!(r#""level":"{expected_log_level}""#)),
-            "{expected_log_message}: {log_output}"
-        );
-        assert!(
-            log_output.contains(&format!(r#""message":"{expected_log_message}""#)),
-            "{expected_log_message}: {log_output}"
-        );
-        assert!(
-            log_output.contains(&format!(r#""plugin_id":"{plugin_id}""#)),
-            "{expected_log_message}: {log_output}"
-        );
-    }
-
-    // `Broken` writes its `failure_reason` on the line.
-    let broken_plugin_log =
-        capture_event_logs(&[Event::Plugin(PluginEvent::Broken(PluginBroken {
-            plugin_id,
-            failure_reason: "manifest names no entry point".to_string(),
-        }))]);
-    assert!(
-        broken_plugin_log.contains(r#""failure_reason":"manifest names no entry point""#),
-        "{broken_plugin_log}"
-    );
-}
-
 // The remaining silent variants. With
-// `events_that_fire_faster_than_a_person_acts_write_nothing` and
-// `command_rejected_writes_nothing_because_the_rejection_itself_is_logged`,
-// every silent arm of `log_event` is covered.
+// `events_that_fire_faster_than_a_person_acts_write_nothing`, every silent arm
+// of `log_event` is covered.
 #[test]
 fn the_remaining_silent_events_write_nothing() {
     let log_output = capture_event_logs(&[
@@ -1074,48 +778,6 @@ fn the_remaining_silent_events_write_nothing() {
         Event::LayoutChanged(LayoutChanged {
             tab_id: TabId::new(),
         }),
-        Event::PaneSuppressed(PaneSuppressed {
-            pane_id: PaneId::new(),
-            tab_id: TabId::new(),
-        }),
-        Event::PaneResumed(PaneResumed {
-            pane_id: PaneId::new(),
-            tab_id: TabId::new(),
-        }),
-        // Carries the command line the user typed.
-        Event::PaneEnterPressed(PaneEnterPressed {
-            pane_id: PaneId::new(),
-            tab_id: TabId::new(),
-            session_id: SessionId::new(),
-            client_id: ClientId::new(),
-            submitted_line: SubmittedLinePayload::SafePublic("ls -la".to_string()),
-            accepted_at: std::time::SystemTime::UNIX_EPOCH,
-        }),
-        // One per click and per step of a drag.
-        Event::MousePressed(MousePressed {
-            client_id: ClientId::new(),
-            pane_id: Some(PaneId::new()),
-            position: Point { column: 1, row: 2 },
-            button: MouseButton::Left,
-        }),
-        Event::MouseReleased(MouseReleased {
-            client_id: ClientId::new(),
-            pane_id: Some(PaneId::new()),
-            position: Point { column: 1, row: 2 },
-            button: MouseButton::Left,
-        }),
-        Event::MouseDragged(MouseDragged {
-            client_id: ClientId::new(),
-            pane_id: None,
-            position: Point { column: 3, row: 4 },
-            button: MouseButton::Left,
-        }),
-        Event::PaneMouseForwarded(PaneMouseForwarded {
-            pane_id: PaneId::new(),
-        }),
-        Event::PluginMouseInput(PluginMouseInput {
-            plugin_id: PluginId::new(),
-        }),
         // What the shell inside a pane is doing, not koshi's own state.
         Event::PaneCommandStarted(PaneCommandStarted {
             pane_id: PaneId::new(),
@@ -1123,12 +785,6 @@ fn the_remaining_silent_events_write_nothing() {
         Event::PaneCommandFinished(PaneCommandFinished {
             pane_id: PaneId::new(),
             exit_code: Some(1),
-        }),
-        // Fires while a pane prints past the end of its buffer.
-        Event::PaneScrollbackTruncated(PaneScrollbackTruncated {
-            pane_id: PaneId::new(),
-            dropped_lines: 500,
-            dropped_bytes: 40_000,
         }),
         // One per step of a mouse drag across the screen.
         Event::SelectionChanged(SelectionChanged {

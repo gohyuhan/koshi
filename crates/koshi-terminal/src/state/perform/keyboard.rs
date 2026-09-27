@@ -8,8 +8,8 @@ use super::params::{get_first_parameter_number, get_parameter_number_at};
 impl TerminalState {
     /// `CSI > flags u` — push `flags` onto the active screen's stack. An absent
     /// parameter pushes flags `0`.
-    pub(super) fn push_keyboard_flags(&mut self, params: &vte::Params) {
-        let flags = get_first_parameter_number(params).unwrap_or(0);
+    pub(super) fn push_keyboard_flags(&mut self, csi_parameters: &vte::Params) {
+        let flags = get_first_parameter_number(csi_parameters).unwrap_or(0);
         self.get_active_keyboard_stack_mut()
             .push_keyboard_flags(flags);
     }
@@ -17,8 +17,8 @@ impl TerminalState {
     /// `CSI < count u` — pop `count` entries off the active screen's stack. An
     /// absent parameter and an explicit `0` both pop one entry. A count past
     /// the entries held empties the stack, which leaves flags `0`.
-    pub(super) fn pop_keyboard_flags(&mut self, params: &vte::Params) {
-        let entry_count = get_first_parameter_number(params)
+    pub(super) fn pop_keyboard_flags(&mut self, csi_parameters: &vte::Params) {
+        let entry_count = get_first_parameter_number(csi_parameters)
             .filter(|&parameter_value| parameter_value != 0)
             .unwrap_or(1);
         self.get_active_keyboard_stack_mut()
@@ -29,9 +29,9 @@ impl TerminalState {
     /// creating it when the stack is empty. Mode `1` replaces it with `flags`,
     /// `2` adds `flags` to it, and `3` clears `flags` from it; an absent mode
     /// and an explicit `0` both mean `1`. Absent flags mean `0`.
-    pub(super) fn set_keyboard_flags(&mut self, params: &vte::Params) {
-        let flags = get_first_parameter_number(params).unwrap_or(0);
-        let mode = get_parameter_number_at(params, 1)
+    pub(super) fn set_keyboard_flags(&mut self, csi_parameters: &vte::Params) {
+        let flags = get_first_parameter_number(csi_parameters).unwrap_or(0);
+        let mode = get_parameter_number_at(csi_parameters, 1)
             .filter(|&parameter_value| parameter_value != 0)
             .unwrap_or(1);
         self.get_active_keyboard_stack_mut()

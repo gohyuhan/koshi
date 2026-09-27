@@ -633,14 +633,7 @@ fn a_leader_parses_back_from_the_text_it_renders() {
     }
 }
 
-// -- error classification -------------------------------------------------
-
-#[test]
-fn a_key_parse_error_is_a_recoverable_config_error() {
-    let parse_error = parse_chord("Ctrl-g").unwrap_err();
-    assert_eq!(parse_error.category(), DomainCategory::Config);
-    assert_eq!(parse_error.get_severity(), Severity::Recoverable);
-}
+// -- error messages -------------------------------------------------------
 
 #[test]
 fn an_error_names_the_token_and_the_reason() {
@@ -949,7 +942,7 @@ fn every_error_kind_renders_its_own_message() {
         (
             KeyParseErrorKind::SequenceTooLong {
                 chord_count: 5,
-                max_chord_depth: 4,
+                maximum_chord_depth: 4,
             },
             "the sequence has 5 chords; the cap is 4",
         ),

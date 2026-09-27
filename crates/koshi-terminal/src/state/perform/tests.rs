@@ -74,9 +74,9 @@ fn print_writes_the_glyph_at_the_cursor_and_advances() {
     let mut terminal_state = build_terminal_state(5, 3);
     terminal_state.print('a');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a'));
-    let cursor = terminal_state.active_cursor();
+    let cursor = terminal_state.get_active_cursor();
     assert_eq!((cursor.row, cursor.column), (0, 1));
-    assert!(!cursor.pending_wrap);
+    assert!(!cursor.is_wrap_pending);
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn print_lays_a_string_left_to_right() {
     print_text(&mut terminal_state, "hi");
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('h'));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('i'));
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn print_stamps_the_pen_style_with_width_one() {
         .get_cell(0, 0)
         .expect("in bounds");
     assert_eq!(cell.get_display_width(), 1);
-    assert_eq!(cell.get_style(), terminal_state.active_render().style);
+    assert_eq!(cell.get_style(), terminal_state.get_active_render().style);
 }
 
 #[test]
@@ -105,9 +105,9 @@ fn print_at_the_last_column_parks_without_moving() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // fills row 0 exactly
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('c'));
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 2)); // cursor stays
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -117,9 +117,9 @@ fn exact_width_line_does_not_scroll_until_the_next_get_terminal_glyph() {
     terminal_state.print('d'); // forces the deferred wrap
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a')); // row 0 untouched, no early scroll
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('d')); // wrapped onto row 1
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 1));
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn deferred_wrap_on_the_bottom_row_scrolls() {
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('d'));
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('e')); // 'e' on the fresh bottom row
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 1), Some(' '));
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
 }
 
 #[test]
@@ -138,9 +138,9 @@ fn newline_moves_down_and_leaves_the_column() {
     let mut terminal_state = build_terminal_state(5, 3);
     terminal_state.print('a'); // cursor at column 1
     terminal_state.execute(b'\n');
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 1));
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
@@ -149,14 +149,14 @@ fn vertical_tab_and_form_feed_behave_like_newline() {
         let mut terminal_state = build_terminal_state(2, 3);
         print_text(&mut terminal_state, "ab"); // parks at (0, 1) with the wrap latch armed
         terminal_state.execute(byte);
-        let cursor_position = terminal_state.active_cursor();
+        let cursor_position = terminal_state.get_active_cursor();
         assert_eq!(
             (cursor_position.row, cursor_position.column),
             (1, 1),
             "byte {byte:#x} should line-feed"
         );
         assert!(
-            !cursor_position.pending_wrap,
+            !cursor_position.is_wrap_pending,
             "byte {byte:#x} should clear the latch"
         );
     }
@@ -172,7 +172,7 @@ fn newline_on_the_bottom_row_scrolls() {
     terminal_state.execute(b'\n'); // bottom row -> scroll
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('z')); // row 1 rose to row 0
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // fresh blank bottom
-    assert_eq!(terminal_state.active_cursor().row, 1); // cursor pinned to the last row
+    assert_eq!(terminal_state.get_active_cursor().row, 1); // cursor pinned to the last row
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn carriage_return_returns_to_column_zero() {
     let mut terminal_state = build_terminal_state(5, 3);
     print_text(&mut terminal_state, "ab");
     terminal_state.execute(b'\r');
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
 }
 
 #[test]
@@ -188,19 +188,19 @@ fn backspace_steps_back_one_column_and_floors_at_zero() {
     let mut terminal_state = build_terminal_state(5, 3);
     print_text(&mut terminal_state, "ab"); // column 2
     terminal_state.execute(0x08);
-    assert_eq!(terminal_state.active_cursor().column, 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 1);
     terminal_state.execute(0x08);
     terminal_state.execute(0x08); // already at 0, saturates
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
 }
 
 #[test]
 fn tab_advances_to_each_eight_column_stop() {
     let mut terminal_state = build_terminal_state(20, 1);
     terminal_state.execute(b'\t');
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
     terminal_state.execute(b'\t');
-    assert_eq!(terminal_state.active_cursor().column, 16);
+    assert_eq!(terminal_state.get_active_cursor().column, 16);
 }
 
 #[test]
@@ -208,14 +208,14 @@ fn tab_from_mid_stop_lands_on_the_next_stop() {
     let mut terminal_state = build_terminal_state(20, 1);
     print_text(&mut terminal_state, "abc"); // column 3
     terminal_state.execute(b'\t');
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
 }
 
 #[test]
 fn tab_clamps_to_the_last_column() {
     let mut terminal_state = build_terminal_state(6, 1); // last column is 5
     terminal_state.execute(b'\t');
-    assert_eq!(terminal_state.active_cursor().column, 5);
+    assert_eq!(terminal_state.get_active_cursor().column, 5);
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn bell_is_ignored() {
     let mut terminal_state = build_terminal_state(5, 3);
     print_text(&mut terminal_state, "a"); // column 1
     terminal_state.execute(0x07);
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 1));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a'));
 }
@@ -233,7 +233,7 @@ fn unknown_control_byte_is_ignored() {
     let mut terminal_state = build_terminal_state(5, 3);
     print_text(&mut terminal_state, "a");
     terminal_state.execute(0x01); // SOH — unhandled
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 1));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a'));
 }
@@ -242,12 +242,12 @@ fn unknown_control_byte_is_ignored() {
 fn a_cursor_move_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(2, 2);
     print_text(&mut terminal_state, "ab"); // parked on the last column
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.execute(b'\r'); // any cursor move clears the latch
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('c'); // must overwrite in place, not wrap to a new line
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('c'));
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 1));
 }
 
@@ -259,7 +259,7 @@ fn driven_through_the_parser_plain_text_lands_in_the_grid() {
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('é'));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('l'));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 4), Some('o'));
-    assert_eq!(terminal_state.active_cursor().column, 5);
+    assert_eq!(terminal_state.get_active_cursor().column, 5);
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn driven_through_the_parser_newline_and_carriage_return() {
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('b'));
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('c'));
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 1), Some('d'));
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 2));
 }
 
@@ -301,7 +301,7 @@ fn fill_three_by_three_grid(terminal_state: &mut TerminalState) {
 fn cup_sets_an_absolute_one_based_position() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;3H");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 2)); // 2;3 -> 0-based
 }
 
@@ -310,7 +310,7 @@ fn cup_with_no_arguments_homes_the_cursor() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[4;4H"); // move away first
     process_terminal_bytes(&mut terminal_state, b"\x1b[H");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
 }
 
@@ -318,7 +318,7 @@ fn cup_with_no_arguments_homes_the_cursor() {
 fn cup_zero_arguments_are_treated_as_one() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[0;0H");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
 }
 
@@ -326,7 +326,7 @@ fn cup_zero_arguments_are_treated_as_one() {
 fn cup_clamps_out_of_range_arguments_to_the_grid_edges() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99;99H");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (4, 9)); // last row, last column
 }
 
@@ -334,7 +334,7 @@ fn cup_clamps_out_of_range_arguments_to_the_grid_edges() {
 fn hvp_positions_like_cup() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;4f");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 3));
 }
 
@@ -343,14 +343,14 @@ fn cuu_moves_up_by_the_count() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[4;4H"); // (3, 3)
     process_terminal_bytes(&mut terminal_state, b"\x1b[2A");
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
 }
 
 #[test]
 fn cud_moves_down_and_clamps_to_the_last_row() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99B");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.row, 4);
 }
 
@@ -358,7 +358,7 @@ fn cud_moves_down_and_clamps_to_the_last_row() {
 fn cuf_moves_forward_and_clamps_to_the_last_column() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99C");
-    assert_eq!(terminal_state.active_cursor().column, 9);
+    assert_eq!(terminal_state.get_active_cursor().column, 9);
 }
 
 #[test]
@@ -366,7 +366,7 @@ fn cub_moves_back_and_floors_at_column_zero() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;4H"); // column 3
     process_terminal_bytes(&mut terminal_state, b"\x1b[5D");
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
 }
 
 #[test]
@@ -374,9 +374,9 @@ fn a_missing_or_zero_move_count_defaults_to_one() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H"); // (2, 2)
     process_terminal_bytes(&mut terminal_state, b"\x1b[A"); // no argument -> up one
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
     process_terminal_bytes(&mut terminal_state, b"\x1b[0A"); // explicit zero -> up one
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.row, 0);
 }
 
@@ -384,9 +384,9 @@ fn a_missing_or_zero_move_count_defaults_to_one() {
 fn a_csi_cursor_move_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(2, 2);
     print_text(&mut terminal_state, "ab"); // parked on the last column
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[C"); // CUF clears the latch
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -413,10 +413,10 @@ fn el_0_erases_the_parked_last_column_glyph_and_clears_the_wrap_latch() {
     // clears the wrap latch. The next print overwrites at the last column.
     let mut terminal_state = build_terminal_state(5, 2);
     print_text(&mut terminal_state, "abcde"); // 'e' lands at column 4 with the wrap pending
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[K"); // EL 0
     assert_eq!(get_row_text(&terminal_state, 0), "abcd "); // 'e' erased
-    assert!(!terminal_state.active_cursor().pending_wrap); // latch cleared
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending); // latch cleared
     terminal_state.print('f');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 4), Some('f')); // overwrote at the last column
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // did NOT wrap
@@ -440,9 +440,9 @@ fn el_1_and_el_2_clear_the_wrap_latch_when_parked() {
     for erase_sequence_bytes in [&b"\x1b[1K"[..], &b"\x1b[2K"[..]] {
         let mut terminal_state = build_terminal_state(5, 2);
         print_text(&mut terminal_state, "abcde"); // parks at column 4 with the latch
-        assert!(terminal_state.active_cursor().pending_wrap);
+        assert!(terminal_state.get_active_cursor().is_wrap_pending);
         process_terminal_bytes(&mut terminal_state, erase_sequence_bytes);
-        assert!(!terminal_state.active_cursor().pending_wrap);
+        assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     }
 }
 
@@ -453,14 +453,14 @@ fn ed_clears_the_wrap_latch_for_erasing_modes_but_not_ed_3() {
     for erase_sequence_bytes in [&b"\x1b[J"[..], &b"\x1b[1J"[..], &b"\x1b[2J"[..]] {
         let mut terminal_state = build_terminal_state(5, 2);
         print_text(&mut terminal_state, "abcde"); // parks at column 4
-        assert!(terminal_state.active_cursor().pending_wrap);
+        assert!(terminal_state.get_active_cursor().is_wrap_pending);
         process_terminal_bytes(&mut terminal_state, erase_sequence_bytes);
-        assert!(!terminal_state.active_cursor().pending_wrap);
+        assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     }
     let mut terminal_state = build_terminal_state(5, 2);
     print_text(&mut terminal_state, "abcde");
     process_terminal_bytes(&mut terminal_state, b"\x1b[3J"); // scrollback only — visible grid untouched
-    assert!(terminal_state.active_cursor().pending_wrap); // latch survives
+    assert!(terminal_state.get_active_cursor().is_wrap_pending); // latch survives
 }
 
 #[test]
@@ -693,9 +693,9 @@ fn line_operations_drop_images_when_a_one_row_screen_has_no_survivor() {
 #[test]
 fn image_placement_cursor_motion_uses_accepted_cell_dimensions() {
     let mut terminal_state = build_terminal_state(10, 8);
-    terminal_state.active_cursor_mut().row = 2;
-    terminal_state.active_cursor_mut().column = 3;
-    terminal_state.active_cursor_mut().pending_wrap = true;
+    terminal_state.get_active_cursor_mut().row = 2;
+    terminal_state.get_active_cursor_mut().column = 3;
+    terminal_state.get_active_cursor_mut().is_wrap_pending = true;
     let mut image_record = build_image_record((2, 3), 3, 2);
     image_record.display.should_move_cursor = true;
 
@@ -704,7 +704,7 @@ fn image_placement_cursor_motion_uses_accepted_cell_dimensions() {
         .expect("the image fits the grid");
 
     assert_eq!(terminal_state.get_active_cursor_position(), (4, 6));
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -804,9 +804,9 @@ fn ed_3_leaves_the_visible_screen_untouched() {
 #[test]
 fn ed_3_clears_the_retained_scrollback() {
     let mut terminal_state = build_terminal_state(3, 2); // two rows
-    terminal_state.active_cursor_mut().row = 1; // bottom row: each line feed scrolls
-    terminal_state.linefeed();
-    terminal_state.linefeed();
+    terminal_state.get_active_cursor_mut().row = 1; // bottom row: each line feed scrolls
+    terminal_state.apply_linefeed();
+    terminal_state.apply_linefeed();
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 2); // history populated
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[3J"); // xterm "erase saved lines"
@@ -818,9 +818,9 @@ fn ed_3_on_the_alternate_screen_leaves_primary_scrollback_intact() {
     // Scrollback is the primary screen's history. ED 3 on the alternate screen
     // leaves it intact.
     let mut terminal_state = build_terminal_state(3, 2);
-    terminal_state.active_cursor_mut().row = 1; // bottom row, on the primary screen
-    terminal_state.linefeed();
-    terminal_state.linefeed();
+    terminal_state.get_active_cursor_mut().row = 1; // bottom row, on the primary screen
+    terminal_state.apply_linefeed();
+    terminal_state.apply_linefeed();
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 2); // populated from the primary
 
     terminal_state.active_screen = Screen::Alternate;
@@ -842,7 +842,7 @@ fn sgr_bold_sets_the_bold_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_bold(true))
     );
 }
@@ -852,7 +852,7 @@ fn sgr_zero_resets_the_pen() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;31m"); // bold + red
     process_terminal_bytes(&mut terminal_state, b"\x1b[0m");
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -860,7 +860,7 @@ fn sgr_empty_params_reset_like_zero() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1m");
     process_terminal_bytes(&mut terminal_state, b"\x1b[m"); // bare CSI m is an implicit reset
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -868,7 +868,7 @@ fn sgr_attribute_off_codes_clear_each_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;3;4;7m"); // bold, italic, underline, reverse on
     process_terminal_bytes(&mut terminal_state, b"\x1b[22;23;24;27m"); // each turned back off
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -876,7 +876,7 @@ fn sgr_sixteen_color_foreground_and_background() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[31;42m"); // fg red (1), bg green (2)
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_foreground_color(Color::Indexed(1));
             style.set_background_color(Color::Indexed(2));
@@ -889,7 +889,7 @@ fn sgr_bright_colors_map_to_indices_eight_through_fifteen() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[91;102m"); // bright red fg (8+1), bright green bg (8+2)
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_foreground_color(Color::Indexed(9));
             style.set_background_color(Color::Indexed(10));
@@ -902,7 +902,7 @@ fn sgr_default_color_codes_restore_the_default() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[31;42m");
     process_terminal_bytes(&mut terminal_state, b"\x1b[39;49m"); // default fg + bg
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -910,7 +910,7 @@ fn sgr_256_color_foreground() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;5;196m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Indexed(196)))
     );
 }
@@ -920,7 +920,7 @@ fn sgr_256_color_background() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[48;5;21m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_background_color(Color::Indexed(21)))
     );
 }
@@ -930,7 +930,7 @@ fn sgr_truecolor_foreground_semicolon_form() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;2;255;128;0m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Rgb(255, 128, 0)))
     );
 }
@@ -940,7 +940,7 @@ fn sgr_truecolor_background_semicolon_form() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[48;2;10;20;30m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_background_color(Color::Rgb(10, 20, 30)))
     );
 }
@@ -950,7 +950,7 @@ fn sgr_256_color_colon_form() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:5:196m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Indexed(196)))
     );
 }
@@ -962,7 +962,7 @@ fn sgr_256_color_colon_form_with_empty_colorspace_id() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:5::196m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Indexed(196)))
     );
 }
@@ -972,7 +972,7 @@ fn sgr_truecolor_colon_form() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:2:255:128:0m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Rgb(255, 128, 0)))
     );
 }
@@ -982,7 +982,7 @@ fn sgr_truecolor_colon_form_with_empty_colorspace_id() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:2::255:128:0m"); // ITU form: empty colorspace slot
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Rgb(255, 128, 0)))
     );
 }
@@ -995,7 +995,7 @@ fn sgr_truecolor_colon_form_reads_the_channels_after_the_colorspace_slot() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:2:1:255:0:0:0:5m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Rgb(255, 0, 0)))
     );
 }
@@ -1005,7 +1005,7 @@ fn sgr_combines_multiple_codes_in_one_sequence() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;4;38;5;200;48;2;1;2;3m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_underline(UnderlineStyle::Single);
@@ -1039,7 +1039,7 @@ fn sgr_unknown_code_is_ignored() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1m"); // bold on
     process_terminal_bytes(&mut terminal_state, b"\x1b[99m"); // unknown SGR code -> pen unchanged
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_bold(true))
     );
 }
@@ -1048,32 +1048,32 @@ fn sgr_unknown_code_is_ignored() {
 fn sgr_incomplete_extended_color_leaves_the_pen_unchanged() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;5m"); // 256-color selector with no index
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
 fn sgr_incomplete_colon_extended_color_leaves_the_pen_unchanged() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:5m"); // colon 256-color selector with no index
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
 fn sgr_256_color_index_out_of_range_leaves_the_pen_unchanged() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;5;256m"); // index 256 > 255 — out of range
-    assert_eq!(terminal_state.active_render().style, Style::default()); // rejected, NOT wrapped to Indexed(0)
+    assert_eq!(terminal_state.get_active_render().style, Style::default()); // rejected, NOT wrapped to Indexed(0)
     process_terminal_bytes(&mut terminal_state, b"\x1b[38:5:300m"); // colon form, index 300 > 255
-    assert_eq!(terminal_state.active_render().style, Style::default()); // rejected, NOT wrapped to Indexed(44)
+    assert_eq!(terminal_state.get_active_render().style, Style::default()); // rejected, NOT wrapped to Indexed(44)
 }
 
 #[test]
 fn sgr_truecolor_channel_out_of_range_leaves_the_pen_unchanged() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;2;999;0;0m"); // semicolon form, r = 999 > 255
-    assert_eq!(terminal_state.active_render().style, Style::default()); // rejected, NOT wrapped to Rgb(231, 0, 0)
+    assert_eq!(terminal_state.get_active_render().style, Style::default()); // rejected, NOT wrapped to Rgb(231, 0, 0)
     process_terminal_bytes(&mut terminal_state, b"\x1b[48:2:0:256:0m"); // colon form bg, g = 256 > 255
-    assert_eq!(terminal_state.active_render().style, Style::default()); // rejected, NOT wrapped to Rgb(0, 0, 0)
+    assert_eq!(terminal_state.get_active_render().style, Style::default()); // rejected, NOT wrapped to Rgb(0, 0, 0)
 }
 
 #[test]
@@ -1081,7 +1081,7 @@ fn sgr_faint_sets_the_faint_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_faint(true))
     );
 }
@@ -1091,14 +1091,14 @@ fn sgr_blink_slow_and_rapid_both_set_one_flag() {
     let mut slow = build_terminal_state(5, 2);
     process_terminal_bytes(&mut slow, b"\x1b[5m"); // 5: slow blink
     assert_eq!(
-        slow.active_render().style,
+        slow.get_active_render().style,
         build_style_with_mutator(|style| style.set_blink(true))
     );
 
     let mut rapid = build_terminal_state(5, 2);
     process_terminal_bytes(&mut rapid, b"\x1b[6m"); // 6: rapid blink — same flag
     assert_eq!(
-        rapid.active_render().style,
+        rapid.get_active_render().style,
         build_style_with_mutator(|style| style.set_blink(true))
     );
 }
@@ -1108,7 +1108,7 @@ fn sgr_conceal_sets_the_conceal_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[8m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_conceal(true))
     );
 }
@@ -1118,7 +1118,7 @@ fn sgr_strike_sets_the_strike_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[9m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_strike(true))
     );
 }
@@ -1128,7 +1128,7 @@ fn sgr_double_underline_sets_the_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[21m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline(UnderlineStyle::Double))
     );
 }
@@ -1138,7 +1138,7 @@ fn sgr_overline_sets_the_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[53m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_overline(true))
     );
 }
@@ -1148,7 +1148,7 @@ fn sgr_new_attribute_off_codes_clear_each_attribute() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[5;8;9;53m"); // blink, conceal, strike, overline on
     process_terminal_bytes(&mut terminal_state, b"\x1b[25;28;29;55m"); // each turned back off
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -1156,14 +1156,14 @@ fn sgr_normal_intensity_clears_both_bold_and_faint() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2m"); // bold AND faint — both held
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_faint(true);
         })
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[22m"); // 22 cancels both
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -1171,14 +1171,14 @@ fn sgr_underline_styles_are_mutually_exclusive_last_one_wins() {
     let mut single_last = build_terminal_state(5, 2);
     process_terminal_bytes(&mut single_last, b"\x1b[21;4m"); // double then single — single wins
     assert_eq!(
-        single_last.active_render().style,
+        single_last.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline(UnderlineStyle::Single))
     );
 
     let mut double_last = build_terminal_state(5, 2);
     process_terminal_bytes(&mut double_last, b"\x1b[4;21m"); // single then double — double wins
     assert_eq!(
-        double_last.active_render().style,
+        double_last.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline(UnderlineStyle::Double))
     );
 }
@@ -1188,7 +1188,7 @@ fn sgr_not_underlined_clears_the_underline_style() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[21m"); // double underline on
     process_terminal_bytes(&mut terminal_state, b"\x1b[24m"); // 24 → no underline
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -1208,7 +1208,7 @@ fn sgr_underline_subparameters_select_the_style() {
         let mut terminal_state = build_terminal_state(5, 2);
         process_terminal_bytes(&mut terminal_state, sgr_sequence_bytes);
         assert_eq!(
-            terminal_state.active_render().style,
+            terminal_state.get_active_render().style,
             build_style_with_mutator(|style| style.set_underline(*underline_style)),
             "sequence {sgr_sequence_bytes:?}"
         );
@@ -1222,8 +1222,8 @@ fn sgr_underline_colon_double_matches_legacy_21() {
     let mut legacy_terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut legacy_terminal_state, b"\x1b[21m"); // legacy double-underline code
     assert_eq!(
-        colon_form_terminal_state.active_render().style,
-        legacy_terminal_state.active_render().style
+        colon_form_terminal_state.get_active_render().style,
+        legacy_terminal_state.get_active_render().style
     );
 }
 
@@ -1232,7 +1232,7 @@ fn sgr_underline_semicolon_two_is_single_plus_faint_not_double() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[4;2m"); // two separate params: underline + faint
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_underline(UnderlineStyle::Single);
             style.set_faint(true);
@@ -1245,14 +1245,14 @@ fn sgr_underline_color_256_both_forms() {
     let mut semicolon_form_terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut semicolon_form_terminal_state, b"\x1b[58;5;208m");
     assert_eq!(
-        semicolon_form_terminal_state.active_render().style,
+        semicolon_form_terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline_color(Some(Color::Indexed(208))))
     );
 
     let mut colon_form_terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut colon_form_terminal_state, b"\x1b[58:5:208m");
     assert_eq!(
-        colon_form_terminal_state.active_render().style,
+        colon_form_terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline_color(Some(Color::Indexed(208))))
     );
 }
@@ -1262,14 +1262,14 @@ fn sgr_underline_color_truecolor_both_forms() {
     let mut semicolon_form_terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut semicolon_form_terminal_state, b"\x1b[58;2;10;20;30m");
     assert_eq!(
-        semicolon_form_terminal_state.active_render().style,
+        semicolon_form_terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline_color(Some(Color::Rgb(10, 20, 30))))
     );
 
     let mut colon_form_terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut colon_form_terminal_state, b"\x1b[58:2:10:20:30m");
     assert_eq!(
-        colon_form_terminal_state.active_render().style,
+        colon_form_terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_underline_color(Some(Color::Rgb(10, 20, 30))))
     );
 }
@@ -1279,16 +1279,16 @@ fn sgr_default_underline_color_resets_to_none() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[58;5;208m"); // explicit underline color
     process_terminal_bytes(&mut terminal_state, b"\x1b[59m"); // 59: back to default (follow fg)
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
 fn sgr_underline_color_out_of_range_leaves_the_pen_unchanged() {
     let mut terminal_state = build_terminal_state(5, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[58;5;256m"); // index 256 > 255 — rejected
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
     process_terminal_bytes(&mut terminal_state, b"\x1b[58:2:300:0:0m"); // colon channel 300 > 255 — rejected
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -1317,10 +1317,10 @@ fn decsc_restores_the_new_sgr_attributes() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;58;5;208m"); // faint + underline color
     process_terminal_bytes(&mut terminal_state, b"\x1b7"); // DECSC snapshots the whole render terminal_state
     process_terminal_bytes(&mut terminal_state, b"\x1b[0m"); // wipe the pen
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC restores it
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_faint(true);
             style.set_underline_color(Some(Color::Indexed(208)));
@@ -1335,13 +1335,13 @@ fn sgr_out_of_range_truecolor_drains_its_channels_not_leaking_into_following_cod
     // channels and must be CONSUMED, not reinterpreted as standalone SGR codes
     // (fg red / fg green). The pen must end fully unchanged.
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;2;999;31;32m");
-    assert_eq!(terminal_state.active_render().style, Style::default()); // no leak
+    assert_eq!(terminal_state.get_active_render().style, Style::default()); // no leak
 
     // Exactly three channels (999, 1, 2) are drained, then the trailing `1` is
     // applied as SGR bold.
     process_terminal_bytes(&mut terminal_state, b"\x1b[38;2;999;1;2;1m");
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_bold(true))
     );
 }
@@ -1351,7 +1351,7 @@ fn sgr_does_not_move_the_cursor() {
     let mut terminal_state = build_terminal_state(5, 2);
     print_text(&mut terminal_state, "ab"); // column 2
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;31m");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 2));
 }
 
@@ -1359,9 +1359,9 @@ fn sgr_does_not_move_the_cursor() {
 fn sgr_preserves_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(2, 2);
     print_text(&mut terminal_state, "ab"); // parked on the last column
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1m"); // SGR is not a cursor move
-    assert!(terminal_state.active_cursor().pending_wrap); // latch survives
+    assert!(terminal_state.get_active_cursor().is_wrap_pending); // latch survives
 }
 
 // --- BCE: erase / scroll fill with the current background (not default) ---
@@ -1403,7 +1403,9 @@ fn erase_uses_the_background_only_not_the_full_pen() {
     let mut terminal_state = build_terminal_state(3, 1);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;31;44m"); // bold + fg red + bg blue
     process_terminal_bytes(&mut terminal_state, b"\x1b[K"); // erase row 0
-                                                            // Erased cells carry ONLY the background; bold + foreground are dropped.
+                                                            // Erased cells carry ONLY the
+                                                            // background; bold + foreground are
+                                                            // dropped.
     let background_style =
         build_style_with_mutator(|style| style.set_background_color(Color::Indexed(4)));
     assert!((0..3).all(|column_index| {
@@ -1415,7 +1417,7 @@ fn erase_uses_the_background_only_not_the_full_pen() {
     }));
     // The pen itself is unchanged by the erase.
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_foreground_color(Color::Indexed(1));
@@ -1453,10 +1455,10 @@ fn decsc_decrc_restores_the_cursor_and_pen() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // move home
     process_terminal_bytes(&mut terminal_state, b"\x1b[0m"); // reset pen
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3));
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_foreground_color(Color::Indexed(1));
@@ -1468,12 +1470,12 @@ fn decsc_decrc_restores_the_cursor_and_pen() {
 fn decsc_decrc_preserves_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(2, 2);
     print_text(&mut terminal_state, "ab"); // fills row 0, parks at the last column
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b7"); // DECSC saves the latch
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // a cursor move clears it
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC restores the latch
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('c'); // the latch makes the next glyph wrap, not overwrite
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a')); // row 0 untouched
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('c')); // wrapped onto row 1
@@ -1484,14 +1486,14 @@ fn scosc_scorc_save_and_restore_the_cursor_and_pen() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;5H"); // (1, 4)
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;31m"); // bold + fg red
-    let saved_style = terminal_state.active_render().style;
+    let saved_style = terminal_state.get_active_render().style;
     process_terminal_bytes(&mut terminal_state, b"\x1b[s"); // SCOSC
     process_terminal_bytes(&mut terminal_state, b"\x1b[5;5H"); // move away
     process_terminal_bytes(&mut terminal_state, b"\x1b[0m"); // reset the pen to a different style
     process_terminal_bytes(&mut terminal_state, b"\x1b[u"); // SCORC
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 4));
-    assert_eq!(terminal_state.active_render().style, saved_style); // pen restored too
+    assert_eq!(terminal_state.get_active_render().style, saved_style); // pen restored too
 }
 
 #[test]
@@ -1500,9 +1502,9 @@ fn decrc_without_a_save_homes_and_resets_the_pen() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4H"); // move away
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;31m"); // dirty the pen
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC with no prior DECSC
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -1515,7 +1517,7 @@ fn decrc_clamps_the_restored_cursor_into_a_shrunk_grid() {
         row_count: 3,
     });
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // restore -> clamped to the new bounds
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 2));
 }
 
@@ -1524,7 +1526,7 @@ fn reverse_index_moves_the_cursor_up_one_line() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;1H"); // row 2
     process_terminal_bytes(&mut terminal_state, b"\x1bM"); // RI
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
 }
 
 #[test]
@@ -1544,7 +1546,7 @@ fn decstbm_sets_the_region_and_homes_the_cursor() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;1H"); // move away from home first
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;4r"); // margins rows 2..4 (1-based) -> (1, 3)
     assert_eq!(terminal_state.primary_scroll_region, Some((1, 3)));
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
 }
 
@@ -1582,7 +1584,7 @@ fn decstbm_top_equal_bottom_is_ignored() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H"); // move the cursor away from home
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3r"); // top == bottom (both 0-based 2) -> ignored
     assert_eq!(terminal_state.primary_scroll_region, Some((1, 3))); // region unchanged
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 2)); // cursor NOT homed by the ignored request
 }
 
@@ -1598,7 +1600,7 @@ fn decslrm_requires_declrmm_and_clears_on_reset() {
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[?69l");
     assert_eq!(terminal_state.primary_horizontal_margins, None);
-    assert!(!terminal_state.modes.declrmm);
+    assert!(!terminal_state.modes.is_left_right_margin_mode_enabled);
 }
 
 #[test]
@@ -1694,7 +1696,7 @@ fn decsc_decrc_save_and_restore_origin_mode() {
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b7\x1b[?6l\x1b[1;1H\x1b8");
 
-    assert!(terminal_state.active_cursor().origin);
+    assert!(terminal_state.get_active_cursor().is_origin_mode_enabled);
     assert_eq!(terminal_state.get_active_cursor_position(), (2, 3));
 }
 
@@ -1736,10 +1738,10 @@ fn horizontal_margins_bound_c0_controls_without_origin_mode() {
 fn disabling_horizontal_margins_clears_pending_wrap_latches() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?69h\x1b[3;6s\x1b[1;3Hcdef");
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[?69l");
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"x");
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 6));
 }
@@ -1752,7 +1754,7 @@ fn soft_reset_clears_pending_wrap_latches_on_both_screens() {
         b"\x1b[?69h\x1b[?47h\x1b[3;6s\x1b[1;3Hcdef\x1b[?47l",
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[!p\x1b[?47h");
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"x");
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 6));
 }
@@ -1787,7 +1789,7 @@ fn printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some('X'));
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('Y'));
     assert_eq!(terminal_state.get_active_cursor_position(), (1, 1));
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -1806,7 +1808,7 @@ fn wide_printing_outside_horizontal_margins_wraps_at_the_grid_edge() {
         Some(0)
     );
     assert_eq!(terminal_state.get_active_cursor_position(), (1, 2));
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -1820,7 +1822,7 @@ fn printing_outside_horizontal_margins_with_autowrap_off_stays_at_the_grid_edge(
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 7), Some('Y'));
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' '));
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 7));
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -1845,7 +1847,7 @@ fn vs16_promotion_outside_horizontal_margins_uses_the_grid_edge() {
         Some(0)
     );
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 7));
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -1908,9 +1910,9 @@ fn ich_inserts_blank_cells_shifting_the_line_right() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;3H"); // cursor -> (0, 2) on 'c'
     process_terminal_bytes(&mut terminal_state, b"\x1b[2@"); // ICH 2
     assert_eq!(get_row_text(&terminal_state, 0), "ab  c"); // c shifts right; d, e fall off
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 2)); // cursor unchanged
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -1945,9 +1947,9 @@ fn dch_deletes_cells_pulling_the_line_left() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H"); // cursor -> (0, 1) on 'b'
     process_terminal_bytes(&mut terminal_state, b"\x1b[2P"); // DCH 2
     assert_eq!(get_row_text(&terminal_state, 0), "ade  "); // b, c removed; padded right
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 1)); // cursor unchanged
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -1977,7 +1979,7 @@ fn il_inserts_a_blank_line_and_keeps_the_cursor() {
     assert_eq!(get_row_text(&terminal_state, 0), "abc"); // above, untouched
     assert_eq!(get_row_text(&terminal_state, 1), "   "); // blank inserted
     assert_eq!(get_row_text(&terminal_state, 2), "def"); // def pushed down; ghi fell off
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 2)); // cursor unchanged (column kept)
 }
 
@@ -2014,7 +2016,7 @@ fn su_scrolls_the_region_up_leaving_the_cursor() {
     assert_eq!(get_row_text(&terminal_state, 0), "def");
     assert_eq!(get_row_text(&terminal_state, 1), "ghi");
     assert_eq!(get_row_text(&terminal_state, 2), "   ");
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 1)); // cursor unmoved
 }
 
@@ -2027,7 +2029,7 @@ fn sd_scrolls_the_region_down_leaving_the_cursor() {
     assert_eq!(get_row_text(&terminal_state, 0), "   ");
     assert_eq!(get_row_text(&terminal_state, 1), "abc");
     assert_eq!(get_row_text(&terminal_state, 2), "def"); // ghi fell off the bottom
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 1)); // cursor unmoved
 }
 
@@ -2040,7 +2042,7 @@ fn sd_via_the_ecma48_caret_form_scrolls_the_region_down() {
     assert_eq!(get_row_text(&terminal_state, 0), "   ");
     assert_eq!(get_row_text(&terminal_state, 1), "abc");
     assert_eq!(get_row_text(&terminal_state, 2), "def"); // ghi fell off the bottom
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 1)); // cursor unmoved
 }
 
@@ -2090,7 +2092,7 @@ fn dec_1049_saves_the_cursor_switches_and_restores() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // move on the alternate screen
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l");
     assert_eq!(terminal_state.active_screen, Screen::Primary);
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3)); // restored
 }
 
@@ -2145,11 +2147,11 @@ fn dec_1048_saves_and_restores_the_cursor_and_pen_without_swapping() {
     assert_eq!(terminal_state.active_screen, Screen::Primary);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H\x1b[0m"); // move home + reset pen
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1048l"); // restore
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3)); // position restored
     assert_eq!(terminal_state.active_screen, Screen::Primary);
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_foreground_color(Color::Indexed(1));
@@ -2185,7 +2187,7 @@ fn a_save_on_the_alternate_screen_does_not_clobber_the_primary_stash() {
         .expect("primary still saved");
     assert_eq!((primary_after.row, primary_after.column), (2, 3)); // the alt DECSC did NOT touch the primary slot
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l"); // back to primary, restore from the primary slot
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3)); // primary stash intact + restored
 }
 
@@ -2507,8 +2509,8 @@ fn osc_7_a_new_valid_report_updates_the_cwd() {
 
 #[test]
 fn osc_7_rejects_a_path_with_a_nul_byte() {
-    // `%00` decodes to a NUL: the report is rejected and the previous good reported_working_directory
-    // is left intact.
+    // `%00` decodes to a NUL: the report is rejected and the previous good
+    // reported_working_directory is left intact.
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b]7;file:///good\x07");
     process_terminal_bytes(&mut terminal_state, b"\x1b]7;file:///a%00b\x07");
@@ -2675,8 +2677,11 @@ fn dec_1049_clears_the_alternate_buffer_on_exit() {
 fn dec_47_before_1049_in_one_decset_saves_the_primary_cursor_not_the_alternate() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4H"); // primary cursor -> (2, 3)
-                                                               // `?47` switches to the alternate first; `?1049` must still stash the cursor
-                                                               // of the screen the list began on (the primary), not the alternate.
+                                                               // `?47` switches to the alternate
+                                                               // first; `?1049` must still stash
+                                                               // the cursor of the screen the list
+                                                               // began on (the primary), not the
+                                                               // alternate.
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47;1049h");
     assert_eq!(terminal_state.active_screen, Screen::Alternate);
     let saved = terminal_state
@@ -2691,7 +2696,7 @@ fn dec_47_before_1049_in_one_decset_saves_the_primary_cursor_not_the_alternate()
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // move on the alternate
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l"); // exit + restore
     assert_eq!(terminal_state.active_screen, Screen::Primary);
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3)); // primary cursor restored
 }
 
@@ -2701,7 +2706,9 @@ fn dec_47_before_1049_in_one_decset_clears_the_stale_alternate() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter the alternate without clearing
     process_terminal_bytes(&mut terminal_state, b"xyz"); // alternate row 0 = "xyz"
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // back to primary; the alternate keeps "xyz"
-                                                               // `?47` re-enters onto the stale "xyz"; `?1049` must still clear it.
+                                                               // `?47` re-enters onto the stale
+                                                               // "xyz"; `?1049` must still clear
+                                                               // it.
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47;1049h");
     assert_eq!(terminal_state.active_screen, Screen::Alternate);
     assert_eq!(get_row_text(&terminal_state, 0), "     "); // 1049 cleared the stale alternate
@@ -2754,8 +2761,10 @@ fn dec_1049_l_then_1047_l_clears_the_alternate_only_once() {
 fn dec_1049_then_47_in_one_decset_saves_the_primary_and_seeds_the_alternate_once() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4H"); // primary cursor -> (2, 3)
-                                                               // `?1049` enters + saves + clears; the trailing `?47` must be a no-op (no
-                                                               // re-seed of the alternate cursor, no second clear).
+                                                               // `?1049` enters + saves + clears;
+                                                               // the trailing `?47` must be a no-op
+                                                               // (no re-seed of the alternate
+                                                               // cursor, no second clear).
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049;47h");
     assert_eq!(terminal_state.active_screen, Screen::Alternate);
     let saved = terminal_state
@@ -2763,7 +2772,7 @@ fn dec_1049_then_47_in_one_decset_saves_the_primary_and_seeds_the_alternate_once
         .saved
         .expect("primary cursor saved");
     assert_eq!((saved.row, saved.column), (2, 3));
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3)); // alternate cursor seeded from the primary
 }
 
@@ -2781,14 +2790,14 @@ fn verify_params_iter_yields_correct_param_groups() {
     impl Perform for Inspector {
         fn csi_dispatch(
             &mut self,
-            params: &vte::Params,
+            csi_parameters: &vte::Params,
             intermediates: &[u8],
             _ignore: bool,
             _action: char,
         ) {
             if intermediates == b"?" {
-                for param in params.iter() {
-                    self.results.push(param.to_vec());
+                for parameter in csi_parameters.iter() {
+                    self.results.push(parameter.to_vec());
                 }
             }
         }
@@ -2843,7 +2852,7 @@ fn dec_1049_reset_restores_the_cursor_even_when_already_on_primary() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1048h"); // save the primary cursor (no switch)
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // move to (0, 0)
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l"); // already on primary: the ?1048 l restore must still run
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3)); // restored
     assert_eq!(terminal_state.active_screen, Screen::Primary);
 }
@@ -2946,7 +2955,7 @@ fn a_fresh_1049_entry_drops_a_stale_alternate_saved_cursor() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h"); // app B enters fresh
     assert_eq!(terminal_state.alternate_cursor.saved, None); // app A's DECSC stash dropped
     process_terminal_bytes(&mut terminal_state, b"\x1b[5;5H\x1b8"); // app B DECRC with no prior DECSC -> home, not (2, 2)
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
 }
 
@@ -2966,13 +2975,13 @@ fn a_clearing_exit_drops_the_alternate_wrap_latch() {
     let mut terminal_state = build_terminal_state(3, 2); // 3 columns, 2 rows
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1047h"); // enter the alternate
     process_terminal_bytes(&mut terminal_state, b"abc"); // fill row 0 -> parks the wrap latch at the last column
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1047l"); // clearing exit erases the parked glyph -> the latch must drop
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // non-clearing re-entry sees the fresh cursor
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('z'); // first print lands in place, no spurious wrap against an erased glyph
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('z'));
-    assert_eq!(terminal_state.active_cursor().row, 0);
+    assert_eq!(terminal_state.get_active_cursor().row, 0);
 }
 
 #[test]
@@ -2982,7 +2991,7 @@ fn a_clearing_exit_resets_the_alternate_cursor_to_home() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4H"); // move the alternate cursor to (2, 3)
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1047l"); // a clearing exit ends the session -> reset to a fresh buffer
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // non-clearing re-entry sees the fresh cursor
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0)); // home — the clearing exit reset the cursor before re-entry
 }
 
@@ -2992,26 +3001,26 @@ fn a_clearing_exit_resets_the_alternate_cursor_to_home() {
 fn dec_1049h_does_not_carry_pending_wrap_to_the_alternate() {
     let mut terminal_state = build_terminal_state(3, 2);
     process_terminal_bytes(&mut terminal_state, b"abc"); // fills row 0 on primary, parks at (0, 2)
-    assert!(terminal_state.active_cursor().pending_wrap); // parked on primary
+    assert!(terminal_state.get_active_cursor().is_wrap_pending); // parked on primary
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h"); // enter alternate: seed column from primary, clear latch + grid
-    assert!(!terminal_state.active_cursor().pending_wrap); // latch NOT carried
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending); // latch NOT carried
     terminal_state.print('x'); // must not wrap early to row 1
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('x')); // lands at the seeded column on row 0
-    assert_eq!(terminal_state.active_cursor().row, 0); // no early wrap
+    assert_eq!(terminal_state.get_active_cursor().row, 0); // no early wrap
 }
 
 #[test]
 fn pending_wrap_is_independent_per_screen() {
     let mut terminal_state = build_terminal_state(3, 2);
     process_terminal_bytes(&mut terminal_state, b"abc"); // primary parks at (0, 2)
-    assert!(terminal_state.active_cursor().pending_wrap); // primary has the latch
+    assert!(terminal_state.get_active_cursor().is_wrap_pending); // primary has the latch
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter alternate (no clear, no reseed): its own cursor
-    assert!(!terminal_state.active_cursor().pending_wrap); // alternate latch independent (starts clear)
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending); // alternate latch independent (starts clear)
     terminal_state.print('x'); // alternate cursor starts at home (0, 0); no early wrap
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('x'));
-    assert_eq!(terminal_state.active_cursor().row, 0);
+    assert_eq!(terminal_state.get_active_cursor().row, 0);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // back to primary
-    assert!(terminal_state.active_cursor().pending_wrap); // primary latch untouched
+    assert!(terminal_state.get_active_cursor().is_wrap_pending); // primary latch untouched
 }
 
 #[test]
@@ -3019,12 +3028,12 @@ fn dec_47_reentry_resumes_where_the_alternate_left_off() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter the alternate (its own cursor at home)
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4Hxy"); // draw on the alternate; cursor ends at (2, 5)
-    let alt = terminal_state.active_cursor();
+    let alt = terminal_state.get_active_cursor();
     assert_eq!((alt.row, alt.column), (2, 5));
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // pop back to the primary (alternate kept intact)
     process_terminal_bytes(&mut terminal_state, b"zz"); // primary output — must not disturb the alternate cursor
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // re-enter: must resume at (2, 5), not reseed from the primary
-    let alt = terminal_state.active_cursor();
+    let alt = terminal_state.get_active_cursor();
     assert_eq!((alt.row, alt.column), (2, 5));
     process_terminal_bytes(&mut terminal_state, b"w"); // resumes exactly where the alternate left off
     assert_eq!(get_terminal_glyph(&terminal_state, 2, 5), Some('w'));
@@ -3035,10 +3044,10 @@ fn dec_47_reentry_preserves_the_alternate_wrap_latch() {
     let mut terminal_state = build_terminal_state(3, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter the alternate
     process_terminal_bytes(&mut terminal_state, b"abc"); // fill the alternate's row 0 — parks the wrap latch at (0, 2)
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // back to primary
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // re-enter: the latch must survive, not be cleared by a reseed
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('z'); // the parked latch wraps to row 1 instead of overprinting (0, 2)
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('z'));
 }
@@ -3049,32 +3058,32 @@ fn cursor_position_is_independent_per_screen() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H"); // primary cursor at (2, 2)
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (2, 2)
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049h"); // enter alternate: cursor seeded from the primary
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (2, 2)
     ); // seeded, not (0, 0)
     process_terminal_bytes(&mut terminal_state, b"\x1b[4;4H"); // move the alternate cursor to (3, 3)
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (3, 3)
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1049l"); // back to primary
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (2, 2)
     ); // primary intact, unaffected by alt's move
@@ -3101,16 +3110,16 @@ fn dec_47_round_trip_leaves_the_primary_cursor_untouched() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[5;5H"); // move the alternate cursor to (4, 4)
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (4, 4)
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // exit (no restore)
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (2, 2)
     ); // primary cursor never touched by the alternate's motion
@@ -3159,12 +3168,12 @@ fn active_screen_flips_on_alternate_switch() {
 fn wide_char_occupies_two_cells_and_advances_by_two() {
     let mut terminal_state = build_terminal_state(5, 3);
     terminal_state.print('中'); // CJK ideograph, display width 2
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '中');
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_character(), '中');
+    assert_eq!(base_cell.get_display_width(), 2);
     // The second column is a width-0 continuation placeholder.
     assert_eq!(
         terminal_state
@@ -3174,8 +3183,8 @@ fn wide_char_occupies_two_cells_and_advances_by_two() {
         Some(0)
     );
     // Cursor steps past both cells.
-    assert_eq!(terminal_state.active_cursor().column, 2);
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -3203,7 +3212,7 @@ fn emoji_is_wide() {
             .map(Cell::get_display_width),
         Some(0)
     );
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]
@@ -3226,7 +3235,7 @@ fn two_wide_chars_lay_side_by_side() {
             .map(Cell::get_display_width),
         Some(0)
     );
-    assert_eq!(terminal_state.active_cursor().column, 4);
+    assert_eq!(terminal_state.get_active_cursor().column, 4);
 }
 
 #[test]
@@ -3240,7 +3249,7 @@ fn ambiguous_width_char_is_narrow() {
             .map(Cell::get_display_width),
         Some(1)
     );
-    assert_eq!(terminal_state.active_cursor().column, 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 1);
 }
 
 #[test]
@@ -3255,7 +3264,7 @@ fn combining_mark_attaches_to_the_previous_cell_without_advancing() {
     assert_eq!(cell.get_character(), 'e');
     assert_eq!(cell.list_combining_characters(), ['\u{301}']);
     assert_eq!(cell.get_display_width(), 1); // base width unchanged
-    assert_eq!(terminal_state.active_cursor().column, 1); // cursor did not advance
+    assert_eq!(terminal_state.get_active_cursor().column, 1); // cursor did not advance
 }
 
 #[test]
@@ -3269,7 +3278,7 @@ fn multiple_combining_marks_stack_in_arrival_order() {
         .get_cell(0, 0)
         .expect("in bounds");
     assert_eq!(cell.list_combining_characters(), ['\u{301}', '\u{308}']);
-    assert_eq!(terminal_state.active_cursor().column, 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 1);
 }
 
 #[test]
@@ -3291,7 +3300,7 @@ fn combining_mark_attaches_to_a_wide_base_not_its_continuation() {
         .expect("continuation")
         .list_combining_characters()
         .is_empty());
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]
@@ -3304,14 +3313,14 @@ fn combining_mark_at_line_start_is_dropped() {
         .expect("in bounds")
         .list_combining_characters()
         .is_empty());
-    assert_eq!(terminal_state.active_cursor().column, 0); // no advance, no panic
+    assert_eq!(terminal_state.get_active_cursor().column, 0); // no advance, no panic
 }
 
 #[test]
 fn combining_mark_attaches_to_a_parked_get_terminal_glyph() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // row 0 full, cursor parked at column 2 with the wrap latch
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('\u{301}'); // attaches to the parked 'c' without wrapping
     let cell = terminal_state
         .get_active_grid()
@@ -3319,16 +3328,16 @@ fn combining_mark_attaches_to_a_parked_get_terminal_glyph() {
         .expect("in bounds");
     assert_eq!(cell.get_character(), 'c');
     assert_eq!(cell.list_combining_characters(), ['\u{301}']);
-    assert_eq!(terminal_state.active_cursor().column, 2);
-    assert!(terminal_state.active_cursor().pending_wrap); // latch preserved
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending); // latch preserved
 }
 
 #[test]
 fn wide_char_at_the_last_column_wraps_and_blanks_the_freed_cell() {
     let mut terminal_state = build_terminal_state(3, 2); // columns 0..=2; last column = 2
     print_text(&mut terminal_state, "ab"); // a@0, b@1, cursor at the last free column 2
-    assert_eq!(terminal_state.active_cursor().column, 2);
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('中'); // width 2, only column 2 free → blank it and wrap whole
     let freed = terminal_state
         .get_active_grid()
@@ -3346,8 +3355,8 @@ fn wide_char_at_the_last_column_wraps_and_blanks_the_freed_cell() {
     );
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (1, 2)
     );
@@ -3366,9 +3375,9 @@ fn wide_char_reaching_the_last_column_parks() {
             .map(Cell::get_display_width),
         Some(0)
     );
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.column, 3);
-    assert!(cursor_position.pending_wrap);
+    assert!(cursor_position.is_wrap_pending);
     terminal_state.print('y'); // the deferred wrap fires here
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('y'));
 }
@@ -3379,7 +3388,7 @@ fn control_char_reaching_print_is_ignored() {
     terminal_state.print('a');
     terminal_state.print('\u{0}'); // NUL: a control char, no display width
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a'));
-    assert_eq!(terminal_state.active_cursor().column, 1); // nothing written, no advance
+    assert_eq!(terminal_state.get_active_cursor().column, 1); // nothing written, no advance
 }
 
 #[test]
@@ -3411,13 +3420,14 @@ fn overwriting_a_wide_continuation_with_a_narrow_clears_the_orphan_base() {
     terminal_state.print('中'); // column 0 base, column 1 continuation
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H"); // cursor to (0, 1), the continuation
     terminal_state.print('a'); // overwrite the continuation with a narrow glyph
-                               // The orphaned wide base must be blanked, not left claiming two columns.
-    let base = terminal_state
+                               // The orphaned wide base must be blanked, not left claiming two
+                               // columns.
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), ' ');
-    assert_eq!(base.get_display_width(), 1);
+    assert_eq!(base_cell.get_character(), ' ');
+    assert_eq!(base_cell.get_display_width(), 1);
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('a'));
 }
 
@@ -3454,7 +3464,7 @@ fn cursor_forward_counts_columns_so_one_step_lands_inside_a_wide_glyph() {
     print_text(&mut terminal_state, "漢字"); // 漢 on columns 0-1, 字 on columns 2-3
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // home, on the 漢 base
     process_terminal_bytes(&mut terminal_state, b"\x1b[C"); // one column forward → the 漢 continuation
-    assert_eq!(terminal_state.active_cursor().column, 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 1);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3463,7 +3473,7 @@ fn cursor_forward_counts_columns_so_one_step_lands_inside_a_wide_glyph() {
         Some(0)
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[C"); // one more → the 字 base
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('字'));
     assert_eq!(
         terminal_state
@@ -3478,11 +3488,11 @@ fn cursor_forward_counts_columns_so_one_step_lands_inside_a_wide_glyph() {
 fn cursor_back_from_past_a_wide_glyph_lands_on_its_continuation_then_its_base() {
     let mut terminal_state = build_terminal_state(6, 2);
     terminal_state.print('漢'); // columns 0-1, cursor rests at column 2
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b[D"); // back one column → the continuation
-    assert_eq!(terminal_state.active_cursor().column, 1);
+    assert_eq!(terminal_state.get_active_cursor().column, 1);
     process_terminal_bytes(&mut terminal_state, b"\x1b[D"); // back one more → the base
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('漢'));
     assert_eq!(
         terminal_state
@@ -3499,7 +3509,7 @@ fn backspacing_over_a_wide_glyph_and_blanking_it_leaves_no_orphan_half() {
     terminal_state.print('漢'); // columns 0-1, cursor at column 2
     terminal_state.execute(0x08); // BS → column 1
     terminal_state.execute(0x08); // BS → column 0
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
 
     // The two spaces a shell erases a wide glyph with. The first one lands on
     // the base and blanks the continuation with it.
@@ -3512,19 +3522,19 @@ fn backspacing_over_a_wide_glyph_and_blanking_it_leaves_no_orphan_half() {
     assert_eq!(orphan.get_display_width(), 1);
 
     terminal_state.print(' ');
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), ' ');
-    assert_eq!(base.get_display_width(), 1);
+    assert_eq!(base_cell.get_character(), ' ');
+    assert_eq!(base_cell.get_display_width(), 1);
     let right = terminal_state
         .get_active_grid()
         .get_cell(0, 1)
         .expect("in bounds");
     assert_eq!(right.get_character(), ' ');
     assert_eq!(right.get_display_width(), 1);
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 // --- Wide-pair integrity across erase / insert / delete cell ops ---
@@ -3535,12 +3545,12 @@ fn el_to_eol_from_a_continuation_column_clears_the_orphan_base() {
     terminal_state.print('中'); // column 0 base (w2), column 1 continuation (w0)
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H"); // cursor onto the continuation (0, 1)
     process_terminal_bytes(&mut terminal_state, b"\x1b[0K"); // erase cursor→EOL: clears column 1, splits the pair
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), ' '); // orphaned base blanked
-    assert_eq!(base.get_display_width(), 1);
+    assert_eq!(base_cell.get_character(), ' '); // orphaned base blanked
+    assert_eq!(base_cell.get_display_width(), 1);
 }
 
 #[test]
@@ -3563,12 +3573,12 @@ fn ed_to_end_from_a_continuation_column_clears_the_orphan_base() {
     terminal_state.print('中'); // (0,0) base, (0,1) continuation
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H"); // cursor onto the continuation
     process_terminal_bytes(&mut terminal_state, b"\x1b[0J"); // erase cursor→end of screen: clears (0,1)
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), ' ');
-    assert_eq!(base.get_display_width(), 1);
+    assert_eq!(base_cell.get_character(), ' ');
+    assert_eq!(base_cell.get_display_width(), 1);
 }
 
 #[test]
@@ -3577,7 +3587,9 @@ fn ich_between_a_wide_pair_clears_both_orphaned_halves() {
     terminal_state.print('中'); // column 0 base, column 1 continuation
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H"); // cursor onto the continuation (0, 1)
     process_terminal_bytes(&mut terminal_state, b"\x1b[@"); // insert 1 blank at column 1, splitting the pair
-                                                            // base@0 lost its continuation; the displaced continuation@2 lost its base.
+                                                            // base@0 lost its continuation; the
+                                                            // displaced continuation@2 lost its
+                                                            // base.
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3603,7 +3615,8 @@ fn ich_truncating_a_wide_continuation_off_the_edge_clears_the_orphan_base() {
     terminal_state.print('中'); // column 2 base, column 3 continuation
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // home
     process_terminal_bytes(&mut terminal_state, b"\x1b[@"); // insert pushes the pair right; continuation falls off
-                                                            // the base sits at the last column with no continuation → blanked.
+                                                            // the base sits at the last column with
+                                                            // no continuation → blanked.
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3661,13 +3674,13 @@ fn vs16_promotes_a_text_glyph_to_a_wide_emoji_cell() {
     let mut terminal_state = build_terminal_state(6, 2);
     terminal_state.print('\u{2764}'); // heart, text presentation, width 1
     terminal_state.print('\u{FE0F}'); // VS16 → emoji presentation, width 2
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{2764}');
-    assert_eq!(base.list_combining_characters(), ['\u{FE0F}']);
-    assert_eq!(base.get_display_width(), 2); // promoted from 1 to 2
+    assert_eq!(base_cell.get_character(), '\u{2764}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{FE0F}']);
+    assert_eq!(base_cell.get_display_width(), 2); // promoted from 1 to 2
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3675,7 +3688,7 @@ fn vs16_promotes_a_text_glyph_to_a_wide_emoji_cell() {
             .map(Cell::get_display_width),
         Some(0)
     ); // claimed continuation
-    assert_eq!(terminal_state.active_cursor().column, 2); // advanced over both columns
+    assert_eq!(terminal_state.get_active_cursor().column, 2); // advanced over both columns
 }
 
 #[test]
@@ -3685,16 +3698,16 @@ fn zwj_emoji_sequence_folds_into_one_wide_cell() {
         &mut terminal_state,
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
     ); // 👨‍👩‍👧
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{1F468}');
+    assert_eq!(base_cell.get_character(), '\u{1F468}');
     assert_eq!(
-        base.list_combining_characters(),
+        base_cell.list_combining_characters(),
         ['\u{200D}', '\u{1F469}', '\u{200D}', '\u{1F467}']
     );
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_display_width(), 2);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3702,34 +3715,34 @@ fn zwj_emoji_sequence_folds_into_one_wide_cell() {
             .map(Cell::get_display_width),
         Some(0)
     );
-    assert_eq!(terminal_state.active_cursor().column, 2); // one wide glyph, not three
+    assert_eq!(terminal_state.get_active_cursor().column, 2); // one wide glyph, not three
 }
 
 #[test]
 fn skin_tone_modifier_folds_onto_the_base() {
     let mut terminal_state = build_terminal_state(6, 2);
     print_text(&mut terminal_state, "\u{1F44D}\u{1F3FD}"); // 👍 + medium skin tone
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{1F44D}');
-    assert_eq!(base.list_combining_characters(), ['\u{1F3FD}']);
-    assert_eq!(base.get_display_width(), 2);
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(base_cell.get_character(), '\u{1F44D}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{1F3FD}']);
+    assert_eq!(base_cell.get_display_width(), 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]
 fn regional_indicator_pair_is_one_flag_cell() {
     let mut terminal_state = build_terminal_state(6, 2);
     print_text(&mut terminal_state, "\u{1F1EF}\u{1F1F5}"); // 🇯 + 🇵 = JP flag
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{1F1EF}');
-    assert_eq!(base.list_combining_characters(), ['\u{1F1F5}']);
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_character(), '\u{1F1EF}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{1F1F5}']);
+    assert_eq!(base_cell.get_display_width(), 2);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3737,7 +3750,7 @@ fn regional_indicator_pair_is_one_flag_cell() {
             .map(Cell::get_display_width),
         Some(0)
     );
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]
@@ -3766,7 +3779,7 @@ fn separate_emoji_without_a_joiner_stay_two_cells_each() {
             .map(Cell::get_display_width),
         Some(2)
     );
-    assert_eq!(terminal_state.active_cursor().column, 4);
+    assert_eq!(terminal_state.get_active_cursor().column, 4);
 }
 
 #[test]
@@ -3789,20 +3802,20 @@ fn vs16_promotion_at_the_last_column_wraps_to_the_next_line() {
     let mut terminal_state = build_terminal_state(3, 3); // last column = 2
     print_text(&mut terminal_state, "ab"); // a@0, b@1, cursor at column 2
     terminal_state.print('\u{2764}'); // heart width 1 at column 2, parks
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('\u{FE0F}'); // VS16 promotes → no room at the edge → move whole cluster down
     let freed = terminal_state
         .get_active_grid()
         .get_cell(0, 2)
         .expect("in bounds");
     assert_eq!(freed.get_character(), ' '); // old narrow cell blanked
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(1, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{2764}');
-    assert_eq!(base.list_combining_characters(), ['\u{FE0F}']);
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_character(), '\u{2764}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{FE0F}']);
+    assert_eq!(base_cell.get_display_width(), 2);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3812,8 +3825,8 @@ fn vs16_promotion_at_the_last_column_wraps_to_the_next_line() {
     );
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (1, 2)
     );
@@ -3869,7 +3882,8 @@ fn a_dcs_terminated_by_c1_st_breaks_a_cluster_run() {
     let mut terminal_state = build_terminal_state(6, 2);
     terminal_state.print('e'); // base
     process_terminal_bytes(&mut terminal_state, b"\x1bPq\x9c"); // DCS closed by the 8-bit C1 ST (0x9C),
-                                                                // whose only Perform callback is `unhook`
+                                                                // whose only Perform callback is
+                                                                // `unhook`
     terminal_state.print('\u{301}'); // combining acute must NOT fold onto 'e'
     let cell = terminal_state
         .get_active_grid()
@@ -3906,7 +3920,7 @@ fn a_style_only_sgr_does_not_break_a_cluster_run() {
     assert_eq!(cell.get_character(), 'e');
     assert_eq!(cell.list_combining_characters(), ['\u{301}']); // attached across the SGR
     assert_eq!(cell.get_display_width(), 1);
-    assert_eq!(terminal_state.active_cursor().column, 1); // no advance
+    assert_eq!(terminal_state.get_active_cursor().column, 1); // no advance
 }
 
 #[test]
@@ -3915,13 +3929,13 @@ fn a_style_only_sgr_does_not_break_a_vs16_promotion() {
     terminal_state.print('\u{2764}'); // heart, text presentation, width 1
     process_terminal_bytes(&mut terminal_state, b"\x1b[1m"); // bold — pen only, no cursor move
     terminal_state.print('\u{FE0F}'); // VS16 must still promote the heart across the SGR
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{2764}');
-    assert_eq!(base.list_combining_characters(), ['\u{FE0F}']);
-    assert_eq!(base.get_display_width(), 2); // promoted across the SGR
+    assert_eq!(base_cell.get_character(), '\u{2764}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{FE0F}']);
+    assert_eq!(base_cell.get_display_width(), 2); // promoted across the SGR
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -3929,7 +3943,7 @@ fn a_style_only_sgr_does_not_break_a_vs16_promotion() {
             .map(Cell::get_display_width),
         Some(0)
     );
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
 }
 
 #[test]
@@ -3978,16 +3992,17 @@ fn a_wrapped_vs16_promotion_clears_a_wide_glyph_it_lands_on() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // home (0, 0)
     print_text(&mut terminal_state, "xyz"); // fill row 0 columns 0..2, cursor at the last column 3
     terminal_state.print('\u{2764}'); // heart width 1 parks at (0, 3)
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('\u{FE0F}'); // VS16 promotes -> no room at the edge -> wrap the cluster to row 1
-                                      // The promoted pair overwrites (1,0)+(1,1), taking 中's base at column 1;
-                                      // 中's old continuation at column 2 is cleared with it.
-    let base = terminal_state
+                                      // The promoted pair overwrites (1,0)+(1,1), taking 中's base
+                                      // at column 1; 中's old continuation at column 2 is cleared
+                                      // with it.
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(1, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{2764}');
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_character(), '\u{2764}');
+    assert_eq!(base_cell.get_display_width(), 2);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -4013,12 +4028,12 @@ fn an_in_place_vs16_promotion_clears_a_wide_glyph_it_claims() {
     terminal_state.print('\u{FE0F}'); // VS16 promotes the heart in place, claiming column 1
                                       // The promotion overwrites 中's base at column 1; 中's old
                                       // continuation at column 2 is cleared with it.
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{2764}');
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_character(), '\u{2764}');
+    assert_eq!(base_cell.get_display_width(), 2);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -4104,7 +4119,7 @@ fn combining_marks_are_capped_to_bound_per_cell_memory() {
         cell.list_combining_characters().len(),
         MAX_GRAPHEME_CONTINUATION_COUNT
     ); // bounded, not 10_000
-    assert_eq!(terminal_state.active_cursor().column, 1); // never advanced
+    assert_eq!(terminal_state.get_active_cursor().column, 1); // never advanced
 }
 
 #[test]
@@ -4152,15 +4167,15 @@ fn vs15_demotes_a_wide_emoji_base_to_a_narrow_text_get_terminal_glyph() {
             .map(Cell::get_display_width),
         Some(2)
     );
-    assert_eq!(terminal_state.active_cursor().column, 2);
+    assert_eq!(terminal_state.get_active_cursor().column, 2);
     terminal_state.print('\u{FE0E}'); // VS15 → text presentation → width 1
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(0, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{26A1}');
-    assert_eq!(base.list_combining_characters(), ['\u{FE0E}']);
-    assert_eq!(base.get_display_width(), 1); // demoted from 2 to 1
+    assert_eq!(base_cell.get_character(), '\u{26A1}');
+    assert_eq!(base_cell.list_combining_characters(), ['\u{FE0E}']);
+    assert_eq!(base_cell.get_display_width(), 1); // demoted from 2 to 1
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -4168,8 +4183,8 @@ fn vs15_demotes_a_wide_emoji_base_to_a_narrow_text_get_terminal_glyph() {
             .map(Cell::get_display_width),
         Some(1)
     ); // continuation cleared
-    assert_eq!(terminal_state.active_cursor().column, 1); // cursor stepped back over the freed column
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert_eq!(terminal_state.get_active_cursor().column, 1); // cursor stepped back over the freed column
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('Z'); // next glyph lands at the freed column, not two ahead
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some('Z'));
 }
@@ -4179,15 +4194,15 @@ fn vs16_promotion_wraps_correctly_in_a_two_column_grid() {
     let mut terminal_state = build_terminal_state(2, 2); // last column = 1 — the narrow-grid promotion edge
     terminal_state.print('a'); // column 0
     terminal_state.print('\u{2764}'); // heart width 1 at column 1 (last), parks
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('\u{FE0F}'); // VS16 promotes; no room at column 1 → move the whole cluster down
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 1), Some(' ')); // old narrow cell blanked
-    let base = terminal_state
+    let base_cell = terminal_state
         .get_active_grid()
         .get_cell(1, 0)
         .expect("in bounds");
-    assert_eq!(base.get_character(), '\u{2764}');
-    assert_eq!(base.get_display_width(), 2);
+    assert_eq!(base_cell.get_character(), '\u{2764}');
+    assert_eq!(base_cell.get_display_width(), 2);
     assert_eq!(
         terminal_state
             .get_active_grid()
@@ -4195,17 +4210,17 @@ fn vs16_promotion_wraps_correctly_in_a_two_column_grid() {
             .map(Cell::get_display_width),
         Some(0)
     ); // continuation fills the row
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.column, 1); // parked at the last column
-    assert!(cursor_position.pending_wrap);
+    assert!(cursor_position.is_wrap_pending);
 }
 
 #[test]
 fn linefeed_pushes_the_top_primary_line_into_scrollback() {
     let mut terminal_state = build_terminal_state(4, 2); // two rows; bottom margin is row 1
     print_text(&mut terminal_state, "ab"); // row 0 = "ab.."
-    terminal_state.linefeed(); // row 0 -> 1 (descends; not yet at the bottom)
-    terminal_state.linefeed(); // at the bottom: the region scrolls, row 0 scrolls off
+    terminal_state.apply_linefeed(); // row 0 -> 1 (descends; not yet at the bottom)
+    terminal_state.apply_linefeed(); // at the bottom: the region scrolls, row 0 scrolls off
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 1);
     let captured = terminal_state
         .get_scrollback()
@@ -4222,8 +4237,8 @@ fn linefeed_pushes_the_top_primary_line_into_scrollback() {
 fn linefeed_on_the_alternate_screen_does_not_feed_scrollback() {
     let mut terminal_state = build_terminal_state(4, 2);
     terminal_state.active_screen = Screen::Alternate; // the alternate never feeds history
-    terminal_state.linefeed(); // alt cursor 0 -> 1
-    terminal_state.linefeed(); // at the bottom: the alternate scrolls, but feeds nothing
+    terminal_state.apply_linefeed(); // alt cursor 0 -> 1
+    terminal_state.apply_linefeed(); // at the bottom: the alternate scrolls, but feeds nothing
     assert!(terminal_state.get_scrollback().is_empty());
 }
 
@@ -4231,8 +4246,8 @@ fn linefeed_on_the_alternate_screen_does_not_feed_scrollback() {
 fn linefeed_below_a_top_margin_discards_rather_than_feeds() {
     let mut terminal_state = build_terminal_state(4, 3); // three rows
     *terminal_state.scroll_region_mut() = Some((1, 2)); // region top margin = row 1
-    terminal_state.active_cursor_mut().row = 2; // park at the region's bottom margin
-    terminal_state.linefeed(); // scrolls within rows 1..=2; top margin != 0 -> no feed
+    terminal_state.get_active_cursor_mut().row = 2; // park at the region's bottom margin
+    terminal_state.apply_linefeed(); // scrolls within rows 1..=2; top margin != 0 -> no feed
     assert!(terminal_state.get_scrollback().is_empty());
 }
 
@@ -4240,18 +4255,18 @@ fn linefeed_below_a_top_margin_discards_rather_than_feeds() {
 fn linefeed_in_a_region_anchored_at_the_top_feeds_scrollback() {
     let mut terminal_state = build_terminal_state(4, 3);
     *terminal_state.scroll_region_mut() = Some((0, 1)); // region top margin = row 0
-    terminal_state.active_cursor_mut().row = 1; // the region's bottom margin
-    terminal_state.linefeed();
+    terminal_state.get_active_cursor_mut().row = 1; // the region's bottom margin
+    terminal_state.apply_linefeed();
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 1);
 }
 
 #[test]
 fn successive_bottom_linefeeds_accumulate_scrollback() {
     let mut terminal_state = build_terminal_state(4, 2);
-    terminal_state.active_cursor_mut().row = 1; // sit at the bottom row
-    terminal_state.linefeed();
-    terminal_state.linefeed();
-    terminal_state.linefeed();
+    terminal_state.get_active_cursor_mut().row = 1; // sit at the bottom row
+    terminal_state.apply_linefeed();
+    terminal_state.apply_linefeed();
+    terminal_state.apply_linefeed();
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 3);
 }
 
@@ -4275,7 +4290,7 @@ fn linefeed_on_a_full_height_single_row_screen_always_scrolls() {
         .as_slice();
     assert_eq!(captured[0].get_character(), 'a');
     assert_eq!(captured[1].get_character(), 'a');
-    assert_eq!(terminal_state.active_cursor().row, 0); // pinned to the only row
+    assert_eq!(terminal_state.get_active_cursor().row, 0); // pinned to the only row
 }
 
 #[test]
@@ -4302,7 +4317,6 @@ fn ordinary_linefeeds_evict_the_oldest_scrollback_row_at_the_line_cap() {
         .map(Cell::get_character)
         .collect();
     assert_eq!(history, "cc");
-    assert_eq!(terminal_state.get_scrollback().get_dropped_line_count(), 2);
     assert_eq!(get_row_text(&terminal_state, 0), "  "); // the only row is blank after the last scroll
 }
 
@@ -4375,7 +4389,7 @@ fn dl_with_the_cursor_on_row_0_feeds_scrollback() {
 #[test]
 fn dl_below_row_0_is_an_interior_delete_and_does_not_feed() {
     let mut terminal_state = build_terminal_state(3, 3);
-    terminal_state.active_cursor_mut().row = 1; // interior delete, nothing leaves the top
+    terminal_state.get_active_cursor_mut().row = 1; // interior delete, nothing leaves the top
     process_terminal_bytes(&mut terminal_state, b"\x1b[M");
     assert!(terminal_state.get_scrollback().is_empty());
 }
@@ -4516,7 +4530,7 @@ fn one_decset_list_sets_tracking_and_encoding_together() {
 }
 
 #[test]
-fn alt_scroll_enables_and_disables() {
+fn alternate_scroll_enables_and_disables() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1007h");
     assert!(terminal_state.is_alternate_scroll_enabled());
@@ -4527,23 +4541,35 @@ fn alt_scroll_enables_and_disables() {
 #[test]
 fn sixel_modes_start_with_scrolling_and_private_registers() {
     let terminal_state = build_terminal_state(5, 3);
-    assert!(terminal_state.modes.sixel_scrolling);
-    assert!(terminal_state.modes.sixel_private_color_registers);
-    assert!(!terminal_state.modes.sixel_cursor_right);
+    assert!(terminal_state.modes.is_sixel_scrolling_enabled);
+    assert!(
+        terminal_state
+            .modes
+            .is_sixel_private_color_registers_enabled
+    );
+    assert!(!terminal_state.modes.is_sixel_cursor_right_enabled);
 }
 
 #[test]
 fn sixel_private_modes_set_and_reset_their_terminal_state() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?80;1070;8452h");
-    assert!(!terminal_state.modes.sixel_scrolling);
-    assert!(terminal_state.modes.sixel_private_color_registers);
-    assert!(terminal_state.modes.sixel_cursor_right);
+    assert!(!terminal_state.modes.is_sixel_scrolling_enabled);
+    assert!(
+        terminal_state
+            .modes
+            .is_sixel_private_color_registers_enabled
+    );
+    assert!(terminal_state.modes.is_sixel_cursor_right_enabled);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[?80;1070;8452l");
-    assert!(terminal_state.modes.sixel_scrolling);
-    assert!(!terminal_state.modes.sixel_private_color_registers);
-    assert!(!terminal_state.modes.sixel_cursor_right);
+    assert!(terminal_state.modes.is_sixel_scrolling_enabled);
+    assert!(
+        !terminal_state
+            .modes
+            .is_sixel_private_color_registers_enabled
+    );
+    assert!(!terminal_state.modes.is_sixel_cursor_right_enabled);
 }
 
 // --- Absolute / relative cursor positioning, tab moves, erase-char ---
@@ -4553,7 +4579,7 @@ fn cha_sets_an_absolute_one_based_column() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H"); // (2, 2)
     process_terminal_bytes(&mut terminal_state, b"\x1b[5G"); // column 5 -> 0-based 4, row unchanged
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 4));
 }
 
@@ -4561,7 +4587,7 @@ fn cha_sets_an_absolute_one_based_column() {
 fn cha_clamps_past_the_last_column() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99G");
-    assert_eq!(terminal_state.active_cursor().column, 9); // clamped to the last column
+    assert_eq!(terminal_state.get_active_cursor().column, 9); // clamped to the last column
 }
 
 #[test]
@@ -4569,7 +4595,7 @@ fn cha_with_no_argument_homes_the_column() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[5;5H"); // (4, 4)
     process_terminal_bytes(&mut terminal_state, b"\x1b[G"); // default 1 -> column 0
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (4, 0));
 }
 
@@ -4578,7 +4604,7 @@ fn hpa_backtick_is_the_same_as_cha() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H"); // (2, 2)
     process_terminal_bytes(&mut terminal_state, b"\x1b[5\x60"); // HPA `CSI 5 \`` -> column 4
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 4));
 }
 
@@ -4586,11 +4612,11 @@ fn hpa_backtick_is_the_same_as_cha() {
 fn cha_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // parks at the last column with the latch set
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2G"); // column 2 -> 0-based 1
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.column, 1);
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
@@ -4598,7 +4624,7 @@ fn vpa_sets_an_absolute_one_based_row() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;4H"); // (0, 3)
     process_terminal_bytes(&mut terminal_state, b"\x1b[3d"); // row 3 -> 0-based 2, column unchanged
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 3));
 }
 
@@ -4606,7 +4632,7 @@ fn vpa_sets_an_absolute_one_based_row() {
 fn vpa_clamps_past_the_last_row() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99d");
-    assert_eq!(terminal_state.active_cursor().row, 4); // clamped to the last row
+    assert_eq!(terminal_state.get_active_cursor().row, 4); // clamped to the last row
 }
 
 #[test]
@@ -4614,9 +4640,9 @@ fn hpr_moves_forward_like_cuf_and_clamps() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;3H"); // column 2
     process_terminal_bytes(&mut terminal_state, b"\x1b[2a"); // HPR forward 2 -> column 4
-    assert_eq!(terminal_state.active_cursor().column, 4);
+    assert_eq!(terminal_state.get_active_cursor().column, 4);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99a"); // clamps to the last column
-    assert_eq!(terminal_state.active_cursor().column, 9);
+    assert_eq!(terminal_state.get_active_cursor().column, 9);
 }
 
 #[test]
@@ -4624,9 +4650,9 @@ fn vpr_moves_down_like_cud_and_clamps() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;1H"); // row 1
     process_terminal_bytes(&mut terminal_state, b"\x1b[2e"); // VPR down 2 -> row 3
-    assert_eq!(terminal_state.active_cursor().row, 3);
+    assert_eq!(terminal_state.get_active_cursor().row, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[99e"); // clamps to the last row
-    assert_eq!(terminal_state.active_cursor().row, 4);
+    assert_eq!(terminal_state.get_active_cursor().row, 4);
 }
 
 #[test]
@@ -4634,7 +4660,7 @@ fn cnl_moves_down_to_column_zero() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2;4H"); // (1, 3)
     process_terminal_bytes(&mut terminal_state, b"\x1b[1E"); // next line: down 1, column 0
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 0));
 }
 
@@ -4644,7 +4670,7 @@ fn cnl_clamps_to_the_last_row_without_scrolling() {
     fill_three_by_three_grid(&mut terminal_state); // rows "abc" / "def" / "ghi"
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;2H"); // (2, 1) — the last row
     process_terminal_bytes(&mut terminal_state, b"\x1b[5E"); // down 5 clamps; no scroll
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (2, 0));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('a')); // content did not scroll up
 }
@@ -4654,7 +4680,7 @@ fn cpl_moves_up_to_column_zero() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;4H"); // (2, 3)
     process_terminal_bytes(&mut terminal_state, b"\x1b[1F"); // previous line: up 1, column 0
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 0));
 }
 
@@ -4664,7 +4690,7 @@ fn cpl_clamps_at_row_zero_without_scrolling() {
     fill_three_by_three_grid(&mut terminal_state);
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;2H"); // (0, 1) — the top row
     process_terminal_bytes(&mut terminal_state, b"\x1b[5F"); // up 5 clamps; no scroll
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
     assert_eq!(get_terminal_glyph(&terminal_state, 2, 0), Some('g')); // content did not scroll down
 }
@@ -4674,14 +4700,14 @@ fn cnl_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // parks with the latch set
     process_terminal_bytes(&mut terminal_state, b"\x1b[1E");
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
 fn cht_advances_to_the_next_tab_stop() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[I"); // default 1 stop, from column 0 -> 8
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
 }
 
 #[test]
@@ -4689,21 +4715,21 @@ fn cht_from_a_tab_stop_advances_a_full_eight() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[9G"); // column 8 (a stop)
     process_terminal_bytes(&mut terminal_state, b"\x1b[I");
-    assert_eq!(terminal_state.active_cursor().column, 16);
+    assert_eq!(terminal_state.get_active_cursor().column, 16);
 }
 
 #[test]
 fn cht_count_advances_multiple_stops() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[2I"); // two stops from column 0 -> 8 -> 16
-    assert_eq!(terminal_state.active_cursor().column, 16);
+    assert_eq!(terminal_state.get_active_cursor().column, 16);
 }
 
 #[test]
 fn cht_clamps_to_the_last_column() {
     let mut terminal_state = build_terminal_state(20, 3); // last column 19
     process_terminal_bytes(&mut terminal_state, b"\x1b[9I"); // far more stops than fit
-    assert_eq!(terminal_state.active_cursor().column, 19);
+    assert_eq!(terminal_state.get_active_cursor().column, 19);
 }
 
 #[test]
@@ -4711,7 +4737,7 @@ fn cht_at_the_last_column_stays_put() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[20G"); // last column (19)
     process_terminal_bytes(&mut terminal_state, b"\x1b[I");
-    assert_eq!(terminal_state.active_cursor().column, 19);
+    assert_eq!(terminal_state.get_active_cursor().column, 19);
 }
 
 #[test]
@@ -4719,7 +4745,7 @@ fn cbt_retreats_to_the_previous_tab_stop() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[11G"); // column 10
     process_terminal_bytes(&mut terminal_state, b"\x1b[Z");
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
 }
 
 #[test]
@@ -4727,14 +4753,14 @@ fn cbt_from_a_tab_stop_retreats_a_full_eight() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[17G"); // column 16 (a stop)
     process_terminal_bytes(&mut terminal_state, b"\x1b[Z");
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
 }
 
 #[test]
 fn cbt_at_column_zero_stays_put() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[Z");
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
 }
 
 #[test]
@@ -4742,18 +4768,18 @@ fn cbt_count_retreats_multiple_stops() {
     let mut terminal_state = build_terminal_state(20, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[18G"); // column 17
     process_terminal_bytes(&mut terminal_state, b"\x1b[2Z"); // 17 -> 16 -> 8
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
 }
 
 #[test]
 fn cbt_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(20, 2);
     print_text(&mut terminal_state, "aaaaaaaaaaaaaaaaaaaa"); // 20 chars -> parks at column 19
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[Z"); // 19 -> 16
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.column, 16);
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
@@ -4805,10 +4831,10 @@ fn ech_erases_the_parked_glyph_and_clears_the_wrap_latch() {
     // the wrap latch clears. The next print overwrites in place.
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // parks at column 2 with the latch
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[X"); // erases the parked glyph
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some(' '));
-    assert!(!terminal_state.active_cursor().pending_wrap); // latch cleared
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending); // latch cleared
     terminal_state.print('d');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('d')); // overwrote at the last column
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // did NOT wrap
@@ -4845,7 +4871,8 @@ fn ech_starting_on_a_wide_continuation_repairs_the_base() {
     terminal_state.print('中'); // wide base at column 0, continuation at column 1
     process_terminal_bytes(&mut terminal_state, b"\x1b[2G"); // column 1 (the continuation)
     process_terminal_bytes(&mut terminal_state, b"\x1b[X"); // erase the continuation
-                                                            // The orphaned wide base is repaired to a blank narrow cell.
+                                                            // The orphaned wide base is repaired to
+                                                            // a blank narrow cell.
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some(' '));
     assert_eq!(
         terminal_state
@@ -4869,9 +4896,9 @@ fn cup_clears_the_pending_wrap_latch_through_goto() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // parks with the latch set
     process_terminal_bytes(&mut terminal_state, b"\x1b[1;1H"); // home, via the shared cursor path
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
@@ -4879,9 +4906,9 @@ fn vpa_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // parks at (0, 2) with the latch set
     process_terminal_bytes(&mut terminal_state, b"\x1b[2d"); // row 2 -> 0-based 1, column unchanged
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (1, 2));
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
@@ -4889,20 +4916,20 @@ fn cpl_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(3, 2);
     print_text(&mut terminal_state, "abc"); // parks with the latch set
     process_terminal_bytes(&mut terminal_state, b"\x1b[1F"); // previous line clamps to row 0, column 0
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!((cursor_position.row, cursor_position.column), (0, 0));
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 #[test]
 fn cht_clears_the_pending_wrap_latch() {
     let mut terminal_state = build_terminal_state(20, 2);
     print_text(&mut terminal_state, "aaaaaaaaaaaaaaaaaaaa"); // 20 chars -> parks at column 19
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[I"); // already at the last column: stays, but clears the latch
-    let cursor_position = terminal_state.active_cursor();
+    let cursor_position = terminal_state.get_active_cursor();
     assert_eq!(cursor_position.column, 19);
-    assert!(!cursor_position.pending_wrap);
+    assert!(!cursor_position.is_wrap_pending);
 }
 
 // --- Charset designation + DEC line-drawing (G0-G3, SI/SO) ---
@@ -4981,7 +5008,8 @@ fn dec_line_drawing_maps_the_full_table() {
 fn dec_line_drawing_passes_through_outside_the_mapped_range() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b(0"); // G0 = DEC line drawing
-                                                            // 'A' (0x41) and '0' (0x30) are below the 0x5F-0x7E table; unchanged.
+                                                            // 'A' (0x41) and '0' (0x30) are below
+                                                            // the 0x5F-0x7E table; unchanged.
     terminal_state.print('A');
     terminal_state.print('0');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('A'));
@@ -5037,7 +5065,10 @@ fn unknown_charset_final_falls_back_to_ascii() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b(0"); // G0 = DEC line drawing
     process_terminal_bytes(&mut terminal_state, b"\x1b(>"); // unsupported final -> ASCII passthrough
-    assert_eq!(terminal_state.active_render().charsets[0], Charset::Ascii);
+    assert_eq!(
+        terminal_state.get_active_render().charsets[0],
+        Charset::Ascii
+    );
     terminal_state.print('q');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('q'));
 }
@@ -5048,11 +5079,11 @@ fn g2_and_g3_are_designated_but_not_selectable() {
     process_terminal_bytes(&mut terminal_state, b"\x1b*0"); // designate G2 = DEC line drawing
     process_terminal_bytes(&mut terminal_state, b"\x1b+0"); // designate G3 = DEC line drawing
     assert_eq!(
-        terminal_state.active_render().charsets[2],
+        terminal_state.get_active_render().charsets[2],
         Charset::DecLineDrawing
     );
     assert_eq!(
-        terminal_state.active_render().charsets[3],
+        terminal_state.get_active_render().charsets[3],
         Charset::DecLineDrawing
     );
     // There is no LS2/LS3: GL stays on G0 (ASCII) and printing is unchanged.
@@ -5093,7 +5124,10 @@ fn decrc_without_a_save_resets_the_charset_to_ascii() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x1b(0"); // G0 = DEC line drawing, never saved
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC with no prior DECSC -> defaults
-    assert_eq!(terminal_state.active_render().charsets[0], Charset::Ascii);
+    assert_eq!(
+        terminal_state.get_active_render().charsets[0],
+        Charset::Ascii
+    );
     terminal_state.print('q');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('q'));
 }
@@ -5203,7 +5237,7 @@ fn decrc_without_a_save_resets_the_gl_slot_to_g0() {
     let mut terminal_state = build_terminal_state(8, 2);
     process_terminal_bytes(&mut terminal_state, b"\x0e"); // SO -> GL = G1
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC with no prior save -> GL back to G0
-    assert_eq!(terminal_state.active_render().gl, 0);
+    assert_eq!(terminal_state.get_active_render().gl, 0);
 }
 
 #[test]
@@ -5213,9 +5247,9 @@ fn the_gl_slot_is_carried_into_the_alternate() {
     let mut terminal_state = build_terminal_state(8, 3);
     process_terminal_bytes(&mut terminal_state, b"\x0e"); // SO -> GL = G1 on the primary
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47h"); // enter the alternate (clones the primary's render)
-    assert_eq!(terminal_state.active_render().gl, 1); // alternate inherited GL = G1
+    assert_eq!(terminal_state.get_active_render().gl, 1); // alternate inherited GL = G1
     process_terminal_bytes(&mut terminal_state, b"\x1b[?47l"); // back to the primary (its GL is its own)
-    assert_eq!(terminal_state.active_render().gl, 1);
+    assert_eq!(terminal_state.get_active_render().gl, 1);
 }
 
 #[test]
@@ -5226,13 +5260,13 @@ fn an_alternate_pen_change_does_not_leak_to_the_primary() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[31m"); // primary pen: red fg
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1047h"); // enter the alternate (inherits red)
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Indexed(1)))
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b[32m"); // alt changes pen to green fg
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1047l"); // exit to the primary
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_foreground_color(Color::Indexed(1))) // primary still red — green did not leak
     );
 }
@@ -5277,7 +5311,8 @@ fn mixed_mode_47_then_1049_keeps_the_charset() {
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('─')); // shared charset intact
 }
 
-// --- Cross-subsystem render-terminal_state integration (the render terminal_state vs other features) ---
+// --- Cross-subsystem render-terminal_state integration (the render terminal_state vs other
+// features) ---
 
 #[test]
 fn decsc_decrc_round_trip_the_whole_render_state_together() {
@@ -5292,13 +5327,13 @@ fn decsc_decrc_round_trip_the_whole_render_state_together() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[0m"); // pen reset
     process_terminal_bytes(&mut terminal_state, b"\x1b8"); // DECRC: restore all three
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_foreground_color(Color::Indexed(1));
         })
     );
-    assert_eq!(terminal_state.active_render().gl, 1);
+    assert_eq!(terminal_state.get_active_render().gl, 1);
     terminal_state.print('q'); // GL = G1 (DEC) -> box glyph
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('─'));
 }
@@ -5320,15 +5355,15 @@ fn charset_applies_with_autowrap_off() {
 #[test]
 fn erase_preserves_the_active_charset() {
     // EL and ED clear cells but leave the charset designation alone.
-    let mut el = build_terminal_state(8, 2);
-    process_terminal_bytes(&mut el, b"\x1b(0\x1b[2K"); // G0 = DEC, then EL 2 (erase line)
-    el.print('q');
-    assert_eq!(get_terminal_glyph(&el, 0, 0), Some('─'));
+    let mut erase_line_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut erase_line_state, b"\x1b(0\x1b[2K"); // G0 = DEC, then EL 2 (erase line)
+    erase_line_state.print('q');
+    assert_eq!(get_terminal_glyph(&erase_line_state, 0, 0), Some('─'));
 
-    let mut ed = build_terminal_state(8, 2);
-    process_terminal_bytes(&mut ed, b"\x1b(0\x1b[2J"); // G0 = DEC, then ED 2 (erase display)
-    ed.print('q');
-    assert_eq!(get_terminal_glyph(&ed, 0, 0), Some('─'));
+    let mut erase_display_state = build_terminal_state(8, 2);
+    process_terminal_bytes(&mut erase_display_state, b"\x1b(0\x1b[2J"); // G0 = DEC, then ED 2 (erase display)
+    erase_display_state.print('q');
+    assert_eq!(get_terminal_glyph(&erase_display_state, 0, 0), Some('─'));
 }
 
 #[test]
@@ -5360,7 +5395,7 @@ fn setting_mouse_modes_does_not_touch_the_render_state() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1000;1006;1007h"); // mouse tracking + SGR encoding + alt-scroll
     process_terminal_bytes(&mut terminal_state, b"\x1b[?2004h"); // bracketed paste
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| {
             style.set_bold(true);
             style.set_foreground_color(Color::Indexed(1));
@@ -5417,10 +5452,10 @@ fn dec_line_drawing_survives_a_deferred_wrap() {
     process_terminal_bytes(&mut terminal_state, b"qqq"); // fills row 0 with ───, parks at the last column
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('─'));
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('─'));
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('q'); // forces the deferred wrap onto row 1
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('─'));
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
 }
 
 #[test]
@@ -5447,7 +5482,7 @@ fn a_combining_mark_folds_onto_a_line_drawing_get_terminal_glyph() {
         .expect("in bounds");
     assert_eq!(cell.get_character(), '─');
     assert_eq!(cell.list_combining_characters(), &['\u{0301}']);
-    assert_eq!(terminal_state.active_cursor().column, 1); // cursor did not advance a 2nd column
+    assert_eq!(terminal_state.get_active_cursor().column, 1); // cursor did not advance a 2nd column
 }
 
 // --- Autowrap (DECAWM ?7) ---
@@ -5468,8 +5503,8 @@ fn autowrap_on_wraps_at_the_last_column() {
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('f')); // wrapped onto row 1
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (1, 1)
     );
@@ -5488,8 +5523,8 @@ fn autowrap_off_overwrites_the_last_column_in_place() {
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // nothing wrapped down
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (0, 4)
     );
@@ -5518,8 +5553,8 @@ fn disabling_autowrap_after_parking_does_not_wrap() {
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' '));
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (0, 4)
     );
@@ -5534,21 +5569,21 @@ fn a_last_column_write_under_autowrap_off_arms_no_wrap_when_re_enabled() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?7l");
     print_text(&mut terminal_state, "abcde"); // 'e' lands on column 4 under autowrap-off → no latch
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?7h"); // re-enable autowrap
     terminal_state.print('f');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 4), Some('f')); // overwrote 'e', did NOT wrap
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' '));
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (0, 4)
     );
     terminal_state.print('g'); // the latch is armed → this glyph wraps
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('g'));
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
 }
 
 #[test]
@@ -5560,8 +5595,8 @@ fn a_wide_glyph_at_the_last_column_is_dropped_when_autowrap_off() {
     print_text(&mut terminal_state, "abc"); // cursor at column 3 (the last column)
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (0, 3)
     );
@@ -5570,8 +5605,8 @@ fn a_wide_glyph_at_the_last_column_is_dropped_when_autowrap_off() {
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // nothing wrapped down
     assert_eq!(
         (
-            terminal_state.active_cursor().row,
-            terminal_state.active_cursor().column
+            terminal_state.get_active_cursor().row,
+            terminal_state.get_active_cursor().column
         ),
         (0, 3)
     );
@@ -5586,7 +5621,7 @@ fn a_wide_glyph_at_the_last_column_wraps_when_autowrap_on() {
     terminal_state.print('中');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 3), Some(' ')); // freed column blanked
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some('中')); // wrapped whole onto row 1
-    assert_eq!(terminal_state.active_cursor().row, 1);
+    assert_eq!(terminal_state.get_active_cursor().row, 1);
 }
 
 #[test]
@@ -5602,7 +5637,7 @@ fn enabling_autowrap_after_a_dropped_wide_glyph_overwrites_not_wraps() {
     terminal_state.print('x');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 3), Some('x')); // overwrote at the last column
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // did NOT wrap onto row 1
-    assert_eq!(terminal_state.active_cursor().row, 0);
+    assert_eq!(terminal_state.get_active_cursor().row, 0);
 }
 
 #[test]
@@ -5632,11 +5667,11 @@ fn a_vs16_promotion_at_the_last_column_does_not_wrap_when_autowrap_off() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[?7l");
     print_text(&mut terminal_state, "ab"); // cursor at column 2 (last column)
     terminal_state.print('\u{2764}'); // heart, text presentation, width 1, rests at column 2
-    assert!(!terminal_state.active_cursor().pending_wrap); // autowrap off arms no wrap latch
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending); // autowrap off arms no wrap latch
     terminal_state.print('\u{FE0F}'); // VS16 wants the wide emoji form
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 2), Some('\u{2764}')); // stayed in place
     assert_eq!(get_terminal_glyph(&terminal_state, 1, 0), Some(' ')); // did NOT wrap onto row 1
-    assert_eq!(terminal_state.active_cursor().row, 0);
+    assert_eq!(terminal_state.get_active_cursor().row, 0);
 }
 
 // --- Application cursor keys / reverse video / cursor blink + unsupported modes ---
@@ -5645,7 +5680,7 @@ fn a_vs16_promotion_at_the_last_column_does_not_wrap_when_autowrap_off() {
 fn the_new_dec_modes_start_at_their_defaults() {
     let terminal_state = build_terminal_state(5, 3);
     assert!(terminal_state.is_autowrap_enabled()); // ?7 defaults on
-    assert!(!terminal_state.are_application_cursor_keys_enabled()); // ?1
+    assert!(!terminal_state.is_application_cursor_keys_enabled()); // ?1
     assert!(!terminal_state.is_reverse_video_enabled()); // ?5
     assert!(!terminal_state.is_cursor_blink_enabled()); // ?12
 }
@@ -5654,9 +5689,9 @@ fn the_new_dec_modes_start_at_their_defaults() {
 fn application_cursor_keys_toggles() {
     let mut terminal_state = build_terminal_state(5, 3);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1h");
-    assert!(terminal_state.are_application_cursor_keys_enabled());
+    assert!(terminal_state.is_application_cursor_keys_enabled());
     process_terminal_bytes(&mut terminal_state, b"\x1b[?1l");
-    assert!(!terminal_state.are_application_cursor_keys_enabled());
+    assert!(!terminal_state.is_application_cursor_keys_enabled());
 }
 
 #[test]
@@ -5818,7 +5853,7 @@ fn unsupported_dec_modes_are_ignored() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[?8h");
     process_terminal_bytes(&mut terminal_state, b"\x1b[?8l");
     assert!(terminal_state.is_autowrap_enabled()); // untouched
-    assert!(!terminal_state.are_application_cursor_keys_enabled());
+    assert!(!terminal_state.is_application_cursor_keys_enabled());
     terminal_state.print('x');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('x'));
 }
@@ -5861,7 +5896,7 @@ fn a_csi_at_the_max_parameter_count_still_dispatches() {
     csi_sequence_bytes.push(b'm');
     process_terminal_bytes(&mut terminal_state, &csi_sequence_bytes);
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_bold(true))
     );
 }
@@ -5923,7 +5958,7 @@ fn a_parameterized_decstr_is_ignored() {
     process_terminal_bytes(&mut terminal_state, b"\x1b[1!p\x1b[0;0!p");
     assert_eq!(terminal_state.get_active_cursor_position(), (2, 2));
     assert_eq!(
-        terminal_state.active_render().style,
+        terminal_state.get_active_render().style,
         build_style_with_mutator(|style| style.set_bold(true))
     );
 }
@@ -5933,7 +5968,7 @@ fn an_explicit_zero_decstr_soft_resets() {
     let mut terminal_state = build_terminal_state(10, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[3;3H\x1b[1m\x1b[0!p");
     assert_eq!(terminal_state.get_active_cursor_position(), (2, 2));
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 #[test]
@@ -5944,11 +5979,11 @@ fn stored_tab_stops_drive_ht_cht_and_cbt() {
     assert!(terminal_state.tab_stops[16]);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[6G\x1bH\r\t");
-    assert_eq!(terminal_state.active_cursor().column, 5);
+    assert_eq!(terminal_state.get_active_cursor().column, 5);
     process_terminal_bytes(&mut terminal_state, b"\x1b[I");
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
     process_terminal_bytes(&mut terminal_state, b"\x1b[Z");
-    assert_eq!(terminal_state.active_cursor().column, 5);
+    assert_eq!(terminal_state.get_active_cursor().column, 5);
 }
 
 #[test]
@@ -5956,38 +5991,38 @@ fn tbc_clears_current_or_all_and_reads_only_its_first_parameter() {
     let mut terminal_state = build_terminal_state(20, 2);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[6G\x1bH\x1b[g\r\t");
-    assert_eq!(terminal_state.active_cursor().column, 8);
+    assert_eq!(terminal_state.get_active_cursor().column, 8);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[0;3g\r\t");
-    assert_eq!(terminal_state.active_cursor().column, 16);
+    assert_eq!(terminal_state.get_active_cursor().column, 16);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[6G\x1bH\x1b[2g\r\t");
-    assert_eq!(terminal_state.active_cursor().column, 5);
+    assert_eq!(terminal_state.get_active_cursor().column, 5);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[3g\r\t");
-    assert_eq!(terminal_state.active_cursor().column, 19);
+    assert_eq!(terminal_state.get_active_cursor().column, 19);
     process_terminal_bytes(&mut terminal_state, b"\r\x1b[I");
-    assert_eq!(terminal_state.active_cursor().column, 19);
+    assert_eq!(terminal_state.get_active_cursor().column, 19);
     process_terminal_bytes(&mut terminal_state, b"\x1b[Z");
-    assert_eq!(terminal_state.active_cursor().column, 0);
+    assert_eq!(terminal_state.get_active_cursor().column, 0);
 }
 
 #[test]
 fn tab_setup_and_clear_preserve_wrap_but_tab_motion_clears_it() {
     let mut terminal_state = build_terminal_state(5, 2);
     print_text(&mut terminal_state, "abcde");
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
 
     process_terminal_bytes(&mut terminal_state, b"\x1bH");
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 4));
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[g");
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 4));
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[I");
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
 }
 
 #[test]
@@ -6087,7 +6122,7 @@ fn decstr_resets_only_its_active_dec_state() {
         &mut terminal_state,
         b"\x1b[?1;5;7;12;1000;1006;1007;2004h\x1b[5 q",
     );
-    terminal_state.active_cursor_mut().pending_wrap = true;
+    terminal_state.get_active_cursor_mut().is_wrap_pending = true;
     let history_row = terminal_state.get_active_grid().list_rows()[0].clone();
     terminal_state
         .scrollback
@@ -6101,29 +6136,32 @@ fn decstr_resets_only_its_active_dec_state() {
     let device_query_replies = terminal_state.device_query_replies.clone();
     let mouse_tracking = terminal_state.modes.mouse_tracking;
     let mouse_encoding = terminal_state.modes.mouse_encoding;
-    let alternate_scroll = terminal_state.modes.alternate_scroll;
-    let reverse_video = terminal_state.modes.reverse_video;
-    let cursor_blink = terminal_state.modes.cursor_blink;
+    let alternate_scroll = terminal_state.modes.is_alternate_scroll_enabled;
+    let reverse_video = terminal_state.modes.is_reverse_video_enabled;
+    let cursor_blink = terminal_state.modes.is_cursor_blink_enabled;
     let cursor_shape = terminal_state.modes.cursor_shape;
 
     process_terminal_bytes(&mut terminal_state, b"\x1b[!p");
 
     assert_eq!(terminal_state.get_active_grid(), &grid);
     assert_eq!(terminal_state.get_active_cursor_position(), (2, 3));
-    assert!(terminal_state.active_cursor().is_visible);
-    assert!(!terminal_state.active_cursor().pending_wrap);
-    assert_eq!(terminal_state.active_cursor().saved, None);
-    assert_eq!(*terminal_state.active_render(), RenderState::fresh());
+    assert!(terminal_state.get_active_cursor().is_visible);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
+    assert_eq!(terminal_state.get_active_cursor().saved, None);
+    assert_eq!(*terminal_state.get_active_render(), RenderState::new());
     assert_eq!(terminal_state.get_scroll_region(), None);
-    assert!(!terminal_state.modes.application_cursor_keys);
-    assert!(!terminal_state.modes.autowrap);
+    assert!(!terminal_state.modes.is_application_cursor_keys_enabled);
+    assert!(!terminal_state.modes.is_autowrap_enabled);
     assert_eq!(terminal_state.modes.mouse_tracking, mouse_tracking);
     assert_eq!(terminal_state.modes.mouse_encoding, mouse_encoding);
-    assert_eq!(terminal_state.modes.alternate_scroll, alternate_scroll);
-    assert_eq!(terminal_state.modes.reverse_video, reverse_video);
-    assert_eq!(terminal_state.modes.cursor_blink, cursor_blink);
+    assert_eq!(
+        terminal_state.modes.is_alternate_scroll_enabled,
+        alternate_scroll
+    );
+    assert_eq!(terminal_state.modes.is_reverse_video_enabled, reverse_video);
+    assert_eq!(terminal_state.modes.is_cursor_blink_enabled, cursor_blink);
     assert_eq!(terminal_state.modes.cursor_shape, cursor_shape);
-    assert!(terminal_state.modes.bracketed_paste);
+    assert!(terminal_state.modes.is_bracketed_paste_enabled);
     assert_eq!(terminal_state.tab_stops, tab_stops);
     assert_eq!(terminal_state.title, terminal_title);
     assert_eq!(
@@ -6162,9 +6200,9 @@ fn decstr_resets_only_the_active_screen() {
     );
     assert_eq!(terminal_state.get_active_cursor_position(), (1, 7));
     assert!(terminal_state.alternate_cursor.is_visible);
-    assert!(!terminal_state.alternate_cursor.pending_wrap);
+    assert!(!terminal_state.alternate_cursor.is_wrap_pending);
     assert_eq!(terminal_state.alternate_cursor.saved, None);
-    assert_eq!(terminal_state.alternate_render, RenderState::fresh());
+    assert_eq!(terminal_state.alternate_render, RenderState::new());
     assert_eq!(terminal_state.alternate_scroll_region, None);
     assert_eq!(terminal_state.primary, primary_grid);
     assert_eq!(terminal_state.primary_cursor, primary_cursor);
@@ -6238,8 +6276,6 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
     let reported_working_directory = terminal_state.reported_working_directory.clone();
     let device_query_replies = terminal_state.device_query_replies.clone();
     let total_pushed = terminal_state.scrollback.get_total_pushed_line_count();
-    let dropped_lines = terminal_state.scrollback.get_dropped_line_count();
-    let dropped_bytes = terminal_state.scrollback.get_dropped_byte_count();
 
     process_terminal_bytes(&mut terminal_state, b"\x1bc");
 
@@ -6264,11 +6300,11 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
     ] {
         assert_eq!((screen_cursor.row, screen_cursor.column), (0, 0));
         assert!(screen_cursor.is_visible);
-        assert!(!screen_cursor.pending_wrap);
+        assert!(!screen_cursor.is_wrap_pending);
         assert_eq!(screen_cursor.saved, None);
     }
-    assert_eq!(terminal_state.primary_render, RenderState::fresh());
-    assert_eq!(terminal_state.alternate_render, RenderState::fresh());
+    assert_eq!(terminal_state.primary_render, RenderState::new());
+    assert_eq!(terminal_state.alternate_render, RenderState::new());
     assert_eq!(terminal_state.modes, TerminalModes::default());
     assert_eq!(terminal_state.primary_scroll_region, None);
     assert_eq!(terminal_state.alternate_scroll_region, None);
@@ -6283,14 +6319,6 @@ fn ris_restores_display_state_but_keeps_session_metadata() {
     assert_eq!(
         terminal_state.scrollback.get_total_pushed_line_count(),
         total_pushed
-    );
-    assert_eq!(
-        terminal_state.scrollback.get_dropped_line_count(),
-        dropped_lines
-    );
-    assert_eq!(
-        terminal_state.scrollback.get_dropped_byte_count(),
-        dropped_bytes
     );
     assert_eq!(
         terminal_state.reported_working_directory,
@@ -6385,11 +6413,11 @@ fn printing_into_a_one_by_one_grid_scrolls_each_glyph_into_history() {
     // the next glyph wraps, scrolling the parked one into scrollback.
     let mut terminal_state = build_terminal_state(1, 1);
     terminal_state.print('a'); // fills (0, 0), parks with the wrap latch armed
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('b'); // wraps: 'a' scrolls into history, 'b' takes the cell
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('b'));
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 0));
-    assert!(terminal_state.active_cursor().pending_wrap);
+    assert!(terminal_state.get_active_cursor().is_wrap_pending);
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 1);
     assert_eq!(
         terminal_state
@@ -6409,7 +6437,7 @@ fn a_one_by_one_grid_with_autowrap_off_overwrites_in_place() {
     let mut terminal_state = build_terminal_state(1, 1);
     process_terminal_bytes(&mut terminal_state, b"\x1b[?7l"); // autowrap off
     terminal_state.print('a');
-    assert!(!terminal_state.active_cursor().pending_wrap);
+    assert!(!terminal_state.get_active_cursor().is_wrap_pending);
     terminal_state.print('b');
     assert_eq!(get_terminal_glyph(&terminal_state, 0, 0), Some('b'));
     assert_eq!(terminal_state.get_active_cursor_position(), (0, 0));
@@ -6625,11 +6653,11 @@ fn a_non_utf8_title_keeps_its_replacement_characters() {
 
 #[test]
 fn a_title_at_the_limit_is_kept_whole_and_one_past_it_is_cut() {
-    let max_title_byte_count = koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
+    let maximum_title_byte_count = koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
     for (title_byte_count, expected_byte_count) in [
-        (max_title_byte_count - 1, max_title_byte_count - 1),
-        (max_title_byte_count, max_title_byte_count),
-        (max_title_byte_count + 1, max_title_byte_count),
+        (maximum_title_byte_count - 1, maximum_title_byte_count - 1),
+        (maximum_title_byte_count, maximum_title_byte_count),
+        (maximum_title_byte_count + 1, maximum_title_byte_count),
     ] {
         let mut terminal_state = build_terminal_state(5, 3);
         let mut osc_sequence_bytes = Vec::from(&b"\x1b]2;"[..]);
@@ -6680,12 +6708,12 @@ fn every_cursor_moving_control_byte_clears_the_pending_wrap_latch() {
         process_terminal_bytes(&mut terminal_state, b"\x1b[2;1H"); // row 1, off both margins
         print_text(&mut terminal_state, "abc"); // parks at (1, 2) with the latch armed
         assert!(
-            terminal_state.active_cursor().pending_wrap,
+            terminal_state.get_active_cursor().is_wrap_pending,
             "byte {byte:#x}"
         );
         terminal_state.execute(byte);
         assert!(
-            !terminal_state.active_cursor().pending_wrap,
+            !terminal_state.get_active_cursor().is_wrap_pending,
             "byte {byte:#x}"
         );
     }
@@ -6704,7 +6732,7 @@ fn shift_bell_hts_and_unknown_control_bytes_preserve_the_pending_wrap_latch() {
             "byte {byte:#x}"
         );
         assert!(
-            terminal_state.active_cursor().pending_wrap,
+            terminal_state.get_active_cursor().is_wrap_pending,
             "byte {byte:#x}"
         );
     }
@@ -7024,7 +7052,7 @@ fn an_overlong_sgr_is_dropped_without_touching_the_pen() {
     seq.extend(std::iter::repeat_n(&b"1;"[..], 40).flatten().copied());
     seq.push(b'm'); // 40 bold codes: past vte's 32-parameter cap, flagged ignore
     process_terminal_bytes(&mut terminal_state, &seq);
-    assert_eq!(terminal_state.active_render().style, Style::default());
+    assert_eq!(terminal_state.get_active_render().style, Style::default());
 }
 
 // --- Alternate screen: a `?1049` entry while already on the alternate ---

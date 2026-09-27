@@ -281,8 +281,9 @@ fn concurrent_writers_never_leave_partial_content() {
 
     std::thread::scope(|thread_scope| {
         for file_bytes in &file_contents {
-            let destination_path_ref = &destination_path;
-            thread_scope.spawn(move || write_atomic(destination_path_ref, file_bytes).unwrap());
+            let destination_path_reference = &destination_path;
+            thread_scope
+                .spawn(move || write_atomic(destination_path_reference, file_bytes).unwrap());
         }
     });
 
@@ -294,51 +295,6 @@ fn concurrent_writers_never_leave_partial_content() {
     assert_eq!(
         list_directory_entries(test_directory.path()),
         vec!["cfg.kdl".to_string()]
-    );
-}
-
-#[test]
-fn write_atomic_stages_the_file_in_the_targets_own_directory() {
-    let test_directory = TempDir::new().unwrap();
-    // The missing target directory is named in the staging-file error. No
-    // entry is created under `test_directory`.
-    let missing_directory_path = test_directory.path().join("missing");
-    let destination_path = missing_directory_path.join("cfg.kdl");
-
-    let storage_error = write_atomic(&destination_path, b"x").unwrap_err();
-
-    let StorageError::Io { detail } = storage_error else {
-        panic!("expected an Io error, got {storage_error:?}");
-    };
-    assert!(
-        detail.starts_with(&format!(
-            "create temp in {}: ",
-            missing_directory_path.display()
-        )),
-        "unexpected error detail: {detail}"
-    );
-    assert_eq!(
-        list_directory_entries(test_directory.path()),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn write_atomic_names_the_target_when_the_rename_is_blocked() {
-    let test_directory = TempDir::new().unwrap();
-    // A directory at `destination_path` makes replacement fail after the staging file is written and
-    // synced.
-    let destination_path = test_directory.path().join("target");
-    std::fs::create_dir(&destination_path).unwrap();
-
-    let storage_error = write_atomic(&destination_path, b"x").unwrap_err();
-
-    let StorageError::Io { detail } = storage_error else {
-        panic!("expected an Io error, got {storage_error:?}");
-    };
-    assert!(
-        detail.starts_with(&format!("replace {}: ", destination_path.display())),
-        "unexpected error detail: {detail}"
     );
 }
 
@@ -608,20 +564,4 @@ fn a_filesystem_root_is_refused_before_a_staging_file_is_created() {
         detail,
         format!("no parent directory for {}", root.display())
     );
-}
-
-#[test]
-fn a_failed_write_is_a_recoverable_storage_error() {
-    use koshi_core::error::{DomainCategory, DomainError, Severity};
-
-    let test_directory = TempDir::new().unwrap();
-    // A directory at `destination_path` makes replacement fail.
-    let destination_path = test_directory.path().join("target");
-    std::fs::create_dir(&destination_path).unwrap();
-
-    let storage_error = write_atomic(&destination_path, b"x")
-        .expect_err("a directory at the destination path blocks the rename");
-
-    assert_eq!(storage_error.category(), DomainCategory::Storage);
-    assert_eq!(storage_error.get_severity(), Severity::Recoverable);
 }

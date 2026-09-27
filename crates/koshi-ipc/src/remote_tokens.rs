@@ -14,12 +14,11 @@
 //! session. Every other case is refused.
 //!
 //! The whole set lives in one JSON file —
-//! [`resolve_token_store_path`](crate::remote_tokens::resolve_token_store_path) — inside the private
-//! koshi data directory. The file carries the format number
-//! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT), and a
-//! file carrying any other number is refused. Writes go through
-//! [`koshi_storage::atomic::write_atomic`]: a reader finds the old content
-//! or the new, never a half-written middle.
+//! [`resolve_token_store_path`](crate::remote_tokens::resolve_token_store_path) — inside the
+//! private koshi data directory. The file carries the format number
+//! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT), and a file carrying any other
+//! number is refused. Writes go through [`koshi_storage::atomic::write_atomic`]: a reader finds the
+//! old content or the new, never a half-written middle.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -57,7 +56,7 @@ pub enum TokenScope {
 }
 
 impl TokenScope {
-    /// Whether this scope reaches `session`.
+    /// Whether this scope reaches `session_id`.
     #[must_use]
     pub fn is_allowed_for_session(&self, session_id: SessionId) -> bool {
         match self {
@@ -94,10 +93,10 @@ pub struct TokenRecord {
 }
 
 /// Whether a grant stamped `revoked_at` and `expires_at` still stands at
-/// `now`: nobody revoked it, and it either never expires or expires after
-/// `now`.
+/// `current_time`: nobody revoked it, and it either never expires or expires after
+/// `current_time`.
 ///
-/// Example — `revoked_at` `None` with `expires_at` one second before `now`
+/// Example — `revoked_at` `None` with `expires_at` one second before `current_time`
 /// gives `false`.
 fn is_token_active_at(
     revoked_at: Option<SystemTime>,
@@ -108,8 +107,8 @@ fn is_token_active_at(
 }
 
 impl TokenRecord {
-    /// Whether this record still stands at `now`: nobody revoked it, and it
-    /// either never expires or expires after `now`.
+    /// Whether this record still stands at `current_time`: nobody revoked it, and it
+    /// either never expires or expires after `current_time`.
     fn is_active_at(&self, current_time: SystemTime) -> bool {
         is_token_active_at(self.revoked_at, self.expires_at, current_time)
     }
@@ -152,22 +151,12 @@ pub struct TokenEntry {
 }
 
 impl TokenEntry {
-    /// Whether this grant still stands at `now`: nobody revoked it, and it
-    /// either never expires or expires after `now`.
+    /// Whether this grant still stands at `current_time`: nobody revoked it, and it
+    /// either never expires or expires after `current_time`.
     #[must_use]
     pub fn is_active_at(&self, current_time: SystemTime) -> bool {
         is_token_active_at(self.revoked_at, self.expires_at, current_time)
     }
-}
-
-/// What a presented secret reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Resolution {
-    /// A live record holds that secret's hash and its scope covers the
-    /// session asked for.
-    Admitted,
-    /// Everything else.
-    Refused,
 }
 
 /// Every grant this machine has made.
@@ -216,13 +205,13 @@ impl TokenStore {
         };
         let token_store_bytes = match std::fs::read(token_store_path) {
             Ok(token_store_bytes) => token_store_bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(TokenStore::new())
             }
-            Err(error) => return Err(build_refusal(error.to_string())),
+            Err(io_error) => return Err(build_refusal(io_error.to_string())),
         };
         let token_store: TokenStore = serde_json::from_slice(&token_store_bytes)
-            .map_err(|error| build_refusal(error.to_string()))?;
+            .map_err(|parse_error| build_refusal(parse_error.to_string()))?;
         if let Some(format_error) =
             find_format_mismatch(token_store.store_format, TOKEN_STORE_FORMAT)
         {
@@ -309,74 +298,16 @@ impl TokenStore {
         revoked_scopes
     }
 
-    /// Where in `token_records` the last record sits that holds the hash `presented`,
-    /// still stands at `now`, and whose scope `reaches` accepts. `None` when no
-    /// record does.
+    /// What `connection_token` reaches at `current_time`.
     ///
-    /// Every record is walked, in order, and each hash compared through its
-    /// last byte; a hash whose length differs from `presented` is unequal at
-    /// once, with no byte compared. The walk runs to the end and reads no
-    /// record out of a map.
-    fn find_last_matching_token_record_index(
-        &self,
-        presented_token_hash: &str,
-        current_time: SystemTime,
-        is_scope_allowed_for_session: impl Fn(&TokenScope) -> bool,
-    ) -> Option<usize> {
-        let mut matching_token_record_index = None;
-        for (token_record_index, token_record) in self.token_records.iter().enumerate() {
-            let is_token_hash_matching: bool = token_record
-                .token_hash
-                .as_bytes()
-                .ct_eq(presented_token_hash.as_bytes())
-                .into();
-            if is_token_hash_matching
-                && token_record.is_active_at(current_time)
-                && is_scope_allowed_for_session(&token_record.scope)
-            {
-                matching_token_record_index = Some(token_record_index);
-            }
-        }
-        matching_token_record_index
-    }
-
-    /// What `connection_token` reaches on `session_id` at `current_time`.
-    ///
-    /// The presented secret is hashed once, then every record is walked and
-    /// each hash compared through its last byte. The answer is
-    /// [`Resolution::Admitted`] when a record holds that hash, still stands at
-    /// `now`, and covers `session`; every other case is
-    /// [`Resolution::Refused`]. Admitting stamps the last such record's
-    /// last-used time with `now`. The store is not written; the caller does
+    /// The presented secret is hashed once, then every record is walked, in
+    /// order, and each hash compared through its last byte; a hash whose
+    /// length differs is unequal at once, with no byte compared. The walk runs
+    /// to the end and reads no record out of a map. Returns the scope of the
+    /// last record holding that hash that still stands at `current_time`, and
+    /// `None` when no record does. Admitting stamps that record's last-used
+    /// time with `current_time`. The store is not written; the caller does
     /// that.
-    pub fn resolve_token_access(
-        &mut self,
-        connection_token: &ConnectionToken,
-        session_id: SessionId,
-        current_time: SystemTime,
-    ) -> Resolution {
-        let presented_token_hash = hash_connection_token(connection_token);
-        match self.find_last_matching_token_record_index(
-            &presented_token_hash,
-            current_time,
-            |scope| scope.is_allowed_for_session(session_id),
-        ) {
-            Some(token_record_index) => {
-                self.token_records[token_record_index].last_used_at = Some(current_time);
-                Resolution::Admitted
-            }
-            None => Resolution::Refused,
-        }
-    }
-
-    /// What `connection_token` reaches at `current_time`, without naming a session.
-    ///
-    /// The presented secret is hashed once, then every record is walked and
-    /// each hash compared through its last byte. The walk runs to the end and
-    /// reads no record out of a map. Returns the scope of the last live record
-    /// holding that hash, and `None` when no record does. Admitting stamps
-    /// that record's last-used time with `current_time`. The store is not written; the
-    /// caller does that.
     ///
     /// The caller checks the scope against the session it wants with
     /// [`TokenScope::is_allowed_for_session`].
@@ -386,11 +317,18 @@ impl TokenStore {
         current_time: SystemTime,
     ) -> Option<TokenScope> {
         let presented_token_hash = hash_connection_token(connection_token);
-        let token_record_index = self.find_last_matching_token_record_index(
-            &presented_token_hash,
-            current_time,
-            |_| true,
-        )?;
+        let mut matching_token_record_index = None;
+        for (token_record_index, token_record) in self.token_records.iter().enumerate() {
+            let is_token_hash_matching: bool = token_record
+                .token_hash
+                .as_bytes()
+                .ct_eq(presented_token_hash.as_bytes())
+                .into();
+            if is_token_hash_matching && token_record.is_active_at(current_time) {
+                matching_token_record_index = Some(token_record_index);
+            }
+        }
+        let token_record_index = matching_token_record_index?;
         self.token_records[token_record_index].last_used_at = Some(current_time);
         Some(self.token_records[token_record_index].scope.clone())
     }
@@ -441,7 +379,7 @@ pub fn resolve_token_store_path(data_directory: &Path) -> PathBuf {
 /// The sha256 of `connection_token`'s secret, as 64 lowercase hex characters.
 #[must_use]
 pub fn hash_connection_token(connection_token: &ConnectionToken) -> String {
-    crate::bytes::format_hex(&Sha256::digest(connection_token.expose().as_bytes()))
+    crate::bytes::format_hex(&Sha256::digest(connection_token.expose_secret().as_bytes()))
 }
 
 #[cfg(test)]

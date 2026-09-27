@@ -4,7 +4,7 @@
 //! halves of a split stream share it behind a mutex; one thread reads
 //! plaintext while another writes plaintext.
 //! [`split_tls_stream`](crate::tls::split_tls_stream) makes that pair, and
-//! [`transport::frame_halves`](crate::transport::frame_halves) puts koshi's
+//! [`transport::build_frame_halves`](crate::transport::build_frame_halves) puts koshi's
 //! frame shape on it.
 //!
 //! The dialling side does not use a certificate authority. It remembers the
@@ -176,9 +176,9 @@ pub struct TlsReader {
     /// The buffer each socket read lands in before decryption, allocated once
     /// for the half's lifetime.
     encrypted_read_buffer: Box<[u8; TLS_READ_BUFFER_BYTE_COUNT]>,
-    /// How many of `encrypted_read_buffer`'s first `encrypted_byte_count` bytes the decryption state has
-    /// taken so far. The bytes between `encrypted_bytes_consumed` and `encrypted_byte_count` are handed to it
-    /// before the socket is read again.
+    /// How many of `encrypted_read_buffer`'s first `encrypted_byte_count` bytes the decryption
+    /// state has taken so far. The bytes between `encrypted_bytes_consumed` and
+    /// `encrypted_byte_count` are handed to it before the socket is read again.
     encrypted_bytes_consumed: usize,
     /// How many bytes of `encrypted_read_buffer` the last socket read filled.
     encrypted_byte_count: usize,
@@ -187,8 +187,9 @@ pub struct TlsReader {
 impl fmt::Debug for TlsReader {
     /// Writes the socket and the deadline, and none of the read buffer's
     /// bytes.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlsReader")
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsReader")
             .field("socket", &self.socket)
             .field("deadline", &self.deadline)
             .finish_non_exhaustive()
@@ -531,10 +532,10 @@ impl ServerCertVerifier for PinVerifier {
     }
 }
 
-/// Open a TLS stream to `address`, refusing a certificate whose fingerprint
-/// is not `expected_certificate_fingerprint`.
+/// Open a TLS stream to `server_address`, refusing a certificate whose
+/// fingerprint is not `expected_certificate_fingerprint`.
 ///
-/// `address` is `host:port`. The lookup is the operating system's own, and
+/// `server_address` is `host:port`. The lookup is the operating system's own, and
 /// the first address it returns is the one dialled. Returns the two halves of
 /// the stream and the fingerprint the server presented, which the caller
 /// saves on a first connection.

@@ -65,14 +65,6 @@ fn constructors_accept_valid_values() {
         SizeConstraint::from_fixed_cell_count(80),
         Ok(SizeConstraint::Fixed(80))
     );
-    assert_eq!(
-        SizeConstraint::from_minimum_cell_count(2),
-        Ok(SizeConstraint::Minimum(2))
-    );
-    assert_eq!(
-        SizeConstraint::from_preferred_cell_count(120),
-        Ok(SizeConstraint::Preferred(120))
-    );
 }
 
 #[test]
@@ -97,14 +89,6 @@ fn constructors_reject_invalid_values() {
         SizeConstraint::from_fixed_cell_count(0),
         Err(ConstraintError::ZeroFixedCellCount)
     );
-    assert_eq!(
-        SizeConstraint::from_minimum_cell_count(0),
-        Err(ConstraintError::ZeroMinimumCellCount)
-    );
-    assert_eq!(
-        SizeConstraint::from_preferred_cell_count(0),
-        Err(ConstraintError::ZeroPreferredCellCount)
-    );
 }
 
 #[test]
@@ -116,14 +100,6 @@ fn constructors_accept_their_maximum_values() {
     assert_eq!(
         SizeConstraint::from_fixed_cell_count(u16::MAX),
         Ok(SizeConstraint::Fixed(u16::MAX))
-    );
-    assert_eq!(
-        SizeConstraint::from_minimum_cell_count(u16::MAX),
-        Ok(SizeConstraint::Minimum(u16::MAX))
-    );
-    assert_eq!(
-        SizeConstraint::from_preferred_cell_count(u16::MAX),
-        Ok(SizeConstraint::Preferred(u16::MAX))
     );
 }
 
@@ -172,31 +148,6 @@ fn constraint_errors_display_their_exact_messages() {
         ConstraintError::ZeroFixedCellCount.to_string(),
         "fixed size must be at least one cell"
     );
-    assert_eq!(
-        ConstraintError::ZeroMinimumCellCount.to_string(),
-        "minimum size must be at least one cell"
-    );
-    assert_eq!(
-        ConstraintError::ZeroPreferredCellCount.to_string(),
-        "preferred size must be at least one cell"
-    );
-}
-
-#[test]
-fn constraint_errors_are_recoverable_layout_errors() {
-    let constraint_errors = [
-        ConstraintError::ZeroFlexWeight,
-        ConstraintError::PercentOutOfRange {
-            received_percent: 0,
-        },
-        ConstraintError::ZeroFixedCellCount,
-        ConstraintError::ZeroMinimumCellCount,
-        ConstraintError::ZeroPreferredCellCount,
-    ];
-    for constraint_error in constraint_errors {
-        assert_eq!(constraint_error.category(), DomainCategory::Layout);
-        assert_eq!(constraint_error.get_severity(), Severity::Recoverable);
-    }
 }
 
 #[test]

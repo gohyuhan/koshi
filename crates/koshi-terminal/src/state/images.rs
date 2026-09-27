@@ -163,60 +163,6 @@ pub(super) struct KittyImage {
     virtual_screen: Option<Screen>,
 }
 
-impl serde::Serialize for KittyImage {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.image_record.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for KittyImage {
-    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
-    where
-        Deserializer: serde::Deserializer<'de>,
-    {
-        let image_record = Arc::<ImageRecord>::deserialize(deserializer)?;
-        let image_content_id =
-            ImageContentId::from_raw_image_content_id(1).expect("one is a valid image content id");
-        let image_content = Arc::new(ImageContent {
-            image_content_id,
-            decoded_image: Arc::clone(&image_record.image),
-            animation: image_record.animation.clone(),
-            animation_frame_index: 0,
-            animation_loop_count: 0,
-            animation_elapsed_nanos: 0,
-            is_animation_running: image_record.animation.is_some(),
-            is_animation_loading: false,
-            sixel: None,
-        });
-        Ok(Self {
-            image_record,
-            image_content,
-            is_virtual_placement: false,
-            virtual_screen: None,
-        })
-    }
-}
-
-pub(super) fn legacy_image_content_for_record(
-    image_record: &Arc<ImageRecord>,
-) -> Arc<ImageContent> {
-    Arc::new(ImageContent {
-        image_content_id: ImageContentId::from_raw_image_content_id(1)
-            .expect("one is a valid image content id"),
-        decoded_image: Arc::clone(&image_record.image),
-        animation: image_record.animation.clone(),
-        animation_frame_index: 0,
-        animation_loop_count: 0,
-        animation_elapsed_nanos: 0,
-        is_animation_running: image_record.animation.is_some(),
-        is_animation_loading: false,
-        sixel: None,
-    })
-}
-
 impl Deref for KittyImage {
     type Target = ImageRecord;
 
@@ -238,14 +184,32 @@ pub(super) struct RasterPlan {
     canvas_size: (u32, u32),
     /// The target's top-left pixel offset in the complete canvas.
     pixel_offset: (u32, u32),
+    /// Whether the placement draws a prepared raster. `false` draws the image
+    /// record as it is.
+    needs_raster: bool,
 }
 
 impl RasterPlan {
     fn is_same_raster(&self, other: &Self) -> bool {
-        self.source_rect == other.source_rect
+        self.needs_raster == other.needs_raster
+            && self.source_rect == other.source_rect
             && self.target_size == other.target_size
             && self.canvas_size == other.canvas_size
             && self.pixel_offset == other.pixel_offset
+    }
+
+    /// Returns `canvas_size.0 * canvas_size.1 * 4`, or an error when the
+    /// product overflows `usize`.
+    fn compute_canvas_byte_count(&self) -> Result<usize, String> {
+        let canvas_pixel_width = usize::try_from(self.canvas_size.0).ok();
+        let canvas_pixel_height = usize::try_from(self.canvas_size.1).ok();
+        canvas_pixel_width
+            .zip(canvas_pixel_height)
+            .and_then(|(canvas_pixel_width, canvas_pixel_height)| {
+                canvas_pixel_width.checked_mul(canvas_pixel_height)
+            })
+            .and_then(|canvas_pixel_count| canvas_pixel_count.checked_mul(4))
+            .ok_or_else(|| "image raster plan byte count overflows".to_owned())
     }
 }
 
@@ -277,10 +241,6 @@ enum ImageCursorMovement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SerializedImageRecord {
     protocol: GraphicsProtocol,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    decoded_image: Option<Arc<crate::graphics::DecodedImage>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    animation: Option<Arc<DecodedAnimation>>,
     action: ImageAction,
     display: crate::graphics::ImageDisplay,
     anchor: (u16, u16),
@@ -290,25 +250,18 @@ pub(super) struct SerializedImageRecord {
 pub(super) struct SerializedImagePlacement {
     image_placement_id: ImagePlacementId,
     image_record: SerializedImageRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    image_content_id: Option<ImageContentId>,
+    image_content_id: ImageContentId,
     anchor: (u64, u16),
     column_count: u16,
     row_count: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    plan: Option<RasterPlan>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    geometry: Option<ImageCellGeometry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    raster: Option<Arc<crate::graphics::DecodedImage>>,
+    plan: RasterPlan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SerializedKittyImage {
     #[serde(flatten)]
     image_record: SerializedImageRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    image_content_id: Option<ImageContentId>,
+    image_content_id: ImageContentId,
     #[serde(default, skip_serializing_if = "is_false_boolean_flag")]
     is_virtual_placement: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -622,71 +575,9 @@ impl<'de> Visitor<'de> for BudgetedDecodedImageVisitor<'_> {
     }
 }
 
-struct OptionalImageSeed<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+pub(super) struct SerializedImagePlacementsSeed;
 
-impl<'de> DeserializeSeed<'de> for OptionalImageSeed<'_> {
-    type Value = Option<Arc<crate::graphics::DecodedImage>>;
-
-    fn deserialize<Deserializer>(
-        self,
-        deserializer: Deserializer,
-    ) -> Result<Self::Value, Deserializer::Error>
-    where
-        Deserializer: DeserializerTrait<'de>,
-    {
-        deserializer.deserialize_option(OptionalImageVisitor {
-            budget: self.budget,
-        })
-    }
-}
-
-struct OptionalImageVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
-
-impl<'de> Visitor<'de> for OptionalImageVisitor<'_> {
-    type Value = Option<Arc<crate::graphics::DecodedImage>>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an optional decoded RGBA image")
-    }
-
-    fn visit_none<Error>(self) -> Result<Self::Value, Error>
-    where
-        Error: de::Error,
-    {
-        Ok(None)
-    }
-
-    fn visit_unit<Error>(self) -> Result<Self::Value, Error>
-    where
-        Error: de::Error,
-    {
-        Ok(None)
-    }
-
-    fn visit_some<Deserializer>(
-        self,
-        deserializer: Deserializer,
-    ) -> Result<Self::Value, Deserializer::Error>
-    where
-        Deserializer: DeserializerTrait<'de>,
-    {
-        BudgetedDecodedImageSeed {
-            budget: self.budget,
-        }
-        .deserialize(deserializer)
-        .map(Some)
-    }
-}
-
-pub(super) struct SerializedImagePlacementsSeed<'a> {
-    pub(super) budget: &'a mut ImageStateBudget,
-}
-
-impl<'de> DeserializeSeed<'de> for SerializedImagePlacementsSeed<'_> {
+impl<'de> DeserializeSeed<'de> for SerializedImagePlacementsSeed {
     type Value = Vec<SerializedImagePlacement>;
 
     fn deserialize<Deserializer>(
@@ -696,17 +587,13 @@ impl<'de> DeserializeSeed<'de> for SerializedImagePlacementsSeed<'_> {
     where
         Deserializer: DeserializerTrait<'de>,
     {
-        deserializer.deserialize_seq(SerializedImagePlacementsVisitor {
-            budget: self.budget,
-        })
+        deserializer.deserialize_seq(SerializedImagePlacementsVisitor)
     }
 }
 
-struct SerializedImagePlacementsVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+struct SerializedImagePlacementsVisitor;
 
-impl<'de> Visitor<'de> for SerializedImagePlacementsVisitor<'_> {
+impl<'de> Visitor<'de> for SerializedImagePlacementsVisitor {
     type Value = Vec<SerializedImagePlacement>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -715,42 +602,53 @@ impl<'de> Visitor<'de> for SerializedImagePlacementsVisitor<'_> {
 
     fn visit_seq<SequenceAccess>(
         self,
-        mut sequence: SequenceAccess,
+        sequence: SequenceAccess,
     ) -> Result<Self::Value, SequenceAccess::Error>
     where
         SequenceAccess: SeqAccess<'de>,
     {
-        let mut serialized_placements = Vec::with_capacity(
-            sequence
-                .size_hint()
-                .unwrap_or_default()
-                .min(MAX_IMAGE_PLACEMENT_COUNT),
-        );
-        while serialized_placements.len() < MAX_IMAGE_PLACEMENT_COUNT {
-            let Some(serialized_placement) =
-                sequence.next_element_seed(SerializedImagePlacementSeed {
-                    budget: self.budget,
-                })?
-            else {
-                return Ok(serialized_placements);
-            };
-            serialized_placements.push(serialized_placement);
-        }
-        if sequence.next_element::<de::IgnoredAny>()?.is_some() {
-            return Err(de::Error::custom(ImagePlacementError::TooManyPlacements {
-                placement_count: MAX_IMAGE_PLACEMENT_COUNT + 1,
-                placement_limit: MAX_IMAGE_PLACEMENT_COUNT,
-            }));
-        }
-        Ok(serialized_placements)
+        read_bounded_image_sequence(sequence, |sequence| {
+            sequence.next_element_seed(SerializedImagePlacementSeed)
+        })
     }
 }
 
-pub(super) struct SerializedKittyImagesSeed<'a> {
-    pub(super) budget: &'a mut ImageStateBudget,
+/// Reads serialized image records with `read_next_record` until the sequence
+/// ends. A sequence longer than `MAX_IMAGE_PLACEMENT_COUNT` returns
+/// `TooManyPlacements` with a count of `MAX_IMAGE_PLACEMENT_COUNT + 1`.
+fn read_bounded_image_sequence<'de, SequenceAccess, SerializedRecord>(
+    mut sequence: SequenceAccess,
+    mut read_next_record: impl FnMut(
+        &mut SequenceAccess,
+    ) -> Result<Option<SerializedRecord>, SequenceAccess::Error>,
+) -> Result<Vec<SerializedRecord>, SequenceAccess::Error>
+where
+    SequenceAccess: SeqAccess<'de>,
+{
+    let mut serialized_records = Vec::with_capacity(
+        sequence
+            .size_hint()
+            .unwrap_or_default()
+            .min(MAX_IMAGE_PLACEMENT_COUNT),
+    );
+    while serialized_records.len() < MAX_IMAGE_PLACEMENT_COUNT {
+        let Some(serialized_record) = read_next_record(&mut sequence)? else {
+            return Ok(serialized_records);
+        };
+        serialized_records.push(serialized_record);
+    }
+    if sequence.next_element::<de::IgnoredAny>()?.is_some() {
+        return Err(de::Error::custom(ImagePlacementError::TooManyPlacements {
+            placement_count: MAX_IMAGE_PLACEMENT_COUNT + 1,
+            placement_limit: MAX_IMAGE_PLACEMENT_COUNT,
+        }));
+    }
+    Ok(serialized_records)
 }
 
-impl<'de> DeserializeSeed<'de> for SerializedKittyImagesSeed<'_> {
+pub(super) struct SerializedKittyImagesSeed;
+
+impl<'de> DeserializeSeed<'de> for SerializedKittyImagesSeed {
     type Value = Vec<SerializedKittyImage>;
 
     fn deserialize<Deserializer>(
@@ -760,17 +658,13 @@ impl<'de> DeserializeSeed<'de> for SerializedKittyImagesSeed<'_> {
     where
         Deserializer: DeserializerTrait<'de>,
     {
-        deserializer.deserialize_seq(SerializedKittyImagesVisitor {
-            budget: self.budget,
-        })
+        deserializer.deserialize_seq(SerializedKittyImagesVisitor)
     }
 }
 
-struct SerializedKittyImagesVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+struct SerializedKittyImagesVisitor;
 
-impl<'de> Visitor<'de> for SerializedKittyImagesVisitor<'_> {
+impl<'de> Visitor<'de> for SerializedKittyImagesVisitor {
     type Value = Vec<SerializedKittyImage>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -779,34 +673,14 @@ impl<'de> Visitor<'de> for SerializedKittyImagesVisitor<'_> {
 
     fn visit_seq<SequenceAccess>(
         self,
-        mut sequence: SequenceAccess,
+        sequence: SequenceAccess,
     ) -> Result<Self::Value, SequenceAccess::Error>
     where
         SequenceAccess: SeqAccess<'de>,
     {
-        let mut serialized_kitty_images = Vec::with_capacity(
-            sequence
-                .size_hint()
-                .unwrap_or_default()
-                .min(MAX_IMAGE_PLACEMENT_COUNT),
-        );
-        while serialized_kitty_images.len() < MAX_IMAGE_PLACEMENT_COUNT {
-            let Some(serialized_kitty_image) =
-                sequence.next_element_seed(SerializedKittyImageSeed {
-                    budget: self.budget,
-                })?
-            else {
-                return Ok(serialized_kitty_images);
-            };
-            serialized_kitty_images.push(serialized_kitty_image);
-        }
-        if sequence.next_element::<de::IgnoredAny>()?.is_some() {
-            return Err(de::Error::custom(ImagePlacementError::TooManyPlacements {
-                placement_count: MAX_IMAGE_PLACEMENT_COUNT + 1,
-                placement_limit: MAX_IMAGE_PLACEMENT_COUNT,
-            }));
-        }
-        Ok(serialized_kitty_images)
+        read_bounded_image_sequence(sequence, |sequence| {
+            sequence.next_element_seed(SerializedKittyImageSeed)
+        })
     }
 }
 
@@ -843,150 +717,22 @@ impl<'de> Visitor<'de> for SerializedImageContentsVisitor<'_> {
 
     fn visit_seq<SequenceAccess>(
         self,
-        mut sequence: SequenceAccess,
+        sequence: SequenceAccess,
     ) -> Result<Self::Value, SequenceAccess::Error>
     where
         SequenceAccess: SeqAccess<'de>,
     {
-        let mut serialized_contents = Vec::with_capacity(
-            sequence
-                .size_hint()
-                .unwrap_or_default()
-                .min(MAX_IMAGE_PLACEMENT_COUNT),
-        );
-        while serialized_contents.len() < MAX_IMAGE_PLACEMENT_COUNT {
-            let Some(serialized_content) =
-                sequence.next_element_seed(SerializedImageContentSeed {
-                    budget: self.budget,
-                })?
-            else {
-                return Ok(serialized_contents);
-            };
-            serialized_contents.push(serialized_content);
-        }
-        if sequence.next_element::<de::IgnoredAny>()?.is_some() {
-            return Err(de::Error::custom(ImagePlacementError::TooManyPlacements {
-                placement_count: MAX_IMAGE_PLACEMENT_COUNT + 1,
-                placement_limit: MAX_IMAGE_PLACEMENT_COUNT,
-            }));
-        }
-        Ok(serialized_contents)
-    }
-}
-
-struct SerializedImageRecordSeed<'a> {
-    budget: &'a mut ImageStateBudget,
-}
-
-impl<'de> DeserializeSeed<'de> for SerializedImageRecordSeed<'_> {
-    type Value = SerializedImageRecord;
-
-    fn deserialize<Deserializer>(
-        self,
-        deserializer: Deserializer,
-    ) -> Result<Self::Value, Deserializer::Error>
-    where
-        Deserializer: DeserializerTrait<'de>,
-    {
-        deserializer.deserialize_map(SerializedImageRecordVisitor {
-            budget: self.budget,
+        read_bounded_image_sequence(sequence, |sequence| {
+            sequence.next_element_seed(SerializedImageContentSeed {
+                budget: self.budget,
+            })
         })
     }
 }
 
-struct SerializedImageRecordVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+struct SerializedImagePlacementSeed;
 
-impl<'de> Visitor<'de> for SerializedImageRecordVisitor<'_> {
-    type Value = SerializedImageRecord;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an image record")
-    }
-
-    fn visit_map<MapAccess>(self, mut map: MapAccess) -> Result<Self::Value, MapAccess::Error>
-    where
-        MapAccess: serde::de::MapAccess<'de>,
-    {
-        let mut graphics_protocol = None;
-        let mut decoded_image = None;
-        let mut decoded_animation = None;
-        let mut image_action = None;
-        let mut image_display = None;
-        let mut image_anchor = None;
-        while let Some(field_name) = map.next_key::<String>()? {
-            match field_name.as_str() {
-                "protocol" => {
-                    if graphics_protocol.is_some() {
-                        return Err(de::Error::duplicate_field("protocol"));
-                    }
-                    graphics_protocol = Some(map.next_value::<GraphicsProtocol>()?);
-                }
-                "decoded_image" => {
-                    if decoded_image.is_some() {
-                        return Err(de::Error::duplicate_field("decoded_image"));
-                    }
-                    decoded_image = Some(map.next_value_seed(OptionalImageSeed {
-                        budget: self.budget,
-                    })?);
-                }
-                "animation" => {
-                    if decoded_animation.is_some() {
-                        return Err(de::Error::duplicate_field("animation"));
-                    }
-                    decoded_animation = Some(map.next_value::<Option<Arc<DecodedAnimation>>>()?);
-                }
-                "action" => {
-                    if image_action.is_some() {
-                        return Err(de::Error::duplicate_field("action"));
-                    }
-                    image_action = Some(map.next_value::<ImageAction>()?);
-                }
-                "display" => {
-                    if image_display.is_some() {
-                        return Err(de::Error::duplicate_field("display"));
-                    }
-                    image_display = Some(map.next_value::<crate::graphics::ImageDisplay>()?);
-                }
-                "anchor" => {
-                    if image_anchor.is_some() {
-                        return Err(de::Error::duplicate_field("anchor"));
-                    }
-                    image_anchor = Some(map.next_value::<(u16, u16)>()?);
-                }
-                _ => {
-                    let _: de::IgnoredAny = map.next_value()?;
-                }
-            }
-        }
-        let mut decoded_image = decoded_image.unwrap_or_default();
-        let decoded_animation = decoded_animation.unwrap_or_default();
-        alias_animation_image(
-            &mut decoded_image,
-            decoded_animation.as_ref(),
-            0,
-            self.budget,
-        )
-        .map_err(de::Error::custom)?;
-        charge_animation_budget(self.budget, decoded_animation.as_ref())
-            .map_err(de::Error::custom)?;
-        Ok(SerializedImageRecord {
-            protocol: graphics_protocol.ok_or_else(|| de::Error::missing_field("protocol"))?,
-            decoded_image,
-            animation: decoded_animation,
-            action: image_action.ok_or_else(|| de::Error::missing_field("action"))?,
-            display: image_display.ok_or_else(|| de::Error::missing_field("display"))?,
-            anchor: image_anchor.ok_or_else(|| de::Error::missing_field("anchor"))?,
-        })
-    }
-}
-
-struct SerializedImagePlacementSeed<'a> {
-    budget: &'a mut ImageStateBudget,
-}
-
-impl<'de> DeserializeSeed<'de> for SerializedImagePlacementSeed<'_> {
+impl<'de> DeserializeSeed<'de> for SerializedImagePlacementSeed {
     type Value = SerializedImagePlacement;
 
     fn deserialize<Deserializer>(
@@ -996,24 +742,23 @@ impl<'de> DeserializeSeed<'de> for SerializedImagePlacementSeed<'_> {
     where
         Deserializer: DeserializerTrait<'de>,
     {
-        deserializer.deserialize_map(SerializedImagePlacementVisitor {
-            budget: self.budget,
-        })
+        deserializer.deserialize_map(SerializedImagePlacementVisitor)
     }
 }
 
-struct SerializedImagePlacementVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+struct SerializedImagePlacementVisitor;
 
-impl<'de> Visitor<'de> for SerializedImagePlacementVisitor<'_> {
+impl<'de> Visitor<'de> for SerializedImagePlacementVisitor {
     type Value = SerializedImagePlacement;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("an image placement")
     }
 
-    fn visit_map<MapAccess>(self, mut map: MapAccess) -> Result<Self::Value, MapAccess::Error>
+    fn visit_map<MapAccess>(
+        self,
+        mut map_access: MapAccess,
+    ) -> Result<Self::Value, MapAccess::Error>
     where
         MapAccess: serde::de::MapAccess<'de>,
     {
@@ -1024,71 +769,53 @@ impl<'de> Visitor<'de> for SerializedImagePlacementVisitor<'_> {
         let mut column_count = None;
         let mut row_count = None;
         let mut raster_plan = None;
-        let mut image_geometry = None;
-        let mut raster_image = None;
-        while let Some(field_name) = map.next_key::<String>()? {
+        while let Some(field_name) = map_access.next_key::<String>()? {
             match field_name.as_str() {
                 "image_placement_id" => {
                     if image_placement_id.is_some() {
                         return Err(de::Error::duplicate_field("image_placement_id"));
                     }
-                    image_placement_id = Some(map.next_value::<ImagePlacementId>()?);
+                    image_placement_id = Some(map_access.next_value::<ImagePlacementId>()?);
                 }
                 "image_record" => {
                     if serialized_image_record.is_some() {
                         return Err(de::Error::duplicate_field("image_record"));
                     }
                     serialized_image_record =
-                        Some(map.next_value_seed(SerializedImageRecordSeed {
-                            budget: self.budget,
-                        })?);
+                        Some(map_access.next_value::<SerializedImageRecord>()?);
                 }
                 "image_content_id" => {
                     if image_content_id.is_some() {
                         return Err(de::Error::duplicate_field("image_content_id"));
                     }
-                    image_content_id = Some(map.next_value::<Option<ImageContentId>>()?);
+                    image_content_id = Some(map_access.next_value::<ImageContentId>()?);
                 }
                 "anchor" => {
                     if image_anchor.is_some() {
                         return Err(de::Error::duplicate_field("anchor"));
                     }
-                    image_anchor = Some(map.next_value::<(u64, u16)>()?);
+                    image_anchor = Some(map_access.next_value::<(u64, u16)>()?);
                 }
                 "column_count" => {
                     if column_count.is_some() {
                         return Err(de::Error::duplicate_field("column_count"));
                     }
-                    column_count = Some(map.next_value::<u16>()?);
+                    column_count = Some(map_access.next_value::<u16>()?);
                 }
                 "row_count" => {
                     if row_count.is_some() {
                         return Err(de::Error::duplicate_field("row_count"));
                     }
-                    row_count = Some(map.next_value::<u16>()?);
+                    row_count = Some(map_access.next_value::<u16>()?);
                 }
                 "plan" => {
                     if raster_plan.is_some() {
                         return Err(de::Error::duplicate_field("plan"));
                     }
-                    raster_plan = Some(map.next_value::<Option<RasterPlan>>()?);
-                }
-                "geometry" => {
-                    if image_geometry.is_some() {
-                        return Err(de::Error::duplicate_field("geometry"));
-                    }
-                    image_geometry = Some(map.next_value::<Option<ImageCellGeometry>>()?);
-                }
-                "raster" => {
-                    if raster_image.is_some() {
-                        return Err(de::Error::duplicate_field("raster"));
-                    }
-                    raster_image = Some(map.next_value_seed(OptionalImageSeed {
-                        budget: self.budget,
-                    })?);
+                    raster_plan = Some(map_access.next_value::<RasterPlan>()?);
                 }
                 _ => {
-                    let _: de::IgnoredAny = map.next_value()?;
+                    let _: de::IgnoredAny = map_access.next_value()?;
                 }
             }
         }
@@ -1097,22 +824,19 @@ impl<'de> Visitor<'de> for SerializedImagePlacementVisitor<'_> {
                 .ok_or_else(|| de::Error::missing_field("image_placement_id"))?,
             image_record: serialized_image_record
                 .ok_or_else(|| de::Error::missing_field("image_record"))?,
-            image_content_id: image_content_id.unwrap_or_default(),
+            image_content_id: image_content_id
+                .ok_or_else(|| de::Error::missing_field("image_content_id"))?,
             anchor: image_anchor.ok_or_else(|| de::Error::missing_field("anchor"))?,
             column_count: column_count.ok_or_else(|| de::Error::missing_field("column_count"))?,
             row_count: row_count.ok_or_else(|| de::Error::missing_field("row_count"))?,
-            plan: raster_plan.unwrap_or_default(),
-            geometry: image_geometry.unwrap_or_default(),
-            raster: raster_image.unwrap_or_default(),
+            plan: raster_plan.ok_or_else(|| de::Error::missing_field("plan"))?,
         })
     }
 }
 
-struct SerializedKittyImageSeed<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+struct SerializedKittyImageSeed;
 
-impl<'de> DeserializeSeed<'de> for SerializedKittyImageSeed<'_> {
+impl<'de> DeserializeSeed<'de> for SerializedKittyImageSeed {
     type Value = SerializedKittyImage;
 
     fn deserialize<Deserializer>(
@@ -1122,120 +846,91 @@ impl<'de> DeserializeSeed<'de> for SerializedKittyImageSeed<'_> {
     where
         Deserializer: DeserializerTrait<'de>,
     {
-        deserializer.deserialize_map(SerializedKittyImageVisitor {
-            budget: self.budget,
-        })
+        deserializer.deserialize_map(SerializedKittyImageVisitor)
     }
 }
 
-struct SerializedKittyImageVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
+struct SerializedKittyImageVisitor;
 
-impl<'de> Visitor<'de> for SerializedKittyImageVisitor<'_> {
+impl<'de> Visitor<'de> for SerializedKittyImageVisitor {
     type Value = SerializedKittyImage;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("a retained Kitty image")
     }
 
-    fn visit_map<MapAccess>(self, mut map: MapAccess) -> Result<Self::Value, MapAccess::Error>
+    fn visit_map<MapAccess>(
+        self,
+        mut map_access: MapAccess,
+    ) -> Result<Self::Value, MapAccess::Error>
     where
         MapAccess: serde::de::MapAccess<'de>,
     {
         let mut graphics_protocol = None;
-        let mut decoded_image = None;
-        let mut decoded_animation = None;
         let mut image_action = None;
         let mut image_display = None;
         let mut image_anchor = None;
         let mut image_content_id = None;
         let mut is_virtual_placement = None;
         let mut virtual_screen = None;
-        while let Some(field_name) = map.next_key::<String>()? {
+        while let Some(field_name) = map_access.next_key::<String>()? {
             match field_name.as_str() {
                 "protocol" => {
                     if graphics_protocol.is_some() {
                         return Err(de::Error::duplicate_field("protocol"));
                     }
-                    graphics_protocol = Some(map.next_value::<GraphicsProtocol>()?);
-                }
-                "decoded_image" => {
-                    if decoded_image.is_some() {
-                        return Err(de::Error::duplicate_field("decoded_image"));
-                    }
-                    decoded_image = Some(map.next_value_seed(OptionalImageSeed {
-                        budget: self.budget,
-                    })?);
-                }
-                "animation" => {
-                    if decoded_animation.is_some() {
-                        return Err(de::Error::duplicate_field("animation"));
-                    }
-                    decoded_animation = Some(map.next_value::<Option<Arc<DecodedAnimation>>>()?);
+                    graphics_protocol = Some(map_access.next_value::<GraphicsProtocol>()?);
                 }
                 "action" => {
                     if image_action.is_some() {
                         return Err(de::Error::duplicate_field("action"));
                     }
-                    image_action = Some(map.next_value::<ImageAction>()?);
+                    image_action = Some(map_access.next_value::<ImageAction>()?);
                 }
                 "display" => {
                     if image_display.is_some() {
                         return Err(de::Error::duplicate_field("display"));
                     }
-                    image_display = Some(map.next_value::<crate::graphics::ImageDisplay>()?);
+                    image_display = Some(map_access.next_value::<crate::graphics::ImageDisplay>()?);
                 }
                 "anchor" => {
                     if image_anchor.is_some() {
                         return Err(de::Error::duplicate_field("anchor"));
                     }
-                    image_anchor = Some(map.next_value::<(u16, u16)>()?);
+                    image_anchor = Some(map_access.next_value::<(u16, u16)>()?);
                 }
                 "image_content_id" => {
                     if image_content_id.is_some() {
                         return Err(de::Error::duplicate_field("image_content_id"));
                     }
-                    image_content_id = Some(map.next_value::<Option<ImageContentId>>()?);
+                    image_content_id = Some(map_access.next_value::<ImageContentId>()?);
                 }
                 "is_virtual_placement" => {
                     if is_virtual_placement.is_some() {
                         return Err(de::Error::duplicate_field("is_virtual_placement"));
                     }
-                    is_virtual_placement = Some(map.next_value::<bool>()?);
+                    is_virtual_placement = Some(map_access.next_value::<bool>()?);
                 }
                 "virtual_screen" => {
                     if virtual_screen.is_some() {
                         return Err(de::Error::duplicate_field("virtual_screen"));
                     }
-                    virtual_screen = Some(map.next_value::<Option<Screen>>()?);
+                    virtual_screen = Some(map_access.next_value::<Option<Screen>>()?);
                 }
                 _ => {
-                    let _: de::IgnoredAny = map.next_value()?;
+                    let _: de::IgnoredAny = map_access.next_value()?;
                 }
             }
         }
-        let mut decoded_image = decoded_image.unwrap_or_default();
-        let decoded_animation = decoded_animation.unwrap_or_default();
-        alias_animation_image(
-            &mut decoded_image,
-            decoded_animation.as_ref(),
-            0,
-            self.budget,
-        )
-        .map_err(de::Error::custom)?;
-        charge_animation_budget(self.budget, decoded_animation.as_ref())
-            .map_err(de::Error::custom)?;
         Ok(SerializedKittyImage {
             image_record: SerializedImageRecord {
                 protocol: graphics_protocol.ok_or_else(|| de::Error::missing_field("protocol"))?,
-                decoded_image,
-                animation: decoded_animation,
                 action: image_action.ok_or_else(|| de::Error::missing_field("action"))?,
                 display: image_display.ok_or_else(|| de::Error::missing_field("display"))?,
                 anchor: image_anchor.ok_or_else(|| de::Error::missing_field("anchor"))?,
             },
-            image_content_id: image_content_id.unwrap_or_default(),
+            image_content_id: image_content_id
+                .ok_or_else(|| de::Error::missing_field("image_content_id"))?,
             is_virtual_placement: is_virtual_placement.unwrap_or(false),
             virtual_screen: virtual_screen.unwrap_or_default(),
         })
@@ -1273,7 +968,10 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
         formatter.write_str("an image content entry")
     }
 
-    fn visit_map<MapAccess>(self, mut map: MapAccess) -> Result<Self::Value, MapAccess::Error>
+    fn visit_map<MapAccess>(
+        self,
+        mut map_access: MapAccess,
+    ) -> Result<Self::Value, MapAccess::Error>
     where
         MapAccess: serde::de::MapAccess<'de>,
     {
@@ -1286,19 +984,19 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
         let mut is_animation_running = None;
         let mut is_animation_loading = None;
         let mut sixel = None;
-        while let Some(field_name) = map.next_key::<String>()? {
+        while let Some(field_name) = map_access.next_key::<String>()? {
             match field_name.as_str() {
                 "image_content_id" => {
                     if image_content_id.is_some() {
                         return Err(de::Error::duplicate_field("image_content_id"));
                     }
-                    image_content_id = Some(map.next_value::<ImageContentId>()?);
+                    image_content_id = Some(map_access.next_value::<ImageContentId>()?);
                 }
                 "decoded_image" => {
                     if decoded_image.is_some() {
                         return Err(de::Error::duplicate_field("decoded_image"));
                     }
-                    decoded_image = Some(map.next_value_seed(BudgetedDecodedImageSeed {
+                    decoded_image = Some(map_access.next_value_seed(BudgetedDecodedImageSeed {
                         budget: self.budget,
                     })?);
                 }
@@ -1306,46 +1004,47 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
                     if decoded_animation.is_some() {
                         return Err(de::Error::duplicate_field("animation"));
                     }
-                    decoded_animation = Some(map.next_value::<Option<Arc<DecodedAnimation>>>()?);
+                    decoded_animation =
+                        Some(map_access.next_value::<Option<Arc<DecodedAnimation>>>()?);
                 }
                 "animation_frame_index" => {
                     if animation_frame_index.is_some() {
                         return Err(de::Error::duplicate_field("animation_frame_index"));
                     }
-                    animation_frame_index = Some(map.next_value::<u32>()?);
+                    animation_frame_index = Some(map_access.next_value::<u32>()?);
                 }
                 "animation_loop_count" => {
                     if animation_loop_count.is_some() {
                         return Err(de::Error::duplicate_field("animation_loop_count"));
                     }
-                    animation_loop_count = Some(map.next_value::<u32>()?);
+                    animation_loop_count = Some(map_access.next_value::<u32>()?);
                 }
                 "animation_elapsed_nanos" => {
                     if animation_elapsed_nanos.is_some() {
                         return Err(de::Error::duplicate_field("animation_elapsed_nanos"));
                     }
-                    animation_elapsed_nanos = Some(map.next_value::<u64>()?);
+                    animation_elapsed_nanos = Some(map_access.next_value::<u64>()?);
                 }
                 "is_animation_running" => {
                     if is_animation_running.is_some() {
                         return Err(de::Error::duplicate_field("is_animation_running"));
                     }
-                    is_animation_running = Some(map.next_value::<bool>()?);
+                    is_animation_running = Some(map_access.next_value::<bool>()?);
                 }
                 "is_animation_loading" => {
                     if is_animation_loading.is_some() {
                         return Err(de::Error::duplicate_field("is_animation_loading"));
                     }
-                    is_animation_loading = Some(map.next_value::<bool>()?);
+                    is_animation_loading = Some(map_access.next_value::<bool>()?);
                 }
                 "sixel" => {
                     if sixel.is_some() {
                         return Err(de::Error::duplicate_field("sixel"));
                     }
-                    sixel = Some(map.next_value::<Option<SixelImageSource>>()?);
+                    sixel = Some(map_access.next_value::<Option<SixelImageSource>>()?);
                 }
                 _ => {
-                    let _: de::IgnoredAny = map.next_value()?;
+                    let _: de::IgnoredAny = map_access.next_value()?;
                 }
             }
         }
@@ -1400,102 +1099,25 @@ impl<'de> Visitor<'de> for SerializedImageContentVisitor<'_> {
     }
 }
 
-pub(super) struct OptionalContentsSeed<'a> {
-    pub(super) budget: &'a mut ImageStateBudget,
-}
-
-impl<'de> DeserializeSeed<'de> for OptionalContentsSeed<'_> {
-    type Value = Option<Vec<SerializedImageContent>>;
-
-    fn deserialize<Deserializer>(
-        self,
-        deserializer: Deserializer,
-    ) -> Result<Self::Value, Deserializer::Error>
-    where
-        Deserializer: DeserializerTrait<'de>,
-    {
-        deserializer.deserialize_option(OptionalContentsVisitor {
-            budget: self.budget,
-        })
-    }
-}
-
-struct OptionalContentsVisitor<'a> {
-    budget: &'a mut ImageStateBudget,
-}
-
-impl<'de> Visitor<'de> for OptionalContentsVisitor<'_> {
-    type Value = Option<Vec<SerializedImageContent>>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an optional image content sequence")
-    }
-
-    fn visit_none<Error>(self) -> Result<Self::Value, Error>
-    where
-        Error: de::Error,
-    {
-        Ok(None)
-    }
-
-    fn visit_unit<Error>(self) -> Result<Self::Value, Error>
-    where
-        Error: de::Error,
-    {
-        Ok(None)
-    }
-
-    fn visit_some<Deserializer>(
-        self,
-        deserializer: Deserializer,
-    ) -> Result<Self::Value, Deserializer::Error>
-    where
-        Deserializer: DeserializerTrait<'de>,
-    {
-        SerializedImageContentsSeed {
-            budget: self.budget,
-        }
-        .deserialize(deserializer)
-        .map(Some)
-    }
-}
-
 impl SerializedImageRecord {
-    fn from_image_record(image_record: &ImageRecord, should_include_image: bool) -> Self {
+    fn from_image_record(image_record: &ImageRecord) -> Self {
         SerializedImageRecord {
             protocol: image_record.protocol,
-            decoded_image: should_include_image.then(|| Arc::clone(&image_record.image)),
-            animation: should_include_image
-                .then(|| image_record.animation.clone())
-                .flatten(),
             action: image_record.action,
             display: image_record.display.clone(),
             anchor: image_record.anchor,
         }
     }
 
-    fn into_image_record(
-        self,
-        image_content: Arc<ImageContent>,
-    ) -> Result<Arc<ImageRecord>, String> {
-        if let Some(decoded_image) = self.decoded_image {
-            if decoded_image.as_ref() != image_content.decoded_image.as_ref() {
-                return Err("image record pixels do not match its content id".to_owned());
-            }
-        }
-        if let Some(animation) = &self.animation {
-            if image_content.animation.as_deref() != Some(animation.as_ref()) {
-                return Err("image record animation does not match its content id".to_owned());
-            }
-        }
-        Ok(Arc::new(ImageRecord {
+    fn into_image_record(self, image_content: &ImageContent) -> Arc<ImageRecord> {
+        Arc::new(ImageRecord {
             protocol: self.protocol,
             image: Arc::clone(&image_content.decoded_image),
             animation: image_content.animation.clone(),
             action: self.action,
             display: self.display,
             anchor: self.anchor,
-        }))
+        })
     }
 }
 
@@ -1510,14 +1132,12 @@ pub(super) fn serialize_image_placement(
     }
     Ok(SerializedImagePlacement {
         image_placement_id: placement.image_placement_id,
-        image_record: SerializedImageRecord::from_image_record(placement.get_image_record(), false),
-        image_content_id: Some(placement.image_content.image_content_id),
+        image_record: SerializedImageRecord::from_image_record(placement.get_image_record()),
+        image_content_id: placement.image_content.image_content_id,
         anchor: (u64::from(placement.anchor.0), placement.anchor.1),
         column_count: placement.column_count,
         row_count: placement.row_count,
-        plan: Some(placement.plan.clone()),
-        geometry: None,
-        raster: None,
+        plan: placement.plan.clone(),
     })
 }
 
@@ -1532,17 +1152,12 @@ pub(super) fn serialize_primary_history_image_placement(
     }
     Ok(SerializedImagePlacement {
         image_placement_id: placement.image_placement_id,
-        image_record: SerializedImageRecord::from_image_record(
-            placement.image_record.as_ref(),
-            false,
-        ),
-        image_content_id: Some(placement.image_content.image_content_id),
+        image_record: SerializedImageRecord::from_image_record(placement.image_record.as_ref()),
+        image_content_id: placement.image_content.image_content_id,
         anchor: placement.anchor,
         column_count: placement.column_count,
         row_count: placement.row_count,
-        plan: Some(placement.plan.clone()),
-        geometry: None,
-        raster: None,
+        plan: placement.plan.clone(),
     })
 }
 
@@ -1556,11 +1171,8 @@ pub(super) fn serialize_kitty_image(
         return Err("Kitty image record is not aliased to its content".to_owned());
     }
     Ok(SerializedKittyImage {
-        image_record: SerializedImageRecord::from_image_record(
-            kitty_image.image_record.as_ref(),
-            false,
-        ),
-        image_content_id: Some(kitty_image.image_content.image_content_id),
+        image_record: SerializedImageRecord::from_image_record(kitty_image.image_record.as_ref()),
+        image_content_id: kitty_image.image_content.image_content_id,
         is_virtual_placement: kitty_image.is_virtual_placement,
         virtual_screen: kitty_image.virtual_screen,
     })
@@ -1629,25 +1241,22 @@ pub(super) fn serialize_image_content_table(
 
 struct RestoreImageBuilder {
     image_content_by_id: BTreeMap<ImageContentId, Arc<ImageContent>>,
-    legacy_kitty_content_by_image_id: BTreeMap<u32, Arc<ImageContent>>,
     referenced_image_content_ids: HashSet<ImageContentId>,
     raster_by_key: HashMap<RasterCacheKey, Arc<crate::graphics::DecodedImage>>,
     decoded_image_pointers: HashSet<*const crate::graphics::DecodedImage>,
     storage_byte_count: usize,
     next_image_content_id: ImageContentId,
-    is_new_format: bool,
 }
 
 impl RestoreImageBuilder {
     fn from_serialized_image_contents(
-        serialized_contents: Option<Vec<SerializedImageContent>>,
-        next_image_content_id: Option<ImageContentId>,
+        serialized_contents: Vec<SerializedImageContent>,
+        next_image_content_id: ImageContentId,
     ) -> Result<Self, String> {
-        let is_new_format = serialized_contents.is_some();
         let mut image_content_by_id = BTreeMap::new();
         let mut storage_byte_count = 0usize;
         let mut decoded_image_pointers = HashSet::new();
-        for serialized_content in serialized_contents.unwrap_or_default() {
+        for serialized_content in serialized_contents {
             if image_content_by_id.contains_key(&serialized_content.image_content_id) {
                 return Err("image content identities must be unique".to_owned());
             }
@@ -1716,8 +1325,6 @@ impl RestoreImageBuilder {
                 return Err("image content storage exceeds the image limit".to_owned());
             }
         }
-        let next_image_content_id =
-            next_image_content_id.unwrap_or_else(default_next_image_content_id);
         if image_content_by_id.contains_key(&next_image_content_id) {
             return Err("next image content identity collides with retained content".to_owned());
         }
@@ -1726,96 +1333,25 @@ impl RestoreImageBuilder {
         }
         Ok(Self {
             image_content_by_id,
-            legacy_kitty_content_by_image_id: BTreeMap::new(),
             referenced_image_content_ids: HashSet::new(),
             raster_by_key: HashMap::new(),
             decoded_image_pointers,
             storage_byte_count,
             next_image_content_id,
-            is_new_format,
         })
     }
 
-    fn get_or_create_image_content(
+    fn get_image_content(
         &mut self,
-        serialized_image_record: &SerializedImageRecord,
-        image_content_id: Option<ImageContentId>,
+        image_content_id: ImageContentId,
     ) -> Result<Arc<ImageContent>, String> {
-        if self.is_new_format != image_content_id.is_some() {
-            return Err("image records must use the content table consistently".to_owned());
-        }
-        if image_content_id.is_some() && serialized_image_record.decoded_image.is_some() {
-            return Err("content-table image records cannot carry inline pixels".to_owned());
-        }
-        if let Some(image_content_id) = image_content_id {
-            let image_content = self
-                .image_content_by_id
-                .get(&image_content_id)
-                .cloned()
-                .ok_or_else(|| "image placement refers to missing content".to_owned())?;
-            self.referenced_image_content_ids.insert(image_content_id);
-            return Ok(image_content);
-        }
-        let decoded_image = serialized_image_record
-            .decoded_image
-            .as_ref()
-            .ok_or_else(|| "legacy image record is missing pixels".to_owned())?;
-        if let Some(image_id) = get_kitty_image_id_from_record(serialized_image_record) {
-            if let Some(image_content) = self.legacy_kitty_content_by_image_id.get(&image_id) {
-                if image_content.decoded_image.as_ref() != decoded_image.as_ref() {
-                    return Err("one Kitty image id refers to different pixels".to_owned());
-                }
-                return Ok(Arc::clone(image_content));
-            }
-        }
-        let image_content_id = self.allocate_image_content_id()?;
-        self.retain_decoded_image(Arc::clone(decoded_image))?;
-        let image_content = Arc::new(ImageContent {
-            image_content_id,
-            decoded_image: Arc::clone(decoded_image),
-            animation: serialized_image_record.animation.clone(),
-            animation_frame_index: 0,
-            animation_loop_count: 0,
-            animation_elapsed_nanos: 0,
-            is_animation_running: serialized_image_record.animation.is_some(),
-            is_animation_loading: false,
-            sixel: None,
-        });
-        if let Some(animation) = &serialized_image_record.animation {
-            for animation_frame in animation.list_frames() {
-                self.retain_decoded_image(animation_frame.clone_decoded_image())?;
-            }
-        }
-        if let Some(image_id) = get_kitty_image_id_from_record(serialized_image_record) {
-            self.legacy_kitty_content_by_image_id
-                .insert(image_id, Arc::clone(&image_content));
-        }
+        let image_content = self
+            .image_content_by_id
+            .get(&image_content_id)
+            .cloned()
+            .ok_or_else(|| "image placement refers to missing content".to_owned())?;
+        self.referenced_image_content_ids.insert(image_content_id);
         Ok(image_content)
-    }
-
-    fn allocate_image_content_id(&mut self) -> Result<ImageContentId, String> {
-        let mut candidate_image_content_id = self.next_image_content_id;
-        loop {
-            let next_image_content_id = candidate_image_content_id
-                .get_raw_image_content_id()
-                .checked_add(1)
-                .and_then(ImageContentId::from_raw_image_content_id)
-                .ok_or_else(|| "image content identity space is exhausted".to_owned())?;
-            if !self
-                .image_content_by_id
-                .contains_key(&candidate_image_content_id)
-                && !self
-                    .legacy_kitty_content_by_image_id
-                    .values()
-                    .any(|legacy_image_content| {
-                        legacy_image_content.image_content_id == candidate_image_content_id
-                    })
-            {
-                self.next_image_content_id = next_image_content_id;
-                return Ok(candidate_image_content_id);
-            }
-            candidate_image_content_id = next_image_content_id;
-        }
     }
 
     fn add_storage_byte_count(&mut self, requested_byte_count: usize) -> Result<(), String> {
@@ -1867,14 +1403,6 @@ impl RestoreImageBuilder {
         Ok(raster)
     }
 
-    fn retain_raster_image(
-        &mut self,
-        raster: Arc<crate::graphics::DecodedImage>,
-    ) -> Result<Arc<crate::graphics::DecodedImage>, String> {
-        self.retain_decoded_image(Arc::clone(&raster))?;
-        Ok(raster)
-    }
-
     fn retain_decoded_image(
         &mut self,
         decoded_image: Arc<crate::graphics::DecodedImage>,
@@ -1889,9 +1417,7 @@ impl RestoreImageBuilder {
     }
 
     fn finish_restore(self) -> Result<ImageContentId, String> {
-        if self.is_new_format
-            && self.referenced_image_content_ids.len() != self.image_content_by_id.len()
-        {
+        if self.referenced_image_content_ids.len() != self.image_content_by_id.len() {
             return Err("image content table contains unreferenced entries".to_owned());
         }
         Ok(self.next_image_content_id)
@@ -1963,105 +1489,33 @@ fn restore_raster_plan(
     image_content: &Arc<ImageContent>,
     restore_builder: &mut RestoreImageBuilder,
 ) -> Result<(RasterPlan, Option<Arc<crate::graphics::DecodedImage>>), String> {
-    if let Some(raster_plan) = &serialized_placement.plan {
-        validate_raster_plan(
-            image_record,
-            raster_plan,
-            serialized_placement.column_count,
-            serialized_placement.row_count,
-        )?;
-        let raster = match &serialized_placement.raster {
-            Some(raster) => {
-                if (raster.pixel_width, raster.pixel_height) != raster_plan.canvas_size {
-                    return Err("image raster dimensions do not match its raster plan".to_owned());
-                }
-                Some(restore_builder.retain_raster_image(raster.clone())?)
-            }
-            None => {
-                let raster_cache_key = (
-                    image_content.image_content_id,
-                    raster_plan.source_rect,
-                    raster_plan.target_size,
-                    raster_plan.canvas_size,
-                    raster_plan.pixel_offset,
-                );
-                if let Some(cached_raster) = restore_builder.raster_by_key.get(&raster_cache_key) {
-                    Some(Arc::clone(cached_raster))
-                } else {
-                    let is_identity = raster_plan.target_size == raster_plan.canvas_size
-                        && raster_plan.pixel_offset == (0, 0)
-                        && raster_plan.source_rect
-                            == image_record
-                                .compute_source_rect()
-                                .map_err(|source_rect_error| source_rect_error.to_string())?
-                        && raster_plan.target_size
-                            == (
-                                image_record.image.pixel_width,
-                                image_record.image.pixel_height,
-                            );
-                    if !is_identity {
-                        let raster_byte_count = usize::try_from(raster_plan.canvas_size.0)
-                            .ok()
-                            .and_then(|image_pixel_width| {
-                                usize::try_from(raster_plan.canvas_size.1).ok().and_then(
-                                    |image_pixel_height| {
-                                        image_pixel_width
-                                            .checked_mul(image_pixel_height)
-                                            .and_then(|pixel_count| pixel_count.checked_mul(4))
-                                    },
-                                )
-                            })
-                            .ok_or_else(|| "image raster plan byte count overflows".to_owned())?;
-                        restore_builder.ensure_storage_byte_count(raster_byte_count)?;
-                    }
-                    let raster = raster::rebuild_raster_image(image_record, raster_plan)
-                        .map_err(|raster_error| raster_error.to_string())?;
-                    raster
-                        .map(|raster| restore_builder.cache_raster_image(raster_cache_key, raster))
-                        .transpose()?
-                }
-            }
-        };
-        return Ok((raster_plan.clone(), raster));
-    }
-    let image_geometry = serialized_placement.geometry.unwrap_or(ImageCellGeometry {
-        full_size: Size {
-            column_count: serialized_placement.column_count,
-            row_count: serialized_placement.row_count,
-        },
-        cell_offset: Point { column: 0, row: 0 },
-    });
-    validate_image_geometry(
+    let raster_plan = &serialized_placement.plan;
+    validate_raster_plan(
         image_record,
+        raster_plan,
         serialized_placement.column_count,
         serialized_placement.row_count,
-        Some(image_geometry),
     )?;
-    let raster = serialized_placement
-        .raster
-        .clone()
-        .map(|raster| restore_builder.retain_raster_image(raster))
-        .transpose()?;
-    Ok((
-        legacy_image_raster_plan(image_record, image_geometry, raster.as_ref()),
-        raster,
-    ))
-}
-
-fn validate_new_format_placement(
-    serialized_placement: &SerializedImagePlacement,
-    restore_builder: &RestoreImageBuilder,
-) -> Result<(), String> {
-    if !restore_builder.is_new_format {
-        return Ok(());
-    }
-    if serialized_placement.plan.is_none() {
-        return Err("content-table image placements require a raster plan".to_owned());
-    }
-    if serialized_placement.geometry.is_some() || serialized_placement.raster.is_some() {
-        return Err("content-table image placements cannot carry legacy raster fields".to_owned());
-    }
-    Ok(())
+    let raster_cache_key = (
+        image_content.image_content_id,
+        raster_plan.source_rect,
+        raster_plan.target_size,
+        raster_plan.canvas_size,
+        raster_plan.pixel_offset,
+    );
+    let raster = if let Some(cached_raster) = restore_builder.raster_by_key.get(&raster_cache_key) {
+        Some(Arc::clone(cached_raster))
+    } else {
+        if raster_plan.needs_raster {
+            restore_builder.ensure_storage_byte_count(raster_plan.compute_canvas_byte_count()?)?;
+        }
+        let raster = raster::rebuild_raster_image(image_record, raster_plan)
+            .map_err(|raster_error| raster_error.to_string())?;
+        raster
+            .map(|raster| restore_builder.cache_raster_image(raster_cache_key, raster))
+            .transpose()?
+    };
+    Ok((raster_plan.clone(), raster))
 }
 
 fn validate_raster_plan(
@@ -2109,18 +1563,7 @@ fn validate_raster_plan(
     {
         return Err("image raster plan source overflows".to_owned());
     }
-    let raster_byte_count = usize::try_from(raster_plan.canvas_size.0)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(raster_plan.canvas_size.1)
-                .ok()
-                .and_then(|height| {
-                    width
-                        .checked_mul(height)
-                        .and_then(|pixels| pixels.checked_mul(4))
-                })
-        })
-        .ok_or_else(|| "image raster plan byte count overflows".to_owned())?;
+    let raster_byte_count = raster_plan.compute_canvas_byte_count()?;
     if raster_plan.canvas_size.0 > MAX_IMAGE_SIDE_PIXEL_COUNT as u32
         || raster_plan.canvas_size.1 > MAX_IMAGE_SIDE_PIXEL_COUNT as u32
         || raster_byte_count > MAX_IMAGE_STORAGE_BYTE_COUNT
@@ -2134,7 +1577,6 @@ fn restore_live_image_placement(
     serialized_placement: SerializedImagePlacement,
     restore_builder: &mut RestoreImageBuilder,
 ) -> Result<ImagePlacement, String> {
-    validate_new_format_placement(&serialized_placement, restore_builder)?;
     let image_placement_id = serialized_placement.image_placement_id;
     if image_placement_id == 0 {
         return Err("image placement identity must be nonzero".to_owned());
@@ -2145,14 +1587,11 @@ fn restore_live_image_placement(
     if serialized_placement.anchor.0 > u64::from(u16::MAX) {
         return Err("image placement coordinate extent does not fit in u16".to_owned());
     }
-    let image_content = restore_builder.get_or_create_image_content(
-        &serialized_placement.image_record,
-        serialized_placement.image_content_id,
-    )?;
+    let image_content = restore_builder.get_image_content(serialized_placement.image_content_id)?;
     let image_record = serialized_placement
         .image_record
         .clone()
-        .into_image_record(Arc::clone(&image_content))?;
+        .into_image_record(&image_content);
     if !matches!(
         image_record.action,
         ImageAction::Display | ImageAction::TransmitAndDisplay
@@ -2194,21 +1633,17 @@ fn restore_history_image_placement(
     serialized_placement: SerializedImagePlacement,
     restore_builder: &mut RestoreImageBuilder,
 ) -> Result<PrimaryHistoryImagePlacement, String> {
-    validate_new_format_placement(&serialized_placement, restore_builder)?;
     if serialized_placement.image_placement_id == 0 {
         return Err("image placement identity must be nonzero".to_owned());
     }
     if serialized_placement.column_count == 0 || serialized_placement.row_count == 0 {
         return Err("image placement dimensions must be nonzero".to_owned());
     }
-    let image_content = restore_builder.get_or_create_image_content(
-        &serialized_placement.image_record,
-        serialized_placement.image_content_id,
-    )?;
+    let image_content = restore_builder.get_image_content(serialized_placement.image_content_id)?;
     let image_record = serialized_placement
         .image_record
         .clone()
-        .into_image_record(Arc::clone(&image_content))?;
+        .into_image_record(&image_content);
     if !matches!(
         image_record.action,
         ImageAction::Display | ImageAction::TransmitAndDisplay
@@ -2248,8 +1683,8 @@ pub(super) fn restore_serialized_image_state(
     primary_image_history: Vec<SerializedImagePlacement>,
     alternate_image_placements: Vec<SerializedImagePlacement>,
     serialized_kitty_images: Vec<SerializedKittyImage>,
-    serialized_image_contents: Option<Vec<SerializedImageContent>>,
-    next_image_content_id: Option<ImageContentId>,
+    serialized_image_contents: Vec<SerializedImageContent>,
+    next_image_content_id: ImageContentId,
 ) -> Result<RestoredImageState, String> {
     let total_placement_count = primary_image_placements
         .len()
@@ -2274,26 +1709,18 @@ pub(super) fn restore_serialized_image_state(
         serialized_image_contents,
         next_image_content_id,
     )?;
-    let mut primary_image_placement_ids = HashSet::new();
-    if primary_image_placements
-        .iter()
-        .any(|placement| !primary_image_placement_ids.insert(placement.image_placement_id))
-    {
-        return Err("image placement identities must be unique per screen".to_owned());
-    }
-    let mut history_image_placement_ids = HashSet::new();
-    if primary_image_history
-        .iter()
-        .any(|placement| !history_image_placement_ids.insert(placement.image_placement_id))
-    {
-        return Err("image placement identities must be unique per screen".to_owned());
-    }
-    let mut alternate_image_placement_ids = HashSet::new();
-    if alternate_image_placements
-        .iter()
-        .any(|placement| !alternate_image_placement_ids.insert(placement.image_placement_id))
-    {
-        return Err("image placement identities must be unique per screen".to_owned());
+    for serialized_placements in [
+        &primary_image_placements,
+        &primary_image_history,
+        &alternate_image_placements,
+    ] {
+        let mut image_placement_ids = HashSet::new();
+        if serialized_placements
+            .iter()
+            .any(|placement| !image_placement_ids.insert(placement.image_placement_id))
+        {
+            return Err("image placement identities must be unique per screen".to_owned());
+        }
     }
     let primary_image_placements = primary_image_placements
         .into_iter()
@@ -2346,14 +1773,12 @@ pub(super) fn restore_serialized_image_state(
         if !kitty_image_identities.insert(kitty_image_identity) {
             return Err("retained Kitty image ids must be unique".to_owned());
         }
-        let image_content = restore_builder.get_or_create_image_content(
-            &serialized_kitty_image.image_record,
-            serialized_kitty_image.image_content_id,
-        )?;
+        let image_content =
+            restore_builder.get_image_content(serialized_kitty_image.image_content_id)?;
         let image_record = serialized_kitty_image
             .image_record
             .clone()
-            .into_image_record(Arc::clone(&image_content))?;
+            .into_image_record(&image_content);
         kitty_images.push(KittyImage {
             image_record,
             image_content,
@@ -2361,43 +1786,26 @@ pub(super) fn restore_serialized_image_state(
             virtual_screen: serialized_kitty_image.virtual_screen,
         });
     }
-    let mut retained_kitty_ids = kitty_images
+    let retained_kitty_ids = kitty_images
         .iter()
-        .filter_map(|image| get_kitty_image_id(image.image_record.as_ref()))
+        .filter_map(|kitty_image| get_kitty_image_id(kitty_image.image_record.as_ref()))
         .collect::<HashSet<_>>();
-    for placement in primary_image_placements
+    let placement_image_records = primary_image_placements
         .iter()
         .chain(&alternate_image_placements)
-    {
-        let Some(kitty_image_id) = get_kitty_image_id(placement.image_record.as_ref()) else {
-            continue;
-        };
-        if retained_kitty_ids.insert(kitty_image_id) {
-            let mut upload = placement.image_record.as_ref().clone();
-            upload.action = ImageAction::Transmit;
-            upload.display.image_id = Some(kitty_image_id);
-            kitty_images.push(KittyImage {
-                image_record: Arc::new(upload),
-                image_content: Arc::clone(&placement.image_content),
-                is_virtual_placement: false,
-                virtual_screen: None,
-            });
-        }
-    }
-    for placement in &primary_image_history {
-        let Some(kitty_image_id) = get_kitty_image_id(placement.image_record.as_ref()) else {
-            continue;
-        };
-        if retained_kitty_ids.insert(kitty_image_id) {
-            let mut upload = placement.image_record.as_ref().clone();
-            upload.action = ImageAction::Transmit;
-            upload.display.image_id = Some(kitty_image_id);
-            kitty_images.push(KittyImage {
-                image_record: Arc::new(upload),
-                image_content: Arc::clone(&placement.image_content),
-                is_virtual_placement: false,
-                virtual_screen: None,
-            });
+        .map(|placement| &placement.image_record)
+        .chain(
+            primary_image_history
+                .iter()
+                .map(|placement| &placement.image_record),
+        );
+    for image_record in placement_image_records {
+        if get_kitty_image_id(image_record.as_ref())
+            .is_some_and(|kitty_image_id| !retained_kitty_ids.contains(&kitty_image_id))
+        {
+            return Err(
+                "a Kitty image placement names an image id no retained upload holds".to_owned(),
+            );
         }
     }
     let next_image_content_id = restore_builder.finish_restore()?;
@@ -2411,14 +1819,13 @@ pub(super) fn restore_serialized_image_state(
 }
 
 /// One displayed image and the cells covered by its placement rectangle.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImagePlacement {
     /// The terminal-local identity for this placement.
     image_placement_id: ImagePlacementId,
     /// The complete image record retained with the placement and terminal state.
     image_record: Arc<ImageRecord>,
     /// The canonical image source shared by this placement's copies.
-    #[serde(skip)]
     image_content: Arc<ImageContent>,
     /// The zero-based row and column of the upper-left covered cell.
     anchor: (u16, u16),
@@ -2434,14 +1841,13 @@ pub struct ImagePlacement {
 
 /// An image placement whose primary-screen row is addressed in the retained
 /// history and live-screen row space.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrimaryHistoryImagePlacement {
     /// The terminal-local identity for this placement.
     image_placement_id: ImagePlacementId,
     /// The complete image record retained with the placement and terminal state.
     image_record: Arc<ImageRecord>,
     /// The canonical image source shared by this placement's copies.
-    #[serde(skip)]
     image_content: Arc<ImageContent>,
     /// The absolute primary row and column of the upper-left covered cell.
     anchor: (u64, u16),
@@ -2577,33 +1983,6 @@ impl ImagePlacement {
     pub fn get_image_cell_dimensions(&self) -> (u16, u16) {
         (self.row_count, self.column_count)
     }
-
-    /// Return whether (`row_index`, `column_index`) is one of the cells covered by this
-    /// placement.
-    #[must_use]
-    pub fn is_cell_covered(&self, row_index: u16, column_index: u16) -> bool {
-        u32::from(row_index) >= u32::from(self.anchor.0)
-            && u32::from(column_index) >= u32::from(self.anchor.1)
-            && u32::from(row_index) < u32::from(self.anchor.0) + u32::from(self.row_count)
-            && u32::from(column_index) < u32::from(self.anchor.1) + u32::from(self.column_count)
-    }
-
-    /// Visit covered cells in row-major order.
-    pub fn list_covered_cells(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
-        let (anchor_row, anchor_column) = self.anchor;
-        (0..self.row_count).flat_map(move |row_offset| {
-            (0..self.column_count).map(move |column_offset| {
-                (
-                    anchor_row
-                        .checked_add(row_offset)
-                        .expect("validated image placement row fits in u16"),
-                    anchor_column
-                        .checked_add(column_offset)
-                        .expect("validated image placement column fits in u16"),
-                )
-            })
-        })
-    }
 }
 
 impl PrimaryHistoryImagePlacement {
@@ -2703,254 +2082,11 @@ impl AbsoluteImagePlacement {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for ImagePlacement {
-    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
-    where
-        Deserializer: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct ImagePlacementFields {
-            image_placement_id: ImagePlacementId,
-            image_record: Arc<ImageRecord>,
-            anchor: (u16, u16),
-            column_count: u16,
-            row_count: u16,
-            #[serde(default)]
-            geometry: Option<ImageCellGeometry>,
-            #[serde(default)]
-            plan: Option<RasterPlan>,
-            #[serde(default)]
-            raster: Option<Arc<crate::graphics::DecodedImage>>,
-        }
-
-        let image_placement_fields =
-            <ImagePlacementFields as serde::Deserialize>::deserialize(deserializer)?;
-        if image_placement_fields.image_placement_id == 0 {
-            return Err(serde::de::Error::custom(
-                "image placement identity must be nonzero",
-            ));
-        }
-        if !matches!(
-            image_placement_fields.image_record.action,
-            ImageAction::Display | ImageAction::TransmitAndDisplay
-        ) {
-            return Err(serde::de::Error::custom(
-                "image placement image record must be a display record",
-            ));
-        }
-        if image_placement_fields.column_count == 0 || image_placement_fields.row_count == 0 {
-            return Err(serde::de::Error::custom(
-                "image placement dimensions must be nonzero",
-            ));
-        }
-        validate_image_geometry(
-            &image_placement_fields.image_record,
-            image_placement_fields.column_count,
-            image_placement_fields.row_count,
-            image_placement_fields
-                .plan
-                .as_ref()
-                .map(|plan| plan.geometry)
-                .or(image_placement_fields.geometry),
-        )
-        .map_err(serde::de::Error::custom)?;
-        let row_end = u32::from(image_placement_fields.anchor.0)
-            + u32::from(image_placement_fields.row_count);
-        let column_end = u32::from(image_placement_fields.anchor.1)
-            + u32::from(image_placement_fields.column_count);
-        if row_end > u32::from(u16::MAX) + 1 || column_end > u32::from(u16::MAX) + 1 {
-            return Err(serde::de::Error::custom(
-                "image placement coordinate extent does not fit in u16",
-            ));
-        }
-
-        let image_record = image_placement_fields.image_record;
-        let image_content = legacy_image_content_for_record(&image_record);
-        let plan = image_placement_fields.plan.unwrap_or_else(|| {
-            legacy_image_raster_plan(
-                &image_record,
-                image_placement_fields
-                    .geometry
-                    .unwrap_or(ImageCellGeometry {
-                        full_size: Size {
-                            column_count: image_placement_fields.column_count,
-                            row_count: image_placement_fields.row_count,
-                        },
-                        cell_offset: Point { column: 0, row: 0 },
-                    }),
-                image_placement_fields.raster.as_ref(),
-            )
-        });
-        Ok(ImagePlacement {
-            image_placement_id: image_placement_fields.image_placement_id,
-            image_record,
-            anchor: image_placement_fields.anchor,
-            column_count: image_placement_fields.column_count,
-            row_count: image_placement_fields.row_count,
-            plan,
-            image_content,
-            raster: image_placement_fields.raster,
-        })
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for PrimaryHistoryImagePlacement {
-    fn deserialize<Deserializer>(deserializer: Deserializer) -> Result<Self, Deserializer::Error>
-    where
-        Deserializer: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        struct PrimaryHistoryImagePlacementFields {
-            image_placement_id: ImagePlacementId,
-            image_record: Arc<ImageRecord>,
-            anchor: (u64, u16),
-            column_count: u16,
-            row_count: u16,
-            #[serde(default)]
-            geometry: Option<ImageCellGeometry>,
-            #[serde(default)]
-            plan: Option<RasterPlan>,
-            #[serde(default)]
-            raster: Option<Arc<crate::graphics::DecodedImage>>,
-        }
-
-        let image_placement_fields =
-            <PrimaryHistoryImagePlacementFields as serde::Deserialize>::deserialize(deserializer)?;
-        validate_history_image_placement(
-            &image_placement_fields.image_record,
-            image_placement_fields.anchor,
-            image_placement_fields.column_count,
-            image_placement_fields.row_count,
-            image_placement_fields
-                .plan
-                .as_ref()
-                .map(|plan| plan.geometry)
-                .or(image_placement_fields.geometry),
-        )
-        .map_err(serde::de::Error::custom)?;
-        if image_placement_fields.image_placement_id == 0 {
-            return Err(serde::de::Error::custom(
-                "image placement identity must be nonzero",
-            ));
-        }
-
-        let image_record = image_placement_fields.image_record;
-        let image_content = legacy_image_content_for_record(&image_record);
-        let plan = image_placement_fields.plan.unwrap_or_else(|| {
-            legacy_image_raster_plan(
-                &image_record,
-                image_placement_fields
-                    .geometry
-                    .unwrap_or(ImageCellGeometry {
-                        full_size: Size {
-                            column_count: image_placement_fields.column_count,
-                            row_count: image_placement_fields.row_count,
-                        },
-                        cell_offset: Point { column: 0, row: 0 },
-                    }),
-                image_placement_fields.raster.as_ref(),
-            )
-        });
-        Ok(PrimaryHistoryImagePlacement {
-            image_placement_id: image_placement_fields.image_placement_id,
-            image_record,
-            anchor: image_placement_fields.anchor,
-            column_count: image_placement_fields.column_count,
-            row_count: image_placement_fields.row_count,
-            plan,
-            image_content,
-            raster: image_placement_fields.raster,
-        })
-    }
-}
-
-fn validate_history_image_placement(
-    image_record: &ImageRecord,
-    placement_anchor: (u64, u16),
-    column_count: u16,
-    row_count: u16,
-    image_geometry: Option<ImageCellGeometry>,
-) -> Result<(), String> {
-    if !matches!(
-        image_record.action,
-        ImageAction::Display | ImageAction::TransmitAndDisplay
-    ) {
-        return Err("image placement image record must be a display record".to_string());
-    }
-    if column_count == 0 || row_count == 0 {
-        return Err("image placement dimensions must be nonzero".to_string());
-    }
-    validate_image_geometry(image_record, column_count, row_count, image_geometry)?;
-    placement_anchor
-        .0
-        .checked_add(u64::from(row_count))
-        .ok_or_else(|| "image placement row extent overflows u64".to_string())?;
-    let column_end = u32::from(placement_anchor.1) + u32::from(column_count);
-    if column_end > u32::from(u16::MAX) + 1 {
-        return Err("image placement coordinate extent does not fit in u16".to_string());
-    }
-    Ok(())
-}
-
-fn validate_image_geometry(
-    image_record: &ImageRecord,
-    column_count: u16,
-    row_count: u16,
-    image_geometry: Option<ImageCellGeometry>,
-) -> Result<(), String> {
-    image_record
-        .compute_source_rect()
-        .map_err(|source_rect_error| source_rect_error.to_string())?;
-    if let Some(image_geometry) = image_geometry {
-        if !image_geometry.is_visible_size_contained(Size {
-            column_count,
-            row_count,
-        }) {
-            return Err("image clipping exceeds its complete cell dimensions".to_string());
-        }
-    } else {
-        let (image_column_count, image_row_count) = compute_image_cell_dimensions(image_record)
-            .map_err(|dimension_error| dimension_error.to_string())?;
-        if image_column_count != u32::from(column_count) || image_row_count != u32::from(row_count)
-        {
-            return Err("image placement dimensions do not match its image record".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn legacy_image_raster_plan(
-    image_record: &ImageRecord,
-    image_geometry: ImageCellGeometry,
-    raster_image: Option<&Arc<crate::graphics::DecodedImage>>,
-) -> RasterPlan {
-    let source_rect = image_record.compute_source_rect().unwrap_or((
-        0,
-        0,
-        image_record.image.pixel_width,
-        image_record.image.pixel_height,
-    ));
-    let canvas_size = raster_image.map_or(
-        (
-            image_record.image.pixel_width,
-            image_record.image.pixel_height,
-        ),
-        |decoded_image| (decoded_image.pixel_width, decoded_image.pixel_height),
-    );
-    RasterPlan {
-        geometry: image_geometry,
-        source_rect,
-        target_size: canvas_size,
-        canvas_size,
-        pixel_offset: (0, 0),
-    }
-}
-
-pub(super) fn default_next_image_placement_id() -> ImagePlacementId {
+pub(super) fn get_default_next_image_placement_id() -> ImagePlacementId {
     1
 }
 
-pub(super) fn default_next_image_content_id() -> ImageContentId {
+pub(super) fn get_default_next_image_content_id() -> ImageContentId {
     ImageContentId::from_raw_image_content_id(1).expect("one is a valid image content id")
 }
 
@@ -2969,7 +2105,9 @@ pub(super) fn validate_image_state(
         .primary_image_placements
         .len()
         .checked_add(terminal_state_fields.primary_image_history.len())
-        .and_then(|count| count.checked_add(terminal_state_fields.alternate_image_placements.len()))
+        .and_then(|placement_count| {
+            placement_count.checked_add(terminal_state_fields.alternate_image_placements.len())
+        })
         .ok_or_else(|| "image placement count overflows".to_owned())?;
     if total_image_placement_count > MAX_IMAGE_PLACEMENT_COUNT {
         return Err(ImagePlacementError::TooManyPlacements {
@@ -3035,9 +2173,7 @@ pub(super) fn validate_image_state(
     for placement in &terminal_state_fields.primary_image_placements {
         validate_live_image_placement(
             placement,
-            if terminal_state_fields.native_image_coverage
-                && placement.image_record.protocol != GraphicsProtocol::Kitty
-            {
+            if placement.image_record.protocol != GraphicsProtocol::Kitty {
                 (u16::MAX, u16::MAX)
             } else {
                 terminal_state_fields.primary.get_grid_dimensions()
@@ -3147,9 +2283,7 @@ pub(super) fn validate_image_state(
     for placement in &terminal_state_fields.alternate_image_placements {
         validate_live_image_placement(
             placement,
-            if terminal_state_fields.native_image_coverage
-                && placement.image_record.protocol != GraphicsProtocol::Kitty
-            {
+            if placement.image_record.protocol != GraphicsProtocol::Kitty {
                 (u16::MAX, u16::MAX)
             } else {
                 terminal_state_fields.alternate.get_grid_dimensions()
@@ -3343,7 +2477,7 @@ fn validate_image_pixels(decoded_image: &Arc<crate::graphics::DecodedImage>) -> 
         image_pixel_width,
         image_pixel_height,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|decode_error| decode_error.to_string())?;
     if decoded_image.rgba_bytes.len() != expected_rgba_byte_count {
         return Err("image RGBA length does not match its dimensions".to_owned());
     }
@@ -3461,31 +2595,13 @@ impl TerminalState {
 
     fn list_image_animation_contents(&self) -> BTreeMap<ImageContentId, Arc<ImageContent>> {
         let mut image_content_by_id = BTreeMap::new();
-        for placement in self
-            .primary_image_placements
-            .iter()
-            .chain(self.native_images.iter().map(|source| &source.placement))
-        {
-            image_content_by_id
-                .entry(placement.image_content.image_content_id)
-                .or_insert_with(|| Arc::clone(&placement.image_content));
+        for image_content in self.list_retained_image_contents() {
+            if image_content.animation.is_some() {
+                image_content_by_id
+                    .entry(image_content.image_content_id)
+                    .or_insert_with(|| Arc::clone(image_content));
+            }
         }
-        for placement in &self.primary_image_history {
-            image_content_by_id
-                .entry(placement.image_content.image_content_id)
-                .or_insert_with(|| Arc::clone(&placement.image_content));
-        }
-        for placement in &self.alternate_image_placements {
-            image_content_by_id
-                .entry(placement.image_content.image_content_id)
-                .or_insert_with(|| Arc::clone(&placement.image_content));
-        }
-        for kitty_image in &self.kitty_images {
-            image_content_by_id
-                .entry(kitty_image.image_content.image_content_id)
-                .or_insert_with(|| Arc::clone(&kitty_image.image_content));
-        }
-        image_content_by_id.retain(|_, image_content| image_content.animation.is_some());
         image_content_by_id
     }
 }
@@ -3721,11 +2837,11 @@ impl TerminalState {
             kitty_images: std::mem::take(&mut self.kitty_images),
             next_image_placement_id: std::mem::replace(
                 &mut self.next_image_placement_id,
-                default_next_image_placement_id(),
+                get_default_next_image_placement_id(),
             ),
             next_image_content_id: std::mem::replace(
                 &mut self.next_image_content_id,
-                default_next_image_content_id(),
+                get_default_next_image_content_id(),
             ),
         }
     }
@@ -3800,7 +2916,7 @@ impl TerminalState {
         image: Arc<crate::graphics::DecodedImage>,
     ) -> Arc<crate::graphics::DecodedImage> {
         self.list_retained_image_contents()
-            .map(|content| &content.decoded_image)
+            .map(|image_content| &image_content.decoded_image)
             .find(|kept| kept.as_ref() == image.as_ref())
             .cloned()
             .unwrap_or(image)
@@ -3809,6 +2925,7 @@ impl TerminalState {
     pub(super) fn allocate_image_content(
         &mut self,
         image_record: Arc<ImageRecord>,
+        sixel_source: Option<SixelImageSource>,
     ) -> Result<Arc<ImageContent>, ImagePlacementError> {
         let image_content_id = self.allocate_image_content_id()?;
         Ok(Arc::new(ImageContent {
@@ -3820,26 +2937,7 @@ impl TerminalState {
             animation_elapsed_nanos: 0,
             is_animation_running: image_record.animation.is_some(),
             is_animation_loading: false,
-            sixel: None,
-        }))
-    }
-
-    pub(super) fn allocate_sixel_image_content(
-        &mut self,
-        image_record: Arc<ImageRecord>,
-        sixel_source: SixelImageSource,
-    ) -> Result<Arc<ImageContent>, ImagePlacementError> {
-        let image_content_id = self.allocate_image_content_id()?;
-        Ok(Arc::new(ImageContent {
-            image_content_id,
-            decoded_image: Arc::clone(&image_record.image),
-            animation: image_record.animation.clone(),
-            animation_frame_index: 0,
-            animation_loop_count: 0,
-            animation_elapsed_nanos: 0,
-            is_animation_running: image_record.animation.is_some(),
-            is_animation_loading: false,
-            sixel: Some(sixel_source),
+            sixel: sixel_source,
         }))
     }
 
@@ -3882,7 +2980,7 @@ impl TerminalState {
                 return Ok(image_content);
             }
         }
-        self.allocate_image_content(Arc::clone(image_record))
+        self.allocate_image_content(Arc::clone(image_record), None)
     }
 
     /// Return image placements whose anchors are on the active live screen in
@@ -3942,7 +3040,7 @@ impl TerminalState {
             );
             return placements;
         }
-        let (view_grid, scrolled_row_count) = self.scrolled_view(view_row_offset);
+        let (view_grid, scrolled_row_count) = self.get_scrolled_view(view_row_offset);
         let (row_count, column_count) = view_grid.get_grid_dimensions();
         let view_top_row = self
             .scrollback
@@ -4005,7 +3103,7 @@ impl TerminalState {
             for (column_index, terminal_cell) in grid_row_cells.iter().enumerate() {
                 let resolved_placeholder =
                     terminal_cell
-                        .image_placeholder()
+                        .get_image_placeholder()
                         .and_then(|raw_placeholder| {
                             resolve_placeholder(raw_placeholder, previous_placeholder)
                         });
@@ -4253,9 +3351,9 @@ impl TerminalState {
         self.primary_image_placements.clear();
         self.primary_image_history.clear();
 
-        let history_len = self.scrollback.get_retained_line_count() as u64;
+        let history_line_count = self.scrollback.get_retained_line_count() as u64;
         let live_top = self.scrollback.get_total_pushed_line_count();
-        let oldest_history_row = live_top.saturating_sub(history_len);
+        let oldest_history_row = live_top.saturating_sub(history_line_count);
         let live_end = live_top.saturating_add(u64::from(self.primary.get_grid_dimensions().0));
         let grid_columns = self.primary.get_grid_dimensions().1;
 
@@ -4322,7 +3420,7 @@ impl TerminalState {
                 sixel_source,
             );
             return match image_record_result {
-                Ok((_, cursor_movement)) => {
+                Ok(cursor_movement) => {
                     if let Some(cursor_movement) = cursor_movement {
                         candidate_terminal_state.apply_image_cursor_movement(cursor_movement);
                     }
@@ -4348,7 +3446,7 @@ impl TerminalState {
         );
         let candidate_image_state = self.take_image_state_snapshot();
         match image_record_result {
-            Ok((_, cursor_movement)) => {
+            Ok(cursor_movement) => {
                 self.set_image_state_snapshot(candidate_image_state);
                 if let Some(cursor_movement) = cursor_movement {
                     self.apply_image_cursor_movement(cursor_movement);
@@ -4368,8 +3466,7 @@ impl TerminalState {
         is_sixel_scrolling: Option<bool>,
         should_move_cursor_right: bool,
         sixel_source: Option<SixelImageSource>,
-    ) -> Result<(crate::graphics::ImageDisplay, Option<ImageCursorMovement>), ImagePlacementError>
-    {
+    ) -> Result<Option<ImageCursorMovement>, ImagePlacementError> {
         let mut image_record = image_record.clone();
         self.retain_kitty_image_upload(&mut image_record)?;
         if image_record.display.is_unicode_placeholder
@@ -4380,7 +3477,7 @@ impl TerminalState {
                 image_record.image.rgba_bytes.len(),
                 get_kitty_image_id(&image_record),
             )?;
-            return Ok((image_record.display, None));
+            return Ok(None);
         }
         let is_relative = image_record.display.relative_image_id.is_some()
             || image_record.display.relative_placement_id.is_some();
@@ -4420,10 +3517,7 @@ impl TerminalState {
         }
         let should_move_cursor =
             should_move_cursor && image_record.protocol != GraphicsProtocol::Iterm2;
-        Ok((
-            image_record.display,
-            cursor_movement.filter(|_| should_move_cursor),
-        ))
+        Ok(cursor_movement.filter(|_| should_move_cursor))
     }
 
     fn place_image(
@@ -4509,17 +3603,16 @@ impl TerminalState {
         } else {
             self.allocate_image_placement_id()?
         };
-        let content_record = Arc::new(image_record.clone());
-        let content = if let Some(sixel) = sixel_source {
-            self.allocate_sixel_image_content(Arc::clone(&content_record), sixel)?
-        } else {
-            self.get_image_content_for_record(&content_record)?
-        };
         let image_record = Arc::new(image_record.clone());
+        let image_content = if sixel_source.is_some() {
+            self.allocate_image_content(Arc::clone(&image_record), sixel_source)?
+        } else {
+            self.get_image_content_for_record(&image_record)?
+        };
         let mut placement = ImagePlacement::from_image_record(
             image_placement_id,
             Arc::clone(&image_record),
-            content,
+            image_content,
             prepared_image.plan,
             image_column_count,
             image_row_count,
@@ -4614,19 +3707,19 @@ impl TerminalState {
         &mut self,
         palette: &SixelPalette,
     ) -> Result<(), crate::graphics::GraphicsError> {
-        let mut contents = HashMap::new();
+        let mut image_content_by_id = HashMap::new();
         for placement in self.primary_image_placements.iter_mut().chain(
             self.native_images
                 .iter_mut()
                 .map(|source| &mut source.placement),
         ) {
-            refresh_shared_sixel_placement(placement, palette, &mut contents)?;
+            refresh_shared_sixel_placement(placement, palette, &mut image_content_by_id)?;
         }
         for placement in &mut self.primary_image_history {
-            refresh_shared_sixel_history_placement(placement, palette, &mut contents)?;
+            refresh_shared_sixel_history_placement(placement, palette, &mut image_content_by_id)?;
         }
         for placement in &mut self.alternate_image_placements {
-            refresh_shared_sixel_placement(placement, palette, &mut contents)?;
+            refresh_shared_sixel_placement(placement, palette, &mut image_content_by_id)?;
         }
         Ok(())
     }
@@ -4725,99 +3818,22 @@ impl TerminalState {
     }
 
     fn remove_kitty_image(&mut self, kitty_image_id: u32) {
-        self.primary_image_placements.retain(|placement| {
-            placement.image_record.protocol != GraphicsProtocol::Kitty
-                || placement.image_record.display.image_id != Some(kitty_image_id)
-        });
-        self.primary_image_history.retain(|placement| {
-            placement.image_record.protocol != GraphicsProtocol::Kitty
-                || placement.image_record.display.image_id != Some(kitty_image_id)
-        });
-        self.alternate_image_placements.retain(|placement| {
-            placement.image_record.protocol != GraphicsProtocol::Kitty
-                || placement.image_record.display.image_id != Some(kitty_image_id)
-        });
+        let is_other_image = |image_record: &ImageRecord| {
+            image_record.protocol != GraphicsProtocol::Kitty
+                || image_record.display.image_id != Some(kitty_image_id)
+        };
+        self.primary_image_placements
+            .retain(|placement| is_other_image(&placement.image_record));
+        self.primary_image_history
+            .retain(|placement| is_other_image(&placement.image_record));
+        self.alternate_image_placements
+            .retain(|placement| is_other_image(&placement.image_record));
     }
 
     pub(super) fn clear_active_image_placements(&mut self) {
         let (grid_row_count, grid_column_count) = self.get_active_grid().get_grid_dimensions();
         let scrollback_top_line_count = self.scrollback.get_total_pushed_line_count();
-        let mut relative_anchor_by_placement_id = HashMap::new();
-        match self.active_screen {
-            Screen::Primary => {
-                for image_placement in &self.primary_image_placements {
-                    if image_placement
-                        .image_record
-                        .display
-                        .relative_image_id
-                        .is_some()
-                        || image_placement
-                            .image_record
-                            .display
-                            .relative_placement_id
-                            .is_some()
-                    {
-                        if let Ok(Some((anchor_row, anchor_column))) = self.resolve_relative_anchor(
-                            &image_placement.image_record,
-                            Some(image_placement.image_placement_id),
-                        ) {
-                            relative_anchor_by_placement_id.insert(
-                                image_placement.image_placement_id,
-                                (i128::from(anchor_row), anchor_column),
-                            );
-                        }
-                    }
-                }
-                for image_placement in &self.primary_image_history {
-                    if image_placement
-                        .image_record
-                        .display
-                        .relative_image_id
-                        .is_some()
-                        || image_placement
-                            .image_record
-                            .display
-                            .relative_placement_id
-                            .is_some()
-                    {
-                        if let Ok(Some((anchor_row, anchor_column))) = self.resolve_relative_anchor(
-                            &image_placement.image_record,
-                            Some(image_placement.image_placement_id),
-                        ) {
-                            relative_anchor_by_placement_id.insert(
-                                image_placement.image_placement_id,
-                                (i128::from(anchor_row), anchor_column),
-                            );
-                        }
-                    }
-                }
-            }
-            Screen::Alternate => {
-                for image_placement in &self.alternate_image_placements {
-                    if image_placement
-                        .image_record
-                        .display
-                        .relative_image_id
-                        .is_some()
-                        || image_placement
-                            .image_record
-                            .display
-                            .relative_placement_id
-                            .is_some()
-                    {
-                        if let Ok(Some((anchor_row, anchor_column))) = self.resolve_relative_anchor(
-                            &image_placement.image_record,
-                            Some(image_placement.image_placement_id),
-                        ) {
-                            relative_anchor_by_placement_id.insert(
-                                image_placement.image_placement_id,
-                                (i128::from(anchor_row), anchor_column),
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let relative_anchor_by_placement_id = self.list_active_relative_anchors();
         let is_image_intersecting_live_grid =
             |image_record: &ImageRecord,
              image_placement_id: ImagePlacementId,
@@ -4878,6 +3894,45 @@ impl TerminalState {
                 )
             }),
         }
+    }
+
+    /// Returns the resolved `(row, column)` anchor of every relative placement
+    /// on the active screen, keyed by placement id. On the primary screen this
+    /// covers live and history placements; a history row is relative to the
+    /// live top row. A placement whose parent does not resolve has no entry.
+    fn list_active_relative_anchors(&self) -> HashMap<ImagePlacementId, (i128, i64)> {
+        let active_image_records: Vec<(&Arc<ImageRecord>, ImagePlacementId)> =
+            match self.active_screen {
+                Screen::Primary => {
+                    self.primary_image_placements
+                        .iter()
+                        .map(|placement| (&placement.image_record, placement.image_placement_id))
+                        .chain(self.primary_image_history.iter().map(|placement| {
+                            (&placement.image_record, placement.image_placement_id)
+                        }))
+                        .collect()
+                }
+                Screen::Alternate => self
+                    .alternate_image_placements
+                    .iter()
+                    .map(|placement| (&placement.image_record, placement.image_placement_id))
+                    .collect(),
+            };
+        let mut relative_anchor_by_placement_id = HashMap::new();
+        for (image_record, image_placement_id) in active_image_records {
+            let is_relative_image = image_record.display.relative_image_id.is_some()
+                || image_record.display.relative_placement_id.is_some();
+            if !is_relative_image {
+                continue;
+            }
+            if let Ok(Some((anchor_row, anchor_column))) =
+                self.resolve_relative_anchor(image_record, Some(image_placement_id))
+            {
+                relative_anchor_by_placement_id
+                    .insert(image_placement_id, (i128::from(anchor_row), anchor_column));
+            }
+        }
+        relative_anchor_by_placement_id
     }
 
     pub(super) fn clear_alternate_image_placements(&mut self) {
@@ -4947,7 +4002,7 @@ impl TerminalState {
 
     fn move_cursor_after_image(&mut self, column_count: u16, row_count: u16) {
         let (grid_rows, grid_columns) = self.get_active_grid().get_grid_dimensions();
-        let cursor_position = self.active_cursor_mut();
+        let cursor_position = self.get_active_cursor_mut();
         cursor_position.row = cursor_position
             .row
             .saturating_add(row_count)
@@ -4956,7 +4011,7 @@ impl TerminalState {
             .column
             .saturating_add(column_count)
             .min(grid_columns.saturating_sub(1));
-        cursor_position.pending_wrap = false;
+        cursor_position.is_wrap_pending = false;
     }
 
     fn move_cursor_after_sixel(
@@ -4988,7 +4043,7 @@ impl TerminalState {
             }
         }
         if top_row_index <= bottom_row_index {
-            let background_style = self.active_render().style.get_background_fill_style();
+            let background_style = self.get_active_render().style.get_background_fill_style();
             while cursor_row_index > bottom_row_index {
                 self.delete_lines_into_scrollback(
                     top_row_index,
@@ -4999,10 +4054,10 @@ impl TerminalState {
                 cursor_row_index -= 1;
             }
         }
-        let cursor_position = self.active_cursor_mut();
+        let cursor_position = self.get_active_cursor_mut();
         cursor_position.row = cursor_row_index.min(grid_rows - 1);
         cursor_position.column = next_cursor_column_index.min(grid_columns - 1);
-        cursor_position.pending_wrap = false;
+        cursor_position.is_wrap_pending = false;
     }
 }
 
@@ -5104,13 +4159,13 @@ fn refresh_shared_sixel_placement(
     palette: &SixelPalette,
     image_content_by_id: &mut HashMap<ImageContentId, Arc<ImageContent>>,
 ) -> Result<(), crate::graphics::GraphicsError> {
-    let Some(content) =
+    let Some(image_content) =
         get_refreshed_shared_sixel_content(&placement.image_content, palette, image_content_by_id)?
     else {
         return Ok(());
     };
     let mut refreshed_image_record = placement.image_record.as_ref().clone();
-    refreshed_image_record.image = Arc::clone(&content.decoded_image);
+    refreshed_image_record.image = Arc::clone(&image_content.decoded_image);
     let refreshed_image_record = Arc::new(refreshed_image_record);
     let raster = raster::rebuild_raster_image(&refreshed_image_record, &placement.plan).map_err(
         |reason| crate::graphics::GraphicsError::PlacementRejected {
@@ -5119,7 +4174,7 @@ fn refresh_shared_sixel_placement(
         },
     )?;
     placement.image_record = refreshed_image_record;
-    placement.image_content = content;
+    placement.image_content = image_content;
     placement.raster = raster;
     Ok(())
 }
@@ -5129,13 +4184,13 @@ fn refresh_shared_sixel_history_placement(
     palette: &SixelPalette,
     image_content_by_id: &mut HashMap<ImageContentId, Arc<ImageContent>>,
 ) -> Result<(), crate::graphics::GraphicsError> {
-    let Some(content) =
+    let Some(image_content) =
         get_refreshed_shared_sixel_content(&placement.image_content, palette, image_content_by_id)?
     else {
         return Ok(());
     };
     let mut refreshed_image_record = placement.image_record.as_ref().clone();
-    refreshed_image_record.image = Arc::clone(&content.decoded_image);
+    refreshed_image_record.image = Arc::clone(&image_content.decoded_image);
     let refreshed_image_record = Arc::new(refreshed_image_record);
     let raster = raster::rebuild_raster_image(&refreshed_image_record, &placement.plan).map_err(
         |reason| crate::graphics::GraphicsError::PlacementRejected {
@@ -5144,7 +4199,7 @@ fn refresh_shared_sixel_history_placement(
         },
     )?;
     placement.image_record = refreshed_image_record;
-    placement.image_content = content;
+    placement.image_content = image_content;
     placement.raster = raster;
     Ok(())
 }
@@ -5222,7 +4277,7 @@ where
     for (row_index, row_cells) in grid_row_entries {
         let mut previous_placeholder = None;
         for (column_index, cell) in row_cells.iter().enumerate() {
-            let Some(raw_placeholder) = cell.image_placeholder() else {
+            let Some(raw_placeholder) = cell.get_image_placeholder() else {
                 previous_placeholder = None;
                 continue;
             };

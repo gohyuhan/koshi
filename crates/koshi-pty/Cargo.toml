@@ -5,19 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-portable-pty = "0.9.0"
+koshi-core.workspace = true
+koshi-ipc.workspace = true
+portable-pty.workspace = true
 thiserror.workspace = true
-koshi-core = { version = "0.4.0", path = "../koshi-core" }
-koshi-ipc = { version = "0.4.0", path = "../koshi-ipc" }
 
-[target."cfg(unix)".dependencies]
-nix = { version = "0.28", features = ["signal", "hostname", "poll", "event", "process"] }
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
+nix = { workspace = true, features = ["event", "hostname", "poll", "process", "signal"] }
 
-[target."cfg(windows)".dependencies]
+[target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
-  "Win32_System_Console",
+  "Win32_Foundation",
+  "Win32_Security",
   "Win32_System_JobObjects",
+  "Win32_System_Threading",
 ] }
 
 [dev-dependencies]

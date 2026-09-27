@@ -124,8 +124,8 @@ fn nested_layout_tree_lists_leaves_depth_first() {
         layout_tree.list_leaf_pane_ids(),
         [left_pane_id, upper_right_pane_id, lower_right_pane_id]
     );
-    assert!(layout_tree.contains_pane(upper_right_pane_id));
-    assert!(!layout_tree.contains_pane(PaneId::new()));
+    assert!(layout_tree.has_pane(upper_right_pane_id));
+    assert!(!layout_tree.has_pane(PaneId::new()));
 }
 
 #[test]
@@ -133,8 +133,8 @@ fn a_bare_pane_is_its_own_only_leaf() {
     let pane_id = PaneId::new();
     let layout_tree = LayoutNode::Pane(pane_id);
     assert_eq!(layout_tree.list_leaf_pane_ids(), [pane_id]);
-    assert!(layout_tree.contains_pane(pane_id));
-    assert!(!layout_tree.contains_pane(PaneId::new()));
+    assert!(layout_tree.has_pane(pane_id));
+    assert!(!layout_tree.has_pane(PaneId::new()));
 }
 
 #[test]
@@ -144,52 +144,7 @@ fn an_empty_split_has_no_leaves() {
         Vec::new(),
     ));
     assert_eq!(empty_split.list_leaf_pane_ids(), []);
-    assert!(!empty_split.contains_pane(PaneId::new()));
-}
-
-#[test]
-fn first_leaf_of_a_bare_pane_is_that_pane() {
-    let pane_id = PaneId::new();
-    assert_eq!(
-        LayoutNode::Pane(pane_id).find_first_leaf_pane_id(),
-        Some(pane_id)
-    );
-}
-
-#[test]
-fn first_leaf_of_a_nested_layout_tree_is_the_first_leaf_in_layout_order() {
-    let (left_pane_id, upper_right_pane_id, lower_right_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    let layout_tree =
-        build_nested_layout_tree(left_pane_id, upper_right_pane_id, lower_right_pane_id);
-    assert_eq!(layout_tree.find_first_leaf_pane_id(), Some(left_pane_id));
-    assert_eq!(
-        layout_tree.get_node_at_path(&[1]).find_first_leaf_pane_id(),
-        Some(upper_right_pane_id)
-    );
-}
-
-#[test]
-fn first_leaf_of_an_empty_split_is_none() {
-    let empty_split = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Vertical,
-        Vec::new(),
-    ));
-    assert_eq!(empty_split.find_first_leaf_pane_id(), None);
-}
-
-#[test]
-fn first_leaf_skips_an_empty_split_before_a_pane() {
-    let pane_id = PaneId::new();
-    let empty_split = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Vertical,
-        Vec::new(),
-    ));
-    let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
-        SplitDirection::Horizontal,
-        vec![empty_split, build_leaf_node(pane_id)],
-    ));
-    assert_eq!(layout_tree.find_first_leaf_pane_id(), Some(pane_id));
+    assert!(!empty_split.has_pane(PaneId::new()));
 }
 
 #[test]
@@ -604,110 +559,24 @@ fn a_deserialized_active_index_past_the_last_child_is_kept_and_clamped_on_read()
 }
 
 #[test]
-fn a_stored_child_wrapped_in_a_node_record_reads_as_the_node_itself() {
+fn a_split_child_wrapped_in_a_node_record_is_refused() {
     let default_size_weight_json = json!({
         "primary_constraint": { "Flex": 1 },
         "minimum_cell_count": null,
         "preferred_cell_count": null,
         "resize_delta": 0
     });
-    let wrapped_split: SplitNode = serde_json::from_value(json!({
+    let decode_error = serde_json::from_value::<SplitNode>(json!({
         "direction": "Horizontal",
-        "children": [
-            { "node": { "Pane": "00000000-0000-0000-0000-000000000001" } },
-            { "node": { "Split": {
-                "direction": "Vertical",
-                "children": [{ "node": { "Pane": "00000000-0000-0000-0000-000000000002" } }],
-                "weights": [default_size_weight_json.clone()],
-                "active_child_index": 0
-            } } }
-        ],
-        "weights": [default_size_weight_json.clone(), default_size_weight_json.clone()],
-        "active_child_index": 0
-    }))
-    .expect("deserialize");
-    let bare_split: SplitNode = serde_json::from_value(json!({
-        "direction": "Horizontal",
-        "children": [
-            { "Pane": "00000000-0000-0000-0000-000000000001" },
-            { "Split": {
-                "direction": "Vertical",
-                "children": [{ "Pane": "00000000-0000-0000-0000-000000000002" }],
-                "weights": [default_size_weight_json.clone()],
-                "active_child_index": 0
-            } }
-        ],
-        "weights": [default_size_weight_json.clone(), default_size_weight_json],
-        "active_child_index": 0
-    }))
-    .expect("deserialize");
-    assert_eq!(wrapped_split, bare_split);
-    assert_eq!(
-        wrapped_split.children,
-        [
-            LayoutNode::Pane(build_fixed_pane_id("00000000-0000-0000-0000-000000000001")),
-            LayoutNode::Split(SplitNode::with_equal_weights(
-                SplitDirection::Vertical,
-                vec![LayoutNode::Pane(build_fixed_pane_id(
-                    "00000000-0000-0000-0000-000000000002"
-                ))],
-            )),
-        ]
-    );
-}
-
-#[test]
-fn a_stored_child_that_is_neither_a_node_nor_a_node_record_is_refused() {
-    let default_size_weight_json = json!({
-        "primary_constraint": { "Flex": 1 },
-        "minimum_cell_count": null,
-        "preferred_cell_count": null,
-        "resize_delta": 0
-    });
-    let deserialization_result = serde_json::from_value::<SplitNode>(json!({
-        "direction": "Horizontal",
-        "children": [{ "slot": { "Pane": "00000000-0000-0000-0000-000000000001" } }],
+        "children": [{ "node": { "Pane": "00000000-0000-0000-0000-000000000001" } }],
         "weights": [default_size_weight_json],
         "active_child_index": 0
-    }));
-    assert!(deserialization_result.is_err());
-}
-
-#[test]
-fn a_stored_child_carrying_a_collapsed_flag_still_reads_and_drops_it() {
-    let default_size_weight_json = json!({
-        "primary_constraint": { "Flex": 1 },
-        "minimum_cell_count": null,
-        "preferred_cell_count": null,
-        "resize_delta": 0
-    });
-    let split_node: SplitNode = serde_json::from_value(json!({
-        "direction": "Stacked",
-        "children": [
-            {
-                "node": { "Pane": "00000000-0000-0000-0000-000000000001" },
-                "collapsed": false
-            },
-            {
-                "node": { "Pane": "00000000-0000-0000-0000-000000000002" },
-                "collapsed": true
-            }
-        ],
-        "weights": [default_size_weight_json.clone(), default_size_weight_json],
-        "active_child_index": 0
     }))
-    .expect("deserialize");
-    // `active_child_index` alone decides the collapse, so the stored flags are ignored:
-    // the stored file says child 0 is expanded and child 1 collapsed, and
-    // `active` 0 says the same.
-    assert!(!split_node.is_child_collapsed(0));
-    assert!(split_node.is_child_collapsed(1));
+    .expect_err("a child is the node itself");
+
     assert_eq!(
-        split_node.children,
-        [
-            LayoutNode::Pane(build_fixed_pane_id("00000000-0000-0000-0000-000000000001")),
-            LayoutNode::Pane(build_fixed_pane_id("00000000-0000-0000-0000-000000000002")),
-        ]
+        decode_error.to_string(),
+        "unknown variant `node`, expected `Pane` or `Split`"
     );
 }
 

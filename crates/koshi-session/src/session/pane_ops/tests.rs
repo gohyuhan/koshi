@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
@@ -49,7 +49,7 @@ fn build_single_pane_session() -> (Session, TabId, PaneId, ClientId) {
     );
     let _ = session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(pane, SystemTime::UNIX_EPOCH));
+        .register_pane_record(PaneRecord::from_terminal_pane(pane));
 
     let mut client = Client::from_attachment(
         client_id,
@@ -100,7 +100,6 @@ fn commit_with_an_unknown_tab_registers_nothing_and_emits_nothing() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(previous, None);
@@ -112,7 +111,7 @@ fn commit_with_an_unknown_tab_registers_nothing_and_emits_nothing() {
             .map(PaneRecord::get_pane_id),
         None
     );
-    assert_eq!(session.panes.pane_record_count(), 1);
+    assert_eq!(session.panes.count_pane_records(), 1);
     assert_eq!(
         session.tabs.get(&tab).expect("tab").get_layout_tree(),
         &LayoutNode::Pane(source_pane_id)
@@ -133,7 +132,6 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
     assert_eq!(
         events,
@@ -166,7 +164,7 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
 
     // The new pane is registered `Running`, focused, and at the front of the
     // tab's focus history.
-    assert_eq!(session.panes.pane_record_count(), 2);
+    assert_eq!(session.panes.count_pane_records(), 2);
     assert_eq!(
         *session
             .panes
@@ -180,7 +178,7 @@ fn commit_emits_events_swaps_the_tree_and_focuses_the_new_pane() {
             .clients
             .get_client_by_id(client)
             .expect("client")
-            .get_focused_pane(tab),
+            .get_focused_pane_id(tab),
         Some(new_pane_id),
     );
     assert_eq!(
@@ -216,16 +214,10 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
         .insert(tab_b, Tab::from_root_pane(tab_b, "b".to_owned(), 1, pane_b));
     let _ = session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            pane_a,
-            SystemTime::UNIX_EPOCH,
-        ));
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_a));
     let _ = session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            pane_b,
-            SystemTime::UNIX_EPOCH,
-        ));
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_b));
     let mut client = Client::from_attachment(
         client_id,
         session.session_id,
@@ -256,7 +248,6 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
         candidate_layout_tree,
         Some(client_id),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     // The client was not viewing tab B, so it is switched there, tab A comes
@@ -268,7 +259,7 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
             .clients
             .get_client_by_id(client_id)
             .expect("client")
-            .get_active_tab(),
+            .get_active_tab_id(),
         tab_b
     );
     assert_eq!(
@@ -276,7 +267,7 @@ fn commit_switches_a_client_from_another_tab_and_reports_the_previous() {
             .clients
             .get_client_by_id(client_id)
             .expect("client")
-            .get_focused_pane(tab_b),
+            .get_focused_pane_id(tab_b),
         Some(new_pane_id),
     );
     assert_eq!(
@@ -315,7 +306,6 @@ fn commit_without_a_focus_client_emits_no_focus_event() {
         candidate_layout_tree,
         None,
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
     assert_eq!(
         events,
@@ -328,7 +318,7 @@ fn commit_without_a_focus_client_emits_no_focus_event() {
         ]
     );
     // No focus was claimed, so nothing entered the tab's focus history.
-    assert_eq!(session.panes.pane_record_count(), 2);
+    assert_eq!(session.panes.count_pane_records(), 2);
     assert!(session
         .tabs
         .get(&tab)
@@ -350,37 +340,9 @@ fn commit_leaves_the_session_consistent() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(session.validate_session_consistency(), Ok(()));
-}
-
-#[test]
-fn commit_stamps_the_supplied_created_at_on_the_new_pane_record() {
-    let (mut session, tab, source_pane_id, client) = build_single_pane_session();
-    let (new_pane_id, candidate_layout_tree) =
-        prepare_split_candidate(&session, tab, source_pane_id, Direction::Right);
-    let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(4321);
-
-    let (_previous, _events) = commit_new_pane(
-        &mut session,
-        new_pane_id,
-        tab,
-        candidate_layout_tree,
-        Some(client),
-        NewPaneSpec::default(),
-        created_at,
-    );
-
-    assert_eq!(
-        session
-            .panes
-            .get_pane_record_by_id(new_pane_id)
-            .expect("pane record")
-            .get_created_at(),
-        created_at
-    );
 }
 
 #[test]
@@ -396,7 +358,6 @@ fn commit_with_the_default_spec_leaves_the_new_pane_without_a_working_directory_
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     let pane_record = session
@@ -425,7 +386,6 @@ fn commit_puts_the_new_pane_ahead_of_the_existing_focus_history() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(
@@ -447,10 +407,7 @@ fn commit_with_no_acting_client_drops_the_tabs_zoom_for_a_client_on_another_tab(
     );
     let _ = session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            other_pane,
-            SystemTime::UNIX_EPOCH,
-        ));
+        .register_pane_record(PaneRecord::from_terminal_pane(other_pane));
 
     let onlooker_id = ClientId::new();
     let mut onlooker = Client::from_attachment(
@@ -478,7 +435,6 @@ fn commit_with_no_acting_client_drops_the_tabs_zoom_for_a_client_on_another_tab(
         candidate_layout_tree,
         None,
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(
@@ -495,7 +451,7 @@ fn commit_with_no_acting_client_drops_the_tabs_zoom_for_a_client_on_another_tab(
             .clients
             .get_client_by_id(onlooker_id)
             .expect("onlooker")
-            .get_active_tab(),
+            .get_active_tab_id(),
         other_tab
     );
     assert_eq!(
@@ -503,7 +459,7 @@ fn commit_with_no_acting_client_drops_the_tabs_zoom_for_a_client_on_another_tab(
             .clients
             .get_client_by_id(onlooker_id)
             .expect("onlooker")
-            .get_focused_pane(other_tab),
+            .get_focused_pane_id(other_tab),
         Some(other_pane)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
@@ -533,7 +489,6 @@ fn commit_records_working_directory_and_spawn_spec_on_the_new_pane() {
             working_directory: Some(working_directory.clone()),
             spawn_spec: Some(spawn_spec.clone()),
         },
-        SystemTime::UNIX_EPOCH,
     );
     let pane_record = session
         .panes
@@ -560,7 +515,6 @@ fn commit_with_a_stale_focus_client_claims_no_focus() {
         candidate_layout_tree,
         Some(stale_client_id),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
     // The named client is not attached, so nothing is focused: no PaneFocused,
     // and no focus-MRU entry claims a focus that never happened.
@@ -574,7 +528,7 @@ fn commit_with_a_stale_focus_client_claims_no_focus() {
             Event::LayoutChanged(LayoutChanged { tab_id: tab }),
         ]
     );
-    assert_eq!(session.panes.pane_record_count(), 2);
+    assert_eq!(session.panes.count_pane_records(), 2);
     assert!(session
         .tabs
         .get(&tab)
@@ -604,7 +558,6 @@ fn commit_with_no_acting_client_drops_every_zoom_of_the_tab() {
         candidate_layout_tree,
         None,
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(
@@ -658,7 +611,6 @@ fn commit_drops_the_splitting_clients_zoom_and_no_others() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(
@@ -711,10 +663,9 @@ fn committing_a_pane_id_already_registered_keeps_the_original_record() {
             working_directory: Some(PathBuf::from("/replacement")),
             spawn_spec: None,
         },
-        SystemTime::UNIX_EPOCH,
     );
 
-    assert_eq!(session.panes.pane_record_count(), 1);
+    assert_eq!(session.panes.count_pane_records(), 1);
     assert_eq!(
         session
             .panes
@@ -741,7 +692,6 @@ fn commit_reports_no_previous_tab_when_the_client_already_views_the_tab() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(previous, None);
@@ -766,14 +716,14 @@ fn commit_reports_no_previous_tab_when_the_client_already_views_the_tab() {
             .clients
             .get_client_by_id(client)
             .expect("client")
-            .get_active_tab(),
+            .get_active_tab_id(),
         tab
     );
 }
 
 /// Add a second tab holding a single leaf, register that leaf's pane record, and zoom
 /// `client` on it. Returns the new tab and pane ids.
-fn second_tab_zoomed_by(session: &mut Session, client: ClientId) -> (TabId, PaneId) {
+fn add_second_tab_zoomed_by(session: &mut Session, client: ClientId) -> (TabId, PaneId) {
     let other_tab = TabId::new();
     let other_pane = PaneId::new();
     session.tabs.insert(
@@ -782,10 +732,7 @@ fn second_tab_zoomed_by(session: &mut Session, client: ClientId) -> (TabId, Pane
     );
     let _ = session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            other_pane,
-            SystemTime::UNIX_EPOCH,
-        ));
+        .register_pane_record(PaneRecord::from_terminal_pane(other_pane));
     session
         .clients
         .get_client_mut_by_id(client)
@@ -799,7 +746,7 @@ fn second_tab_zoomed_by(session: &mut Session, client: ClientId) -> (TabId, Pane
 #[test]
 fn commit_leaves_the_splitting_clients_zoom_of_another_tab_alone() {
     let (mut session, tab, source_pane_id, client) = build_single_pane_session();
-    let (other_tab, other_pane) = second_tab_zoomed_by(&mut session, client);
+    let (other_tab, other_pane) = add_second_tab_zoomed_by(&mut session, client);
     session
         .clients
         .get_client_mut_by_id(client)
@@ -816,7 +763,6 @@ fn commit_leaves_the_splitting_clients_zoom_of_another_tab_alone() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(
@@ -845,7 +791,7 @@ fn commit_leaves_the_splitting_clients_zoom_of_another_tab_alone() {
 #[test]
 fn commit_with_no_acting_client_leaves_a_zoom_of_another_tab_alone() {
     let (mut session, tab, source_pane_id, client) = build_single_pane_session();
-    let (other_tab, other_pane) = second_tab_zoomed_by(&mut session, client);
+    let (other_tab, other_pane) = add_second_tab_zoomed_by(&mut session, client);
     session
         .clients
         .get_client_mut_by_id(client)
@@ -862,7 +808,6 @@ fn commit_with_no_acting_client_leaves_a_zoom_of_another_tab_alone() {
         candidate_layout_tree,
         None,
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(
@@ -902,7 +847,6 @@ fn a_second_commit_puts_the_newest_pane_at_the_front_of_the_history() {
         first_candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     let (second_new_pane_id, second_candidate_layout_tree) =
@@ -914,10 +858,9 @@ fn a_second_commit_puts_the_newest_pane_at_the_front_of_the_history() {
         second_candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
-    assert_eq!(session.panes.pane_record_count(), 3);
+    assert_eq!(session.panes.count_pane_records(), 3);
     assert_eq!(
         session.tabs.get(&tab).expect("tab").list_focus_mru(),
         [second_new_pane_id, first_new_pane_id].as_slice()
@@ -927,7 +870,7 @@ fn a_second_commit_puts_the_newest_pane_at_the_front_of_the_history() {
             .clients
             .get_client_by_id(client)
             .expect("client")
-            .get_focused_pane(tab),
+            .get_focused_pane_id(tab),
         Some(second_new_pane_id)
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
@@ -953,7 +896,6 @@ fn commit_reports_no_prior_pane_when_the_client_focused_nothing_in_the_tab() {
         candidate_layout_tree,
         Some(client),
         NewPaneSpec::default(),
-        SystemTime::UNIX_EPOCH,
     );
 
     assert_eq!(

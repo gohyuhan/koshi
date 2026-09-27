@@ -7,7 +7,7 @@ pub const REDACTED: &str = "***";
 
 /// Hide a spawned child's arguments: element 0, the program name, passes
 /// through; every element after it becomes `***`, whatever it holds. An empty
-/// `argv` yields an empty `Vec`.
+/// `command_argv` yields an empty `Vec`.
 ///
 /// `["mysql", "-pHUNTER2"]` results in `["mysql", "***"]`.
 pub fn redact_command_argv(command_argv: &[String]) -> Vec<String> {

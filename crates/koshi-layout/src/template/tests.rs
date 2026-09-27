@@ -4,40 +4,25 @@
 use super::*;
 use crate::size::SizeConstraint;
 
-/// A terminal leaf running the default shell.
-fn build_shell_template() -> LeafTemplate {
-    LeafTemplate::Terminal(TerminalTemplate::default())
-}
-
 /// A terminal leaf running `program` with no arguments.
-fn build_command_template(program: &str) -> LeafTemplate {
-    LeafTemplate::Terminal(TerminalTemplate {
+fn build_command_template(program: &str) -> TerminalTemplate {
+    TerminalTemplate {
         command: Some(CommandTemplate {
             program: PathBuf::from(program),
             arguments: Vec::new(),
         }),
         working_directory: None,
         environment_variables: BTreeMap::new(),
-    })
+    }
 }
 
-/// A plugin leaf named `plugin_name`.
-fn build_plugin_template(plugin_name: &str) -> LeafTemplate {
-    LeafTemplate::Plugin(PluginTemplate {
-        plugin_name: plugin_name.to_string(),
-    })
-}
-
+/// A terminal leaf running the default shell.
 fn build_shell_leaf() -> TemplateNode {
-    TemplateNode::Leaf(build_shell_template())
+    TemplateNode::Leaf(TerminalTemplate::default())
 }
 
 fn build_command_template_node(program: &str) -> TemplateNode {
     TemplateNode::Leaf(build_command_template(program))
-}
-
-fn build_plugin_template_node(plugin_name: &str) -> TemplateNode {
-    TemplateNode::Leaf(build_plugin_template(plugin_name))
 }
 
 /// A split of `direction` with one default weight per child.
@@ -60,14 +45,11 @@ fn build_empty_split() -> TemplateNode {
 }
 
 /// A horizontal split with a nested vertical split:
-/// `horizontal(nvim, vertical(shell, plugin))`, weighted 60/40.
+/// `horizontal(nvim, vertical(shell, top))`, weighted 60/40.
 fn build_nested_template() -> TemplateNode {
     let nested_vertical_template = build_template_split(
         SplitDirection::Vertical,
-        vec![
-            build_shell_leaf(),
-            build_plugin_template_node("session-manager"),
-        ],
+        vec![build_shell_leaf(), build_command_template_node("top")],
         0,
     );
     TemplateNode::Split(TemplateSplit {
@@ -87,24 +69,20 @@ fn build_nested_template() -> TemplateNode {
 #[test]
 fn leaves_are_depth_first_in_layout_order() {
     let template = build_nested_template();
-    let (nvim_template, default_shell_template, session_manager_template) = (
+    let (nvim_template, default_shell_template, top_template) = (
         build_command_template("nvim"),
-        build_shell_template(),
-        build_plugin_template("session-manager"),
+        TerminalTemplate::default(),
+        build_command_template("top"),
     );
     assert_eq!(
         template.list_leaf_templates(),
-        [
-            &nvim_template,
-            &default_shell_template,
-            &session_manager_template
-        ]
+        [&nvim_template, &default_shell_template, &top_template]
     );
 }
 
 #[test]
 fn leaves_of_a_bare_leaf_is_that_leaf() {
-    let default_shell = build_shell_template();
+    let default_shell = TerminalTemplate::default();
     assert_eq!(build_shell_leaf().list_leaf_templates(), [&default_shell]);
 }
 
@@ -112,7 +90,7 @@ fn leaves_of_a_bare_leaf_is_that_leaf() {
 fn leaves_of_an_empty_split_is_empty() {
     assert_eq!(
         build_empty_split().list_leaf_templates(),
-        Vec::<&LeafTemplate>::new()
+        Vec::<&TerminalTemplate>::new()
     );
 }
 
@@ -256,7 +234,7 @@ fn first_visible_leaf_skips_collapsed_stack_members() {
 
 #[test]
 fn first_visible_leaf_counts_every_leaf_of_earlier_stack_members() {
-    // stack(vertical(shell, htop) collapsed, plugin expanded): the expanded
+    // stack(vertical(shell, htop) collapsed, top expanded): the expanded
     // member comes after the two leaves of the collapsed member.
     let collapsed_member_template = build_template_split(
         SplitDirection::Vertical,
@@ -267,7 +245,7 @@ fn first_visible_leaf_counts_every_leaf_of_earlier_stack_members() {
         SplitDirection::Stacked,
         vec![
             collapsed_member_template,
-            build_plugin_template_node("session-manager"),
+            build_command_template_node("top"),
         ],
         1,
     );
@@ -276,13 +254,13 @@ fn first_visible_leaf_counts_every_leaf_of_earlier_stack_members() {
 
 #[test]
 fn first_visible_leaf_descends_into_a_nested_stack() {
-    // stack(shell collapsed, stack(htop collapsed, plugin expanded) expanded):
-    // leaves are [shell, htop, plugin] and the visible one is plugin.
+    // stack(shell collapsed, stack(htop collapsed, top expanded) expanded):
+    // leaves are [shell, htop, top] and the visible one is top.
     let inner_stack_template = build_template_split(
         SplitDirection::Stacked,
         vec![
             build_command_template_node("htop"),
-            build_plugin_template_node("session-manager"),
+            build_command_template_node("top"),
         ],
         1,
     );
@@ -333,7 +311,7 @@ fn an_empty_split_child_consumes_no_ids() {
         vec![
             build_shell_leaf(),
             build_empty_split(),
-            build_plugin_template_node("session-manager"),
+            build_command_template_node("top"),
         ],
         0,
     );

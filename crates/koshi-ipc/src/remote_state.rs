@@ -16,8 +16,9 @@
 //! the owning user, and are replaced through
 //! [`koshi_storage::atomic::write_atomic`]. The token store and the
 //! saved-server store are written the same way, through the
-//! `write_owner_only` this module holds, and each of the four files states a
-//! format number this build does not read through the same `format_mismatch`.
+//! `write_remote_file` this module holds, and each of the four files states a
+//! format number this build does not read through the same
+//! `find_format_mismatch`.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -58,7 +59,7 @@ pub struct CertFile {
 }
 
 impl CertFile {
-    /// Where the certificate file lives: `remote/cert` under `data_dir`.
+    /// Where the certificate file lives: `remote/cert` under `data_directory`.
     ///
     /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
     #[must_use]
@@ -109,7 +110,7 @@ pub struct EnabledFile {
 }
 
 impl EnabledFile {
-    /// Where the enabled file lives: `remote/enabled` under `data_dir`.
+    /// Where the enabled file lives: `remote/enabled` under `data_directory`.
     ///
     /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
     #[must_use]
@@ -147,17 +148,17 @@ impl EnabledFile {
 }
 
 /// Whether the operator has switched remote access on for the koshi data
-/// directory at `data_dir`: whether the enabled file reads.
+/// directory at `data_directory`: whether the enabled file reads.
 #[must_use]
 pub fn is_remote_enabled(data_directory: &Path) -> bool {
     EnabledFile::load_from_path(&EnabledFile::resolve_enabled_file_path(data_directory)).is_ok()
 }
 
-/// The reason `found` is not the format number this build reads, or `None`
-/// when it is that number.
+/// The reason `found_format` is not `expected_format`, the format number this
+/// build reads, or `None` when it is that number.
 ///
-/// Example — `found` 2 against `expected` 1 gives `Some("format 2 is not the
-/// 1 this build reads")`.
+/// Example — `found_format` 2 against `expected_format` 1 gives
+/// `Some("format 2 is not the 1 this build reads")`.
 pub(crate) fn find_format_mismatch(found_format: u32, expected_format: u32) -> Option<String> {
     (found_format != expected_format)
         .then(|| format!("format {found_format} is not the {expected_format} this build reads"))
@@ -176,9 +177,9 @@ pub(crate) fn build_unreadable_remote_file_error(
     }
 }
 
-/// Read and decode the JSON file at `path`. A path with no file is
-/// [`IpcError::RemoteFileUnreadable`] on `file`, as is a file that cannot be
-/// read or decoded.
+/// Read and decode the JSON file at `remote_file_path`. A path with no file is
+/// [`IpcError::RemoteFileUnreadable`] on `remote_file`, as is a file that
+/// cannot be read or decoded.
 fn load_remote_file<FileContents: DeserializeOwned>(
     remote_file: RemoteFile,
     remote_file_path: &Path,
@@ -191,14 +192,15 @@ fn load_remote_file<FileContents: DeserializeOwned>(
     })
 }
 
-/// Encode `value` and write it at `path` as a file only the owning user
-/// reaches, naming the failure as [`IpcError::RemoteFileWrite`] on `file`.
+/// Encode `serializable_contents` and write it at `remote_file_path` as a file
+/// only the owning user reaches, naming the failure as
+/// [`IpcError::RemoteFileWrite`] on `remote_file`.
 pub(crate) fn write_remote_file<FileContents: Serialize>(
     remote_file: RemoteFile,
     remote_file_path: &Path,
     serializable_contents: &FileContents,
 ) -> Result<(), IpcError> {
-    write_owner_only(remote_file_path, serializable_contents).map_err(|error_detail| {
+    write_owner_only_file(remote_file_path, serializable_contents).map_err(|error_detail| {
         IpcError::RemoteFileWrite {
             remote_file,
             remote_file_path: remote_file_path.display().to_string(),
@@ -207,19 +209,19 @@ pub(crate) fn write_remote_file<FileContents: Serialize>(
     })
 }
 
-/// Encode `value` and write it at `path`, replacing whatever is there, and
-/// create the directory holding it when it is missing.
+/// Encode `serializable_contents` and write it at `file_path`, replacing
+/// whatever is there, and create the directory holding it when it is missing.
 ///
 /// The file is restricted to the owning user: mode `0600` on Unix, set on an
 /// existing file before the replace; the new file carries it too. On Windows
 /// the file takes the data directory's owner-scoped ACLs. The directory itself
-/// gets mode `0700` on Unix. A `path` with no directory part creates no
+/// gets mode `0700` on Unix. A `file_path` with no directory part creates no
 /// directory.
 ///
 /// # Errors
 /// The text of the first step that failed: creating the directory, setting a
-/// mode, encoding `value`, or replacing the file.
-pub(crate) fn write_owner_only<FileContents: Serialize>(
+/// mode, encoding `serializable_contents`, or replacing the file.
+fn write_owner_only_file<FileContents: Serialize>(
     file_path: &Path,
     serializable_contents: &FileContents,
 ) -> Result<(), String> {
@@ -227,24 +229,24 @@ pub(crate) fn write_owner_only<FileContents: Serialize>(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(parent).map_err(|io_error| io_error.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| error.to_string())?;
+                .map_err(|io_error| io_error.to_string())?;
         }
     }
     #[cfg(unix)]
     if file_path.exists() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| error.to_string())?;
+            .map_err(|io_error| io_error.to_string())?;
     }
     let serialized_file_bytes = serde_json::to_vec(serializable_contents)
         .map_err(|serialization_error| serialization_error.to_string())?;
     koshi_storage::atomic::write_atomic(file_path, &serialized_file_bytes)
-        .map_err(|error| error.to_string())
+        .map_err(|io_error| io_error.to_string())
 }
 
 #[cfg(test)]

@@ -4,8 +4,6 @@
 //! exact code and message, and a refusal never changes what the gate lets
 //! through.
 
-use std::time::{Duration, UNIX_EPOCH};
-
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
 
@@ -18,14 +16,14 @@ const ABOVE_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION + 1;
 const BELOW_PROTOCOL_VERSION: u32 = MIN_PROTOCOL_VERSION.saturating_sub(1);
 
 /// The token this Koshi expects, as the gate under test holds it.
-fn expected_connection_token() -> ConnectionToken {
+fn build_expected_connection_token() -> ConnectionToken {
     ConnectionToken::from_secret("k7QxSecret")
 }
 
 /// A gate for a fresh connection from this machine's own user, still closed.
 fn build_test_handshake() -> Handshake {
     Handshake::from_expected_token_and_peer(
-        expected_connection_token(),
+        build_expected_connection_token(),
         Peer::Local {
             is_same_user: true,
             is_other_user_access_allowed: false,
@@ -34,15 +32,15 @@ fn build_test_handshake() -> Handshake {
 }
 
 /// A gate for a fresh connection from another machine, still closed.
-fn remote_build_test_handshake() -> Handshake {
-    Handshake::from_expected_token_and_peer(expected_connection_token(), Peer::Remote)
+fn build_remote_test_handshake() -> Handshake {
+    Handshake::from_expected_token_and_peer(build_expected_connection_token(), Peer::Remote)
 }
 
 /// A gate for a fresh connection from another user of this machine, with
 /// `allow-other-users` set to `allowed`.
-fn other_user_build_test_handshake(is_other_user_access_allowed: bool) -> Handshake {
+fn build_other_user_test_handshake(is_other_user_access_allowed: bool) -> Handshake {
     Handshake::from_expected_token_and_peer(
-        expected_connection_token(),
+        build_expected_connection_token(),
         Peer::Local {
             is_same_user: false,
             is_other_user_access_allowed,
@@ -52,7 +50,7 @@ fn other_user_build_test_handshake(is_other_user_access_allowed: bool) -> Handsh
 
 /// The refusal a Hello from another user earns while `allow-other-users` is
 /// off, spelled out.
-fn other_users_refusal() -> IpcErrorPayload {
+fn build_other_users_refusal() -> IpcErrorPayload {
     IpcErrorPayload {
         code: IpcErrorCode::OtherUsersOff,
         message: "this Koshi serves only the user who started it; \
@@ -62,54 +60,58 @@ fn other_users_refusal() -> IpcErrorPayload {
     }
 }
 
-/// The refusal a Hello presenting a token other than [`expected_connection_token`] earns,
+/// The refusal a Hello presenting a token other than [`build_expected_connection_token`] earns,
 /// spelled out.
-fn bad_token_refusal() -> IpcErrorPayload {
+fn build_bad_token_refusal() -> IpcErrorPayload {
     IpcErrorPayload {
         code: IpcErrorCode::BadToken,
         message: "the token presented does not match this Koshi's".to_string(),
     }
 }
 
-/// A Hello speaking `minimum_protocol_version` to `maximum_protocol_version` and presenting the right token.
-fn hello_speaking(minimum_protocol_version: u32, maximum_protocol_version: u32) -> IpcRequestKind {
+/// A Hello speaking `minimum_protocol_version` to `maximum_protocol_version` and presenting the
+/// right token.
+fn build_hello_speaking(
+    minimum_protocol_version: u32,
+    maximum_protocol_version: u32,
+) -> IpcRequestKind {
     IpcRequestKind::Hello {
-        min_protocol_version: minimum_protocol_version,
-        max_protocol_version: maximum_protocol_version,
-        connection_token: expected_connection_token(),
+        minimum_protocol_version,
+        maximum_protocol_version,
+        connection_token: build_expected_connection_token(),
         is_remote: false,
     }
 }
 
 /// A Hello speaking exactly this build's range, with the right token.
-fn good_hello() -> IpcRequestKind {
-    hello_speaking(MIN_PROTOCOL_VERSION, PROTOCOL_VERSION)
+fn build_good_hello() -> IpcRequestKind {
+    build_hello_speaking(MIN_PROTOCOL_VERSION, PROTOCOL_VERSION)
 }
 
 /// A Hello speaking this build's range, presenting the right token, and
 /// saying `remote` — the shape the router sends for a caller it accepted over
 /// TLS.
-fn remote_hello() -> IpcRequestKind {
+fn build_remote_hello() -> IpcRequestKind {
     IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
-        connection_token: expected_connection_token(),
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
+        connection_token: build_expected_connection_token(),
         is_remote: true,
     }
 }
 
 /// A Hello speaking this build's range and presenting a wrong token.
-fn wrong_token_hello() -> IpcRequestKind {
+fn build_wrong_token_hello() -> IpcRequestKind {
     IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: false,
     }
 }
 
 /// The refusal an out-of-range Hello earns, spelled out.
-fn version_refusal(
+fn build_version_refusal(
     minimum_protocol_version: u32,
     maximum_protocol_version: u32,
 ) -> IpcErrorPayload {
@@ -131,7 +133,6 @@ fn submit_command() -> IpcRequestKind {
             session_id: None,
             target_client_id: None,
         },
-        UNIX_EPOCH + Duration::from_secs(1_700_000_000),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )))
 }
@@ -139,7 +140,7 @@ fn submit_command() -> IpcRequestKind {
 #[test]
 fn a_hello_speaking_this_builds_range_is_accepted() {
     assert_eq!(
-        build_test_handshake().validate_request_kind(&good_hello()),
+        build_test_handshake().validate_request_kind(&build_good_hello()),
         Ok(())
     );
 }
@@ -153,7 +154,7 @@ fn a_closed_gate_has_settled_no_version() {
 fn an_accepted_hello_settles_the_highest_version_both_sides_speak() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&hello_speaking(
+    gate.validate_request_kind(&build_hello_speaking(
         MIN_PROTOCOL_VERSION,
         ABOVE_PROTOCOL_VERSION,
     ))
@@ -170,8 +171,11 @@ fn an_accepted_hello_settles_the_highest_version_both_sides_speak() {
 fn a_caller_speaking_only_this_builds_lowest_settles_there() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&hello_speaking(MIN_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION))
-        .expect("a caller pinned to the floor is accepted");
+    gate.validate_request_kind(&build_hello_speaking(
+        MIN_PROTOCOL_VERSION,
+        MIN_PROTOCOL_VERSION,
+    ))
+    .expect("a caller pinned to the floor is accepted");
 
     assert_eq!(
         gate.get_agreed_protocol_version(),
@@ -183,7 +187,7 @@ fn a_caller_speaking_only_this_builds_lowest_settles_there() {
 fn an_accepted_hello_opens_the_gate_for_other_requests() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect("the Hello is accepted");
 
     assert_eq!(
@@ -196,33 +200,33 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
 #[test]
 fn a_hello_with_a_wrong_token_is_refused_as_bad_token() {
     assert_eq!(
-        build_test_handshake().validate_request_kind(&wrong_token_hello()),
-        Err(bad_token_refusal())
+        build_test_handshake().validate_request_kind(&build_wrong_token_hello()),
+        Err(build_bad_token_refusal())
     );
 }
 
 #[test]
 fn a_hello_from_another_machine_with_a_wrong_token_is_refused_as_bad_token() {
     assert_eq!(
-        remote_build_test_handshake().validate_request_kind(&wrong_token_hello()),
-        Err(bad_token_refusal())
+        build_remote_test_handshake().validate_request_kind(&build_wrong_token_hello()),
+        Err(build_bad_token_refusal())
     );
 }
 
 #[test]
 fn a_hello_from_another_machine_with_the_right_token_is_accepted() {
-    let mut gate = remote_build_test_handshake();
+    let mut gate = build_remote_test_handshake();
 
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
 }
 
 #[test]
 fn an_allowed_other_user_opens_the_gate_without_a_token() {
-    let mut gate = other_user_build_test_handshake(true);
+    let mut gate = build_other_user_test_handshake(true);
     let hello = IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret(""),
         is_remote: false,
     };
@@ -241,7 +245,7 @@ fn the_starting_user_still_presents_the_token_while_other_users_are_allowed() {
     // With the setting on, the user who started the session still presents
     // the token.
     let mut gate = Handshake::from_expected_token_and_peer(
-        expected_connection_token(),
+        build_expected_connection_token(),
         Peer::Local {
             is_same_user: true,
             is_other_user_access_allowed: true,
@@ -249,19 +253,22 @@ fn the_starting_user_still_presents_the_token_while_other_users_are_allowed() {
     );
 
     assert_eq!(
-        gate.validate_request_kind(&wrong_token_hello()),
-        Err(bad_token_refusal())
+        gate.validate_request_kind(&build_wrong_token_hello()),
+        Err(build_bad_token_refusal())
     );
     assert_eq!(gate.get_agreed_protocol_version(), None);
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
 }
 
 #[test]
 fn an_allowed_other_user_is_admitted_whatever_token_it_presents() {
     // An allowed other user's Hello is not judged on its token.
-    let mut gate = other_user_build_test_handshake(true);
+    let mut gate = build_other_user_test_handshake(true);
 
-    assert_eq!(gate.validate_request_kind(&wrong_token_hello()), Ok(()));
+    assert_eq!(
+        gate.validate_request_kind(&build_wrong_token_hello()),
+        Ok(())
+    );
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
 }
 
@@ -270,26 +277,26 @@ fn a_hello_from_another_machine_presenting_no_token_is_refused_as_bad_token() {
     // An empty token from another machine is refused like any other wrong
     // token.
     let hello = IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret(""),
         is_remote: false,
     };
 
     assert_eq!(
-        remote_build_test_handshake().validate_request_kind(&hello),
-        Err(bad_token_refusal())
+        build_remote_test_handshake().validate_request_kind(&hello),
+        Err(build_bad_token_refusal())
     );
 }
 
 #[test]
 fn repeated_hellos_never_wear_down_a_setting_that_is_off() {
-    let mut gate = other_user_build_test_handshake(false);
+    let mut gate = build_other_user_test_handshake(false);
 
     for _ in 0..3 {
         assert_eq!(
-            gate.validate_request_kind(&good_hello()),
-            Err(other_users_refusal())
+            gate.validate_request_kind(&build_good_hello()),
+            Err(build_other_users_refusal())
         );
     }
 
@@ -306,21 +313,21 @@ fn repeated_hellos_never_wear_down_a_setting_that_is_off() {
 #[test]
 fn another_user_is_refused_while_the_setting_is_off() {
     assert_eq!(
-        other_user_build_test_handshake(false).validate_request_kind(&good_hello()),
-        Err(other_users_refusal()),
+        build_other_user_test_handshake(false).validate_request_kind(&build_good_hello()),
+        Err(build_other_users_refusal()),
         "the right token does not let another user in while the setting is off"
     );
     assert_eq!(
-        other_user_build_test_handshake(false).validate_request_kind(&wrong_token_hello()),
-        Err(other_users_refusal())
+        build_other_user_test_handshake(false).validate_request_kind(&build_wrong_token_hello()),
+        Err(build_other_users_refusal())
     );
 }
 
 #[test]
 fn a_refused_other_user_leaves_the_gate_closed() {
-    let mut gate = other_user_build_test_handshake(false);
+    let mut gate = build_other_user_test_handshake(false);
 
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect_err("the Hello is refused");
 
     assert_eq!(gate.get_agreed_protocol_version(), None);
@@ -336,32 +343,32 @@ fn a_refused_other_user_leaves_the_gate_closed() {
 #[test]
 fn an_out_of_range_hello_from_another_user_is_refused_for_the_version() {
     assert_eq!(
-        other_user_build_test_handshake(false).validate_request_kind(&hello_speaking(
+        build_other_user_test_handshake(false).validate_request_kind(&build_hello_speaking(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         )),
-        Err(version_refusal(
+        Err(build_version_refusal(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         )),
         "the version is settled before the peer's own rule, for every peer"
     );
     assert_eq!(
-        other_user_build_test_handshake(true).validate_request_kind(&hello_speaking(
+        build_other_user_test_handshake(true).validate_request_kind(&build_hello_speaking(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         )),
-        Err(version_refusal(
+        Err(build_version_refusal(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         ))
     );
     assert_eq!(
-        remote_build_test_handshake().validate_request_kind(&hello_speaking(
+        build_remote_test_handshake().validate_request_kind(&build_hello_speaking(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         )),
-        Err(version_refusal(
+        Err(build_version_refusal(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         ))
@@ -371,11 +378,11 @@ fn an_out_of_range_hello_from_another_user_is_refused_for_the_version() {
 #[test]
 fn a_caller_speaking_only_above_this_build_is_refused_naming_both_ranges() {
     assert_eq!(
-        build_test_handshake().validate_request_kind(&hello_speaking(
+        build_test_handshake().validate_request_kind(&build_hello_speaking(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         )),
-        Err(version_refusal(
+        Err(build_version_refusal(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         ))
@@ -385,11 +392,11 @@ fn a_caller_speaking_only_above_this_build_is_refused_naming_both_ranges() {
 #[test]
 fn a_caller_speaking_only_below_this_build_is_refused_naming_both_ranges() {
     assert_eq!(
-        build_test_handshake().validate_request_kind(&hello_speaking(
+        build_test_handshake().validate_request_kind(&build_hello_speaking(
             BELOW_PROTOCOL_VERSION,
             BELOW_PROTOCOL_VERSION
         )),
-        Err(version_refusal(
+        Err(build_version_refusal(
             BELOW_PROTOCOL_VERSION,
             BELOW_PROTOCOL_VERSION
         ))
@@ -401,11 +408,11 @@ fn a_hello_whose_range_is_inverted_is_refused_for_the_version() {
     let mut gate = build_test_handshake();
 
     assert_eq!(
-        gate.validate_request_kind(&hello_speaking(
+        gate.validate_request_kind(&build_hello_speaking(
             ABOVE_PROTOCOL_VERSION,
             BELOW_PROTOCOL_VERSION
         )),
-        Err(version_refusal(
+        Err(build_version_refusal(
             ABOVE_PROTOCOL_VERSION,
             BELOW_PROTOCOL_VERSION
         )),
@@ -419,7 +426,7 @@ fn a_caller_speaking_every_version_settles_on_this_builds_highest() {
     let mut gate = build_test_handshake();
 
     assert_eq!(
-        gate.validate_request_kind(&hello_speaking(0, u32::MAX)),
+        gate.validate_request_kind(&build_hello_speaking(0, u32::MAX)),
         Ok(())
     );
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
@@ -429,7 +436,7 @@ fn a_caller_speaking_every_version_settles_on_this_builds_highest() {
 fn a_refused_version_settles_nothing() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&hello_speaking(
+    gate.validate_request_kind(&build_hello_speaking(
         ABOVE_PROTOCOL_VERSION,
         ABOVE_PROTOCOL_VERSION,
     ))
@@ -441,15 +448,15 @@ fn a_refused_version_settles_nothing() {
 #[test]
 fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
     let hello = IpcRequestKind::Hello {
-        min_protocol_version: ABOVE_PROTOCOL_VERSION,
-        max_protocol_version: ABOVE_PROTOCOL_VERSION,
+        minimum_protocol_version: ABOVE_PROTOCOL_VERSION,
+        maximum_protocol_version: ABOVE_PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: false,
     };
 
     assert_eq!(
         build_test_handshake().validate_request_kind(&hello),
-        Err(version_refusal(
+        Err(build_version_refusal(
             ABOVE_PROTOCOL_VERSION,
             ABOVE_PROTOCOL_VERSION
         ))
@@ -494,7 +501,7 @@ fn an_unknown_kind_before_any_hello_is_refused_as_hello_required() {
 fn an_unknown_kind_on_an_open_gate_is_refused_by_name() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect("the Hello is accepted");
 
     assert_eq!(
@@ -510,7 +517,7 @@ fn an_unknown_kind_on_an_open_gate_is_refused_by_name() {
 fn a_refused_hello_leaves_the_gate_closed() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&wrong_token_hello())
+    gate.validate_request_kind(&build_wrong_token_hello())
         .expect_err("the Hello is refused");
 
     assert_eq!(
@@ -526,12 +533,12 @@ fn a_refused_hello_leaves_the_gate_closed() {
 fn a_good_hello_after_a_version_refusal_opens_the_build_test_handshake() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&hello_speaking(
+    gate.validate_request_kind(&build_hello_speaking(
         ABOVE_PROTOCOL_VERSION,
         ABOVE_PROTOCOL_VERSION,
     ))
     .expect_err("the Hello is refused");
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect("the Hello is accepted");
 
     assert_eq!(
@@ -545,9 +552,9 @@ fn a_good_hello_after_a_version_refusal_opens_the_build_test_handshake() {
 fn a_good_hello_after_a_token_refusal_opens_the_build_test_handshake() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&wrong_token_hello())
+    gate.validate_request_kind(&build_wrong_token_hello())
         .expect_err("the Hello is refused");
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect("the Hello is accepted");
 
     assert_eq!(
@@ -560,10 +567,10 @@ fn a_good_hello_after_a_token_refusal_opens_the_build_test_handshake() {
 fn a_repeated_hello_on_an_open_gate_gets_the_same_answer() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect("the Hello is accepted");
 
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
 }
 
@@ -571,9 +578,9 @@ fn a_repeated_hello_on_an_open_gate_gets_the_same_answer() {
 fn a_refused_hello_on_an_open_gate_leaves_it_open_and_keeps_its_version() {
     let mut gate = build_test_handshake();
 
-    gate.validate_request_kind(&good_hello())
+    gate.validate_request_kind(&build_good_hello())
         .expect("the Hello is accepted");
-    gate.validate_request_kind(&wrong_token_hello())
+    gate.validate_request_kind(&build_wrong_token_hello())
         .expect_err("the Hello is refused");
 
     assert_eq!(
@@ -635,7 +642,7 @@ fn compute_agreed_protocol_version_rejects_inverted_u32_ranges() {
 fn a_hello_that_says_nothing_leaves_the_connection_local() {
     let mut gate = build_test_handshake();
 
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
 
     assert!(!gate.is_remote_caller());
 }
@@ -644,7 +651,7 @@ fn a_hello_that_says_nothing_leaves_the_connection_local() {
 fn a_hello_saying_remote_marks_the_connection() {
     let mut gate = build_test_handshake();
 
-    assert_eq!(gate.validate_request_kind(&remote_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
 
     assert!(gate.is_remote_caller());
 }
@@ -652,9 +659,9 @@ fn a_hello_saying_remote_marks_the_connection() {
 #[test]
 fn a_second_hello_cannot_clear_the_remote_mark() {
     let mut gate = build_test_handshake();
-    assert_eq!(gate.validate_request_kind(&remote_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
 
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
 
     assert!(
         gate.is_remote_caller(),
@@ -665,9 +672,9 @@ fn a_second_hello_cannot_clear_the_remote_mark() {
 #[test]
 fn a_second_hello_can_still_set_the_remote_mark() {
     let mut gate = build_test_handshake();
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
 
-    assert_eq!(gate.validate_request_kind(&remote_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
 
     assert!(gate.is_remote_caller());
 }
@@ -676,19 +683,19 @@ fn a_second_hello_can_still_set_the_remote_mark() {
 fn a_refused_hello_saying_remote_does_not_mark_the_connection() {
     let mut gate = build_test_handshake();
     let refused = IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: true,
     };
 
     assert_eq!(
         gate.validate_request_kind(&refused),
-        Err(bad_token_refusal())
+        Err(build_bad_token_refusal())
     );
 
     assert!(!gate.is_remote_caller());
-    assert_eq!(gate.validate_request_kind(&good_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_good_hello()), Ok(()));
     assert!(
         !gate.is_remote_caller(),
         "a Hello that never passed its token check marked the connection"
@@ -699,15 +706,15 @@ fn a_refused_hello_saying_remote_does_not_mark_the_connection() {
 fn a_refused_hello_saying_remote_leaves_the_gate_closed() {
     let mut gate = build_test_handshake();
     let refused = IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret("wrongToken"),
         is_remote: true,
     };
 
     assert_eq!(
         gate.validate_request_kind(&refused),
-        Err(bad_token_refusal())
+        Err(build_bad_token_refusal())
     );
 
     assert_eq!(gate.get_agreed_protocol_version(), None);
@@ -715,9 +722,9 @@ fn a_refused_hello_saying_remote_leaves_the_gate_closed() {
 
 #[test]
 fn a_remote_hello_from_another_machine_marks_the_connection() {
-    let mut gate = remote_build_test_handshake();
+    let mut gate = build_remote_test_handshake();
 
-    assert_eq!(gate.validate_request_kind(&remote_hello()), Ok(()));
+    assert_eq!(gate.validate_request_kind(&build_remote_hello()), Ok(()));
 
     assert!(gate.is_remote_caller());
     assert_eq!(gate.get_agreed_protocol_version(), Some(PROTOCOL_VERSION));
@@ -725,10 +732,10 @@ fn a_remote_hello_from_another_machine_marks_the_connection() {
 
 #[test]
 fn an_allowed_other_users_hello_saying_remote_marks_the_connection() {
-    let mut gate = other_user_build_test_handshake(true);
+    let mut gate = build_other_user_test_handshake(true);
     let hello = IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::from_secret(""),
         is_remote: true,
     };
@@ -741,17 +748,17 @@ fn an_allowed_other_users_hello_saying_remote_marks_the_connection() {
 
 #[test]
 fn a_refused_other_users_hello_saying_remote_does_not_mark_the_connection() {
-    let mut gate = other_user_build_test_handshake(false);
+    let mut gate = build_other_user_test_handshake(false);
     let refused = IpcRequestKind::Hello {
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
-        connection_token: expected_connection_token(),
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
+        connection_token: build_expected_connection_token(),
         is_remote: true,
     };
 
     assert_eq!(
         gate.validate_request_kind(&refused),
-        Err(other_users_refusal())
+        Err(build_other_users_refusal())
     );
 
     assert!(!gate.is_remote_caller());
@@ -762,8 +769,8 @@ fn a_refused_other_users_hello_saying_remote_does_not_mark_the_connection() {
 fn the_gate_trait_names_only_a_hello_as_the_hello() {
     use crate::plane::Gate as _;
 
-    assert!(Handshake::is_hello(&good_hello()));
-    assert!(Handshake::is_hello(&wrong_token_hello()));
+    assert!(Handshake::is_hello(&build_good_hello()));
+    assert!(Handshake::is_hello(&build_wrong_token_hello()));
     assert!(!Handshake::is_hello(&IpcRequestKind::Discovery));
     assert!(!Handshake::is_hello(&submit_command()));
 }

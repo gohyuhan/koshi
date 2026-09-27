@@ -25,8 +25,9 @@ pub mod portable;
 /// PTY resize operations.
 pub mod resize;
 
-/// The `PtyBackend` trait and the `PtyHandle` a spawned pane is driven
-/// through; the concrete backend built on `portable-pty` lives in [`portable`].
+/// The `PtyBackend` trait and the `PtySink` a backend delivers each pane's
+/// output and exit to; the concrete backend built on `portable-pty` lives in
+/// [`portable`].
 pub mod backend;
 
 /// Driving panes that live in another process, over the supervisor link.

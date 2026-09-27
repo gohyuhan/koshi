@@ -32,9 +32,6 @@ A profile is one or more `tab` blocks. A `version` line is required.
 | `stack { … }` | Its children share one rectangle; one is expanded. | ≥ 0.1.0 |
 | `lock` | Bare marker. Start the session's first terminal with input locked. | ≥ 0.4.0 |
 
-A `plugin "<name>"` node parses and validates, and no koshi build launches it:
-a profile holding one starts one shell instead.
-
 ## Inside a `pane`
 
 | Key | Value / type | Since |
@@ -97,8 +94,7 @@ profile). Without either, the first pane and the first tab start focused.
 
 ## Full example
 
-This uses every layout form that launches, every pane setting, and every
-sizing key.
+This uses every layout form, every pane setting, and every sizing key.
 
 ```kdl
 // profile/dev.kdl — every layout form, pane setting, and sizing key.

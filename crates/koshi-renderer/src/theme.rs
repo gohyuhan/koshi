@@ -153,8 +153,7 @@ fn compute_interpolated_channel(
     }
     let start_channel = i128::from(start_channel);
     let end_channel = i128::from(end_channel);
-    // `i128` holds every `usize` on every target this builds for, so a long
-    // run never wraps its denominator negative and flips the interpolation.
+    // `i128` holds every `usize` value on every build target.
     let interpolated_channel = start_channel
         + (end_channel - start_channel) * (ramp_element_index as i128)
             / (last_ramp_element_index as i128);

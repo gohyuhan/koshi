@@ -38,8 +38,7 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 #[cfg(unix)]
 use koshi_ipc::router::resolve_router_endpoint_path;
@@ -144,8 +143,8 @@ fn try_open_session_connection(
     let hello = IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: endpoint.connection_token,
             is_remote: false,
         },
@@ -164,8 +163,7 @@ fn attach_test_client(connection: &mut Connection, session_id: SessionId) {
     let request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Attach {
-            viewport: ATTACH_VIEWPORT_SIZE,
-            event_filter: EventFilterSpec::All,
+            viewport_size: ATTACH_VIEWPORT_SIZE,
             resume_client_id: None,
             resume_token: None,
             pane_area: None,
@@ -195,7 +193,7 @@ fn attach_test_client(connection: &mut Connection, session_id: SessionId) {
 /// frame or the read failure that ended it. Fails the test once [`WAIT_DURATION`] has
 /// passed with no ending.
 fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcError> {
-    let (ending_tx, ending_rx) = mpsc::channel();
+    let (ending_sender, ending_receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let ending = loop {
             match connection.recv::<SessionEvent>() {
@@ -205,9 +203,9 @@ fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcEr
                 Err(receive_error) => break Err(receive_error),
             }
         };
-        let _ = ending_tx.send(ending);
+        let _ = ending_sender.send(ending);
     });
-    ending_rx
+    ending_receiver
         .recv_timeout(WAIT_DURATION)
         .expect("the event stream ends")
 }
@@ -240,21 +238,21 @@ fn build_runtime_directory_under(home: &Path) -> PathBuf {
 /// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
 /// reads: macOS derives it from the home directory alone.
 #[cfg(target_os = "macos")]
-fn config_dir_under(home: &Path) -> PathBuf {
+fn resolve_config_directory_under(home: &Path) -> PathBuf {
     home.join("Library/Application Support/koshi")
 }
 
 /// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home`
 /// reads: `.config/koshi` inside the home directory.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn config_dir_under(home: &Path) -> PathBuf {
+fn resolve_config_directory_under(home: &Path) -> PathBuf {
     home.join(".config/koshi")
 }
 
 /// Write `body` as the `koshi.kdl` a process started under `home` reads.
 #[cfg(unix)]
 fn write_test_config(home: &Path, config_text: &str) {
-    let config_directory = config_dir_under(home);
+    let config_directory = resolve_config_directory_under(home);
     std::fs::create_dir_all(&config_directory).expect("a config directory under the test home");
     std::fs::write(config_directory.join("koshi.kdl"), config_text)
         .expect("the config file is written");
@@ -556,8 +554,8 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
             &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
         );
         if endpoint_attempt.is_ok_and(|advertised_endpoint| {
-            advertised_endpoint.connection_token.expose()
-                != endpoint_before_restart.connection_token.expose()
+            advertised_endpoint.connection_token.expose_secret()
+                != endpoint_before_restart.connection_token.expose_secret()
         }) {
             break;
         }
