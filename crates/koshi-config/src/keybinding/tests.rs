@@ -9,24 +9,27 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
 use super::*;
 use crate::types::SCHEMA_VERSION;
 
-/// Parses `keybinding_text` as a keybinding file at a fixed test path.
+/// Parses `keybinding_source_text` as a keybinding file at a fixed test path.
 fn parse_keybinding_text(
-    keybinding_text: &str,
+    keybinding_source_text: &str,
 ) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
-    let keybinding_text_with_version = if keybinding_text
+    let keybinding_source_text_with_version = if keybinding_source_text
         .lines()
-        .any(|line| line.trim_start().starts_with("version "))
+        .any(|keybinding_line_text| keybinding_line_text.trim_start().starts_with("version "))
     {
-        keybinding_text.to_string()
+        keybinding_source_text.to_string()
     } else {
-        format!("version 1\n{keybinding_text}")
+        format!("version 1\n{keybinding_source_text}")
     };
-    parse_keybindings(Path::new("keybinding.kdl"), &keybinding_text_with_version)
+    parse_keybindings(
+        Path::new("keybinding.kdl"),
+        &keybinding_source_text_with_version,
+    )
 }
 
-/// Parses `keybinding_text`, expecting schema violations, and returns their messages.
-fn collect_keybinding_diagnostic_messages(keybinding_text: &str) -> Vec<String> {
-    match parse_keybinding_text(keybinding_text) {
+/// Parses `keybinding_source_text`, expecting schema violations, and returns their messages.
+fn collect_keybinding_diagnostic_messages(keybinding_source_text: &str) -> Vec<String> {
+    match parse_keybinding_text(keybinding_source_text) {
         Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics
             .iter()
             .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
@@ -94,7 +97,7 @@ mode "locked" {
 
     assert_eq!(partial.chord_timeout_ms, Some(750));
     assert_eq!(partial.which_key_delay_ms, Some(300));
-    assert_eq!(partial.max_chord_depth, Some(5));
+    assert_eq!(partial.maximum_chord_depth, Some(5));
     assert_eq!(
         partial.leader,
         Some(Leader::Chord(KeyChord::from_parts(
@@ -118,7 +121,6 @@ mode "locked" {
         new_tab.action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
-    assert_eq!(new_tab.action_arguments, ActionArgs::None);
     // `<leader> w` under a chord leader is the leader chord then `w`.
     let close = &normal.bound_action_by_key_sequence[&build_two_chord_sequence(
         KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
@@ -128,7 +130,6 @@ mode "locked" {
         close.action_reference,
         ActionReference::from_str("core:close-pane").unwrap()
     );
-    assert_eq!(close.action_arguments, ActionArgs::None);
     assert_eq!(
         normal.removed_key_sequences,
         [build_single_chord_sequence(
@@ -646,7 +647,7 @@ fn integer_settings_accept_their_widest_values() {
         "max-chord-depth 255\nchord-timeout-ms 4294967295\nwhich-key-delay-ms 0",
     )
     .expect("boundary values parse");
-    assert_eq!(partial.max_chord_depth, Some(u8::MAX));
+    assert_eq!(partial.maximum_chord_depth, Some(u8::MAX));
     assert_eq!(partial.chord_timeout_ms, Some(u32::MAX));
     assert_eq!(partial.which_key_delay_ms, Some(0));
 }

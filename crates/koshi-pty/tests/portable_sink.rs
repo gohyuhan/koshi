@@ -1,8 +1,7 @@
 //! Integration tests for the real `portable-pty` backend driven through a
-//! [`PtySink`] instead of the handle's channels.
+//! [`PtySink`]: the pane's own reader thread delivers each chunk to the
+//! consumer.
 //!
-//! This is the route the running binary takes: the pane's own reader thread
-//! delivers each chunk to the consumer, and no relay thread exists per pane.
 //! Each test asserts the order the consumer observes: every byte the child
 //! printed, and only then the child's exit.
 //!
@@ -20,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, ShellKind, SpawnSpec};
-use koshi_pty::backend::state::{PtyBackend, PtyHandle, PtySink};
+use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::error::PtyError;
 use koshi_pty::portable::PortablePtyBackend;
 
@@ -367,11 +366,7 @@ fn build_shell_spawn_spec(shell_script: &str) -> SpawnSpec {
 }
 
 /// Spawn `shell_script` as `pane_id` through [`PTY_GATE`], panicking on failure.
-fn spawn_script(
-    pty_backend: &PortablePtyBackend,
-    pane_id: PaneId,
-    shell_script: &str,
-) -> PtyHandle {
+fn spawn_script(pty_backend: &PortablePtyBackend, pane_id: PaneId, shell_script: &str) {
     let _pty_creation_guard = PTY_GATE.lock().expect("pty gate");
     pty_backend
         .spawn_pane(
@@ -379,7 +374,7 @@ fn spawn_script(
             build_shell_spawn_spec(shell_script),
             STANDARD_PTY_SIZE,
         )
-        .expect("spawn child")
+        .expect("spawn child");
 }
 
 /// Poll until `condition` returns true or `TEST_TIMEOUT_DURATION` elapses.
@@ -388,32 +383,6 @@ fn wait_until_condition(mut condition: impl FnMut() -> bool) {
     while !condition() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-}
-
-#[test]
-fn a_channel_backed_pane_reports_the_same_child_process_exit() {
-    // The control for every sink test here: the same child, ending the same
-    // way, delivered through the handle's channels instead. The watcher
-    // observes the child's end and feeds both routes. A failure here is the
-    // child's end not being observed at all; this passing alongside a failing
-    // sink test puts the fault in the sink route.
-    let pty_backend = PortablePtyBackend::new();
-    let pty_handle = spawn_script(
-        &pty_backend,
-        PaneId::new(),
-        SCRIPT_PRINTS_THEN_EXITS_WITH_CODE_3,
-    );
-
-    let mut exit_status = None;
-    wait_until_condition(|| {
-        exit_status = pty_handle.try_receive_exit_status();
-        exit_status.is_some()
-    });
-    assert_eq!(
-        exit_status,
-        Some(ExitStatus::ExitCode(3)),
-        "the child's end was never observed on the channel route either"
-    );
 }
 
 #[test]
@@ -744,24 +713,6 @@ fn a_settled_pane_forwards_no_more_of_a_descendant_process_output() {
 
     // Reap the descendant still holding the terminal open.
     let _ = pty_backend.kill_pane(pane_id, KillPolicy::Tree);
-}
-
-#[test]
-fn a_sink_backed_pane_hands_back_a_handle_with_no_channels() {
-    // The handle carries no receivers, which is how the runtime knows this
-    // pane needs no forwarder thread: it is already delivering to the sink.
-    let sink_recorder = SinkRecorder::new();
-    let pty_backend = PortablePtyBackend::with_pty_sink(sink_recorder.clone());
-    let pane_id = PaneId::new();
-    let mut pty_handle = spawn_script(&pty_backend, pane_id, SCRIPT_EXITS_WITH_CODE_0);
-
-    assert_eq!(pty_handle.get_pane_id(), pane_id);
-    assert!(pty_handle.take_output_and_exit_receivers().is_none());
-    assert_eq!(pty_handle.try_receive_output_chunk(), None);
-    assert_eq!(pty_handle.try_receive_exit_status(), None);
-
-    // The sink is still the one being fed.
-    assert_eq!(sink_recorder.wait_for_exit(), Some(ExitStatus::ExitCode(0)));
 }
 
 #[test]

@@ -197,7 +197,7 @@ impl Discovered {
     /// the gap: `koshi list-panes` with one session unable to answer prints the
     /// other sessions' panes and still exits 4.
     #[must_use]
-    pub fn incomplete_listing(&self) -> Option<CliError> {
+    pub fn find_incomplete_listing_error(&self) -> Option<CliError> {
         if self.is_complete() {
             None
         } else {
@@ -308,7 +308,7 @@ fn remove_stale_session_files(runtime_directory: &Path, session_id: SessionId) {
 }
 
 /// The `list-sessions` answer: one row per running session. Every row's
-/// `server` is `None` — each session in `session_overviews` runs on this machine.
+/// `server_name_or_address` is `None` — each session in `session_overviews` runs on this machine.
 #[must_use]
 pub fn build_session_rows(session_overviews: &[SessionOverview]) -> Vec<SessionRow> {
     session_overviews

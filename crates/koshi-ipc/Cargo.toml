@@ -5,26 +5,29 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-thiserror.workspace = true
-koshi-core = { version = "0.4.0", path = "../koshi-core" }
-koshi-layout = { version = "0.4.0", path = "../koshi-layout" }
-koshi-pane = { version = "0.4.0", path = "../koshi-pane" }
-koshi-storage = { version = "0.4.0", path = "../koshi-storage" }
-serde.workspace = true
-subtle.workspace = true
-interprocess = "2.4.2"
-serde_json.workspace = true
-getrandom = "0.4.3"
 base64.workspace = true
-sha2 = "0.11.0"
+getrandom.workspace = true
+interprocess.workspace = true
+koshi-core.workspace = true
+koshi-layout.workspace = true
+koshi-storage.workspace = true
 rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
 
-[target."cfg(unix)".dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-[target."cfg(windows)".dependencies]
-widestring = "1"
-windows-sys.workspace = true
+[target.'cfg(windows)'.dependencies]
+widestring.workspace = true
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 rcgen.workspace = true

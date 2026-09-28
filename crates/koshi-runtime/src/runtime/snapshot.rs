@@ -1,15 +1,13 @@
 //! The render-snapshot builder: freezing live [`Server`] state into the
 //! read-only [`RenderSnapshot`] the renderer draws.
 //!
-//! [`Server::build_snapshot`] takes a `client_id` and produces the world the
-//! way that one client sees it: its viewed tab solved into pane rectangles, and
-//! each of that tab's panes' terminal grids, cursors, and scrollback tallies
-//! copied out. A pane the client follows live travels by reference — the
-//! per-pane [`Arc<Grid>`](koshi_terminal::grid::state::Grid) handle from
+//! [`Server::build_snapshot`] takes a `client_id` and produces the world the way that one client
+//! sees it: its viewed tab solved into pane rectangles, and each of that tab's panes' terminal
+//! grids, cursors, and scrollback line counts copied out. A pane the client follows live travels by
+//! reference — the per-pane [`Arc<Grid>`](koshi_terminal::grid::state::Grid) handle from
 //! [`TerminalState::get_active_grid_arc`](koshi_terminal::state::TerminalState::get_active_grid_arc)
-//! — and copies no cells; the next write to that pane clones its buffer once
-//! (copy-on-write). A pane the client has scrolled back in carries a grid
-//! composed for that window instead.
+//! — and copies no cells; the next write to that pane clones its buffer once (copy-on-write). A
+//! pane the client has scrolled back in carries a grid composed for that window instead.
 //!
 //! The snapshot is per-client, not session-global: `session.active_tab` holds
 //! *this* client's viewed tab, and always names the same tab as
@@ -34,13 +32,11 @@ use koshi_core::mouse::MouseTracking;
 use koshi_layout::content::list_content_rects;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::solver::{solve_layout_with_mode, LayoutSolve, PaneSizing};
-use koshi_pane::pane::lifecycle::PaneLifecycle;
-use koshi_pane::pane::state::PaneKind;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, GridView, ImagePlacementSnapshot, OwnedFrameLayout, PaneSlot,
     PaneSnapshot, PlacementClientSnapshot, PlacementPaneSnapshot, PlacementSnapshot,
-    PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, PluginUiSnapshot,
-    RenderSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot,
+    PlacementSnapshotError, PlacementSnapshotErrorCode, PlacementTabSnapshot, RenderSnapshot,
+    ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
 };
 use koshi_session::client::Client;
 use koshi_session::session::state::{Session, Tab};
@@ -138,12 +134,12 @@ impl Server {
     ///
     /// Returns `None` when no attached client has that id, or its viewed tab has
     /// gone — the caller skips the frame. On success, `session.active_tab` is the
-    /// client's own viewed tab, solved over the tab's effective size (the
+    /// client's own viewed tab, solved over the tab size (the
     /// per-axis-minimum pane area across every client viewing it), so the
     /// renderer letterboxes it (centers it with padding) into this client's
     /// larger viewport. A tab whose every viewer reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving) solves
-    /// at `0x0`: every pane is suppressed and the frame carries `all_suppressed`.
+    /// at `0x0`: every pane is suppressed and the frame carries `is_every_pane_suppressed`.
     pub fn build_snapshot(&self, client_id: ClientId) -> Option<RenderSnapshot> {
         let owned_frame_layout = self.build_frame_layout(client_id)?;
         let session = self.get_session_for_client(client_id)?;
@@ -165,10 +161,10 @@ impl Server {
             .collect();
 
         Some(RenderSnapshot {
+            is_recovery_notice_visible: session.is_recovery_notice_visible,
             session_snapshot: owned_frame_layout.session_snapshot,
             pane_snapshots,
             client_snapshot: owned_frame_layout.client_snapshot,
-            plugin_ui_snapshot: PluginUiSnapshot::default(),
         })
     }
 
@@ -190,33 +186,31 @@ impl Server {
         let source_tab = session
             .tabs
             .values()
-            .find(|tab| tab.get_layout_tree().contains_pane(source_pane_id))
+            .find(|tab| tab.get_layout_tree().has_pane(source_pane_id))
             .ok_or_else(|| build_placement_not_found_error("the source pane does not exist"))?;
         let destination_tab = session
             .tabs
             .get(&destination_tab_id)
             .ok_or_else(|| build_placement_not_found_error("the destination tab does not exist"))?;
         let source_tab_id = source_tab.get_tab_id();
-        let source_viewport = if source_tab_id == destination_tab_id {
-            session.get_tab_viewport(source_tab_id).unwrap_or_else(|| {
+        let source_tab_size = if source_tab_id == destination_tab_id {
+            session.get_tab_size(source_tab_id).unwrap_or_else(|| {
                 client.get_pane_area().unwrap_or(Size {
                     column_count: 0,
                     row_count: 0,
                 })
             })
         } else {
-            compute_placement_preview_viewport(session, client_id, source_tab_id, false)
+            compute_placement_preview_tab_size(session, client_id, source_tab_id, false)
         };
-        let destination_viewport = if source_tab_id == destination_tab_id {
-            source_viewport
+        let destination_tab_size = if source_tab_id == destination_tab_id {
+            source_tab_size
         } else {
-            compute_placement_preview_viewport(session, client_id, destination_tab_id, true)
+            compute_placement_preview_tab_size(session, client_id, destination_tab_id, true)
         };
-        let source_tab_layout =
-            self.solve_placement_tab_layout(session, source_tab, source_viewport);
-        let destination_tab_layout = (source_tab_id != destination_tab_id).then(|| {
-            self.solve_placement_tab_layout(session, destination_tab, destination_viewport)
-        });
+        let source_tab_layout = self.solve_placement_tab_layout(source_tab, source_tab_size);
+        let destination_tab_layout = (source_tab_id != destination_tab_id)
+            .then(|| self.solve_placement_tab_layout(destination_tab, destination_tab_size));
         let source_pane_count = source_tab_layout.pane_slots.len();
         let destination_pane_count = destination_tab_layout
             .as_ref()
@@ -236,14 +230,14 @@ impl Server {
 
         let source_tab_snapshot = self.build_placement_tab_snapshot(
             source_tab,
-            source_viewport,
+            source_tab_size,
             source_tab_layout,
             (source_tab_id != destination_tab_id).then_some(source_pane_id),
         );
         let destination_tab_snapshot = destination_tab_layout.map(|tab_layout| {
             self.build_placement_tab_snapshot(
                 destination_tab,
-                destination_viewport,
+                destination_tab_size,
                 tab_layout,
                 None,
             )
@@ -262,8 +256,8 @@ impl Server {
                     client_id: client.get_client_id(),
                     client_revision: client.get_placement_revision(),
                     viewport_size: client.get_viewport_size(),
-                    active_tab_id: client.get_active_tab(),
-                    focused_pane_id: client.get_focused_pane(client.get_active_tab()),
+                    active_tab_id: client.get_active_tab_id(),
+                    focused_pane_id: client.get_focused_pane_id(client.get_active_tab_id()),
                     lock_mode: client.get_lock_mode(),
                     is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
                 },
@@ -274,44 +268,13 @@ impl Server {
     }
 
     /// Build one tab's solved placement and visible pane content for a preview.
-    fn solve_placement_tab_layout(
-        &self,
-        session: &Session,
-        tab: &Tab,
-        effective_cell_size: Size,
-    ) -> SolvedPlacementTab {
+    fn solve_placement_tab_layout(&self, tab: &Tab, tab_size: Size) -> SolvedPlacementTab {
         // Placement previews use the complete tiled tree, even when the
         // requesting client currently shows a fullscreen or zoomed pane.
         let layout_mode = LayoutMode::Tiled;
         let pane_sizing = self.get_pane_sizing();
-        let layout_solve = solve_tab_layout(tab, layout_mode, effective_cell_size, pane_sizing);
-        let computed_content_rects = list_content_rects(&layout_solve);
-        let suppressed_pane_ids: HashSet<PaneId> =
-            layout_solve.suppressed_pane_ids.iter().copied().collect();
-        let pane_slots = layout_solve
-            .pane_rects
-            .iter()
-            .zip(computed_content_rects.iter())
-            .map(
-                |(&(pane_id, outer_rect), &(content_pane_id, content_rect))| {
-                    debug_assert_eq!(pane_id, content_pane_id);
-                    let pane_record = session.panes.get_pane_record_by_id(pane_id);
-                    PaneSlot {
-                        pane_id,
-                        outer_rect,
-                        content_rect,
-                        pane_kind: pane_record.map_or(PaneKind::Terminal, |pane_record| {
-                            *pane_record.get_pane_kind()
-                        }),
-                        is_visible: content_rect.is_some(),
-                        is_suppressed: suppressed_pane_ids.contains(&pane_id),
-                        is_dead: pane_record.is_some_and(|pane_record| {
-                            matches!(pane_record.get_lifecycle(), PaneLifecycle::Exited { .. })
-                        }),
-                    }
-                },
-            )
-            .collect();
+        let layout_solve = solve_tab_layout(tab, layout_mode, tab_size, pane_sizing);
+        let pane_slots = list_pane_slots(&layout_solve);
         SolvedPlacementTab {
             layout_solve,
             pane_slots,
@@ -321,7 +284,7 @@ impl Server {
     fn build_placement_tab_snapshot(
         &self,
         tab: &Tab,
-        effective_cell_size: Size,
+        tab_size: Size,
         solved_placement_tab: SolvedPlacementTab,
         retained_pane_id: Option<PaneId>,
     ) -> PlacementTabSnapshot {
@@ -355,10 +318,10 @@ impl Server {
                 tab_id: tab.get_tab_id(),
                 tab_name: tab.get_tab_name().to_owned(),
                 pane_slots,
-                effective_cell_size,
+                tab_size,
                 stack_headers: layout_solve.stack_headers,
                 layout_mode,
-                are_all_panes_suppressed: layout_solve.is_all_panes_suppressed,
+                is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
                 gap_cell_count: pane_sizing.gap_cell_count,
             },
             pane_snapshots,
@@ -378,73 +341,41 @@ impl Server {
     pub(crate) fn build_frame_layout(&self, client_id: ClientId) -> Option<OwnedFrameLayout> {
         let session = self.get_session_for_client(client_id)?;
         let client = session.clients.get_client_by_id(client_id)?;
-        let active_tab_id = client.get_active_tab();
+        let active_tab_id = client.get_active_tab_id();
         let tab_record = session.tabs.get(&active_tab_id)?;
 
         // Solve the active tab's layout over a rect at origin (0, 0) sized to the
-        // shared effective size; the renderer offsets it into the client viewport.
+        // shared tab size; the renderer offsets it into the client viewport.
         // A tab whose every viewer is starving solves at 0x0, which suppresses
         // every pane.
         //
         // The solve uses THIS client's layout mode: zoom is per-client, so a pane
         // filling the tab for this client can be one tile among several for
         // another client viewing the same tab at the same moment.
-        let effective_cell_size = session.get_tab_viewport(active_tab_id).unwrap_or(Size {
+        let tab_size = session.get_tab_size(active_tab_id).unwrap_or(Size {
             column_count: 0,
             row_count: 0,
         });
         let layout_mode = client.get_layout_mode(active_tab_id);
         let pane_sizing = self.get_pane_sizing();
-        let layout_solve =
-            solve_tab_layout(tab_record, layout_mode, effective_cell_size, pane_sizing);
-        let computed_content_rects = list_content_rects(&layout_solve);
-
-        // One `PaneSlot` per leaf: outer rect from the solve, inner (content)
-        // rect from `computed_content_rects`, both in the same solve order. A tab with
-        // no room suppresses every pane it holds.
-        let suppressed_pane_ids: HashSet<PaneId> =
-            layout_solve.suppressed_pane_ids.iter().copied().collect();
-        let pane_slots: Vec<PaneSlot> = layout_solve
-            .pane_rects
-            .iter()
-            .zip(computed_content_rects.iter())
-            .map(
-                |(&(pane_id, outer_rect), &(content_pane_id, content_rect))| {
-                    debug_assert_eq!(pane_id, content_pane_id);
-                    let pane_record = session.panes.get_pane_record_by_id(pane_id);
-                    PaneSlot {
-                        pane_id,
-                        outer_rect,
-                        content_rect,
-                        pane_kind: pane_record.map_or(PaneKind::Terminal, |pane_record| {
-                            *pane_record.get_pane_kind()
-                        }),
-                        is_visible: content_rect.is_some(),
-                        is_suppressed: suppressed_pane_ids.contains(&pane_id),
-                        is_dead: pane_record.is_some_and(|pane_record| {
-                            matches!(pane_record.get_lifecycle(), PaneLifecycle::Exited { .. })
-                        }),
-                    }
-                },
-            )
-            .collect();
+        let layout_solve = solve_tab_layout(tab_record, layout_mode, tab_size, pane_sizing);
 
         let active_tab_snapshot = TabSnapshot {
             tab_id: tab_record.get_tab_id(),
             tab_name: tab_record.get_tab_name().to_owned(),
-            pane_slots,
-            effective_cell_size,
+            pane_slots: list_pane_slots(&layout_solve),
+            tab_size,
             stack_headers: layout_solve.stack_headers,
             layout_mode,
-            are_all_panes_suppressed: layout_solve.is_all_panes_suppressed,
+            is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
             gap_cell_count: pane_sizing.gap_cell_count,
         };
 
         // Metadata for every tab in the session, in display (index) order.
-        let mut tabs_metadata: Vec<TabMeta> = session
+        let mut tabs_metadata: Vec<TabMetadata> = session
             .tabs
             .values()
-            .map(|tab_record| TabMeta {
+            .map(|tab_record| TabMetadata {
                 tab_id: tab_record.get_tab_id(),
                 tab_name: tab_record.get_tab_name().to_owned(),
                 tab_index: tab_record.get_tab_index(),
@@ -466,14 +397,14 @@ impl Server {
                 client_revision: client.get_placement_revision(),
                 viewport_size: client.get_viewport_size(),
                 active_tab_id,
-                focused_pane_id: client.get_focused_pane(active_tab_id),
+                focused_pane_id: client.get_focused_pane_id(active_tab_id),
                 lock_mode: client.get_lock_mode(),
                 is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             },
         })
     }
 
-    /// Content snapshot for one pane at scrollback view `view_offset` — lines the
+    /// Content snapshot for one pane at scrollback view `scrollback_offset` — lines the
     /// viewing client has scrolled up from the live bottom, `0` following live
     /// output. The offset is clamped to the pane's retained line count, and that
     /// clamped value drives both the composed grid and the scroll indicator, so
@@ -483,8 +414,8 @@ impl Server {
     /// `selection` is the viewing client's highlight in this pane, resolved here
     /// from absolute line numbers to the rows this frame actually shows.
     ///
-    /// A pane with no terminal engine — a plugin pane, or one not yet spawned —
-    /// gets `grid_view = None`, a hidden cursor, and no mouse mode at all: the
+    /// A pane with no terminal engine — one not yet spawned — gets
+    /// `grid_view = None`, a hidden cursor, and no mouse mode at all: the
     /// renderer draws no cells for it, and a wheel over it asks nothing of a
     /// program.
     #[allow(clippy::needless_pass_by_value)]
@@ -514,8 +445,7 @@ impl Server {
                 selection_spans: None,
                 has_selection: false,
                 view_top_row_index: 0,
-                scrollback_meta: ScrollbackMeta {
-                    is_truncated: false,
+                scrollback_metadata: ScrollbackMetadata {
                     retained_line_count: 0,
                 },
             };
@@ -529,7 +459,7 @@ impl Server {
         // screen), so the composed grid, the indicator, and cursor suppression
         // all agree on how far the view is scrolled.
         let (terminal_grid, effective_scrollback_offset) =
-            terminal_state.scrolled_view(scrollback_offset);
+            terminal_state.get_scrolled_view(scrollback_offset);
         let image_placement_snapshots = terminal_state
             .list_image_placements_for_view(effective_scrollback_offset)
             .iter()
@@ -580,8 +510,7 @@ impl Server {
             mouse_tracking: terminal_state.get_mouse_tracking(),
             is_alternate_scroll_enabled: terminal_state.is_alternate_scroll_enabled(),
             is_on_alternate_screen: terminal_state.get_active_screen() == Screen::Alternate,
-            scrollback_meta: ScrollbackMeta {
-                is_truncated: scrollback_state.get_dropped_line_count() > 0,
+            scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: scrollback_state.get_retained_line_count(),
             },
         }
@@ -628,23 +557,23 @@ fn shorten_home_path(display_path: &std::path::Path, home_path_text: Option<&str
     display_path_text
 }
 
-fn compute_placement_preview_viewport(
+fn compute_placement_preview_tab_size(
     session: &Session,
     requesting_client_id: ClientId,
     tab_id: TabId,
     should_include_requesting_client: bool,
 ) -> Size {
-    let shared_viewport = session
+    let shared_tab_size = session
         .clients
         .list_attached_clients()
         .filter(|client| {
             (should_include_requesting_client && client.get_client_id() == requesting_client_id)
                 || (client.get_client_id() != requesting_client_id
-                    && client.get_active_tab() == tab_id)
+                    && client.get_active_tab_id() == tab_id)
         })
         .filter_map(Client::get_pane_area)
         .reduce(Size::compute_minimum_axes);
-    shared_viewport.unwrap_or_else(|| {
+    shared_tab_size.unwrap_or_else(|| {
         if should_include_requesting_client {
             session
                 .clients
@@ -663,41 +592,6 @@ fn compute_placement_preview_viewport(
     })
 }
 
-#[cfg(test)]
-fn count_placement_snapshot_resources(
-    source_tab_snapshot: &PlacementTabSnapshot,
-    destination_tab_snapshot: Option<&PlacementTabSnapshot>,
-) -> (u64, usize, u64) {
-    let mut cell_count = 0u64;
-    let mut image_count = 0usize;
-    let mut image_byte_count = 0u64;
-    let mut counted_image_memory_addresses = HashSet::new();
-    for tab_snapshot in [Some(source_tab_snapshot), destination_tab_snapshot]
-        .into_iter()
-        .flatten()
-    {
-        for pane_snapshot in &tab_snapshot.pane_snapshots {
-            if let Some(terminal_grid_view) = &pane_snapshot.terminal_grid_view {
-                let (row_count, column_count) = terminal_grid_view.grid.get_grid_dimensions();
-                cell_count = cell_count
-                    .saturating_add(u64::from(row_count).saturating_mul(u64::from(column_count)));
-            }
-            image_count = image_count.saturating_add(pane_snapshot.image_placement_snapshots.len());
-            for image_placement_snapshot in &pane_snapshot.image_placement_snapshots {
-                let Some(image_record) = image_placement_snapshot.get_image_record() else {
-                    continue;
-                };
-                if counted_image_memory_addresses.insert(Arc::as_ptr(&image_record.image)) {
-                    image_byte_count = image_byte_count.saturating_add(
-                        u64::try_from(image_record.image.rgba_bytes.len()).unwrap_or(u64::MAX),
-                    );
-                }
-            }
-        }
-    }
-    (cell_count, image_count, image_byte_count)
-}
-
 fn build_placement_not_found_error(message: &str) -> PlacementSnapshotError {
     PlacementSnapshotError {
         code: PlacementSnapshotErrorCode::NotFound,
@@ -712,7 +606,7 @@ fn build_placement_resource_limit_error(message: &str) -> PlacementSnapshotError
     }
 }
 
-/// Solve `tab`'s current layout in `mode` over a `viewport`-sized rect at origin
+/// Solve `tab`'s current layout in `layout_mode` over an `tab_size`-sized rect at origin
 /// `(0, 0)` — the space `PaneSlot`/content rects live in.
 ///
 /// `mode` is a viewing client's, never the tab's: the tab holds only the tree,
@@ -721,15 +615,39 @@ fn build_placement_resource_limit_error(message: &str) -> PlacementSnapshotError
 pub(crate) fn solve_tab_layout(
     tab: &Tab,
     layout_mode: LayoutMode,
-    effective_cell_size: Size,
+    tab_size: Size,
     pane_sizing: PaneSizing,
 ) -> LayoutSolve {
     solve_layout_with_mode(
         tab.get_layout_tree(),
         layout_mode,
-        Rect::from_size_at_origin(effective_cell_size),
+        Rect::from_size_at_origin(tab_size),
         pane_sizing,
     )
+}
+
+/// One [`PaneSlot`] per leaf of `layout_solve`, in solve order: the outer rect
+/// from the solve and the content rect from [`list_content_rects`].
+fn list_pane_slots(layout_solve: &LayoutSolve) -> Vec<PaneSlot> {
+    let suppressed_pane_ids: HashSet<PaneId> =
+        layout_solve.suppressed_pane_ids.iter().copied().collect();
+    layout_solve
+        .pane_rects
+        .iter()
+        .zip(list_content_rects(layout_solve))
+        .map(
+            |(&(pane_id, outer_rect), (content_pane_id, content_rect))| {
+                debug_assert_eq!(pane_id, content_pane_id);
+                PaneSlot {
+                    pane_id,
+                    outer_rect,
+                    content_rect,
+                    is_visible: content_rect.is_some(),
+                    is_suppressed: suppressed_pane_ids.contains(&pane_id),
+                }
+            },
+        )
+        .collect()
 }
 
 /// Cut `selection` down to the rows this frame shows, as a column range per
@@ -738,8 +656,8 @@ pub(crate) fn solve_tab_layout(
 /// A selection stores absolute line numbers — every line the pane ever pushed
 /// into scrollback — while the renderer draws a window of rows numbered from its
 /// own top. This is the one place the two meet: the window's top row is line
-/// `total_pushed - view_offset`, so a line `a` draws at row `a - (total_pushed -
-/// view_offset)`, and a row outside `0..rows` is not on screen.
+/// `total_pushed_line_count - scrollback_offset`, so a line `a` draws at row `a - (total_pushed_line_count -
+/// scrollback_offset)`, and a row outside `0..rows` is not on screen.
 ///
 /// A highlight only partly on screen keeps the part that is: when its first
 /// visible row is not the selection's own first row, that row starts at column

@@ -6,8 +6,7 @@
 //! layout), lowest precedence first. [`merge_keymaps`] folds them per key:
 //! a higher-precedence layer's entry on a key replaces a lower layer's on the same key,
 //! and every other key is untouched. The result splits each mode into two
-//! maps. The two resolve at different tiers of the key-resolution stack, with
-//! sticky plugin layers between them:
+//! maps, and a keypress checks the user map before the default map:
 //!
 //! - **`user_bindings_by_key_sequence`** — the winning user-authored entries, each tagged with
 //!   the layer that authored it.
@@ -25,9 +24,8 @@
 //! or the defaults alone after
 //! [`RevertToDefaults`](crate::conflict::KeymapVerdict::RevertToDefaults).
 //! Merge checks neither the unlock guarantee nor cross-layer collisions;
-//! detection does both. Merging is pure and re-runs whenever the layers or
-//! the action registry change (config reload, plugin load or unload); a
-//! binding that turns live re-enters the merged map on that run.
+//! detection does both. Merging is pure and re-runs on every config load or
+//! reload.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -54,11 +52,10 @@ pub struct MergedBinding {
 /// records.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergedModeMap {
-    /// The winning user-authored binding per key. Resolves above sticky
-    /// plugin layers in the key-resolution stack.
+    /// The winning user-authored binding per key.
     pub user_bindings_by_key_sequence: BTreeMap<KeySequence, MergedBinding>,
     /// The surviving built-in binding per key: firing shipped defaults no
-    /// user surface took or removed. Resolves below sticky plugin layers.
+    /// user surface took or removed.
     pub default_bindings_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
     /// Every key any layer removes in this mode, whether or not a lower
     /// layer held it.
@@ -81,26 +78,26 @@ pub struct MergedKeyMap {
 /// per-mode lookup tables.
 ///
 /// `registry` is the live action table each binding is resolved against
-/// for the firing judgment; `max_chord_depth` is the cap a firing sequence
+/// for the firing judgment; `maximum_chord_depth` is the cap a firing sequence
 /// must fit. A layer's binding whose mode is not one of the
 /// [`LockMode`](koshi_core::lock::LockMode) names is skipped, matching
 /// detection. The reserved unlock chord is `unlock_alternative` when set,
 /// otherwise [`KeybindingsConfig::RESERVED_UNLOCK`].
 ///
-/// Per key, the highest firing entry wins. A firing user-authored entry on
-/// a defaulted key takes it and the displaced default moves to
-/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence); a remove above
-/// the defaults layer does the same. A dead binding (resolver-refused,
-/// swallowed by the locked-mode reserved-chord bypass, or longer than the
-/// chord-depth cap) enters no map: a dead user entry leaves the default
-/// beneath it live, and a dead default is absent from
+/// Per key, the highest firing entry wins. A firing user-authored entry on a defaulted key takes it
+/// and the displaced default moves to
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence);
+/// a remove above the defaults layer does the same. A dead binding (resolver-refused, swallowed by
+/// the locked-mode reserved-chord bypass, or longer than the chord-depth cap) enters no map: a dead
+/// user entry leaves the default beneath it live, and a dead default is absent from
 /// `default_bindings_by_key_sequence` and from
-/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence) both.
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence)
+/// both.
 #[must_use]
 pub fn merge_keymaps(
     layers: &[KeymapLayer],
     unlock_alternative: Option<KeyChord>,
-    max_chord_depth: u8,
+    maximum_chord_depth: u8,
     registry: &ActionRegistry,
 ) -> MergedKeyMap {
     let known_mode_names = &list_builtin_mode_names();
@@ -111,7 +108,7 @@ pub fn merge_keymaps(
         registry,
         reserved_unlock_chord,
         locked_mode_name: &locked_mode_name,
-        max_chord_depth,
+        maximum_chord_depth,
     };
 
     let mut merged_mode_map_by_name: BTreeMap<ModeName, MergedModeMap> = BTreeMap::new();
@@ -139,7 +136,8 @@ pub fn merge_keymaps(
                     key_sequence,
                     layer_index,
                 ) {
-                    // A removed default lands in `unbound_defaults`; a removed
+                    // A removed default lands in
+                    // `unbound_default_bindings_by_key_sequence`; a removed
                     // user entry enters no map at all.
                     if !layer.origin.is_user_authored() {
                         merged_mode_map

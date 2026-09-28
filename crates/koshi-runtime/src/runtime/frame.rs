@@ -1,13 +1,12 @@
 //! The wire-frame builder: turning the in-process [`RenderSnapshot`] into the
 //! [`PaintedFrame`] a client in another process draws.
 //!
-//! [`wire_frame`] is a plain field-for-field mapping. The session, tab, slot,
+//! [`build_wire_frame`] is a plain field-for-field mapping. The session, tab, slot,
 //! tab-bar and client parts already hold shared types
 //! ([`Rect`](koshi_core::geometry::Rect),
 //! [`Size`](koshi_core::geometry::Size),
 //! [`StackHeader`](koshi_layout::solver::StackHeader),
 //! [`LayoutMode`](koshi_layout::mode::LayoutMode),
-//! [`PaneKind`](koshi_pane::pane::state::PaneKind),
 //! [`MouseTracking`](koshi_core::mouse::MouseTracking)), so they copy straight
 //! across. The terminal types do not travel, so each pane's
 //! [`Grid`] is read cell by cell into a [`FrameWindow`], and
@@ -17,17 +16,13 @@
 //! Rows are run-length encoded from source [`Cell`] values into [`FrameRun`]
 //! records: a 1×3 row holding a styled `e` then two default blanks travels as
 //! two runs — `count: 1` for the `e`, `count: 2` for the blanks.
-//!
-//! Plugin UI does not travel.
-//! [`build_snapshot`](crate::server::Server::build_snapshot) always sets the
-//! default, and [`PaintedFrame`] has no slot for it.
 
 use koshi_ipc::frame::{
-    FrameAttrs, FrameCell, FrameClient, FrameColor, FrameCursor, FrameCursorShape,
+    FrameAttributes, FrameCell, FrameClient, FrameColor, FrameCursor, FrameCursorShape,
     FrameGraphicsProtocol, FrameImageAction, FrameImageDimension, FrameImageDisplay,
     FrameImagePlacement, FrameImageRecordHeader, FrameImageTransfer, FramePane, FrameRow,
     FrameRowEnd, FrameRun, FrameScrollback, FrameSelection, FrameSession, FrameSixelBackground,
-    FrameSlot, FrameStyle, FrameTab, FrameTabMeta, FrameUnderline, FrameWindow, PaintedFrame,
+    FrameSlot, FrameStyle, FrameTab, FrameTabMetadata, FrameUnderline, FrameWindow, PaintedFrame,
     MAX_FRAME_IMAGE_CHUNK_BYTE_COUNT,
 };
 use koshi_ipc::placement::{
@@ -38,7 +33,7 @@ use koshi_ipc::placement::{
 };
 use koshi_renderer::snapshot::{
     GridView, ImagePlacementSnapshot, PaneSlot, PaneSnapshot, PlacementPaneSnapshot,
-    PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabMeta,
+    PlacementSnapshot, PlacementTabSnapshot, RenderSnapshot, TabMetadata,
 };
 use koshi_terminal::graphics::{
     GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord, SixelBackground,
@@ -50,12 +45,11 @@ use koshi_terminal::style::{Color, Style, UnderlineStyle};
 /// Turn one painted frame into the form it travels in.
 ///
 /// Carries the session's identity, its solved active tab, the tab-bar entries,
-/// every pane's content, and the viewing client's own state. Carries no plugin
-/// UI.
+/// every pane's content, and the viewing client's own state.
 #[must_use]
-pub fn wire_frame(render_snapshot: &RenderSnapshot) -> PaintedFrame {
+pub fn build_wire_frame(render_snapshot: &RenderSnapshot) -> PaintedFrame {
     let mut next_image_content_id = 1u64;
-    wire_frame_with_content_ids(render_snapshot, |_, _| {
+    build_wire_frame_with_content_ids(render_snapshot, |_, _| {
         let image_content_id = next_image_content_id;
         next_image_content_id = next_image_content_id.saturating_add(1);
         image_content_id
@@ -64,7 +58,7 @@ pub fn wire_frame(render_snapshot: &RenderSnapshot) -> PaintedFrame {
 
 /// Turn one painted frame into wire form with connection-selected image ids.
 #[must_use]
-pub(crate) fn wire_frame_with_content_ids(
+pub(crate) fn build_wire_frame_with_content_ids(
     render_snapshot: &RenderSnapshot,
     mut assign_image_content_id: impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
 ) -> PaintedFrame {
@@ -72,6 +66,7 @@ pub(crate) fn wire_frame_with_content_ids(
     let active_tab_snapshot = &session_snapshot.active_tab_snapshot;
     let client_snapshot = &render_snapshot.client_snapshot;
     PaintedFrame {
+        is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
         session_snapshot: FrameSession {
             session_id: session_snapshot.session_id,
             session_revision: session_snapshot.session_revision,
@@ -82,24 +77,24 @@ pub(crate) fn wire_frame_with_content_ids(
                 pane_slots: active_tab_snapshot
                     .pane_slots
                     .iter()
-                    .map(wire_slot)
+                    .map(build_wire_slot)
                     .collect(),
-                effective_cell_size: active_tab_snapshot.effective_cell_size,
+                tab_size: active_tab_snapshot.tab_size,
                 stack_headers: active_tab_snapshot.stack_headers.clone(),
                 layout_mode: active_tab_snapshot.layout_mode,
-                is_every_pane_suppressed: active_tab_snapshot.are_all_panes_suppressed,
+                is_every_pane_suppressed: active_tab_snapshot.is_every_pane_suppressed,
                 gap_cell_count: active_tab_snapshot.gap_cell_count,
             },
             tab_snapshots: session_snapshot
                 .tabs_metadata
                 .iter()
-                .map(wire_tab_meta)
+                .map(build_wire_tab_metadata)
                 .collect(),
         },
         pane_snapshots: render_snapshot
             .pane_snapshots
             .iter()
-            .map(|pane_snapshot| wire_pane(pane_snapshot, &mut assign_image_content_id))
+            .map(|pane_snapshot| build_wire_pane(pane_snapshot, &mut assign_image_content_id))
             .collect(),
         client_snapshot: FrameClient {
             client_id: client_snapshot.client_id,
@@ -115,11 +110,11 @@ pub(crate) fn wire_frame_with_content_ids(
 
 /// Turn a read-only placement preview into wire form with local image ids.
 #[must_use]
-pub(crate) fn wire_placement_snapshot(
+pub(crate) fn build_wire_placement_snapshot(
     placement_snapshot: &PlacementSnapshot,
 ) -> WirePlacementSnapshot {
     let mut next_image_content_id = 1u64;
-    wire_placement_snapshot_with_content_ids(placement_snapshot, |_, _| {
+    build_wire_placement_snapshot_with_content_ids(placement_snapshot, |_, _| {
         let image_content_id = next_image_content_id;
         next_image_content_id = next_image_content_id.saturating_add(1);
         image_content_id
@@ -128,7 +123,7 @@ pub(crate) fn wire_placement_snapshot(
 
 /// Turn a read-only placement preview into wire form with connection-selected image ids.
 #[must_use]
-pub(crate) fn wire_placement_snapshot_with_content_ids(
+pub(crate) fn build_wire_placement_snapshot_with_content_ids(
     placement_snapshot: &PlacementSnapshot,
     mut assign_image_content_id: impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
 ) -> WirePlacementSnapshot {
@@ -139,14 +134,13 @@ pub(crate) fn wire_placement_snapshot_with_content_ids(
         destination_tab_id: placement_snapshot.destination_tab_id,
         session_placement_revision: placement_snapshot.session_placement_revision,
         client_placement_revision: placement_snapshot.client_placement_revision,
-        source_tab_snapshot: wire_placement_tab(
+        source_tab_snapshot: build_wire_placement_tab(
             &placement_snapshot.source_tab_snapshot,
             &mut assign_image_content_id,
         ),
-        destination_tab_snapshot: placement_snapshot
-            .destination_tab_snapshot
-            .as_ref()
-            .map(|tab_snapshot| wire_placement_tab(tab_snapshot, &mut assign_image_content_id)),
+        destination_tab_snapshot: placement_snapshot.destination_tab_snapshot.as_ref().map(
+            |tab_snapshot| build_wire_placement_tab(tab_snapshot, &mut assign_image_content_id),
+        ),
         client_snapshot: WirePlacementClientSnapshot {
             client_id: placement_snapshot.client_snapshot.client_snapshot.client_id,
             viewport_size: placement_snapshot
@@ -170,7 +164,7 @@ pub(crate) fn wire_placement_snapshot_with_content_ids(
     }
 }
 
-fn wire_placement_tab(
+fn build_wire_placement_tab(
     placement_tab_snapshot: &PlacementTabSnapshot,
     assign_image_content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
 ) -> WirePlacementTabSnapshot {
@@ -179,21 +173,25 @@ fn wire_placement_tab(
         tab_id: tab_snapshot.tab_id,
         tab_name: tab_snapshot.tab_name.clone(),
         layout_tree: placement_tab_snapshot.layout_tree.clone(),
-        pane_slots: tab_snapshot.pane_slots.iter().map(wire_slot).collect(),
-        effective_cell_size: tab_snapshot.effective_cell_size,
+        pane_slots: tab_snapshot
+            .pane_slots
+            .iter()
+            .map(build_wire_slot)
+            .collect(),
+        tab_size: tab_snapshot.tab_size,
         stack_headers: tab_snapshot.stack_headers.clone(),
         layout_mode: tab_snapshot.layout_mode,
-        is_every_pane_suppressed: tab_snapshot.are_all_panes_suppressed,
+        is_every_pane_suppressed: tab_snapshot.is_every_pane_suppressed,
         gap_cell_count: tab_snapshot.gap_cell_count,
         pane_snapshots: placement_tab_snapshot
             .pane_snapshots
             .iter()
-            .map(|pane_snapshot| wire_placement_pane(pane_snapshot, assign_image_content_id))
+            .map(|pane_snapshot| build_wire_placement_pane(pane_snapshot, assign_image_content_id))
             .collect(),
     }
 }
 
-fn wire_placement_pane(
+fn build_wire_placement_pane(
     placement_pane_snapshot: &PlacementPaneSnapshot,
     assign_image_content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
 ) -> WirePlacementPaneSnapshot {
@@ -202,12 +200,12 @@ fn wire_placement_pane(
         terminal_window: placement_pane_snapshot
             .terminal_grid_view
             .as_ref()
-            .map(wire_window),
+            .map(build_wire_window),
         image_placement_snapshots: placement_pane_snapshot
             .image_placement_snapshots
             .iter()
             .map(|image_placement_snapshot| {
-                wire_image_placement(
+                build_wire_image_placement(
                     placement_pane_snapshot.pane_id,
                     image_placement_snapshot,
                     assign_image_content_id,
@@ -219,18 +217,18 @@ fn wire_placement_pane(
 
 /// Build the metadata sent before one image record's RGBA chunks.
 #[must_use]
-pub(crate) fn wire_image_transfer(
+pub(crate) fn build_wire_image_transfer(
     image_content_id: u64,
     image_record: &ImageRecord,
 ) -> FrameImageTransfer {
     FrameImageTransfer {
         image_content_id,
         image_record: FrameImageRecordHeader {
-            protocol: wire_graphics_protocol(image_record.protocol),
+            protocol: build_wire_graphics_protocol(image_record.protocol),
             pixel_width: image_record.image.pixel_width,
             pixel_height: image_record.image.pixel_height,
-            image_action: wire_image_action(image_record.action),
-            display: wire_image_display(&image_record.display),
+            image_action: build_wire_image_action(image_record.action),
+            display: build_wire_image_display(&image_record.display),
             anchor_cell: image_record.anchor,
         },
         image_byte_count: u64::try_from(image_record.image.rgba_bytes.len())
@@ -239,7 +237,7 @@ pub(crate) fn wire_image_transfer(
 }
 
 /// Return bounded RGBA chunks for one connection-local image record.
-pub(crate) fn wire_image_chunk_sources(
+pub(crate) fn build_wire_image_chunk_sources(
     image_record: &ImageRecord,
 ) -> impl Iterator<Item = (u64, bool, &[u8])> {
     let image_byte_count = image_record.image.rgba_bytes.len();
@@ -264,21 +262,19 @@ pub(crate) fn wire_image_chunk_sources(
 }
 
 /// One solved pane placement, as it travels.
-fn wire_slot(pane_slot: &PaneSlot) -> FrameSlot {
+fn build_wire_slot(pane_slot: &PaneSlot) -> FrameSlot {
     FrameSlot {
         pane_id: pane_slot.pane_id,
         outer_rect: pane_slot.outer_rect,
         content_rect: pane_slot.content_rect,
-        pane_kind: pane_slot.pane_kind,
         is_visible: pane_slot.is_visible,
         is_suppressed: pane_slot.is_suppressed,
-        is_dead: pane_slot.is_dead,
     }
 }
 
 /// One tab-bar entry, as it travels.
-fn wire_tab_meta(tab_metadata: &TabMeta) -> FrameTabMeta {
-    FrameTabMeta {
+fn build_wire_tab_metadata(tab_metadata: &TabMetadata) -> FrameTabMetadata {
+    FrameTabMetadata {
         tab_id: tab_metadata.tab_id,
         tab_name: tab_metadata.tab_name.clone(),
         tab_index: tab_metadata.tab_index,
@@ -288,7 +284,7 @@ fn wire_tab_meta(tab_metadata: &TabMeta) -> FrameTabMeta {
 
 /// One pane's content, as it travels. A pane with no terminal content sends no
 /// window.
-fn wire_pane(
+fn build_wire_pane(
     pane_snapshot: &PaneSnapshot,
     assign_image_content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
 ) -> FramePane {
@@ -300,14 +296,20 @@ fn wire_pane(
             column_index: pane_snapshot.cursor_snapshot.column_index,
             is_visible: pane_snapshot.cursor_snapshot.is_visible,
             is_blinking: pane_snapshot.cursor_snapshot.is_blinking,
-            shape: pane_snapshot.cursor_snapshot.shape.map(wire_cursor_shape),
+            shape: pane_snapshot
+                .cursor_snapshot
+                .shape
+                .map(build_wire_cursor_shape),
         },
-        terminal_window: pane_snapshot.terminal_grid_view.as_ref().map(wire_window),
+        terminal_window: pane_snapshot
+            .terminal_grid_view
+            .as_ref()
+            .map(build_wire_window),
         image_placement_snapshots: pane_snapshot
             .image_placement_snapshots
             .iter()
             .map(|image_placement_snapshot| {
-                wire_image_placement(
+                build_wire_image_placement(
                     pane_snapshot.pane_id,
                     image_placement_snapshot,
                     assign_image_content_id,
@@ -316,7 +318,7 @@ fn wire_pane(
             .collect(),
         is_reverse_video: pane_snapshot.is_reverse_video,
         mouse_tracking: pane_snapshot.mouse_tracking,
-        is_alt_scroll_enabled: pane_snapshot.is_alternate_scroll_enabled,
+        is_alternate_scroll_enabled: pane_snapshot.is_alternate_scroll_enabled,
         is_on_alt_screen: pane_snapshot.is_on_alternate_screen,
         view_top_row_index: pane_snapshot.view_top_row_index,
         selection_spans: pane_snapshot
@@ -326,15 +328,14 @@ fn wire_pane(
                 row_spans: selection_spans.row_spans.clone(),
             }),
         has_selection: pane_snapshot.has_selection,
-        scrollback_meta: FrameScrollback {
-            is_truncated: pane_snapshot.scrollback_meta.is_truncated,
-            retained_line_count: pane_snapshot.scrollback_meta.retained_line_count,
+        scrollback_metadata: FrameScrollback {
+            retained_line_count: pane_snapshot.scrollback_metadata.retained_line_count,
         },
     }
 }
 
 /// One validated image placement, as it travels with its pane.
-fn wire_image_placement(
+fn build_wire_image_placement(
     pane_id: koshi_core::ids::PaneId,
     image_placement_snapshot: &ImagePlacementSnapshot,
     assign_image_content_id: &mut impl FnMut(koshi_core::ids::PaneId, &ImagePlacementSnapshot) -> u64,
@@ -345,7 +346,7 @@ fn wire_image_placement(
         cell_geometry: Some(image_placement_snapshot.get_cell_geometry()),
         image_record: image_placement_snapshot
             .get_image_record()
-            .map(|image_record| wire_image_transfer(1, image_record).image_record),
+            .map(|image_record| build_wire_image_transfer(1, image_record).image_record),
         image_content_id: assign_image_content_id(pane_id, image_placement_snapshot),
         is_available: image_placement_snapshot.get_image_record().is_some(),
         anchor_cell: image_placement_snapshot.get_anchor_cell(),
@@ -355,7 +356,7 @@ fn wire_image_placement(
 }
 
 /// The source image protocol in wire form.
-fn wire_graphics_protocol(protocol: GraphicsProtocol) -> FrameGraphicsProtocol {
+fn build_wire_graphics_protocol(protocol: GraphicsProtocol) -> FrameGraphicsProtocol {
     match protocol {
         GraphicsProtocol::Sixel => FrameGraphicsProtocol::Sixel,
         GraphicsProtocol::Kitty => FrameGraphicsProtocol::Kitty,
@@ -364,7 +365,7 @@ fn wire_graphics_protocol(protocol: GraphicsProtocol) -> FrameGraphicsProtocol {
 }
 
 /// The image operation in wire form.
-fn wire_image_action(action: ImageAction) -> FrameImageAction {
+fn build_wire_image_action(action: ImageAction) -> FrameImageAction {
     match action {
         ImageAction::Transmit => FrameImageAction::Transmit,
         ImageAction::Display => FrameImageAction::Display,
@@ -373,7 +374,7 @@ fn wire_image_action(action: ImageAction) -> FrameImageAction {
 }
 
 /// One protocol dimension in wire form.
-fn wire_image_dimension(dimension: ImageDimension) -> FrameImageDimension {
+fn build_wire_image_dimension(dimension: ImageDimension) -> FrameImageDimension {
     match dimension {
         ImageDimension::Cells(cell_count) => FrameImageDimension::Cells(cell_count),
         ImageDimension::Pixels(pixel_count) => FrameImageDimension::Pixels(pixel_count),
@@ -383,7 +384,7 @@ fn wire_image_dimension(dimension: ImageDimension) -> FrameImageDimension {
 }
 
 /// One Sixel background rule in wire form.
-fn wire_sixel_background(background: SixelBackground) -> FrameSixelBackground {
+fn build_wire_sixel_background(background: SixelBackground) -> FrameSixelBackground {
     match background {
         SixelBackground::Terminal => FrameSixelBackground::Terminal,
         SixelBackground::Preserve => FrameSixelBackground::Preserve,
@@ -391,13 +392,13 @@ fn wire_sixel_background(background: SixelBackground) -> FrameSixelBackground {
 }
 
 /// Display metadata in wire form.
-fn wire_image_display(display: &ImageDisplay) -> FrameImageDisplay {
+fn build_wire_image_display(display: &ImageDisplay) -> FrameImageDisplay {
     FrameImageDisplay {
         response_suppression_level: display.response_suppression_level,
-        requested_width: display.requested_width.map(wire_image_dimension),
-        requested_height: display.requested_height.map(wire_image_dimension),
+        requested_width: display.requested_width.map(build_wire_image_dimension),
+        requested_height: display.requested_height.map(build_wire_image_dimension),
         is_aspect_ratio_preserved: display.is_aspect_ratio_preserved,
-        sixel_background: display.sixel_background.map(wire_sixel_background),
+        sixel_background: display.sixel_background.map(build_wire_sixel_background),
         image_id: display.image_id,
         image_number: display.image_number,
         placement_id: display.placement_id,
@@ -419,12 +420,12 @@ fn wire_image_display(display: &ImageDisplay) -> FrameImageDisplay {
 }
 
 /// The pane's visible cells, row by row, each row folded into runs.
-fn wire_window(view: &GridView) -> FrameWindow {
+fn build_wire_window(view: &GridView) -> FrameWindow {
     let (row_count, column_count) = view.grid.get_grid_dimensions();
     FrameWindow {
         column_count,
         row_snapshots: (0..row_count)
-            .map(|row_index| wire_row(&view.grid, row_index, column_count))
+            .map(|row_index| build_wire_row(&view.grid, row_index, column_count))
             .collect(),
         view_row_offset: view.view_row_offset,
     }
@@ -433,7 +434,7 @@ fn wire_window(view: &GridView) -> FrameWindow {
 /// Row `row_index`, always exactly `column_count` cells wide, folded into runs of equal
 /// neighbours, with how the row ends its logical line. A cell the grid does not
 /// hold travels as a blank, so the row keeps its width.
-fn wire_row(terminal_grid: &Grid, row_index: u16, column_count: u16) -> FrameRow {
+fn build_wire_row(terminal_grid: &Grid, row_index: u16, column_count: u16) -> FrameRow {
     let row_cells = terminal_grid
         .list_rows()
         .get(row_index as usize)
@@ -444,7 +445,7 @@ fn wire_row(terminal_grid: &Grid, row_index: u16, column_count: u16) -> FrameRow
         column_count as usize,
         "every grid row is the grid's width"
     );
-    let blank_cell = Cell::blank();
+    let blank_cell = Cell::build_blank();
     let mut frame_runs: Vec<FrameRun> = Vec::new();
     let mut source_frame_run: Option<(&Cell, u16)> = None;
     for cell in (0..column_count)
@@ -464,7 +465,7 @@ fn wire_row(terminal_grid: &Grid, row_index: u16, column_count: u16) -> FrameRow
             Some((source_cell, run_cell_count)) => {
                 frame_runs.push(FrameRun {
                     repeat_count: run_cell_count,
-                    cell: wire_cell(source_cell),
+                    cell: build_wire_cell(source_cell),
                 });
                 source_frame_run = Some((cell, 1));
             }
@@ -474,17 +475,17 @@ fn wire_row(terminal_grid: &Grid, row_index: u16, column_count: u16) -> FrameRow
     if let Some((source_cell, run_cell_count)) = source_frame_run {
         frame_runs.push(FrameRun {
             repeat_count: run_cell_count,
-            cell: wire_cell(source_cell),
+            cell: build_wire_cell(source_cell),
         });
     }
     FrameRow {
         cell_runs: frame_runs,
-        row_end: wire_row_end(terminal_grid.get_row_end(row_index)),
+        row_end: build_wire_row_end(terminal_grid.get_row_end(row_index)),
     }
 }
 
 /// The wire form of one row's line-continuation state.
-fn wire_row_end(end: RowEnd) -> FrameRowEnd {
+fn build_wire_row_end(end: RowEnd) -> FrameRowEnd {
     match end {
         RowEnd::Hard => FrameRowEnd::Hard,
         RowEnd::Soft => FrameRowEnd::Soft,
@@ -494,7 +495,7 @@ fn wire_row_end(end: RowEnd) -> FrameRowEnd {
 
 /// One cell: its character, the rest of its grapheme cluster, its display
 /// width, and its style.
-fn wire_cell(terminal_cell: &Cell) -> FrameCell {
+fn build_wire_cell(terminal_cell: &Cell) -> FrameCell {
     FrameCell {
         character: terminal_cell.get_character(),
         combining_characters: if terminal_cell.has_image_placeholder() {
@@ -503,18 +504,18 @@ fn wire_cell(terminal_cell: &Cell) -> FrameCell {
             terminal_cell.list_combining_characters().to_vec()
         },
         cell_width: terminal_cell.get_display_width(),
-        style: wire_style(terminal_cell.get_style()),
+        style: build_wire_style(terminal_cell.get_style()),
     }
 }
 
 /// One cell's colors and text attributes.
-fn wire_style(style: Style) -> FrameStyle {
+fn build_wire_style(style: Style) -> FrameStyle {
     let text_attributes = style.get_attributes();
     FrameStyle {
-        foreground_color: wire_color(style.get_foreground_color()),
-        background_color: wire_color(style.get_background_color()),
-        underline_color: style.get_underline_color().map(wire_color),
-        text_attributes: FrameAttrs {
+        foreground_color: build_wire_color(style.get_foreground_color()),
+        background_color: build_wire_color(style.get_background_color()),
+        underline_color: style.get_underline_color().map(build_wire_color),
+        text_attributes: FrameAttributes {
             is_bold: text_attributes.is_bold(),
             is_italic: text_attributes.is_italic(),
             is_reverse: text_attributes.is_reverse(),
@@ -523,13 +524,13 @@ fn wire_style(style: Style) -> FrameStyle {
             is_concealed: text_attributes.is_concealed(),
             is_struck_through: text_attributes.is_strikethrough(),
             is_overlined: text_attributes.is_overlined(),
-            underline_style: wire_underline(text_attributes.get_underline_style()),
+            underline_style: build_wire_underline(text_attributes.get_underline_style()),
         },
     }
 }
 
 /// One foreground, background or underline color.
-fn wire_color(color: Color) -> FrameColor {
+fn build_wire_color(color: Color) -> FrameColor {
     match color {
         Color::Default => FrameColor::Default,
         Color::Indexed(color_index) => FrameColor::Indexed(color_index),
@@ -538,7 +539,7 @@ fn wire_color(color: Color) -> FrameColor {
 }
 
 /// One cell's underline style.
-fn wire_underline(underline: UnderlineStyle) -> FrameUnderline {
+fn build_wire_underline(underline: UnderlineStyle) -> FrameUnderline {
     match underline {
         UnderlineStyle::None => FrameUnderline::None,
         UnderlineStyle::Single => FrameUnderline::Single,
@@ -550,7 +551,7 @@ fn wire_underline(underline: UnderlineStyle) -> FrameUnderline {
 }
 
 /// The shape a pane asked its cursor to be drawn as.
-fn wire_cursor_shape(shape: CursorShape) -> FrameCursorShape {
+fn build_wire_cursor_shape(shape: CursorShape) -> FrameCursorShape {
     match shape {
         CursorShape::Block => FrameCursorShape::Block,
         CursorShape::Underline => FrameCursorShape::Underline,

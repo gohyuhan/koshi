@@ -636,7 +636,13 @@ fn shared_memory_payload_without_size_ignores_mapping_padding() {
     let mut raw_rgba_bytes = build_red_rgba_pixel().to_vec();
     raw_rgba_bytes.extend_from_slice(&[0; 32]);
     assert_eq!(
-        exact_shared_memory_payload(&raw_rgba_bytes, KittyFormat::Rgba, Some(1), Some(1), false,),
+        extract_exact_shared_memory_payload(
+            &raw_rgba_bytes,
+            KittyFormat::Rgba,
+            Some(1),
+            Some(1),
+            false,
+        ),
         Ok(build_red_rgba_pixel().to_vec())
     );
 
@@ -644,7 +650,7 @@ fn shared_memory_payload_without_size_ignores_mapping_padding() {
     let mut padded_png_bytes = png_bytes.clone();
     padded_png_bytes.extend_from_slice(&[0; 32]);
     assert_eq!(
-        exact_shared_memory_payload(&padded_png_bytes, KittyFormat::Png, None, None, false),
+        extract_exact_shared_memory_payload(&padded_png_bytes, KittyFormat::Png, None, None, false),
         Ok(png_bytes)
     );
 
@@ -652,7 +658,7 @@ fn shared_memory_payload_without_size_ignores_mapping_padding() {
     let mut padded_compressed_payload_bytes = compressed_payload_bytes.clone();
     padded_compressed_payload_bytes.extend_from_slice(&[0; 32]);
     assert_eq!(
-        exact_shared_memory_payload(
+        extract_exact_shared_memory_payload(
             &padded_compressed_payload_bytes,
             KittyFormat::Rgba,
             Some(1),
@@ -666,7 +672,7 @@ fn shared_memory_payload_without_size_ignores_mapping_padding() {
 #[test]
 fn shared_memory_rgb_payload_without_size_uses_three_channels() {
     assert_eq!(
-        exact_shared_memory_payload(&[1, 2, 3], KittyFormat::Rgb, Some(1), Some(1), false),
+        extract_exact_shared_memory_payload(&[1, 2, 3], KittyFormat::Rgb, Some(1), Some(1), false),
         Ok(vec![1, 2, 3])
     );
 }
@@ -674,7 +680,7 @@ fn shared_memory_rgb_payload_without_size_uses_three_channels() {
 #[test]
 fn shared_memory_payload_without_size_rejects_truncated_data() {
     assert_eq!(
-        exact_shared_memory_payload(
+        extract_exact_shared_memory_payload(
             &build_red_rgba_pixel()[..3],
             KittyFormat::Rgba,
             Some(1),
@@ -687,7 +693,7 @@ fn shared_memory_payload_without_size_rejects_truncated_data() {
     );
     let png_bytes = build_red_png_bytes();
     assert_eq!(
-        exact_shared_memory_payload(
+        extract_exact_shared_memory_payload(
             &png_bytes[..png_bytes.len() - 1],
             KittyFormat::Png,
             None,
@@ -700,7 +706,7 @@ fn shared_memory_payload_without_size_rejects_truncated_data() {
     );
     let compressed_payload_bytes = compress_payload_bytes(&build_red_rgba_pixel());
     assert_eq!(
-        exact_shared_memory_payload(
+        extract_exact_shared_memory_payload(
             &compressed_payload_bytes[..compressed_payload_bytes.len() - 1],
             KittyFormat::Rgba,
             Some(1),

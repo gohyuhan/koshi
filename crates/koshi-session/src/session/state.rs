@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     client::{Client, ClientRegistry},
     error::{InvalidTransition, SessionConsistencyError},
-    session::lifecycle::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle},
+    session::lifecycle::{SessionLifecycle, SessionLifecycleEvent},
 };
 
-/// One tab: its name, bar position, layout tree, lifecycle, and the panes it
-/// focused, most-recent first.
+/// One tab: its name, bar position, layout tree, and the panes it focused,
+/// most-recent first.
 ///
 /// A tab holds no layout mode. Zoom is a client property: it lives on
-/// [`crate::client::Client`] as `zoom_by_tab`, and two clients on this tab can
+/// [`crate::client::Client`] as `zoomed_pane_id_by_tab_id`, and two clients on this tab can
 /// hold different zoom. The tab holds the tree that every client solves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
@@ -31,7 +31,6 @@ pub struct Tab {
     tab_name: String,
     tab_index: usize,
     layout: LayoutNode,
-    lifecycle: TabLifecycle,
     /// Panes this tab has focused, most-recent first, with at most one entry
     /// per pane — re-focusing moves a pane to the front instead of adding a
     /// duplicate. Capped at [`MAX_TAB_FOCUS_MRU_ENTRY_COUNT`]; focus recovery walks
@@ -41,8 +40,8 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// A freshly created tab showing a single pane. Starts in `Creating`
-    /// with no focus recorded yet; `root_pane` is its only layout leaf.
+    /// A freshly created tab showing a single pane, with no focus recorded
+    /// yet; `root_pane` is its only layout leaf.
     #[must_use]
     pub fn from_root_pane(
         tab_id: TabId,
@@ -55,7 +54,6 @@ impl Tab {
             tab_name,
             tab_index,
             layout: LayoutNode::Pane(root_pane),
-            lifecycle: TabLifecycle::Creating,
             focus_mru: Vec::new(),
         }
     }
@@ -120,11 +118,6 @@ impl Tab {
         self.focus_mru
             .retain(|&focused_pane_id| focused_pane_id != pane_id);
     }
-
-    /// This tab's current lifecycle state.
-    pub fn get_lifecycle(&self) -> &TabLifecycle {
-        &self.lifecycle
-    }
 }
 
 /// One running session: the aggregate root owning the tabs, the pane
@@ -133,7 +126,7 @@ impl Tab {
 /// Anything one client may see differently from another — focus, viewport,
 /// input mode — lives on that client's entry in [`ClientRegistry`], never as a
 /// session-global field. Two attached clients can look at different tabs and
-/// panes at the same time. `start_locked` is the mode the session hands the
+/// panes at the same time. `should_start_locked` is the mode the session hands the
 /// first client to attach, not a mode the session is in.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -160,7 +153,12 @@ pub struct Session {
     /// without that marker holds `false` and locks nobody. Absent from a
     /// stored session, it reads back `false`.
     #[serde(default)]
-    pub start_locked: bool,
+    pub should_start_locked: bool,
+
+    /// A restart seeded a new shell after the carried session could not be
+    /// restored. The statusline shows the notice until input reaches a pane.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_recovery_notice_visible: bool,
 
     /// Generation of committed layout, membership, and shared sizing inputs.
     #[serde(default)]
@@ -171,7 +169,7 @@ pub struct Session {
 
 impl Session {
     /// A session with no tabs and no panes, holding the supplied client
-    /// registry. Starts in `Starting` with `start_locked`
+    /// registry. Starts in `Starting` with `should_start_locked`
     /// `false`. `created_at` is supplied by the caller at the creation
     /// boundary, never read from the clock here.
     #[must_use]
@@ -188,7 +186,8 @@ impl Session {
             tabs: BTreeMap::new(),
             panes: PaneRegistry::new(),
             clients: client_registry,
-            start_locked: false,
+            should_start_locked: false,
+            is_recovery_notice_visible: false,
             placement_revision: 0,
             lifecycle: SessionLifecycle::Starting,
         }
@@ -198,10 +197,10 @@ impl Session {
     /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked), clearing the
     /// flag as it reads it.
     ///
-    /// Reads [`start_locked`](Self::start_locked) and clears it in one step,
+    /// Reads [`should_start_locked`](Self::should_start_locked) and clears it in one step,
     /// so it returns `true` at most once per session.
     pub fn take_start_lock(&mut self) -> bool {
-        std::mem::take(&mut self.start_locked)
+        std::mem::take(&mut self.should_start_locked)
     }
 
     /// The session's current lifecycle state.
@@ -230,7 +229,7 @@ impl Session {
         true
     }
 
-    /// Apply a lifecycle `event`, advancing the session's state, or return
+    /// Apply a `lifecycle_event`, advancing the session's state, or return
     /// [`InvalidTransition`] if the move is illegal from the current state.
     /// Crate-internal — callers drive the lifecycle through the typed wrappers
     /// ([`Session::attach_client`], [`Session::detach_client`],
@@ -254,9 +253,9 @@ impl Session {
     /// `Stopped` it is rejected and the lifecycle stays as it was. The client
     /// is registered either way.
     pub fn attach_client(&mut self, client: Client) -> Option<Client> {
-        let displaced = self.clients.attach_client(client);
+        let displaced_client = self.clients.attach_client(client);
         let _ = self.update_lifecycle(SessionLifecycleEvent::ClientAttached);
-        displaced
+        displaced_client
     }
 
     /// Detach the client `client_id`, returning the removed record (`None` if it
@@ -264,32 +263,32 @@ impl Session {
     /// drops to `Detaching` — its tabs and panes stay alive; detaching one of
     /// several clients leaves the session `Running`.
     pub fn detach_client(&mut self, client_id: ClientId) -> Option<Client> {
-        let removed = self.clients.detach_client(client_id);
+        let detached_client = self.clients.detach_client(client_id);
         if !self.clients.has_clients() {
             // Only a `Running` session moves to `Detaching`. `Starting`,
             // `Detaching`, `Stopping` and `Stopped` reject the event and keep
             // the state they had.
             let _ = self.update_lifecycle(SessionLifecycleEvent::LastClientDetached);
         }
-        removed
+        detached_client
     }
 
     /// The pane region to size tab `tab_id` against: each viewing client's own
-    /// pane area, reduced to the per-axis minimum (`cols` and `rows`
+    /// pane area, reduced to the per-axis minimum (`column_count` and `row_count`
     /// independently), which is the largest grid that fits inside *every*
     /// viewer on *both* axes.
     ///
-    /// Every attached client whose [`Client::get_active_tab`] is `tab_id`
+    /// Every attached client whose [`Client::get_active_tab_id`] is `tab_id`
     /// contributes its [`Client::get_pane_area`]; a viewer that reports
     /// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
     /// contributes nothing. Returns `None` when no viewer of `tab_id`
     /// contributes a size. The result does not depend on which client (if any)
     /// issued the command, nor on the order the viewers attached.
     #[must_use]
-    pub fn get_tab_viewport(&self, tab_id: TabId) -> Option<Size> {
+    pub fn get_tab_size(&self, tab_id: TabId) -> Option<Size> {
         self.clients
             .list_attached_clients()
-            .filter(|client| client.get_active_tab() == tab_id)
+            .filter(|client| client.get_active_tab_id() == tab_id)
             .filter_map(Client::get_pane_area)
             .reduce(Size::compute_minimum_axes)
     }
@@ -299,7 +298,9 @@ impl Session {
     pub fn get_tab_cell_size(&self, tab_id: TabId) -> Option<koshi_core::geometry::PixelCellSize> {
         self.clients
             .list_attached_clients()
-            .filter(|client| client.get_active_tab() == tab_id && client.get_cell_size().is_some())
+            .filter(|client| {
+                client.get_active_tab_id() == tab_id && client.get_cell_size().is_some()
+            })
             .min_by_key(|client| (client.get_attached_at(), client.get_client_id()))
             .and_then(Client::get_cell_size)
     }
@@ -347,12 +348,6 @@ impl Session {
                     stored_tab_id: *tab_id,
                     reported_tab_id: tab.tab_id,
                 });
-            }
-
-            // A `Closed` tab is terminal and should have left the map.
-            if *tab.get_lifecycle() == TabLifecycle::Closed {
-                consistency_violations
-                    .push(SessionConsistencyError::LingeringClosedTab { tab_id: tab.tab_id });
             }
 
             *tab_count_by_index.entry(tab.tab_index).or_insert(0) += 1;
@@ -427,16 +422,16 @@ impl Session {
             // while the session still holds tabs: a session emptied by its last
             // tab closing leaves every client's `active_tab` naming that closed
             // tab until the transport disconnects them.
-            if !self.tabs.is_empty() && !self.tabs.contains_key(&client.get_active_tab()) {
+            if !self.tabs.is_empty() && !self.tabs.contains_key(&client.get_active_tab_id()) {
                 consistency_violations.push(SessionConsistencyError::ActiveTabMissing {
                     client_id: client.get_client_id(),
-                    tab_id: client.get_active_tab(),
+                    tab_id: client.get_active_tab_id(),
                 });
             }
 
             // Each remembered focus must point at a real pane that is a leaf of
             // the tab it was focused in.
-            for (&tab_id, &focused_pane_id) in client.list_focused_panes() {
+            for (&tab_id, &focused_pane_id) in client.list_focused_pane_ids() {
                 if self.panes.get_pane_record_by_id(focused_pane_id).is_none() {
                     consistency_violations.push(SessionConsistencyError::FocusPaneNotInRegistry {
                         client_id: client.get_client_id(),
@@ -450,7 +445,7 @@ impl Session {
                         client_id: client.get_client_id(),
                         tab_id,
                     }),
-                    Some(tab) if !tab.layout.contains_pane(focused_pane_id) => {
+                    Some(tab) if !tab.layout.has_pane(focused_pane_id) => {
                         consistency_violations.push(SessionConsistencyError::FocusTargetMissing {
                             client_id: client.get_client_id(),
                             tab_id,
@@ -464,12 +459,12 @@ impl Session {
             // The pane a client is zoomed on must have a registry record and be
             // a leaf of the tab it is zoomed in. Removing a pane drops every
             // zoom on it.
-            for (&tab_id, &zoomed_pane_id) in client.list_zoomed_panes() {
+            for (&tab_id, &zoomed_pane_id) in client.list_zoomed_pane_ids() {
                 let is_live_leaf = self.panes.get_pane_record_by_id(zoomed_pane_id).is_some()
                     && self
                         .tabs
                         .get(&tab_id)
-                        .is_some_and(|tab| tab.layout.contains_pane(zoomed_pane_id));
+                        .is_some_and(|tab| tab.layout.has_pane(zoomed_pane_id));
                 if !is_live_leaf {
                     consistency_violations.push(SessionConsistencyError::ZoomTargetMissing {
                         client_id: client.get_client_id(),

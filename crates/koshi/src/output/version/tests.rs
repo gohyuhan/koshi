@@ -14,7 +14,7 @@ fn build_session_id(unique_number: u128) -> SessionId {
 }
 
 /// Every state a server row can be in, against one router and three sessions.
-fn mixed_rows() -> Vec<ServerVersionRow> {
+fn build_mixed_rows() -> Vec<ServerVersionRow> {
     vec![
         ServerVersionRow {
             server_kind: ServerKind::Router,
@@ -45,31 +45,34 @@ fn mixed_rows() -> Vec<ServerVersionRow> {
 
 #[test]
 fn the_version_table_is_the_line_the_version_flag_prints() {
-    let rendered =
+    let rendered_output =
         render_client_version(&ClientVersion::build_client_version(), OutputFormat::Table);
 
-    assert_eq!(rendered, Cli::command().render_version());
-    assert_eq!(rendered, format!("koshi {}\n", env!("CARGO_PKG_VERSION")));
+    assert_eq!(rendered_output, Cli::command().render_version());
+    assert_eq!(
+        rendered_output,
+        format!("koshi {}\n", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
 fn the_version_json_carries_the_build_alone() {
-    let rendered = render_client_version(
+    let rendered_output = render_client_version(
         &ClientVersion {
             version: "0.2.0".to_string(),
         },
         OutputFormat::Json,
     );
 
-    assert_eq!(rendered, "{\n  \"version\": \"0.2.0\"\n}\n");
+    assert_eq!(rendered_output, "{\n  \"version\": \"0.2.0\"\n}\n");
 }
 
 #[test]
 fn a_server_table_tells_every_state_apart() {
-    let rendered = render_server_versions(&mixed_rows(), OutputFormat::Table);
+    let rendered_output = render_server_versions(&build_mixed_rows(), OutputFormat::Table);
 
     assert_eq!(
-        rendered,
+        rendered_output,
         "kind     session                                       version\n\
          router   -                                             0.2.0\n\
          session  session-00000000-0000-0000-0000-000000000001  unknown\n\
@@ -80,10 +83,10 @@ fn a_server_table_tells_every_state_apart() {
 
 #[test]
 fn a_server_json_answer_keeps_every_state_apart() {
-    let rendered = render_server_versions(&mixed_rows(), OutputFormat::Json);
+    let rendered_output = render_server_versions(&build_mixed_rows(), OutputFormat::Json);
 
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&rendered).expect("the answer is JSON"),
+        serde_json::from_str::<serde_json::Value>(&rendered_output).expect("the answer is JSON"),
         serde_json::json!([
             { "server_kind": "Router", "session_id": null, "state": "Running", "version": "0.2.0" },
             {

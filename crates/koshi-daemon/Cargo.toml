@@ -6,28 +6,28 @@ license.workspace = true
 
 [dependencies]
 fs4.workspace = true
-koshi-config = { version = "0.4.0", path = "../koshi-config" }
-koshi-core = { version = "0.4.0", path = "../koshi-core" }
-koshi-ipc = { version = "0.4.0", path = "../koshi-ipc" }
-koshi-link = { version = "0.4.0", path = "../koshi-link" }
-koshi-observability = { version = "0.4.0", path = "../koshi-observability" }
-koshi-paths = { version = "0.4.0", path = "../koshi-paths" }
-koshi-pty = { version = "0.4.0", path = "../koshi-pty" }
-koshi-runtime = { version = "0.4.0", path = "../koshi-runtime" }
-koshi-storage = { version = "0.4.0", path = "../koshi-storage" }
+koshi-config.workspace = true
+koshi-core.workspace = true
+koshi-ipc.workspace = true
+koshi-link.workspace = true
+koshi-observability.workspace = true
+koshi-paths.workspace = true
+koshi-pty.workspace = true
+koshi-runtime.workspace = true
+koshi-storage.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 
-[target."cfg(unix)".dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 clap.workspace = true
-koshi = { version = "0.4.0", path = "../koshi" }
-koshi-renderer = { version = "0.4.0", path = "../koshi-renderer" }
-koshi-terminal = { version = "0.4.0", path = "../koshi-terminal" }
-koshi-test-support = { version = "0.4.0", path = "../koshi-test-support" }
+koshi.workspace = true
+koshi-renderer.workspace = true
+koshi-terminal.workspace = true
+koshi-test-support.workspace = true
 tempfile.workspace = true

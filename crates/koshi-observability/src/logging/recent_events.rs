@@ -1,5 +1,6 @@
-//! The recent-events ring: the last [`MAX_RECENT_EVENT_COUNT`](recent_events::MAX_RECENT_EVENT_COUNT)
-//! events this process published, as `koshi debug events` prints them.
+//! The recent-events ring: the last
+//! [`MAX_RECENT_EVENT_COUNT`](recent_events::MAX_RECENT_EVENT_COUNT) events this process published,
+//! as `koshi debug events` prints them.
 //!
 //! [`record_event`](recent_events::record_event) runs once per committed event, beside
 //! [`log_event`](event_log::log_event), and keeps the newest `MAX_RECENT_EVENT_COUNT`
@@ -7,8 +8,8 @@
 //!
 //! Each record holds only the event's name and the ids it named — see
 //! [`koshi_core::recent_event`]. No payload content is stored for any event
-//! class: an event carrying a typed character or a plugin failure message
-//! leaves the character and the message behind.
+//! class: an event carrying a typed character or a submitted line leaves the
+//! character and the line behind.
 //!
 //! The ring is process-wide. Any thread may record into it or read it, and
 //! every reader and writer recovers a poisoned lock.
@@ -52,12 +53,6 @@ pub fn record_event(runtime_event: &Event) {
 #[must_use]
 pub fn list_recent_events() -> Vec<RecentEvent> {
     lock_recent_event_ring().iter().cloned().collect()
-}
-
-/// Remove every record from the ring.
-#[cfg(test)]
-fn clear_recent_events() {
-    lock_recent_event_ring().clear();
 }
 
 #[cfg(test)]

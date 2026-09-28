@@ -19,7 +19,7 @@ fn default_weight_is_one_flex_share() {
 }
 
 #[test]
-fn every_constraint_kind_assert_size_weight_round_trips() {
+fn each_size_constraint_round_trips_as_a_size_weight() {
     let size_constraints = [
         SizeConstraint::Flex(3),
         SizeConstraint::Percent(40),
@@ -38,7 +38,7 @@ fn every_constraint_kind_assert_size_weight_round_trips() {
 }
 
 #[test]
-fn combined_flex_with_overlays_assert_size_weight_round_trips() {
+fn a_size_weight_with_flex_and_overlays_round_trips() {
     assert_size_weight_round_trip(&SizeWeight {
         primary_constraint: SizeConstraint::Flex(2),
         minimum_cell_count: Some(20),
@@ -48,7 +48,7 @@ fn combined_flex_with_overlays_assert_size_weight_round_trips() {
 }
 
 #[test]
-fn constructors_accept_valid_values() {
+fn size_constraint_constructors_accept_valid_values() {
     assert_eq!(
         SizeConstraint::from_flex_weight(1),
         Ok(SizeConstraint::Flex(1))
@@ -65,18 +65,10 @@ fn constructors_accept_valid_values() {
         SizeConstraint::from_fixed_cell_count(80),
         Ok(SizeConstraint::Fixed(80))
     );
-    assert_eq!(
-        SizeConstraint::from_minimum_cell_count(2),
-        Ok(SizeConstraint::Minimum(2))
-    );
-    assert_eq!(
-        SizeConstraint::from_preferred_cell_count(120),
-        Ok(SizeConstraint::Preferred(120))
-    );
 }
 
 #[test]
-fn constructors_reject_invalid_values() {
+fn size_constraint_constructors_reject_invalid_values() {
     assert_eq!(
         SizeConstraint::from_flex_weight(0),
         Err(ConstraintError::ZeroFlexWeight)
@@ -97,18 +89,10 @@ fn constructors_reject_invalid_values() {
         SizeConstraint::from_fixed_cell_count(0),
         Err(ConstraintError::ZeroFixedCellCount)
     );
-    assert_eq!(
-        SizeConstraint::from_minimum_cell_count(0),
-        Err(ConstraintError::ZeroMinimumCellCount)
-    );
-    assert_eq!(
-        SizeConstraint::from_preferred_cell_count(0),
-        Err(ConstraintError::ZeroPreferredCellCount)
-    );
 }
 
 #[test]
-fn constructors_accept_their_maximum_values() {
+fn size_constraint_constructors_accept_their_maximum_values() {
     assert_eq!(
         SizeConstraint::from_flex_weight(u32::MAX),
         Ok(SizeConstraint::Flex(u32::MAX))
@@ -116,14 +100,6 @@ fn constructors_accept_their_maximum_values() {
     assert_eq!(
         SizeConstraint::from_fixed_cell_count(u16::MAX),
         Ok(SizeConstraint::Fixed(u16::MAX))
-    );
-    assert_eq!(
-        SizeConstraint::from_minimum_cell_count(u16::MAX),
-        Ok(SizeConstraint::Minimum(u16::MAX))
-    );
-    assert_eq!(
-        SizeConstraint::from_preferred_cell_count(u16::MAX),
-        Ok(SizeConstraint::Preferred(u16::MAX))
     );
 }
 
@@ -172,31 +148,6 @@ fn constraint_errors_display_their_exact_messages() {
         ConstraintError::ZeroFixedCellCount.to_string(),
         "fixed size must be at least one cell"
     );
-    assert_eq!(
-        ConstraintError::ZeroMinimumCellCount.to_string(),
-        "minimum size must be at least one cell"
-    );
-    assert_eq!(
-        ConstraintError::ZeroPreferredCellCount.to_string(),
-        "preferred size must be at least one cell"
-    );
-}
-
-#[test]
-fn constraint_errors_are_recoverable_layout_errors() {
-    let constraint_errors = [
-        ConstraintError::ZeroFlexWeight,
-        ConstraintError::PercentOutOfRange {
-            received_percent: 0,
-        },
-        ConstraintError::ZeroFixedCellCount,
-        ConstraintError::ZeroMinimumCellCount,
-        ConstraintError::ZeroPreferredCellCount,
-    ];
-    for constraint_error in constraint_errors {
-        assert_eq!(constraint_error.category(), DomainCategory::Layout);
-        assert_eq!(constraint_error.get_severity(), Severity::Recoverable);
-    }
 }
 
 #[test]
@@ -214,7 +165,7 @@ fn a_weight_serializes_to_its_exact_json_shape() {
 }
 
 #[test]
-fn every_constraint_kind_serializes_as_a_tagged_object() {
+fn each_size_constraint_serializes_as_a_tagged_object() {
     assert_eq!(
         serde_json::to_string(&SizeConstraint::Flex(3)).unwrap(),
         r#"{"Flex":3}"#

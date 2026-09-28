@@ -132,8 +132,8 @@ pub fn validate_config(
     config_path: &Path,
     config_source_text: &str,
 ) -> Result<ValidatedConfig, MigrationError> {
-    validate_schema_registry(CONFIG_SCHEMAS)?;
-    let schema_version = read_schema_version(config_path, config_source_text)?;
+    validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION)?;
+    let schema_version = parse_config_schema_version(config_path, config_source_text)?;
     if schema_version > SCHEMA_VERSION {
         return Err(MigrationError::Version {
             config_path: config_path.display().to_string(),
@@ -176,8 +176,8 @@ fn migrate_with_registry(
     config_schemas: &[ConfigSchema],
     current_schema_version: u32,
 ) -> Result<MigratedConfig, MigrationError> {
-    validate_schema_registry_for(config_schemas, current_schema_version)?;
-    let source_schema_version = read_schema_version(config_path, config_source_text)?;
+    validate_schema_registry(config_schemas, current_schema_version)?;
+    let source_schema_version = parse_config_schema_version(config_path, config_source_text)?;
     if source_schema_version > current_schema_version {
         return Err(MigrationError::Version {
             config_path: config_path.display().to_string(),
@@ -204,7 +204,7 @@ fn migrate_with_registry(
                     to_schema_version: next_schema_version,
                 })?;
         migrated_source = migrate_to_next_schema(config_path, &migrated_source)?;
-        let declared_schema_version = read_schema_version(config_path, &migrated_source)?;
+        let declared_schema_version = parse_config_schema_version(config_path, &migrated_source)?;
         if declared_schema_version != next_schema_version {
             return Err(MigrationError::Version {
                 config_path: config_path.display().to_string(),
@@ -224,7 +224,7 @@ fn migrate_with_registry(
     })
 }
 
-fn read_schema_version(
+fn parse_config_schema_version(
     config_path: &Path,
     config_source_text: &str,
 ) -> Result<u32, MigrationError> {
@@ -239,7 +239,7 @@ fn parse_schema_version_from_document(
     let mut version_nodes = config_document
         .nodes()
         .iter()
-        .filter(|node| node.name().value() == "version");
+        .filter(|kdl_node| kdl_node.name().value() == "version");
     let Some(version_node) = version_nodes.next() else {
         return Err(build_version_error(
             config_path,
@@ -375,7 +375,7 @@ fn migrate_schema_one_to_two(
     let version_node = config_document
         .nodes()
         .iter()
-        .find(|node| node.name().value() == "version")
+        .find(|kdl_node| kdl_node.name().value() == "version")
         .ok_or_else(|| build_version_error(config_path, "file must declare `version`"))?;
     let version_entry = version_node.entries().first().ok_or_else(|| {
         build_version_error(config_path, "`version` takes exactly one integer argument")
@@ -401,11 +401,7 @@ fn find_schema_by_version(
         .ok_or(MigrationError::MissingSchema { schema_version })
 }
 
-fn validate_schema_registry(config_schemas: &[ConfigSchema]) -> Result<(), MigrationError> {
-    validate_schema_registry_for(config_schemas, SCHEMA_VERSION)
-}
-
-fn validate_schema_registry_for(
+fn validate_schema_registry(
     config_schemas: &[ConfigSchema],
     current_schema_version: u32,
 ) -> Result<(), MigrationError> {

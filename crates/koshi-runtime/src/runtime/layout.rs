@@ -51,17 +51,17 @@ impl Server {
         let tab_layouts = selected_tab_records
             .into_iter()
             .map(|tab_record| {
-                // One size per tab, not per client: `tab_viewport` is the
+                // One size per tab, not per client: `get_tab_size` answers the
                 // smallest pane area on each axis among the clients viewing
                 // the tab that have one, and it is `None` when no such client
                 // views the tab.
-                let solved_tabs = match session.get_tab_viewport(tab_record.get_tab_id()) {
+                let solved_tabs = match session.get_tab_size(tab_record.get_tab_id()) {
                     None => Vec::new(),
-                    Some(effective_cell_size) => session
+                    Some(tab_size) => session
                         .clients
                         .list_attached_clients()
                         .filter(|client_record| {
-                            client_record.get_active_tab() == tab_record.get_tab_id()
+                            client_record.get_active_tab_id() == tab_record.get_tab_id()
                         })
                         .map(|client_record| {
                             let layout_mode =
@@ -69,12 +69,12 @@ impl Server {
                             let layout_solve = crate::runtime::snapshot::solve_tab_layout(
                                 tab_record,
                                 layout_mode,
-                                effective_cell_size,
+                                tab_size,
                                 pane_sizing,
                             );
                             SolvedTab {
                                 client_id: client_record.get_client_id(),
-                                viewport_size: effective_cell_size,
+                                viewport_size: tab_size,
                                 layout_mode,
                                 pane_rects: layout_solve
                                     .pane_rects
@@ -85,7 +85,7 @@ impl Server {
                                     })
                                     .collect(),
                                 suppressed_pane_ids: layout_solve.suppressed_pane_ids,
-                                is_every_pane_suppressed: layout_solve.is_all_panes_suppressed,
+                                is_every_pane_suppressed: layout_solve.is_every_pane_suppressed,
                                 stack_headers: layout_solve.stack_headers,
                             }
                         })
@@ -106,8 +106,9 @@ impl Server {
             .list_attached_clients()
             .map(|client_record| ClientFocus {
                 client_id: client_record.get_client_id(),
-                active_tab_id: client_record.get_active_tab(),
-                focused_pane_id: client_record.get_focused_pane(client_record.get_active_tab()),
+                active_tab_id: client_record.get_active_tab_id(),
+                focused_pane_id: client_record
+                    .get_focused_pane_id(client_record.get_active_tab_id()),
             })
             .collect();
 

@@ -63,10 +63,10 @@ fn time_serializes_as_its_flat_epoch_pair() {
     let session_discovery =
         build_session_discovery(SystemTime::UNIX_EPOCH + Duration::new(1234, 500));
 
-    let serialized_discovery = serde_json::to_value(&session_discovery).expect("serializes");
+    let session_discovery_json = serde_json::to_value(&session_discovery).expect("serializes");
 
     assert_eq!(
-        serialized_discovery["created_at"],
+        session_discovery_json["created_at"],
         json!({"secs_since_epoch": 1234, "nanos_since_epoch": 500})
     );
 }
@@ -76,21 +76,21 @@ fn times_round_trip_through_json() {
     let session_discovery =
         build_session_discovery(SystemTime::UNIX_EPOCH + Duration::new(1234, 500));
 
-    let serialized_discovery = serde_json::to_value(&session_discovery).expect("serializes");
-    let decoded_discovery: SessionDiscovery =
-        serde_json::from_value(serialized_discovery).expect("deserializes");
+    let session_discovery_json = serde_json::to_value(&session_discovery).expect("serializes");
+    let decoded_session_discovery: SessionDiscovery =
+        serde_json::from_value(session_discovery_json).expect("deserializes");
 
-    assert_eq!(decoded_discovery, session_discovery);
+    assert_eq!(decoded_session_discovery, session_discovery);
 }
 
 #[test]
 fn non_utf8_working_directory_serializes_as_its_lossy_string() {
     let pane_discovery = build_pane_discovery(Some(build_non_utf8_path()));
 
-    let serialized_discovery = serde_json::to_value(&pane_discovery).expect("serializes");
+    let pane_discovery_json = serde_json::to_value(&pane_discovery).expect("serializes");
 
     assert_eq!(
-        serialized_discovery["working_directory"],
+        pane_discovery_json["working_directory"],
         json!("/tmp/f\u{FFFD}oo")
     );
 }
@@ -99,10 +99,10 @@ fn non_utf8_working_directory_serializes_as_its_lossy_string() {
 fn absent_working_directory_serializes_as_null() {
     let pane_discovery = build_pane_discovery(None);
 
-    let serialized_discovery = serde_json::to_value(&pane_discovery).expect("serializes");
+    let pane_discovery_json = serde_json::to_value(&pane_discovery).expect("serializes");
 
     assert_eq!(
-        serialized_discovery["working_directory"],
+        pane_discovery_json["working_directory"],
         serde_json::Value::Null
     );
 }
@@ -111,10 +111,10 @@ fn absent_working_directory_serializes_as_null() {
 fn valid_utf8_working_directory_serializes_as_its_plain_string() {
     let pane_discovery = build_pane_discovery(Some(PathBuf::from("/home/user/project")));
 
-    let serialized_discovery = serde_json::to_value(&pane_discovery).expect("serializes");
+    let pane_discovery_json = serde_json::to_value(&pane_discovery).expect("serializes");
 
     assert_eq!(
-        serialized_discovery["working_directory"],
+        pane_discovery_json["working_directory"],
         json!("/home/user/project")
     );
 }
@@ -143,8 +143,8 @@ fn pane_lifecycle_serializes_with_declared_variant_names() {
     );
 }
 
-/// A client row whose origin is `origin`, with fixed everything else.
-fn build_client_discovery(origin: Option<ClientOrigin>) -> ClientDiscovery {
+/// A client row whose origin is `client_origin`, with fixed everything else.
+fn build_client_discovery(client_origin: Option<ClientOrigin>) -> ClientDiscovery {
     ClientDiscovery {
         client_id: ClientId::from_uuid(build_fixed_uuid()),
         session_id: SessionId::from_uuid(build_fixed_uuid()),
@@ -156,7 +156,7 @@ fn build_client_discovery(origin: Option<ClientOrigin>) -> ClientDiscovery {
         active_tab_id: TabId::from_uuid(build_fixed_uuid()),
         focused_pane_id: None,
         lock_mode: LockMode::Normal,
-        origin,
+        origin: client_origin,
         pane_area: None,
     }
 }
@@ -170,42 +170,48 @@ fn client_discovery_json_without_pane_area_decodes_as_none() {
         })),
         ..build_client_discovery(None)
     };
-    let mut client_json = serde_json::to_value(&client_discovery).expect("serialize");
-    client_json
+    let mut client_discovery_json = serde_json::to_value(&client_discovery).expect("serialize");
+    client_discovery_json
         .as_object_mut()
         .expect("a client row is a JSON object")
         .remove("pane_area")
         .expect("the row carries a `pane_area` field to remove");
 
-    let decoded_client: ClientDiscovery = serde_json::from_value(client_json).expect("deserialize");
+    let decoded_client_discovery: ClientDiscovery =
+        serde_json::from_value(client_discovery_json).expect("deserialize");
 
-    assert_eq!(decoded_client, build_client_discovery(None));
+    assert_eq!(decoded_client_discovery, build_client_discovery(None));
 }
 
 #[test]
 fn a_client_row_carrying_no_origin_field_reads_as_unanswered_never_as_local() {
-    let mut client_json =
+    let mut client_discovery_json =
         serde_json::to_value(build_client_discovery(Some(ClientOrigin::Local))).expect("serialize");
-    client_json
+    client_discovery_json
         .as_object_mut()
         .expect("a client row is a JSON object")
         .remove("origin")
         .expect("the row carries an `origin` field to remove");
 
-    let decoded_client: ClientDiscovery = serde_json::from_value(client_json).expect("deserialize");
+    let decoded_client_discovery: ClientDiscovery =
+        serde_json::from_value(client_discovery_json).expect("deserialize");
 
-    assert_eq!(decoded_client.origin, None);
-    assert_eq!(decoded_client, build_client_discovery(None));
+    assert_eq!(decoded_client_discovery.origin, None);
+    assert_eq!(decoded_client_discovery, build_client_discovery(None));
 }
 
 #[test]
 fn a_client_row_stating_its_origin_keeps_that_answer() {
-    for origin in [ClientOrigin::Local, ClientOrigin::Remote] {
-        let client_json =
-            serde_json::to_value(build_client_discovery(Some(origin))).expect("serialize");
-        let decoded_client: ClientDiscovery =
-            serde_json::from_value(client_json).expect("deserialize");
-        assert_eq!(decoded_client.origin, Some(origin), "{origin:?}");
+    for client_origin in [ClientOrigin::Local, ClientOrigin::Remote] {
+        let client_discovery_json =
+            serde_json::to_value(build_client_discovery(Some(client_origin))).expect("serialize");
+        let decoded_client_discovery: ClientDiscovery =
+            serde_json::from_value(client_discovery_json).expect("deserialize");
+        assert_eq!(
+            decoded_client_discovery.origin,
+            Some(client_origin),
+            "{client_origin:?}"
+        );
     }
 }
 
@@ -220,21 +226,24 @@ fn pane_lifecycle_round_trips_through_json_for_every_variant() {
         },
         PaneLifecycle::Exited { exit_code: None },
     ] {
-        let lifecycle_json = serde_json::to_string(&pane_lifecycle).expect("serialize");
-        let decoded_lifecycle: PaneLifecycle =
-            serde_json::from_str(&lifecycle_json).expect("deserialize");
-        assert_eq!(pane_lifecycle, decoded_lifecycle, "{lifecycle_json}");
+        let pane_lifecycle_json = serde_json::to_string(&pane_lifecycle).expect("serialize");
+        let decoded_pane_lifecycle: PaneLifecycle =
+            serde_json::from_str(&pane_lifecycle_json).expect("deserialize");
+        assert_eq!(
+            pane_lifecycle, decoded_pane_lifecycle,
+            "{pane_lifecycle_json}"
+        );
     }
 }
 
 #[test]
 fn a_non_utf8_working_directory_decodes_as_its_lossy_path() {
-    let serialized_discovery =
+    let pane_discovery_json =
         serde_json::to_value(build_pane_discovery(Some(build_non_utf8_path())))
             .expect("serializes");
 
     let decoded_pane_discovery: PaneDiscovery =
-        serde_json::from_value(serialized_discovery).expect("deserializes");
+        serde_json::from_value(pane_discovery_json).expect("deserializes");
 
     assert_eq!(
         decoded_pane_discovery.working_directory,
@@ -252,10 +261,11 @@ fn pane_discovery_round_trips_with_every_optional_field_set() {
         ..build_pane_discovery(Some(PathBuf::from("/home/user/project")))
     };
 
-    let pane_json = serde_json::to_string(&pane_discovery).expect("serializes");
-    let decoded_discovery: PaneDiscovery = serde_json::from_str(&pane_json).expect("deserializes");
+    let pane_discovery_json = serde_json::to_string(&pane_discovery).expect("serializes");
+    let decoded_pane_discovery: PaneDiscovery =
+        serde_json::from_str(&pane_discovery_json).expect("deserializes");
 
-    assert_eq!(decoded_discovery, pane_discovery);
+    assert_eq!(decoded_pane_discovery, pane_discovery);
 }
 
 #[test]
@@ -269,10 +279,11 @@ fn tab_discovery_round_trips_through_json() {
         pane_count: 3,
     };
 
-    let tab_json = serde_json::to_string(&tab_discovery).expect("serializes");
-    let decoded_discovery: TabDiscovery = serde_json::from_str(&tab_json).expect("deserializes");
+    let tab_discovery_json = serde_json::to_string(&tab_discovery).expect("serializes");
+    let decoded_tab_discovery: TabDiscovery =
+        serde_json::from_str(&tab_discovery_json).expect("deserializes");
 
-    assert_eq!(decoded_discovery, tab_discovery);
+    assert_eq!(decoded_tab_discovery, tab_discovery);
 }
 
 #[test]
@@ -287,11 +298,11 @@ fn client_discovery_round_trips_with_every_optional_field_set() {
         ..build_client_discovery(Some(ClientOrigin::Remote))
     };
 
-    let client_json = serde_json::to_string(&client_discovery).expect("serializes");
-    let decoded_discovery: ClientDiscovery =
-        serde_json::from_str(&client_json).expect("deserializes");
+    let client_discovery_json = serde_json::to_string(&client_discovery).expect("serializes");
+    let decoded_client_discovery: ClientDiscovery =
+        serde_json::from_str(&client_discovery_json).expect("deserializes");
 
-    assert_eq!(decoded_discovery, client_discovery);
+    assert_eq!(decoded_client_discovery, client_discovery);
 }
 
 #[test]
@@ -301,17 +312,17 @@ fn a_starving_pane_area_round_trips_through_json() {
         ..build_client_discovery(None)
     };
 
-    let client_json = serde_json::to_string(&client_discovery).expect("serializes");
-    let decoded_discovery: ClientDiscovery =
-        serde_json::from_str(&client_json).expect("deserializes");
+    let client_discovery_json = serde_json::to_string(&client_discovery).expect("serializes");
+    let decoded_client_discovery: ClientDiscovery =
+        serde_json::from_str(&client_discovery_json).expect("deserializes");
 
-    assert_eq!(decoded_discovery.pane_area, Some(PaneArea::Starving));
-    assert_eq!(decoded_discovery, client_discovery);
+    assert_eq!(decoded_client_discovery.pane_area, Some(PaneArea::Starving));
+    assert_eq!(decoded_client_discovery, client_discovery);
 }
 
 #[test]
 fn session_overview_round_trips_through_json() {
-    let overview = SessionOverview {
+    let session_overview = SessionOverview {
         session: SessionDiscovery {
             attached_client_ids: vec![ClientId::from_uuid(build_fixed_uuid())],
             pane_count: 1,
@@ -329,59 +340,63 @@ fn session_overview_round_trips_through_json() {
         clients: vec![build_client_discovery(Some(ClientOrigin::Local))],
     };
 
-    let overview_json = serde_json::to_string(&overview).expect("serializes");
-    let decoded_overview: SessionOverview =
-        serde_json::from_str(&overview_json).expect("deserializes");
+    let session_overview_json = serde_json::to_string(&session_overview).expect("serializes");
+    let decoded_session_overview: SessionOverview =
+        serde_json::from_str(&session_overview_json).expect("deserializes");
 
-    assert_eq!(decoded_overview, overview);
+    assert_eq!(decoded_session_overview, session_overview);
 }
 
 #[test]
 fn an_empty_session_overview_round_trips_through_json() {
-    let overview = SessionOverview {
+    let session_overview = SessionOverview {
         session: build_session_discovery(SystemTime::UNIX_EPOCH),
         tabs: Vec::new(),
         panes: Vec::new(),
         clients: Vec::new(),
     };
 
-    let overview_json = serde_json::to_string(&overview).expect("serializes");
-    let decoded_overview: SessionOverview =
-        serde_json::from_str(&overview_json).expect("deserializes");
+    let session_overview_json = serde_json::to_string(&session_overview).expect("serializes");
+    let decoded_session_overview: SessionOverview =
+        serde_json::from_str(&session_overview_json).expect("deserializes");
 
-    assert_eq!(decoded_overview, overview);
+    assert_eq!(decoded_session_overview, session_overview);
 }
 
 #[test]
-fn an_unknown_pane_state_name_is_rejected() {
-    let lifecycle_parse_error =
+fn an_unknown_pane_lifecycle_variant_is_rejected() {
+    let pane_lifecycle_parse_error =
         serde_json::from_value::<PaneLifecycle>(json!("sleeping")).expect_err("rejects");
 
     assert_eq!(
-        lifecycle_parse_error.to_string(),
+        pane_lifecycle_parse_error.to_string(),
         "unknown variant `sleeping`, expected one of `Spawning`, `Running`, `Exited`, `Closing`"
     );
 }
 
 #[test]
-fn an_exited_state_without_its_code_field_decodes_with_no_code() {
-    let decoded_lifecycle: PaneLifecycle =
+fn an_exited_pane_without_an_exit_code_decodes_with_no_code() {
+    let decoded_pane_lifecycle: PaneLifecycle =
         serde_json::from_value(json!({"Exited": {}})).expect("deserializes");
 
-    assert_eq!(decoded_lifecycle, PaneLifecycle::Exited { exit_code: None });
+    assert_eq!(
+        decoded_pane_lifecycle,
+        PaneLifecycle::Exited { exit_code: None }
+    );
 }
 
 #[test]
 fn a_client_row_missing_its_id_is_rejected() {
-    let mut client_json = serde_json::to_value(build_client_discovery(None)).expect("serialize");
-    client_json
+    let mut client_discovery_json =
+        serde_json::to_value(build_client_discovery(None)).expect("serialize");
+    client_discovery_json
         .as_object_mut()
         .expect("a client row is a JSON object")
         .remove("client_id")
         .expect("the row carries a `client_id` field to remove");
 
     let client_parse_error =
-        serde_json::from_value::<ClientDiscovery>(client_json).expect_err("rejects");
+        serde_json::from_value::<ClientDiscovery>(client_discovery_json).expect_err("rejects");
 
     assert_eq!(client_parse_error.to_string(), "missing field `client_id`");
 }

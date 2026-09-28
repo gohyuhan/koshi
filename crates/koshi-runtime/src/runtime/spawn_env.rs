@@ -19,8 +19,8 @@ use koshi_ipc::endpoint::compute_socket_address;
 /// and `KOSHI_PANE_ID`. Present when known: `KOSHI_CLIENT_ID` (the client
 /// designated to view the pane at spawn — a pane created with no designated
 /// client carries none) and `KOSHI_SOCKET` (the session's control-socket
-/// address, resolved from `runtime_directory` through
-/// [`compute_socket_address`]; a machine with no resolvable runtime directory carries
+/// address, resolved from `runtime_directory_path` through
+/// [`compute_socket_address`]; a machine with no resolvable runtime directory path carries
 /// none). Ids render in their prefixed `Display` form
 /// (`session-<uuid>`, `client-<uuid>`, `pane-<uuid>`).
 ///
@@ -30,7 +30,7 @@ pub(crate) fn build_koshi_environment(
     session_id: SessionId,
     client_id: Option<ClientId>,
     pane_id: PaneId,
-    runtime_directory: Option<&Path>,
+    runtime_directory_path: Option<&Path>,
 ) -> BTreeMap<String, String> {
     let mut environment_by_name = BTreeMap::new();
     environment_by_name.insert("KOSHI".to_string(), "1".to_string());
@@ -39,10 +39,10 @@ pub(crate) fn build_koshi_environment(
         environment_by_name.insert("KOSHI_CLIENT_ID".to_string(), client_id.to_string());
     }
     environment_by_name.insert("KOSHI_PANE_ID".to_string(), pane_id.to_string());
-    if let Some(runtime_directory) = runtime_directory {
+    if let Some(runtime_directory_path) = runtime_directory_path {
         environment_by_name.insert(
             "KOSHI_SOCKET".to_string(),
-            compute_socket_address(runtime_directory, session_id),
+            compute_socket_address(runtime_directory_path, session_id),
         );
     }
     environment_by_name

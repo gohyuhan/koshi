@@ -18,6 +18,13 @@ and after them the background process that tracks sessions. A session keeps its
 panes, the programs running in them and their scrollback, and an attached
 terminal rejoins the session on its own.
 
+A session whose saved state is partly damaged still comes back. A pane whose
+screen could not be read comes back blank with a notice, and its program keeps
+running. When the layout could not be read, each program comes back in a tab of
+its own. When nothing could be brought back, the session starts one new shell
+with a notice, and every program it ran is ended. An attached terminal rejoins
+in each of these cases.
+
 `koshi update` names every session that did not move on standard error, and that
 session keeps the old build until you end it and start it again. A session
 refuses the restart when a pane's program stopped reading its input, when a pane
@@ -211,13 +218,10 @@ Example: terminals `client-1a2b…` and `client-3c4d…` both watch session
 |---|---|
 | `koshi actions list [--format table\|json]` | List supported actions |
 | `koshi actions explain <ACTION> [--format table\|json]` | Explain one action |
-| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout] [--recommended] [--format table\|json]` | List effective shortcuts, or with `--recommended` the shortcuts plugins recommend |
+| `koshi keys list [--mode <MODE>] [--scope default\|user\|session\|layout] [--format table\|json]` | List effective shortcuts |
 | `koshi keys describe "<KEY_SEQUENCE>"` | Explain one shortcut |
 | `koshi keys conflicts` | Report clashes, dead shortcuts, and warnings |
 | `koshi keys validate <PATH>` | Check a shortcut file without applying it |
-
-No koshi build launches a plugin, so `koshi keys list --recommended` prints an
-empty table in this release.
 
 ## Remote access
 
@@ -606,7 +610,6 @@ shell               ok       a new pane runs /bin/zsh                           
 terminal            warn     TERM is not set                                                                     set TERM before running koshi, for example TERM=xterm-256color
 runtime directory   ok       /tmp/koshi-1000 is ready; koshi names it after your user id                         -
 log directory       ok       /home/you/.local/state/koshi/logs is writable and logging is off                    -
-plugins directory   ok       /home/you/.config/koshi/plugins is readable                                         -
 router              ok       no koshi is running                                                                 -
 session directory   ok       sessions are advertised in /tmp/koshi-1000 (mode 700), which only you may reach     -
 remote access       ok       koshi.kdl names no remote listen address, and this machine holds 0 standing grants  -
@@ -633,7 +636,6 @@ The checks run in this order:
 | `terminal` | `TERM` and `COLORTERM` |
 | `runtime directory` | The runtime directory: which directory it is, that it can be read, that it is private, and which rule produced its path |
 | `log directory` | The log directory: that a file can be written there, and whether `koshi.kdl` turns logging on |
-| `plugins directory` | The plugins directory: that it exists and can be read |
 | `router` | Whether a router answers on its control socket |
 | `session directory` | Where sessions are advertised, and who may reach that directory |
 | `remote access` | `koshi.kdl`'s remote listen address, and how many access grants still stand |
@@ -641,10 +643,10 @@ The checks run in this order:
 
 The `session directory` and `remote connections` rows report facts and rate
 nothing. The `remote access` row rates one thing: it reads `warn` when the
-grants could not be read. The `plugins directory` row reads the directory and
-opens no plugin. `koshi doctor` starts no koshi and creates no directory. The
-`log directory` row writes one empty file in the log directory and removes it
-again, which is how it reports whether that directory can be written.
+grants could not be read. `koshi doctor` starts no koshi and creates no
+directory. The `log directory` row writes one empty file in the log directory
+and removes it again, which is how it reports whether that directory can be
+written.
 
 The `router` row is the only row that rates the running router. A router whose
 build has no such question is `warn`; a router that is listening and does not
@@ -698,8 +700,8 @@ run `dump-state`, which every session answers.
 
 `koshi debug events` prints the last 1000 events a session published. Each line
 names when the record was stamped, which event it was, and the ids it named. No
-line carries content: a keystroke prints as `PaneTyped` with its session, client,
-tab and pane ids, never as the character typed.
+line carries content: a text selection prints as `SelectionChanged` with its
+client and pane ids, never as the selected text.
 
 A session remembers events only for as long as its server process runs. A
 restart starts the list empty.
@@ -727,5 +729,4 @@ neither event.
 Example: running `cargo test` in pane `pane-7f3a…` under such a shell results
 in two rows whose `event` cells read `PaneCommandStarted` and
 `PaneCommandFinished`, each with `pane-7f3a…` as its only id.
-`koshi debug events --filter panecommand` keeps that pair; `--filter command`
-also keeps `CommandRejected`, whose name contains the same text.
+`koshi debug events --filter panecommand` keeps that pair.

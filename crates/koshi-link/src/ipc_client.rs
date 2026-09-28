@@ -17,14 +17,13 @@
 //! that is not listening reads as `NotRunning` rather than an error.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use koshi_core::command::{Command, CommandEnvelope, CommandResult, CommandSource};
 use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
 use koshi_core::recent_event::RecentEvent;
-use koshi_ipc::endpoint::{compute_shared_socket_address, EndpointFile, RESUME_SUFFIX};
+use koshi_ipc::endpoint::{compute_socket_address, EndpointFile, RESUME_SUFFIX};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{
@@ -125,11 +124,13 @@ pub fn submit_external_command_via_runtime_directory(
 /// process's own, read here at send time, so the new pane opens where the
 /// command was run. A command that already names a directory is left alone,
 /// and every other command carries none.
-fn capture_current_working_directory(mut command: Command) -> Command {
+fn apply_current_working_directory_to_command(mut command: Command) -> Command {
     let working_directory = match &mut command {
-        Command::NewPane(command_args) => &mut command_args.working_directory,
-        Command::NewTab(command_args) => &mut command_args.working_directory,
-        Command::RunCommandPane(command_args) => &mut command_args.working_directory,
+        Command::NewPane(new_pane_arguments) => &mut new_pane_arguments.working_directory,
+        Command::NewTab(new_tab_arguments) => &mut new_tab_arguments.working_directory,
+        Command::RunCommandPane(run_command_pane_arguments) => {
+            &mut run_command_pane_arguments.working_directory
+        }
         _ => return command,
     };
     if working_directory.is_none() {
@@ -149,13 +150,9 @@ fn submit_command_envelope(
     command_source: CommandSource,
     command: Command,
 ) -> Result<CommandResult, CliError> {
-    let prepared_command = capture_current_working_directory(command);
-    let command_envelope = CommandEnvelope::from_parts(
-        CommandId::new(),
-        command_source,
-        SystemTime::now(),
-        prepared_command,
-    );
+    let prepared_command = apply_current_working_directory_to_command(command);
+    let command_envelope =
+        CommandEnvelope::from_parts(CommandId::new(), command_source, prepared_command);
     let ipc_request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
@@ -183,7 +180,7 @@ pub fn fetch_session_overview(
     )
 }
 
-/// Ask the session `session_id` listening at `socket` to describe itself, as
+/// Ask the session `session_id` listening at `socket_address` to describe itself, as
 /// a session another local user started: the address is the one the shared
 /// directory advertised, and the token presented is empty.
 pub fn fetch_foreign_session_overview(
@@ -302,7 +299,7 @@ pub fn fetch_recent_events(
     }
 }
 
-/// True when `code` says the session's build has no such request request_kind: the
+/// True when `code` says the session's build has no such request kind: the
 /// session named the kind as one it lacks
 /// ([`UnsupportedKind`](IpcErrorCode::UnsupportedKind)), or it could not read
 /// the request's bytes at all
@@ -369,8 +366,7 @@ pub fn restart_running_session(
 /// The build version the running session `session_id` reports in its Hello
 /// answer.
 ///
-/// `Ok(None)` means no session is running under that id. An empty string means
-/// the session answered but predates the version field. Sends nothing besides
+/// `Ok(None)` means no session is running under that id. Sends nothing besides
 /// the Hello.
 pub fn get_running_session_version(
     runtime_directory: &Path,
@@ -433,7 +429,7 @@ fn list_session_ids_named_by_suffix(
         .collect()
 }
 
-/// The session a file named `session-<uuid>` plus `suffix` names. Any other
+/// The session a file named `session-<uuid>` plus `file_name_suffix` names. Any other
 /// name is `None`.
 fn parse_session_id(file_name: &str, file_name_suffix: &str) -> Option<SessionId> {
     let session_uuid_text = file_name
@@ -520,7 +516,7 @@ pub fn list_foreign_sessions(
                 (!advertised_session_ids.contains(&session_id)).then(|| {
                     (
                         session_id,
-                        compute_shared_socket_address(shared_sessions_base_directory, session_id),
+                        compute_socket_address(shared_sessions_base_directory, session_id),
                     )
                 })
             })
@@ -542,13 +538,13 @@ fn list_user_session_sockets(user_directory: &Path) -> Vec<(SessionId, String)> 
             let session_id = parse_session_id(directory_entry.file_name().to_str()?, ".sock")?;
             Some((
                 session_id,
-                compute_shared_socket_address(user_directory, session_id),
+                compute_socket_address(user_directory, session_id),
             ))
         })
         .collect()
 }
 
-/// How to reach the session another local user started at `socket`: the
+/// How to reach the session another local user started at `socket_address`: the
 /// address the shared directory advertised, and the empty token that session
 /// asks another user for. That user's own endpoint file stays unread.
 fn build_foreign_session_endpoint(socket_address: String) -> EndpointFile {

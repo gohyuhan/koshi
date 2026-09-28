@@ -15,28 +15,30 @@ use crate::types::{ClientConfig, WheelScroll};
 
 use super::{parse_app_config, AppConfigFile};
 
-/// Parses `config_text` as `koshi.kdl`, panicking on error, dropping warnings.
-fn parse_config(config_text: &str) -> PartialKoshiConfig {
-    parse_file(config_text).layer
+/// Parses `config_source_text` as `koshi.kdl`, panicking on error, and drops
+/// warnings.
+fn parse_config(config_source_text: &str) -> PartialKoshiConfig {
+    parse_file(config_source_text).layer
 }
 
-/// Parses `config_text`, returning both the layer and the warnings.
-fn parse_with_warnings(config_text: &str) -> (PartialKoshiConfig, Vec<String>) {
-    let app_config = parse_file(config_text);
+/// Parses `config_source_text`, returning both the layer and the warnings.
+fn parse_with_warnings(config_source_text: &str) -> (PartialKoshiConfig, Vec<String>) {
+    let app_config = parse_file(config_source_text);
     (app_config.layer, app_config.parse_warnings)
 }
 
-/// Parses `config_text` as `koshi.kdl` whole — layer, theme name, and warnings —
+/// Parses `config_source_text` as `koshi.kdl` whole — layer, theme name, and warnings —
 /// panicking on error.
-fn parse_file(config_text: &str) -> AppConfigFile {
-    let config_text_with_version = add_config_version(config_text);
-    parse_app_config(Path::new("koshi.kdl"), &config_text_with_version).expect("valid config")
+fn parse_file(config_source_text: &str) -> AppConfigFile {
+    let config_source_text_with_version = add_config_version(config_source_text);
+    parse_app_config(Path::new("koshi.kdl"), &config_source_text_with_version)
+        .expect("valid config")
 }
 
-/// The message a [`ConfigError::Parse`] carries for `config_text`: the first
-/// sub-diagnostic of the raw kdl parse error.
-fn kdl_first_diagnostic(config_text: &str) -> String {
-    config_text
+/// The message a [`ConfigError::Parse`] carries for `config_source_text`: the
+/// first sub-diagnostic of the raw KDL parse error.
+fn get_kdl_first_diagnostic(config_source_text: &str) -> String {
+    config_source_text
         .parse::<KdlDocument>()
         .expect_err("source is invalid KDL")
         .diagnostics
@@ -45,8 +47,8 @@ fn kdl_first_diagnostic(config_text: &str) -> String {
         .to_string()
 }
 
-/// Asserts `error` is [`ConfigError::Validation`] with exactly this `key` and
-/// `detail`.
+/// Asserts `validation_error` is [`ConfigError::Validation`] with exactly this
+/// `expected_config_key` and `expected_validation_detail`.
 #[track_caller]
 fn assert_validation(
     validation_error: ConfigError,
@@ -64,16 +66,17 @@ fn assert_validation(
     assert_eq!(actual_validation_detail, expected_validation_detail);
 }
 
-fn add_config_version(config_text: &str) -> String {
-    if config_text
+fn add_config_version(config_source_text: &str) -> String {
+    if config_source_text
         .lines()
-        .any(|line| line.trim_start().starts_with("version "))
+        .any(|config_line_text| config_line_text.trim_start().starts_with("version "))
     {
-        config_text.to_string()
-    } else if let Some(config_text_without_bom) = config_text.strip_prefix('\u{feff}') {
-        format!("\u{feff}version 1\n{config_text_without_bom}")
+        config_source_text.to_string()
+    } else if let Some(config_source_text_without_bom) = config_source_text.strip_prefix('\u{feff}')
+    {
+        format!("\u{feff}version 1\n{config_source_text_without_bom}")
     } else {
-        format!("version 1\n{config_text}")
+        format!("version 1\n{config_source_text}")
     }
 }
 
@@ -159,7 +162,6 @@ fn allow_beta_features_records_what_it_is_set_to() {
 
 #[test]
 fn an_absent_allow_beta_features_sets_no_layer() {
-    // Absent leaves the field unset; the built-in `false` stands.
     assert_eq!(parse_config("").should_allow_beta_features, None);
 }
 
@@ -365,7 +367,7 @@ fn a_colors_block_in_the_app_file_is_ignored() {
 }
 
 #[test]
-fn reads_all_update_fields() {
+fn parse_update_applies_every_configured_field() {
     let update =
         parse_config("update {\n    auto-check #false\n    check-interval-days 30\n    allow-prerelease #true\n}")
             .update
@@ -563,7 +565,7 @@ fn syntax_error_is_a_parse_error() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        kdl_first_diagnostic(invalid_config_text)
+        get_kdl_first_diagnostic(invalid_config_text)
     );
 }
 
@@ -1134,10 +1136,10 @@ fn a_float_where_an_integer_is_required_is_skipped_as_a_non_integer() {
 fn the_largest_u32_interval_is_accepted_and_one_past_it_is_a_validation_error() {
     // u32's ceiling, 4294967295, fits the strict `update` interval field; one
     // more overflows it and fails the whole parse with the range reason.
-    let at_max = parse_config("update {\n    check-interval-days 4294967295\n}")
+    let at_maximum_config = parse_config("update {\n    check-interval-days 4294967295\n}")
         .update
         .expect("update present");
-    assert_eq!(at_max.check_interval_days, Some(4_294_967_295));
+    assert_eq!(at_maximum_config.check_interval_days, Some(4_294_967_295));
 
     let validation_error = parse_app_config(
         Path::new("koshi.kdl"),
@@ -1207,7 +1209,7 @@ fn an_unterminated_quote_is_a_parse_error_not_a_panic() {
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(
         parse_error_detail,
-        kdl_first_diagnostic(invalid_config_text)
+        get_kdl_first_diagnostic(invalid_config_text)
     );
 }
 

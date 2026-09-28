@@ -1,6 +1,5 @@
 //! Errors reported while decoding or placing terminal images.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -9,11 +8,11 @@ use crate::{ImageDimension, MAX_GRAPHICS_CONTROL_BYTE_COUNT};
 
 struct BoundedGraphicsTextVisitor;
 
-fn validate_graphics_text<E>(text_value: &str) -> Result<(), E>
+fn validate_graphics_text<E>(graphics_text: &str) -> Result<(), E>
 where
     E: de::Error,
 {
-    if text_value.len() > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
+    if graphics_text.len() > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
         return Err(E::custom(format!(
             "graphics error text exceeds {MAX_GRAPHICS_CONTROL_BYTE_COUNT} bytes"
         )));
@@ -28,28 +27,28 @@ impl<'de> Visitor<'de> for BoundedGraphicsTextVisitor {
         formatter.write_str("bounded graphics error text")
     }
 
-    fn visit_str<E>(self, text_value: &str) -> Result<Self::Value, E>
+    fn visit_str<E>(self, graphics_text: &str) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        validate_graphics_text(text_value)?;
-        Ok(text_value.to_owned())
+        validate_graphics_text(graphics_text)?;
+        Ok(graphics_text.to_owned())
     }
 
-    fn visit_string<E>(self, text_value: String) -> Result<Self::Value, E>
+    fn visit_string<E>(self, graphics_text: String) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        validate_graphics_text(&text_value)?;
-        Ok(text_value)
+        validate_graphics_text(&graphics_text)?;
+        Ok(graphics_text)
     }
 }
 
-fn deserialize_graphics_text<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn deserialize_graphics_text<'de, D>(graphics_text_deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
-    deserializer.deserialize_string(BoundedGraphicsTextVisitor)
+    graphics_text_deserializer.deserialize_string(BoundedGraphicsTextVisitor)
 }
 
 /// A recoverable terminal-image processing error.
@@ -119,18 +118,6 @@ pub enum GraphicsError {
         "{dropped_event_count} graphics events were dropped because the graphics event count or image-byte limit was reached"
     )]
     QueueFull { dropped_event_count: usize },
-}
-
-impl DomainError for GraphicsError {
-    /// Image decode failures belong to terminal emulation.
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Terminal
-    }
-
-    /// One rejected image does not stop the pane.
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// A failure that leaves terminal image state unchanged.

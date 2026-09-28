@@ -7,14 +7,12 @@ use koshi_core::command::{Command, CommandSource, ToggleLockModeArgs};
 use koshi_core::ids::CommandId;
 use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_test_support::fixtures::build_key_input_for_chord;
-use std::time::SystemTime;
 
-/// A deterministic, boundary-free envelope for the IPC/plugin variants.
+/// An envelope for the IPC variant, from an external CLI naming no session.
 fn build_test_command_envelope() -> CommandEnvelope {
     CommandEnvelope::from_parts(
         CommandId::new(),
-        CommandSource::Internal,
-        SystemTime::UNIX_EPOCH,
+        CommandSource::from_external_cli(None, None),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
 }
@@ -150,7 +148,7 @@ fn ipc_carries_its_envelope_and_a_working_reply_channel() {
     let command_envelope = build_test_command_envelope();
     let (reply_sender, reply_receiver) = std::sync::mpsc::channel();
     let ipc_event = RuntimeEvent::Ipc {
-        envelope: command_envelope.clone(),
+        envelope: Box::new(command_envelope.clone()),
         response_sender: reply_sender,
     };
     let RuntimeEvent::Ipc {
@@ -160,7 +158,7 @@ fn ipc_carries_its_envelope_and_a_working_reply_channel() {
     else {
         panic!("expected Ipc");
     };
-    assert_eq!(envelope, &command_envelope);
+    assert_eq!(**envelope, command_envelope);
     response_sender
         .send(CommandResult::Ok {
             command_id: command_envelope.command_id,
@@ -247,14 +245,4 @@ fn writing_threads_sharing_one_ending_notice_all_count_into_it() {
     }
 
     assert_eq!(ending_notice.count_running_writers(), 8);
-}
-
-#[test]
-fn plugin_carries_its_envelope() {
-    let command_envelope = build_test_command_envelope();
-    let plugin = RuntimeEvent::Plugin(command_envelope.clone());
-    let RuntimeEvent::Plugin(carried_envelope) = &plugin else {
-        panic!("expected Plugin");
-    };
-    assert_eq!(carried_envelope, &command_envelope);
 }

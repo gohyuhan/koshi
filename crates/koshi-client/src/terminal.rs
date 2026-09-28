@@ -34,8 +34,7 @@ use koshi_input::keyboard::decode_key_event;
 use koshi_input::mouse::decode_mouse;
 use koshi_ipc::protocol::GraphicsCapabilities;
 use koshi_iterm::{
-    iterm_feature_string_supports_file, iterm_feature_string_supports_sixel,
-    ITERM_CAPABILITIES_QUERY,
+    supports_iterm_file_feature, supports_iterm_sixel_feature, ITERM_CAPABILITIES_QUERY,
 };
 use koshi_kitty::{
     write_kitty_abort, write_kitty_delete_all, write_kitty_support_query, KittyOutputError,
@@ -49,12 +48,12 @@ use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
     CommittedRegions, CursorSnapshot, CursorStyle, KeymapHints, PaneSlot, PaneSnapshot,
     PlacementPaneSnapshot, PlacementSnapshot, PlacementStatus, PlacementTabSnapshot,
-    RenderSnapshot, ScrollbackMeta, TabSnapshot, ViewerChrome,
+    RenderSnapshot, ScrollbackMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
 use koshi_renderer::{
     build_image_cell_snapshot, build_image_paints, get_cursor_position, get_cursor_style,
-    render_frame_with_placement_target, ImagePlacementKey, ImageRenderMode,
+    render_frame, ImagePlacementKey, ImageRenderMode,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_sixel::{PRIMARY_DEVICE_ATTRIBUTES_QUERY, SIXEL_GEOMETRY_QUERY, SIXEL_PALETTE_QUERY};
@@ -100,7 +99,7 @@ const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
     b"\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// Paints a render snapshot into ratatui's frame buffer with
-/// [`koshi_renderer::render_frame_with_placement_target`]. With a placement
+/// [`koshi_renderer::render_frame`]. With a placement
 /// display snapshot and a placement target, it then outlines the target's
 /// slot in the retained placement snapshot.
 pub(crate) struct SnapshotWidget<'a> {
@@ -132,7 +131,7 @@ pub(crate) struct SnapshotWidget<'a> {
 
 impl Widget for SnapshotWidget<'_> {
     fn render(self, render_area: Rect, render_buffer: &mut Buffer) {
-        render_frame_with_placement_target(
+        render_frame(
             self.snapshot,
             self.committed_regions,
             self.theme,
@@ -291,8 +290,7 @@ fn build_empty_placement_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
         view_top_row_index: 0,
         selection_spans: None,
         has_selection: false,
-        scrollback_meta: ScrollbackMeta {
-            is_truncated: false,
+        scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
     }
@@ -326,15 +324,12 @@ fn draw_placement_target_outline(
     ) else {
         return;
     };
-    let layout_size = displayed_tab_snapshot.tab_snapshot.effective_cell_size;
+    let tab_size = displayed_tab_snapshot.tab_snapshot.tab_size;
     let pane_area = koshi_renderer::compute_pane_area(committed_regions, render_area);
-    let layout_rect = koshi_renderer::compute_content_rect(pane_area, layout_size);
-    let Some(target_outline) = build_target_outline_rect(
-        base_tab_snapshot,
-        placement_target,
-        layout_size,
-        layout_rect,
-    ) else {
+    let layout_rect = koshi_renderer::compute_content_rect(pane_area, tab_size);
+    let Some(target_outline) =
+        build_target_outline_rect(base_tab_snapshot, placement_target, tab_size, layout_rect)
+    else {
         return;
     };
     let source_pane_rect = displayed_render_snapshot
@@ -344,7 +339,7 @@ fn draw_placement_target_outline(
         .iter()
         .find(|pane_slot| pane_slot.pane_id == placement_snapshot.source_pane_id)
         .filter(|pane_slot| pane_slot.is_visible)
-        .and_then(|pane_slot| project_core_rect(pane_slot.outer_rect, layout_size, layout_rect));
+        .and_then(|pane_slot| project_core_rect(pane_slot.outer_rect, tab_size, layout_rect));
     apply_placement_target_outline_style(target_outline, source_pane_rect, theme, render_buffer);
 }
 
@@ -414,14 +409,13 @@ fn build_proposed_placement_snapshot(
         }
     }
     let source_tab_snapshot = &placement_snapshot.source_tab_snapshot;
-    let source_tab_rect =
-        CoreRect::from_size_at_origin(source_tab_snapshot.tab_snapshot.effective_cell_size);
-    let mut pane_slot_by_id = source_tab_snapshot
+    let source_tab_rect = CoreRect::from_size_at_origin(source_tab_snapshot.tab_snapshot.tab_size);
+    let mut known_pane_ids = source_tab_snapshot
         .tab_snapshot
         .pane_slots
         .iter()
-        .map(|pane_slot| (pane_slot.pane_id, pane_slot.clone()))
-        .collect::<HashMap<_, _>>();
+        .map(|pane_slot| pane_slot.pane_id)
+        .collect::<HashSet<_>>();
     let mut pane_snapshots = source_tab_snapshot.pane_snapshots.clone();
 
     let Some(destination_tab_snapshot) = placement_snapshot.destination_tab_snapshot.as_ref()
@@ -437,7 +431,7 @@ fn build_proposed_placement_snapshot(
         let proposed_source_tab_snapshot = build_proposed_placement_tab_snapshot(
             source_tab_snapshot,
             &proposed_layout_tree,
-            &pane_slot_by_id,
+            &known_pane_ids,
             &pane_snapshots,
             placement_snapshot.pane_sizing,
         )?;
@@ -446,11 +440,13 @@ fn build_proposed_placement_snapshot(
         return Some(proposed_snapshot);
     };
 
-    for pane_slot in &destination_tab_snapshot.tab_snapshot.pane_slots {
-        pane_slot_by_id
-            .entry(pane_slot.pane_id)
-            .or_insert_with(|| pane_slot.clone());
-    }
+    known_pane_ids.extend(
+        destination_tab_snapshot
+            .tab_snapshot
+            .pane_slots
+            .iter()
+            .map(|pane_slot| pane_slot.pane_id),
+    );
     for pane_snapshot in &destination_tab_snapshot.pane_snapshots {
         if pane_snapshots
             .iter()
@@ -460,7 +456,7 @@ fn build_proposed_placement_snapshot(
         }
     }
     let destination_tab_rect =
-        CoreRect::from_size_at_origin(destination_tab_snapshot.tab_snapshot.effective_cell_size);
+        CoreRect::from_size_at_origin(destination_tab_snapshot.tab_snapshot.tab_size);
     let cross_tab_placement = place_pane_across_tabs(
         &source_tab_snapshot.layout_tree,
         placement_snapshot.source_pane_id,
@@ -474,7 +470,7 @@ fn build_proposed_placement_snapshot(
         Some(source_layout_tree) => build_proposed_placement_tab_snapshot(
             source_tab_snapshot,
             source_layout_tree,
-            &pane_slot_by_id,
+            &known_pane_ids,
             &pane_snapshots,
             placement_snapshot.pane_sizing,
         )?,
@@ -483,7 +479,7 @@ fn build_proposed_placement_snapshot(
     let proposed_destination_tab_snapshot = build_proposed_placement_tab_snapshot(
         destination_tab_snapshot,
         &cross_tab_placement.destination_tree,
-        &pane_slot_by_id,
+        &known_pane_ids,
         &pane_snapshots,
         placement_snapshot.pane_sizing,
     )?;
@@ -537,7 +533,7 @@ pub(crate) fn interpolate_placement_snapshot(
 ///   `to_tab_snapshot` rect. A pane in only one tab grows from, or shrinks to,
 ///   zero size at its own origin.
 /// - `is_suppressed`, the stack headers, the layout mode, and
-///   `are_all_panes_suppressed` come from `from_tab_snapshot` below progress
+///   `is_every_pane_suppressed` come from `from_tab_snapshot` below progress
 ///   `0.5`, then from `to_tab_snapshot`. A pane in only one tab keeps its own
 ///   `is_suppressed`.
 /// - The pane content is every pane snapshot of `to_tab_snapshot`, then each
@@ -609,8 +605,8 @@ fn interpolate_placement_tab_snapshot(
         .stack_headers
         .clone_from(&nearer_tab_snapshot.stack_headers);
     animated_tab_snapshot.tab_snapshot.layout_mode = nearer_tab_snapshot.layout_mode;
-    animated_tab_snapshot.tab_snapshot.are_all_panes_suppressed =
-        nearer_tab_snapshot.are_all_panes_suppressed;
+    animated_tab_snapshot.tab_snapshot.is_every_pane_suppressed =
+        nearer_tab_snapshot.is_every_pane_suppressed;
     let to_pane_snapshot_ids = to_tab_snapshot
         .pane_snapshots
         .iter()
@@ -684,7 +680,7 @@ fn interpolate_optional_rect(
         (Some(from_rect), None) if progress < 1.0 => Some(CoreRect::from_origin_and_size(
             from_rect.origin,
             interpolate_size(
-                from_rect.cell_size,
+                from_rect.size,
                 Size {
                     column_count: 0,
                     row_count: 0,
@@ -699,7 +695,7 @@ fn interpolate_optional_rect(
                     column_count: 0,
                     row_count: 0,
                 },
-                to_rect.cell_size,
+                to_rect.size,
                 progress,
             ),
         )),
@@ -712,7 +708,7 @@ fn interpolate_optional_rect(
 fn interpolate_rect(from_rect: CoreRect, to_rect: CoreRect, progress: f32) -> CoreRect {
     CoreRect::from_origin_and_size(
         interpolate_point(from_rect.origin, to_rect.origin, progress),
-        interpolate_size(from_rect.cell_size, to_rect.cell_size, progress),
+        interpolate_size(from_rect.size, to_rect.size, progress),
     )
 }
 
@@ -759,18 +755,20 @@ pub(crate) fn build_layout_placement_target(
     }
 }
 
-/// Build a solved tab snapshot for one proposed layout tree.
+/// Build a solved tab snapshot for one proposed layout tree. Returns `None` when a
+/// pane of `layout_tree` is not in `known_pane_ids` or has no entry in
+/// `pane_snapshots`.
 fn build_proposed_placement_tab_snapshot(
     base_tab_snapshot: &PlacementTabSnapshot,
     layout_tree: &koshi_layout::tree::LayoutNode,
-    pane_slot_by_id: &HashMap<PaneId, PaneSlot>,
+    known_pane_ids: &HashSet<PaneId>,
     pane_snapshots: &[PlacementPaneSnapshot],
     pane_sizing: koshi_layout::solver::PaneSizing,
 ) -> Option<PlacementTabSnapshot> {
     let layout_solve = solve_layout_with_mode(
         layout_tree,
         LayoutMode::Tiled,
-        CoreRect::from_size_at_origin(base_tab_snapshot.tab_snapshot.effective_cell_size),
+        CoreRect::from_size_at_origin(base_tab_snapshot.tab_snapshot.tab_size),
         pane_sizing,
     );
     let content_rect_by_pane_id = list_content_rects(&layout_solve)
@@ -785,16 +783,16 @@ fn build_proposed_placement_tab_snapshot(
         .pane_rects
         .iter()
         .map(|(pane_id, outer_rect)| {
-            let template_pane_slot = pane_slot_by_id.get(pane_id)?;
+            if !known_pane_ids.contains(pane_id) {
+                return None;
+            }
             let content_rect = content_rect_by_pane_id.get(pane_id).copied().flatten();
             Some(PaneSlot {
                 pane_id: *pane_id,
                 outer_rect: *outer_rect,
                 content_rect,
-                pane_kind: template_pane_slot.pane_kind,
                 is_visible: content_rect.is_some(),
                 is_suppressed: suppressed_pane_ids.contains(pane_id),
-                is_dead: template_pane_slot.is_dead,
             })
         })
         .collect::<Option<Vec<_>>>()?;
@@ -812,8 +810,8 @@ fn build_proposed_placement_tab_snapshot(
     proposed_tab_snapshot.tab_snapshot.pane_slots = pane_slots;
     proposed_tab_snapshot.tab_snapshot.stack_headers = layout_solve.stack_headers;
     proposed_tab_snapshot.tab_snapshot.layout_mode = LayoutMode::Tiled;
-    proposed_tab_snapshot.tab_snapshot.are_all_panes_suppressed =
-        layout_solve.is_all_panes_suppressed;
+    proposed_tab_snapshot.tab_snapshot.is_every_pane_suppressed =
+        layout_solve.is_every_pane_suppressed;
     proposed_tab_snapshot.pane_snapshots = proposed_pane_snapshots;
     Some(proposed_tab_snapshot)
 }
@@ -825,7 +823,7 @@ fn build_empty_placement_tab_snapshot(
     let mut empty_tab_snapshot = base_tab_snapshot.clone();
     empty_tab_snapshot.tab_snapshot.pane_slots.clear();
     empty_tab_snapshot.tab_snapshot.stack_headers.clear();
-    empty_tab_snapshot.tab_snapshot.are_all_panes_suppressed = false;
+    empty_tab_snapshot.tab_snapshot.is_every_pane_suppressed = false;
     empty_tab_snapshot.tab_snapshot.layout_mode = LayoutMode::Tiled;
     empty_tab_snapshot.pane_snapshots.clear();
     empty_tab_snapshot
@@ -847,14 +845,14 @@ pub(crate) fn project_core_rect(
     }
     let (column, column_count) = project_axis(
         core_rect.origin.column,
-        core_rect.cell_size.column_count,
+        core_rect.size.column_count,
         source_size.column_count,
         target_rect.x,
         target_rect.width,
     );
     let (row, row_count) = project_axis(
         core_rect.origin.row,
-        core_rect.cell_size.row_count,
+        core_rect.size.row_count,
         source_size.row_count,
         target_rect.y,
         target_rect.height,
@@ -904,7 +902,7 @@ fn project_axis(
 fn build_target_outline_rect(
     base_tab_snapshot: &PlacementTabSnapshot,
     placement_target: &PanePlacementTarget,
-    layout_size: Size,
+    tab_size: Size,
     layout_rect: Rect,
 ) -> Option<Rect> {
     if matches!(
@@ -927,7 +925,7 @@ fn build_target_outline_rect(
                 Some(placement_target),
             )
         })
-        .filter_map(|pane_slot| project_core_rect(pane_slot.outer_rect, layout_size, layout_rect))
+        .filter_map(|pane_slot| project_core_rect(pane_slot.outer_rect, tab_size, layout_rect))
         .reduce(Rect::union)
 }
 
@@ -945,9 +943,9 @@ pub(crate) enum GraphicsSupport {
         /// Number of colors available to the Sixel encoder.
         palette_color_count: usize,
         /// Maximum Sixel width in pixels, or `None` when the host reports no limit.
-        max_pixel_width: Option<u32>,
+        maximum_pixel_width: Option<u32>,
         /// Maximum Sixel height in pixels, or `None` when the host reports no limit.
-        max_pixel_height: Option<u32>,
+        maximum_pixel_height: Option<u32>,
     },
 }
 
@@ -1008,7 +1006,7 @@ struct TerminalProbe {
 
 impl TerminalProbe {
     /// Build the result for a terminal that answered no capability query.
-    const fn unsupported() -> Self {
+    const fn build_unsupported() -> Self {
         Self {
             graphics_support: GraphicsSupport::Unsupported,
             cell_size: None,
@@ -1132,7 +1130,7 @@ pub(crate) struct TerminalOwner {
     /// Initial pixel dimensions of one terminal cell from the probe or window metrics.
     initial_cell_size: Option<PixelCellSize>,
     /// Whether standard output is the terminal receiving rendered frames.
-    output_is_terminal: bool,
+    is_output_terminal: bool,
     /// Terminal handle used for protocol output and platform-mode restoration.
     terminal: Arc<Mutex<Option<TerminalDevice>>>,
     /// Parsed input source shared with the input thread. `None` when both
@@ -1142,11 +1140,11 @@ pub(crate) struct TerminalOwner {
     /// when `reader` is present.
     waker: Option<PlatformWaker>,
     /// Stops input delivery before terminal restoration.
-    shutdown: Arc<AtomicBool>,
+    is_shutdown_requested: Arc<AtomicBool>,
     /// Whether this attachment enabled application-level terminal modes.
-    application_modes_active: Arc<AtomicBool>,
+    has_active_application_modes: Arc<AtomicBool>,
     /// Ensures one path cancels Kitty transfers and deletes this attachment's images.
-    image_cleanup_claimed: Arc<AtomicBool>,
+    is_image_cleanup_claimed: Arc<AtomicBool>,
     /// The input thread started after Attach succeeds.
     input_thread: Option<thread::JoinHandle<()>>,
     /// Rejects a second activation of the same terminal.
@@ -1160,15 +1158,15 @@ impl TerminalOwner {
     /// With piped input and output, build an unsupported owner without opening
     /// `/dev/tty`; that client reads no keys and writes its frame to the pipe.
     pub(crate) fn open_terminal_owner(supports_native_images: bool) -> Result<Self, String> {
-        let input_is_terminal = io::stdin().is_terminal();
-        let output_is_terminal = io::stdout().is_terminal();
+        let is_input_terminal = io::stdin().is_terminal();
+        let is_output_terminal = io::stdout().is_terminal();
         let (graphics_support, initial_cell_size, terminal, reader, waker) =
-            if needs_terminal_device(input_is_terminal, output_is_terminal) {
+            if needs_terminal_device(is_input_terminal, is_output_terminal) {
                 let (mut terminal, event_source) = TerminalDevice::open_terminal_device()
                     .map_err(|open_error| format!("could not open the terminal: {open_error}"))?;
                 let mut reader = InputReader::from_event_source(event_source);
                 let terminal_probe = if supports_native_images {
-                    resolve_graphics_support_for_output(output_is_terminal, || {
+                    resolve_graphics_support_for_output(is_output_terminal, || {
                         run_with_raw_mode(
                             &mut terminal,
                             |terminal| terminal.enter_raw_mode(),
@@ -1180,7 +1178,7 @@ impl TerminalOwner {
                         format!("could not probe terminal graphics support: {probe_error}")
                     })?
                 } else {
-                    TerminalProbe::unsupported()
+                    TerminalProbe::build_unsupported()
                 };
                 let locally_measured_cell_size = if terminal_probe.cell_size.is_some()
                     || matches!(
@@ -1207,17 +1205,17 @@ impl TerminalOwner {
             } else {
                 (GraphicsSupport::Unsupported, None, None, None, None)
             };
-        let image_cleanup_claimed = Arc::new(AtomicBool::new(false));
+        let is_image_cleanup_claimed = Arc::new(AtomicBool::new(false));
         Ok(Self {
             graphics_support,
             initial_cell_size,
-            output_is_terminal,
+            is_output_terminal,
             terminal: Arc::new(Mutex::new(terminal)),
             reader,
             waker,
-            shutdown: Arc::new(AtomicBool::new(false)),
-            application_modes_active: Arc::new(AtomicBool::new(false)),
-            image_cleanup_claimed,
+            is_shutdown_requested: Arc::new(AtomicBool::new(false)),
+            has_active_application_modes: Arc::new(AtomicBool::new(false)),
+            is_image_cleanup_claimed,
             input_thread: None,
             is_activated: false,
         })
@@ -1228,17 +1226,11 @@ impl TerminalOwner {
         self.graphics_support
     }
 
-    /// Return the cell dimensions captured during the initial terminal probe.
-    #[allow(dead_code)]
-    pub(crate) fn get_initial_cell_size(&self) -> Option<PixelCellSize> {
-        self.initial_cell_size
-    }
-
     /// Build the cell-size coordinator used after this terminal attaches.
     pub(crate) fn build_cell_size_query(&self) -> CellSizeQuery {
         CellSizeQuery::from_current_measurement(
             self.initial_cell_size,
-            self.output_is_terminal
+            self.is_output_terminal
                 && !matches!(self.graphics_support, GraphicsSupport::Unsupported),
             false,
         )
@@ -1248,20 +1240,20 @@ impl TerminalOwner {
     pub(crate) fn register_restore(&self, cleanup: &TerminalCleanupGuard) {
         let terminal = Arc::clone(&self.terminal);
         let graphics_support = self.graphics_support;
-        let shutdown = Arc::clone(&self.shutdown);
+        let is_shutdown_requested = Arc::clone(&self.is_shutdown_requested);
         let waker = self.waker.clone();
-        let application_modes_active = Arc::clone(&self.application_modes_active);
-        let image_cleanup_claimed = Arc::clone(&self.image_cleanup_claimed);
+        let has_active_application_modes = Arc::clone(&self.has_active_application_modes);
+        let is_image_cleanup_claimed = Arc::clone(&self.is_image_cleanup_claimed);
         cleanup.register_cleanup(Box::new(move || {
-            shutdown.store(true, Ordering::Release);
+            is_shutdown_requested.store(true, Ordering::Release);
             if let Some(waker) = &waker {
                 let _ = waker.wake();
             }
             try_restore_shared_terminal(
                 &terminal,
                 graphics_support,
-                &application_modes_active,
-                &image_cleanup_claimed,
+                &has_active_application_modes,
+                &is_image_cleanup_claimed,
             );
         }));
     }
@@ -1283,15 +1275,16 @@ impl TerminalOwner {
                 terminal.enter_raw_mode().map_err(|raw_mode_error| {
                     format!("could not enter terminal raw mode: {raw_mode_error}")
                 })?;
-                if self.output_is_terminal {
-                    self.application_modes_active.store(true, Ordering::Release);
+                if self.is_output_terminal {
+                    self.has_active_application_modes
+                        .store(true, Ordering::Release);
                     enable_terminal_modes(terminal, self.graphics_support).map_err(
                         |mode_enable_error| {
                             format!("could not enable terminal modes: {mode_enable_error}")
                         },
                     )?;
                 }
-            } else if self.output_is_terminal || should_read_input {
+            } else if self.is_output_terminal || should_read_input {
                 return Err("terminal owner was already restored".to_string());
             }
         }
@@ -1303,7 +1296,7 @@ impl TerminalOwner {
             .reader
             .take()
             .ok_or_else(|| "terminal input reader is unavailable".to_string())?;
-        let shutdown = Arc::clone(&self.shutdown);
+        let is_shutdown_requested = Arc::clone(&self.is_shutdown_requested);
         let panic_event_sender = runtime_event_sender.clone();
         self.input_thread = Some(
             thread::Builder::new()
@@ -1314,7 +1307,7 @@ impl TerminalOwner {
                             &mut input_reader,
                             &runtime_event_sender,
                             client_id,
-                            &shutdown,
+                            &is_shutdown_requested,
                         );
                     }));
                     if input_thread_result.is_err() {
@@ -1335,7 +1328,7 @@ impl TerminalOwner {
 
     /// Signal and join the input thread, then restore every terminal mode.
     fn stop_terminal_owner(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.is_shutdown_requested.store(true, Ordering::Release);
         if let Some(waker) = &self.waker {
             let _ = waker.wake();
         }
@@ -1345,8 +1338,8 @@ impl TerminalOwner {
         restore_shared_terminal(
             &self.terminal,
             self.graphics_support,
-            &self.application_modes_active,
-            &self.image_cleanup_claimed,
+            &self.has_active_application_modes,
+            &self.is_image_cleanup_claimed,
         );
     }
 }
@@ -1358,19 +1351,19 @@ impl Drop for TerminalOwner {
 }
 
 /// Whether input or output needs access to the controlling terminal.
-fn needs_terminal_device(input_is_terminal: bool, output_is_terminal: bool) -> bool {
-    input_is_terminal || output_is_terminal
+fn needs_terminal_device(is_input_terminal: bool, is_output_terminal: bool) -> bool {
+    is_input_terminal || is_output_terminal
 }
 
 /// Probe only when standard output is the terminal that will receive images.
 fn resolve_graphics_support_for_output(
-    output_is_terminal: bool,
+    is_output_terminal: bool,
     probe: impl FnOnce() -> io::Result<TerminalProbe>,
 ) -> io::Result<TerminalProbe> {
-    if output_is_terminal {
+    if is_output_terminal {
         probe()
     } else {
-        Ok(TerminalProbe::unsupported())
+        Ok(TerminalProbe::build_unsupported())
     }
 }
 
@@ -1408,8 +1401,8 @@ fn lock_terminal(
 fn restore_shared_terminal(
     shared_terminal: &Mutex<Option<TerminalDevice>>,
     graphics_support: GraphicsSupport,
-    application_modes_active: &AtomicBool,
-    image_cleanup_claimed: &AtomicBool,
+    has_active_application_modes: &AtomicBool,
+    is_image_cleanup_claimed: &AtomicBool,
 ) {
     let terminal_device = lock_terminal(shared_terminal).take();
     let Some(mut terminal) = terminal_device else {
@@ -1418,8 +1411,8 @@ fn restore_shared_terminal(
     restore_terminal(
         &mut terminal,
         graphics_support,
-        application_modes_active,
-        image_cleanup_claimed,
+        has_active_application_modes,
+        is_image_cleanup_claimed,
     );
 }
 
@@ -1427,8 +1420,8 @@ fn restore_shared_terminal(
 fn try_restore_shared_terminal(
     shared_terminal: &Mutex<Option<TerminalDevice>>,
     graphics_support: GraphicsSupport,
-    application_modes_active: &AtomicBool,
-    image_cleanup_claimed: &AtomicBool,
+    has_active_application_modes: &AtomicBool,
+    is_image_cleanup_claimed: &AtomicBool,
 ) {
     let mut terminal_guard = match shared_terminal.try_lock() {
         Ok(terminal_guard) => terminal_guard,
@@ -1436,8 +1429,8 @@ fn try_restore_shared_terminal(
         Err(TryLockError::WouldBlock) => {
             write_fallback_terminal_cleanup(
                 graphics_support,
-                application_modes_active,
-                image_cleanup_claimed,
+                has_active_application_modes,
+                is_image_cleanup_claimed,
             );
             return;
         }
@@ -1449,8 +1442,8 @@ fn try_restore_shared_terminal(
     restore_terminal(
         &mut terminal,
         graphics_support,
-        application_modes_active,
-        image_cleanup_claimed,
+        has_active_application_modes,
+        is_image_cleanup_claimed,
     );
 }
 
@@ -1458,14 +1451,14 @@ fn try_restore_shared_terminal(
 fn restore_terminal(
     terminal: &mut TerminalDevice,
     graphics_support: GraphicsSupport,
-    application_modes_active: &AtomicBool,
-    image_cleanup_claimed: &AtomicBool,
+    has_active_application_modes: &AtomicBool,
+    is_image_cleanup_claimed: &AtomicBool,
 ) {
     if let Err(application_restore_error) = restore_application_modes(
         terminal,
         graphics_support,
-        application_modes_active,
-        image_cleanup_claimed,
+        has_active_application_modes,
+        is_image_cleanup_claimed,
     ) {
         tracing::warn!(%application_restore_error, "could not restore terminal application modes");
     }
@@ -1478,18 +1471,18 @@ fn restore_terminal(
 fn restore_application_modes<W: Write>(
     writer: &mut W,
     graphics_support: GraphicsSupport,
-    application_modes_active: &AtomicBool,
-    image_cleanup_claimed: &AtomicBool,
+    has_active_application_modes: &AtomicBool,
+    is_image_cleanup_claimed: &AtomicBool,
 ) -> io::Result<()> {
-    if !application_modes_active.swap(false, Ordering::AcqRel) {
+    if !has_active_application_modes.swap(false, Ordering::AcqRel) {
         return Ok(());
     }
-    write_terminal_cleanup(writer, graphics_support, image_cleanup_claimed)
+    write_terminal_cleanup(writer, graphics_support, is_image_cleanup_claimed)
 }
 
 /// Claim the one Kitty cleanup allowed for an attachment.
-fn claim_image_cleanup(image_cleanup_claimed: &AtomicBool) -> bool {
-    !image_cleanup_claimed.swap(true, Ordering::AcqRel)
+fn claim_image_cleanup(is_image_cleanup_claimed: &AtomicBool) -> bool {
+    !is_image_cleanup_claimed.swap(true, Ordering::AcqRel)
 }
 
 /// Gather every capability reply available before one shared deadline.
@@ -1536,10 +1529,8 @@ impl ProbeReplies {
                 self.supports_kitty |= kitty_reply.is_successful;
             }
             Event::TerminalFeatures(terminal_features) => {
-                self.supports_iterm_file_output |=
-                    iterm_feature_string_supports_file(&terminal_features);
-                self.supports_iterm_sixel |=
-                    iterm_feature_string_supports_sixel(&terminal_features);
+                self.supports_iterm_file_output |= supports_iterm_file_feature(&terminal_features);
+                self.supports_iterm_sixel |= supports_iterm_sixel_feature(&terminal_features);
             }
             Event::PrimaryDeviceAttributes(device_attributes) => {
                 self.supports_da1_sixel |= device_attributes
@@ -1605,7 +1596,7 @@ impl ProbeReplies {
             Some(Ok(palette_color_count)) => palette_color_count.min(256) as usize,
             Some(Err(_)) | None => 2,
         };
-        let (max_pixel_width, max_pixel_height) = match self.sixel_geometry {
+        let (maximum_pixel_width, maximum_pixel_height) = match self.sixel_geometry {
             Some(Ok((pixel_width, pixel_height))) => (
                 (pixel_width != 0).then_some(pixel_width),
                 (pixel_height != 0).then_some(pixel_height),
@@ -1614,8 +1605,8 @@ impl ProbeReplies {
         };
         Some(GraphicsSupport::Sixel {
             palette_color_count,
-            max_pixel_width,
-            max_pixel_height,
+            maximum_pixel_width,
+            maximum_pixel_height,
         })
     }
 }
@@ -1657,11 +1648,11 @@ fn enable_terminal_modes<W: Write>(
 fn write_terminal_cleanup<W: Write>(
     writer: &mut W,
     graphics_support: GraphicsSupport,
-    image_cleanup_claimed: &AtomicBool,
+    is_image_cleanup_claimed: &AtomicBool,
 ) -> io::Result<()> {
     let mut first_io_error = None;
     if matches!(graphics_support, GraphicsSupport::Kitty)
-        && claim_image_cleanup(image_cleanup_claimed)
+        && claim_image_cleanup(is_image_cleanup_claimed)
     {
         retain_first_io_error(
             &mut first_io_error,
@@ -1702,15 +1693,15 @@ fn retain_first_io_error(first_io_error: &mut Option<io::Error>, io_result: io::
 /// Write application resets when the panic hook cannot take the terminal lock.
 fn write_fallback_terminal_cleanup(
     graphics_support: GraphicsSupport,
-    application_modes_active: &AtomicBool,
-    image_cleanup_claimed: &AtomicBool,
+    has_active_application_modes: &AtomicBool,
+    is_image_cleanup_claimed: &AtomicBool,
 ) {
     let mut stdout = io::stdout();
     let _ = restore_application_modes(
         &mut stdout,
         graphics_support,
-        application_modes_active,
-        image_cleanup_claimed,
+        has_active_application_modes,
+        is_image_cleanup_claimed,
     );
 }
 
@@ -1719,14 +1710,14 @@ fn run_terminal_input(
     input_reader: &mut InputReader,
     runtime_event_sender: &mpsc::SyncSender<RuntimeEvent>,
     client_id: ClientId,
-    shutdown: &AtomicBool,
+    is_shutdown_requested: &AtomicBool,
 ) {
-    while !shutdown.load(Ordering::Acquire) {
+    while !is_shutdown_requested.load(Ordering::Acquire) {
         let runtime_event = match input_reader.read_matching_event(|_| true) {
             Ok(host_event) => build_terminal_runtime_event(client_id, host_event),
             Err(input_read_error)
                 if input_read_error.kind() == io::ErrorKind::Interrupted
-                    && shutdown.load(Ordering::Acquire) =>
+                    && is_shutdown_requested.load(Ordering::Acquire) =>
             {
                 break;
             }
@@ -1835,11 +1826,11 @@ fn compute_pixel_cell_size(window_size: WindowSize) -> Option<PixelCellSize> {
 /// frames arrive over the connection instead. `terminal_cleanup_guard` is the guard that
 /// restores the outer terminal.
 ///
-/// `loaded_config.app_config_layer` and `loaded_config.theme_config_layer` fold into the viewer's settings and chrome
-/// colors and always apply. `loaded_config.keybindings` is validated: a verdict other
-/// than [`Apply`](koshi_config::conflict::KeymapVerdict::Apply) logs a warning
-/// naming `koshi keys conflicts`, an `Apply` logs `"keybinding.kdl applied"`,
-/// and a `None` keymap layer logs nothing.
+/// `loaded_config.app_config_layer` and `loaded_config.theme_config_layer` fold into the viewer's
+/// settings and chrome colors and always apply. `loaded_config.keybindings` is validated: a verdict
+/// other than [`Apply`](koshi_config::conflict::KeymapVerdict::Apply) logs a warning naming `koshi
+/// keys conflicts`, an `Apply` logs `"keybinding.kdl applied"`, and a `None` keymap layer logs
+/// nothing.
 pub(crate) fn build_client_with_loaded_config(
     client_id: ClientId,
     viewport_size: Size,
@@ -1847,7 +1838,7 @@ pub(crate) fn build_client_with_loaded_config(
     terminal_cleanup_guard: TerminalCleanupGuard,
     loaded_config: koshi_link::config::LoadedConfig,
 ) -> Client {
-    let mut viewer_client = Client::from_client_id_and_viewport(
+    let mut viewer_client = Client::from_client_id_and_viewport_size(
         client_id,
         viewport_size,
         frame_delivery_receiver,
@@ -1867,7 +1858,8 @@ pub(crate) fn build_client_with_loaded_config(
     viewer_client
 }
 
-/// Draw `snapshot` into `terminal`, keeping the outer terminal's window title
+/// Draw `displayed_snapshot`, the frame in the pane layout shown to the user,
+/// into `terminal`, keeping the outer terminal's window title
 /// and cursor style in step with the focused pane.
 ///
 /// The theme comes from `client`, and so does the hint bar, built for the
@@ -1888,76 +1880,6 @@ pub(crate) fn build_client_with_loaded_config(
 ///
 /// Returns a backend or native-image error when the frame cannot be fully
 /// painted. A failed title or cursor-style write is ignored.
-#[cfg(test)]
-pub(crate) fn paint_frame<B: Backend>(
-    terminal: &mut Terminal<B>,
-    client: &Client,
-    snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    frame_paint: &ViewerPaint,
-    last_window_title: &mut String,
-    last_cursor_style: &mut Option<CursorStyle>,
-) -> Result<(), PaintError<B::Error>> {
-    let mut image_output_state = ImageOutputState::disabled();
-    paint_frame_with_images(
-        terminal,
-        client,
-        snapshot,
-        committed_regions,
-        frame_paint,
-        ImageRenderMode::Placeholder,
-        &mut image_output_state,
-        None,
-        last_window_title,
-        last_cursor_style,
-        None,
-        None,
-    )
-    .map(|_| ())
-}
-
-/// Paint one frame and schedule native images when the outer terminal supports
-/// them.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_frame_with_images<B: Backend>(
-    terminal: &mut Terminal<B>,
-    client: &Client,
-    snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    frame_paint: &ViewerPaint,
-    image_mode: ImageRenderMode,
-    image_output_state: &mut ImageOutputState,
-    cell_size: Option<PixelCellSize>,
-    last_window_title: &mut String,
-    last_cursor_style: &mut Option<CursorStyle>,
-    placement_snapshot: Option<&PlacementSnapshot>,
-    placement_display_snapshot: Option<&PlacementSnapshot>,
-) -> Result<bool, PaintError<B::Error>> {
-    let placement_render_snapshot =
-        placement_display_snapshot
-            .or(placement_snapshot)
-            .and_then(|placement_display_snapshot| {
-                build_placement_render_snapshot(snapshot, placement_display_snapshot)
-            });
-    let displayed_snapshot = placement_render_snapshot.as_ref().unwrap_or(snapshot);
-    paint_frame_with_displayed_snapshot(
-        terminal,
-        client,
-        displayed_snapshot,
-        committed_regions,
-        frame_paint,
-        image_mode,
-        image_output_state,
-        cell_size,
-        last_window_title,
-        last_cursor_style,
-        placement_snapshot,
-        placement_display_snapshot,
-    )
-}
-
-/// Paint one frame that already uses the pane layout shown to the user.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_frame_with_displayed_snapshot<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -2020,14 +1942,14 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     let mut render_area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
     let mut hardware_cursor_position =
         get_cursor_position(displayed_snapshot, committed_regions, render_area);
-    let is_native_image_output = image_output_state.output_kind().is_some();
+    let is_native_image_output = image_output_state.get_output_kind().is_some();
     image_output_state.set_host_terminal_size(terminal_size.width, terminal_size.height);
     let image_paint_commands =
         build_image_paints(displayed_snapshot, committed_regions, render_area);
     let image_cell_composition_snapshot = image_output_state
-        .output_kind()
+        .get_output_kind()
         .filter(|output_kind| {
-            output_kind.uses_cell_composition() && !image_paint_commands.is_empty()
+            output_kind.needs_cell_composition() && !image_paint_commands.is_empty()
         })
         .and_then(|_| {
             Some(Arc::new(build_image_cell_snapshot(
@@ -2046,9 +1968,9 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
         return Ok(false);
     }
     let is_native_image_commit =
-        is_native_image_output && image_output_state.native_commit_pending();
+        is_native_image_output && image_output_state.is_native_commit_pending();
     let native_image_output_bytes = if is_native_image_commit {
-        match image_output_state.frame_output(hardware_cursor_position) {
+        match image_output_state.build_frame_output(hardware_cursor_position) {
             Ok(native_image_output_bytes) => native_image_output_bytes,
             Err(image_frame_error) => {
                 image_output_state.fail_frame_commit();
@@ -2129,7 +2051,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
             execute!(writer, SetTitle(&window_title_text)).map_err(PaintError::Image)?;
         }
         if is_cursor_style_changed {
-            if let Some(cursor_command) = cursor_style.map(set_cursor_style) {
+            if let Some(cursor_command) = cursor_style.map(resolve_cursor_style_command) {
                 execute!(writer, cursor_command).map_err(PaintError::Image)?;
             }
         }
@@ -2206,11 +2128,11 @@ fn convert_kitty_output_error(kitty_error: KittyOutputError) -> io::Error {
 /// [`UserDefault`](CursorStyle::UserDefault) maps to
 /// [`DefaultUserShape`](SetCursorStyle::DefaultUserShape), which hands the
 /// cursor back to whatever the user configured in their own terminal.
-pub(crate) fn set_cursor_style(cursor_style: CursorStyle) -> SetCursorStyle {
-    let CursorStyle::Shaped { shape, blink } = cursor_style else {
+pub(crate) fn resolve_cursor_style_command(cursor_style: CursorStyle) -> SetCursorStyle {
+    let CursorStyle::Shaped { shape, is_blinking } = cursor_style else {
         return SetCursorStyle::DefaultUserShape;
     };
-    match (shape, blink) {
+    match (shape, is_blinking) {
         (CursorShape::Block, true) => SetCursorStyle::BlinkingBlock,
         (CursorShape::Block, false) => SetCursorStyle::SteadyBlock,
         (CursorShape::Underline, true) => SetCursorStyle::BlinkingUnderScore,

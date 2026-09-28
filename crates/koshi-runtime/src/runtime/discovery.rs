@@ -28,7 +28,7 @@ impl Server {
     /// session ending and the process exiting).
     ///
     /// `session.pane_count` counts every pane the session registry holds, and
-    /// each `tabs[column_index].pane_count` every leaf of that tab's layout.
+    /// each tab's `pane_count` every leaf of that tab's layout.
     /// Both keep counting a pane that `pane_discoveries` gives no row.
     #[must_use]
     pub fn build_overview(&self) -> Option<SessionOverview> {
@@ -59,8 +59,8 @@ impl Server {
                 session_id: session.session_id,
                 attached_at: client.get_attached_at(),
                 viewport_size: client.get_viewport_size(),
-                active_tab_id: client.get_active_tab(),
-                focused_pane_id: client.get_focused_pane(client.get_active_tab()),
+                active_tab_id: client.get_active_tab_id(),
+                focused_pane_id: client.get_focused_pane_id(client.get_active_tab_id()),
                 lock_mode: client.get_lock_mode(),
                 origin: Some(client.get_origin()),
                 pane_area: client.get_reported_pane_area(),
@@ -76,7 +76,7 @@ impl Server {
                     .iter()
                     .map(|client| client.client_id)
                     .collect(),
-                pane_count: session.panes.pane_record_count(),
+                pane_count: session.panes.count_pane_records(),
             },
             tabs: tab_discoveries,
             panes: pane_discoveries,
@@ -93,9 +93,9 @@ impl Server {
 fn list_pane_discoveries(
     session: &Session,
     tabs: &[&Tab],
-    terminal_state_by_pane_id: &HashMap<PaneId, TerminalEngine>,
+    terminal_engine_by_pane_id: &HashMap<PaneId, TerminalEngine>,
 ) -> Vec<PaneDiscovery> {
-    let mut pane_discoveries = Vec::with_capacity(session.panes.pane_record_count());
+    let mut pane_discoveries = Vec::with_capacity(session.panes.count_pane_records());
     for tab in tabs {
         for pane_id in tab.get_layout_tree().list_leaf_pane_ids() {
             let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
@@ -113,18 +113,20 @@ fn list_pane_discoveries(
             let focused_by_client_ids = session
                 .clients
                 .list_attached_clients()
-                .filter(|client| client.get_focused_pane(client.get_active_tab()) == Some(pane_id))
+                .filter(|client| {
+                    client.get_focused_pane_id(client.get_active_tab_id()) == Some(pane_id)
+                })
                 .map(|client| client.get_client_id())
                 .collect();
             pane_discoveries.push(PaneDiscovery {
                 pane_id,
                 tab_id: tab.get_tab_id(),
                 session_id: session.session_id,
-                pane_title: terminal_state_by_pane_id
+                pane_title: terminal_engine_by_pane_id
                     .get(&pane_id)
                     .and_then(|engine| engine.get_terminal_state().get_title().map(str::to_owned)),
                 working_directory: pane_record.working_directory.clone(),
-                command_argv: pane_record.spawn_spec.as_ref().map(spawn_argv),
+                command_argv: pane_record.spawn_spec.as_ref().map(list_spawn_argv),
                 lifecycle: pane_lifecycle,
                 focused_by_client_ids,
             });
@@ -135,10 +137,10 @@ fn list_pane_discoveries(
 
 /// A spawn spec as the argv discovery reports: the program first, then its
 /// arguments.
-fn spawn_argv(spec: &SpawnSpec) -> Vec<String> {
-    let mut argv = Vec::with_capacity(spec.arguments.len() + 1);
-    argv.push(spec.program.to_string_lossy().into_owned());
-    argv.extend(spec.arguments.iter().cloned());
+fn list_spawn_argv(spawn_spec: &SpawnSpec) -> Vec<String> {
+    let mut argv = Vec::with_capacity(spawn_spec.arguments.len() + 1);
+    argv.push(spawn_spec.program.to_string_lossy().into_owned());
+    argv.extend(spawn_spec.arguments.iter().cloned());
     argv
 }
 

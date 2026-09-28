@@ -2,11 +2,11 @@
 
 use super::*;
 
-fn build_cell_rect(column_index: u16, row_index: u16, column_count: u16, row_count: u16) -> Rect {
+fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
     Rect::from_origin_and_size(
         Point {
-            column: column_index,
-            row: row_index,
+            column: origin_column,
+            row: origin_row,
         },
         Size {
             column_count,
@@ -23,7 +23,7 @@ fn build_region_geometry(edge: Edge, extent_cell_count: u16) -> RegionGeometry {
 }
 
 #[test]
-fn empty_geometry_keeps_the_full_viewport() {
+fn no_region_geometries_keep_the_full_viewport() {
     let regions_result = solve_region_rects(
         Size {
             column_count: 80,
@@ -289,7 +289,7 @@ fn maximum_viewport_clamps_without_overflow() {
 
 #[test]
 fn repeated_solves_are_identical() {
-    let geometries = [
+    let region_geometries = [
         build_region_geometry(Edge::Right, 4),
         build_region_geometry(Edge::Top, 2),
         build_region_geometry(Edge::Bottom, 3),
@@ -301,7 +301,7 @@ fn repeated_solves_are_identical() {
             column_count: 12,
             row_count: 9,
         },
-        &geometries,
+        &region_geometries,
     );
 
     assert_eq!(
@@ -310,7 +310,7 @@ fn repeated_solves_are_identical() {
                 column_count: 12,
                 row_count: 9
             },
-            &geometries
+            &region_geometries
         ),
         first_region_solution
     );

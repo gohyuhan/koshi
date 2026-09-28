@@ -4,23 +4,23 @@ use std::path::Path;
 
 use super::*;
 
-fn validate_any_config(
+fn validate_test_config_file_schema(
     _config_file_kind: ConfigFileKind,
-    config_file_path: &Path,
+    config_path: &Path,
     config_source_text: &str,
 ) -> Result<(), MigrationError> {
-    read_schema_version(config_file_path, config_source_text).map(|_| ())
+    parse_config_schema_version(config_path, config_source_text).map(|_| ())
 }
 
 fn migrate_to_schema_two(
-    _config_file_path: &Path,
+    _config_path: &Path,
     config_source_text: &str,
 ) -> Result<String, MigrationError> {
     Ok(config_source_text.replacen("version 1", "version 2", 1) + "step-one #true\n")
 }
 
 fn migrate_to_schema_three(
-    _config_file_path: &Path,
+    _config_path: &Path,
     config_source_text: &str,
 ) -> Result<String, MigrationError> {
     Ok(config_source_text.replacen("version 2", "version 3", 1) + "step-two #true\n")
@@ -45,7 +45,7 @@ fn current_valid_file_stays_byte_for_byte_unchanged() {
 
 #[test]
 fn production_registry_covers_every_supported_version() {
-    validate_schema_registry(CONFIG_SCHEMAS).unwrap();
+    validate_schema_registry(CONFIG_SCHEMAS, SCHEMA_VERSION).unwrap();
 }
 
 #[test]
@@ -154,7 +154,9 @@ fn get_version_error_detail(config_source_text: &str) -> String {
             assert_eq!(config_path, "koshi.kdl");
             version_error_detail
         }
-        other => panic!("expected a version error, got {other:?}"),
+        unexpected_migration_error => {
+            panic!("expected a version error, got {unexpected_migration_error:?}")
+        }
     }
 }
 
@@ -275,17 +277,17 @@ fn migration_runs_every_adjacent_step_in_order() {
     let config_schemas = [
         ConfigSchema {
             schema_version: 1,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: Some(migrate_to_schema_two),
         },
         ConfigSchema {
             schema_version: 2,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: Some(migrate_to_schema_three),
         },
         ConfigSchema {
             schema_version: 3,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: None,
         },
     ];
@@ -313,12 +315,12 @@ fn missing_adjacent_step_stops_the_chain() {
     let config_schemas = [
         ConfigSchema {
             schema_version: 1,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: None,
         },
         ConfigSchema {
             schema_version: 2,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: None,
         },
     ];
@@ -343,25 +345,25 @@ fn missing_adjacent_step_stops_the_chain() {
 
 #[test]
 fn bad_source_schema_stops_before_migration() {
-    fn reject(
+    fn reject_invalid_source_config_schema(
         _config_file_kind: ConfigFileKind,
-        config_file_path: &Path,
+        config_path: &Path,
         _config_source_text: &str,
     ) -> Result<(), MigrationError> {
         Err(MigrationError::Invalid {
-            config_path: config_file_path.display().to_string(),
+            config_path: config_path.display().to_string(),
             validation_error_detail: "bad old field".to_string(),
         })
     }
     let config_schemas = [
         ConfigSchema {
             schema_version: 1,
-            validate_config_file: reject,
+            validate_config_file: reject_invalid_source_config_schema,
             migrate_to_next_schema: Some(migrate_to_schema_two),
         },
         ConfigSchema {
             schema_version: 2,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: None,
         },
     ];
@@ -386,15 +388,15 @@ fn bad_source_schema_stops_before_migration() {
 
 #[test]
 fn bad_migrated_schema_stops_the_chain() {
-    fn validate_step(
-        _kind: ConfigFileKind,
-        config_file_path: &Path,
+    fn validate_test_migration_schema(
+        _config_file_kind: ConfigFileKind,
+        config_path: &Path,
         config_source_text: &str,
     ) -> Result<(), MigrationError> {
-        let schema_version = read_schema_version(config_file_path, config_source_text)?;
+        let schema_version = parse_config_schema_version(config_path, config_source_text)?;
         if schema_version == 2 && !config_source_text.contains("required #true") {
             return Err(MigrationError::Invalid {
-                config_path: config_file_path.display().to_string(),
+                config_path: config_path.display().to_string(),
                 validation_error_detail: "missing required version 2 field".to_string(),
             });
         }
@@ -403,12 +405,12 @@ fn bad_migrated_schema_stops_the_chain() {
     let config_schemas = [
         ConfigSchema {
             schema_version: 1,
-            validate_config_file: validate_step,
+            validate_config_file: validate_test_migration_schema,
             migrate_to_next_schema: Some(migrate_to_schema_two),
         },
         ConfigSchema {
             schema_version: 2,
-            validate_config_file: validate_step,
+            validate_config_file: validate_test_migration_schema,
             migrate_to_next_schema: None,
         },
     ];
@@ -435,7 +437,7 @@ fn bad_migrated_schema_stops_the_chain() {
 fn a_registry_missing_a_supported_version_is_refused_before_any_work() {
     let config_schemas = [ConfigSchema {
         schema_version: 2,
-        validate_config_file: validate_any_config,
+        validate_config_file: validate_test_config_file_schema,
         migrate_to_next_schema: None,
     }];
 
@@ -461,12 +463,12 @@ fn a_step_landing_on_the_wrong_version_stops_the_chain() {
     let config_schemas = [
         ConfigSchema {
             schema_version: 1,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: Some(migrate_to_schema_three),
         },
         ConfigSchema {
             schema_version: 2,
-            validate_config_file: validate_any_config,
+            validate_config_file: validate_test_config_file_schema,
             migrate_to_next_schema: None,
         },
     ];
@@ -491,7 +493,7 @@ fn a_step_landing_on_the_wrong_version_stops_the_chain() {
 }
 
 #[test]
-fn newer_version_is_rejected() {
+fn schema_version_newer_than_supported_is_rejected() {
     let migration_error =
         migrate_config(ConfigFileKind::App, Path::new("koshi.kdl"), "version 3\n").unwrap_err();
 

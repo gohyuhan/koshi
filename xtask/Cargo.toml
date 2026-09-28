@@ -6,4 +6,4 @@ license.workspace = true
 publish = false
 
 [dependencies]
-cargo_metadata = "0.23.1"
+cargo_metadata.workspace = true

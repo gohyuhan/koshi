@@ -14,16 +14,17 @@ use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, HintBinding, PluginUiSnapshot, Reconnecting, RenderSnapshot,
-    SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, HintBinding, Reconnecting, RenderSnapshot, SessionSnapshot,
+    TabMetadata, TabSnapshot, ViewerChrome,
 };
 
 /// A frame of one session named `one`, holding one tab named `first` with no
 /// panes in it.
-fn build_render_snapshot() -> RenderSnapshot {
+fn build_region_test_render_snapshot() -> RenderSnapshot {
     let tab_id = TabId::new();
 
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -32,16 +33,16 @@ fn build_render_snapshot() -> RenderSnapshot {
                 tab_id,
                 tab_name: "first".to_string(),
                 pane_slots: Vec::new(),
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 80,
                     row_count: 24,
                 },
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
-            tabs_metadata: vec![TabMeta {
+            tabs_metadata: vec![TabMetadata {
                 tab_id,
                 tab_name: "first".to_string(),
                 tab_index: 0,
@@ -61,12 +62,11 @@ fn build_render_snapshot() -> RenderSnapshot {
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 /// Hints holding one binding: `<C-l>` labeled `Lock`.
-fn build_keymap_hints() -> KeymapHints {
+fn build_region_test_keymap_hints() -> KeymapHints {
     KeymapHints {
         hint_bindings: Arc::new(vec![HintBinding {
             key_sequence: KeySequence::from_first_and_rest(
@@ -85,7 +85,7 @@ fn build_keymap_hints() -> KeymapHints {
 
 #[test]
 fn core_regions_commit_exact_chrome_rectangles_and_revision() {
-    let committed_regions = CommittedRegions::core(
+    let committed_regions = CommittedRegions::build_core(
         Size {
             column_count: 80,
             row_count: 24,
@@ -136,12 +136,12 @@ fn core_regions_commit_exact_chrome_rectangles_and_revision() {
 fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
     // Two rows: the tab row takes the first, the hint row the second, and no row
     // is left for panes.
-    let two_row_regions = solve_core_regions(Size {
+    let two_row_viewport_solve = solve_core_regions(Size {
         column_count: 80,
         row_count: 2,
     });
     assert_eq!(
-        two_row_regions.region_rects,
+        two_row_viewport_solve.region_rects,
         vec![
             Rect::from_origin_and_size(
                 Point { column: 0, row: 0 },
@@ -160,7 +160,7 @@ fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
         ]
     );
     assert_eq!(
-        two_row_regions.pane_rect,
+        two_row_viewport_solve.pane_rect,
         Rect::from_origin_and_size(
             Point { column: 0, row: 1 },
             Size {
@@ -172,12 +172,12 @@ fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
 
     // One row: the tab row takes it and the hint row keeps a zero-height
     // rectangle at the row after it.
-    let one_row_regions = solve_core_regions(Size {
+    let one_row_viewport_solve = solve_core_regions(Size {
         column_count: 80,
         row_count: 1,
     });
     assert_eq!(
-        one_row_regions.region_rects,
+        one_row_viewport_solve.region_rects,
         vec![
             Rect::from_origin_and_size(
                 Point { column: 0, row: 0 },
@@ -196,7 +196,7 @@ fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
         ]
     );
     assert_eq!(
-        one_row_regions.pane_rect,
+        one_row_viewport_solve.pane_rect,
         Rect::from_origin_and_size(
             Point { column: 0, row: 1 },
             Size {
@@ -207,20 +207,23 @@ fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
     );
 
     // A zero-size viewport: both rectangles are empty at the origin.
-    let zero_size_regions = solve_core_regions(Size {
+    let zero_size_viewport_solve = solve_core_regions(Size {
         column_count: 0,
         row_count: 0,
     });
     assert_eq!(
-        zero_size_regions.region_rects,
-        vec![Rect::empty_at_origin(), Rect::empty_at_origin()]
+        zero_size_viewport_solve.region_rects,
+        vec![Rect::build_empty_at_origin(), Rect::build_empty_at_origin()]
     );
-    assert_eq!(zero_size_regions.pane_rect, Rect::empty_at_origin());
+    assert_eq!(
+        zero_size_viewport_solve.pane_rect,
+        Rect::build_empty_at_origin()
+    );
 }
 
 #[test]
-fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
-    let keymap_hints = build_keymap_hints();
+fn assembling_statusline_inputs_twice_shares_every_allocation() {
+    let keymap_hints = build_region_test_keymap_hints();
     let pending_key_sequence = KeySequence::from_first_and_rest(
         KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
         Vec::new(),
@@ -230,11 +233,13 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
         placement_status: None,
+        is_recovery_notice_visible: false,
     };
     let second_statusline_inputs = StatuslineInputs {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
         placement_status: None,
+        is_recovery_notice_visible: false,
     };
 
     assert!(
@@ -275,8 +280,8 @@ fn assembling_the_keybinding_row_input_twice_shares_every_allocation() {
 }
 
 #[test]
-fn assembling_the_tab_row_input_twice_borrows_each_shared_field() {
-    let mut render_snapshot = build_render_snapshot();
+fn assembling_tabline_inputs_twice_borrows_each_shared_field() {
+    let mut render_snapshot = build_region_test_render_snapshot();
     render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
     render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
     let viewer_chrome = ViewerChrome {

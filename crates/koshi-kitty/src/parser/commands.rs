@@ -77,7 +77,7 @@ pub struct KittyAnimationCommand {
     /// The packed RGBA background for a new frame.
     pub background_rgba_bytes: Option<[u8; 4]>,
     /// Whether composition replaces destination pixels instead of blending them.
-    pub replaces_destination_pixels: bool,
+    pub should_replace_destination_pixels: bool,
     /// The playback state requested by a control command.
     pub playback_state: Option<u8>,
     /// The playback loop count requested by a control command.
@@ -235,17 +235,7 @@ pub(crate) fn parse_animation_transfer_chunk(
         && find_control_parameter_bytes(control_body_bytes, b'i').is_none()
         && find_control_parameter_bytes(control_body_bytes, b'I').is_none()
     {
-        let mut normalized_control_bytes = Vec::new();
-        for control_field in control_body_bytes.split(|byte| *byte == b',') {
-            if control_field.starts_with(b"a=") {
-                normalized_control_bytes.extend_from_slice(b"a=t");
-            } else {
-                normalized_control_bytes.extend_from_slice(control_field);
-            }
-            normalized_control_bytes.push(b',');
-        }
-        normalized_control_bytes.pop();
-        let kitty_control = super::parse_kitty_control(&normalized_control_bytes)?;
+        let kitty_control = super::parse_animation_control(control_header_bytes)?;
         if !kitty_control.has_more_chunks_parameter {
             return Err(build_invalid_command_error());
         }
@@ -425,7 +415,7 @@ pub(super) fn parse_animation_command_fields(
     control_header_bytes: &[u8],
     encoded_payload_bytes: &[u8],
     command_kind: KittyCommandKind,
-    allows_additional_chunks: bool,
+    can_have_additional_chunks: bool,
 ) -> Result<KittyCommand, GraphicsError> {
     let mut normalized_control_bytes = Vec::new();
     let mut is_delete_frame = None;
@@ -445,7 +435,7 @@ pub(super) fn parse_animation_command_fields(
         normalized_control_bytes.pop();
     }
     let mut kitty_control = parse_kitty_control(&normalized_control_bytes)?;
-    if (kitty_control.has_more_chunks && !allows_additional_chunks) || kitty_control.is_query {
+    if (kitty_control.has_more_chunks && !can_have_additional_chunks) || kitty_control.is_query {
         return Err(build_invalid_command_error());
     }
     if kitty_control.has_more_chunks
@@ -601,7 +591,7 @@ pub(super) fn parse_animation_command_fields(
     } else {
         b'C'
     };
-    let replaces_destination_pixels =
+    let should_replace_destination_pixels =
         parse_raw_u32_parameter(control_header_bytes, replacement_control_key)?
             .is_some_and(|replacement_value| replacement_value == 1);
     kitty_control.image_display.requested_width = None;
@@ -645,7 +635,7 @@ pub(super) fn parse_animation_command_fields(
         },
         gap_milliseconds,
         background_rgba_bytes,
-        replaces_destination_pixels,
+        should_replace_destination_pixels,
         playback_state,
         loop_count,
         encoded_payload_bytes: encoded_payload_bytes.to_vec(),

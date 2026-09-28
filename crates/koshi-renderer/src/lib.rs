@@ -14,8 +14,8 @@ pub mod theme;
 
 pub use hit_test::{
     compute_clamped_pane_cell, compute_pane_local_cell, compute_placement_handle_rect,
-    find_first_visible_tab_index, hit_test, is_placement_handle_cell, pane_content_rect, HitRegion,
-    PLACEMENT_HANDLE_COLUMN_COUNT,
+    find_first_visible_tab_index, find_pane_content_rect, is_placement_handle_cell,
+    resolve_hit_region, HitRegion, PLACEMENT_HANDLE_COLUMN_COUNT,
 };
 pub use images::{
     build_image_cell_snapshot, build_image_paints, draw_image_placeholders, ImageCellSnapshot,
@@ -24,6 +24,5 @@ pub use images::{
 };
 pub use render::{
     compute_content_rect, compute_pane_area, get_cursor_position, get_cursor_style,
-    is_placement_target_pane, render_frame, render_frame_with_images,
-    render_frame_with_placement_target,
+    is_placement_target_pane, render_frame,
 };

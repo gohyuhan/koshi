@@ -82,9 +82,9 @@ impl PtyChildKillControl {
         (process_id > 0).then(|| Pid::from_raw(process_id))
     }
 
-    /// Send `signal` to the child (`kill`) or, when `whole_group`, to its whole
-    /// process group (`killpg`). Any error maps to [`PtyError::Signal`]
-    /// carrying the errno's name and description (`ESRCH: No such process`).
+    /// Send `signal` to the child (`kill`) or, when `should_signal_process_group`, to its whole
+    /// process group (`killpg`). Any error maps to [`PtyError::Signal`] carrying the errno's name
+    /// and description (`ESRCH: No such process`).
     ///
     /// A pid of `0`, and one above `i32::MAX`, is [`PtyError::Signal`] carrying
     /// `pid <n> names no child process`, and nothing is signalled.
@@ -117,7 +117,7 @@ impl PtyChildKillControl {
         self.send_signal(false, Signal::SIGKILL)
     }
 
-    /// SIGKILL the child's whole process group, reaping any grandchildren.
+    /// SIGKILL every process in the child's process group. Nothing is reaped.
     ///
     /// # Errors
     /// Returns [`PtyError::Signal`] when `killpg` fails: `ESRCH` when no
@@ -176,7 +176,7 @@ impl PtyChildKillControl {
 /// member: [`force_kill_child`] ends the child alone, [`force_kill_process_tree`]
 /// ends the whole group.
 ///
-/// [`panes_die_with_this_process`] holds one more, with that limit set.
+/// [`get_shared_kill_on_close_job`] holds one more, with that limit set.
 ///
 /// [`force_kill_child`]: PtyChildKillControl::force_kill_child
 /// [`force_kill_process_tree`]: PtyChildKillControl::force_kill_process_tree
@@ -205,7 +205,7 @@ unsafe impl Sync for OwnedJob {}
 /// `None` once creating it or setting its limit failed; a caller that cannot
 /// join it refuses to open the pane.
 #[cfg(windows)]
-static PANES_DIE_WITH_THIS_PROCESS: OnceLock<Option<OwnedJob>> = OnceLock::new();
+static SHARED_KILL_ON_CLOSE_JOB: OnceLock<Option<OwnedJob>> = OnceLock::new();
 
 /// The job whose closing ends every child of this process, created on first
 /// use and held open until this process exits.
@@ -217,8 +217,8 @@ static PANES_DIE_WITH_THIS_PROCESS: OnceLock<Option<OwnedJob>> = OnceLock::new()
 ///
 /// `None` when the job could not be created or its limit could not be set.
 #[cfg(windows)]
-fn panes_die_with_this_process() -> Option<HANDLE> {
-    PANES_DIE_WITH_THIS_PROCESS
+fn get_shared_kill_on_close_job() -> Option<HANDLE> {
+    SHARED_KILL_ON_CLOSE_JOB
         .get_or_init(|| unsafe {
             let shared_job_handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if shared_job_handle.is_null() {
@@ -246,7 +246,7 @@ fn panes_die_with_this_process() -> Option<HANDLE> {
 
 /// Owns a duplicated handle to the child process and closes it on drop.
 ///
-/// `force` terminates through this handle. The handle names the exact process
+/// `force_kill_child` terminates through this handle. The handle names the exact process
 /// object, dead or alive; a PID another process took over after the child
 /// exited is never terminated.
 #[cfg(windows)]
@@ -298,7 +298,7 @@ impl PtyChildKillControl {
         child_handle: RawHandle,
     ) -> Result<Self, PtyError> {
         unsafe {
-            let Some(shared_job_handle) = panes_die_with_this_process() else {
+            let Some(shared_job_handle) = get_shared_kill_on_close_job() else {
                 return Err(PtyError::Signal {
                     detail: "the job that ends this process's panes could not be created"
                         .to_string(),

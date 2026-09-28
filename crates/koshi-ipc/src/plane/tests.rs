@@ -2,9 +2,9 @@
 //!
 //! Each one runs over a real socket, the way every other transport test in
 //! this crate does: a listener in the temp directory, one connected caller,
-//! and [`next_request`] driven on the server's end.
+//! and [`read_next_request`] driven on the server's end.
 //!
-//! Every test drives [`next_request`] with the session protocol's
+//! Every test drives [`read_next_request`] with the session protocol's
 //! [`SessionPlane`]; the four decisions are the same on any plane.
 
 use super::*;
@@ -18,8 +18,8 @@ use koshi_core::geometry::Size;
 
 use crate::handshake::{Handshake, Peer};
 use crate::protocol::{
-    ConnectionToken, EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
-    SessionPlane, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, SessionPlane,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use crate::transport::Listener;
 
@@ -54,7 +54,7 @@ fn build_test_handshake(connection_token: ConnectionToken) -> Handshake {
     )
 }
 
-/// Serve one connection at `socket_address`, running `next_request` until it says stop,
+/// Serve one connection at `socket_address`, running `read_next_request` until it says stop,
 /// and hand back every outcome it produced in order.
 ///
 /// The dispatch arm answers nothing: this module owns the decisions before
@@ -72,9 +72,9 @@ fn serve_test_connection(
     connection_token: ConnectionToken,
     should_admit_connection: impl Fn() -> bool + Send + 'static,
 ) -> thread::JoinHandle<Vec<RequestDisposition<IpcRequestKind>>> {
-    let (server_thread, connection_accepted_rx) =
+    let (server_thread, connection_accepted_receiver) =
         serve_connection_and_announce(socket_address, connection_token, should_admit_connection);
-    drop(connection_accepted_rx);
+    drop(connection_accepted_receiver);
     server_thread
 }
 
@@ -93,14 +93,14 @@ fn serve_connection_and_announce(
     mpsc::Receiver<()>,
 ) {
     let listener = Listener::bind(socket_address).expect("bind the test listener");
-    let (connection_accepted_tx, connection_accepted_rx) = mpsc::channel();
+    let (connection_accepted_sender, connection_accepted_receiver) = mpsc::channel();
     let server_thread = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the caller");
-        let _ = connection_accepted_tx.send(());
+        let _ = connection_accepted_sender.send(());
         let mut request_handshake = build_test_handshake(connection_token);
         let mut request_dispositions = Vec::new();
         loop {
-            let request_disposition = next_request::<SessionPlane>(
+            let request_disposition = read_next_request::<SessionPlane>(
                 &mut connection,
                 &mut request_handshake,
                 TEST_BUILD_VERSION,
@@ -113,7 +113,7 @@ fn serve_connection_and_announce(
             }
         }
     });
-    (server_thread, connection_accepted_rx)
+    (server_thread, connection_accepted_receiver)
 }
 
 /// How long a test waits for its body to finish before calling the server
@@ -126,13 +126,13 @@ const ANSWER_WAIT_DURATION: Duration = Duration::from_secs(10);
 ///
 /// [`Connection`] has no read deadline: a server that stops answering blocks
 /// the body on a socket read, and the deadline turns that into a failure.
-fn within_deadline(test_body: impl FnOnce() + Send + 'static) {
-    let (test_finished_tx, test_finished_rx) = mpsc::channel();
+fn run_within_deadline(test_body: impl FnOnce() + Send + 'static) {
+    let (test_finished_sender, test_finished_receiver) = mpsc::channel();
     let test_thread = thread::spawn(move || {
         test_body();
-        let _ = test_finished_tx.send(());
+        let _ = test_finished_sender.send(());
     });
-    match test_finished_rx.recv_timeout(ANSWER_WAIT_DURATION) {
+    match test_finished_receiver.recv_timeout(ANSWER_WAIT_DURATION) {
         Ok(()) => test_thread.join().expect("the test body finished"),
         // The body panicked, so its own message is this test's failure.
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -154,7 +154,7 @@ fn build_test_hello_request(request_id: u64, connection_token: ConnectionToken) 
 
 #[test]
 fn a_hello_is_answered_here_with_the_settled_version_and_the_build() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("hello");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -185,7 +185,7 @@ fn a_hello_is_answered_here_with_the_settled_version_and_the_build() {
 
 #[test]
 fn a_request_after_the_hello_is_handed_to_the_callers_dispatch() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("dispatch");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -219,7 +219,7 @@ fn a_request_after_the_hello_is_handed_to_the_callers_dispatch() {
 
 #[test]
 fn a_request_before_the_hello_is_refused_here_and_the_connection_keeps_serving() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("gated");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -269,7 +269,7 @@ fn a_request_before_the_hello_is_refused_here_and_the_connection_keeps_serving()
 
 #[test]
 fn a_kind_this_build_does_not_have_is_refused_by_name_and_the_connection_keeps_serving() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("unknown-kind");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -320,7 +320,7 @@ fn a_kind_this_build_does_not_have_is_refused_by_name_and_the_connection_keeps_s
 
 #[test]
 fn a_frame_read_whole_but_unreadable_is_refused_and_the_connection_keeps_serving() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("malformed");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -368,7 +368,7 @@ fn a_frame_read_whole_but_unreadable_is_refused_and_the_connection_keeps_serving
 
 #[test]
 fn a_kind_this_build_does_not_have_before_the_hello_is_refused_as_hello_required() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("unknown-kind-gated");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -419,7 +419,7 @@ fn a_kind_this_build_does_not_have_before_the_hello_is_refused_as_hello_required
 
 #[test]
 fn a_hello_naming_a_version_range_this_build_does_not_share_is_refused_here() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("version");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -430,8 +430,8 @@ fn a_hello_naming_a_version_range_this_build_does_not_share_is_refused_here() {
             .send(&IpcRequest {
                 request_id: 1,
                 request_kind: IpcRequestKind::Hello {
-                    min_protocol_version: unsupported_protocol_version,
-                    max_protocol_version: unsupported_protocol_version,
+                    minimum_protocol_version: unsupported_protocol_version,
+                    maximum_protocol_version: unsupported_protocol_version,
                     connection_token,
                     is_remote: false,
                 },
@@ -462,7 +462,7 @@ fn a_hello_naming_a_version_range_this_build_does_not_share_is_refused_here() {
 
 #[test]
 fn a_hello_presenting_the_wrong_token_is_refused_here() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("token");
         let server_thread = run_test_request_loop(
             &socket_address,
@@ -498,7 +498,7 @@ fn a_hello_presenting_the_wrong_token_is_refused_here() {
 
 #[test]
 fn a_refused_hello_keeps_the_connection_serving_for_the_next_hello() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("token-retry");
         let connection_token = ConnectionToken::from_secret("the real secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
@@ -550,7 +550,7 @@ fn a_refused_hello_keeps_the_connection_serving_for_the_next_hello() {
 
 #[test]
 fn a_peer_no_longer_admitted_is_answered_nothing_at_all() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         // `should_admit_connection` is read after the Hello arrives: a peer whose access was
         // withdrawn while its connection sat open is not served that Hello.
         let socket_address = build_test_socket_address("withdrawn");
@@ -577,7 +577,7 @@ fn a_peer_no_longer_admitted_is_answered_nothing_at_all() {
 
 #[test]
 fn a_peer_whose_access_is_withdrawn_after_the_hello_is_answered_nothing_more() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("withdrawn-after-hello");
         let connection_token = ConnectionToken::from_secret("secret");
         let is_connection_admitted = Arc::new(AtomicBool::new(true));
@@ -625,7 +625,7 @@ fn a_peer_whose_access_is_withdrawn_after_the_hello_is_answered_nothing_more() {
 
 #[test]
 fn a_malformed_frame_is_answered_even_while_the_peer_is_not_admitted() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         // The malformed-frame answer goes out before `should_admit_connection` is read.
         let socket_address = build_test_socket_address("withdrawn-junk");
         let server_thread = serve_test_connection(
@@ -658,9 +658,9 @@ fn a_malformed_frame_is_answered_even_while_the_peer_is_not_admitted() {
 
 #[test]
 fn a_peer_that_hangs_up_ends_the_connection() {
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("hangup");
-        let (server_thread, connection_accepted_rx) = serve_connection_and_announce(
+        let (server_thread, connection_accepted_receiver) = serve_connection_and_announce(
             &socket_address,
             ConnectionToken::from_secret("secret"),
             || true,
@@ -669,7 +669,7 @@ fn a_peer_that_hangs_up_ends_the_connection() {
         let caller_connection = Connection::connect(&socket_address).expect("connect");
         // Dropped once the server holds the connection: a peer going away
         // mid-serve.
-        connection_accepted_rx
+        connection_accepted_receiver
             .recv()
             .expect("the server accepted the caller");
         drop(caller_connection);
@@ -692,9 +692,9 @@ fn an_oversize_length_prefix_ends_the_connection_with_nothing_written() {
 
     use crate::transport::MAX_FRAME_BYTE_COUNT;
 
-    within_deadline(|| {
+    run_within_deadline(|| {
         let socket_address = build_test_socket_address("oversize");
-        let (server_thread, connection_accepted_rx) = serve_connection_and_announce(
+        let (server_thread, connection_accepted_receiver) = serve_connection_and_announce(
             &socket_address,
             ConnectionToken::from_secret("secret"),
             || true,
@@ -702,7 +702,7 @@ fn an_oversize_length_prefix_ends_the_connection_with_nothing_written() {
 
         let mut caller_connection =
             std::os::unix::net::UnixStream::connect(&socket_address).expect("connect");
-        connection_accepted_rx
+        connection_accepted_receiver
             .recv()
             .expect("the server accepted the caller");
         caller_connection
@@ -725,13 +725,13 @@ fn an_oversize_length_prefix_ends_the_connection_with_nothing_written() {
 
 #[test]
 fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
-    within_deadline(|| {
-        // `next_request` hands an Attach to dispatch whole, payload included.
+    run_within_deadline(|| {
+        // `read_next_request` hands an Attach to dispatch whole, payload included.
         let socket_address = build_test_socket_address("attach");
         let connection_token = ConnectionToken::from_secret("secret");
         let server_thread = run_test_request_loop(&socket_address, connection_token.clone());
 
-        let attach_viewport = Size {
+        let attach_viewport_size = Size {
             column_count: 80,
             row_count: 24,
         };
@@ -744,8 +744,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
             .send(&IpcRequest {
                 request_id: 2,
                 request_kind: IpcRequestKind::Attach {
-                    viewport: attach_viewport,
-                    event_filter: EventFilterSpec::All,
+                    viewport_size: attach_viewport_size,
                     resume_client_id: None,
                     resume_token: None,
                     pane_area: None,
@@ -763,8 +762,7 @@ fn an_attach_carries_its_payload_through_to_the_callers_dispatch() {
                 RequestDisposition::Dispatch {
                     request_id: 2,
                     request_kind: IpcRequestKind::Attach {
-                        viewport: attach_viewport,
-                        event_filter: EventFilterSpec::All,
+                        viewport_size: attach_viewport_size,
                         resume_client_id: None,
                         resume_token: None,
                         pane_area: None,

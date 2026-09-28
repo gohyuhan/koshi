@@ -71,8 +71,8 @@ mod tests;
 /// An `80x24` viewport reports `Reported(80x22)`. A viewport shorter than the
 /// two rows reports zero rows instead of an invalid negative size.
 #[must_use]
-pub(crate) fn compute_core_pane_area(viewport: Size) -> PaneArea {
-    PaneArea::Reported(solve_core_regions(viewport).pane_rect.cell_size)
+pub(crate) fn compute_core_pane_area(viewport_size: Size) -> PaneArea {
+    PaneArea::Reported(solve_core_regions(viewport_size).pane_rect.size)
 }
 
 /// One pending read-only placement preview request.
@@ -256,7 +256,7 @@ pub struct Client {
     /// The client's own outer-terminal size in cells. Updated from resize
     /// events and reported to the session, which reconciles tab sizes from
     /// every viewer's report; this copy is the client's alone.
-    viewport: Size,
+    viewport_size: Size,
     /// Receiving end of this client's event subscription, read by
     /// [`apply_events`](Self::apply_events). A viewer subscribed to a session in
     /// this process is fed by that session's bounded fan-out: live events, and
@@ -278,7 +278,7 @@ pub struct Client {
     /// [`client_config`](Self::client_config)'s keybindings and the action table.
     keymap_catalog: KeymapHintCatalog,
     /// The action table a bound name is checked against — for the hint bar's
-    /// labels and the `continuous` flag a repeat-capable binding re-arms on.
+    /// labels and the `is_continuous` flag a repeat-capable binding re-arms on.
     /// Dispatch itself happens on the session, against its own table.
     registry: ActionRegistry,
     /// This viewer's base input mode. It decides what a key means when no local
@@ -359,9 +359,9 @@ impl Client {
     /// palette, and the shipped keymap. The files the user wrote arrive
     /// through [`load_startup_config`](Self::load_startup_config).
     #[must_use]
-    pub fn from_client_id_and_viewport(
+    pub fn from_client_id_and_viewport_size(
         client_id: ClientId,
-        viewport: Size,
+        viewport_size: Size,
         delivery_receiver: Receiver<Delivery>,
         cleanup_guard: TerminalCleanupGuard,
     ) -> Self {
@@ -373,7 +373,7 @@ impl Client {
         Client {
             client_id,
             session_id: None,
-            viewport,
+            viewport_size,
             delivery_receiver,
             config_layers,
             client_config,
@@ -424,7 +424,8 @@ impl Client {
         theme: Option<PartialThemeConfig>,
         keybindings: Option<PartialKeybindingsConfig>,
     ) -> Option<ConflictReport> {
-        self.config_layers = ConfigLayers::from_files(app.clone(), theme.clone(), None);
+        self.config_layers =
+            ConfigLayers::from_config_file_layers(app.clone(), theme.clone(), None);
         self.client_config = self.config_layers.resolve_effective_client_config();
         self.theme = theme::resolve_theme(&self.client_config.theme);
 
@@ -434,7 +435,7 @@ impl Client {
             return None;
         };
         let user_mode_bindings_by_name = candidate.mode_bindings_by_name.clone();
-        let tentative_layers = ConfigLayers::from_files(app, theme, Some(candidate));
+        let tentative_layers = ConfigLayers::from_config_file_layers(app, theme, Some(candidate));
         let tentative = tentative_layers.resolve_effective_client_config();
         let key_layers =
             build_keymap_layers(user_mode_bindings_by_name, tentative.keybindings.leader);
@@ -442,7 +443,7 @@ impl Client {
             &key_layers,
             tentative.keybindings.leader,
             tentative.keybindings.unlock_alternative,
-            tentative.keybindings.max_chord_depth,
+            tentative.keybindings.maximum_chord_depth,
             &self.registry,
         );
         if report.get_verdict() != KeymapVerdict::Apply {
@@ -458,7 +459,7 @@ impl Client {
         }
         self.config_layers = tentative_layers;
         self.client_config = tentative;
-        self.keymap_catalog = KeymapHintCatalog::from_parts(
+        self.keymap_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
             &key_layers,
             &self.client_config.keybindings,
             &self.registry,
@@ -495,13 +496,13 @@ impl Client {
     /// The client's own outer-terminal size in cells.
     #[must_use]
     pub fn get_viewport_size(&self) -> Size {
-        self.viewport
+        self.viewport_size
     }
 
     /// Record the outer terminal's new size. The caller also reports the
     /// resize to the session, which owns the reconciled tab sizes.
-    pub fn set_viewport(&mut self, viewport: Size) {
-        self.viewport = viewport;
+    pub fn set_viewport_size(&mut self, viewport_size: Size) {
+        self.viewport_size = viewport_size;
     }
 
     /// Record the session that supplies the current event stream.
@@ -856,7 +857,7 @@ impl Client {
 
     /// Return the time until the current placement tab hover may request a preview.
     #[must_use]
-    pub(crate) fn next_placement_tab_hover_wakeup(
+    pub(crate) fn compute_next_placement_tab_hover_wakeup(
         &self,
         current_time: Instant,
     ) -> Option<Duration> {
@@ -958,7 +959,8 @@ impl Client {
         self.placement_state.queued_placement_read.take()
     }
 
-    /// Start one placement preview request, or retain the newest destination while another is pending.
+    /// Start one placement preview request, or retain the newest destination while another is
+    /// pending.
     pub(crate) fn begin_placement_read(
         &mut self,
         request_id: u64,
@@ -985,7 +987,10 @@ impl Client {
 
     /// Return the time until the current placement preview request expires.
     #[must_use]
-    pub(crate) fn next_placement_read_wakeup(&self, current_time: Instant) -> Option<Duration> {
+    pub(crate) fn compute_next_placement_read_wakeup(
+        &self,
+        current_time: Instant,
+    ) -> Option<Duration> {
         self.placement_state
             .placement_read_request
             .as_ref()
@@ -1002,7 +1007,7 @@ impl Client {
         self.placement_state.placement_read_request.is_some()
     }
 
-    /// Whether the placement status reads `loading`: a preview read is in
+    /// Whether the placement status is `PlacementStatusKind::Loading`: a preview read is in
     /// flight, or the end of this attachment loop pass sends one.
     #[must_use]
     pub(crate) fn is_placement_preview_loading(&self) -> bool {
@@ -1318,7 +1323,7 @@ impl Client {
         self.is_mouse_selection_enabled = is_mouse_selection_enabled;
     }
 
-    /// The hint-bar data one frame is painted from, using `mode` and the
+    /// The hint-bar data one frame is painted from, using `lock_mode` and the
     /// acting client's mouse-selection state.
     ///
     /// The entry labelled [`MOUSE_SELECT_HINT`] reads [`MOUSE_UNSELECT_HINT`]
@@ -1329,7 +1334,7 @@ impl Client {
         lock_mode: LockMode,
         is_mouse_selection_enabled: bool,
     ) -> KeymapHints {
-        mouse_select_hints(
+        apply_mouse_selection_hints(
             self.keymap_catalog.build_hints_for_mode(lock_mode),
             is_mouse_selection_enabled,
         )
@@ -1414,11 +1419,14 @@ impl Client {
 /// `hints` with the `core:mouse-select` entry wearing its "on" label, so the
 /// hint bar reads `Mouse Unselect` while mouse-select mode is active.
 ///
-/// `on` false returns `hints` untouched. `on` true returns a copy in which
+/// `is_mouse_selection_enabled` false returns `keymap_hints` untouched. `is_mouse_selection_enabled` true returns a copy in which
 /// every entry labelled [`MOUSE_SELECT_HINT`] is relabelled
 /// [`MOUSE_UNSELECT_HINT`]; nothing else changes. Matching is on the label, so
 /// a rebound or duplicated binding flips too.
-fn mouse_select_hints(keymap_hints: KeymapHints, is_mouse_selection_enabled: bool) -> KeymapHints {
+fn apply_mouse_selection_hints(
+    keymap_hints: KeymapHints,
+    is_mouse_selection_enabled: bool,
+) -> KeymapHints {
     if !is_mouse_selection_enabled {
         return keymap_hints;
     }

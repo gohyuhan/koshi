@@ -17,7 +17,7 @@
 //! the whole file to defaults. A conflict in a `keybinding.kdl` that *parses*
 //! is caught where the runtime applies it, not here.
 //!
-//! `load` writes no log line of its own. It runs before the tracing
+//! `load_config_files` writes no log line of its own. It runs before the tracing
 //! subscriber is installed, and returns each skip reason as a string the
 //! caller replays once tracing is up.
 
@@ -37,7 +37,7 @@ use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
-use koshi_observability::logging::LoggingParams;
+use koshi_observability::logging::LoggingParameters;
 use koshi_runtime::ipc_server::{OtherUsers, OtherUsersSetting};
 
 #[cfg(test)]
@@ -106,19 +106,19 @@ pub fn load_app_layer() -> Option<PartialKoshiConfig> {
         .map(|app_config_file| app_config_file.layer)
 }
 
-/// The tracing subscriber's settings for `session_id`: `app`'s `logging`
+/// The tracing subscriber's settings for `session_id`: `app_config_layer`'s `logging`
 /// section over the built-in defaults. The session server and every client
 /// attached to it build their params here; one session's lines all land in one
 /// file.
 #[must_use]
-pub fn build_logging_params(
+pub fn build_logging_parameters(
     app_config_layer: Option<&PartialKoshiConfig>,
     session_id: SessionId,
-) -> LoggingParams {
+) -> LoggingParameters {
     let logging_config = app_config_layer
         .map(PartialKoshiConfig::get_logging_config)
         .unwrap_or_default();
-    LoggingParams {
+    LoggingParameters {
         is_enabled: logging_config.is_enabled,
         log_level: logging_config.level,
         log_format: logging_config.log_format,
@@ -129,7 +129,7 @@ pub fn build_logging_params(
 /// What the session's control socket needs to serve the other users of this
 /// machine, or `None` when only the user who started the session may reach it.
 ///
-/// `forced_on` is the `--allow-other-users` flag: `Some(true)` serves them
+/// `forced_allow_other_users` is the `--allow-other-users` flag: `Some(true)` serves them
 /// whatever `koshi.kdl` says, `Some(false)` serves only this user whatever
 /// that file says, and `None` leaves the answer to that file's
 /// `allow-other-users`.
@@ -198,13 +198,16 @@ fn is_other_user_access_allowed() -> bool {
 
 /// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate that
 /// every `#[beta_feature]` entry point reads.
-pub fn apply_beta_gate(app: Option<PartialKoshiConfig>) {
-    let server_config = merge_server(ServerConfig::default(), app.into_iter().collect());
+pub fn apply_beta_gate(app_config_layer: Option<PartialKoshiConfig>) {
+    let server_config = merge_server(
+        ServerConfig::default(),
+        app_config_layer.into_iter().collect(),
+    );
     koshi_beta::set_beta_features_allowed(server_config.should_allow_beta_features);
 }
 
 /// The split direction a pane-opening verb uses when `--direction` is absent:
-/// `app`'s `layout.new-pane-direction` folded onto the built-in defaults. The
+/// `app_config_layer`'s `layout.new-pane-direction` folded onto the built-in defaults. The
 /// CLI is a client, so it folds the viewer-owned sections exactly as a viewer
 /// does. `None` — no config directory, no `koshi.kdl`, or a file that did not
 /// parse — gives the built-in [`Direction::Right`].
@@ -218,7 +221,7 @@ pub fn resolve_new_pane_direction(app_config_layer: Option<PartialKoshiConfig>) 
     .new_pane_direction
 }
 
-/// Whether this viewer sends native image output to its terminal: `app`'s
+/// Whether this viewer sends native image output to its terminal: `app_config_layer`'s
 /// `image-support` folded onto the built-in default. `None` gives `true`.
 #[must_use]
 pub fn supports_image_output(app_config_layer: Option<PartialKoshiConfig>) -> bool {
@@ -230,7 +233,7 @@ pub fn supports_image_output(app_config_layer: Option<PartialKoshiConfig>) -> bo
 }
 
 /// The file's text, or `None` when it is absent (not an error) or unreadable.
-/// A read failure is recorded in `warnings`.
+/// A read failure is recorded in `config_warnings`.
 fn load_config_file(config_path: &Path, config_warnings: &mut Vec<String>) -> Option<String> {
     if !config_path.exists() {
         return None;
@@ -271,14 +274,14 @@ fn load_app_config(config_path: &Path, config_warnings: &mut Vec<String>) -> Opt
     }
 }
 
-/// Parses the theme `theme_name` selects — `themes/<theme_name>.kdl` under `config_directory` — into
-/// its color layer, naming the layer after the file it came from and recording
-/// every field-partial skip.
+/// Parses the theme `theme_name` selects — `themes/<theme_name>.kdl` under `config_directory` —
+/// into its color layer, naming the layer after the file it came from and recording every
+/// field-partial skip.
 ///
 /// Returns `None`, which leaves koshi's built-in colors in place, when `theme_name`
 /// is [`DEFAULT_THEME`], is not a plain file name, or names a file that is
 /// absent, unreadable, or fails to parse. Every one of those but the first is
-/// recorded in `warnings`.
+/// recorded in `config_warnings`.
 fn load_theme_config(
     config_directory: &Path,
     theme_name: &str,
@@ -336,7 +339,7 @@ fn load_theme_config(
     }
 }
 
-/// Records `reason` as the warning for a theme that could not be used, saying
+/// Records `fallback_reason` as the warning for a theme that could not be used, saying
 /// which theme stands instead, and yields the `None` that leaves the built-in
 /// colors in place.
 ///
@@ -370,7 +373,7 @@ fn load_keybindings_config(
     }
 }
 
-/// Appends each field-partial skip from a parsed file to `warnings`, prefixed
+/// Appends each field-partial skip from a parsed file to `config_warnings`, prefixed
 /// with the file it came from.
 fn append_config_field_warnings(
     config_path: &Path,

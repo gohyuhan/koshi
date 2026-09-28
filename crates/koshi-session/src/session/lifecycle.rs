@@ -1,34 +1,14 @@
-//! Lifecycle state machines for the session model: the typed states a tab and
-//! a session move through from creation to teardown.
+//! The lifecycle state machine for a session: the typed states it moves
+//! through from creation to teardown.
 //!
-//! Each lifecycle is a small enum naming the stages a tab or a session can be
-//! in: a tab is `Creating`, `Active`, `Inactive`, `Closing`, or `Closed`; a
-//! session starts `Starting`, reaches `Running` on its first tab, drops to
-//! `Detaching` while no client is attached, and ends `Stopping` then `Stopped`.
-//!
-//! [`SessionLifecycle::transition`] is the only transition function defined
-//! here; it accepts seven state-and-event pairs and rejects every other. A
-//! [`Tab`](crate::session::state::Tab) starts at `TabLifecycle::Creating` and
-//! nothing in this crate advances it to `Active`, `Inactive`, `Closing`, or
-//! `Closed`: a tab that closes is dropped from the session outright.
+//! A session starts `Starting`, reaches `Running` on its first tab, drops to
+//! `Detaching` while no client is attached, and ends `Stopping` then
+//! `Stopped`. [`SessionLifecycle::transition`] accepts seven state-and-event
+//! pairs and rejects every other.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::InvalidTransition;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TabLifecycle {
-    /// The tab was just created; no lifecycle transition has advanced it yet.
-    Creating,
-    /// The tab is visible and its panes are interactive.
-    Active,
-    /// The tab exists in the background while the client displays a different tab.
-    Inactive,
-    /// The tab is shutting down; panes are being closed.
-    Closing,
-    /// The tab has closed and should be removed from the session.
-    Closed,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionLifecycle {
@@ -88,7 +68,8 @@ pub enum SessionLifecycleEvent {
     LastClientDetached,
     /// A client attached to a `Detaching` session, reviving it to `Running`.
     ClientAttached,
-    /// Shutdown was requested; session moves to `Stopping` from `Running`, `Detaching`, or `Starting`.
+    /// Shutdown was requested; session moves to `Stopping` from `Running`, `Detaching`, or
+    /// `Starting`.
     StopRequested,
     /// Shutdown completed after teardown; moves `Stopping` to `Stopped`.
     StopCompleted,

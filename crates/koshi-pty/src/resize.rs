@@ -27,10 +27,10 @@ const MIN_PTY_SIZE: PtySize = PtySize {
 pub fn compute_pty_size(content_rect: Rect) -> PtySize {
     PtySize {
         column_count: content_rect
-            .cell_size
+            .size
             .column_count
             .max(MIN_PTY_SIZE.column_count),
-        row_count: content_rect.cell_size.row_count.max(MIN_PTY_SIZE.row_count),
+        row_count: content_rect.size.row_count.max(MIN_PTY_SIZE.row_count),
     }
 }
 

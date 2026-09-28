@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
-use ratatui::style::{Color as RatatuiColor, Modifier, Style as RatatuiStyle};
 
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -15,17 +14,16 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseTracking;
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::SolvedRegions;
-use koshi_pane::pane::state::PaneKind;
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDimension, ImageDisplay, ImageRecord,
 };
 use koshi_terminal::grid::state::{Cell, Grid};
-use koshi_terminal::style::{Color as CellColor, Style};
+use koshi_terminal::style::Style;
 
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, GridView, ImagePlacementSnapshot,
-    KeymapHints, PaneSlot, PaneSnapshot, PluginUiSnapshot, RenderSnapshot, ScrollbackMeta,
-    SelectionSpans, SessionSnapshot, TabMeta, TabSnapshot, ViewerChrome,
+    KeymapHints, PaneSlot, PaneSnapshot, RenderSnapshot, ScrollbackMetadata, SelectionSpans,
+    SessionSnapshot, TabMetadata, TabSnapshot, ViewerChrome,
 };
 use crate::theme::Theme;
 
@@ -37,7 +35,7 @@ fn build_image_record(pixel_width: u32, pixel_height: u32, z_index: i32) -> Arc<
             pixel_width,
             pixel_height,
             rgba_bytes: (0..pixel_count * 4)
-                .map(|channel_value| u8::try_from(channel_value % 256).expect("test byte fits"))
+                .map(|rgba_byte_index| u8::try_from(rgba_byte_index % 256).expect("test byte fits"))
                 .collect(),
         })
         .into(),
@@ -57,7 +55,7 @@ fn build_render_snapshot(
     image_placement_snapshots: Vec<ImagePlacementSnapshot>,
     has_terminal_grid: bool,
     is_visible: bool,
-    are_all_panes_suppressed: bool,
+    is_every_pane_suppressed: bool,
 ) -> RenderSnapshot {
     let tab_id = TabId::new();
     let viewport_size = Size {
@@ -75,7 +73,7 @@ fn build_render_snapshot(
             shape: None,
         },
         terminal_grid_view: has_terminal_grid.then(|| GridView {
-            grid: Arc::new(Grid::blank(6, 38, Style::default())),
+            grid: Arc::new(Grid::build_blank(6, 38, Style::default())),
             view_row_offset: 0,
         }),
         image_placement_snapshots,
@@ -86,12 +84,12 @@ fn build_render_snapshot(
         view_top_row_index: 0,
         selection_spans: None,
         has_selection: false,
-        scrollback_meta: ScrollbackMeta {
-            is_truncated: false,
+        scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
     };
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -103,21 +101,19 @@ fn build_render_snapshot(
                     pane_id,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
-                        cell_size: viewport_size,
+                        size: viewport_size,
                     },
                     content_rect: Some(content_rect),
-                    pane_kind: PaneKind::Terminal,
                     is_visible,
-                    is_suppressed: are_all_panes_suppressed,
-                    is_dead: false,
+                    is_suppressed: is_every_pane_suppressed,
                 }],
-                effective_cell_size: viewport_size,
+                tab_size: viewport_size,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed,
+                is_every_pane_suppressed,
                 gap_cell_count: 0,
             },
-            tabs_metadata: vec![TabMeta {
+            tabs_metadata: vec![TabMetadata {
                 tab_id,
                 tab_name: String::from("tab"),
                 tab_index: 0,
@@ -134,11 +130,10 @@ fn build_render_snapshot(
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
-fn regions() -> CommittedRegions {
+fn build_regions() -> CommittedRegions {
     CommittedRegions::from_solved_regions(
         Size {
             column_count: 40,
@@ -161,7 +156,7 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
         PaneId::new(),
         Rect {
             origin: Point { column: 1, row: 1 },
-            cell_size: Size {
+            size: Size {
                 column_count: 8,
                 row_count: 5,
             },
@@ -184,10 +179,11 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
     let mut second_cell = Cell::from_character('e', 1, Style::default());
     second_cell.push_combining('\u{300}');
     *grid.get_cell_mut(0, 1).unwrap() = second_cell;
-    let image_cells =
-        build_image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
+    let image_cell_snapshot =
+        build_image_cell_snapshot(&snapshot, &build_regions(), RatatuiRect::new(0, 0, 40, 8))
+            .unwrap();
     assert_eq!(
-        image_cells.find_cell(1, 1),
+        image_cell_snapshot.find_cell(1, 1),
         Some(&ImageCellState {
             character: 'e',
             cell_width: 1,
@@ -196,7 +192,7 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
         })
     );
     assert_eq!(
-        image_cells.find_cell(2, 1),
+        image_cell_snapshot.find_cell(2, 1),
         Some(&ImageCellState {
             character: 'e',
             cell_width: 1,
@@ -207,48 +203,13 @@ fn image_cell_snapshot_keeps_exact_combining_characters() {
 }
 
 #[test]
-fn image_cell_snapshot_overlay_reads_rendered_preview_cells() {
-    let mut image_cell_snapshot = ImageCellSnapshot::from_cell_states(
-        RatatuiRect::new(0, 0, 2, 1),
-        vec![ImageCellState::default(), ImageCellState::default()],
-    )
-    .expect("the test area has two cells");
-    let mut render_buffer = Buffer::empty(RatatuiRect::new(0, 0, 2, 1));
-    render_buffer[(0, 0)]
-        .set_char('X')
-        .set_fg(RatatuiColor::LightRed)
-        .set_bg(RatatuiColor::Rgb(1, 2, 3))
-        .set_style(RatatuiStyle::default().add_modifier(Modifier::BOLD));
-
-    image_cell_snapshot.overlay_buffer(RatatuiRect::new(0, 0, 1, 1), &render_buffer);
-
-    let cell_state = image_cell_snapshot
-        .find_cell(0, 0)
-        .expect("the cell is present");
-    assert_eq!(cell_state.character, 'X');
-    assert_eq!(
-        cell_state.style.get_foreground_color(),
-        CellColor::Indexed(9)
-    );
-    assert_eq!(
-        cell_state.style.get_background_color(),
-        CellColor::Rgb(1, 2, 3)
-    );
-    assert!(cell_state.style.get_attributes().is_bold());
-    assert_eq!(
-        image_cell_snapshot.find_cell(1, 0),
-        Some(&ImageCellState::default())
-    );
-}
-
-#[test]
 fn image_cell_snapshot_matches_screen_reverse_and_selection() {
     let pane_id = PaneId::new();
     let mut snapshot = build_render_snapshot(
         pane_id,
         Rect {
             origin: Point { column: 1, row: 1 },
-            cell_size: Size {
+            size: Size {
                 column_count: 8,
                 row_count: 5,
             },
@@ -277,22 +238,23 @@ fn image_cell_snapshot_matches_screen_reverse_and_selection() {
     reversed_without_selection.set_reverse(true);
     *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, reversed_without_selection);
 
-    let image_cells =
-        build_image_cell_snapshot(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8)).unwrap();
+    let image_cell_snapshot =
+        build_image_cell_snapshot(&snapshot, &build_regions(), RatatuiRect::new(0, 0, 40, 8))
+            .unwrap();
 
-    assert!(image_cells
+    assert!(image_cell_snapshot
         .find_cell(1, 1)
         .unwrap()
         .style
         .get_attributes()
         .is_reverse());
-    assert!(image_cells
+    assert!(image_cell_snapshot
         .find_cell(2, 1)
         .unwrap()
         .style
         .get_attributes()
         .is_reverse());
-    assert!(!image_cells
+    assert!(!image_cell_snapshot
         .find_cell(3, 1)
         .unwrap()
         .style
@@ -307,7 +269,7 @@ fn image_order_is_one_global_sequence_across_panes() {
         pane_id,
         Rect {
             origin: Point { column: 1, row: 1 },
-            cell_size: Size {
+            size: Size {
                 column_count: 8,
                 row_count: 5,
             },
@@ -340,7 +302,8 @@ fn image_order_is_one_global_sequence_across_panes() {
         .active_tab_snapshot
         .pane_slots
         .push(second_pane_slot);
-    let image_paints = build_image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
+    let image_paints =
+        build_image_paints(&snapshot, &build_regions(), RatatuiRect::new(0, 0, 40, 8));
     assert_eq!(
         image_paints
             .iter()
@@ -356,7 +319,7 @@ fn image_order_is_one_global_sequence_across_panes() {
 #[test]
 fn a_scrolled_crop_keeps_the_full_image_scale() {
     let pane_id = PaneId::new();
-    let placement =
+    let image_placement_snapshot =
         ImagePlacementSnapshot::from_image_record(7, build_image_record(8, 12, 0), (0, 0), 4, 4)
             .expect("valid placement")
             .with_cell_geometry(koshi_core::geometry::ImageCellGeometry {
@@ -371,17 +334,18 @@ fn a_scrolled_crop_keeps_the_full_image_scale() {
         pane_id,
         Rect {
             origin: Point { column: 1, row: 1 },
-            cell_size: Size {
+            size: Size {
                 column_count: 8,
                 row_count: 5,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
     );
-    let image_paints = build_image_paints(&snapshot, &regions(), RatatuiRect::new(0, 0, 40, 8));
+    let image_paints =
+        build_image_paints(&snapshot, &build_regions(), RatatuiRect::new(0, 0, 40, 8));
     assert_eq!(
         image_paints
             .iter()
@@ -402,26 +366,26 @@ fn a_scrolled_crop_keeps_the_full_image_scale() {
 #[test]
 fn image_paint_keeps_geometry_and_rgba_record() {
     let pane_id = PaneId::new();
-    let placement =
+    let image_placement_snapshot =
         ImagePlacementSnapshot::from_image_record(7, build_image_record(6, 4, 0), (1, 2), 3, 2)
             .expect("test image placement is valid");
     let snapshot = build_render_snapshot(
         pane_id,
         Rect {
             origin: Point { column: 1, row: 1 },
-            cell_size: Size {
+            size: Size {
                 column_count: 8,
                 row_count: 5,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
     );
     let image_paints = build_image_paints(
         &snapshot,
-        &regions(),
+        &build_regions(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -462,7 +426,7 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
     let pane_id = PaneId::new();
     let pane_content_rect = Rect {
         origin: Point { column: 2, row: 2 },
-        cell_size: Size {
+        size: Size {
             column_count: 4,
             row_count: 4,
         },
@@ -476,7 +440,7 @@ fn image_paint_crops_right_and_bottom_edges_to_the_pane() {
     let snapshot = build_render_snapshot(pane_id, pane_content_rect, placements, true, true, false);
     let image_paints = build_image_paints(
         &snapshot,
-        &regions(),
+        &build_regions(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -541,19 +505,19 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
         requested_row_count: Some(2),
         ..ImageDisplay::default()
     };
-    let placement =
+    let image_placement_snapshot =
         ImagePlacementSnapshot::from_image_record(1, Arc::new(image_record), (0, 0), 3, 2)
             .expect("test image placement is valid");
     let snapshot = build_render_snapshot(
         pane_id,
         Rect {
             origin: Point { column: 0, row: 0 },
-            cell_size: Size {
+            size: Size {
                 column_count: 3,
                 row_count: 2,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
@@ -561,7 +525,7 @@ fn image_paint_applies_kitty_source_and_first_cell_offsets() {
 
     let image_paints = build_image_paints(
         &snapshot,
-        &regions(),
+        &build_regions(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -604,18 +568,19 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
         },
         anchor: (0, 0),
     });
-    let placement = ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
-        .expect("test image placement is valid");
+    let image_placement_snapshot =
+        ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
+            .expect("test image placement is valid");
     let snapshot = build_render_snapshot(
         pane_id,
         Rect {
             origin: Point { column: 0, row: 0 },
-            cell_size: Size {
+            size: Size {
                 column_count: 1,
                 row_count: 1,
             },
         },
-        vec![placement],
+        vec![image_placement_snapshot],
         true,
         true,
         false,
@@ -623,7 +588,7 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
 
     let image_paints = build_image_paints(
         &snapshot,
-        &regions(),
+        &build_regions(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -639,10 +604,10 @@ fn image_paint_ignores_kitty_offsets_on_other_protocols() {
 
 #[test]
 fn available_and_unavailable_placements_start_with_full_geometry() {
-    let available =
+    let available_image_placement =
         ImagePlacementSnapshot::from_image_record(1, build_image_record(2, 3, 0), (4, 5), 6, 7)
             .expect("the available placement is valid");
-    let unavailable = ImagePlacementSnapshot::unavailable(1, 9, (4, 5), 6, 7)
+    let unavailable_image_placement = ImagePlacementSnapshot::build_unavailable(1, 9, (4, 5), 6, 7)
         .expect("the unavailable placement is valid");
     let expected_image_cell_geometry = koshi_core::geometry::ImageCellGeometry {
         full_size: Size {
@@ -652,9 +617,12 @@ fn available_and_unavailable_placements_start_with_full_geometry() {
         cell_offset: Point { column: 0, row: 0 },
     };
 
-    assert_eq!(available.get_cell_geometry(), expected_image_cell_geometry);
     assert_eq!(
-        unavailable.get_cell_geometry(),
+        available_image_placement.get_cell_geometry(),
+        expected_image_cell_geometry
+    );
+    assert_eq!(
+        unavailable_image_placement.get_cell_geometry(),
         expected_image_cell_geometry
     );
 }
@@ -762,7 +730,7 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
             .expect("test image placement is valid");
     let pane_content_rect = Rect {
         origin: Point { column: 0, row: 0 },
-        cell_size: Size {
+        size: Size {
             column_count: 4,
             row_count: 4,
         },
@@ -782,7 +750,7 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
             true,
             false,
         ),
-        &regions(),
+        &build_regions(),
         viewport_area
     )
     .is_empty());
@@ -795,7 +763,7 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
             false,
             false,
         ),
-        &regions(),
+        &build_regions(),
         viewport_area
     )
     .is_empty());
@@ -808,7 +776,7 @@ fn image_paints_skip_hidden_suppressed_and_gridless_panes() {
             true,
             true,
         ),
-        &regions(),
+        &build_regions(),
         viewport_area
     )
     .is_empty());
@@ -828,7 +796,7 @@ fn image_paints_sort_overlaps_by_z_index() {
             pane_id,
             Rect {
                 origin: Point { column: 0, row: 0 },
-                cell_size: Size {
+                size: Size {
                     column_count: 4,
                     row_count: 4,
                 },
@@ -838,7 +806,7 @@ fn image_paints_sort_overlaps_by_z_index() {
             true,
             false,
         ),
-        &regions(),
+        &build_regions(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -873,7 +841,7 @@ fn unsupported_image_text_fills_the_visible_coverage() {
         pane_id,
         Rect {
             origin: Point { column: 0, row: 0 },
-            cell_size: Size {
+            size: Size {
                 column_count: 26,
                 row_count: 1,
             },
@@ -885,7 +853,7 @@ fn unsupported_image_text_fills_the_visible_coverage() {
     );
     let image_paints = build_image_paints(
         &snapshot,
-        &regions(),
+        &build_regions(),
         RatatuiRect {
             x: 0,
             y: 0,
@@ -893,7 +861,7 @@ fn unsupported_image_text_fills_the_visible_coverage() {
             height: 8,
         },
     );
-    let mut buffer = Buffer::empty(RatatuiRect {
+    let mut screen_buffer = Buffer::empty(RatatuiRect {
         x: 0,
         y: 0,
         width: 40,
@@ -904,10 +872,10 @@ fn unsupported_image_text_fills_the_visible_coverage() {
         .iter()
         .map(|image_paint| image_paint.target_area)
         .collect();
-    draw_image_placeholders(&image_target_areas, &mut buffer);
+    draw_image_placeholders(&image_target_areas, &mut screen_buffer);
 
     let rendered_placeholder_text: String = (0..26)
-        .map(|column_index| buffer[(column_index, 0)].symbol())
+        .map(|column_index| screen_buffer[(column_index, 0)].symbol())
         .collect();
     assert_eq!(rendered_placeholder_text, TERMINAL_IMAGE_UNAVAILABLE);
 }
@@ -919,7 +887,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         pane_id,
         Rect {
             origin: Point { column: 1, row: 1 },
-            cell_size: Size {
+            size: Size {
                 column_count: 4,
                 row_count: 1,
             },
@@ -936,7 +904,7 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         true,
         false,
     );
-    let mut terminal_grid = Grid::blank(6, 38, Style::default());
+    let mut terminal_grid = Grid::build_blank(6, 38, Style::default());
     *terminal_grid
         .get_cell_mut(0, 0)
         .expect("image target cell exists") = Cell::from_character('X', 1, Style::default());
@@ -954,14 +922,17 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     let render_theme = Theme::default();
 
     let mut placeholder_buffer = Buffer::empty(viewport_area);
-    crate::render::render_frame_with_images(
+    crate::render::render_frame(
         &snapshot,
-        &regions(),
+        &build_regions(),
         &render_theme,
         &keymap_hints,
         None,
         ViewerChrome::default(),
         ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut placeholder_buffer,
     );
@@ -971,14 +942,17 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     assert_eq!(placeholder_text, "term");
 
     let mut native_buffer = Buffer::empty(viewport_area);
-    crate::render::render_frame_with_images(
+    crate::render::render_frame(
         &snapshot,
-        &regions(),
+        &build_regions(),
         &render_theme,
         &keymap_hints,
         None,
         ViewerChrome::default(),
         ImageRenderMode::Native,
+        None,
+        None,
+        None,
         viewport_area,
         &mut native_buffer,
     );
@@ -992,9 +966,9 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         .all(|buffer_cell| !buffer_cell.symbol().contains('\u{1b}')));
 
     let mut unavailable_buffer = Buffer::empty(viewport_area);
-    crate::render::render_frame_with_placement_target(
+    crate::render::render_frame(
         &snapshot,
-        &regions(),
+        &build_regions(),
         &render_theme,
         &keymap_hints,
         None,
@@ -1012,9 +986,9 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
     assert_eq!(unavailable_text, "term");
 
     let mut available_buffer = Buffer::empty(viewport_area);
-    crate::render::render_frame_with_placement_target(
+    crate::render::render_frame(
         &snapshot,
-        &regions(),
+        &build_regions(),
         &render_theme,
         &keymap_hints,
         None,

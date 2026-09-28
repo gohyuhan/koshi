@@ -1,16 +1,9 @@
-//! Exit-code mapping, message rendering, and domain classification for
-//! [`CliError`].
+//! Exit-code mapping and message rendering for [`CliError`].
 
 use super::*;
 
 #[test]
 fn maps_each_error_class_to_its_exit_code() {
-    assert_eq!(
-        CliExitCode::from(&CliError::UnknownCommand {
-            command_name: "x".into()
-        }),
-        CliExitCode::UsageOrConfig
-    );
     assert_eq!(
         CliExitCode::from(&CliError::UnknownAction {
             action_name: "x".into()
@@ -147,90 +140,7 @@ fn messages_render_without_a_koshi_prefix() {
 }
 
 #[test]
-fn category_classifies_by_variant() {
-    assert_eq!(
-        CliError::UnknownCommand {
-            command_name: "x".into()
-        }
-        .category(),
-        DomainCategory::Cli
-    );
-    assert_eq!(
-        CliError::UnknownAction {
-            action_name: "x".into()
-        }
-        .category(),
-        DomainCategory::Cli
-    );
-    assert_eq!(
-        CliError::InvalidArgs { detail: "x".into() }.category(),
-        DomainCategory::Cli
-    );
-    assert_eq!(
-        CliError::Config { detail: "x".into() }.category(),
-        DomainCategory::Cli
-    );
-    assert_eq!(
-        CliError::InSessionEnv { detail: "x".into() }.category(),
-        DomainCategory::Cli
-    );
-    assert_eq!(
-        CliError::IpcUnavailable { detail: "x".into() }.category(),
-        DomainCategory::Ipc
-    );
-    assert_eq!(
-        CliError::Runtime { detail: "x".into() }.category(),
-        DomainCategory::Session
-    );
-}
-
-#[test]
-fn severity_is_recoverable_for_every_variant() {
-    assert_eq!(
-        CliError::UnknownCommand {
-            command_name: "x".into()
-        }
-        .get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::UnknownAction {
-            action_name: "x".into()
-        }
-        .get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::InvalidArgs { detail: "x".into() }.get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::Config { detail: "x".into() }.get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::InSessionEnv { detail: "x".into() }.get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::IpcUnavailable { detail: "x".into() }.get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::Runtime { detail: "x".into() }.get_severity(),
-        Severity::Recoverable
-    );
-}
-
-#[test]
-fn unknown_command_and_invalid_args_messages_are_exact() {
-    assert_eq!(
-        CliError::UnknownCommand {
-            command_name: "frobnicate".into()
-        }
-        .to_string(),
-        "unknown command: frobnicate"
-    );
+fn the_invalid_args_message_is_exact() {
     assert_eq!(
         CliError::InvalidArgs {
             detail: "missing --pane".into()
@@ -256,20 +166,6 @@ fn an_unbound_key_and_a_bad_keymap_file_exit_as_usage_problems() {
         .get_exit_code(),
         2
     );
-    assert_eq!(
-        CliError::UnboundKey {
-            sequence: "<C-t> g".into()
-        }
-        .category(),
-        DomainCategory::Cli
-    );
-    assert_eq!(
-        CliError::InvalidKeymapFile {
-            keymap_file_path: "keybinding.kdl".into()
-        }
-        .category(),
-        DomainCategory::Cli
-    );
 }
 
 #[test]
@@ -279,7 +175,6 @@ fn no_running_session_exits_the_same_as_a_named_session_that_is_gone() {
         CliExitCode::SessionNotFound
     );
     assert_eq!(CliExitCode::from(&CliError::NoSessions).get_exit_code(), 3);
-    assert_eq!(CliError::NoSessions.category(), DomainCategory::Session);
 }
 
 #[test]
@@ -296,13 +191,6 @@ fn a_failed_update_exits_as_a_runtime_failure() {
         })
         .get_exit_code(),
         1
-    );
-    assert_eq!(
-        CliError::Update {
-            detail: "the download stopped halfway".into()
-        }
-        .category(),
-        DomainCategory::Session
     );
 }
 
@@ -340,11 +228,11 @@ fn messages_render_an_empty_or_unicode_field_verbatim() {
     // The message formats the field exactly as given, with no escaping and no
     // substitution.
     assert_eq!(
-        CliError::UnknownCommand {
-            command_name: String::new()
+        CliError::UnknownAction {
+            action_name: String::new()
         }
         .to_string(),
-        "unknown command: "
+        "unknown action: "
     );
     assert_eq!(
         CliError::UnknownAction {
@@ -352,63 +240,6 @@ fn messages_render_an_empty_or_unicode_field_verbatim() {
         }
         .to_string(),
         "unknown action: 日本語"
-    );
-}
-
-#[test]
-fn a_missing_session_and_a_rejected_command_are_session_domain() {
-    assert_eq!(
-        CliError::SessionNotFound {
-            session_name: "session-x".into()
-        }
-        .category(),
-        DomainCategory::Session
-    );
-    assert_eq!(
-        CliError::CommandRejected {
-            reason: RejectReason::Unauthorized,
-            help: None
-        }
-        .category(),
-        DomainCategory::Session
-    );
-}
-
-#[test]
-fn severity_is_recoverable_for_the_key_session_and_update_variants() {
-    assert_eq!(
-        CliError::UnboundKey {
-            sequence: "<C-t> g".into()
-        }
-        .get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::InvalidKeymapFile {
-            keymap_file_path: "keybinding.kdl".into()
-        }
-        .get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::SessionNotFound {
-            session_name: "session-x".into()
-        }
-        .get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(CliError::NoSessions.get_severity(), Severity::Recoverable);
-    assert_eq!(
-        CliError::CommandRejected {
-            reason: RejectReason::MinSize,
-            help: None
-        }
-        .get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        CliError::Update { detail: "x".into() }.get_severity(),
-        Severity::Recoverable
     );
 }
 
@@ -442,7 +273,7 @@ fn every_rejection_reason_renders_its_own_sentence() {
         ),
         (RejectReason::Unauthorized, "command not permitted"),
         (RejectReason::InvalidState, "invalid in the current state"),
-        (RejectReason::MinSize, "below minimum size"),
+        (RejectReason::MinimumSize, "below minimum size"),
     ] {
         assert_eq!(
             CliError::CommandRejected { reason, help: None }.to_string(),
@@ -466,12 +297,6 @@ fn an_empty_help_hint_still_renders_its_own_line() {
 #[test]
 fn every_error_class_exits_with_its_documented_number() {
     for (cli_error, exit_code) in [
-        (
-            CliError::UnknownCommand {
-                command_name: "x".into(),
-            },
-            2,
-        ),
         (
             CliError::UnknownAction {
                 action_name: "x".into(),

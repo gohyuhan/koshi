@@ -25,10 +25,7 @@ fn build_session() -> Session {
 fn register_pane(session: &mut Session, pane_id: PaneId) {
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            pane_id,
-            SystemTime::UNIX_EPOCH,
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("pane id is unique");
 }
 
@@ -170,12 +167,12 @@ fn transferring_a_sole_source_pane_closes_only_the_empty_tab() {
         .clients
         .get_client_by_id(client_id)
         .expect("acting client");
-    assert_eq!(client.get_active_tab(), destination_tab_id);
+    assert_eq!(client.get_active_tab_id(), destination_tab_id);
     assert_eq!(
-        client.get_focused_pane(destination_tab_id),
+        client.get_focused_pane_id(destination_tab_id),
         Some(source_pane_id)
     );
-    assert_eq!(client.get_zoomed_pane(source_tab_id), None);
+    assert_eq!(client.get_zoomed_pane_id(source_tab_id), None);
 }
 
 #[test]
@@ -242,7 +239,7 @@ fn transfer_repairs_a_background_clients_source_focus_and_zoom() {
             .clients
             .get_client_by_id(background_client_id)
             .expect("background client")
-            .get_focused_pane(source_tab_id),
+            .get_focused_pane_id(source_tab_id),
         Some(surviving_source_pane_id)
     );
     assert_eq!(
@@ -250,7 +247,7 @@ fn transfer_repairs_a_background_clients_source_focus_and_zoom() {
             .clients
             .get_client_by_id(background_client_id)
             .expect("background client")
-            .get_zoomed_pane(source_tab_id),
+            .get_zoomed_pane_id(source_tab_id),
         None
     );
     assert_eq!(

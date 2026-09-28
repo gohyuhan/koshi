@@ -9,29 +9,29 @@ use super::*;
 
 /// One test walks every state of the gate, which is one process-wide flag.
 #[test]
-fn the_gate_follows_what_it_is_set_to() {
+fn beta_feature_gate_returns_the_latest_setting() {
     set_beta_features_allowed(true);
-    assert!(are_beta_features_allowed());
+    assert!(should_allow_beta_features());
 
     set_beta_features_allowed(true);
-    assert!(are_beta_features_allowed());
+    assert!(should_allow_beta_features());
 
     set_beta_features_allowed(false);
-    assert!(!are_beta_features_allowed());
+    assert!(!should_allow_beta_features());
 
     set_beta_features_allowed(false);
-    assert!(!are_beta_features_allowed());
+    assert!(!should_allow_beta_features());
 
-    let thread_gate_status = std::thread::spawn(are_beta_features_allowed)
+    let should_allow_beta_features_in_thread = std::thread::spawn(should_allow_beta_features)
         .join()
         .unwrap();
-    assert!(!thread_gate_status);
+    assert!(!should_allow_beta_features_in_thread);
 
     set_beta_features_allowed(true);
-    let thread_gate_status = std::thread::spawn(are_beta_features_allowed)
+    let should_allow_beta_features_in_thread = std::thread::spawn(should_allow_beta_features)
         .join()
         .unwrap();
-    assert!(thread_gate_status);
+    assert!(should_allow_beta_features_in_thread);
 
     set_beta_features_allowed(false);
 }
@@ -40,12 +40,12 @@ fn the_gate_follows_what_it_is_set_to() {
 /// the generated code, not here.
 #[test]
 fn log_blocked_emits_one_warn_record_per_call_with_the_function_field() {
-    let (_guard, logs) = koshi_observability::logging::with_test_writer();
+    let (_logging_guard, captured_log_output) = koshi_observability::logging::with_test_writer();
 
     log_blocked_feature_warning("attach");
     log_blocked_feature_warning("attach");
 
-    let log_lines = logs.lines();
+    let log_lines = captured_log_output.lines();
     assert_eq!(log_lines.len(), 2, "{log_lines:?}");
     for log_line in &log_lines {
         assert!(log_line.contains(r#""level":"WARN""#), "{log_line}");
@@ -64,12 +64,12 @@ fn log_blocked_emits_one_warn_record_per_call_with_the_function_field() {
 /// backticks and a name holding backticks or braces is not escaped.
 #[test]
 fn log_blocked_keeps_the_function_name_byte_for_byte() {
-    let (_guard, logs) = koshi_observability::logging::with_test_writer();
+    let (_logging_guard, captured_log_output) = koshi_observability::logging::with_test_writer();
 
     log_blocked_feature_warning("");
     log_blocked_feature_warning("a`b{c}");
 
-    let log_lines = logs.lines();
+    let log_lines = captured_log_output.lines();
     assert_eq!(log_lines.len(), 2, "{log_lines:?}");
     assert!(log_lines[0].contains(r#""function":"""#), "{log_lines:?}");
     assert!(

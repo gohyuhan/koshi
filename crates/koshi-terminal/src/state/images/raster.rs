@@ -11,16 +11,6 @@ pub(super) struct PreparedRaster {
     pub(super) raster: Option<Arc<DecodedImage>>,
 }
 
-#[cfg(test)]
-pub(super) fn prepare_image_raster(
-    image_record: &ImageRecord,
-    pixel_cell_size: Option<PixelCellSize>,
-    grid_dimensions: (u16, u16),
-) -> Result<(u32, u32, Option<Arc<DecodedImage>>), ImagePlacementError> {
-    let prepared = prepare_image_with_raster_plan(image_record, pixel_cell_size, grid_dimensions)?;
-    Ok((prepared.column_count, prepared.row_count, prepared.raster))
-}
-
 pub(super) fn prepare_image_with_raster_plan(
     image_record: &ImageRecord,
     pixel_cell_size: Option<PixelCellSize>,
@@ -159,23 +149,12 @@ pub(super) fn prepare_image_with_raster_plan(
             (Some(width_pixels), Some(height_pixels))
                 if image_display.is_aspect_ratio_preserved =>
             {
-                if width_pixels * u64::from(source_pixel_height)
-                    <= height_pixels * u64::from(source_pixel_width)
-                {
-                    (
-                        width_pixels,
-                        (width_pixels * u64::from(source_pixel_height)
-                            / u64::from(source_pixel_width))
-                        .max(1),
-                    )
-                } else {
-                    (
-                        (height_pixels * u64::from(source_pixel_width)
-                            / u64::from(source_pixel_height))
-                        .max(1),
-                        height_pixels,
-                    )
-                }
+                compute_aspect_fit_size(
+                    u64::from(source_pixel_width),
+                    u64::from(source_pixel_height),
+                    width_pixels,
+                    height_pixels,
+                )
             }
             (Some(width_pixels), Some(height_pixels)) => (width_pixels, height_pixels),
         };
@@ -323,6 +302,7 @@ pub(super) fn prepare_image_with_raster_plan(
                 target_size: (target_width_pixels as u32, target_height_pixels as u32),
                 canvas_size: (canvas_width_pixels as u32, canvas_height_pixels as u32),
                 pixel_offset: (output_pixel_offset_x as u32, output_pixel_offset_y as u32),
+                needs_raster: false,
             },
             raster: None,
         });
@@ -399,6 +379,7 @@ pub(super) fn prepare_image_with_raster_plan(
             target_size: (target_width_pixels as u32, target_height_pixels as u32),
             canvas_size: (canvas_width_pixels as u32, canvas_height_pixels as u32),
             pixel_offset: (output_pixel_offset_x as u32, output_pixel_offset_y as u32),
+            needs_raster: true,
         },
         raster: Some(raster_image),
     })
@@ -408,15 +389,7 @@ pub(super) fn rebuild_raster_image(
     image_record: &ImageRecord,
     raster_plan: &RasterPlan,
 ) -> Result<Option<Arc<DecodedImage>>, ImagePlacementError> {
-    if raster_plan.target_size == raster_plan.canvas_size
-        && raster_plan.pixel_offset == (0, 0)
-        && raster_plan.source_rect == image_record.compute_source_rect()?
-        && raster_plan.target_size
-            == (
-                image_record.image.pixel_width,
-                image_record.image.pixel_height,
-            )
-    {
+    if !raster_plan.needs_raster {
         return Ok(None);
     }
     validate_source_pixels(image_record)?;
@@ -490,6 +463,7 @@ fn build_identity_raster_plan(
             image_record.image.pixel_height,
         ),
         pixel_offset: (0, 0),
+        needs_raster: false,
     })
 }
 

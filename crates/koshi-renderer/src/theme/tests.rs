@@ -14,7 +14,7 @@ fn ramp_endpoints_are_the_palette_ends() {
 }
 
 #[test]
-fn a_single_element_run_takes_the_start_end() {
+fn single_element_ramp_uses_the_start_color() {
     assert_eq!(
         Theme::default().get_ramp_color(0, 1),
         Color::Rgb(0xd0, 0xa5, 0xff)
@@ -22,7 +22,7 @@ fn a_single_element_run_takes_the_start_end() {
 }
 
 #[test]
-fn an_out_of_range_index_clamps_to_the_last_end() {
+fn ramp_color_clamps_an_out_of_range_index_to_the_last_color() {
     let theme = Theme::default();
     assert_eq!(theme.get_ramp_color(9, 3), Color::Rgb(0x7d, 0xbc, 0xff));
     assert_eq!(theme.get_ramp_color(2, 3), Color::Rgb(0x7d, 0xbc, 0xff));
@@ -30,31 +30,41 @@ fn an_out_of_range_index_clamps_to_the_last_end() {
 
 #[test]
 fn middle_stops_sit_between_the_ends() {
-    let Color::Rgb(r, g, b) = Theme::default().get_ramp_color(1, 3) else {
+    let Color::Rgb(red_channel, green_channel, blue_channel) =
+        Theme::default().get_ramp_color(1, 3)
+    else {
         panic!("ramp yields Rgb");
     };
-    assert_eq!((r, g, b), (0xa7, 0xb0, 0xff));
+    assert_eq!(
+        (red_channel, green_channel, blue_channel),
+        (0xa7, 0xb0, 0xff)
+    );
 }
 
 #[test]
-fn the_dim_variant_darkens_every_channel() {
-    let Color::Rgb(r, g, b) = Theme::default().get_dimmed_ramp_color(0, 1) else {
-        panic!("ramp_dim yields Rgb");
+fn dimmed_ramp_color_scales_every_rgb_channel() {
+    let Color::Rgb(red_channel, green_channel, blue_channel) =
+        Theme::default().get_dimmed_ramp_color(0, 1)
+    else {
+        panic!("dimmed ramp color yields RGB");
     };
-    assert_eq!((r, g, b), (0x72, 0x5a, 0x8c));
+    assert_eq!(
+        (red_channel, green_channel, blue_channel),
+        (0x72, 0x5a, 0x8c)
+    );
 }
 
 #[test]
-fn a_zero_count_run_returns_the_start_end_without_dividing_by_zero() {
-    // `count == 0` drives `den == 0` inside `lerp`; the explicit guard there
-    // must return the start channel rather than dividing by zero.
+fn zero_element_ramp_returns_the_start_color_without_dividing_by_zero() {
+    // A zero element count gives `compute_interpolated_channel` a zero final
+    // index, so it returns the start channel without dividing by zero.
     let theme = Theme::default();
     assert_eq!(theme.get_ramp_color(0, 0), Color::Rgb(0xd0, 0xa5, 0xff));
     assert_eq!(theme.get_ramp_color(7, 0), Color::Rgb(0xd0, 0xa5, 0xff));
 }
 
 #[test]
-fn the_dim_variant_tracks_the_ramp_stop_it_darkens() {
+fn dimmed_ramp_color_tracks_the_ramp_stop_it_scales() {
     // The dim of the far ramp end is that end pulled to 55% of each channel.
     let theme = Theme::default();
     assert_eq!(
@@ -66,11 +76,11 @@ fn the_dim_variant_tracks_the_ramp_stop_it_darkens() {
 #[test]
 fn every_stop_of_a_five_element_run_is_exact() {
     let theme = Theme::default();
-    let stops: Vec<Color> = (0..5)
+    let ramp_colors: Vec<Color> = (0..5)
         .map(|ramp_stop_index| theme.get_ramp_color(ramp_stop_index, 5))
         .collect();
     assert_eq!(
-        stops,
+        ramp_colors,
         vec![
             Color::Rgb(0xd0, 0xa5, 0xff),
             Color::Rgb(0xbc, 0xaa, 0xff),
@@ -92,7 +102,7 @@ fn an_index_at_and_past_the_run_length_clamps_to_the_last_stop() {
 }
 
 #[test]
-fn the_dim_variant_clamps_its_index_and_count_the_way_the_ramp_does() {
+fn dimmed_ramp_color_uses_ramp_clamping_for_indices_and_element_counts() {
     let theme = Theme::default();
     // Past the last stop of a three-element run, and a zero-element run.
     assert_eq!(
@@ -106,7 +116,7 @@ fn the_dim_variant_clamps_its_index_and_count_the_way_the_ramp_does() {
 }
 
 #[test]
-fn the_dim_variant_leaves_black_black_and_pulls_white_to_fifty_five_percent() {
+fn dimmed_ramp_color_keeps_black_and_scales_white_to_fifty_five_percent() {
     let theme = Theme {
         ramp_start: (0x00, 0x00, 0x00),
         ramp_end: (0xff, 0xff, 0xff),
@@ -126,25 +136,52 @@ fn the_dim_variant_leaves_black_black_and_pulls_white_to_fifty_five_percent() {
 fn the_default_theme_is_the_config_crates_default_palette() {
     let theme = Theme::default();
     let palette = ColorPalette::default();
-    let rgb = |color: RgbColor| Color::Rgb(color.red, color.green, color.blue);
-    let channels = |color: RgbColor| (color.red, color.green, color.blue);
+    let to_ratatui_rgb_color = |color: RgbColor| Color::Rgb(color.red, color.green, color.blue);
+    let extract_rgb_channels = |color: RgbColor| (color.red, color.green, color.blue);
 
-    assert_eq!(theme.ramp_start, channels(palette.ramp_start));
-    assert_eq!(theme.ramp_end, channels(palette.ramp_end));
-    assert_eq!(theme.ramp_block_text_color, rgb(palette.on_ramp));
-    assert_eq!(theme.dimmed_ramp_text_color, rgb(palette.on_ramp_dim));
-    assert_eq!(theme.accent_color, rgb(palette.accent));
-    assert_eq!(theme.accent_block_text_color, rgb(palette.on_accent));
-    assert_eq!(theme.focused_border_color, rgb(palette.border_focused));
-    assert_eq!(theme.unfocused_border_color, rgb(palette.border_unfocused));
-    assert_eq!(theme.hover_border_color, rgb(palette.border_hover));
-    assert_eq!(theme.stack_header_text_color, rgb(palette.stack_header_fg));
+    assert_eq!(theme.ramp_start, extract_rgb_channels(palette.ramp_start));
+    assert_eq!(theme.ramp_end, extract_rgb_channels(palette.ramp_end));
+    assert_eq!(
+        theme.ramp_block_text_color,
+        to_ratatui_rgb_color(palette.on_ramp)
+    );
+    assert_eq!(
+        theme.dimmed_ramp_text_color,
+        to_ratatui_rgb_color(palette.on_ramp_dim)
+    );
+    assert_eq!(theme.accent_color, to_ratatui_rgb_color(palette.accent));
+    assert_eq!(
+        theme.accent_block_text_color,
+        to_ratatui_rgb_color(palette.on_accent)
+    );
+    assert_eq!(
+        theme.focused_border_color,
+        to_ratatui_rgb_color(palette.border_focused)
+    );
+    assert_eq!(
+        theme.unfocused_border_color,
+        to_ratatui_rgb_color(palette.border_unfocused)
+    );
+    assert_eq!(
+        theme.hover_border_color,
+        to_ratatui_rgb_color(palette.border_hover)
+    );
+    assert_eq!(
+        theme.stack_header_text_color,
+        to_ratatui_rgb_color(palette.stack_header_fg)
+    );
     assert_eq!(
         theme.stack_header_background_color,
-        rgb(palette.stack_header_bg)
+        to_ratatui_rgb_color(palette.stack_header_bg)
     );
-    assert_eq!(theme.letterbox_color, rgb(palette.letterbox));
-    assert_eq!(theme.bar_background_color, rgb(palette.bar_bg));
+    assert_eq!(
+        theme.letterbox_color,
+        to_ratatui_rgb_color(palette.letterbox)
+    );
+    assert_eq!(
+        theme.bar_background_color,
+        to_ratatui_rgb_color(palette.bar_bg)
+    );
 }
 
 #[test]
@@ -175,13 +212,14 @@ fn custom_endpoints_drive_the_ramp() {
     };
     assert_eq!(theme.get_ramp_color(0, 2), Color::Rgb(0xff, 0x00, 0x00));
     assert_eq!(theme.get_ramp_color(1, 2), Color::Rgb(0x00, 0x00, 0xff));
-    // Midpoint by integer lerp: red truncates toward zero (255 - 255/2 = 128).
+    // Midpoint by integer linear interpolation: red truncates toward zero
+    // (255 - 255/2 = 128).
     assert_eq!(theme.get_ramp_color(1, 3), Color::Rgb(0x80, 0x00, 0x7f));
 }
 
 #[test]
-fn a_run_longer_than_the_signed_32_bit_range_still_lands_inside_the_gradient() {
-    // The denominator is widened to i64, so it never wraps negative and flips
+fn ramp_interpolation_handles_the_maximum_element_count() {
+    // The denominator is widened to i128, so it never wraps negative and flips
     // the interpolation past either end of the ramp.
     let theme = Theme::default();
 

@@ -9,12 +9,12 @@ use tempfile::TempDir;
 use super::*;
 
 /// A fixed point on the clock, measured in seconds after the epoch.
-fn moment(seconds_since_epoch: u64) -> SystemTime {
+fn build_system_time_at_seconds(seconds_since_epoch: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds_since_epoch)
 }
 
 /// A certificate file holding two short stand-in byte strings.
-fn cert_file() -> CertFile {
+fn build_cert_file() -> CertFile {
     CertFile {
         file_format: CERT_FILE_FORMAT,
         cert_der: vec![1, 2, 3, 4],
@@ -39,7 +39,7 @@ fn the_two_files_live_under_remote_in_the_data_dir() {
 fn a_written_certificate_file_reads_back_the_same() {
     let test_directory = TempDir::new().expect("make a test directory");
     let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
-    let certificate_file = cert_file();
+    let certificate_file = build_cert_file();
     certificate_file
         .write_to_path(&remote_file_path)
         .expect("write the certificate file");
@@ -56,7 +56,7 @@ fn the_written_file_and_its_directory_are_private_to_the_owner() {
 
     let test_directory = TempDir::new().expect("make a test directory");
     let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
-    cert_file()
+    build_cert_file()
         .write_to_path(&remote_file_path)
         .expect("write the certificate file");
 
@@ -78,7 +78,7 @@ fn the_written_file_and_its_directory_are_private_to_the_owner() {
 fn a_certificate_file_at_another_format_number_is_refused() {
     let test_directory = TempDir::new().expect("make a test directory");
     let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
-    let mut certificate_file = cert_file();
+    let mut certificate_file = build_cert_file();
     certificate_file.file_format = CERT_FILE_FORMAT + 1;
     certificate_file
         .write_to_path(&remote_file_path)
@@ -145,7 +145,7 @@ fn remote_access_is_off_until_the_enabled_file_is_written() {
 
     let enabled_file = EnabledFile {
         file_format: ENABLED_FILE_FORMAT,
-        enabled_at: moment(1_000),
+        enabled_at: build_system_time_at_seconds(1_000),
     };
     enabled_file
         .write_to_path(&EnabledFile::resolve_enabled_file_path(
@@ -193,7 +193,7 @@ fn an_enabled_file_at_another_format_number_leaves_remote_access_off() {
     let test_directory = TempDir::new().expect("make a test directory");
     EnabledFile {
         file_format: ENABLED_FILE_FORMAT + 1,
-        enabled_at: moment(1_000),
+        enabled_at: build_system_time_at_seconds(1_000),
     }
     .write_to_path(&EnabledFile::resolve_enabled_file_path(
         test_directory.path(),
@@ -208,7 +208,7 @@ fn an_enabled_file_at_another_format_number_is_refused_naming_the_record() {
     let remote_file_path = EnabledFile::resolve_enabled_file_path(test_directory.path());
     EnabledFile {
         file_format: ENABLED_FILE_FORMAT + 1,
-        enabled_at: moment(1_000),
+        enabled_at: build_system_time_at_seconds(1_000),
     }
     .write_to_path(&remote_file_path)
     .expect("write the enabled file");
@@ -351,7 +351,7 @@ fn writing_where_the_directory_cannot_exist_names_the_file_that_failed() {
     .expect("write it");
 
     let cert_path = CertFile::resolve_certificate_file_path(test_directory.path());
-    let certificate_write_error = cert_file()
+    let certificate_write_error = build_cert_file()
         .write_to_path(&cert_path)
         .expect_err("a file in the directory's place stops the write");
     let IpcError::RemoteFileWrite {
@@ -368,7 +368,7 @@ fn writing_where_the_directory_cannot_exist_names_the_file_that_failed() {
     let enabled_path = EnabledFile::resolve_enabled_file_path(test_directory.path());
     let enabled_file_write_error = EnabledFile {
         file_format: ENABLED_FILE_FORMAT,
-        enabled_at: moment(1_000),
+        enabled_at: build_system_time_at_seconds(1_000),
     }
     .write_to_path(&enabled_path)
     .expect_err("a file in the directory's place stops the write");
@@ -392,13 +392,13 @@ fn a_certificate_file_that_was_group_readable_is_private_after_the_write() {
 
     let test_directory = TempDir::new().expect("make a test directory");
     let remote_file_path = CertFile::resolve_certificate_file_path(test_directory.path());
-    cert_file()
+    build_cert_file()
         .write_to_path(&remote_file_path)
         .expect("write the certificate file");
     std::fs::set_permissions(&remote_file_path, std::fs::Permissions::from_mode(0o644))
         .expect("open the file up");
 
-    cert_file()
+    build_cert_file()
         .write_to_path(&remote_file_path)
         .expect("write the certificate file again");
 
@@ -413,14 +413,14 @@ fn a_certificate_file_that_was_group_readable_is_private_after_the_write() {
 #[test]
 fn the_two_files_are_written_as_these_exact_bytes() {
     let test_directory = TempDir::new().expect("make a test directory");
-    cert_file()
+    build_cert_file()
         .write_to_path(&CertFile::resolve_certificate_file_path(
             test_directory.path(),
         ))
         .expect("write the certificate file");
     EnabledFile {
         file_format: ENABLED_FILE_FORMAT,
-        enabled_at: moment(1_000),
+        enabled_at: build_system_time_at_seconds(1_000),
     }
     .write_to_path(&EnabledFile::resolve_enabled_file_path(
         test_directory.path(),
@@ -451,13 +451,13 @@ fn writing_the_enabled_file_again_replaces_the_time_it_holds() {
     let remote_file_path = EnabledFile::resolve_enabled_file_path(test_directory.path());
     EnabledFile {
         file_format: ENABLED_FILE_FORMAT,
-        enabled_at: moment(1_000),
+        enabled_at: build_system_time_at_seconds(1_000),
     }
     .write_to_path(&remote_file_path)
     .expect("write the enabled file");
     let replacement_enabled_file = EnabledFile {
         file_format: ENABLED_FILE_FORMAT,
-        enabled_at: moment(2_000),
+        enabled_at: build_system_time_at_seconds(2_000),
     };
 
     replacement_enabled_file

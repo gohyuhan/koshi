@@ -29,25 +29,25 @@ fn resize_terminal_engine(terminal_engine: &mut TerminalEngine, column_count: u1
 /// The visible text of `row_index`: base characters of non-continuation cells,
 /// trailing spaces trimmed.
 fn get_row_text(terminal_engine: &TerminalEngine, row_index: u16) -> String {
-    let grid = terminal_engine.get_terminal_state().get_active_grid();
-    let (_, column_count) = grid.get_grid_dimensions();
-    let row_text: String = (0..column_count)
-        .filter_map(|column_index| grid.get_cell(row_index, column_index))
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    let (_, column_count) = active_grid.get_grid_dimensions();
+    let terminal_row_text: String = (0..column_count)
+        .filter_map(|column_index| active_grid.get_cell(row_index, column_index))
         .filter(|cell| cell.get_display_width() != 0)
         .map(Cell::get_character)
         .collect();
-    row_text.trim_end().to_string()
+    terminal_row_text.trim_end().to_string()
 }
 
 /// The visible text of every retained history row, oldest first.
-fn get_scrollback_text_rows(terminal_engine: &TerminalEngine) -> Vec<String> {
+fn list_scrollback_row_texts(terminal_engine: &TerminalEngine) -> Vec<String> {
     terminal_engine
         .get_terminal_state()
         .get_scrollback()
         .list_retained_lines()
         .iter()
-        .map(|(cells, _)| {
-            cells
+        .map(|(history_row_cells, _)| {
+            history_row_cells
                 .iter()
                 .filter(|cell| cell.get_display_width() != 0)
                 .map(Cell::get_character)
@@ -132,7 +132,7 @@ fn widen_rejoins_soft_wrapped_rows() {
 }
 
 #[test]
-fn cursor_follows_its_content_offset_across_reflows() {
+fn cursor_follows_its_content_cell_offset_across_reflows() {
     let mut terminal_engine = build_terminal_engine(8, 4);
     feed_terminal_text(&mut terminal_engine, "abcdefghij");
     assert_eq!(get_cursor_position(&terminal_engine), (1, 2));
@@ -155,7 +155,7 @@ fn shrink_overflow_enters_history_and_widen_pulls_it_back() {
     // At width 3 the first line needs two rows: four rows of content on a
     // three-row screen, so the oldest row scrolls into history.
     resize_terminal_engine(&mut terminal_engine, 3, 3);
-    assert_eq!(get_scrollback_text_rows(&terminal_engine), vec!["aaa"]);
+    assert_eq!(list_scrollback_row_texts(&terminal_engine), vec!["aaa"]);
     assert_eq!(
         terminal_engine
             .get_terminal_state()
@@ -192,7 +192,7 @@ fn scrollback_rows_rewrap_with_the_screen() {
     let mut terminal_engine = build_terminal_engine(6, 2);
     feed_terminal_text(&mut terminal_engine, "abcdef\r\nghijkl\r\nm\r\nn");
     assert_eq!(
-        get_scrollback_text_rows(&terminal_engine),
+        list_scrollback_row_texts(&terminal_engine),
         vec!["abcdef", "ghijkl"]
     );
     assert_eq!(get_row_text(&terminal_engine, 0), "m");
@@ -200,7 +200,7 @@ fn scrollback_rows_rewrap_with_the_screen() {
 
     resize_terminal_engine(&mut terminal_engine, 3, 2);
     assert_eq!(
-        get_scrollback_text_rows(&terminal_engine),
+        list_scrollback_row_texts(&terminal_engine),
         vec!["abc", "def", "ghi", "jkl"]
     );
     assert_eq!(get_row_text(&terminal_engine, 0), "m");
@@ -208,7 +208,7 @@ fn scrollback_rows_rewrap_with_the_screen() {
 
     resize_terminal_engine(&mut terminal_engine, 6, 2);
     assert_eq!(
-        get_scrollback_text_rows(&terminal_engine),
+        list_scrollback_row_texts(&terminal_engine),
         vec!["abcdef", "ghijkl"]
     );
     assert_eq!(get_row_text(&terminal_engine, 0), "m");
@@ -226,10 +226,13 @@ fn wide_glyph_wrap_leaves_a_spacer_and_rejoins_without_a_phantom_space() {
     // Widening drops the spacer: the glyph reattaches directly after `c`.
     resize_terminal_engine(&mut terminal_engine, 8, 3);
     assert_eq!(get_row_text(&terminal_engine, 0), "abc\u{6f22}");
-    let grid = terminal_engine.get_terminal_state().get_active_grid();
-    assert_eq!(grid.get_cell(0, 3).unwrap().get_character(), '\u{6f22}');
-    assert_eq!(grid.get_cell(0, 3).unwrap().get_display_width(), 2);
-    assert_eq!(grid.get_cell(0, 4).unwrap().get_display_width(), 0);
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    assert_eq!(
+        active_grid.get_cell(0, 3).unwrap().get_character(),
+        '\u{6f22}'
+    );
+    assert_eq!(active_grid.get_cell(0, 3).unwrap().get_display_width(), 2);
+    assert_eq!(active_grid.get_cell(0, 4).unwrap().get_display_width(), 0);
 
     // Narrowing again re-creates the spacer and the wrap.
     resize_terminal_engine(&mut terminal_engine, 4, 3);
@@ -253,11 +256,17 @@ fn one_column_screen_stores_wide_glyphs_narrow() {
     feed_terminal_text(&mut terminal_engine, "\u{6f22}\u{5b57}"); // 漢字 fills the 4-column row.
 
     resize_terminal_engine(&mut terminal_engine, 1, 4);
-    let grid = terminal_engine.get_terminal_state().get_active_grid();
-    assert_eq!(grid.get_cell(0, 0).unwrap().get_character(), '\u{6f22}');
-    assert_eq!(grid.get_cell(0, 0).unwrap().get_display_width(), 1);
-    assert_eq!(grid.get_cell(1, 0).unwrap().get_character(), '\u{5b57}');
-    assert_eq!(grid.get_cell(1, 0).unwrap().get_display_width(), 1);
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    assert_eq!(
+        active_grid.get_cell(0, 0).unwrap().get_character(),
+        '\u{6f22}'
+    );
+    assert_eq!(active_grid.get_cell(0, 0).unwrap().get_display_width(), 1);
+    assert_eq!(
+        active_grid.get_cell(1, 0).unwrap().get_character(),
+        '\u{5b57}'
+    );
+    assert_eq!(active_grid.get_cell(1, 0).unwrap().get_display_width(), 1);
     assert_eq!(get_row_end(&terminal_engine, 0), RowEnd::Soft);
     assert_eq!(get_row_end(&terminal_engine, 1), RowEnd::Hard);
 }
@@ -267,10 +276,13 @@ fn combining_marks_travel_with_their_base_through_a_reflow() {
     let mut terminal_engine = build_terminal_engine(4, 3);
     feed_terminal_text(&mut terminal_engine, "abce\u{0301}"); // é as e + combining acute at the last column
     resize_terminal_engine(&mut terminal_engine, 2, 3);
-    let grid = terminal_engine.get_terminal_state().get_active_grid();
-    assert_eq!(grid.get_cell(1, 1).unwrap().get_character(), 'e');
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    assert_eq!(active_grid.get_cell(1, 1).unwrap().get_character(), 'e');
     assert_eq!(
-        grid.get_cell(1, 1).unwrap().list_combining_characters(),
+        active_grid
+            .get_cell(1, 1)
+            .unwrap()
+            .list_combining_characters(),
         &['\u{0301}']
     );
 }
@@ -314,13 +326,13 @@ fn styled_blank_tail_counts_as_content() {
     let mut terminal_engine = build_terminal_engine(6, 2);
     feed_terminal_text(&mut terminal_engine, "ab\x1b[41m\x1b[K");
     resize_terminal_engine(&mut terminal_engine, 8, 2);
-    let grid = terminal_engine.get_terminal_state().get_active_grid();
-    assert_eq!(grid.get_cell(0, 0).unwrap().get_character(), 'a');
-    let painted = grid.get_cell(0, 5).unwrap();
-    assert_eq!(painted.get_character(), ' ');
-    let mut red = Style::default();
-    red.set_background_color(Color::Indexed(1));
-    assert_eq!(painted.get_style(), red);
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
+    assert_eq!(active_grid.get_cell(0, 0).unwrap().get_character(), 'a');
+    let painted_blank_cell = active_grid.get_cell(0, 5).unwrap();
+    assert_eq!(painted_blank_cell.get_character(), ' ');
+    let mut red_background_style = Style::default();
+    red_background_style.set_background_color(Color::Indexed(1));
+    assert_eq!(painted_blank_cell.get_style(), red_background_style);
 }
 
 #[test]
@@ -340,15 +352,15 @@ fn styled_blank_row_below_the_cursor_survives_a_shrink() {
         0
     );
     assert_eq!(get_row_text(&terminal_engine, 0), "top");
-    let painted = terminal_engine
+    let painted_blank_cell = terminal_engine
         .get_terminal_state()
         .get_active_grid()
         .get_cell(1, 0)
         .unwrap();
-    assert_eq!(painted.get_character(), ' ');
-    let mut blue = Style::default();
-    blue.set_background_color(Color::Indexed(4));
-    assert_eq!(painted.get_style(), blue);
+    assert_eq!(painted_blank_cell.get_character(), ' ');
+    let mut blue_background_style = Style::default();
+    blue_background_style.set_background_color(Color::Indexed(4));
+    assert_eq!(painted_blank_cell.get_style(), blue_background_style);
 }
 
 #[test]
@@ -393,21 +405,19 @@ fn reflow_respects_the_scrollback_caps_and_stays_monotonic() {
     });
     terminal_state.scrollback =
         Scrollback::from_scrollback_limit(ScrollbackLimit::from_line_and_byte_limits(2, 100_000));
-    let mut engine = vte::Parser::new();
-    engine.advance(&mut terminal_state, b"abcdefgh12345678\r\nx");
+    let mut vte_parser = vte::Parser::new();
+    vte_parser.advance(&mut terminal_state, b"abcdefgh12345678\r\nx");
     // The first row scrolled into history as the line feed arrived.
     assert_eq!(terminal_state.scrollback.get_total_pushed_line_count(), 1);
-    assert_eq!(terminal_state.scrollback.get_dropped_line_count(), 0);
 
     // At width 4 the 16-cell line needs 4 rows; 3 overflow the 2-row screen
-    // but only 2 fit the cap — the oldest drops and is tallied. The retained
-    // count grew by one, so the monotonic counter grows by one.
+    // but only 2 fit the cap — the oldest drops. The retained count grew by
+    // one, so the monotonic counter grows by one.
     terminal_state.resize_terminal_state(PtySize {
         column_count: 4,
         row_count: 2,
     });
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 2);
-    assert_eq!(terminal_state.scrollback.get_dropped_line_count(), 1);
     assert_eq!(terminal_state.scrollback.get_total_pushed_line_count(), 2);
 
     // Widening pulls one row back onto the screen: history shrinks, the
@@ -422,23 +432,23 @@ fn reflow_respects_the_scrollback_caps_and_stays_monotonic() {
 
 #[test]
 fn rewrap_line_splits_exactly_and_marks_ends() {
-    let cells: Vec<Cell> = "abcdef"
+    let row_cells: Vec<Cell> = "abcdef"
         .chars()
-        .map(|character| Cell::from_character(character, 1, Style::default()))
+        .map(|row_character| Cell::from_character(row_character, 1, Style::default()))
         .collect();
-    let wrapped_rows = rewrap_line(cells.clone(), 4, Style::default());
+    let wrapped_rows = rewrap_line(row_cells.clone(), 4, Style::default());
     assert_eq!(
         wrapped_rows,
         vec![
             (
-                cells[..4].to_vec(),
+                row_cells[..4].to_vec(),
                 RowMetadata {
                     row_end: RowEnd::Soft,
                     has_prompt_mark: false,
                 }
             ),
             (
-                cells[4..].to_vec(),
+                row_cells[4..].to_vec(),
                 RowMetadata {
                     row_end: RowEnd::Hard,
                     has_prompt_mark: false,
@@ -455,26 +465,30 @@ fn rewrap_line_of_empty_content_is_one_hard_row() {
 }
 
 #[test]
-fn content_len_trims_only_fully_default_blanks() {
-    let mut red = Style::default();
-    red.set_background_color(Color::Indexed(1));
+fn content_cell_count_trims_only_fully_default_blanks() {
+    let mut red_background_style = Style::default();
+    red_background_style.set_background_color(Color::Indexed(1));
     let row_cells = vec![
         Cell::from_character('a', 1, Style::default()),
-        Cell::blank(),
-        Cell::blank_with(red),
-        Cell::blank(),
-        Cell::blank(),
+        Cell::build_blank(),
+        Cell::build_blank_with_style(red_background_style),
+        Cell::build_blank(),
+        Cell::build_blank(),
     ];
     assert_eq!(count_row_content_cells(&row_cells), 3);
-    assert_eq!(count_row_content_cells(&[Cell::blank(), Cell::blank()]), 0);
+    assert_eq!(
+        count_row_content_cells(&[Cell::build_blank(), Cell::build_blank()]),
+        0
+    );
 }
 
 #[test]
-fn locate_content_offset_walks_soft_rows_and_parks_in_final_padding() {
-    let soft = |text: &str| {
+fn locate_content_cell_offset_walks_soft_rows_and_parks_in_final_padding() {
+    let build_soft_row = |row_text: &str| {
         (
-            text.chars()
-                .map(|character| Cell::from_character(character, 1, Style::default()))
+            row_text
+                .chars()
+                .map(|row_character| Cell::from_character(row_character, 1, Style::default()))
                 .collect::<Vec<_>>(),
             RowMetadata {
                 row_end: RowEnd::Soft,
@@ -482,10 +496,11 @@ fn locate_content_offset_walks_soft_rows_and_parks_in_final_padding() {
             },
         )
     };
-    let hard = |text: &str| {
+    let build_hard_row = |row_text: &str| {
         (
-            text.chars()
-                .map(|character| Cell::from_character(character, 1, Style::default()))
+            row_text
+                .chars()
+                .map(|row_character| Cell::from_character(row_character, 1, Style::default()))
                 .collect::<Vec<_>>(),
             RowMetadata {
                 row_end: RowEnd::Hard,
@@ -493,64 +508,68 @@ fn locate_content_offset_walks_soft_rows_and_parks_in_final_padding() {
             },
         )
     };
-    let wrapped_rows = vec![soft("abcd"), soft("efgh"), hard("ij")];
-    assert_eq!(locate_content_offset(&wrapped_rows, 0), (0, 0));
-    assert_eq!(locate_content_offset(&wrapped_rows, 3), (0, 3));
-    assert_eq!(locate_content_offset(&wrapped_rows, 4), (1, 0));
-    assert_eq!(locate_content_offset(&wrapped_rows, 9), (2, 1));
+    let rewrapped_rows = vec![
+        build_soft_row("abcd"),
+        build_soft_row("efgh"),
+        build_hard_row("ij"),
+    ];
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 0), (0, 0));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 3), (0, 3));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 4), (1, 0));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 9), (2, 1));
     // Past the content: parks in the final row's padding.
-    assert_eq!(locate_content_offset(&wrapped_rows, 11), (2, 3));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 11), (2, 3));
 }
 
 /// Every logical line visible anywhere (history then screen), soft wraps
 /// collapsed — the reflow invariant is that this list never changes across
 /// resizes, only how it is cut into rows.
-fn logical_lines(engine: &TerminalEngine) -> Vec<String> {
-    let terminal_state = engine.get_terminal_state();
-    let mut physical: Vec<(Vec<Cell>, RowMetadata)> = terminal_state
+fn list_logical_lines(terminal_engine: &TerminalEngine) -> Vec<String> {
+    let terminal_state = terminal_engine.get_terminal_state();
+    let mut physical_rows: Vec<(Vec<Cell>, RowMetadata)> = terminal_state
         .get_scrollback()
         .list_retained_lines()
         .iter()
         .cloned()
         .collect();
-    let grid = terminal_state.get_active_grid();
-    let (row_count, _) = grid.get_grid_dimensions();
+    let active_grid = terminal_state.get_active_grid();
+    let (row_count, _) = active_grid.get_grid_dimensions();
     for row_index in 0..row_count {
-        physical.push((
-            grid.list_rows()[row_index as usize].clone(),
+        physical_rows.push((
+            active_grid.list_rows()[row_index as usize].clone(),
             RowMetadata {
-                row_end: grid.get_row_end(row_index),
-                has_prompt_mark: grid.has_prompt_mark(row_index),
+                row_end: active_grid.get_row_end(row_index),
+                has_prompt_mark: active_grid.has_prompt_mark(row_index),
             },
         ));
     }
-    let mut lines = Vec::new();
-    let mut current_logical_line = String::new();
-    for (cells, row_metadata) in physical {
-        let row_text: String = cells
+    let mut logical_lines = Vec::new();
+    let mut current_logical_line_text = String::new();
+    for (row_cells, row_metadata) in physical_rows {
+        let row_text: String = row_cells
             .iter()
             .filter(|cell| cell.get_display_width() != 0)
             .map(Cell::get_character)
             .collect();
         match row_metadata.row_end {
-            RowEnd::Soft => current_logical_line.push_str(&row_text),
+            RowEnd::Soft => current_logical_line_text.push_str(&row_text),
             RowEnd::SoftWide => {
                 let trimmed_row_text = row_text.strip_suffix(' ').unwrap_or(&row_text);
-                current_logical_line.push_str(trimmed_row_text);
+                current_logical_line_text.push_str(trimmed_row_text);
             }
             RowEnd::Hard => {
-                current_logical_line.push_str(row_text.trim_end());
-                lines.push(std::mem::take(&mut current_logical_line));
+                current_logical_line_text.push_str(row_text.trim_end());
+                logical_lines.push(std::mem::take(&mut current_logical_line_text));
             }
         }
     }
-    if !current_logical_line.is_empty() {
-        lines.push(current_logical_line);
+    if !current_logical_line_text.is_empty() {
+        logical_lines.push(current_logical_line_text);
     }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+    while logical_lines.last().is_some_and(String::is_empty) {
+        logical_lines.pop();
     }
-    lines
+    logical_lines
 }
 
 #[test]
@@ -560,7 +579,7 @@ fn mixed_content_survives_a_resize_chain_losslessly() {
         &mut terminal_engine,
         "hello world\r\nab \u{6f22}\u{5b57} cd\r\nx\r\ntail",
     );
-    let original_logical_lines = logical_lines(&terminal_engine);
+    let original_logical_lines = list_logical_lines(&terminal_engine);
     assert_eq!(
         original_logical_lines,
         vec!["hello world", "ab \u{6f22}\u{5b57} cd", "x", "tail"]
@@ -569,7 +588,7 @@ fn mixed_content_survives_a_resize_chain_losslessly() {
     for (column_count, row_count) in [(5, 6), (3, 4), (7, 3), (12, 6), (10, 6)] {
         resize_terminal_engine(&mut terminal_engine, column_count, row_count);
         assert_eq!(
-            logical_lines(&terminal_engine),
+            list_logical_lines(&terminal_engine),
             original_logical_lines,
             "content changed at {column_count}x{row_count}"
         );
@@ -582,13 +601,13 @@ fn colored_text_keeps_its_style_across_reflow() {
     feed_terminal_text(&mut terminal_engine, "\x1b[31mabcdef"); // red text soft-wraps at 4
     resize_terminal_engine(&mut terminal_engine, 8, 2);
 
-    let mut red = Style::default();
-    red.set_foreground_color(Color::Indexed(1));
-    let grid = terminal_engine.get_terminal_state().get_active_grid();
+    let mut red_foreground_style = Style::default();
+    red_foreground_style.set_foreground_color(Color::Indexed(1));
+    let active_grid = terminal_engine.get_terminal_state().get_active_grid();
     for column_index in 0..6 {
         assert_eq!(
-            grid.get_cell(0, column_index).unwrap().get_style(),
-            red,
+            active_grid.get_cell(0, column_index).unwrap().get_style(),
+            red_foreground_style,
             "column {column_index}"
         );
     }
@@ -624,22 +643,22 @@ fn a_wrapped_row_keeps_its_link_when_it_scrolls_into_history() {
     // one; `wrap_linefeed` re-applies the real end afterwards. Without that
     // repair, double-clicking a word straddling the boundary selects only its
     // on-screen half.
-    let mut engine = build_terminal_engine(10, 3);
-    feed_terminal_text(&mut engine, "abcdefghijklmnopqrstuvwxyz0123456789");
+    let mut terminal_engine = build_terminal_engine(10, 3);
+    feed_terminal_text(&mut terminal_engine, "abcdefghijklmnopqrstuvwxyz0123456789");
 
-    let terminal_state = engine.get_terminal_state();
-    let history: Vec<RowEnd> = terminal_state
+    let terminal_state = terminal_engine.get_terminal_state();
+    let history_row_ends: Vec<RowEnd> = terminal_state
         .get_scrollback()
         .list_retained_lines()
         .iter()
         .map(|(_, row_metadata)| row_metadata.row_end)
         .collect();
-    assert_eq!(history, vec![RowEnd::Soft]);
+    assert_eq!(history_row_ends, vec![RowEnd::Soft]);
 
-    let grid = terminal_state.get_active_grid();
-    assert_eq!(grid.get_row_end(0), RowEnd::Soft);
-    assert_eq!(grid.get_row_end(1), RowEnd::Soft);
-    assert_eq!(grid.get_row_end(2), RowEnd::Hard);
+    let active_grid = terminal_state.get_active_grid();
+    assert_eq!(active_grid.get_row_end(0), RowEnd::Soft);
+    assert_eq!(active_grid.get_row_end(1), RowEnd::Soft);
+    assert_eq!(active_grid.get_row_end(2), RowEnd::Hard);
 }
 
 #[test]
@@ -647,37 +666,38 @@ fn a_linefeed_scroll_still_ends_its_row_hard() {
     // The counterpart: content scrolled off by an explicit newline genuinely
     // ends, so its history row must be Hard. Guards against "fix" the wrap case
     // by making every boundary Soft.
-    let mut engine = build_terminal_engine(10, 3);
-    feed_terminal_text(&mut engine, "one\r\ntwo\r\nthree\r\nfour");
+    let mut terminal_engine = build_terminal_engine(10, 3);
+    feed_terminal_text(&mut terminal_engine, "one\r\ntwo\r\nthree\r\nfour");
 
-    let terminal_state = engine.get_terminal_state();
-    let history: Vec<RowEnd> = terminal_state
+    let terminal_state = terminal_engine.get_terminal_state();
+    let history_row_ends: Vec<RowEnd> = terminal_state
         .get_scrollback()
         .list_retained_lines()
         .iter()
         .map(|(_, row_metadata)| row_metadata.row_end)
         .collect();
-    assert_eq!(history, vec![RowEnd::Hard]);
+    assert_eq!(history_row_ends, vec![RowEnd::Hard]);
 }
 
 /// One default-styled narrow cell per char of `text`.
-fn cells(text: &str) -> Vec<Cell> {
-    text.chars()
-        .map(|character| Cell::from_character(character, 1, Style::default()))
+fn build_cells(cell_text: &str) -> Vec<Cell> {
+    cell_text
+        .chars()
+        .map(|cell_character| Cell::from_character(cell_character, 1, Style::default()))
         .collect()
 }
 
 /// A wide glyph as stored in the grid: the width-2 base and its width-0
 /// continuation cell.
-fn build_wide_cell_pair(ch: char) -> [Cell; 2] {
+fn build_wide_cell_pair(glyph_character: char) -> [Cell; 2] {
     [
-        Cell::from_character(ch, 2, Style::default()),
+        Cell::from_character(glyph_character, 2, Style::default()),
         Cell::from_character(' ', 0, Style::default()),
     ]
 }
 
 /// The prompt mark of every screen row, top to bottom.
-fn prompt_marks(terminal_state: &TerminalState) -> Vec<bool> {
+fn list_screen_prompt_marks(terminal_state: &TerminalState) -> Vec<bool> {
     let (row_count, _) = terminal_state.primary.get_grid_dimensions();
     (0..row_count)
         .map(|row_index| terminal_state.primary.has_prompt_mark(row_index))
@@ -686,33 +706,33 @@ fn prompt_marks(terminal_state: &TerminalState) -> Vec<bool> {
 
 #[test]
 fn rewrap_line_at_zero_columns_wraps_at_one_column() {
-    let content = cells("abc");
-    let wrapped_rows = rewrap_line(content, 0, Style::default());
-    let soft = RowMetadata {
+    let row_cells = build_cells("abc");
+    let wrapped_rows = rewrap_line(row_cells, 0, Style::default());
+    let soft_row_metadata = RowMetadata {
         row_end: RowEnd::Soft,
         has_prompt_mark: false,
     };
     assert_eq!(
         wrapped_rows,
         vec![
-            (cells("a"), soft),
-            (cells("b"), soft),
-            (cells("c"), RowMetadata::default()),
+            (build_cells("a"), soft_row_metadata),
+            (build_cells("b"), soft_row_metadata),
+            (build_cells("c"), RowMetadata::default()),
         ]
     );
 }
 
 #[test]
 fn rewrap_line_leaves_a_spacer_in_the_fill_before_a_wide_glyph_at_the_last_column() {
-    let mut red = Style::default();
-    red.set_background_color(Color::Indexed(1));
-    let mut content = cells("abc");
-    content.extend(build_wide_cell_pair('\u{6f22}'));
+    let mut red_background_style = Style::default();
+    red_background_style.set_background_color(Color::Indexed(1));
+    let mut row_cells = build_cells("abc");
+    row_cells.extend(build_wide_cell_pair('\u{6f22}'));
 
-    let wrapped_rows = rewrap_line(content, 4, red);
+    let wrapped_rows = rewrap_line(row_cells, 4, red_background_style);
 
-    let mut leading_row_cells = cells("abc");
-    leading_row_cells.push(Cell::blank_with(red));
+    let mut leading_row_cells = build_cells("abc");
+    leading_row_cells.push(Cell::build_blank_with_style(red_background_style));
     assert_eq!(
         wrapped_rows,
         vec![
@@ -733,10 +753,10 @@ fn rewrap_line_leaves_a_spacer_in_the_fill_before_a_wide_glyph_at_the_last_colum
 
 #[test]
 fn rewrap_line_at_one_column_stores_a_wide_glyph_narrow_and_skips_its_continuation() {
-    let mut content = build_wide_cell_pair('\u{6f22}').to_vec();
-    content.extend(build_wide_cell_pair('\u{5b57}'));
+    let mut row_cells = build_wide_cell_pair('\u{6f22}').to_vec();
+    row_cells.extend(build_wide_cell_pair('\u{5b57}'));
 
-    let wrapped_rows = rewrap_line(content, 1, Style::default());
+    let wrapped_rows = rewrap_line(row_cells, 1, Style::default());
 
     assert_eq!(
         wrapped_rows,
@@ -757,12 +777,12 @@ fn rewrap_line_at_one_column_stores_a_wide_glyph_narrow_and_skips_its_continuati
 }
 
 #[test]
-fn locate_content_offset_skips_a_soft_wide_spacer() {
-    let mut leading_row_cells = cells("abc");
-    leading_row_cells.push(Cell::blank());
+fn locate_content_cell_offset_skips_a_soft_wide_spacer() {
+    let mut leading_row_cells = build_cells("abc");
+    leading_row_cells.push(Cell::build_blank());
     let mut following_row_cells = build_wide_cell_pair('\u{6f22}').to_vec();
-    following_row_cells.extend(cells("c"));
-    let wrapped_rows = vec![
+    following_row_cells.extend(build_cells("c"));
+    let rewrapped_rows = vec![
         (
             leading_row_cells,
             RowMetadata {
@@ -774,9 +794,9 @@ fn locate_content_offset_skips_a_soft_wide_spacer() {
     ];
     // Offsets 0-2 are `abc`; the spacer holds none, so offset 3 is the wide
     // glyph at the start of the next row and offset 5 is the `c` after it.
-    assert_eq!(locate_content_offset(&wrapped_rows, 2), (0, 2));
-    assert_eq!(locate_content_offset(&wrapped_rows, 3), (1, 0));
-    assert_eq!(locate_content_offset(&wrapped_rows, 5), (1, 2));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 2), (0, 2));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 3), (1, 0));
+    assert_eq!(locate_content_cell_offset(&rewrapped_rows, 5), (1, 2));
 }
 
 #[test]
@@ -785,10 +805,10 @@ fn prompt_mark_follows_its_row_when_the_line_above_wraps() {
         column_count: 8,
         row_count: 4,
     });
-    let mut parser = vte::Parser::new();
-    parser.advance(&mut terminal_state, b"abcdefg\r\n\x1b]133;A\x07$ ");
+    let mut vte_parser = vte::Parser::new();
+    vte_parser.advance(&mut terminal_state, b"abcdefg\r\n\x1b]133;A\x07$ ");
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![false, true, false, false]
     );
 
@@ -798,7 +818,7 @@ fn prompt_mark_follows_its_row_when_the_line_above_wraps() {
         row_count: 4,
     });
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![false, false, true, false]
     );
     assert_eq!(
@@ -811,7 +831,7 @@ fn prompt_mark_follows_its_row_when_the_line_above_wraps() {
         row_count: 4,
     });
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![false, true, false, false]
     );
 }
@@ -822,10 +842,10 @@ fn a_prompt_mark_on_a_wrapped_line_stays_on_its_first_row() {
         column_count: 4,
         row_count: 4,
     });
-    let mut parser = vte::Parser::new();
-    parser.advance(&mut terminal_state, b"\x1b]133;A\x07abcdefgh");
+    let mut vte_parser = vte::Parser::new();
+    vte_parser.advance(&mut terminal_state, b"\x1b]133;A\x07abcdefgh");
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![true, false, false, false]
     );
 
@@ -834,7 +854,7 @@ fn a_prompt_mark_on_a_wrapped_line_stays_on_its_first_row() {
         row_count: 4,
     });
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![true, false, false, false]
     );
 
@@ -843,7 +863,7 @@ fn a_prompt_mark_on_a_wrapped_line_stays_on_its_first_row() {
         row_count: 4,
     });
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![true, false, false, false]
     );
 }
@@ -854,10 +874,12 @@ fn a_prompt_mark_on_a_continuation_row_moves_to_the_lines_first_row() {
         column_count: 8,
         row_count: 4,
     });
-    let mut parser = vte::Parser::new();
-    parser.advance(&mut terminal_state, b"abcdefghij");
+    let mut vte_parser = vte::Parser::new();
+    vte_parser.advance(&mut terminal_state, b"abcdefghij");
     // Row 1 holds `ij`, the continuation of row 0's line.
-    terminal_state.active_grid_mut().set_prompt_mark(1, true);
+    terminal_state
+        .get_active_grid_mut()
+        .set_prompt_mark(1, true);
 
     // The whole line fits one row: the mark lands on that row.
     terminal_state.resize_terminal_state(PtySize {
@@ -865,7 +887,7 @@ fn a_prompt_mark_on_a_continuation_row_moves_to_the_lines_first_row() {
         row_count: 4,
     });
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![true, false, false, false]
     );
 
@@ -875,7 +897,7 @@ fn a_prompt_mark_on_a_continuation_row_moves_to_the_lines_first_row() {
         row_count: 4,
     });
     assert_eq!(
-        prompt_marks(&terminal_state),
+        list_screen_prompt_marks(&terminal_state),
         vec![true, false, false, false]
     );
 }
@@ -923,7 +945,7 @@ fn resizing_to_the_same_size_changes_nothing() {
     let mut terminal_engine = build_terminal_engine(8, 4);
     feed_terminal_text(&mut terminal_engine, "abcdefghij\r\nxy");
     let original_reflow_state = (
-        logical_lines(&terminal_engine),
+        list_logical_lines(&terminal_engine),
         (0..4)
             .map(|row_index| get_row_end(&terminal_engine, row_index))
             .collect::<Vec<_>>(),
@@ -938,7 +960,7 @@ fn resizing_to_the_same_size_changes_nothing() {
     resize_terminal_engine(&mut terminal_engine, 8, 4);
     assert_eq!(
         (
-            logical_lines(&terminal_engine),
+            list_logical_lines(&terminal_engine),
             (0..4)
                 .map(|row_index| get_row_end(&terminal_engine, row_index))
                 .collect::<Vec<_>>(),
@@ -962,7 +984,7 @@ fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
         row_count: 0,
     });
     terminal_state.scrollback.push_row(
-        &cells("ab"),
+        &build_cells("ab"),
         RowMetadata {
             row_end: RowEnd::Soft,
             has_prompt_mark: false,
@@ -974,8 +996,8 @@ fn a_trailing_soft_history_row_becomes_a_hard_line_on_regrow() {
         row_count: 2,
     });
 
-    let mut expected_regrown_cells = cells("ab");
-    expected_regrown_cells.extend([Cell::blank(), Cell::blank()]);
+    let mut expected_regrown_cells = build_cells("ab");
+    expected_regrown_cells.extend([Cell::build_blank(), Cell::build_blank()]);
     assert_eq!(
         terminal_state.primary.list_rows()[0],
         expected_regrown_cells
@@ -1012,10 +1034,10 @@ fn a_prompt_mark_on_an_empty_trailing_soft_row_survives_regrow() {
 
     assert_eq!(
         terminal_state.primary.list_rows()[0],
-        vec![Cell::blank(); 4]
+        vec![Cell::build_blank(); 4]
     );
     assert_eq!(terminal_state.primary.get_row_end(0), RowEnd::Hard);
-    assert_eq!(prompt_marks(&terminal_state), vec![true, false]);
+    assert_eq!(list_screen_prompt_marks(&terminal_state), vec![true, false]);
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 0);
 }
 
@@ -1029,7 +1051,7 @@ fn height_shrink_with_the_cursor_above_scrolled_content_clamps_it_to_the_top_row
     // dropping; the cursor's own row goes with them and the cursor clamps to
     // the top row, which now holds `c`.
     resize_terminal_engine(&mut terminal_engine, 4, 1);
-    assert_eq!(get_scrollback_text_rows(&terminal_engine), vec!["a", "b"]);
+    assert_eq!(list_scrollback_row_texts(&terminal_engine), vec!["a", "b"]);
     assert_eq!(get_row_text(&terminal_engine, 0), "c");
     assert_eq!(get_cursor_position(&terminal_engine), (0, 0));
 }
@@ -1038,27 +1060,27 @@ fn height_shrink_with_the_cursor_above_scrolled_content_clamps_it_to_the_top_row
 fn a_blank_prompt_marked_row_below_the_cursor_enters_history_on_a_height_shrink() {
     // A prompt mark is content: the row it sits on is not trailing padding,
     // however few cells it holds.
-    let mut engine = build_terminal_engine(6, 4);
-    feed_terminal_text(&mut engine, "a\r\n\x1b]133;A\x07\x1b[H");
-    assert!(engine
+    let mut terminal_engine = build_terminal_engine(6, 4);
+    feed_terminal_text(&mut terminal_engine, "a\r\n\x1b]133;A\x07\x1b[H");
+    assert!(terminal_engine
         .get_terminal_state()
         .get_active_grid()
         .has_prompt_mark(1));
-    assert_eq!(get_cursor_position(&engine), (0, 0));
+    assert_eq!(get_cursor_position(&terminal_engine), (0, 0));
 
-    resize_terminal_engine(&mut engine, 6, 1);
+    resize_terminal_engine(&mut terminal_engine, 6, 1);
 
     // The marked row is kept, so the row above it is the one that overflows
     // into history and the mark stays on the one screen row.
-    let history: Vec<bool> = engine
+    let history_prompt_marks: Vec<bool> = terminal_engine
         .get_terminal_state()
         .get_scrollback()
         .list_retained_lines()
         .iter()
         .map(|(_, row_metadata)| row_metadata.has_prompt_mark)
         .collect();
-    assert_eq!(history, vec![false]);
-    assert!(engine
+    assert_eq!(history_prompt_marks, vec![false]);
+    assert!(terminal_engine
         .get_terminal_state()
         .get_active_grid()
         .has_prompt_mark(0));

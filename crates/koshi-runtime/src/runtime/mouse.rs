@@ -10,7 +10,7 @@
 //!   view of one pane;
 //! - [`forward_mouse_to_pane`](Server::forward_mouse_to_pane) hands an event to
 //!   the program in one pane as a mouse report;
-//! - [`write_alt_scroll_arrows`](Server::write_alt_scroll_arrows) sends cursor
+//! - [`write_alternate_scroll_arrows`](Server::write_alternate_scroll_arrows) sends cursor
 //!   arrows for the alternate-scroll translation of a wheel tick;
 //! - [`drag_resize`](Server::drag_resize) moves one pane border a number of
 //!   cells and reports how many it took.
@@ -39,8 +39,6 @@ use koshi_renderer::snapshot::ViewerChrome;
 use koshi_terminal::mouse_report::encode_mouse;
 use koshi_terminal::state::Screen;
 
-use std::time::SystemTime;
-
 use crate::server::Server;
 
 impl Server {
@@ -55,7 +53,6 @@ impl Server {
         let mouse_command_envelope = CommandEnvelope::from_parts(
             CommandId::new(),
             CommandSource::from_mouse(client_id),
-            SystemTime::now(),
             mouse_command,
         );
         self.dispatch_reporting_spare(mouse_command_envelope)
@@ -67,7 +64,7 @@ impl Server {
         let _ = self.dispatch_mouse_command(client_id, Command::Visual(visual_command));
     }
 
-    /// Ask for `pane`'s `side` border to move `cells` cells in `step`'s
+    /// Ask for `pane_id`'s `border_side` border to move `requested_cell_count` cells in `resize_step`'s
     /// direction. `Err` carries the cells the donating pane can still give: `0`
     /// when it is already at its minimum size, and `0` for every rejection that
     /// is not a minimum-size refusal.
@@ -90,12 +87,12 @@ impl Server {
         });
         match self.dispatch_mouse_command(client_id, resize_command) {
             (CommandResult::Ok { .. }, _) => Ok(()),
-            (_, available_cell_count) => Err(available_cell_count.unwrap_or(0)),
+            (_, available_donor_cell_count) => Err(available_donor_cell_count.unwrap_or(0)),
         }
     }
 
-    /// Move `pane`'s `side` border `count` cells and report how many were
-    /// actually taken. `step` is the direction: `1` grows `pane`, `-1` shrinks
+    /// Move `pane_id`'s `border_side` border `requested_cell_count` cells and report how many were
+    /// actually taken. `resize_step` is the direction: `1` grows `pane_id`, `-1` shrinks
     /// it.
     ///
     /// The whole distance travels in one [`Command::ResizePane`], which is
@@ -107,7 +104,7 @@ impl Server {
     /// for.
     ///
     /// Each round either takes cells or lowers what the next round asks for.
-    /// `applied` never passes `count`.
+    /// The returned count never passes `requested_cell_count`.
     ///
     /// A drag of 5 cells into a neighbor with room for 2 returns `2`.
     pub fn drag_resize(
@@ -136,10 +133,12 @@ impl Server {
                     requested_round_cell_count =
                         requested_cell_count.saturating_sub(applied_cell_count);
                 }
-                // `available_cell_count` is what the donating pane has left above its minimum
+                // `available_donor_cell_count` is what the donating pane has left above its minimum
                 // size, always short of what this round asked for.
-                Err(available_cell_count) if available_cell_count < requested_round_cell_count => {
-                    requested_round_cell_count = available_cell_count;
+                Err(available_donor_cell_count)
+                    if available_donor_cell_count < requested_round_cell_count =>
+                {
+                    requested_round_cell_count = available_donor_cell_count;
                 }
                 Err(_) => break,
             }
@@ -147,7 +146,7 @@ impl Server {
         applied_cell_count
     }
 
-    /// Move `client_id`'s koshi scrollback view of `pane_id` by `lines`, up into
+    /// Move `client_id`'s koshi scrollback view of `pane_id` by `scroll_line_count`, up into
     /// history or back down toward live output, and report the line its top row
     /// now shows.
     ///
@@ -159,7 +158,8 @@ impl Server {
     /// The returned line is the same number [`PaneSnapshot::view_top_row_index`] would
     /// carry for the next frame. `None` names a pane with no terminal.
     ///
-    /// [`PaneSnapshot::view_top_row_index`]: koshi_renderer::snapshot::PaneSnapshot::view_top_row_index
+    /// [`PaneSnapshot::view_top_row_index`]:
+    /// koshi_renderer::snapshot::PaneSnapshot::view_top_row_index
     pub fn scroll_pane_view(
         &mut self,
         client_id: ClientId,
@@ -194,7 +194,7 @@ impl Server {
             terminal_state
                 .get_scrollback()
                 .get_total_pushed_line_count()
-                .saturating_sub(terminal_state.effective_view_offset(scroll_offset) as u64),
+                .saturating_sub(terminal_state.compute_effective_view_offset(scroll_offset) as u64),
         )
     }
 
@@ -226,28 +226,27 @@ impl Server {
     /// Returns whether a report was handed to the pane's writer. It is `false`
     /// when the pane is gone, when its live tracking no longer asks for this
     /// event, when the layout no longer places the pane, and when the pane
-    /// refuses the bytes — so the caller records a gesture only for a press the
-    /// pane accepted.
+    /// refuses the bytes.
     pub fn forward_mouse_to_pane(
         &mut self,
         client_id: ClientId,
         pane_id: PaneId,
         mouse_input: MouseInput,
     ) -> bool {
-        let Some((tracking, encoding)) =
-            self.terminal_engine_by_pane_id
-                .get(&pane_id)
-                .map(|terminal_engine| {
-                    let terminal_state = terminal_engine.get_terminal_state();
-                    (
-                        terminal_state.get_mouse_tracking(),
-                        terminal_state.get_mouse_encoding(),
-                    )
-                })
+        let Some((mouse_tracking, mouse_encoding)) = self
+            .terminal_engine_by_pane_id
+            .get(&pane_id)
+            .map(|terminal_engine| {
+                let terminal_state = terminal_engine.get_terminal_state();
+                (
+                    terminal_state.get_mouse_tracking(),
+                    terminal_state.get_mouse_encoding(),
+                )
+            })
         else {
             return false;
         };
-        if !is_mouse_kind_reported(tracking, mouse_input.mouse_kind) {
+        if !is_mouse_kind_reported(mouse_tracking, mouse_input.mouse_kind) {
             return false;
         }
         let Some(owned_frame_layout) = self.build_frame_layout(client_id) else {
@@ -268,8 +267,8 @@ impl Server {
             mouse_input.modifier_flags,
             column_index,
             row_index,
-            tracking,
-            encoding,
+            mouse_tracking,
+            mouse_encoding,
         ) else {
             return false;
         };
@@ -277,16 +276,19 @@ impl Server {
             .get_pty_backend()
             .write_pane_input(pane_id, &mouse_report_bytes)
             .is_ok();
+        if is_report_written {
+            self.clear_session_recovery_notice_after_pane_input(pane_id);
+        }
         // A wheel tick leaves the highlight standing; every other forwarded
         // report — click, drag, motion, release — drops it.
-        if !matches!(mouse_input.mouse_kind, MouseKind::Scroll(_)) {
+        if is_report_written && !matches!(mouse_input.mouse_kind, MouseKind::Scroll(_)) {
             self.clear_selection_on_pane_input(client_id, pane_id);
         }
         is_report_written
     }
 
     /// Send `arrow_count` cursor arrow keys to `pane_id` for a wheel tick — the
-    /// alternate-scroll (`?1007`) translation. `up` sends up-arrows, otherwise
+    /// alternate-scroll (`?1007`) translation. `is_scrolling_up` sends up-arrows, otherwise
     /// down-arrows.
     ///
     /// The pane must still be on the alternate screen with alternate scroll on,
@@ -298,7 +300,7 @@ impl Server {
     /// same moment: `ESC O A` under application keys, `ESC [ A` otherwise.
     ///
     /// An `arrow_count` of `0` writes nothing.
-    pub fn write_alt_scroll_arrows(
+    pub fn write_alternate_scroll_arrows(
         &mut self,
         pane_id: PaneId,
         is_scrolling_up: bool,
@@ -316,7 +318,7 @@ impl Server {
                 let terminal_state = terminal_engine.get_terminal_state();
                 (terminal_state.is_alternate_scroll_enabled()
                     && terminal_state.get_active_screen() == Screen::Alternate)
-                    .then(|| terminal_state.are_application_cursor_keys_enabled())
+                    .then(|| terminal_state.is_application_cursor_keys_enabled())
             })
         else {
             return;
@@ -329,10 +331,13 @@ impl Server {
         for _ in 0..arrow_count {
             arrow_key_bytes_to_write.extend_from_slice(&arrow_key_bytes);
         }
-        if !arrow_key_bytes_to_write.is_empty() {
-            let _ = self
+        if !arrow_key_bytes_to_write.is_empty()
+            && self
                 .get_pty_backend()
-                .write_pane_input(pane_id, &arrow_key_bytes_to_write);
+                .write_pane_input(pane_id, &arrow_key_bytes_to_write)
+                .is_ok()
+        {
+            self.clear_session_recovery_notice_after_pane_input(pane_id);
         }
     }
 
@@ -379,12 +384,12 @@ impl Server {
                 } => {
                     let _ = self.forward_mouse_to_pane(client_id, pane_id, mouse_input);
                 }
-                WireMouseAction::AltScrollArrows {
+                WireMouseAction::AlternateScrollArrows {
                     pane_id,
                     is_scrolling_up,
                     arrow_count,
                 } => {
-                    self.write_alt_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+                    self.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
                 }
                 WireMouseAction::Resize {
                     pane_id,
@@ -434,7 +439,7 @@ impl Server {
             return;
         };
         self.event_bus
-            .try_send_answer(subscriber_id, request_id, mouse_answers);
+            .try_send_mouse_answer(subscriber_id, request_id, mouse_answers);
     }
 }
 

@@ -14,7 +14,7 @@
 //! - A field is added that one side must not send until it knows the other
 //!   reads it.
 //!
-//! Adding or removing a field that both sides still decode leaves `max` where
+//! Adding or removing a field that both sides still decode leaves `maximum_version` where
 //! it is.
 //!
 //! The first such change after a release sets `maximum_version` to `released_version + 1`. `maximum_version`
@@ -65,6 +65,11 @@ pub struct Surface {
 ///   another tab. A placement preview is a read the client requests. The
 ///   session answers a placement with `PanePlacementCommitted` to every
 ///   viewer, or with `PlacementCommandRejected` to the viewer that sent it.
+/// - Painted frames carry whether the session shows a recovery notice after
+///   opening a new shell in place of an unrestored session.
+/// - A pane-write command carries its bytes in `pane_input_bytes`. Version 3
+///   called this field `input_bytes`; the two versions cannot decode each
+///   other's pane-write command.
 ///
 /// Four shapes differ between 2 and 3:
 ///
@@ -78,11 +83,6 @@ pub struct Surface {
 /// - Painted image placements name connection-local content identities. Their
 ///   RGBA records travel in bounded image-content events and remain cached
 ///   across unchanged frames. Version 2 had no terminal-image wire shape.
-///
-/// The session reader still accepts two shape-level encodings in stored data:
-/// a `HostWrite` holding a list of numbers and a split child wrapped in a
-/// `{"node": …}` record. Resume format 4 is the only resume format this build
-/// reads.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
     minimum_version: 4,
@@ -225,7 +225,7 @@ impl Surface {
     /// 3. `maximum_version` is more than one above `released_version`: `"the control plane speaks
     ///    4, which is more than one step above the 2 the last release spoke"`.
     ///
-    /// The first failing check is the one reported. A surface whose `released`
+    /// The first failing check is the one reported. A surface whose `released_version`
     /// is `None` runs check 1 only.
     #[must_use]
     pub fn find_version_problem(&self) -> Option<String> {

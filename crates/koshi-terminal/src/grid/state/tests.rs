@@ -1,11 +1,25 @@
 //! Unit tests for the cell grid.
 
 use super::*;
+
+impl Cell {
+    /// The allocated capacity of this cell's image-fragment list, or `0` when it
+    /// holds fewer than two fragments.
+    pub(crate) fn get_image_fragment_capacity(&self) -> usize {
+        self.combining.as_ref().map_or(0, |extra| {
+            if let ImageFragments::Many(fragments) = &extra.image_fragments {
+                fragments.capacity()
+            } else {
+                0
+            }
+        })
+    }
+}
 use crate::style::{Color, Style};
 
 /// A blank grid in the default style — the common fixture for these tests.
 fn build_default_grid(row_count: u16, column_count: u16) -> Grid {
-    Grid::blank(row_count, column_count, Style::default())
+    Grid::build_blank(row_count, column_count, Style::default())
 }
 
 #[test]
@@ -74,7 +88,7 @@ fn get_row_text(grid: &Grid, row_index: u16) -> String {
 
 #[test]
 fn blank_cell_is_a_space_of_width_one_in_the_default_style() {
-    let cell = Cell::blank();
+    let cell = Cell::build_blank();
     assert_eq!(cell.character, ' ');
     assert_eq!(cell.display_width, 1);
     assert_eq!(cell.style, Style::default());
@@ -83,7 +97,7 @@ fn blank_cell_is_a_space_of_width_one_in_the_default_style() {
 #[test]
 fn blank_with_is_a_space_of_width_one_in_the_given_style() {
     let fill_style = build_background_style(Color::Indexed(4));
-    let cell = Cell::blank_with(fill_style);
+    let cell = Cell::build_blank_with_style(fill_style);
     assert_eq!(cell.character, ' ');
     assert_eq!(cell.display_width, 1);
     assert_eq!(cell.style, fill_style);
@@ -102,13 +116,13 @@ fn blank_grid_fills_every_cell_with_a_blank() {
     assert!(grid
         .rows
         .iter()
-        .all(|row_cells| row_cells.iter().all(|cell| *cell == Cell::blank())));
+        .all(|row_cells| row_cells.iter().all(|cell| *cell == Cell::build_blank())));
 }
 
 #[test]
 fn blank_grid_fills_every_cell_with_the_given_fill_style() {
     let fill_style = build_background_style(Color::Indexed(2));
-    let grid = Grid::blank(2, 3, fill_style);
+    let grid = Grid::build_blank(2, 3, fill_style);
     assert!(grid
         .rows
         .iter()
@@ -160,8 +174,8 @@ fn dimensions_of_grids_with_a_zero_axis() {
 #[test]
 fn cell_returns_the_cell_for_in_range_coordinates() {
     let grid = build_default_grid(3, 5);
-    assert_eq!(grid.get_cell(0, 0), Some(&Cell::blank()));
-    assert_eq!(grid.get_cell(2, 4), Some(&Cell::blank()));
+    assert_eq!(grid.get_cell(0, 0), Some(&Cell::build_blank()));
+    assert_eq!(grid.get_cell(2, 4), Some(&Cell::build_blank()));
 }
 
 #[test]
@@ -181,7 +195,7 @@ fn cell_mut_writes_a_cell_that_reads_back() {
     let mut grid = build_default_grid(2, 2);
     *grid.get_cell_mut(1, 1).expect("in bounds") = Cell::from_character('Z', 1, Style::default());
     assert_eq!(grid.get_cell(1, 1).map(Cell::get_character), Some('Z'));
-    assert_eq!(grid.get_cell(0, 0), Some(&Cell::blank())); // neighbour untouched
+    assert_eq!(grid.get_cell(0, 0), Some(&Cell::build_blank())); // neighbour untouched
 }
 
 #[test]
@@ -221,7 +235,7 @@ fn delete_lines_full_grid_scrolls_up_dropping_the_top_row() {
 
     assert_eq!(grid.get_cell(0, 0).map(Cell::get_character), Some('b')); // old row 1 rises
     assert_eq!(grid.get_cell(1, 0).map(Cell::get_character), Some('c')); // old row 2 rises
-    assert_eq!(grid.get_cell(2, 0), Some(&Cell::blank())); // fresh blank bottom
+    assert_eq!(grid.get_cell(2, 0), Some(&Cell::build_blank())); // fresh blank bottom
 }
 
 #[test]
@@ -259,9 +273,9 @@ fn clear_line_blanks_the_half_open_span() {
     }
     grid.clear_line(0, 1, 4, Style::default()); // columns 1, 2, 3; column 4 is excluded
     assert_eq!(grid.get_cell(0, 0).map(Cell::get_character), Some('x')); // before the span
-    assert_eq!(grid.get_cell(0, 1), Some(&Cell::blank()));
-    assert_eq!(grid.get_cell(0, 2), Some(&Cell::blank()));
-    assert_eq!(grid.get_cell(0, 3), Some(&Cell::blank()));
+    assert_eq!(grid.get_cell(0, 1), Some(&Cell::build_blank()));
+    assert_eq!(grid.get_cell(0, 2), Some(&Cell::build_blank()));
+    assert_eq!(grid.get_cell(0, 3), Some(&Cell::build_blank()));
     assert_eq!(grid.get_cell(0, 4).map(Cell::get_character), Some('x')); // excluded end kept
 }
 
@@ -297,7 +311,9 @@ fn clear_line_clamps_an_oversized_span() {
             Cell::from_character('z', 1, Style::default());
     }
     grid.clear_line(0, 0, 99, Style::default()); // runs past the row width without panicking
-    assert!((0..3).all(|column_index| { grid.get_cell(0, column_index) == Some(&Cell::blank()) }));
+    assert!(
+        (0..3).all(|column_index| { grid.get_cell(0, column_index) == Some(&Cell::build_blank()) })
+    );
 }
 
 #[test]
@@ -312,7 +328,7 @@ fn clear_line_on_an_out_of_range_row_is_a_no_op() {
 fn insert_cells_shifts_right_and_drops_overflow() {
     let mut grid = build_default_grid(1, 5);
     write_row(&mut grid, 0, "abcde");
-    grid.insert_cells(0, 2, 2, Style::default()); // two blanks at column_index 2
+    grid.insert_cells_in_columns(0, 2, 4, 2, Style::default()); // two blanks at column_index 2
     assert_eq!(get_row_text(&grid, 0), "ab  c"); // c shifts right; d, e fall off
 }
 
@@ -320,7 +336,7 @@ fn insert_cells_shifts_right_and_drops_overflow() {
 fn insert_cells_with_excess_count_blanks_to_the_edge() {
     let mut grid = build_default_grid(1, 4);
     write_row(&mut grid, 0, "abcd");
-    grid.insert_cells(0, 1, 99, Style::default()); // far more than fits
+    grid.insert_cells_in_columns(0, 1, 3, 99, Style::default()); // far more than fits
     assert_eq!(get_row_text(&grid, 0), "a   "); // everything from column 1 is pushed off
     assert_eq!(grid.get_grid_dimensions(), (1, 4)); // column count is preserved
 }
@@ -330,7 +346,7 @@ fn insert_cells_fills_with_the_given_style() {
     let fill_style = build_background_style(Color::Indexed(3));
     let mut grid = build_default_grid(1, 3);
     write_row(&mut grid, 0, "abc");
-    grid.insert_cells(0, 0, 1, fill_style);
+    grid.insert_cells_in_columns(0, 0, 2, 1, fill_style);
     assert_eq!(grid.get_cell(0, 0).map(Cell::get_style), Some(fill_style)); // inserted blank carries fill_style
 }
 
@@ -338,8 +354,8 @@ fn insert_cells_fills_with_the_given_style() {
 fn insert_cells_out_of_bounds_is_a_no_op() {
     let mut grid = build_default_grid(2, 3);
     write_row(&mut grid, 0, "xyz");
-    grid.insert_cells(9, 0, 1, Style::default()); // row is out of range
-    grid.insert_cells(0, 9, 1, Style::default()); // column is out of range
+    grid.insert_cells_in_columns(9, 0, 2, 1, Style::default()); // row is out of range
+    grid.insert_cells_in_columns(0, 9, 2, 1, Style::default()); // column is out of range
     assert_eq!(get_row_text(&grid, 0), "xyz");
 }
 
@@ -347,7 +363,7 @@ fn insert_cells_out_of_bounds_is_a_no_op() {
 fn delete_cells_pulls_left_and_pads_the_right() {
     let mut grid = build_default_grid(1, 5);
     write_row(&mut grid, 0, "abcde");
-    grid.delete_cells(0, 1, 2, Style::default()); // remove b, c
+    grid.delete_cells_in_columns(0, 1, 4, 2, Style::default()); // remove b, c
     assert_eq!(get_row_text(&grid, 0), "ade  ");
 }
 
@@ -355,7 +371,7 @@ fn delete_cells_pulls_left_and_pads_the_right() {
 fn delete_cells_clamps_delete_count_and_preserves_column_count() {
     let mut grid = build_default_grid(1, 4);
     write_row(&mut grid, 0, "abcd");
-    grid.delete_cells(0, 2, 99, Style::default()); // delete count exceeds the cells to the right
+    grid.delete_cells_in_columns(0, 2, 3, 99, Style::default()); // delete count exceeds the cells to the right
     assert_eq!(get_row_text(&grid, 0), "ab  ");
     assert_eq!(grid.get_grid_dimensions(), (1, 4)); // column count must not grow
 }
@@ -365,7 +381,7 @@ fn delete_cells_fills_with_the_given_style() {
     let fill_style = build_background_style(Color::Indexed(3));
     let mut grid = build_default_grid(1, 3);
     write_row(&mut grid, 0, "abc");
-    grid.delete_cells(0, 0, 1, fill_style);
+    grid.delete_cells_in_columns(0, 0, 2, 1, fill_style);
     assert_eq!(grid.get_cell(0, 2).map(Cell::get_style), Some(fill_style)); // pad cell carries fill_style
 }
 
@@ -482,7 +498,7 @@ fn from_rows_pads_short_rows_with_the_fill_style() {
 
 #[test]
 fn row_ends_travel_with_scrolled_rows() {
-    let mut grid = Grid::blank(3, 4, Style::default());
+    let mut grid = Grid::build_blank(3, 4, Style::default());
     grid.set_row_end(1, RowEnd::Soft);
     // Scroll the whole grid up one line: old row 1 lands on row 0 with its
     // continuation state; the fresh bottom row is a hard end.
@@ -493,7 +509,7 @@ fn row_ends_travel_with_scrolled_rows() {
 
 #[test]
 fn delete_lines_breaks_the_continuation_above_the_band() {
-    let mut grid = Grid::blank(3, 4, Style::default());
+    let mut grid = Grid::build_blank(3, 4, Style::default());
     grid.set_row_end(0, RowEnd::Soft); // row 0 wrapped into row 1
     grid.delete_lines(1, 2, 1, Style::default());
     // Row 0's continuation row is gone: the wrap no longer holds.
@@ -502,7 +518,7 @@ fn delete_lines_breaks_the_continuation_above_the_band() {
 
 #[test]
 fn insert_lines_breaks_continuations_at_the_band_edges() {
-    let mut grid = Grid::blank(3, 4, Style::default());
+    let mut grid = Grid::build_blank(3, 4, Style::default());
     grid.set_row_end(0, RowEnd::Soft);
     grid.set_row_end(1, RowEnd::Soft);
     grid.insert_lines(1, 2, 1, Style::default());
@@ -514,7 +530,7 @@ fn insert_lines_breaks_continuations_at_the_band_edges() {
 
 #[test]
 fn tail_edits_reset_the_row_end() {
-    let mut grid = Grid::blank(1, 4, Style::default());
+    let mut grid = Grid::build_blank(1, 4, Style::default());
 
     grid.set_row_end(0, RowEnd::Soft);
     grid.clear_line(0, 2, 4, Style::default()); // reaches the last column
@@ -524,17 +540,17 @@ fn tail_edits_reset_the_row_end() {
     grid.clear_line(0, 0, 2, Style::default()); // stops short of it
     assert_eq!(grid.get_row_end(0), RowEnd::Soft);
 
-    grid.insert_cells(0, 1, 1, Style::default()); // shifts the tail
+    grid.insert_cells_in_columns(0, 1, 3, 1, Style::default()); // shifts the tail
     assert_eq!(grid.get_row_end(0), RowEnd::Hard);
 
     grid.set_row_end(0, RowEnd::Soft);
-    grid.delete_cells(0, 1, 1, Style::default()); // shifts the tail
+    grid.delete_cells_in_columns(0, 1, 3, 1, Style::default()); // shifts the tail
     assert_eq!(grid.get_row_end(0), RowEnd::Hard);
 }
 
 #[test]
 fn row_end_out_of_bounds_reads_hard_and_ignores_writes() {
-    let mut grid = Grid::blank(2, 2, Style::default());
+    let mut grid = Grid::build_blank(2, 2, Style::default());
     assert_eq!(grid.get_row_end(9), RowEnd::Hard);
     grid.set_row_end(9, RowEnd::Soft); // no-op, no panic
     assert_eq!(grid.get_row_end(9), RowEnd::Hard);
@@ -542,7 +558,7 @@ fn row_end_out_of_bounds_reads_hard_and_ignores_writes() {
 
 #[test]
 fn prompt_marks_travel_with_scrolled_rows() {
-    let mut grid = Grid::blank(3, 4, Style::default());
+    let mut grid = Grid::build_blank(3, 4, Style::default());
     grid.set_prompt_mark(1, true);
 
     grid.delete_lines(0, 2, 1, Style::default());
@@ -553,7 +569,7 @@ fn prompt_marks_travel_with_scrolled_rows() {
 
 #[test]
 fn prompt_marks_travel_with_inserted_rows_and_cell_edits() {
-    let mut grid = Grid::blank(3, 4, Style::default());
+    let mut grid = Grid::build_blank(3, 4, Style::default());
     grid.set_prompt_mark(1, true);
 
     grid.insert_lines(1, 2, 1, Style::default());
@@ -565,7 +581,7 @@ fn prompt_marks_travel_with_inserted_rows_and_cell_edits() {
 
 #[test]
 fn serialized_grid_state_round_trips_row_metadata() {
-    let mut grid = Grid::blank(2, 2, Style::default());
+    let mut grid = Grid::build_blank(2, 2, Style::default());
     grid.set_row_end(0, RowEnd::Soft);
     grid.set_prompt_mark(0, true);
 
@@ -577,55 +593,29 @@ fn serialized_grid_state_round_trips_row_metadata() {
 }
 
 #[test]
-fn legacy_row_end_grid_state_deserializes_with_unmarked_rows() {
-    let mut grid = Grid::blank(2, 2, Style::default());
-    grid.set_row_end(0, RowEnd::Soft);
-    grid.set_prompt_mark(0, true);
-    let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
-    let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
-    let serialized_row_metadata = serialized_grid_object
-        .remove("row_metadata")
-        .expect("current metadata exists");
-    let serialized_row_end_values = serialized_row_metadata
-        .as_array()
-        .expect("row metadata is an array")
-        .iter()
-        .map(|row_metadata| row_metadata["row_end"].clone())
-        .collect();
-    serialized_grid_object.insert(
-        "row_ends".to_string(),
-        serde_json::Value::Array(serialized_row_end_values),
-    );
-
-    let restored_grid: Grid =
-        serde_json::from_value(serialized_grid).expect("legacy grid deserializes");
-
-    assert_eq!(restored_grid.get_row_end(0), RowEnd::Soft);
-    assert!(!restored_grid.has_prompt_mark(0));
-}
-
-#[test]
 fn content_cell_count_of_an_empty_row_is_zero() {
     assert_eq!(count_row_content_cells(&[]), 0);
 }
 
 #[test]
 fn content_cell_count_of_an_all_blank_row_is_zero() {
-    assert_eq!(count_row_content_cells(&vec![Cell::blank(); 4]), 0);
+    assert_eq!(count_row_content_cells(&vec![Cell::build_blank(); 4]), 0);
 }
 
 #[test]
 fn content_cell_count_stops_after_the_last_non_default_cell() {
     let mut row_cells = build_text_row("ab");
-    row_cells.resize(6, Cell::blank());
+    row_cells.resize(6, Cell::build_blank());
     assert_eq!(count_row_content_cells(&row_cells), 2);
 }
 
 #[test]
 fn content_cell_count_includes_a_styled_blank() {
     let mut row_cells = build_text_row("a");
-    row_cells.push(Cell::blank_with(build_background_style(Color::Indexed(1))));
-    row_cells.resize(6, Cell::blank());
+    row_cells.push(Cell::build_blank_with_style(build_background_style(
+        Color::Indexed(1),
+    )));
+    row_cells.resize(6, Cell::build_blank());
     assert_eq!(count_row_content_cells(&row_cells), 2);
 }
 
@@ -635,15 +625,15 @@ fn content_cell_count_includes_a_wide_glyph_continuation_cell() {
         Cell::from_character('漢', 2, Style::default()),
         Cell::from_character(' ', 0, Style::default()),
     ];
-    row_cells.resize(6, Cell::blank());
+    row_cells.resize(6, Cell::build_blank());
     assert_eq!(count_row_content_cells(&row_cells), 2);
 }
 
 #[test]
 fn content_cell_count_includes_a_blank_with_a_combining_mark() {
-    let mut marked_cell = Cell::blank();
+    let mut marked_cell = Cell::build_blank();
     marked_cell.push_combining('\u{0301}');
-    let row_cells = vec![marked_cell, Cell::blank(), Cell::blank()];
+    let row_cells = vec![marked_cell, Cell::build_blank(), Cell::build_blank()];
     assert_eq!(count_row_content_cells(&row_cells), 1);
 }
 
@@ -705,7 +695,7 @@ fn row_end_and_prompt_mark_on_an_empty_grid_read_as_defaults() {
 
 #[test]
 fn prompt_mark_out_of_bounds_reads_false_and_ignores_writes() {
-    let mut grid = Grid::blank(2, 2, Style::default());
+    let mut grid = Grid::build_blank(2, 2, Style::default());
     assert!(!grid.has_prompt_mark(2));
     grid.set_prompt_mark(2, true);
     assert!(!grid.has_prompt_mark(2));
@@ -716,7 +706,7 @@ fn prompt_mark_out_of_bounds_reads_false_and_ignores_writes() {
 
 #[test]
 fn clear_line_starting_past_the_row_leaves_the_row_end_alone() {
-    let mut grid = Grid::blank(1, 4, Style::default());
+    let mut grid = Grid::build_blank(1, 4, Style::default());
     write_row(&mut grid, 0, "abcd");
     grid.set_row_end(0, RowEnd::Soft);
     grid.clear_line(0, 4, 9, Style::default()); // first column equals the column count
@@ -726,7 +716,7 @@ fn clear_line_starting_past_the_row_leaves_the_row_end_alone() {
 
 #[test]
 fn clear_line_of_only_the_last_column_breaks_the_row_end() {
-    let mut grid = Grid::blank(1, 4, Style::default());
+    let mut grid = Grid::build_blank(1, 4, Style::default());
     write_row(&mut grid, 0, "abcd");
     grid.set_row_end(0, RowEnd::Soft);
     grid.clear_line(0, 3, 4, Style::default());
@@ -762,7 +752,7 @@ fn delete_lines_with_a_zero_count_moves_nothing_and_keeps_row_ends() {
 fn delete_cells_at_the_last_column_blanks_only_that_cell() {
     let mut grid = build_default_grid(1, 4);
     write_row(&mut grid, 0, "abcd");
-    grid.delete_cells(0, 3, 1, Style::default());
+    grid.delete_cells_in_columns(0, 3, 3, 1, Style::default());
     assert_eq!(get_row_text(&grid, 0), "abc ");
     assert_eq!(grid.get_grid_dimensions(), (1, 4));
 }
@@ -772,8 +762,8 @@ fn delete_cells_out_of_bounds_is_a_no_op() {
     let mut grid = build_default_grid(2, 3);
     write_row(&mut grid, 0, "xyz");
     grid.set_row_end(0, RowEnd::Soft);
-    grid.delete_cells(9, 0, 1, Style::default()); // row is out of range
-    grid.delete_cells(0, 3, 1, Style::default()); // column index equals the column count
+    grid.delete_cells_in_columns(9, 0, 2, 1, Style::default()); // row is out of range
+    grid.delete_cells_in_columns(0, 3, 2, 1, Style::default()); // column index equals the column count
     assert_eq!(get_row_text(&grid, 0), "xyz");
     assert_eq!(grid.get_row_end(0), RowEnd::Soft);
 }
@@ -793,46 +783,26 @@ fn a_cell_with_combining_marks_round_trips_through_serde() {
 }
 
 #[test]
-fn serialized_grid_without_row_metadata_deserializes_with_default_rows() {
-    let mut grid = Grid::blank(2, 2, Style::default());
-    grid.set_row_end(0, RowEnd::Soft);
-    grid.set_prompt_mark(1, true);
+fn serialized_grid_without_row_metadata_is_refused() {
+    let grid = Grid::build_blank(2, 2, Style::default());
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
     serialized_grid_object
         .remove("row_metadata")
         .expect("current metadata exists");
 
-    let restored_grid: Grid =
-        serde_json::from_value(serialized_grid).expect("bare grid deserializes");
+    let grid_deserialization_error =
+        serde_json::from_value::<Grid>(serialized_grid).expect_err("row metadata is required");
 
-    assert_eq!(restored_grid.get_grid_dimensions(), (2, 2));
-    assert_eq!(restored_grid.get_row_end(0), RowEnd::Hard);
-    assert!(!restored_grid.has_prompt_mark(1));
-}
-
-#[test]
-fn serialized_grid_with_both_metadata_forms_takes_the_current_one() {
-    let mut grid = Grid::blank(2, 2, Style::default());
-    grid.set_row_end(0, RowEnd::Soft);
-    grid.set_prompt_mark(0, true);
-    let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
-    let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
-    serialized_grid_object.insert(
-        "row_ends".to_string(),
-        serde_json::json!(["Hard", "SoftWide"]),
+    assert_eq!(
+        grid_deserialization_error.to_string(),
+        "missing field `row_metadata`"
     );
-
-    let restored_grid: Grid = serde_json::from_value(serialized_grid).expect("grid deserializes");
-
-    assert_eq!(restored_grid.get_row_end(0), RowEnd::Soft);
-    assert!(restored_grid.has_prompt_mark(0));
-    assert_eq!(restored_grid.get_row_end(1), RowEnd::Hard);
 }
 
 #[test]
 fn serialized_grid_with_metadata_count_different_from_rows_is_rejected() {
-    let grid = Grid::blank(2, 2, Style::default());
+    let grid = Grid::build_blank(2, 2, Style::default());
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
     serialized_grid_object
@@ -851,28 +821,9 @@ fn serialized_grid_with_metadata_count_different_from_rows_is_rejected() {
 }
 
 #[test]
-fn legacy_serialized_grid_with_row_end_count_different_from_rows_is_rejected() {
-    let grid = Grid::blank(2, 2, Style::default());
-    let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
-    let serialized_grid_object = serialized_grid.as_object_mut().expect("grid is an object");
-    serialized_grid_object
-        .remove("row_metadata")
-        .expect("current metadata exists");
-    serialized_grid_object.insert("row_ends".to_string(), serde_json::json!(["Hard"]));
-
-    let grid_deserialization_error =
-        serde_json::from_value::<Grid>(serialized_grid).expect_err("one row lacks a row end");
-
-    assert_eq!(
-        grid_deserialization_error.to_string(),
-        "grid row metadata does not match rows"
-    );
-}
-
-#[test]
 fn serialized_grid_with_rows_different_in_length_is_rejected() {
     // Every row carries the same number of cells.
-    let grid = Grid::blank(2, 3, Style::default());
+    let grid = Grid::build_blank(2, 3, Style::default());
     let mut serialized_grid = serde_json::to_value(&grid).expect("grid serializes");
     serialized_grid["rows"][1]
         .as_array_mut()
@@ -907,7 +858,7 @@ fn insert_lines_with_a_zero_count_moves_nothing_and_keeps_row_ends() {
 
 #[test]
 fn row_metadata_reads_both_facts_at_once_and_defaults_out_of_bounds() {
-    let mut grid = Grid::blank(2, 2, Style::default());
+    let mut grid = Grid::build_blank(2, 2, Style::default());
     grid.set_row_end(0, RowEnd::Soft);
     grid.set_prompt_mark(0, true);
 

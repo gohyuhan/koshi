@@ -22,7 +22,7 @@
 //!
 //! ## Live pane references
 //!
-//! [`layout_assert::check_live_pane_refs`] checks the pane ids extracted from
+//! [`layout_assert::check_live_pane_references`] checks the pane ids extracted from
 //! layout leaves against a set of live pane ids. Layout tests pass
 //! `tree.list_leaf_pane_ids()` and their live pane-id set to it.
 
@@ -68,13 +68,13 @@ pub enum LayoutAssertionError {
 }
 
 impl std::fmt::Display for LayoutAssertionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SpaceNotFullyOccupied {
                 tab_cell_area,
                 occupied_cell_area,
             } => write!(
-                f,
+                formatter,
                 "layout does not fully occupy the tab: tab area {tab_cell_area} cells, \
                  panes occupy {occupied_cell_area} cells"
             ),
@@ -85,7 +85,7 @@ impl std::fmt::Display for LayoutAssertionError {
                 second_pane_rect,
                 overlap_rect,
             } => write!(
-                f,
+                formatter,
                 "panes overlap: {first_pane_id} {first_pane_rect:?} and \
                  {second_pane_id} {second_pane_rect:?} share {overlap_rect:?}"
             ),
@@ -95,7 +95,7 @@ impl std::fmt::Display for LayoutAssertionError {
                 tab_rect,
             } => {
                 write!(
-                    f,
+                    formatter,
                     "pane {pane_id} {pane_rect:?} extends outside the tab {tab_rect:?}"
                 )
             }
@@ -105,12 +105,12 @@ impl std::fmt::Display for LayoutAssertionError {
                 minimum_size,
             } => {
                 write!(
-                    f,
+                    formatter,
                     "pane {pane_id} size {pane_size:?} is below the minimum {minimum_size:?}"
                 )
             }
             Self::DeadPaneReference { pane_id } => {
-                write!(f, "layout references non-live pane {pane_id}")
+                write!(formatter, "layout references non-live pane {pane_id}")
             }
         }
     }
@@ -120,7 +120,7 @@ impl std::error::Error for LayoutAssertionError {}
 
 /// Return the cells covered by `rect` as `cols * rows` in `u64`.
 fn compute_cell_area(rect: Rect) -> u64 {
-    u64::from(rect.cell_size.column_count) * u64::from(rect.cell_size.row_count)
+    u64::from(rect.size.column_count) * u64::from(rect.size.row_count)
 }
 
 /// Check that placed pane areas sum to the tab area.
@@ -192,16 +192,16 @@ pub fn check_no_outside(
     placed_panes: &[PlacedPane],
     tab_rect: Rect,
 ) -> Result<(), LayoutAssertionError> {
-    let tab_right = u32::from(tab_rect.origin.column) + u32::from(tab_rect.cell_size.column_count);
-    let tab_bottom = u32::from(tab_rect.origin.row) + u32::from(tab_rect.cell_size.row_count);
+    let tab_right = u32::from(tab_rect.origin.column) + u32::from(tab_rect.size.column_count);
+    let tab_bottom = u32::from(tab_rect.origin.row) + u32::from(tab_rect.size.row_count);
     for &(pane_id, pane_rect) in placed_panes {
         if pane_rect.is_empty() {
             continue;
         }
         let pane_right_edge_column =
-            u32::from(pane_rect.origin.column) + u32::from(pane_rect.cell_size.column_count);
+            u32::from(pane_rect.origin.column) + u32::from(pane_rect.size.column_count);
         let pane_bottom_edge_row =
-            u32::from(pane_rect.origin.row) + u32::from(pane_rect.cell_size.row_count);
+            u32::from(pane_rect.origin.row) + u32::from(pane_rect.size.row_count);
         if pane_rect.origin.column < tab_rect.origin.column
             || pane_rect.origin.row < tab_rect.origin.row
             || pane_right_edge_column > tab_right
@@ -234,8 +234,8 @@ pub fn check_exact_tiling(
     check_no_outside(placed_panes, tab_rect)
 }
 
-/// Check that every non-empty placed pane is at least `minimum_size.column_count` wide and `minimum_size.row_count`
-/// tall.
+/// Check that every non-empty placed pane is at least `minimum_size.column_count` wide and
+/// `minimum_size.row_count` tall.
 ///
 /// Empty panes are exempt.
 ///
@@ -251,12 +251,12 @@ pub fn check_minimum_size_respected(
         if pane_rect.is_empty() {
             continue;
         }
-        if pane_rect.cell_size.column_count < minimum_size.column_count
-            || pane_rect.cell_size.row_count < minimum_size.row_count
+        if pane_rect.size.column_count < minimum_size.column_count
+            || pane_rect.size.row_count < minimum_size.row_count
         {
             return Err(LayoutAssertionError::MinimumSizeViolated {
                 pane_id,
-                pane_size: pane_rect.cell_size,
+                pane_size: pane_rect.size,
                 minimum_size,
             });
         }
@@ -274,7 +274,7 @@ pub fn check_minimum_size_respected(
 ///
 /// Returns [`LayoutAssertionError::DeadPaneReference`] for the first id in
 /// slice order that is absent from `live_pane_ids`.
-pub fn check_live_pane_refs(
+pub fn check_live_pane_references(
     layout_leaf_pane_ids: &[PaneId],
     live_pane_ids: &HashSet<PaneId>,
 ) -> Result<(), LayoutAssertionError> {

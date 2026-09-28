@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
@@ -26,9 +27,11 @@ use crate::server::Server;
 /// engine for a pane — a 1-row screen so each fed newline pushes exactly one
 /// line into scrollback. Returns the runtime plus the pane and client ids.
 fn build_runtime_with_pane() -> (Server, PaneId, ClientId) {
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
-    let (tx, inbox_rx) = mpsc::channel::<RuntimeEvent>();
-    let mut runtime = Server::from_runtime_parts(pty_backend, inbox_rx, tx.clone());
+    let (sender, inbox_receiver) = mpsc::channel::<RuntimeEvent>();
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(sender),
+    )));
+    let mut runtime = Server::from_runtime_parts(pty_backend, inbox_receiver);
     let (pane_id, client_id) = attach_test_session_with_pane(&mut runtime);
     (runtime, pane_id, client_id)
 }
@@ -50,7 +53,7 @@ fn attach_test_session_with_pane(runtime: &mut Server) -> (PaneId, ClientId) {
     );
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(pane_id, SystemTime::now()))
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("unique pane id");
     session.tabs.insert(
         tab_id,
@@ -105,7 +108,7 @@ fn add_pane_beside(runtime: &mut Server, sibling_pane_id: PaneId) -> PaneId {
         .get_mut(&session_id)
         .unwrap()
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(pane_id, SystemTime::now()))
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("unique pane id");
     runtime.terminal_engine_by_pane_id.insert(
         pane_id,
@@ -225,11 +228,11 @@ fn scrolling_to_the_bottom_in_visual_mode_keeps_the_view_held() {
 }
 
 #[test]
-fn scroll_to_top_and_bottom_jump_to_the_ends() {
+fn scroll_up_by_the_maximum_and_scroll_to_bottom_jump_to_the_ends() {
     let (mut runtime, pane, client) = build_runtime_with_pane();
     runtime.handle_pty_output(pane, b"\n\n\n\n"); // four lines
 
-    runtime.scroll_to_top(client, pane);
+    runtime.scroll_up(client, pane, usize::MAX);
     assert_eq!(get_scroll_offset(&runtime, client, pane), 4);
     assert!(is_view_held(&runtime, client, pane));
 
@@ -245,8 +248,9 @@ fn new_output_anchors_a_scrolled_back_view_to_the_same_history() {
     runtime.scroll_up(client, pane, 2);
 
     runtime.handle_pty_output(pane, b"\n\n"); // two more pushed
-                                              // Anchored: the get_scroll_offset rose by the two pushed lines, so the same history
-                                              // stays in view instead of drifting.
+                                              // Anchored: the get_scroll_offset rose by the two
+                                              // pushed lines, so the same history stays in view
+                                              // instead of drifting.
     assert_eq!(get_retained_line_count(&runtime, pane), 5);
     assert_eq!(get_scroll_offset(&runtime, client, pane), 4);
 }
@@ -374,10 +378,10 @@ fn erasing_the_scrollback_leaves_a_live_screen_highlight_held() {
 
 #[test]
 fn evicting_a_highlights_lines_leaves_the_view_scrolled_up() {
-    // A set_highlight holds the view, so output raises the get_scroll_offset under it. Once the
-    // cap evicts every line the set_highlight names, the set_highlight is dropped and the
-    // get_scroll_offset stays: the view is is_view_held by the get_scroll_offset alone and stays until the
-    // client scrolls down.
+    // A set_highlight holds the view, so output raises the get_scroll_offset under it. Once the cap
+    // evicts every line the set_highlight names, the set_highlight is dropped and the
+    // get_scroll_offset stays: the view is is_view_held by the get_scroll_offset alone and stays
+    // until the client scrolls down.
     let (mut runtime, pane, client) = build_runtime_with_pane();
     runtime.handle_pty_output(pane, b"\n\n\n");
     set_highlight(&mut runtime, client, pane); // row 0, in history
@@ -429,17 +433,18 @@ fn a_no_op_scroll_schedules_no_repaint() {
     let (mut runtime, pane, client) = build_runtime_with_pane();
     runtime.handle_pty_output(pane, b"\n\n"); // two get_retained_line_count lines
     let now = Instant::now();
-    assert!(runtime.render_scheduler.poll(now)); // drain the output invalidation
+    assert!(runtime.render_scheduler.claim_due_render(now)); // drain the output invalidation
 
     runtime.scroll_down(client, pane, 1); // already following live
     runtime.scroll_up(client, pane, 0); // zero-line move
     runtime.scroll_up(ClientId::new(), pane, 1); // unknown client
-                                                 // Nothing marked the frame stale: the loop would sleep until an event.
-    assert_eq!(runtime.render_scheduler.next_wakeup(now), None);
+                                                 // Nothing marked the frame stale: the loop would
+                                                 // sleep until an event.
+    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
 
     runtime.scroll_up(client, pane, 1); // a real move marks the frame stale
     assert_eq!(
-        runtime.render_scheduler.next_wakeup(now),
+        runtime.render_scheduler.compute_next_wakeup(now),
         Some(FRAME_INTERVAL_DURATION)
     );
 }
@@ -449,15 +454,15 @@ fn scrolling_a_pane_with_no_terminal_moves_nothing() {
     let (mut runtime, pane, client) = build_runtime_with_pane();
     runtime.handle_pty_output(pane, b"\n\n");
     let now = Instant::now();
-    assert!(runtime.render_scheduler.poll(now)); // drain the output invalidation
+    assert!(runtime.render_scheduler.claim_due_render(now)); // drain the output invalidation
 
     let no_engine = PaneId::new(); // never had a terminal engine
     runtime.scroll_up(client, no_engine, 3);
-    runtime.scroll_to_top(client, no_engine);
+    runtime.scroll_up(client, no_engine, usize::MAX);
     runtime.scroll_down(client, no_engine, 3);
     assert_eq!(get_scroll_offset(&runtime, client, no_engine), 0);
     assert!(!is_view_held(&runtime, client, no_engine));
-    assert_eq!(runtime.render_scheduler.next_wakeup(now), None);
+    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
 }
 
 #[test]
@@ -466,13 +471,13 @@ fn scrolling_down_as_an_unknown_client_moves_nothing() {
     runtime.handle_pty_output(pane, b"\n\n\n");
     runtime.scroll_up(client, pane, 2);
     let now = Instant::now();
-    assert!(runtime.render_scheduler.poll(now));
+    assert!(runtime.render_scheduler.claim_due_render(now));
 
     runtime.scroll_down(ClientId::new(), pane, 1);
     runtime.scroll_to_bottom(ClientId::new(), pane);
     assert_eq!(get_scroll_offset(&runtime, client, pane), 2); // the attached client is untouched
     assert!(is_view_held(&runtime, client, pane));
-    assert_eq!(runtime.render_scheduler.next_wakeup(now), None);
+    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
 }
 
 #[test]
@@ -481,25 +486,25 @@ fn scrolling_by_zero_lines_leaves_a_scrolled_view_where_it_is() {
     runtime.handle_pty_output(pane, b"\n\n\n");
     runtime.scroll_up(client, pane, 2);
     let now = Instant::now();
-    assert!(runtime.render_scheduler.poll(now));
+    assert!(runtime.render_scheduler.claim_due_render(now));
 
     runtime.scroll_up(client, pane, 0);
     runtime.scroll_down(client, pane, 0);
     assert_eq!(get_scroll_offset(&runtime, client, pane), 2);
     assert!(is_view_held(&runtime, client, pane));
-    assert_eq!(runtime.render_scheduler.next_wakeup(now), None);
+    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
 }
 
 #[test]
-fn scroll_to_top_with_no_history_stays_at_the_newest_line() {
+fn scroll_up_by_the_maximum_with_no_history_stays_at_the_newest_line() {
     let (mut runtime, pane, client) = build_runtime_with_pane();
     let now = Instant::now();
 
-    runtime.scroll_to_top(client, pane); // nothing has scrolled off the screen yet
+    runtime.scroll_up(client, pane, usize::MAX); // nothing has scrolled off the screen yet
     assert_eq!(get_retained_line_count(&runtime, pane), 0);
     assert_eq!(get_scroll_offset(&runtime, client, pane), 0);
     assert!(!is_view_held(&runtime, client, pane));
-    assert_eq!(runtime.render_scheduler.next_wakeup(now), None);
+    assert_eq!(runtime.render_scheduler.compute_next_wakeup(now), None);
 }
 
 #[test]
@@ -508,19 +513,19 @@ fn scrolling_to_the_bottom_twice_schedules_one_repaint() {
     runtime.handle_pty_output(pane, b"\n\n\n");
     runtime.scroll_up(client, pane, 2);
     let now = Instant::now();
-    assert!(runtime.render_scheduler.poll(now));
+    assert!(runtime.render_scheduler.claim_due_render(now));
 
     runtime.scroll_to_bottom(client, pane);
     assert_eq!(get_scroll_offset(&runtime, client, pane), 0);
     assert_eq!(
-        runtime.render_scheduler.next_wakeup(now),
+        runtime.render_scheduler.compute_next_wakeup(now),
         Some(FRAME_INTERVAL_DURATION)
     );
     let painted = now + FRAME_INTERVAL_DURATION;
-    assert!(runtime.render_scheduler.poll(painted));
+    assert!(runtime.render_scheduler.claim_due_render(painted));
 
     runtime.scroll_to_bottom(client, pane); // already at the newest line
-    assert_eq!(runtime.render_scheduler.next_wakeup(painted), None);
+    assert_eq!(runtime.render_scheduler.compute_next_wakeup(painted), None);
 }
 
 #[test]
@@ -633,7 +638,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
     runtime.handle_pty_output(pane, b"\n\n\n");
 
     let session_id = *runtime.list_sessions().keys().next().unwrap();
-    let tab_id = runtime.get_client_mut(first).unwrap().get_active_tab();
+    let tab_id = runtime.get_client_mut(first).unwrap().get_active_tab_id();
     let (second, third) = (ClientId::new(), ClientId::new());
     for client_id in [second, third] {
         let client = Client::from_attachment(
@@ -673,22 +678,22 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
 
 /// The engine's effective view get_scroll_offset for the pane — what the renderer actually
 /// shows, which is `0` on the alternate screen however far the stored get_scroll_offset sits.
-fn effective_offset(runtime: &Server, pane: PaneId, stored: usize) -> usize {
+fn compute_effective_offset(runtime: &Server, pane: PaneId, stored: usize) -> usize {
     runtime
         .terminal_engine_by_pane_id
         .get(&pane)
         .unwrap()
         .get_terminal_state()
-        .effective_view_offset(stored)
+        .compute_effective_view_offset(stored)
 }
 
 #[test]
 fn scrolling_up_on_the_alternate_screen_moves_the_stored_offset_but_shows_live() {
-    // The alternate screen keeps no history of its own, but the pane's one
-    // scrollback survives entering it (it is restored on exit), so `scroll_up`
-    // still clamps against those get_retained_line_count lines and moves the stored get_scroll_offset. The
-    // renderer never shows it there, though: the engine's effective get_scroll_offset is 0
-    // on the alternate screen.
+    // The alternate screen keeps no history of its own, but the pane's one scrollback survives
+    // entering it (it is restored on exit), so `scroll_up` still clamps against those
+    // get_retained_line_count lines and moves the stored get_scroll_offset. The renderer never
+    // shows it there, though: the engine's effective get_scroll_offset is 0 on the alternate
+    // screen.
     let (mut runtime, pane, client) = build_runtime_with_pane();
     runtime.handle_pty_output(pane, b"\n\n\n"); // three get_retained_line_count lines
     runtime.handle_pty_output(pane, b"\x1b[?1049h"); // enter the alternate screen
@@ -699,25 +704,24 @@ fn scrolling_up_on_the_alternate_screen_moves_the_stored_offset_but_shows_live()
     );
 
     runtime.scroll_up(client, pane, 2);
-    // The stored get_scroll_offset moved — `scroll_up` clamps to the get_retained_line_count count, which
-    // the alternate screen did not clear.
+    // The stored get_scroll_offset moved — `scroll_up` clamps to the get_retained_line_count count,
+    // which the alternate screen did not clear.
     assert_eq!(get_scroll_offset(&runtime, client, pane), 2);
     // But nothing scrolled on screen: the effective get_scroll_offset is 0 on the alt screen.
-    assert_eq!(effective_offset(&runtime, pane, 2), 0);
+    assert_eq!(compute_effective_offset(&runtime, pane, 2), 0);
 }
 
 #[test]
-fn scroll_to_top_on_the_alternate_screen_clamps_to_the_retained_history() {
-    // `scroll_to_top` is a `scroll_up` by the maximum; on the alternate screen it
-    // still lands exactly on the get_retained_line_count primary line count, and still shows
-    // nothing scrolled.
+fn scroll_up_by_the_maximum_on_the_alternate_screen_clamps_to_the_retained_history() {
+    // On the alternate screen a `scroll_up` by the maximum still lands exactly
+    // on the retained primary line count, and still shows nothing scrolled.
     let (mut runtime, pane, client) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane, b"\n\n\n\n"); // four get_retained_line_count lines
+    runtime.handle_pty_output(pane, b"\n\n\n\n"); // four retained lines
     runtime.handle_pty_output(pane, b"\x1b[?1049h");
 
-    runtime.scroll_to_top(client, pane);
-    assert_eq!(get_scroll_offset(&runtime, client, pane), 4); // clamped to the get_retained_line_count count
-    assert_eq!(effective_offset(&runtime, pane, 4), 0); // still live on screen
+    runtime.scroll_up(client, pane, usize::MAX);
+    assert_eq!(get_scroll_offset(&runtime, client, pane), 4); // clamped to the retained count
+    assert_eq!(compute_effective_offset(&runtime, pane, 4), 0); // still live on screen
 }
 
 #[test]
@@ -729,7 +733,7 @@ fn a_view_scrolled_while_on_the_alternate_screen_applies_once_it_exits() {
     runtime.handle_pty_output(pane, b"\n\n\n");
     runtime.handle_pty_output(pane, b"\x1b[?1049h"); // enter
     runtime.scroll_up(client, pane, 2);
-    assert_eq!(effective_offset(&runtime, pane, 2), 0); // hidden while on the alt screen
+    assert_eq!(compute_effective_offset(&runtime, pane, 2), 0); // hidden while on the alt screen
 
     runtime.handle_pty_output(pane, b"\x1b[?1049l"); // leave the alternate screen
     assert_eq!(
@@ -740,5 +744,5 @@ fn a_view_scrolled_while_on_the_alternate_screen_applies_once_it_exits() {
     // The stored get_scroll_offset is unchanged and now shows: the primary view sits two
     // lines back.
     assert_eq!(get_scroll_offset(&runtime, client, pane), 2);
-    assert_eq!(effective_offset(&runtime, pane, 2), 2);
+    assert_eq!(compute_effective_offset(&runtime, pane, 2), 2);
 }

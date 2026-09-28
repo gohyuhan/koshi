@@ -10,16 +10,19 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
-    let survived = std::thread::spawn(|| {
+    let is_serving_thread_alive_after_sigpipe = std::thread::spawn(|| {
         block_sigpipe_on_this_thread();
-        let prior = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
-        let raised = unsafe { libc::raise(libc::SIGPIPE) };
-        unsafe { libc::signal(libc::SIGPIPE, prior) };
-        raised == 0
+        let prior_sigpipe_disposition = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let sigpipe_raise_result = unsafe { libc::raise(libc::SIGPIPE) };
+        unsafe { libc::signal(libc::SIGPIPE, prior_sigpipe_disposition) };
+        sigpipe_raise_result == 0
     })
     .join()
     .expect("the thread survives the raised SIGPIPE");
-    assert!(survived, "the raise itself reported an error");
+    assert!(
+        is_serving_thread_alive_after_sigpipe,
+        "the raise itself reported an error"
+    );
 }
 
 /// A detached helper must survive the process that started it and must draw no

@@ -146,7 +146,7 @@ fn parses_animation_control_compose_and_delete_actions() {
     assert_eq!(compose_animation_command.destination_frame_number, Some(2));
     assert_eq!(compose_animation_command.frame_width_pixels, Some(5));
     assert_eq!(compose_animation_command.frame_height_pixels, Some(6));
-    assert!(compose_animation_command.replaces_destination_pixels);
+    assert!(compose_animation_command.should_replace_destination_pixels);
 
     let delete_command = parse_kitty_command(b"Ga=d,d=f,i=7,r=2", &[])
         .expect("the body is a Kitty command")
@@ -171,8 +171,13 @@ fn command_header_limit_is_checked_before_rewriting_fields() {
         b',',
         MAX_GRAPHICS_CONTROL_BYTE_COUNT - control_header_bytes.len(),
     ));
-    assert!(parse_kitty_command(&control_header_bytes, &[])
-        .is_some_and(|parsed_command_result| parsed_command_result.is_ok()));
+    assert_eq!(
+        parse_kitty_command(&control_header_bytes, &[])
+            .expect("a placement is a command")
+            .expect("a header at the limit parses")
+            .get_command_kind(),
+        KittyCommandKind::Place
+    );
 
     control_header_bytes.push(b'x');
     assert_eq!(

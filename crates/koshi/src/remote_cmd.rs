@@ -309,7 +309,7 @@ fn resolve_certificate_fingerprint(
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when `replaced_server_reference` names no saved server or more than
-/// one, and when another saved server answers to `saved server`'s name or its address.
+/// one, and when another saved server answers to `saved_server`'s name or its address.
 fn save_saved_server(
     server_store: &mut ServerStore,
     saved_server: &SavedServer,
@@ -407,7 +407,7 @@ fn ask_secret(
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
-/// input ended before an answer to `question` arrived.
+/// input ended before an answer to `confirmation_prompt` arrived.
 fn check_saved_server_connection(
     server_address: &str,
     connection_token: &ConnectionToken,

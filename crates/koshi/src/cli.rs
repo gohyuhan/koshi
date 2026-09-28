@@ -8,13 +8,12 @@
 //! machine that invocation runs against. Parsing yields typed values only; no
 //! command here talks to a runtime.
 //!
-//! Action subcommands carry typed arguments and map to the core command
-//! vocabulary through [`CliCommand::build_action_command`](crate::cli::CliCommand::build_action_command),
-//! which pairs each with its `core:` action reference. Entity ids are parsed
-//! at this boundary: a flag accepts the id exactly as koshi prints it
-//! (`pane-<uuid>`) or as a bare UUID. A session or tab argument accepts the
-//! display name too: a value that reads as an id (`session-<uuid>`,
-//! `tab-<uuid>`, or a bare UUID) is that id, anything else is a name.
+//! Action subcommands carry typed arguments and map to the core command vocabulary through
+//! [`CliCommand::build_action_command`](crate::cli::CliCommand::build_action_command), which pairs
+//! each with its `core:` action reference. Entity ids are parsed at this boundary: a flag accepts
+//! the id exactly as koshi prints it (`pane-<uuid>`) or as a bare UUID. A session or tab argument
+//! accepts the display name too: a value that reads as an id (`session-<uuid>`, `tab-<uuid>`, or a
+//! bare UUID) is that id, anything else is a name.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -115,10 +114,10 @@ pub enum SessionReference {
 impl fmt::Display for SessionReference {
     /// Writes the reference as the user named it: the session id for `Id`,
     /// the display name for `Name`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SessionReference::SessionId(session_id) => session_id.fmt(f),
-            SessionReference::SessionName(session_name) => f.write_str(session_name),
+            SessionReference::SessionId(session_id) => session_id.fmt(formatter),
+            SessionReference::SessionName(session_name) => formatter.write_str(session_name),
         }
     }
 }
@@ -269,8 +268,7 @@ pub enum OutputFormat {
 /// token store. `remote` reads and writes the servers this machine has saved,
 /// and reaches no network. `version` prints this program's own build, and
 /// `server-version` asks each running koshi server for the build it runs; both
-/// carry `--format` and render through [`crate::output`]. `plugin` takes no
-/// arguments.
+/// carry `--format` and render through [`crate::output`].
 #[derive(Debug, PartialEq, Eq, Subcommand)]
 pub enum CliCommand {
     /// List running sessions, here and on every saved server that answers.
@@ -569,10 +567,6 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: DebugCommand,
     },
-    /// Manage plugins. Hidden from help until the plugin host exists;
-    /// invoking it reports the runtime as unavailable.
-    #[command(hide = true)]
-    Plugin,
     /// Download and install the latest koshi release.
     Update,
     /// Print the version of the koshi program running this command.
@@ -955,9 +949,6 @@ pub enum KeysCommand {
         /// Limit the listing to bindings authored by one layer.
         #[arg(long, value_enum, value_name = "SCOPE")]
         scope: Option<KeymapScope>,
-        /// List plugin-recommended bindings instead of effective ones.
-        #[arg(long = "recommended")]
-        is_recommended: bool,
         /// Output format.
         #[arg(
             long = "format",
@@ -1138,7 +1129,6 @@ impl CliCommand {
             | CliCommand::Share { .. }
             | CliCommand::Remote { .. }
             | CliCommand::Debug { .. }
-            | CliCommand::Plugin
             | CliCommand::Update
             | CliCommand::Version { .. }
             | CliCommand::ServerVersion { .. }
@@ -1173,7 +1163,7 @@ impl CliCommand {
     /// (`list-sessions`, `kill-session`, `attach`, `detach`, `doctor`), the
     /// read-only discovery and local queries (`inspect`, the `list-*` verbs,
     /// `actions`, `keys`, `config`, and the `debug` dumps), `update`,
-    /// `version`, `server-version`, `share`, `remote`, `plugin`, and the
+    /// `version`, `server-version`, `share`, `remote`, and the
     /// hidden `serve-router`, `serve-session`, `serve-pty-supervisor` and
     /// `resume-support`.
     #[must_use]
@@ -1275,15 +1265,15 @@ impl CliCommand {
             } => {
                 // The text alone sits at the shell prompt; the text plus `\r`,
                 // the byte the Enter key sends, runs as a line.
-                let mut input_bytes = input_text.clone().into_bytes();
+                let mut pane_input_bytes = input_text.clone().into_bytes();
                 if !should_leave_input_at_prompt {
-                    input_bytes.push(b'\r');
+                    pane_input_bytes.push(b'\r');
                 }
                 (
                     "write-to-pane",
                     Command::WriteToPane(WriteToPaneArgs {
                         pane_id: *pane_id,
-                        input_bytes,
+                        pane_input_bytes,
                     }),
                 )
             }
@@ -1321,7 +1311,7 @@ impl CliCommand {
             CliCommand::PreviousTab { client_id } => (
                 "previous-tab",
                 Command::FocusTab(FocusTabArgs {
-                    focus_target: TabTarget::Prev,
+                    focus_target: TabTarget::Previous,
                     client_id: *client_id,
                 }),
             ),
@@ -1422,7 +1412,6 @@ impl CliCommand {
             | CliCommand::Share { .. }
             | CliCommand::Remote { .. }
             | CliCommand::Debug { .. }
-            | CliCommand::Plugin
             | CliCommand::Update
             | CliCommand::Version { .. }
             | CliCommand::ServerVersion { .. }
@@ -1594,7 +1583,7 @@ fn resolve_tab_reference_id(tab_reference: &Option<TabReference>) -> Option<TabI
 /// environment stay empty — they are filled from the issuing terminal when
 /// the command is sent.
 ///
-/// Panics when `argv` is empty.
+/// Panics when `command_arguments` is empty.
 fn build_spawn_spec_from_arguments(command_arguments: &[String]) -> SpawnSpec {
     let program = PathBuf::from(&command_arguments[0]);
     let shell_kind = ShellKind::from_program(&program);

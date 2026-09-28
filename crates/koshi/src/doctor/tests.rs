@@ -14,7 +14,7 @@ use super::*;
 /// one field it is about and leaves the rest.
 ///
 /// Creates no file and reads no environment variable. A test that needs
-/// `<directory_path>/runtime`, `<directory_path>/config`, `<directory_path>/log`, `<directory_path>/config/plugins` or
+/// `<directory_path>/runtime`, `<directory_path>/config`, `<directory_path>/log` or
 /// `<directory_path>/shell` to be there creates it itself.
 fn build_doctor_context(root_directory: &Path) -> DoctorContext {
     DoctorContext {
@@ -24,8 +24,7 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         runtime_directory_mode: Some(0o700),
         log_directory: Some(root_directory.join("log")),
         session_log_file: Ok(None),
-        plugins_directory: Some(root_directory.join("config").join("plugins")),
-        shared_directory: Some(root_directory.join("shared")),
+        shared_sessions_directory: Some(root_directory.join("shared")),
         shell: root_directory.join("shell"),
         shell_source: ShellSource::Environment,
         path_entries: Some(root_directory.as_os_str().to_os_string()),
@@ -793,7 +792,7 @@ fn session_log_file_is_named_when_run_inside_a_pane() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
     let session_id = SessionId::new();
-    let session_log_file = koshi_observability::logging::session_log_path(session_id);
+    let session_log_file = koshi_observability::logging::resolve_session_log_path(session_id);
     doctor_context.session_log_file = Ok(Some(session_log_file.clone()));
 
     assert_eq!(
@@ -911,93 +910,6 @@ fn log_directory_fails_when_it_cannot_be_written() {
     );
 }
 
-// ----------------------------------------------------- plugins directory
-
-#[test]
-fn plugins_directory_fails_when_this_machine_reports_no_home_directory() {
-    let test_directory = TempDir::new().unwrap();
-    let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.plugins_directory = None;
-
-    assert_eq!(
-        check_plugins_directory(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Fail,
-            reason: "this machine reports no home directory, so koshi finds no plugins directory"
-                .to_string(),
-            help: Some("give this user a home directory".to_string()),
-            detail: None,
-        }
-    );
-}
-
-#[test]
-fn plugins_directory_is_ok_when_it_does_not_exist() {
-    let test_directory = TempDir::new().unwrap();
-    let doctor_context = build_doctor_context(test_directory.path());
-
-    assert_eq!(
-        check_plugins_directory(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Ok,
-            reason: format!(
-                "{} does not exist",
-                doctor_context
-                    .plugins_directory
-                    .as_deref()
-                    .unwrap()
-                    .display()
-            ),
-            help: None,
-            detail: None,
-        }
-    );
-}
-
-#[test]
-fn plugins_directory_is_ok_when_it_is_readable() {
-    let test_directory = TempDir::new().unwrap();
-    let doctor_context = build_doctor_context(test_directory.path());
-    let plugins_directory_path = doctor_context.plugins_directory.clone().unwrap();
-    fs::create_dir_all(&plugins_directory_path).unwrap();
-
-    assert_eq!(
-        check_plugins_directory(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Ok,
-            reason: format!("{} is readable", plugins_directory_path.display()),
-            help: None,
-            detail: None,
-        }
-    );
-}
-
-#[test]
-fn plugins_directory_fails_when_it_cannot_be_read() {
-    let test_directory = TempDir::new().unwrap();
-    let mut doctor_context = build_doctor_context(test_directory.path());
-    let plugins_directory_path = test_directory.path().join("plugins-file");
-    fs::write(&plugins_directory_path, "").unwrap();
-    doctor_context.plugins_directory = Some(plugins_directory_path.clone());
-    let plugins_directory_read_error = fs::read_dir(&plugins_directory_path).unwrap_err();
-
-    assert_eq!(
-        check_plugins_directory(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Fail,
-            reason: format!(
-                "{} cannot be read: {plugins_directory_read_error}",
-                plugins_directory_path.display()
-            ),
-            help: Some(format!(
-                "make sure you own {}",
-                plugins_directory_path.display()
-            )),
-            detail: None,
-        }
-    );
-}
-
 // ----------------------------------------------------- session directory
 
 #[test]
@@ -1076,7 +988,7 @@ fn session_directory_with_other_users_names_the_shared_directory() {
             verdict: Verdict::Ok,
             reason: format!(
                 "allow-other-users is on: sessions are also advertised in {}, which every user of this machine may reach",
-                doctor_context.shared_directory.as_deref().unwrap().display()
+                doctor_context.shared_sessions_directory.as_deref().unwrap().display()
             ),
             help: None,
             detail: None,
@@ -1089,7 +1001,7 @@ fn session_directory_with_other_users_and_no_shared_directory() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
     doctor_context.is_other_user_access_allowed = true;
-    doctor_context.shared_directory = None;
+    doctor_context.shared_sessions_directory = None;
 
     assert_eq!(
         check_session_directory(&doctor_context),
@@ -1305,12 +1217,12 @@ fn no_session_or_remote_access_check_ever_fails() {
 
     let mut doctor_contexts = Vec::new();
     for is_other_user_access_allowed in [false, true] {
-        for shared_directory in [None, Some(test_directory.path().join("shared"))] {
+        for shared_sessions_directory in [None, Some(test_directory.path().join("shared"))] {
             for runtime_directory_path in [None, Some(test_directory.path().join("runtime"))] {
                 for runtime_directory_mode in [None, Some(0o700), Some(0o755)] {
                     let mut doctor_context = build_doctor_context(test_directory.path());
                     doctor_context.is_other_user_access_allowed = is_other_user_access_allowed;
-                    doctor_context.shared_directory = shared_directory.clone();
+                    doctor_context.shared_sessions_directory = shared_sessions_directory.clone();
                     doctor_context.runtime_directory = runtime_directory_path.clone();
                     doctor_context.runtime_directory_mode = runtime_directory_mode;
                     doctor_contexts.push(doctor_context);
@@ -1490,7 +1402,6 @@ fn build_doctor_check_rows_runs_every_check_in_print_order() {
             "runtime directory",
             "log directory",
             "session log file",
-            "plugins directory",
             "router",
             "session directory",
             "remote access",
@@ -1872,36 +1783,6 @@ fn log_directory_fails_when_it_points_nowhere() {
             help: Some(format!(
                 "remove {}, or point it at a directory",
                 log_directory_path.display()
-            )),
-            detail: None,
-        }
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn plugins_directory_fails_when_it_points_nowhere() {
-    let test_directory = TempDir::new().unwrap();
-    let plugins_directory_path = test_directory.path().join("plugins");
-    std::os::unix::fs::symlink(
-        test_directory.path().join("nowhere"),
-        &plugins_directory_path,
-    )
-    .unwrap();
-    let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.plugins_directory = Some(plugins_directory_path.clone());
-
-    assert_eq!(
-        check_plugins_directory(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Fail,
-            reason: format!(
-                "{} is there and koshi cannot read it as a directory",
-                plugins_directory_path.display()
-            ),
-            help: Some(format!(
-                "remove {}, or point it at a directory",
-                plugins_directory_path.display()
             )),
             detail: None,
         }

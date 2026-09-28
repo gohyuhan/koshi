@@ -1,6 +1,5 @@
-//! Session domain errors. Classify into [`DomainCategory::Session`].
+//! Session domain errors.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use thiserror::Error;
@@ -17,21 +16,11 @@ pub struct InvalidTransition {
     pub lifecycle_event: SessionLifecycleEvent,
 }
 
-impl DomainError for InvalidTransition {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Session
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
-}
-
-/// A way a session's tabs, layout trees, pane registry, pane and tab
-/// lifecycles, and client focus and zoom can disagree with one another.
-/// [`Session::validate_session_consistency`](crate::session::state::Session::validate_session_consistency) returns
-/// every violation it finds in one pass. Each variant names what it found: the
-/// offending pane, tab or client, or the bar index two tabs claim.
+/// A way a session's tabs, layout trees, pane registry, pane and tab lifecycles, and client focus
+/// and zoom can disagree with one another.
+/// [`Session::validate_session_consistency`](crate::session::state::Session::validate_session_consistency)
+/// returns every violation it finds in one pass. Each variant names what it found: the offending
+/// pane, tab or client, or the bar index two tabs claim.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionConsistencyError {
     /// A layout leaf references a pane with no record in the registry.
@@ -44,8 +33,8 @@ pub enum SessionConsistencyError {
     RemovedPaneInLayout { tab_id: TabId, pane_id: PaneId },
 
     /// A registry record in any state but `Removed` — `Spawning`, `Running`,
-    /// `Exited` or `Closing` — is not a leaf in any tab's layout. `lifecycle`
-    /// is the state the record holds.
+    /// `Exited` or `Closing` — is not a leaf in any tab's layout.
+    /// `pane_lifecycle` is the state the record holds.
     #[error("pane {pane_id:?} is {pane_lifecycle:?} but absent from every layout")]
     OrphanedPaneRecord {
         pane_id: PaneId,
@@ -64,7 +53,7 @@ pub enum SessionConsistencyError {
 
     /// A client remembers focus in a tab that is no longer in the session.
     /// Distinct from [`SessionConsistencyError::ActiveTabMissing`]: this is a
-    /// stale `focus_by_tab` entry for a closed tab, not the tab shown now.
+    /// stale `focused_pane_id_by_tab_id` entry for a closed tab, not the tab shown now.
     #[error("client {client_id:?} remembers focus in tab {tab_id:?} that is not in the session")]
     FocusTabMissing { client_id: ClientId, tab_id: TabId },
 
@@ -130,21 +119,6 @@ pub enum SessionConsistencyError {
     /// Two tabs claim the same bar position.
     #[error("multiple tabs claim bar index {tab_index}")]
     DuplicateTabIndex { tab_index: usize },
-
-    /// A `Closed` tab still sits in the session's tab map instead of having
-    /// been dropped when it wound down.
-    #[error("closed tab {tab_id:?} still sits in the session's tab map")]
-    LingeringClosedTab { tab_id: TabId },
-}
-
-impl DomainError for SessionConsistencyError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Session
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 #[cfg(test)]

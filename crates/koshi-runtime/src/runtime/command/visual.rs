@@ -150,7 +150,7 @@ impl Server {
     /// whole. `command_args.should_trim_trailing_whitespace` drops the blanks a terminal
     /// pads each row out to the pane's width with: a highlight over `hello` in an
     /// 80-column pane copies `hello` when it is set, and `hello` plus 75 blanks
-    /// when it is not. `command_args.clipboard_target` says which clipboard receives it.
+    /// when it is not. The text goes to the issuing client's outer terminal as OSC 52.
     ///
     /// A pane with no highlight, or one whose highlight covers no text, copies
     /// nothing and is not an error.
@@ -177,7 +177,7 @@ impl Server {
             })
             .unwrap_or_default();
         if !copied_text.is_empty() {
-            self.copy_to_clipboard(client_id, command_args.clipboard_target, &copied_text);
+            self.copy_to_clipboard(client_id, &copied_text);
         }
         Ok(Self::commit_events(&mut self.event_bus, command_id, vec![]))
     }

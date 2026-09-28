@@ -19,13 +19,13 @@
 //! buffer is allocated: a length over it is refused after four bytes are
 //! read.
 //!
-//! [`Connection::read_closer`](crate::transport::Connection::read_closer)
+//! [`Connection::create_read_closer`](crate::transport::Connection::create_read_closer)
 //! hands out a [`ReadCloser`](crate::transport::ReadCloser): the handle another
 //! thread holds to end the reading side of a connection while the thread
 //! serving it is blocked reading. The writing side is left alone.
 //!
 //! The frame shape is not tied to the local socket.
-//! [`frame_halves`](crate::transport::frame_halves) puts it on any other pair
+//! [`build_frame_halves`](crate::transport::build_frame_halves) puts it on any other pair
 //! of byte streams, such as the two halves of a TLS stream, and
 //! [`Connection::split_raw`](crate::transport::Connection::split_raw) hands
 //! back a local socket's two halves with no frame shape read off them, for
@@ -75,7 +75,8 @@ pub const MAX_FRAME_BYTE_COUNT: u32 = 16 * 1024 * 1024;
 /// `FILE_CREATE_PIPE_INSTANCE`: the right the server uses to create the pipe
 /// instance that serves the next caller.
 ///
-/// [sddl]: https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+/// [sddl]:
+/// https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
 #[cfg(windows)]
 const SHARED_PIPE_ACCESS: &widestring::U16CStr = widestring::u16cstr!("D:(A;;0x0012019f;;;AU)");
 
@@ -195,13 +196,13 @@ impl Connection {
             .name(platform_socket_name)
             .wait_mode(ConnectWaitMode::Timeout(CONNECT_WAIT_DURATION))
             .connect_sync()
-            .map_err(|error| {
-                if is_no_listener_error(&error) {
+            .map_err(|connect_error| {
+                if is_no_listener_error(&connect_error) {
                     IpcError::NoListener {
                         socket_address: socket_address.to_string(),
                     }
                 } else {
-                    convert_io_error(error)
+                    convert_io_error(connect_error)
                 }
             })?;
         Ok(Connection::from_socket_stream(socket_stream))
@@ -213,8 +214,8 @@ impl Connection {
         write_message(&mut self.socket_stream, message)
     }
 
-    /// Read one frame and decode its message as `T`. Blocks until a whole
-    /// frame arrives. A connection whose read direction is closed reports
+    /// Read one frame and decode its message as `Message`. Blocks until a
+    /// whole frame arrives. A connection whose read direction is closed reports
     /// [`IpcError::Disconnected`].
     pub fn recv<Message: DeserializeOwned>(&mut self) -> Result<Message, IpcError> {
         if self.is_read_closed.load(Ordering::SeqCst) {
@@ -232,7 +233,7 @@ impl Connection {
     ///
     /// # Errors
     /// Returns the failure of duplicating the socket.
-    pub fn read_closer(&self) -> Result<ReadCloser, IpcError> {
+    pub fn create_read_closer(&self) -> Result<ReadCloser, IpcError> {
         Ok(ReadCloser {
             is_closed: Arc::clone(&self.is_read_closed),
             #[cfg(unix)]
@@ -320,13 +321,13 @@ pub trait Deadlined: Send {
 
 impl Deadlined for socket::RecvHalf {
     /// Does nothing: a local socket read blocks for as long as it takes,
-    /// whatever `at` says.
+    /// whatever the deadline says.
     fn set_deadline(&mut self, _deadline: Option<Instant>) {}
 }
 
 impl Deadlined for socket::SendHalf {
     /// Does nothing: a local socket write blocks for as long as it takes,
-    /// whatever `at` says.
+    /// whatever the deadline says.
     fn set_deadline(&mut self, _deadline: Option<Instant>) {}
 }
 
@@ -348,7 +349,7 @@ impl<T: Write + Deadlined> DeadlinedWrite for T {}
 /// [`FrameReader::set_deadline`] and [`FrameWriter::set_deadline`] reach it
 /// through the box.
 #[must_use]
-pub fn frame_halves(
+pub fn build_frame_halves(
     reader_half: Box<dyn DeadlinedRead>,
     writer_half: Box<dyn DeadlinedWrite>,
 ) -> (FrameReader, FrameWriter) {
@@ -389,8 +390,8 @@ impl std::fmt::Debug for FrameReader {
 }
 
 impl FrameReader {
-    /// Read one frame and decode its message as `T`. Blocks until a whole
-    /// frame arrives. The peer closing its writing end, and a read direction
+    /// Read one frame and decode its message as `Message`. Blocks until a
+    /// whole frame arrives. The peer closing its writing end, and a read direction
     /// this side closed, are both [`IpcError::Disconnected`].
     pub fn recv<Message: DeserializeOwned>(&mut self) -> Result<Message, IpcError> {
         if self.is_closed.load(Ordering::SeqCst) {
@@ -402,7 +403,7 @@ impl FrameReader {
 
 /// The handle on one connection's read direction, held by a thread other than
 /// the one reading that connection. Taken with
-/// [`Connection::read_closer`].
+/// [`Connection::create_read_closer`].
 ///
 /// The handle keeps working after the connection is split: it closes the read
 /// direction of both a [`Connection`] and the [`FrameReader`] it splits into.
@@ -552,7 +553,7 @@ pub(crate) fn write_message<Message: Serialize>(
         .map_err(convert_io_error)
 }
 
-/// Read one frame and decode its JSON payload as `T`. The length prefix is
+/// Read one frame and decode its JSON payload as `Message`. The length prefix is
 /// checked against [`MAX_FRAME_BYTE_COUNT`] before the payload buffer is allocated.
 pub(crate) fn read_message<Message: DeserializeOwned>(
     reader: &mut impl Read,
@@ -577,7 +578,7 @@ pub(crate) fn read_message<Message: DeserializeOwned>(
     })
 }
 
-/// Read the user of `process`'s token: the bytes `GetTokenInformation`
+/// Read the user of `process_handle`'s token: the bytes `GetTokenInformation`
 /// writes, which start with a [`TOKEN_USER`] whose `Sid` points into the rest
 /// of the same buffer. The buffer is `u64`: [`TOKEN_USER`] needs 8-byte
 /// alignment.

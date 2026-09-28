@@ -41,13 +41,13 @@ impl Server {
         self.app_layer = reloaded_app_config;
         self.config = merge_app_layer_into_server_config(&self.app_layer);
         self.client_config = merge_app_layer_into_client_config(&self.app_layer);
-        self.config_reloaded_events()
+        self.build_config_reloaded_events()
     }
 
     /// Apply the `koshi.kdl` settings read at startup, before any session
     /// exists.
     ///
-    /// `app` is `None` when the file is absent or failed to load; the built-in
+    /// `startup_app_config` is `None` when the file is absent or failed to load; the built-in
     /// defaults then stand. No session exists yet, so the events
     /// [`reload_app_config`](Self::reload_app_config) returns are dropped.
     pub fn load_startup_config(&mut self, startup_app_config: Option<PartialKoshiConfig>) {
@@ -57,7 +57,7 @@ impl Server {
     }
 
     /// One [`Event::ConfigReloaded`] per live session, in session-id order.
-    fn config_reloaded_events(&self) -> Vec<Event> {
+    fn build_config_reloaded_events(&self) -> Vec<Event> {
         let mut session_ids: Vec<SessionId> = self.session_by_id.keys().copied().collect();
         session_ids.sort_unstable();
         session_ids

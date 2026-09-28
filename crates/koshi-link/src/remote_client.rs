@@ -75,8 +75,8 @@ pub const JOIN_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 /// How long one command sent to a session on another machine has to come back,
 /// counted from the moment the connection opens.
 ///
-/// The dial before it has [`DIAL_TIMEOUT_DURATION`] of its own, so one request takes at
-/// most `DIAL_TIMEOUT_DURATION + REPLY_TIMEOUT_DURATION`. An attached client passes `None` instead and
+/// The dial before it has [`DIAL_TIMEOUT_DURATION`] of its own, so one request takes at most
+/// `DIAL_TIMEOUT_DURATION + REPLY_TIMEOUT_DURATION`. An attached client passes `None` instead and
 /// waits as long as it takes.
 pub const REPLY_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
 
@@ -212,7 +212,7 @@ pub fn load_saved_server_store() -> Result<(PathBuf, ServerStore), CliError> {
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
     let saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
-        .map_err(saved_server_store_failed)?;
+        .map_err(build_saved_server_store_error)?;
     Ok((saved_server_store_path, saved_server_store))
 }
 
@@ -229,21 +229,21 @@ fn resolve_private_data_directory() -> Result<PathBuf, CliError> {
 /// Change the saved-server store, holding it against every other koshi from
 /// the read to the write.
 ///
-/// Takes the lock at `lock_file_path`, reads the store, hands it to `change`, and
-/// writes it back. The lock is released when this returns, either way. A
-/// `change` that refuses stops the write, so the store on disk keeps what it
-/// held.
+/// Takes the store's lock file, reads the store, hands it to `update_store`,
+/// and writes it back. The lock is released when this returns, either way. An
+/// `update_store` that refuses stops the write, so the store on disk keeps
+/// what it held.
 ///
 /// The lock is taken again every 20 milliseconds for up to 5 seconds. A wait
 /// that runs out reports the other koshi rather than writing over it.
 ///
-/// Nothing inside `change` may ask the user a question: every other koshi that
-/// changes the store waits for this one to finish.
+/// Nothing inside `update_store` may ask the user a question: every other
+/// koshi that changes the store waits for this one to finish.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the machine has no data directory, when
 /// the lock could not be taken, when the store could not be read, and when it
-/// could not be written. Whatever `change` reports, with nothing written.
+/// could not be written. Whatever `update_store` reports, with nothing written.
 pub fn update_saved_server_store<T>(
     update_store: impl FnOnce(&mut ServerStore) -> Result<T, CliError>,
 ) -> Result<T, CliError> {
@@ -254,16 +254,16 @@ pub fn update_saved_server_store<T>(
         STORE_LOCK_TIMEOUT_DURATION,
     )?;
     let mut saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
-        .map_err(saved_server_store_failed)?;
-    let updated_store_value = update_store(&mut saved_server_store)?;
+        .map_err(build_saved_server_store_error)?;
+    let store_update_response = update_store(&mut saved_server_store)?;
     saved_server_store
         .write_server_store_to_path(&saved_server_store_path)
-        .map_err(saved_server_store_failed)?;
+        .map_err(build_saved_server_store_error)?;
     drop(store_lock_file);
-    Ok(updated_store_value)
+    Ok(store_update_response)
 }
 
-/// Take the advisory lock on the file at `path`, creating the file and the
+/// Take the advisory lock on the file at `lock_file_path`, creating the file and the
 /// directory holding it when they are missing.
 ///
 /// Both are restricted to the owning user on Unix: mode `0700` on the
@@ -271,7 +271,7 @@ pub fn update_saved_server_store<T>(
 /// file this call creates. On Windows both take the data directory's
 /// owner-scoped ACLs.
 ///
-/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up to `lock_wait`.
+/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up to `lock_wait_duration`.
 /// Dropping the returned file releases the lock, and so does the operating
 /// system when the process holding it dies.
 ///
@@ -279,7 +279,10 @@ pub fn update_saved_server_store<T>(
 /// [`CliError::IpcUnavailable`] when the directory or the file could not be
 /// made, when the lock could not be attempted, and when another koshi still
 /// held it at the deadline.
-fn acquire_store_lock(lock_file_path: &Path, lock_wait: Duration) -> Result<File, CliError> {
+fn acquire_store_lock(
+    lock_file_path: &Path,
+    lock_wait_duration: Duration,
+) -> Result<File, CliError> {
     let build_unavailable_error = |error_detail: String| CliError::IpcUnavailable {
         detail: error_detail,
     };
@@ -319,7 +322,7 @@ fn acquire_store_lock(lock_file_path: &Path, lock_wait: Duration) -> Result<File
             lock_file_path.display()
         ))
     })?;
-    let deadline = Instant::now() + lock_wait;
+    let deadline = Instant::now() + lock_wait_duration;
     loop {
         match FileExt::try_lock(&lock_file) {
             Ok(()) => return Ok(lock_file),
@@ -342,7 +345,7 @@ fn acquire_store_lock(lock_file_path: &Path, lock_wait: Duration) -> Result<File
 }
 
 /// A saved-server store that could not be read or written.
-fn saved_server_store_failed(ipc_error: IpcError) -> CliError {
+fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
     CliError::IpcUnavailable {
         detail: ipc_error.to_string(),
     }
@@ -448,7 +451,7 @@ pub fn validate_saved_server_name(saved_server_name: &str) -> Result<(), CliErro
     Ok(())
 }
 
-/// Refuse a saved name that cannot be given to the server at `address`.
+/// Refuse a saved name that cannot be given to the server at `server_address`.
 ///
 /// Two names are refused: one with the `host:port` shape
 /// ([`validate_saved_server_name`]), and one another record already answers to
@@ -480,7 +483,7 @@ fn validate_save_as(saved_server_name: &str, server_address: &str) -> Result<(),
     Ok(())
 }
 
-/// The secret to present to the server at `address`.
+/// The secret to present to the server at `server_address`.
 ///
 /// `KOSHI_REMOTE_SECRET` is read first. With it unset, or holding bytes that
 /// are not UTF-8, the terminal is asked for the secret and what is typed is
@@ -637,10 +640,10 @@ pub fn connect_remote_server(
     reply_timeout: Option<Duration>,
 ) -> Result<RemoteLink, DialError> {
     let remote_hello = RemoteClientFrame::Hello {
-        min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
-        max_remote_version: REMOTE_PROTOCOL_VERSION,
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
+        maximum_remote_version: REMOTE_PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: connection_token.clone(),
     };
     let (frame_reader, frame_writer, certificate_fingerprint, remote_server_answer) =
@@ -681,7 +684,7 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
 /// [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) reads as a
 /// rejected or revoked token and names both ways to replace it. Any other
 /// refusal message is the server's own sentence, filtered by
-/// [`sanitize_reported_text`], with `address` after it.
+/// [`sanitize_reported_text`], with `server_address` after it.
 ///
 /// Every refusal built here carries [`CliError::Runtime`], which is what
 /// [`probe_saved_server`] reads a [`DialError::Refused`] carrying
@@ -860,7 +863,7 @@ pub fn connect_saved_server(
     }
 }
 
-/// The fingerprint the saved-server store pins for `address`, or `None` when no record
+/// The fingerprint the saved-server store pins for `server_address`, or `None` when no record
 /// answers to it, more than one does, or the one that does pins nothing.
 fn find_pinned_certificate_fingerprint(
     saved_server_store: &ServerStore,
@@ -900,6 +903,7 @@ pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRo
         }),
     }
 }
+
 /// Ask to attach to `selector` and hand the connection's two halves back.
 ///
 /// The bytes after this belong to that session's own server. The machine
@@ -927,12 +931,11 @@ pub fn attach_remote_session(
 /// Submit `command` to the session `session_id` on the server argument, and
 /// hand back the dispatcher's result.
 ///
-/// The command's source is [`CommandSource::ExternalCli`] carrying `session`
-/// and the client the caller named. A pane-creating command carrying no
-/// working directory keeps none. A rejection's hint is filtered by
-/// [`sanitize_reported_text`].
+/// The command's source is [`CommandSource::ExternalCli`] carrying `session_id`
+/// and `client_id`. A pane-creating command carrying no working directory
+/// keeps none. A rejection's hint is filtered by [`sanitize_reported_text`].
 ///
-/// Naming a `client` changes nothing about the exchange: the session's Hello
+/// Naming a `client_id` changes nothing about the exchange: the session's Hello
 /// answer settles the version either way, and a session that settled on a
 /// version this build does not speak is refused before the command is written.
 ///
@@ -948,7 +951,6 @@ pub fn submit_remote_command(
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(Some(session_id), client_id),
-        SystemTime::now(),
         command,
     );
     let command_request = IpcRequest {
@@ -1034,8 +1036,9 @@ fn send_remote_ipc_request(
 /// presented to it.
 ///
 /// A server that answered with a refusal is [`Reach::Refused`]. A server that
-/// could not be reached, was still unanswered at the deadline, or presented a
-/// certificate other than the pinned one is [`Reach::Unreachable`]. Every
+/// presented a certificate other than the pinned one is
+/// [`Reach::CertificateChanged`]. A server that could not be reached or was
+/// still unanswered at the deadline is [`Reach::Unreachable`]. Every
 /// record comes back as exactly one entry, sorted by server name. A store that
 /// cannot be read reads as no saved servers.
 #[must_use]
@@ -1081,11 +1084,11 @@ pub fn reach_all_saved_servers(timeout: Duration) -> Vec<Reach> {
 
     let mut received_reaches = Vec::with_capacity(requested_server_count);
     while received_reaches.len() < requested_server_count {
-        let remaining_wait = deadline.saturating_duration_since(Instant::now());
-        if remaining_wait.is_zero() {
+        let remaining_wait_duration = deadline.saturating_duration_since(Instant::now());
+        if remaining_wait_duration.is_zero() {
             break;
         }
-        match reach_receiver.recv_timeout(remaining_wait) {
+        match reach_receiver.recv_timeout(remaining_wait_duration) {
             Ok(reach_result) => received_reaches.push(reach_result),
             Err(_) => break,
         }
@@ -1141,7 +1144,7 @@ fn complete_reach_results(
 /// A failure carrying [`CliError::Runtime`] — every refusal the server sent —
 /// is [`Reach::Refused`]. A dial refused with [`CliError::IpcUnavailable`] is
 /// the pinned-certificate check and is [`Reach::CertificateChanged`]:
-/// [`dial_failed`] is the only place that builds one, and every refusal
+/// [`classify_dial_failure`] is the only place that builds one, and every refusal
 /// [`validate_remote_server_answer`] builds carries [`CliError::Runtime`]. Every other failure
 /// is [`Reach::Unreachable`].
 ///
@@ -1189,7 +1192,7 @@ fn probe_saved_server(saved_server_record: &SavedServer, deadline: Instant) -> R
 /// The sentence naming a doorway frame the request cannot produce, in the
 /// words [`talk::PeerWords::build_unexpected_wire_name_error`] uses for a session-plane one.
 ///
-/// `server_address` is the address dialled or `"the server"`; `frame_name` is the
+/// `server_address` is the address dialled or `"the server"`; `remote_frame_name` is the
 /// [`RemoteServerFrame`] variant that came back. `("desk.local:7654",
 /// "Sessions")` gives `desk.local:7654 answered with an unexpected Sessions
 /// reply`.

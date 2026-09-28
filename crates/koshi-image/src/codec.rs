@@ -42,9 +42,9 @@ pub fn decompress_bounded(
     protocol: GraphicsProtocol,
     compressed_bytes: &[u8],
 ) -> Result<Vec<u8>, GraphicsError> {
-    let (decompressed_bytes, consumed_byte_count) =
+    let (decompressed_bytes, consumed_compressed_byte_count) =
         decompress_bounded_prefix(protocol, compressed_bytes)?;
-    if consumed_byte_count != compressed_bytes.len() {
+    if consumed_compressed_byte_count != compressed_bytes.len() {
         return Err(GraphicsError::DecodeFailure { protocol });
     }
     Ok(decompressed_bytes)
@@ -62,79 +62,81 @@ pub fn decompress_bounded_prefix(
         return Err(GraphicsError::TransferTooLarge { protocol });
     }
 
-    let mut decoder = Decompress::new(true);
+    let mut zlib_decoder = Decompress::new(true);
     let mut decompressed_bytes = Vec::new();
-    let mut input_byte_offset = 0usize;
-    let mut decompression_chunk = [0u8; 8192];
+    let mut compressed_input_byte_offset = 0usize;
+    let mut decompressed_output_chunk_bytes = [0u8; 8192];
 
     loop {
-        if input_byte_offset > compressed_bytes.len() {
+        if compressed_input_byte_offset > compressed_bytes.len() {
             return Err(GraphicsError::DecodeFailure { protocol });
         }
-        let remaining_compressed_bytes = &compressed_bytes[input_byte_offset..];
-        let flush_mode = if remaining_compressed_bytes.is_empty() {
+        let remaining_compressed_bytes = &compressed_bytes[compressed_input_byte_offset..];
+        let decompression_flush_mode = if remaining_compressed_bytes.is_empty() {
             FlushDecompress::Finish
         } else {
             FlushDecompress::None
         };
-        let compressed_input_byte_count_before = decoder.total_in();
-        let decompressed_output_byte_count_before = decoder.total_out();
-        let decompression_status = decoder
+        let compressed_input_byte_count_before = zlib_decoder.total_in();
+        let decompressed_output_byte_count_before = zlib_decoder.total_out();
+        let decompression_status = zlib_decoder
             .decompress(
                 remaining_compressed_bytes,
-                &mut decompression_chunk,
-                flush_mode,
+                &mut decompressed_output_chunk_bytes,
+                decompression_flush_mode,
             )
             .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
-        let consumed_byte_count = usize::try_from(
-            decoder
+        let consumed_compressed_byte_count = usize::try_from(
+            zlib_decoder
                 .total_in()
                 .checked_sub(compressed_input_byte_count_before)
                 .ok_or(GraphicsError::DecodeFailure { protocol })?,
         )
         .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
-        let produced_byte_count = usize::try_from(
-            decoder
+        let produced_decompressed_byte_count = usize::try_from(
+            zlib_decoder
                 .total_out()
                 .checked_sub(decompressed_output_byte_count_before)
                 .ok_or(GraphicsError::DecodeFailure { protocol })?,
         )
         .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
-        if consumed_byte_count > remaining_compressed_bytes.len()
-            || produced_byte_count > decompression_chunk.len()
+        if consumed_compressed_byte_count > remaining_compressed_bytes.len()
+            || produced_decompressed_byte_count > decompressed_output_chunk_bytes.len()
         {
             return Err(GraphicsError::DecodeFailure { protocol });
         }
-        input_byte_offset = input_byte_offset
-            .checked_add(consumed_byte_count)
+        compressed_input_byte_offset = compressed_input_byte_offset
+            .checked_add(consumed_compressed_byte_count)
             .ok_or(GraphicsError::DecodeFailure { protocol })?;
-        if produced_byte_count > 0 {
+        if produced_decompressed_byte_count > 0 {
             let decompressed_byte_count = decompressed_bytes
                 .len()
-                .checked_add(produced_byte_count)
+                .checked_add(produced_decompressed_byte_count)
                 .ok_or(GraphicsError::ImageTooLarge { protocol })?;
             if decompressed_byte_count > MAX_IMAGE_BYTE_COUNT {
                 return Err(GraphicsError::ImageTooLarge { protocol });
             }
             if decompressed_byte_count > decompressed_bytes.capacity() {
-                let target_capacity = decompressed_bytes
+                let target_decompressed_byte_capacity = decompressed_bytes
                     .capacity()
                     .saturating_mul(2)
                     .max(decompressed_byte_count)
                     .min(MAX_IMAGE_BYTE_COUNT);
-                let additional_byte_count = target_capacity
+                let additional_decompressed_byte_count = target_decompressed_byte_capacity
                     .checked_sub(decompressed_bytes.len())
                     .ok_or(GraphicsError::DecodeFailure { protocol })?;
                 decompressed_bytes
-                    .try_reserve_exact(additional_byte_count)
+                    .try_reserve_exact(additional_decompressed_byte_count)
                     .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
             }
-            decompressed_bytes.extend_from_slice(&decompression_chunk[..produced_byte_count]);
+            decompressed_bytes.extend_from_slice(
+                &decompressed_output_chunk_bytes[..produced_decompressed_byte_count],
+            );
         }
         if decompression_status == Status::StreamEnd {
-            return Ok((decompressed_bytes, input_byte_offset));
+            return Ok((decompressed_bytes, compressed_input_byte_offset));
         }
-        if consumed_byte_count == 0 && produced_byte_count == 0 {
+        if consumed_compressed_byte_count == 0 && produced_decompressed_byte_count == 0 {
             return Err(GraphicsError::DecodeFailure { protocol });
         }
     }
@@ -208,14 +210,14 @@ pub(crate) fn decode_static_raster(
     encoded_image_bytes: &[u8],
 ) -> Result<DecodedImage, GraphicsError> {
     let decoded_image = catch_unwind(AssertUnwindSafe(|| {
-        let mut reader = image::ImageReader::new(Cursor::new(encoded_image_bytes))
+        let mut image_reader = image::ImageReader::new(Cursor::new(encoded_image_bytes))
             .with_guessed_format()
             .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
-        reader.limits(build_raster_limits());
-        reader
+        image_reader.limits(build_raster_limits());
+        image_reader
             .decode()
             .map(|decoded_image| decoded_image.into_rgba8())
-            .map_err(|error| map_image_error(protocol, error))
+            .map_err(|image_decode_error| map_image_error(protocol, image_decode_error))
     }))
     .map_err(|_| GraphicsError::DecodeFailure { protocol })??;
     let (pixel_width, pixel_height) = decoded_image.dimensions();
@@ -225,8 +227,8 @@ pub(crate) fn decode_static_raster(
         usize::try_from(pixel_height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
     validate_image_dimensions(protocol, pixel_width, pixel_height)?;
     let rgba_bytes = decoded_image.into_raw();
-    let expected_byte_count = compute_rgba_byte_count(protocol, pixel_width, pixel_height)?;
-    if rgba_bytes.len() != expected_byte_count {
+    let expected_rgba_byte_count = compute_rgba_byte_count(protocol, pixel_width, pixel_height)?;
+    if rgba_bytes.len() != expected_rgba_byte_count {
         return Err(GraphicsError::DecodeFailure { protocol });
     }
     Ok(DecodedImage {
@@ -244,63 +246,64 @@ fn find_animated_raster_format(
     encoded_image_bytes: &[u8],
 ) -> Result<Option<&'static str>, GraphicsError> {
     match image_format {
-        image::ImageFormat::Gif => gif_has_multiple_frames(protocol, encoded_image_bytes)
+        image::ImageFormat::Gif => has_multiple_gif_frames(protocol, encoded_image_bytes)
             .map(|is_animated| is_animated.then_some("animated GIF")),
-        image::ImageFormat::Png => png_is_animated(protocol, encoded_image_bytes)
+        image::ImageFormat::Png => is_png_animated(protocol, encoded_image_bytes)
             .map(|is_animated| is_animated.then_some("animated PNG")),
-        image::ImageFormat::WebP => webp_is_animated(protocol, encoded_image_bytes)
+        image::ImageFormat::WebP => is_webp_animated(protocol, encoded_image_bytes)
             .map(|is_animated| is_animated.then_some("animated WebP")),
         _ => Ok(None),
     }
 }
 
-pub(crate) fn png_is_animated(
+pub(crate) fn is_png_animated(
     protocol: GraphicsProtocol,
     encoded_png_bytes: &[u8],
 ) -> Result<bool, GraphicsError> {
     catch_unwind(AssertUnwindSafe(|| {
-        let decoder = image::codecs::png::PngDecoder::with_limits(
+        let png_decoder = image::codecs::png::PngDecoder::with_limits(
             Cursor::new(encoded_png_bytes),
             build_raster_limits(),
         )
         .map_err(|image_error| map_image_error(protocol, image_error))?;
-        decoder
+        png_decoder
             .is_apng()
             .map_err(|image_error| map_image_error(protocol, image_error))
     }))
     .map_err(|_| GraphicsError::DecodeFailure { protocol })?
 }
 
-pub(crate) fn webp_is_animated(
+pub(crate) fn is_webp_animated(
     protocol: GraphicsProtocol,
     encoded_webp_bytes: &[u8],
 ) -> Result<bool, GraphicsError> {
     use image::ImageDecoder;
 
     catch_unwind(AssertUnwindSafe(|| {
-        let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(encoded_webp_bytes))
-            .map_err(|image_error| map_image_error(protocol, image_error))?;
-        decoder
+        let mut webp_decoder =
+            image::codecs::webp::WebPDecoder::new(Cursor::new(encoded_webp_bytes))
+                .map_err(|image_error| map_image_error(protocol, image_error))?;
+        webp_decoder
             .set_limits(build_raster_limits())
             .map_err(|image_error| map_image_error(protocol, image_error))?;
-        Ok(decoder.has_animation())
+        Ok(webp_decoder.has_animation())
     }))
     .map_err(|_| GraphicsError::DecodeFailure { protocol })?
 }
 
-fn gif_has_multiple_frames(
+fn has_multiple_gif_frames(
     protocol: GraphicsProtocol,
     encoded_gif_bytes: &[u8],
 ) -> Result<bool, GraphicsError> {
     use image::{AnimationDecoder, ImageDecoder};
 
     catch_unwind(AssertUnwindSafe(|| {
-        let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(encoded_gif_bytes))
+        let mut gif_decoder = image::codecs::gif::GifDecoder::new(Cursor::new(encoded_gif_bytes))
             .map_err(|image_error| map_image_error(protocol, image_error))?;
-        decoder
+        gif_decoder
             .set_limits(build_raster_limits())
             .map_err(|image_error| map_image_error(protocol, image_error))?;
-        let mut gif_frames = decoder.into_frames();
+        let mut gif_frames = gif_decoder.into_frames();
         gif_frames
             .next()
             .transpose()
@@ -320,9 +323,9 @@ pub(crate) fn map_image_error(
     image_error: image::ImageError,
 ) -> GraphicsError {
     match image_error {
-        image::ImageError::Limits(limit_error)
+        image::ImageError::Limits(image_limit_error)
             if matches!(
-                limit_error.kind(),
+                image_limit_error.kind(),
                 image::error::LimitErrorKind::DimensionError
                     | image::error::LimitErrorKind::InsufficientMemory
             ) =>
@@ -334,11 +337,11 @@ pub(crate) fn map_image_error(
 }
 
 pub(crate) fn build_raster_limits() -> image::Limits {
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_IMAGE_SIDE_PIXEL_COUNT as u32);
-    limits.max_image_height = Some(MAX_IMAGE_SIDE_PIXEL_COUNT as u32);
-    limits.max_alloc = Some(MAX_IMAGE_BYTE_COUNT as u64);
-    limits
+    let mut raster_limits = image::Limits::default();
+    raster_limits.max_image_width = Some(MAX_IMAGE_SIDE_PIXEL_COUNT as u32);
+    raster_limits.max_image_height = Some(MAX_IMAGE_SIDE_PIXEL_COUNT as u32);
+    raster_limits.max_alloc = Some(MAX_IMAGE_BYTE_COUNT as u64);
+    raster_limits
 }
 
 /// Convert exactly `width * height` packed RGB bytes into opaque RGBA pixels.
@@ -442,8 +445,8 @@ pub fn validate_image_dimensions(
 
 /// Return `width * height * 4` after validating the image dimensions and byte limit.
 ///
-/// Returns the same dimension errors as [`validate_image_dimensions`] and `InvalidDimensions` when the
-/// RGBA byte count overflows or exceeds `MAX_IMAGE_BYTE_COUNT`.
+/// Returns the same dimension errors as [`validate_image_dimensions`] and `InvalidDimensions` when
+/// the RGBA byte count overflows or exceeds `MAX_IMAGE_BYTE_COUNT`.
 pub fn compute_rgba_byte_count(
     protocol: GraphicsProtocol,
     pixel_width: usize,

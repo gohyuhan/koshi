@@ -13,13 +13,13 @@ fn build_fixed_test_uuid() -> Uuid {
 #[test]
 fn a_new_pane_prints_one_pane_id_line() {
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-    let events = [Event::PaneCreated(PaneCreated {
+    let command_events = [Event::PaneCreated(PaneCreated {
         pane_id,
         tab_id: TabId::from_uuid(build_fixed_test_uuid()),
     })];
 
     assert_eq!(
-        render_created_events(&events),
+        render_created_events(&command_events),
         format!("[PANE ID]: {pane_id}\n")
     );
 }
@@ -28,13 +28,13 @@ fn a_new_pane_prints_one_pane_id_line() {
 fn a_new_tab_prints_tab_then_root_pane() {
     let tab_id = TabId::from_uuid(build_fixed_test_uuid());
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-    let events = [
+    let command_events = [
         Event::TabCreated(TabCreated { tab_id }),
         Event::PaneCreated(PaneCreated { pane_id, tab_id }),
     ];
 
     assert_eq!(
-        render_created_events(&events),
+        render_created_events(&command_events),
         format!("[TAB ID]: {tab_id}\n[PANE ID]: {pane_id}\n")
     );
 }
@@ -56,14 +56,14 @@ fn no_events_print_nothing() {
 fn created_ids_keep_their_event_order() {
     let tab_id = TabId::from_uuid(build_fixed_test_uuid());
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
-    let events = [
+    let command_events = [
         Event::PaneCreated(PaneCreated { pane_id, tab_id }),
         Event::Quit(QuitCause::Requested),
         Event::TabCreated(TabCreated { tab_id }),
     ];
 
     assert_eq!(
-        render_created_events(&events),
+        render_created_events(&command_events),
         format!("[PANE ID]: {pane_id}\n[TAB ID]: {tab_id}\n")
     );
 }

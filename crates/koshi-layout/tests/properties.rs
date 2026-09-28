@@ -34,8 +34,8 @@ use koshi_layout::solver::{
 };
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_test_support::layout_assert::{
-    check_all_space_occupied, check_live_pane_refs, check_minimum_size_respected, check_no_outside,
-    check_no_overlap,
+    check_all_space_occupied, check_live_pane_references, check_minimum_size_respected,
+    check_no_outside, check_no_overlap,
 };
 use proptest::prelude::*;
 use proptest::strategy::Union;
@@ -274,7 +274,7 @@ fn assert_layout_invariants(
     {
         check_all_space_occupied(&layout_result.pane_rects, tab_rect).unwrap();
     }
-    check_live_pane_refs(&layout_tree.list_leaf_pane_ids(), live_pane_ids).unwrap();
+    check_live_pane_references(&layout_tree.list_leaf_pane_ids(), live_pane_ids).unwrap();
     assert_eq!(
         solve_layout_with_sizing(layout_tree, tab_rect, build_pane_sizing(gap_cell_count)),
         layout_result
@@ -434,7 +434,7 @@ fn a_fixed_layout_operation_sequence_lands_on_its_exact_layout() {
                 ),
             ],
             suppressed_pane_ids: Vec::new(),
-            is_all_panes_suppressed: false,
+            is_every_pane_suppressed: false,
             stack_headers: vec![StackHeader {
                 pane_id: leaf_pane_ids[1],
                 header_rect: stack_header_rect,

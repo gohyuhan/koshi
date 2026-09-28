@@ -37,12 +37,12 @@ use crate::types::{
     ServerConfig, TerminalConfig, ThemeConfig, UpdateConfig, WheelScroll,
 };
 
-/// Folds `layers` onto `base` in order and returns the session's effective
-/// settings, reading only the sections a session owns.
+/// Folds `config_layers` onto `base_server_config` in order and returns the
+/// session's effective settings, reading only the sections a session owns.
 ///
-/// `base` is the fully-populated lowest layer, normally
+/// `base_server_config` is the fully-populated lowest layer, normally
 /// [`ServerConfig::default`](crate::types::ServerConfig::default). Each layer
-/// in `layers` is applied in sequence, so higher-precedence entries win on any field they
+/// in `config_layers` is applied in sequence, so higher-precedence entries win on any field they
 /// set. Merging never fails: an empty layer leaves the config unchanged.
 ///
 /// A layer's viewer-owned sections (theme, keybindings, mouse, copy, layout,
@@ -59,8 +59,8 @@ pub fn merge_server(
     server_config
 }
 
-/// Folds `layers` onto `base` in order and returns one viewer's effective
-/// settings, reading only the sections a viewer owns.
+/// Folds `config_layers` onto `base_client_config` in order and returns one
+/// viewer's effective settings, reading only the sections a viewer owns.
 ///
 /// The counterpart of [`merge_server`] over the same layers: a layer's
 /// session-owned sections (pane floor, scrollback caps, terminal environment)
@@ -100,12 +100,13 @@ impl ConfigLayers {
     /// Layers built from the three parsed config files. A file given as `None`
     /// contributes an empty layer, leaving the lower layers untouched.
     ///
-    /// `theme` and `keybindings` each go into their own layer holding that
-    /// section alone. `app`'s `theme` and `keybindings` sections are set to
-    /// `None`; [`parse_app_config`](crate::app_config::parse_app_config) never
-    /// fills either one, and only a hand-built `app` value can carry them.
+    /// `theme_config_layer` and `keybindings_config_layer` each go into their
+    /// own layer holding that section alone. The `theme` and `keybindings`
+    /// sections of `app_config_layer` are set to `None`;
+    /// [`parse_app_config`](crate::app_config::parse_app_config) never fills
+    /// either one, and only a hand-built `app_config_layer` can carry them.
     #[must_use]
-    pub fn from_files(
+    pub fn from_config_file_layers(
         app_config_layer: Option<PartialKoshiConfig>,
         theme_config_layer: Option<PartialThemeConfig>,
         keybindings_config_layer: Option<PartialKeybindingsConfig>,
@@ -393,7 +394,7 @@ pub struct PartialKeybindingsConfig {
     /// Milliseconds before the which-key continuation hint appears.
     pub which_key_delay_ms: Option<u32>,
     /// Maximum number of chords in one key sequence.
-    pub max_chord_depth: Option<u8>,
+    pub maximum_chord_depth: Option<u8>,
     /// The prefix that `<leader>` in a binding resolves to.
     pub leader: Option<Leader>,
     /// Per-mode bindings by mode name. When set, the whole map replaces the lower layer's;
@@ -416,8 +417,8 @@ impl PartialKeybindingsConfig {
             self.which_key_delay_ms,
         );
         merge_override_field(
-            &mut keybindings_config.max_chord_depth,
-            self.max_chord_depth,
+            &mut keybindings_config.maximum_chord_depth,
+            self.maximum_chord_depth,
         );
         merge_override_field(&mut keybindings_config.leader, self.leader);
         // Replace the whole mode map; per-mode keymap merging runs separately.

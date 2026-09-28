@@ -4,8 +4,8 @@
 //! template is a [`crate::tree::LayoutNode`] tree with the pane ids
 //! abstracted away: interior nodes mirror [`SplitNode`] field for field
 //! (direction, ordered children, parallel weights, expanded member), and each
-//! leaf carries *what to put there* — a terminal command or a plugin name —
-//! instead of *which pane is there*.
+//! leaf carries *what to put there* — a terminal command — instead of *which
+//! pane is there*.
 //!
 //! To instantiate a template, create one pane per leaf, then call
 //! [`TemplateNode::build_layout_node`] with the new ids in layout order.
@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -56,8 +55,8 @@ pub struct TabTemplate {
 /// A node in a template tree: a leaf to fill with a pane, or a split.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateNode {
-    /// A slot one pane will occupy.
-    Leaf(LeafTemplate),
+    /// A slot one terminal pane will occupy.
+    Leaf(TerminalTemplate),
     /// An interior node dividing (or stacking) its rectangle, mirroring
     /// [`SplitNode`].
     Split(TemplateSplit),
@@ -69,7 +68,7 @@ impl TemplateNode {
     /// tree: leaf `i` here is the slot `ids[i]` fills in
     /// [`TemplateNode::build_layout_node`].
     #[must_use]
-    pub fn list_leaf_templates(&self) -> Vec<&LeafTemplate> {
+    pub fn list_leaf_templates(&self) -> Vec<&TerminalTemplate> {
         let mut leaf_templates = Vec::new();
         self.append_leaf_templates(&mut leaf_templates);
         leaf_templates
@@ -81,22 +80,22 @@ impl TemplateNode {
     fn count_leaf_templates(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
-            Self::Split(split) => split
+            Self::Split(template_split) => template_split
                 .children
                 .iter()
-                .map(|child| child.count_leaf_templates())
+                .map(|template_child| template_child.count_leaf_templates())
                 .sum(),
         }
     }
 
     /// Recursively appends leaves to `leaf_templates`, depth-first in layout
     /// order.
-    fn append_leaf_templates<'a>(&'a self, leaf_templates: &mut Vec<&'a LeafTemplate>) {
+    fn append_leaf_templates<'a>(&'a self, leaf_templates: &mut Vec<&'a TerminalTemplate>) {
         match self {
-            Self::Leaf(leaf) => leaf_templates.push(leaf),
-            Self::Split(split) => {
-                for child in &split.children {
-                    child.append_leaf_templates(leaf_templates);
+            Self::Leaf(terminal_template) => leaf_templates.push(terminal_template),
+            Self::Split(template_split) => {
+                for template_child in &template_split.children {
+                    template_child.append_leaf_templates(leaf_templates);
                 }
             }
         }
@@ -118,21 +117,22 @@ impl TemplateNode {
     pub fn find_first_visible_leaf_index(&self) -> usize {
         match self {
             Self::Leaf(_) => 0,
-            Self::Split(split) => {
-                let active_child_index = match split.direction {
-                    SplitDirection::Stacked => split
+            Self::Split(template_split) => {
+                let active_child_index = match template_split.direction {
+                    SplitDirection::Stacked => template_split
                         .active_child_index
-                        .min(split.children.len().saturating_sub(1)),
+                        .min(template_split.children.len().saturating_sub(1)),
                     SplitDirection::Horizontal | SplitDirection::Vertical => 0,
                 };
-                let Some(child) = split.children.get(active_child_index) else {
+                let Some(active_template_child) = template_split.children.get(active_child_index)
+                else {
                     return 0;
                 };
-                let skipped_leaf_count: usize = split.children[..active_child_index]
+                let skipped_leaf_count: usize = template_split.children[..active_child_index]
                     .iter()
-                    .map(|earlier| earlier.count_leaf_templates())
+                    .map(|earlier_template_child| earlier_template_child.count_leaf_templates())
                     .sum();
-                skipped_leaf_count + child.find_first_visible_leaf_index()
+                skipped_leaf_count + active_template_child.find_first_visible_leaf_index()
             }
         }
     }
@@ -170,30 +170,23 @@ impl TemplateNode {
                 *next_pane_id_index += 1;
                 LayoutNode::Pane(pane_id)
             }
-            Self::Split(split) => {
-                let layout_children = split
+            Self::Split(template_split) => {
+                let layout_child_nodes = template_split
                     .children
                     .iter()
-                    .map(|child| child.build_layout_subtree(pane_ids, next_pane_id_index))
+                    .map(|template_child| {
+                        template_child.build_layout_subtree(pane_ids, next_pane_id_index)
+                    })
                     .collect();
                 LayoutNode::Split(SplitNode {
-                    direction: split.direction,
-                    children: layout_children,
-                    weights: split.weights.clone(),
-                    active_child_index: split.active_child_index,
+                    direction: template_split.direction,
+                    children: layout_child_nodes,
+                    weights: template_split.weights.clone(),
+                    active_child_index: template_split.active_child_index,
                 })
             }
         }
     }
-}
-
-/// What fills a leaf slot: a terminal pane or a plugin pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeafTemplate {
-    /// A terminal pane running a command (or the default shell).
-    Terminal(TerminalTemplate),
-    /// A plugin pane rendered by the named plugin.
-    Plugin(PluginTemplate),
 }
 
 /// A terminal pane to spawn: what to run, where, and with which extra
@@ -216,13 +209,6 @@ pub struct CommandTemplate {
     pub program: PathBuf,
     /// Arguments passed to the program, in order.
     pub arguments: Vec<String>,
-}
-
-/// A plugin pane to open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginTemplate {
-    /// The plugin's identifier, e.g. `"session-manager"`.
-    pub plugin_name: String,
 }
 
 /// An interior template node, mirroring [`SplitNode`]: `children` and
@@ -254,14 +240,4 @@ pub enum TemplateError {
         /// Length of the supplied id slice.
         provided_pane_id_count: usize,
     },
-}
-
-impl DomainError for TemplateError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }

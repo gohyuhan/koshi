@@ -20,28 +20,18 @@ impl TerminalState {
     /// image placements, the cursor position, tab stops, the title, the
     /// reported cwd, scrollback, both screens' Kitty keyboard flag stacks, and
     /// every other mode stay.
-    pub(super) fn soft_reset(&mut self) {
-        let cursor = self.active_cursor_mut();
-        cursor.is_visible = true;
-        cursor.pending_wrap = false;
-        cursor.origin = false;
-        cursor.saved = None;
+    pub(super) fn apply_soft_reset(&mut self) {
+        let active_cursor = self.get_active_cursor_mut();
+        active_cursor.is_visible = true;
+        active_cursor.is_wrap_pending = false;
+        active_cursor.is_origin_mode_enabled = false;
+        active_cursor.saved = None;
 
-        *self.active_render_mut() = RenderState::fresh();
+        *self.get_active_render_mut() = RenderState::new();
         *self.scroll_region_mut() = None;
-        let had_primary_horizontal_margins = self.primary_horizontal_margins.is_some();
-        let had_alternate_horizontal_margins = self.alternate_horizontal_margins.is_some();
-        self.primary_horizontal_margins = None;
-        self.alternate_horizontal_margins = None;
-        if had_primary_horizontal_margins {
-            self.primary_cursor.pending_wrap = false;
-        }
-        if had_alternate_horizontal_margins {
-            self.alternate_cursor.pending_wrap = false;
-        }
-        self.modes.declrmm = false;
-        self.modes.application_cursor_keys = false;
-        self.modes.autowrap = false;
+        self.clear_left_right_margin_mode();
+        self.modes.is_application_cursor_keys_enabled = false;
+        self.modes.is_autowrap_enabled = false;
         self.reset_cluster();
     }
 
@@ -53,33 +43,34 @@ impl TerminalState {
     /// the tab stops (every eighth column), the
     /// title, and the OSC 133 shell state, and ends the
     /// in-progress grapheme cluster. The reported cwd, queued device replies,
-    /// queued shell-integration facts, and the scrollback tallies stay.
-    pub(super) fn hard_reset(&mut self) {
+    /// queued shell-integration facts, and the scrollback's total pushed line
+    /// count stay.
+    pub(super) fn apply_hard_reset(&mut self) {
         let (row_count, column_count) = self.primary.get_grid_dimensions();
         debug_assert_eq!(
             self.alternate.get_grid_dimensions(),
             (row_count, column_count)
         );
 
-        let grid = Grid::blank(row_count, column_count, Style::default());
-        self.primary = Arc::new(grid.clone());
-        self.alternate = Arc::new(grid);
+        let reset_screen_grid = Grid::build_blank(row_count, column_count, Style::default());
+        self.primary = Arc::new(reset_screen_grid.clone());
+        self.alternate = Arc::new(reset_screen_grid);
         self.active_screen = Screen::Primary;
         self.clear_all_image_placements();
         self.scrollback.clear_scrollback();
 
-        let cursor = Cursor {
+        let reset_cursor = Cursor {
             row: 0,
             column: 0,
             is_visible: true,
-            pending_wrap: false,
-            origin: false,
+            is_wrap_pending: false,
+            is_origin_mode_enabled: false,
             saved: None,
         };
-        self.primary_cursor = cursor;
-        self.alternate_cursor = cursor;
-        self.primary_render = RenderState::fresh();
-        self.alternate_render = RenderState::fresh();
+        self.primary_cursor = reset_cursor;
+        self.alternate_cursor = reset_cursor;
+        self.primary_render = RenderState::new();
+        self.alternate_render = RenderState::new();
         self.modes = TerminalModes::default();
         self.sixel_palette = SixelPalette::default();
         self.primary_scroll_region = None;

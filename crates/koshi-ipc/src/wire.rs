@@ -43,8 +43,8 @@ use serde_json::value::RawValue;
 /// One message asking a peer to do something, on any of koshi's protocols.
 ///
 /// The envelope's own fields are fixed: decoding rejects any field it does not
-/// know, and a misspelled `request_id` is an error. What may travel inside `K`
-/// is each protocol's own business.
+/// know, and a misspelled `request_id` is an error. What may travel inside
+/// `RequestKind` is each protocol's own business.
 ///
 /// `RequestKind` is the request kind. A sender uses the protocol's own kind. A
 /// server uses [`MaybeKnown<RequestKind>`], where a kind this build does not have arrives as
@@ -90,7 +90,7 @@ pub trait WireVariants {
 /// The variant name one value travels under.
 pub trait WireName {
     /// This value's variant name, spelled as it travels.
-    fn wire_name(&self) -> &'static str;
+    fn get_wire_name(&self) -> &'static str;
 }
 
 /// One wire value, which may name a variant this build does not have.

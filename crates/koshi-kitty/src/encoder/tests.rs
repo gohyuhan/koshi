@@ -72,7 +72,7 @@ fn one_pixel_upload_writes_the_exact_kitty_packet() {
         kitty_output_bytes,
         b"\x1b_Ga=t,f=32,s=1,v=1,I=7,q=2,o=z,m=0;eAFjZGJmAQAAGAAL\x1b\\"
     );
-    assert!(upload.has_started_transmission());
+    assert!(upload.has_started_transmission);
     assert!(upload.is_upload_complete());
 }
 
@@ -82,9 +82,9 @@ fn upload_retains_the_caller_arc_and_exposes_its_identity() {
     let upload = KittyUpload::from_decoded_image(Arc::clone(&decoded_image), 11)
         .expect("the image is valid");
 
-    assert!(Arc::ptr_eq(upload.get_decoded_image(), &decoded_image));
-    assert_eq!(upload.get_image_number(), 11);
-    assert!(!upload.has_started_transmission());
+    assert!(Arc::ptr_eq(&upload.decoded_image, &decoded_image));
+    assert_eq!(upload.image_number, 11);
+    assert!(!upload.has_started_transmission);
     assert!(!upload.is_upload_complete());
 }
 
@@ -157,12 +157,12 @@ fn upload_reports_a_writer_failure_at_a_packet_boundary_without_progress() {
         writer.kitty_output_bytes,
         expected_kitty_output_bytes[..first_packet_end_byte_offset]
     );
-    assert!(!upload.has_started_transmission());
+    assert!(!upload.has_started_transmission);
     assert!(!upload.is_upload_complete());
 }
 
 #[test]
-fn one_upload_advance_compresses_at_most_256_kibibytes_of_input() {
+fn one_upload_advance_compresses_at_most_256_kibibytes_of_rgba_input() {
     let mut upload =
         KittyUpload::from_decoded_image(build_decoded_image(16_384, 32, vec![0; 2_097_152]), 1)
             .expect("the image is valid");
@@ -173,8 +173,8 @@ fn one_upload_advance_compresses_at_most_256_kibibytes_of_input() {
         .expect("the bounded step writes");
 
     assert_eq!(
-        upload.input_byte_offset,
-        KITTY_COMPRESSION_INPUT_BYTE_COUNT_PER_STEP
+        upload.rgba_input_byte_offset,
+        KITTY_COMPRESSION_RGBA_BYTE_COUNT_PER_STEP
     );
     assert!(!upload.is_compression_complete);
 }
@@ -186,10 +186,11 @@ fn one_upload_advance_writes_at_most_sixteen_compressed_chunks() {
         decoded_image,
         image_number: 7,
         compressor: Compress::new(Compression::fast(), true),
-        input_byte_offset: 4,
+        rgba_input_byte_offset: 4,
         compressed_bytes: vec![
             0x5a;
-            KITTY_IMAGE_CHUNK_BYTE_COUNT * (KITTY_IMAGE_CHUNK_COUNT_PER_STEP + 1)
+            KITTY_COMPRESSED_CHUNK_BYTE_COUNT
+                * (KITTY_IMAGE_CHUNK_COUNT_PER_STEP + 1)
         ],
         compressed_byte_offset: 0,
         is_compression_complete: true,
@@ -203,9 +204,9 @@ fn one_upload_advance_writes_at_most_sixteen_compressed_chunks() {
 
     assert_eq!(
         upload.compressed_byte_offset,
-        KITTY_IMAGE_CHUNK_BYTE_COUNT * KITTY_IMAGE_CHUNK_COUNT_PER_STEP
+        KITTY_COMPRESSED_CHUNK_BYTE_COUNT * KITTY_IMAGE_CHUNK_COUNT_PER_STEP
     );
-    assert!(upload.has_started_transmission());
+    assert!(upload.has_started_transmission);
     assert!(!upload.is_upload_complete());
     assert_eq!(
         kitty_output_bytes
@@ -313,15 +314,13 @@ fn delete_commands_write_exact_kitty_bytes() {
     let mut kitty_output_bytes = Vec::new();
 
     write_kitty_image_delete(&mut kitty_output_bytes, 7).expect("the image delete writes");
-    write_kitty_placement_delete(&mut kitty_output_bytes, 7, 9)
-        .expect("the placement delete writes");
     write_kitty_delete_all(&mut kitty_output_bytes).expect("the all delete writes");
     write_kitty_visible_placement_delete(&mut kitty_output_bytes)
         .expect("the placement-only delete writes");
 
     assert_eq!(
         kitty_output_bytes,
-        b"\x1b_Ga=d,d=N,I=7,q=2;\x1b\\\x1b_Ga=d,d=n,I=7,p=9,q=2;\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b_Ga=d,d=a,q=2;\x1b\\"
+        b"\x1b_Ga=d,d=N,I=7,q=2;\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b_Ga=d,d=a,q=2;\x1b\\"
     );
 }
 
@@ -335,20 +334,12 @@ fn abort_writes_the_exact_open_transfer_cancellation_bytes() {
 }
 
 #[test]
-fn delete_commands_reject_zero_ids() {
+fn image_delete_rejects_a_zero_image_number() {
     let mut kitty_output_bytes = Vec::new();
 
     assert!(matches!(
         write_kitty_image_delete(&mut kitty_output_bytes, 0),
         Err(KittyOutputError::InvalidImageNumber)
-    ));
-    assert!(matches!(
-        write_kitty_placement_delete(&mut kitty_output_bytes, 0, 1),
-        Err(KittyOutputError::InvalidImageNumber)
-    ));
-    assert!(matches!(
-        write_kitty_placement_delete(&mut kitty_output_bytes, 1, 0),
-        Err(KittyOutputError::InvalidPlacementId)
     ));
     assert!(kitty_output_bytes.is_empty());
 }

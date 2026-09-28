@@ -34,8 +34,8 @@ impl Server {
                 pane_id,
                 exit_status,
             } => {
-                let events = self.handle_child_exit(pane_id, exit_status);
-                self.publish_events(&events);
+                let child_exit_events = self.handle_child_exit(pane_id, exit_status);
+                self.publish_events(&child_exit_events);
             }
             // A raw chord is the viewer's to read: it holds the keymap, the
             // input mode and any open sequence, and hands the session either a
@@ -92,8 +92,8 @@ impl Server {
                 } else {
                     self.saved_view_store.forget_client_resume_token(client_id);
                 }
-                let events = self.handle_client_detach(client_id);
-                self.publish_events(&events);
+                let client_detach_events = self.handle_client_detach(client_id);
+                self.publish_events(&client_detach_events);
             }
             RuntimeEvent::Resize {
                 client_id,
@@ -101,21 +101,14 @@ impl Server {
                 pane_area,
                 cell_size,
             } => {
-                let resize_events = self.handle_client_resize_with_cell_size(
-                    client_id,
-                    viewport_size,
-                    pane_area,
-                    cell_size,
-                );
+                let resize_events =
+                    self.handle_client_resize(client_id, viewport_size, pane_area, cell_size);
                 self.publish_events(&resize_events);
             }
             RuntimeEvent::CellSize {
                 client_id,
                 cell_size,
             } => self.handle_client_cell_size(client_id, cell_size),
-            // The loop's generic wake-up. The session holds no deadline of its
-            // own: a key sequence expires on the viewer that opened it.
-            RuntimeEvent::Timer => {}
             RuntimeEvent::Ipc {
                 envelope,
                 response_sender,
@@ -126,7 +119,7 @@ impl Server {
                     }
                     _ => None,
                 };
-                let command_result = self.submit_command(envelope);
+                let command_result = self.submit_command(*envelope);
                 if let (Some(client_id), CommandResult::Rejected { command_id, .. }) =
                     (placement_client_id, &command_result)
                 {
@@ -142,7 +135,6 @@ impl Server {
                 viewport_size,
                 pane_area,
                 cell_size,
-                event_filter,
                 attached_at,
                 is_remote,
                 response_sender,
@@ -150,13 +142,12 @@ impl Server {
                 // The client and its subscription are registered together here,
                 // so the structure in the answer and the queue's first event
                 // describe one continuous state.
-                let _ = response_sender.send(self.handle_ipc_attach_with_cell_size(
+                let _ = response_sender.send(self.handle_ipc_attach(
                     resume_client_id,
                     resume_token,
                     viewport_size,
                     pane_area,
                     cell_size,
-                    event_filter,
                     attached_at,
                     is_remote,
                 ));
@@ -191,11 +182,9 @@ impl Server {
             RuntimeEvent::DropUnclaimedClients {
                 unclaimed_client_deadline,
             } => {
-                let events = self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
-                self.publish_events(&events);
-            }
-            RuntimeEvent::Plugin(envelope) => {
-                let _ = self.submit_command(envelope);
+                let unclaimed_client_drop_events =
+                    self.handle_drop_unclaimed_clients(unclaimed_client_deadline);
+                self.publish_events(&unclaimed_client_drop_events);
             }
         }
         ControlFlow::Continue(())
@@ -204,7 +193,7 @@ impl Server {
     /// How long the loop may block before the next render is due: `None` to
     /// sleep until an event, `Some(ZERO)` to render now, else the time left on
     /// the current cadence.
-    pub fn next_render_wakeup(&self, current_time: Instant) -> Option<Duration> {
+    pub fn compute_next_render_wakeup(&self, current_time: Instant) -> Option<Duration> {
         let animation_wakeup = self
             .terminal_engine_by_pane_id
             .values()
@@ -221,7 +210,7 @@ impl Server {
             })
             .min();
         [
-            self.render_scheduler.next_wakeup(current_time),
+            self.render_scheduler.compute_next_wakeup(current_time),
             animation_wakeup,
             synchronized_output_wakeup,
         ]
@@ -236,9 +225,10 @@ impl Server {
         let expired_pane_ids: Vec<PaneId> = self
             .terminal_engine_by_pane_id
             .iter()
-            .filter_map(|(pane_id, engine)| {
-                (engine.get_next_synchronized_output_delay(current_time) == Some(Duration::ZERO))
-                    .then_some(*pane_id)
+            .filter_map(|(pane_id, terminal_engine)| {
+                (terminal_engine.get_next_synchronized_output_delay(current_time)
+                    == Some(Duration::ZERO))
+                .then_some(*pane_id)
             })
             .collect();
         for pane_id in expired_pane_ids {
@@ -253,12 +243,12 @@ impl Server {
         if has_animation_changes {
             self.render_scheduler.invalidate();
         }
-        self.render_scheduler.poll(current_time)
+        self.render_scheduler.claim_due_render(current_time)
     }
 
     /// Whether any pane's PTY is still live — the loop exits once none remain.
     pub fn has_active_panes(&self) -> bool {
-        !self.pty_handle_by_pane_id.is_empty()
+        !self.live_pane_ids.is_empty()
     }
 
     /// Immediately group-kill every live pane's child (`KillPolicy::Tree`),
@@ -266,9 +256,9 @@ impl Server {
     /// panic path — no grace window while unwinding; the normal quit path takes
     /// the staged [`Server::shutdown`].
     pub fn kill_all_panes(&mut self) {
-        let backend = Arc::clone(self.get_pty_backend());
-        for pane_id in self.pty_handle_by_pane_id.keys().copied() {
-            let _ = backend.kill_pane(pane_id, KillPolicy::Tree);
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        for pane_id in self.live_pane_ids.iter().copied() {
+            let _ = pty_backend.kill_pane(pane_id, KillPolicy::Tree);
         }
     }
 }

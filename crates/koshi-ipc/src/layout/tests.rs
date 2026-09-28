@@ -170,14 +170,14 @@ fn build_populated_layout_json() -> serde_json::Value {
                         "pane_id": "00000000-0000-0000-0000-000000000004",
                         "outer_rect": {
                             "origin": { "column": 0, "row": 0 },
-                            "cell_size": { "column_count": 80, "row_count": 21 }
+                            "size": { "column_count": 80, "row_count": 21 }
                         }
                     },
                     {
                         "pane_id": "00000000-0000-0000-0000-000000000005",
                         "outer_rect": {
                             "origin": { "column": 0, "row": 21 },
-                            "cell_size": { "column_count": 80, "row_count": 1 }
+                            "size": { "column_count": 80, "row_count": 1 }
                         }
                     }
                 ],
@@ -187,7 +187,7 @@ fn build_populated_layout_json() -> serde_json::Value {
                     "pane_id": "00000000-0000-0000-0000-000000000005",
                     "header_rect": {
                         "origin": { "column": 0, "row": 21 },
-                        "cell_size": { "column_count": 80, "row_count": 1 }
+                        "size": { "column_count": 80, "row_count": 1 }
                     },
                     "member_index": 1,
                     "member_count": 2
@@ -373,7 +373,7 @@ fn a_solved_tab_carrying_an_unknown_field_ignores_it() {
 #[test]
 fn a_solved_pane_carrying_an_unknown_field_ignores_it() {
     let decoded_solved_pane: SolvedPane = serde_json::from_str(
-        r#"{"pane_id":"00000000-0000-0000-0000-000000000004","outer_rect":{"origin":{"column":0,"row":0},"cell_size":{"column_count":80,"row_count":22}},"junk":5}"#,
+        r#"{"pane_id":"00000000-0000-0000-0000-000000000004","outer_rect":{"origin":{"column":0,"row":0},"size":{"column_count":80,"row_count":22}},"junk":5}"#,
     )
     .expect("a field this build does not know is ignored");
 

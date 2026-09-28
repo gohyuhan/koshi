@@ -12,7 +12,6 @@ use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
 use koshi_core::action::ActionReference;
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::log::{LogFormat, LogLevel};
-use koshi_core::resolve::ActionArgs;
 use tempfile::TempDir;
 
 use super::*;
@@ -515,7 +514,7 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
     let layer = load_keybindings_config(&config_file_path, &mut warnings).expect("the file loads");
     assert_eq!(layer.chord_timeout_ms, None);
     assert_eq!(layer.which_key_delay_ms, None);
-    assert_eq!(layer.max_chord_depth, None);
+    assert_eq!(layer.maximum_chord_depth, None);
     assert_eq!(layer.leader, None);
     assert_eq!(layer.unlock_alternative, None);
     assert_eq!(
@@ -528,7 +527,6 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
                     BoundAction {
                         action_reference: ActionReference::from_core_action_name("new-tab")
                             .expect("a core action name"),
-                        action_arguments: ActionArgs::None,
                     },
                 )]),
                 removed_key_sequences: BTreeSet::new(),
@@ -624,24 +622,24 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     };
 
     apply_beta_gate(Some(enabled_config.clone()));
-    assert!(koshi_beta::are_beta_features_allowed());
+    assert!(koshi_beta::should_allow_beta_features());
 
     apply_beta_gate(Some(disabled_config));
-    assert!(!koshi_beta::are_beta_features_allowed());
+    assert!(!koshi_beta::should_allow_beta_features());
 
     // No `koshi.kdl` at all closes an open gate.
     apply_beta_gate(Some(enabled_config));
-    assert!(koshi_beta::are_beta_features_allowed());
+    assert!(koshi_beta::should_allow_beta_features());
     apply_beta_gate(None);
-    assert!(!koshi_beta::are_beta_features_allowed());
+    assert!(!koshi_beta::should_allow_beta_features());
 
     // The whole chain from text on disk: the reader `load_app_layer` uses, onto
     // the gate, into a function carrying the attribute. `load_app_layer` takes
-    // its directory from the platform, so the file goes to `load_app` here.
+    // its directory from the platform, so the file goes to `load_app_config` here.
     let test_directory = TempDir::new().unwrap();
     let config_file_path = test_directory.path().join("koshi.kdl");
 
-    fs::write(&config_file_path, "version 1\nallow-beta-features #true\n").unwrap();
+    fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").unwrap();
     let mut warnings = Vec::new();
     apply_beta_gate(
         load_app_config(&config_file_path, &mut warnings)
@@ -650,7 +648,7 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     assert_eq!(warnings, Vec::<String>::new());
     assert_eq!(mock_beta_entry_point(), 1);
 
-    fs::write(&config_file_path, "version 1\nallow-beta-features #false\n").unwrap();
+    fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").unwrap();
     let mut warnings = Vec::new();
     apply_beta_gate(
         load_app_config(&config_file_path, &mut warnings)
@@ -661,18 +659,18 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
 }
 
 #[test]
-fn build_logging_params_with_no_config_file_are_the_defaults() {
+fn build_logging_parameters_with_no_config_file_are_the_defaults() {
     let session_id = SessionId::new();
-    let logging_params = build_logging_params(None, session_id);
+    let logging_parameters = build_logging_parameters(None, session_id);
 
-    assert!(!logging_params.is_enabled);
-    assert_eq!(logging_params.log_level, LogLevel::Warning);
-    assert_eq!(logging_params.log_format, LogFormat::Pretty);
-    assert_eq!(logging_params.session_id, session_id);
+    assert!(!logging_parameters.is_enabled);
+    assert_eq!(logging_parameters.log_level, LogLevel::Warning);
+    assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
+    assert_eq!(logging_parameters.session_id, session_id);
 }
 
 #[test]
-fn build_logging_params_take_the_level_and_format_the_config_names() {
+fn build_logging_parameters_take_the_level_and_format_the_config_names() {
     let session_id = SessionId::new();
     let app_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
@@ -683,16 +681,16 @@ fn build_logging_params_take_the_level_and_format_the_config_names() {
         ..Default::default()
     };
 
-    let logging_params = build_logging_params(Some(&app_config), session_id);
+    let logging_parameters = build_logging_parameters(Some(&app_config), session_id);
 
-    assert!(logging_params.is_enabled);
-    assert_eq!(logging_params.log_level, LogLevel::Info);
-    assert_eq!(logging_params.log_format, LogFormat::Json);
-    assert_eq!(logging_params.session_id, session_id);
+    assert!(logging_parameters.is_enabled);
+    assert_eq!(logging_parameters.log_level, LogLevel::Info);
+    assert_eq!(logging_parameters.log_format, LogFormat::Json);
+    assert_eq!(logging_parameters.session_id, session_id);
 }
 
 #[test]
-fn build_logging_params_keep_the_defaults_for_every_field_the_config_leaves_out() {
+fn build_logging_parameters_keep_the_defaults_for_every_field_the_config_leaves_out() {
     let session_id = SessionId::new();
     let app_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
@@ -703,12 +701,12 @@ fn build_logging_params_keep_the_defaults_for_every_field_the_config_leaves_out(
         ..Default::default()
     };
 
-    let logging_params = build_logging_params(Some(&app_config), session_id);
+    let logging_parameters = build_logging_parameters(Some(&app_config), session_id);
 
-    assert!(logging_params.is_enabled);
-    assert_eq!(logging_params.log_level, LogLevel::Warning);
-    assert_eq!(logging_params.log_format, LogFormat::Pretty);
-    assert_eq!(logging_params.session_id, session_id);
+    assert!(logging_parameters.is_enabled);
+    assert_eq!(logging_parameters.log_level, LogLevel::Warning);
+    assert_eq!(logging_parameters.log_format, LogFormat::Pretty);
+    assert_eq!(logging_parameters.session_id, session_id);
 }
 
 // --- The direction a pane-opening verb uses with no `--direction` ---
@@ -750,24 +748,23 @@ fn a_layout_section_naming_no_direction_still_opens_rightward() {
 
 // --- Who may reach a session's control socket ---
 
-/// A `koshi.kdl` layer setting `allow-other-users` to `is_allowed` and naming no
-/// shared directory.
-fn build_access_layer(is_allowed: bool) -> PartialKoshiConfig {
+/// A `koshi.kdl` layer with `should_allow_other_users` and no shared directory.
+fn build_other_user_access_config_layer(should_allow_other_users: bool) -> PartialKoshiConfig {
     PartialKoshiConfig {
-        should_allow_other_users: Some(is_allowed),
+        should_allow_other_users: Some(should_allow_other_users),
         ..Default::default()
     }
 }
 
-/// A `koshi.kdl` layer setting `allow-other-users` to `is_allowed` and naming
-/// `shared_directory` as the shared sessions directory.
-fn build_access_layer_with_shared_directory(
-    is_allowed: bool,
-    shared_directory: &str,
+/// A `koshi.kdl` layer with `should_allow_other_users` and
+/// `shared_sessions_directory`.
+fn build_other_user_access_config_layer_with_shared_sessions_directory(
+    should_allow_other_users: bool,
+    shared_sessions_directory: &str,
 ) -> PartialKoshiConfig {
     PartialKoshiConfig {
-        should_allow_other_users: Some(is_allowed),
-        shared_sessions_directory: Some(Some(PathBuf::from(shared_directory))),
+        should_allow_other_users: Some(should_allow_other_users),
+        shared_sessions_directory: Some(Some(PathBuf::from(shared_sessions_directory))),
         ..Default::default()
     }
 }
@@ -775,8 +772,8 @@ fn build_access_layer_with_shared_directory(
 /// The directory a policy shares through, or `None` when the session serves
 /// only the user who started it. `OtherUsers` carries a closure, so the
 /// directory is what a test compares.
-fn get_shared_sessions_directory(policy: Option<OtherUsers>) -> Option<PathBuf> {
-    policy.map(|policy| policy.shared_directory)
+fn get_shared_sessions_directory(other_users_policy: Option<OtherUsers>) -> Option<PathBuf> {
+    other_users_policy.map(|other_users_access_policy| other_users_access_policy.shared_directory)
 }
 
 #[test]
@@ -791,7 +788,7 @@ fn a_fresh_install_serves_only_the_user_who_started_the_session() {
 fn a_config_turning_the_switch_off_serves_only_that_user() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer(false)),
+            Some(&build_other_user_access_config_layer(false)),
             None,
         )),
         None
@@ -802,7 +799,7 @@ fn a_config_turning_the_switch_off_serves_only_that_user() {
 fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer(true)),
+            Some(&build_other_user_access_config_layer(true)),
             None,
         )),
         koshi_paths::resolve_shared_sessions_directory()
@@ -813,10 +810,12 @@ fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
 fn a_config_naming_a_shared_directory_shares_through_that_one() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer_with_shared_directory(
-                true,
-                "/var/run/koshi"
-            )),
+            Some(
+                &build_other_user_access_config_layer_with_shared_sessions_directory(
+                    true,
+                    "/var/run/koshi"
+                )
+            ),
             None
         )),
         Some(PathBuf::from("/var/run/koshi"))
@@ -828,10 +827,12 @@ fn naming_a_shared_directory_alone_serves_only_this_user() {
     // The directory says where the sockets would go, never who may reach them.
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer_with_shared_directory(
-                false,
-                "/var/run/koshi"
-            )),
+            Some(
+                &build_other_user_access_config_layer_with_shared_sessions_directory(
+                    false,
+                    "/var/run/koshi"
+                )
+            ),
             None
         )),
         None
@@ -840,20 +841,25 @@ fn naming_a_shared_directory_alone_serves_only_this_user() {
 
 #[test]
 fn the_flag_shares_a_session_whose_config_says_no() {
-    let policy = resolve_other_users_policy(
-        Some(&build_access_layer_with_shared_directory(
-            false,
-            "/var/run/koshi",
-        )),
+    let other_users_policy = resolve_other_users_policy(
+        Some(
+            &build_other_user_access_config_layer_with_shared_sessions_directory(
+                false,
+                "/var/run/koshi",
+            ),
+        ),
         Some(true),
     )
     .expect("the flag turns the switch on");
 
-    assert_eq!(policy.shared_directory, PathBuf::from("/var/run/koshi"));
+    assert_eq!(
+        other_users_policy.shared_directory,
+        PathBuf::from("/var/run/koshi")
+    );
     // A service unit started under the flag keeps serving whatever the app file
     // says afterwards, so the live read answers the same every time.
-    assert!((policy.is_enabled)());
-    assert!((policy.is_enabled)());
+    assert!((other_users_policy.is_enabled)());
+    assert!((other_users_policy.is_enabled)());
 }
 
 #[test]
@@ -870,10 +876,12 @@ fn a_flag_naming_no_other_users_serves_only_this_user() {
     // spells this today. An explicit answer beats the app file either way.
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
-            Some(&build_access_layer_with_shared_directory(
-                true,
-                "/var/run/koshi"
-            )),
+            Some(
+                &build_other_user_access_config_layer_with_shared_sessions_directory(
+                    true,
+                    "/var/run/koshi"
+                )
+            ),
             Some(false)
         )),
         None

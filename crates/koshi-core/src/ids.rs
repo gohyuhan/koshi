@@ -8,7 +8,7 @@
 //! existing UUID (`from_uuid`), or read from typed text with
 //! [`parse_prefixed_uuid`] followed by `from_uuid`.
 //!
-//! The seven types below share the same shape: a wrapped [`Uuid`], a `new`
+//! The six types below share the same shape: a wrapped [`Uuid`], a `new`
 //! constructor that mints a fresh id, a `from_uuid` constructor that wraps an
 //! existing one, a `get_uuid` accessor, and a `Display` impl that prefixes the
 //! id with its entity name.
@@ -48,8 +48,8 @@ impl Default for SessionId {
 }
 
 impl fmt::Display for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "session-{}", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "session-{}", self.0)
     }
 }
 
@@ -84,8 +84,8 @@ impl Default for ClientId {
 }
 
 impl fmt::Display for ClientId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "client-{}", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "client-{}", self.0)
     }
 }
 
@@ -120,8 +120,8 @@ impl Default for TabId {
 }
 
 impl fmt::Display for TabId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tab-{}", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "tab-{}", self.0)
     }
 }
 
@@ -156,44 +156,8 @@ impl Default for PaneId {
 }
 
 impl fmt::Display for PaneId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pane-{}", self.0)
-    }
-}
-
-/// Identifies a plugin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct PluginId(Uuid);
-
-impl PluginId {
-    /// Generate a new time-ordered identifier (`UUIDv7`).
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Wrap an existing UUID without generating a new one.
-    #[must_use]
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    /// Borrow the underlying UUID.
-    #[must_use]
-    pub fn get_uuid(&self) -> &Uuid {
-        &self.0
-    }
-}
-
-impl Default for PluginId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for PluginId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "plugin-{}", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "pane-{}", self.0)
     }
 }
 
@@ -228,8 +192,8 @@ impl Default for CommandId {
 }
 
 impl fmt::Display for CommandId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "command-{}", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "command-{}", self.0)
     }
 }
 
@@ -264,8 +228,8 @@ impl Default for SubscriberId {
 }
 
 impl fmt::Display for SubscriberId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "subscriber-{}", self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "subscriber-{}", self.0)
     }
 }
 

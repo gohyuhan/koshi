@@ -10,15 +10,15 @@ use super::platform::{PlatformEventSource, PlatformWaker};
 
 /// A platform source that can wait for one parsed event.
 pub(super) trait EventSource {
-    /// Return one event, or `None` when `timeout` expires.
-    fn try_read_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>>;
+    /// Return one event, or `None` when `timeout_duration` expires.
+    fn try_read_event(&mut self, timeout_duration: Option<Duration>) -> io::Result<Option<Event>>;
 }
 
 /// The owned event reader for one attached terminal.
 #[derive(Debug)]
-pub(super) struct InputReader<S = PlatformEventSource> {
-    event_source: S,
-    buffered_events: VecDeque<Event>,
+pub(super) struct InputReader<Source = PlatformEventSource> {
+    event_source: Source,
+    buffered_terminal_events: VecDeque<Event>,
 }
 
 impl InputReader<PlatformEventSource> {
@@ -26,7 +26,7 @@ impl InputReader<PlatformEventSource> {
     pub(super) fn from_event_source(event_source: PlatformEventSource) -> Self {
         Self {
             event_source,
-            buffered_events: VecDeque::with_capacity(32),
+            buffered_terminal_events: VecDeque::with_capacity(32),
         }
     }
 
@@ -36,40 +36,39 @@ impl InputReader<PlatformEventSource> {
     }
 }
 
-impl<S: EventSource> InputReader<S> {
-    #[cfg(test)]
-    pub(super) fn from_event_source_for_tests(event_source: S) -> Self {
-        Self {
-            event_source,
-            buffered_events: VecDeque::with_capacity(32),
-        }
-    }
-
+impl<Source: EventSource> InputReader<Source> {
     /// Wait until an event accepted by `event_filter` is buffered.
     pub(super) fn wait_for_event(
         &mut self,
-        timeout: Option<Duration>,
+        timeout_duration: Option<Duration>,
         mut event_filter: impl FnMut(&Event) -> bool,
     ) -> io::Result<bool> {
-        if self.buffered_events.iter().any(&mut event_filter) {
+        if self.buffered_terminal_events.iter().any(&mut event_filter) {
             return Ok(true);
         }
 
-        let deadline_instant = timeout.map(|timeout_duration| Instant::now() + timeout_duration);
+        let wait_deadline_instant =
+            timeout_duration.map(|wait_duration| Instant::now() + wait_duration);
         loop {
-            let remaining_timeout =
-                deadline_instant.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-            match self.event_source.try_read_event(remaining_timeout)? {
-                Some(event) => {
-                    let is_accepted = event_filter(&event);
-                    self.buffered_events.push_back(event);
-                    if is_accepted {
+            let remaining_timeout_duration = wait_deadline_instant.map(|wait_deadline_instant| {
+                wait_deadline_instant.saturating_duration_since(Instant::now())
+            });
+            match self
+                .event_source
+                .try_read_event(remaining_timeout_duration)?
+            {
+                Some(terminal_event) => {
+                    let is_terminal_event_accepted = event_filter(&terminal_event);
+                    self.buffered_terminal_events.push_back(terminal_event);
+                    if is_terminal_event_accepted {
                         return Ok(true);
                     }
                 }
                 None => return Ok(false),
             }
-            if deadline_instant.is_some_and(|deadline| Instant::now() >= deadline) {
+            if wait_deadline_instant
+                .is_some_and(|wait_deadline_instant| Instant::now() >= wait_deadline_instant)
+            {
                 return Ok(false);
             }
         }
@@ -81,19 +80,21 @@ impl<S: EventSource> InputReader<S> {
         mut event_filter: impl FnMut(&Event) -> bool,
     ) -> io::Result<Event> {
         loop {
-            if let Some(buffered_event_index) =
-                self.buffered_events.iter().position(&mut event_filter)
+            if let Some(buffered_terminal_event_index) = self
+                .buffered_terminal_events
+                .iter()
+                .position(&mut event_filter)
             {
                 return self
-                    .buffered_events
-                    .remove(buffered_event_index)
+                    .buffered_terminal_events
+                    .remove(buffered_terminal_event_index)
                     .ok_or_else(|| io::Error::other("buffered terminal event disappeared"));
             }
-            if let Some(event) = self.event_source.try_read_event(None)? {
-                if event_filter(&event) {
-                    return Ok(event);
+            if let Some(terminal_event) = self.event_source.try_read_event(None)? {
+                if event_filter(&terminal_event) {
+                    return Ok(terminal_event);
                 }
-                self.buffered_events.push_back(event);
+                self.buffered_terminal_events.push_back(terminal_event);
             }
         }
     }

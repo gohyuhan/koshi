@@ -1,12 +1,10 @@
 //! Config domain errors.
 //!
-//! [`ConfigError`] is the plain error enum other code matches on; it
-//! classifies into [`DomainCategory::Config`] when it joins koshi's
-//! crate-wide aggregate error type. [`ConfigParseDiagnostic`] is a richer
-//! parse error that keeps the original KDL source text and the byte span of
-//! the failure; a rendered report points a caret at the bad line. It
-//! flattens down into a plain [`ConfigError::Parse`] once it joins the
-//! aggregate. [`ConfigVersionDiagnostic`] reports a declared schema version
+//! [`ConfigError`] is the plain error enum other code matches on.
+//! [`ConfigParseDiagnostic`] is a richer parse error that keeps the original
+//! KDL source text and the byte span of the failure; a rendered report points
+//! a caret at the bad line. `From` converts it into a plain
+//! [`ConfigError::Parse`]. [`ConfigVersionDiagnostic`] reports a declared schema version
 //! that is zero or newer than this build supports.
 //! [`ColorParseError`] reports a theme color value that is not valid
 //! `#RRGGBB` hex.
@@ -14,7 +12,6 @@
 use std::path::Path;
 
 use kdl::KdlError;
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use miette::{Diagnostic, SourceCode};
 use thiserror::Error;
 
@@ -36,16 +33,6 @@ pub enum ConfigError {
         config_key: String,
         validation_detail: String,
     },
-}
-
-impl DomainError for ConfigError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Config
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 /// Builds a [`ConfigError::Validation`] naming the config key that failed
@@ -101,7 +88,7 @@ impl Diagnostic for ConfigParseDiagnostic {
 
 impl From<ConfigParseDiagnostic> for ConfigError {
     fn from(parse_diagnostic: ConfigParseDiagnostic) -> Self {
-        // `detail` is the first sub-diagnostic's message, or the kdl error's
+        // `parse_error_detail` is the first sub-diagnostic's message, or the kdl error's
         // own Display ("Failed to parse KDL document") when it reported none.
         let parse_error_detail = match parse_diagnostic.kdl_parse_error.diagnostics.first() {
             Some(kdl_diagnostic) => kdl_diagnostic.to_string(),

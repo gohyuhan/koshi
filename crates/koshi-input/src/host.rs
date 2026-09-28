@@ -38,22 +38,10 @@ impl Modifiers {
     /// Num Lock, reported as a held state rather than a press.
     pub const NUM_LOCK: Self = Self(1 << 7);
 
-    /// Return an empty modifier set.
-    #[must_use]
-    pub const fn empty() -> Self {
-        Self::NONE
-    }
-
     /// Return whether every bit in `required_modifiers` is set.
     #[must_use]
     pub const fn has_all_modifiers(self, required_modifiers: Self) -> bool {
         self.0 & required_modifiers.0 == required_modifiers.0
-    }
-
-    /// Return the union of two modifier sets.
-    #[must_use]
-    pub const fn combine_modifiers(self, additional_modifiers: Self) -> Self {
-        Self(self.0 | additional_modifiers.0)
     }
 
     /// Return these modifiers as the stored bitmap a complete keyboard event
@@ -68,7 +56,7 @@ impl BitOr for Modifiers {
     type Output = Self;
 
     fn bitor(self, right_modifiers: Self) -> Self::Output {
-        self.combine_modifiers(right_modifiers)
+        Self(self.0 | right_modifiers.0)
     }
 }
 

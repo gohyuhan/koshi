@@ -4,8 +4,7 @@
 //! other koshi crate.
 //!
 //! - [`ids`] — one typed id per entity, [`geometry`] — cell coordinates and
-//!   rectangles, [`error`] — failure category and severity, [`constant`] —
-//!   numeric bounds several crates share.
+//!   rectangles, [`constant`] — numeric bounds several crates share.
 //! - [`command`] — every mutation that can be requested, with the envelope one
 //!   travels in; [`event`] — every completed fact the runtime emits, with the
 //!   privacy tier an input event carries.
@@ -35,7 +34,6 @@ pub mod command;
 pub mod compat;
 pub mod constant;
 pub mod discovery;
-pub mod error;
 pub mod event;
 pub mod geometry;
 pub mod ids;

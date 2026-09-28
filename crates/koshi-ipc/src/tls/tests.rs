@@ -24,7 +24,7 @@ use crate::remote_wire::{
     open_remote_connection, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
     MIN_REMOTE_PROTOCOL_VERSION, REMOTE_PROTOCOL_VERSION,
 };
-use crate::transport::{frame_halves, Deadlined};
+use crate::transport::{build_frame_halves, Deadlined};
 
 /// How long a loopback handshake and the frames after it have to finish. Well
 /// past what a loopback stream needs, so a slow machine does not fail the run.
@@ -51,10 +51,10 @@ const PAUSE_AFTER_OPENING_RESPONSE_DURATION: Duration = Duration::from_millis(15
 /// How long the send_test_drip_bytes tests leave between the bytes they send.
 const DRIP_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 
-/// How many bytes the send_test_drip_bytes tests send. At one byte every [`DRIP_INTERVAL_DURATION`] the send_test_drip_bytes
-/// lasts far longer than [`SHORT_TIMEOUT_DURATION`] or [`OPENING_TIMEOUT_DURATION`] with [`DEADLINE_SLACK_DURATION`]
-/// on top, so a peer that stretched its deadline by dripping would fail these
-/// tests.
+/// How many bytes the send_test_drip_bytes tests send. At one byte every [`DRIP_INTERVAL_DURATION`]
+/// the send_test_drip_bytes lasts far longer than [`SHORT_TIMEOUT_DURATION`] or
+/// [`OPENING_TIMEOUT_DURATION`] with [`DEADLINE_SLACK_DURATION`] on top, so a peer that stretched
+/// its deadline by dripping would fail these tests.
 const DRIP_BYTE_COUNT: usize = 200;
 
 /// The header of a TLS record of `tls_record_type`, the version, and a payload of 256
@@ -410,7 +410,8 @@ fn frames_cross_a_loopback_stream_both_ways_and_the_client_pins_what_it_was_show
         .expect("the loopback handshake finishes");
         let (reader, writer) =
             split_tls_stream(tls_connection, socket).expect("split the loopback stream");
-        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let (mut frame_reader, mut frame_writer) =
+            build_frame_halves(Box::new(reader), Box::new(writer));
 
         let opening_frame: RemoteClientFrame =
             frame_reader.recv().expect("the client's opening frame");
@@ -436,13 +437,14 @@ fn frames_cross_a_loopback_stream_both_ways_and_the_client_pins_what_it_was_show
         presented_certificate_fingerprint,
         compute_certificate_fingerprint(&certificate_der_bytes)
     );
-    let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+    let (mut frame_reader, mut frame_writer) =
+        build_frame_halves(Box::new(reader), Box::new(writer));
 
     let hello_frame = RemoteClientFrame::Hello {
-        min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
-        max_remote_version: REMOTE_PROTOCOL_VERSION,
-        min_protocol_version: 1,
-        max_protocol_version: 1,
+        minimum_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
+        maximum_remote_version: REMOTE_PROTOCOL_VERSION,
+        minimum_protocol_version: 1,
+        maximum_protocol_version: 1,
         connection_token: ConnectionToken::from_secret("the secret the operator handed out"),
     };
     frame_writer
@@ -578,10 +580,10 @@ fn a_second_connection_presenting_another_certificate_is_refused_by_the_pinned_f
 /// The opening frame a dialling client sends.
 fn build_opening_frame() -> RemoteClientFrame {
     RemoteClientFrame::Hello {
-        min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
-        max_remote_version: REMOTE_PROTOCOL_VERSION,
-        min_protocol_version: 1,
-        max_protocol_version: 1,
+        minimum_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
+        maximum_remote_version: REMOTE_PROTOCOL_VERSION,
+        minimum_protocol_version: 1,
+        maximum_protocol_version: 1,
         connection_token: ConnectionToken::from_secret("the secret the operator handed out"),
     }
 }
@@ -656,7 +658,8 @@ fn a_caller_that_asked_to_wait_reads_however_long_the_server_takes() {
         .expect("the loopback handshake finishes");
         let (reader, writer) =
             split_tls_stream(tls_connection, socket).expect("split the loopback stream");
-        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let (mut frame_reader, mut frame_writer) =
+            build_frame_halves(Box::new(reader), Box::new(writer));
         let opening_frame: RemoteClientFrame =
             frame_reader.recv().expect("the client's opening frame");
         frame_writer
@@ -723,7 +726,8 @@ fn a_caller_that_asked_for_a_bounded_wait_stops_reading_at_it() {
         .expect("the loopback handshake finishes");
         let (reader, writer) =
             split_tls_stream(tls_connection, socket).expect("split the loopback stream");
-        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let (mut frame_reader, mut frame_writer) =
+            build_frame_halves(Box::new(reader), Box::new(writer));
         let _: RemoteClientFrame = frame_reader.recv().expect("the client's opening frame");
         frame_writer
             .send(&RemoteServerFrame::Welcome {
@@ -797,7 +801,8 @@ fn a_framed_half_keeps_the_deadline_it_was_dialled_with_and_can_be_told_to_drop_
         .expect("the loopback handshake finishes");
         let (reader, writer) =
             split_tls_stream(tls_connection, socket).expect("split the loopback stream");
-        let (mut frame_reader, mut frame_writer) = frame_halves(Box::new(reader), Box::new(writer));
+        let (mut frame_reader, mut frame_writer) =
+            build_frame_halves(Box::new(reader), Box::new(writer));
         let _: RemoteClientFrame = frame_reader.recv().expect("the client's opening frame");
         frame_writer
             .send(&RemoteServerFrame::Welcome {
@@ -1372,11 +1377,11 @@ const UNREAD_BYTE_COUNT: usize = 32 * 1024 * 1024;
 #[test]
 fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
     let (server_config, _certificate_der_bytes) = build_fresh_server_config();
-    let (given_up_tx, given_up_rx) = std::sync::mpsc::channel::<()>();
+    let (given_up_sender, given_up_receiver) = std::sync::mpsc::channel::<()>();
     let (server_address, server_thread) =
         serve_after_tls_handshake(server_config, move |_tls_connection, socket| {
             // Reads nothing, and holds the socket open until the write gave up.
-            let _ = given_up_rx.recv_timeout(LOOPBACK_TIMEOUT_DURATION * 3);
+            let _ = given_up_receiver.recv_timeout(LOOPBACK_TIMEOUT_DURATION * 3);
             drop(socket);
         });
 
@@ -1390,7 +1395,7 @@ fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
         .write_all(&vec![0u8; UNREAD_BYTE_COUNT])
         .expect_err("a peer that does not read never takes the bytes");
     let write_elapsed_duration = write_started_at.elapsed();
-    let _ = given_up_tx.send(());
+    let _ = given_up_sender.send(());
 
     assert!(
         is_io_timeout(&timeout_error),

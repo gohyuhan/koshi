@@ -3,7 +3,7 @@
 //! The dispatcher thread does not repaint on a blind loop. After it handles a
 //! [`RuntimeEvent`](crate::runtime::event::RuntimeEvent) it marks the screen
 //! stale with [`RenderScheduler::invalidate`], then asks
-//! [`RenderScheduler::poll`] whether it is time to render. The scheduler
+//! [`RenderScheduler::claim_due_render`] whether it is time to render. The scheduler
 //! **coalesces** a burst of invalidations into a single repaint and **gates**
 //! how often that repaint may happen at [`FRAME_INTERVAL_DURATION`]: a chatty child
 //! produces one frame per tick instead of one per write, and an idle koshi
@@ -27,8 +27,8 @@ pub const FRAME_INTERVAL_DURATION: Duration = Duration::from_millis(8);
 /// Decides when the dispatcher thread repaints.
 ///
 /// Producers mark the screen stale with [`invalidate`](Self::invalidate); the
-/// loop drives [`poll`](Self::poll) to learn whether to render now and
-/// [`next_wakeup`](Self::next_wakeup) to learn how long it may block on the
+/// loop drives [`claim_due_render`](Self::claim_due_render) to learn whether to render now and
+/// [`compute_next_wakeup`](Self::compute_next_wakeup) to learn how long it may block on the
 /// inbox before it must wake to flush a pending frame. Lives on the dispatcher
 /// thread; never shared.
 #[derive(Debug)]
@@ -72,8 +72,8 @@ impl RenderScheduler {
 
     /// Ask whether to render at `current_time`. On `true`, records `current_time` as the last
     /// render and clears the pending mark — the caller then repaints. On
-    /// `false`, leaves the mark in place for a later poll.
-    pub fn poll(&mut self, current_time: Instant) -> bool {
+    /// `false`, leaves the mark in place for the next call.
+    pub fn claim_due_render(&mut self, current_time: Instant) -> bool {
         if self.is_render_due(current_time) {
             self.last_render_time = Some(current_time);
             self.is_render_pending = false;
@@ -88,7 +88,7 @@ impl RenderScheduler {
     /// `None` when nothing is pending — the loop sleeps until an event arrives.
     /// `Some(Duration::ZERO)` when a render is already due. Otherwise the
     /// remaining time until [`FRAME_INTERVAL_DURATION`] elapses.
-    pub fn next_wakeup(&self, current_time: Instant) -> Option<Duration> {
+    pub fn compute_next_wakeup(&self, current_time: Instant) -> Option<Duration> {
         if !self.is_render_pending {
             return None;
         }
@@ -99,12 +99,6 @@ impl RenderScheduler {
                 Some(FRAME_INTERVAL_DURATION.saturating_sub(elapsed_duration))
             }
         }
-    }
-}
-
-impl Default for RenderScheduler {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

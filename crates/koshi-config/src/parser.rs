@@ -319,7 +319,7 @@ pub(crate) fn parse_version_argument(
 /// Stores a parsed field value in `parsed_field_value`. On `Err`, leaves the
 /// field value untouched and pushes one warning naming the field and reason.
 ///
-/// `section_name` is the enclosing block (`pane`), `key_name` the field node's
+/// `section_name` is the enclosing block (`pane`), `field_name` the field node's
 /// name (`min-cols`). A `field_parse_result` of `Err("expected an integer")` pushes
 /// ``ignored `pane.min-cols`: expected an integer``.
 pub(crate) fn set_parsed_field<FieldValue>(
@@ -357,7 +357,7 @@ pub fn format_unknown_key(unknown_key_name: &str, allowed_key_names: &[&str]) ->
     format!("unknown key `{unknown_key_name}`; did you mean `{nearest_key_name}`?")
 }
 
-/// The Levenshtein edit distance between `left` and `right`, counted in
+/// The Levenshtein edit distance between `left_text` and `right_text`, counted in
 /// characters. `"colors.acent"` against `"colors.accent"` is `1`.
 fn compute_edit_distance(left_text: &str, right_text: &str) -> usize {
     let right_character_count = right_text.chars().count();

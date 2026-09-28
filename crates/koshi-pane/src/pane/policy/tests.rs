@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use koshi_core::process::KillPolicy;
 
-use super::{PaneClosePolicy, PaneExitPolicy};
+use super::PaneClosePolicy;
 
 #[test]
 fn the_default_close_policy_is_a_three_second_graceful_close() {
@@ -18,26 +18,21 @@ fn the_default_close_policy_is_a_three_second_graceful_close() {
 }
 
 #[test]
-fn the_default_exit_policy_closes_the_pane_on_exit() {
-    assert_eq!(PaneExitPolicy::default(), PaneExitPolicy::CloseOnExit);
-}
-
-#[test]
 fn each_close_policy_maps_to_its_kill_policy() {
     // Graceful passes its own timeout straight through (5s, not the default).
     assert_eq!(
         PaneClosePolicy::Graceful {
             timeout_duration: Duration::from_secs(5)
         }
-        .kill_policy(),
+        .to_kill_policy(),
         KillPolicy::Graceful {
             timeout_duration: Duration::from_secs(5)
         }
     );
-    assert_eq!(PaneClosePolicy::Force.kill_policy(), KillPolicy::Force);
+    assert_eq!(PaneClosePolicy::Force.to_kill_policy(), KillPolicy::Force);
     // `ConfirmIfBusy` maps to a graceful close with the default 3s timeout.
     assert_eq!(
-        PaneClosePolicy::ConfirmIfBusy.kill_policy(),
+        PaneClosePolicy::ConfirmIfBusy.to_kill_policy(),
         KillPolicy::Graceful {
             timeout_duration: Duration::from_secs(3)
         }
@@ -51,7 +46,7 @@ fn a_zero_graceful_timeout_passes_through_as_zero() {
         PaneClosePolicy::Graceful {
             timeout_duration: Duration::ZERO
         }
-        .kill_policy(),
+        .to_kill_policy(),
         KillPolicy::Graceful {
             timeout_duration: Duration::ZERO
         }
@@ -165,17 +160,6 @@ fn an_unknown_close_policy_fails_to_deserialize() {
 }
 
 #[test]
-fn an_exit_policy_survives_a_serde_round_trip() {
-    let policy = PaneExitPolicy::CloseOnExit;
-
-    let policy_json = serde_json::to_string(&policy).expect("serialize");
-    let deserialized_policy: PaneExitPolicy =
-        serde_json::from_str(&policy_json).expect("deserialize");
-
-    assert_eq!(policy, deserialized_policy);
-}
-
-#[test]
 fn the_unit_close_policies_serialize_as_their_variant_names() {
     assert_eq!(
         serde_json::to_string(&PaneClosePolicy::Force).expect("serialize"),
@@ -184,37 +168,5 @@ fn the_unit_close_policies_serialize_as_their_variant_names() {
     assert_eq!(
         serde_json::to_string(&PaneClosePolicy::ConfirmIfBusy).expect("serialize"),
         r#""ConfirmIfBusy""#
-    );
-}
-
-#[test]
-fn the_exit_policy_serializes_as_its_variant_name() {
-    assert_eq!(
-        serde_json::to_string(&PaneExitPolicy::CloseOnExit).expect("serialize"),
-        r#""CloseOnExit""#
-    );
-}
-
-#[test]
-fn an_unknown_exit_policy_fails_to_deserialize() {
-    let deserialization_error =
-        serde_json::from_str::<PaneExitPolicy>(r#""KeepOpen""#).expect_err("unknown variant");
-
-    assert_eq!(
-        deserialization_error.to_string(),
-        "unknown variant `KeepOpen`, expected `CloseOnExit` at line 1 column 10"
-    );
-}
-
-/// `CloseOnExit` is the whole enum: a stored `"RespawnShell"` is an unknown
-/// variant, not a second policy.
-#[test]
-fn a_stored_respawn_shell_policy_fails_to_deserialize() {
-    let deserialization_error =
-        serde_json::from_str::<PaneExitPolicy>(r#""RespawnShell""#).expect_err("unknown variant");
-
-    assert_eq!(
-        deserialization_error.to_string(),
-        "unknown variant `RespawnShell`, expected `CloseOnExit` at line 1 column 14"
     );
 }

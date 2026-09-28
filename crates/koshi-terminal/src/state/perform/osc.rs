@@ -29,19 +29,21 @@ pub(super) enum Osc133 {
 /// is the finish carrying `0`. A `D` whose first following parameter is empty
 /// carries no code. Anything else — another command number, a marker other
 /// than `A`–`D`, a `D` code that is not a decimal `i32` — yields `None`.
-pub(super) fn parse_osc133(params: &[&[u8]]) -> Option<Osc133> {
-    let [command, marker, rest @ ..] = params else {
+pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
+    let [osc_command_number, shell_integration_marker, remaining_parameters @ ..] = osc_parameters
+    else {
         return None;
     };
-    if *command != b"133" {
+    if *osc_command_number != b"133" {
         return None;
     }
-    match (*marker, rest) {
+    match (*shell_integration_marker, remaining_parameters) {
         (b"A", _) => Some(Osc133::Prompt),
         (b"B", _) => Some(Osc133::Input),
         (b"C", _) => Some(Osc133::CommandStart),
-        (b"D", [exit_code, ..]) if !exit_code.is_empty() => {
-            let exit_code = std::str::from_utf8(exit_code).ok()?.parse().ok()?;
+        (b"D", [exit_code_bytes, ..]) if !exit_code_bytes.is_empty() => {
+            let exit_code_text = std::str::from_utf8(exit_code_bytes).ok()?;
+            let exit_code = exit_code_text.parse().ok()?;
             Some(Osc133::CommandFinished(Some(exit_code)))
         }
         (b"D", _) => Some(Osc133::CommandFinished(None)),
@@ -78,28 +80,36 @@ const _: () = assert!(
 /// leading `/`, is percent-decoded (`%20` → space, `%C3%A9` → `é`; a `%` not
 /// followed by two hex digits stays literal), and becomes a [`PathBuf`] via
 /// [`decode_working_directory_path`]. `?` and `#` are ordinary path bytes.
-pub(super) fn parse_osc7_working_directory(uri: &[u8]) -> Option<ReportedWorkingDirectory> {
-    if uri.len() < 7 || uri.len() > MAX_OSC7_URI_BYTE_COUNT {
+pub(super) fn parse_osc7_working_directory(
+    working_directory_uri: &[u8],
+) -> Option<ReportedWorkingDirectory> {
+    if working_directory_uri.len() < 7 || working_directory_uri.len() > MAX_OSC7_URI_BYTE_COUNT {
         return None;
     }
-    if !uri[..4].eq_ignore_ascii_case(b"file") || &uri[4..7] != b"://" {
+    if !working_directory_uri[..4].eq_ignore_ascii_case(b"file")
+        || &working_directory_uri[4..7] != b"://"
+    {
         return None;
     }
-    let uri_tail = &uri[7..];
-    let path_separator_index = uri_tail.iter().position(|&byte| byte == b'/')?;
-    let host = match &uri_tail[..path_separator_index] {
+    let working_directory_uri_tail = &working_directory_uri[7..];
+    let path_separator_byte_index = working_directory_uri_tail
+        .iter()
+        .position(|&uri_byte| uri_byte == b'/')?;
+    let working_directory_host = match &working_directory_uri_tail[..path_separator_byte_index] {
         [] => None,
-        bytes => Some(koshi_core::text::sanitize_reported_text(
-            &String::from_utf8_lossy(bytes),
+        host_bytes => Some(koshi_core::text::sanitize_reported_text(
+            &String::from_utf8_lossy(host_bytes),
         )),
     };
-    let decoded_path_bytes = percent_decode(&uri_tail[path_separator_index..]).collect::<Vec<u8>>();
+    let decoded_path_bytes =
+        percent_decode(&working_directory_uri_tail[path_separator_byte_index..])
+            .collect::<Vec<u8>>();
     if decoded_path_bytes.contains(&0) {
         return None;
     }
     let working_directory_path = decode_working_directory_path(decoded_path_bytes)?;
     Some(ReportedWorkingDirectory {
-        host,
+        host: working_directory_host,
         working_directory_path,
     })
 }
@@ -119,8 +129,8 @@ fn decode_working_directory_path(decoded_path_bytes: Vec<u8>) -> Option<PathBuf>
 /// `/C:/Users` → `C:/Users`.
 #[cfg(windows)]
 fn decode_working_directory_path(mut decoded_path_bytes: Vec<u8>) -> Option<PathBuf> {
-    let drive_prefixed = matches!(decoded_path_bytes.as_slice(), [b'/', drive, b':', ..] if drive.is_ascii_alphabetic());
-    if drive_prefixed {
+    let is_drive_prefixed = matches!(decoded_path_bytes.as_slice(), [b'/', drive, b':', ..] if drive.is_ascii_alphabetic());
+    if is_drive_prefixed {
         decoded_path_bytes.remove(0);
     }
     String::from_utf8(decoded_path_bytes)

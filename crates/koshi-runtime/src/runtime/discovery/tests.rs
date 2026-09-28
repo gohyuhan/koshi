@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
 use koshi_core::discovery::PaneLifecycle;
@@ -19,7 +20,6 @@ use koshi_session::session::state::{Session, Tab};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use uuid::Uuid;
 
-use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
 const VIEWPORT_SIZE: Size = Size {
@@ -27,25 +27,25 @@ const VIEWPORT_SIZE: Size = Size {
     row_count: 24,
 };
 
-/// A bare runtime with stub services and no sessions. The sender is returned
-/// so the inbox stays open.
-fn build_test_runtime() -> (Server, mpsc::Sender<RuntimeEvent>) {
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
+/// A bare runtime with stub services and no sessions.
+fn build_test_runtime() -> Server {
     let (event_sender, event_receiver) = mpsc::channel();
-    let server = Server::from_runtime_parts(pty_backend, event_receiver, event_sender.clone());
-    (server, event_sender)
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(event_sender),
+    )));
+    Server::from_runtime_parts(pty_backend, event_receiver)
 }
 
 #[test]
 fn no_session_yields_no_overview() {
-    let (server, _event_sender) = build_test_runtime();
+    let server = build_test_runtime();
 
     assert_eq!(server.build_overview(), None);
 }
 
 #[test]
 fn bootstrapped_session_reports_its_exact_rows() {
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let creation_time = SystemTime::UNIX_EPOCH;
     let client_id = server
@@ -90,7 +90,7 @@ fn bootstrapped_session_reports_its_exact_rows() {
 
 #[test]
 fn a_command_pane_reports_its_argv_program_first() {
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let client_id = server
         .bootstrap_local(session_id, VIEWPORT_SIZE, SystemTime::UNIX_EPOCH)
@@ -113,7 +113,6 @@ fn a_command_pane_reports_its_argv_program_first() {
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::UNIX_EPOCH,
         Command::RunCommandPane(koshi_core::command::RunCommandPaneArgs {
             spawn_spec,
             working_directory: None,
@@ -153,7 +152,7 @@ fn a_command_pane_reports_its_argv_program_first() {
 
 #[test]
 fn a_pane_reports_the_title_its_child_set_and_no_argv_for_a_shell() {
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     let session_id = SessionId::new();
     server
         .bootstrap_local(session_id, VIEWPORT_SIZE, SystemTime::UNIX_EPOCH)
@@ -181,7 +180,7 @@ fn a_pane_reports_the_title_its_child_set_and_no_argv_for_a_shell() {
 
 #[test]
 fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let attachment_time = SystemTime::UNIX_EPOCH;
     let seeded_client_id = server
@@ -200,6 +199,7 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
         VIEWPORT_SIZE,
         None,
         tab_id,
+        None,
         attachment_time,
         false,
     );
@@ -215,7 +215,7 @@ fn a_pane_lists_every_client_focused_on_it_in_client_id_order() {
 
 #[test]
 fn the_overview_reports_where_each_client_connected_from() {
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let attachment_time = SystemTime::UNIX_EPOCH;
     let local_client_id = server
@@ -234,6 +234,7 @@ fn the_overview_reports_where_each_client_connected_from() {
         VIEWPORT_SIZE,
         None,
         tab_id,
+        None,
         attachment_time,
         true,
     );
@@ -263,7 +264,7 @@ fn the_overview_reports_where_each_client_connected_from() {
 /// the raw terminal viewport it was reported alongside.
 #[test]
 fn discovery_reports_the_raw_pane_area() {
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     let session_id = SessionId::new();
     let attachment_time = SystemTime::UNIX_EPOCH;
     let seeded_client_id = server
@@ -286,6 +287,7 @@ fn discovery_reports_the_raw_pane_area() {
         VIEWPORT_SIZE,
         Some(reported_pane_area),
         tab_id,
+        None,
         attachment_time,
         false,
     );
@@ -344,10 +346,7 @@ fn register_session_tab_with_pane(
     let pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            pane_id,
-            SystemTime::UNIX_EPOCH,
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("a fresh pane id");
     session.tabs.insert(
         tab_id,
@@ -383,7 +382,7 @@ fn tabs_and_their_panes_come_back_in_tab_bar_order_not_in_id_order() {
     let mut session = build_empty_session(session_id);
     let lower_pane_id = register_session_tab_with_pane(&mut session, lower_tab_id, "second", 1);
     let higher_pane_id = register_session_tab_with_pane(&mut session, higher_tab_id, "first", 0);
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     server.session_by_id.insert(session_id, session);
 
     let overview = server.build_overview().expect("one session is running");
@@ -423,12 +422,9 @@ fn a_registered_pane_no_tab_layout_holds_gets_no_row_but_is_still_counted() {
     let unlisted_pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            unlisted_pane_id,
-            SystemTime::UNIX_EPOCH,
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(unlisted_pane_id))
         .expect("a fresh pane id");
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     server.session_by_id.insert(session_id, session);
 
     let overview = server.build_overview().expect("one session is running");
@@ -458,7 +454,7 @@ fn a_layout_leaf_the_registry_does_not_hold_gets_no_row_but_is_still_counted() {
         stray_tab,
         Tab::from_root_pane(stray_tab, "second".to_string(), 1, stray_pane_id),
     );
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     server.session_by_id.insert(session_id, session);
 
     let overview = server.build_overview().expect("one session is running");
@@ -528,7 +524,7 @@ fn each_lifecycle_becomes_its_reported_state_and_a_removed_pane_gets_no_row() {
         ],
     );
 
-    let (mut server, _event_sender) = build_test_runtime();
+    let mut server = build_test_runtime();
     server.session_by_id.insert(session_id, session);
 
     let overview = server.build_overview().expect("one session is running");

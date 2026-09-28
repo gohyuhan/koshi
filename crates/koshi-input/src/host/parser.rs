@@ -3,7 +3,7 @@
 //! The parser emits complete events and retains incomplete UTF-8, control, and
 //! paste sequences while waiting for more bytes. `finish_pending_input` resolves
 //! timeout-eligible prefixes and discards other incomplete input. For example,
-//! `ESCAPE_BYTE [ 1 ; 5 C` becomes a Right key with Control held.
+//! `ESC [ 1 ; 5 C` becomes a Right key with Control held.
 
 use std::collections::VecDeque;
 
@@ -64,7 +64,7 @@ impl Default for Parser {
 }
 
 impl Parser {
-    /// Parse every byte in `bytes` and queue complete events.
+    /// Parse every byte in `input_bytes` and queue complete events.
     pub fn process_input_bytes(&mut self, input_bytes: &[u8]) {
         for &input_byte in input_bytes {
             self.process_input_byte(input_byte);
@@ -84,8 +84,8 @@ impl Parser {
             | ParserState::Osc { .. }
             | ParserState::DiscardCsi
             | ParserState::DiscardSt { .. }
-            | ParserState::DiscardOsc { .. } => return,
-            ParserState::PrivateCsi => return,
+            | ParserState::DiscardOsc { .. }
+            | ParserState::PrivateCsi => return,
             ParserState::Ss3
             | ParserState::Csi
             | ParserState::CsiX10
@@ -439,15 +439,11 @@ impl Parser {
     }
 
     fn emit_char(&mut self, character: char) {
-        let mut modifiers = if character.is_uppercase() {
+        let modifiers = if character.is_uppercase() {
             Modifiers::SHIFT
         } else {
             Modifiers::NONE
         };
-        if self.is_alt_held {
-            modifiers |= Modifiers::ALT;
-            self.is_alt_held = false;
-        }
         self.emit_key(KeyCode::Char(character), modifiers);
     }
 
@@ -567,12 +563,11 @@ fn parse_graphic_attribute(attribute_parameter_bytes: &[u8]) -> Option<GraphicAt
     let mut attribute_fields = attribute_parameter_bytes.split(|field_byte| *field_byte == b';');
     let attribute_number = parse_decimal(attribute_fields.next()?)?;
     let attribute_status = parse_decimal(attribute_fields.next()?)?;
-    let graphic_attribute_reply = match attribute_number {
+    match attribute_number {
         1 => parse_palette_reply(attribute_status, attribute_fields.collect()),
         2 => parse_geometry_reply(attribute_status, attribute_fields.collect()),
         _ => None,
-    }?;
-    Some(graphic_attribute_reply)
+    }
 }
 
 fn parse_palette_reply(
@@ -723,8 +718,7 @@ fn parse_kitty_key(csi_body: &[u8]) -> Option<KeyEvent> {
 /// empty sub-field is ordinary.
 fn parse_alternate_key(alternate_key_field: Option<&[u8]>) -> Option<Option<char>> {
     match alternate_key_field {
-        None => Some(None),
-        Some([]) => Some(None),
+        None | Some([]) => Some(None),
         Some(alternate_key_field) => {
             let codepoint = parse_decimal(alternate_key_field)?;
             Some(Some(char::from_u32(codepoint)?))
@@ -735,8 +729,8 @@ fn parse_alternate_key(alternate_key_field: Option<&[u8]>) -> Option<Option<char
 /// The text one key event produced, from the colon-separated codepoints of
 /// the third parameter. An absent or empty field produces empty text.
 ///
-/// A malformed field produces empty text and never refuses the event, because
-/// the key is named by the first parameter and stands on its own. `CSI 13;;13u`
+/// A malformed field produces empty text and never refuses the event: the
+/// first parameter still names the key. `CSI 13;;13u`
 /// and `CSI 13;;1114112u` both stay the Enter key and carry no text: a carriage
 /// return is not text a key produced, and `1114112` is no character at all.
 fn parse_associated_text(text_field: Option<&[u8]>) -> String {
@@ -761,8 +755,8 @@ fn parse_associated_text(text_field: Option<&[u8]>) -> String {
 ///
 /// A codepoint with a Koshi key form takes it. A codepoint without one keeps
 /// its number through [`KeyCode::Codepoint`], so a key the binding grammar
-/// cannot name still reaches the event: Left Shift is `Unnamed(57441)`, and a
-/// text-only event is `Unnamed(0)`. A codepoint that is no Unicode scalar
+/// cannot name still reaches the event: Left Shift is `Codepoint(57441)`, and a
+/// text-only event is `Codepoint(0)`. A codepoint that is no Unicode scalar
 /// value — a surrogate, or a number above `1114111` — is refused rather than
 /// given an identity it does not have.
 fn find_reported_key(codepoint: u32, modifiers: Modifiers) -> Option<KeyCode> {

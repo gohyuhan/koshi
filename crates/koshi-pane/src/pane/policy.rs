@@ -1,10 +1,8 @@
-//! Pane close and exit policies: how a pane shuts down, and what becomes of it
-//! when its process ends.
+//! Pane close policy: how a pane shuts down.
 //!
-//! [`PaneClosePolicy`] sets how a requested close runs. [`PaneExitPolicy`] sets
-//! what happens when the child process ends on its own. Each policy has a
-//! default. [`PaneClosePolicy::kill_policy`] maps a close onto the process
-//! [`KillPolicy`]. The policy for an empty tab lives with the session model.
+//! [`PaneClosePolicy`] sets how a requested close runs and has a default.
+//! [`PaneClosePolicy::to_kill_policy`] maps a close onto the process
+//! [`KillPolicy`].
 
 use std::time::Duration;
 
@@ -40,7 +38,7 @@ impl PaneClosePolicy {
     /// layer applies. `Graceful` passes its own timeout through. `ConfirmIfBusy`
     /// maps to a graceful close with the default timeout.
     #[must_use]
-    pub fn kill_policy(&self) -> KillPolicy {
+    pub fn to_kill_policy(&self) -> KillPolicy {
         match self {
             PaneClosePolicy::Graceful { timeout_duration } => KillPolicy::Graceful {
                 timeout_duration: *timeout_duration,
@@ -51,14 +49,6 @@ impl PaneClosePolicy {
             },
         }
     }
-}
-
-/// What happens to a pane when its child process ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum PaneExitPolicy {
-    /// Close the pane when its child process ends.
-    #[default]
-    CloseOnExit,
 }
 
 #[cfg(test)]

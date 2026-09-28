@@ -58,7 +58,7 @@ fn deserialize_gl_slot<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usi
 
 impl RenderState {
     /// A fresh render state: default pen, all four slots ASCII, GL on `G0`.
-    pub(in crate::state) fn fresh() -> Self {
+    pub(in crate::state) fn new() -> Self {
         RenderState {
             style: Style::default(),
             charsets: [Charset::Ascii; 4],

@@ -67,8 +67,8 @@ pub fn decode_key_event(host_key_event: KeyEvent) -> KeyInput {
 /// Encode a chord as the bytes the focused pane's program expects.
 ///
 /// `is_application_cursor_keys_enabled` is the receiving pane's application-cursor-keys state
-/// (DECCKM). With it on, an unmodified cursor key or Home/End opens with
-/// `ESCAPE_BYTE O` in place of `ESCAPE_BYTE [`: `<Up>` is `ESCAPE_BYTE O A`. It changes no other key.
+/// (DECCKM). With it on, an unmodified cursor key or Home/End opens with `ESCAPE_BYTE O` in place
+/// of `ESCAPE_BYTE [`: `<Up>` is `ESCAPE_BYTE O A`. It changes no other key.
 ///
 /// Every chord encodes to at least one byte.
 ///
@@ -126,8 +126,8 @@ fn decode_key_identity(host_key_code: HostKey) -> KeyIdentity {
 }
 
 /// The host's Control, Alt and Super as [`ModFlags`]. Meta counts as Super;
-/// Hyper is dropped. Shift is not carried: [`normalize_key_chord`] adds it for a key
-/// press, and [`crate::mouse`] adds it for a mouse event.
+/// Hyper is dropped. Shift is not carried: [`crate::mouse`] adds it for a mouse
+/// event.
 pub(crate) fn decode_modifiers(host_modifiers: Modifiers) -> ModFlags {
     let mut modifier_flags = ModFlags::NONE;
     if host_modifiers.has_all_modifiers(Modifiers::CONTROL) {
@@ -290,7 +290,7 @@ fn get_function_key_form(function_number: u8) -> (FunctionalKeyForm, ModFlags) {
         10 => FunctionalKeyForm::Tilde(21),
         11 => FunctionalKeyForm::Tilde(23),
         12 => FunctionalKeyForm::Tilde(24),
-        _ => unreachable!("decode_key and the chord parser both bound F to 1..=24"),
+        _ => unreachable!("the key decoder and the chord parser both bound F to 1..=24"),
     };
     (functional_key_form, added_modifier_flags)
 }
@@ -910,8 +910,8 @@ fn get_reported_modifier_parameter(key_input: &KeyInput) -> u16 {
     if is_text_producing_event(key_input) {
         let lock_modifiers = KeyModifierFlags::CAPS_LOCK
             .union(KeyModifierFlags::NUM_LOCK)
-            .bits();
-        modifier_flags = KeyModifierFlags::from_bits(modifier_flags.bits() & !lock_modifiers);
+            .get_bits();
+        modifier_flags = KeyModifierFlags::from_bits(modifier_flags.get_bits() & !lock_modifiers);
     }
     modifier_flags.to_kitty_parameter()
 }

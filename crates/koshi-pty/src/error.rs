@@ -1,14 +1,11 @@
 //! PTY (pseudo-terminal — the OS channel a spawned shell or program runs
-//! inside) domain error. Classifies into [`koshi_core::error::DomainCategory::Pty`].
+//! inside) domain error.
 
-use koshi_core::{
-    error::{DomainCategory, DomainError, Severity},
-    ids::PaneId,
-};
+use koshi_core::ids::PaneId;
 use thiserror::Error;
 
-/// A failure spawning or driving a child PTY. Pane-level failures are
-/// recoverable: a dead PTY closes its pane without crashing the session.
+/// A failure spawning or driving a child PTY. A dead PTY closes its pane
+/// without crashing the session.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum PtyError {
     /// The child process could not be spawned.
@@ -25,16 +22,6 @@ pub enum PtyError {
     /// Job Objects at spawn (Windows).
     #[error("pty signal error: {detail}")]
     Signal { detail: String },
-}
-
-impl DomainError for PtyError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Pty
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 #[cfg(test)]

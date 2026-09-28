@@ -1,9 +1,8 @@
 //! Mouse vocabulary: the button, scroll direction, decoded-event, answer, and
 //! reporting-level types the rest of koshi reasons about.
 //!
-//! [`MouseButton`] and [`ScrollDirection`] are the primitive types; the bus
-//! events in [`crate::event`] (`MousePressed`, `MouseScrolled`, …) compose their
-//! payloads from them, and so does [`MouseInput`]. One button type and one
+//! [`MouseButton`] and [`ScrollDirection`] are the primitive types;
+//! [`MouseInput`] composes its payload from them. One button type and one
 //! scroll type serve the whole crate.
 //!
 //! [`MouseTracking`] says which events the program in a pane asked to receive,
@@ -140,7 +139,7 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
-/// Whether a program at `tracking` is told about a `kind` of event. The ladder:
+/// Whether a program at `mouse_tracking` is told about a `mouse_kind` of event. The ladder:
 /// every level but `Off` reports a press, `Normal` and up add releases,
 /// `ButtonMotion` and up add drags, only `AnyMotion` adds buttonless motion. A
 /// wheel tick reports from `Normal` up; `X10` reports only presses.

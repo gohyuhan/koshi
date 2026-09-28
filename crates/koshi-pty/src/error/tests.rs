@@ -1,5 +1,4 @@
-//! Tests for the display text, the category and the severity of every
-//! [`PtyError`] variant.
+//! Tests for the display text of every [`PtyError`] variant.
 
 use super::*;
 
@@ -54,20 +53,4 @@ fn a_detail_holding_braces_and_non_ascii_reaches_display_unchanged() {
         pty_error.to_string(),
         "pty io error: 権限がありません {0} {}"
     );
-}
-
-#[test]
-fn every_variant_classifies_as_pty_and_recoverable() {
-    let pty_errors = [
-        PtyError::Spawn { detail: "x".into() },
-        PtyError::Io { detail: "x".into() },
-        PtyError::Signal { detail: "x".into() },
-        PtyError::UnknownPane {
-            pane_id: PaneId::new(),
-        },
-    ];
-    for pty_error in pty_errors {
-        assert_eq!(pty_error.category(), DomainCategory::Pty);
-        assert_eq!(pty_error.get_severity(), Severity::Recoverable);
-    }
 }

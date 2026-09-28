@@ -237,11 +237,11 @@ fn peer_text_reaches_the_message_filtered() {
 #[test]
 fn each_peer_reads_its_range_from_the_versioned_surface_table() {
     assert_eq!(
-        SESSION_PEER_WORDS.surface,
+        SESSION_PEER_WORDS.protocol_surface,
         koshi_core::compat::SESSION_PROTOCOL
     );
     assert_eq!(
-        ROUTER_PEER_WORDS.surface,
+        ROUTER_PEER_WORDS.protocol_surface,
         koshi_core::compat::CONTROL_PROTOCOL
     );
 }
@@ -367,6 +367,20 @@ fn a_router_hello_hands_back_the_build_the_router_named() {
         parse_router_hello_version(incoming_response)
             .expect("3 is inside the 3 to 3 this build speaks"),
         "0.9.9"
+    );
+}
+
+#[test]
+fn a_router_hello_build_loses_its_control_characters() {
+    let incoming_response = build_router_response(RouterResult::Hello {
+        protocol_version: 3,
+        build_version: "0.9.9\u{1b}]0;title\u{7}".to_string(),
+    });
+
+    assert_eq!(
+        parse_router_hello_version(incoming_response)
+            .expect("3 is inside the 3 to 3 this build speaks"),
+        "0.9.9]0;title"
     );
 }
 

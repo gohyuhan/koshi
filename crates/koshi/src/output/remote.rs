@@ -60,7 +60,7 @@ pub fn render_remote_discarded() -> String {
     "nothing was saved.\n".to_string()
 }
 
-/// The one line a settled record renders to: `verb`, the name when the record
+/// The one line a settled record renders to: `status_verb`, the name when the record
 /// has one, and the address. A record with no pinned fingerprint says when it
 /// pins one.
 ///

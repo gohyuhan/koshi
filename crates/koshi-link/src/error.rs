@@ -5,7 +5,6 @@
 //! below is the single error-to-exit-code table. Success is exit 0.
 
 use koshi_core::command::CliExitCode;
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::event::RejectReason;
 use thiserror::Error;
 
@@ -14,9 +13,6 @@ use thiserror::Error;
 /// below.
 #[derive(Debug, Error)]
 pub enum CliError {
-    /// The subcommand is not recognized.
-    #[error("unknown command: {command_name}")]
-    UnknownCommand { command_name: String },
     /// The named action is not in the action registry.
     #[error("unknown action: {action_name}")]
     UnknownAction { action_name: String },
@@ -75,30 +71,6 @@ fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String 
     }
 }
 
-impl DomainError for CliError {
-    fn category(&self) -> DomainCategory {
-        match self {
-            CliError::UnknownCommand { .. }
-            | CliError::UnknownAction { .. }
-            | CliError::InvalidArgs { .. }
-            | CliError::UnboundKey { .. }
-            | CliError::InvalidKeymapFile { .. }
-            | CliError::Config { .. }
-            | CliError::InSessionEnv { .. } => DomainCategory::Cli,
-            CliError::IpcUnavailable { .. } => DomainCategory::Ipc,
-            CliError::SessionNotFound { .. }
-            | CliError::NoSessions
-            | CliError::Runtime { .. }
-            | CliError::CommandRejected { .. }
-            | CliError::Update { .. } => DomainCategory::Session,
-        }
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
-}
-
 /// The single error-to-exit-code table: every [`CliError`] class maps to the
 /// [`CliExitCode`] the binary reports to the OS. A usage or config problem
 /// exits 2, a session that is not running exits 3, an unreachable IPC endpoint
@@ -107,8 +79,7 @@ impl DomainError for CliError {
 impl From<&CliError> for CliExitCode {
     fn from(cli_error: &CliError) -> Self {
         match cli_error {
-            CliError::UnknownCommand { .. }
-            | CliError::UnknownAction { .. }
+            CliError::UnknownAction { .. }
             | CliError::InvalidArgs { .. }
             | CliError::UnboundKey { .. }
             | CliError::InvalidKeymapFile { .. }

@@ -1,18 +1,18 @@
 //! Tests for genesis: the first session seeded with one shell pane under a
 //! caller-chosen id, and a `--profile` template opening its tabs and panes,
-//! focusing the pane the profile marks, starting its first client locked, and
-//! refusing a plugin pane.
+//! focusing the pane the profile marks, and starting its first client locked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::layer::{PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::profile::parse_profile;
 use koshi_core::event::{Event, InputModeChanged};
 use koshi_core::geometry::{Direction, Size, SplitDirection};
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_layout::template::{ProfileTemplate, TemplateError};
@@ -28,9 +28,11 @@ use super::{ProfileLaunchError, Server};
 
 /// A runtime backed by a fake PTY, with no session yet.
 fn build_test_runtime() -> (Server, Arc<FakePtyBackend>) {
-    let fake_pty_backend = Arc::new(FakePtyBackend::new());
     let (event_sender, event_receiver) = mpsc::channel();
-    let server = Server::from_runtime_parts(fake_pty_backend.clone(), event_receiver, event_sender);
+    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(event_sender),
+    )));
+    let server = Server::from_runtime_parts(fake_pty_backend.clone(), event_receiver);
     (server, fake_pty_backend)
 }
 
@@ -72,11 +74,7 @@ fn a_profile_opens_its_tab_and_panes() {
         2,
         "two panes in the tab"
     );
-    assert_eq!(
-        server.pty_handle_by_pane_id.len(),
-        2,
-        "both panes' PTYs are parked"
-    );
+    assert_eq!(server.live_pane_ids.len(), 2, "both panes' PTYs are parked");
 }
 
 #[test]
@@ -138,7 +136,7 @@ fn a_profile_focuses_the_pane_it_marks() {
         .clients
         .get_client_by_id(client_id)
         .expect("client attached")
-        .get_focused_pane(*tab_id);
+        .get_focused_pane_id(*tab_id);
     assert_eq!(
         focused_pane_id,
         Some(pane_ids[1]),
@@ -165,32 +163,10 @@ fn a_multi_tab_profile_opens_every_tab() {
     let session = server.session_by_id.values().next().expect("one session");
     assert_eq!(session.tabs.len(), 2);
     assert_eq!(
-        server.pty_handle_by_pane_id.len(),
+        server.live_pane_ids.len(),
         2,
         "one PTY per tab's single pane"
     );
-}
-
-#[test]
-fn a_profile_with_a_plugin_pane_is_refused_and_commits_nothing() {
-    let (mut server, _fake_pty_backend) = build_test_runtime();
-    let profile_template =
-        parse_test_profile_template("version 1\ntab {\n    plugin \"sidebar\"\n}");
-    let client_id = ClientId::new();
-    let launch_error = server
-        .bootstrap_profile(
-            SessionId::new(),
-            profile_template,
-            build_test_viewport_size(),
-            SystemTime::UNIX_EPOCH,
-            Some(client_id),
-        )
-        .expect_err("a plugin pane has no host");
-
-    assert!(matches!(launch_error, ProfileLaunchError::PluginPane));
-    // The plugin is caught before any spawn, so nothing is committed.
-    assert!(server.session_by_id.is_empty(), "no session committed");
-    assert!(server.pty_handle_by_pane_id.is_empty(), "no PTY spawned");
 }
 
 #[test]
@@ -325,15 +301,11 @@ fn a_profile_whose_pane_fails_to_spawn_is_refused_and_commits_nothing() {
     );
     // The failure happens before any commit, so nothing is left behind.
     assert!(server.session_by_id.is_empty(), "no session committed");
-    assert!(server.pty_handle_by_pane_id.is_empty(), "no PTY parked");
+    assert!(server.live_pane_ids.is_empty(), "no PTY parked");
 }
 
 #[test]
 fn profile_launch_error_display_names_each_cause() {
-    assert_eq!(
-        ProfileLaunchError::PluginPane.to_string(),
-        "profile uses a plugin pane, which is not supported yet"
-    );
     assert_eq!(
         ProfileLaunchError::Template(TemplateError::PaneCountMismatch {
             expected_leaf_count: 2,
@@ -418,7 +390,11 @@ fn a_session_seeded_without_a_client_holds_none_and_still_reaches_running() {
         .expect("bootstrap");
 
     let session = server.session_by_id.values().next().expect("one session");
-    assert_eq!(session.clients.client_count(), 0, "no client is registered");
+    assert_eq!(
+        session.clients.count_clients(),
+        0,
+        "no client is registered"
+    );
     assert_eq!(session.tabs.len(), 1, "the first tab is still seeded");
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
 }
@@ -490,7 +466,7 @@ fn a_profile_records_focus_for_every_tab() {
         let pane_ids = tab.get_layout_tree().list_leaf_pane_ids();
         assert_eq!(pane_ids.len(), 1, "tab {tab_id:?} holds one pane");
         assert_eq!(
-            attached_client.get_focused_pane(*tab_id),
+            attached_client.get_focused_pane_id(*tab_id),
             Some(pane_ids[0]),
             "tab {tab_id:?} focuses its own pane"
         );
@@ -529,7 +505,7 @@ fn a_profile_opens_on_the_tab_it_marks_focused() {
             .clients
             .get_client_by_id(client_id)
             .expect("client attached")
-            .get_active_tab(),
+            .get_active_tab_id(),
         focused_tab_id,
     );
 }
@@ -563,7 +539,7 @@ fn a_profile_focusing_a_tab_it_does_not_have_opens_on_its_last_tab() {
             .clients
             .get_client_by_id(client_id)
             .expect("client attached")
-            .get_active_tab(),
+            .get_active_tab_id(),
         last_tab_id,
     );
 }
@@ -593,7 +569,7 @@ fn a_profile_with_the_lock_marker_starts_its_first_client_locked() {
         LockMode::Locked
     );
     assert!(
-        !session.start_locked,
+        !session.should_start_locked,
         "the first client spent the profile's starting lock"
     );
 }
@@ -656,6 +632,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         build_test_viewport_size(),
         None,
         tab_id,
+        None,
         SystemTime::UNIX_EPOCH,
         false,
     );
@@ -671,7 +648,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         LockMode::Locked
     );
     assert_eq!(
-        mode_changes(&emitted_events),
+        list_mode_changes(&emitted_events),
         vec![InputModeChanged {
             client_id: first_client_id,
             lock_mode: LockMode::Locked,
@@ -685,6 +662,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
         build_test_viewport_size(),
         None,
         tab_id,
+        None,
         SystemTime::UNIX_EPOCH,
         false,
     );
@@ -699,7 +677,7 @@ fn the_lock_marker_reaches_only_the_first_client_to_attach() {
             .get_lock_mode(),
         LockMode::Normal
     );
-    assert_eq!(mode_changes(&emitted_events), vec![]);
+    assert_eq!(list_mode_changes(&emitted_events), vec![]);
 }
 
 #[test]
@@ -732,6 +710,7 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         build_test_viewport_size(),
         None,
         tab_id,
+        None,
         SystemTime::UNIX_EPOCH,
         false,
     );
@@ -743,6 +722,7 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
         build_test_viewport_size(),
         None,
         tab_id,
+        None,
         SystemTime::UNIX_EPOCH,
         false,
     );
@@ -758,7 +738,7 @@ fn a_locked_client_reattaching_keeps_its_mode_and_takes_no_second_lock() {
             .get_lock_mode(),
         LockMode::Locked
     );
-    assert_eq!(mode_changes(&emitted_events), vec![]);
+    assert_eq!(list_mode_changes(&emitted_events), vec![]);
 }
 
 #[test]
@@ -776,7 +756,7 @@ fn bootstrap_local_attaches_its_client_to_the_seeded_tab_and_root_pane() {
     let (tab_id, tab) = session.tabs.iter().next().expect("one tab");
     let root_pane_id = tab.get_layout_tree().list_leaf_pane_ids()[0];
     assert_eq!(
-        session.clients.client_count(),
+        session.clients.count_clients(),
         1,
         "the genesis client alone"
     );
@@ -784,13 +764,13 @@ fn bootstrap_local_attaches_its_client_to_the_seeded_tab_and_root_pane() {
         .clients
         .get_client_by_id(client_id)
         .expect("the genesis client");
-    assert_eq!(attached_client.get_active_tab(), *tab_id);
+    assert_eq!(attached_client.get_active_tab_id(), *tab_id);
     assert_eq!(
-        attached_client.get_focused_pane(*tab_id),
+        attached_client.get_focused_pane_id(*tab_id),
         Some(root_pane_id)
     );
     assert_eq!(attached_client.get_origin(), ClientOrigin::Local);
-    assert_eq!(attached_client.get_color(), 0);
+    assert_eq!(attached_client.get_color_index(), 0);
     assert_eq!(attached_client.get_lock_mode(), LockMode::Normal);
     assert_eq!(
         attached_client.get_viewport_size(),
@@ -885,7 +865,7 @@ fn a_genesis_shell_that_fails_to_spawn_commits_nothing_and_surfaces_the_error() 
         }
     );
     assert!(server.session_by_id.is_empty(), "no session committed");
-    assert!(server.pty_handle_by_pane_id.is_empty(), "no PTY parked");
+    assert!(server.live_pane_ids.is_empty(), "no PTY parked");
     assert!(
         server.pty_size_by_pane_id.is_empty(),
         "no PTY size recorded"
@@ -1038,7 +1018,7 @@ fn a_profile_default_shell_pane_records_no_command() {
 }
 
 /// Every [`Event::InputModeChanged`] in `emitted_events`, in order.
-fn mode_changes(emitted_events: &[Event]) -> Vec<InputModeChanged> {
+fn list_mode_changes(emitted_events: &[Event]) -> Vec<InputModeChanged> {
     emitted_events
         .iter()
         .filter_map(|runtime_event| match runtime_event {
@@ -1046,4 +1026,72 @@ fn mode_changes(emitted_events: &[Event]) -> Vec<InputModeChanged> {
             _ => None,
         })
         .collect()
+}
+
+#[test]
+fn panes_restored_without_their_layout_each_get_a_tab_in_order_showing_the_notice() {
+    let (mut server, _fake_pty_backend) = build_test_runtime();
+    let session_id = SessionId::new();
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let first_pty_size = PtySize {
+        column_count: 200,
+        row_count: 24,
+    };
+    let second_pty_size = PtySize {
+        column_count: 160,
+        row_count: 40,
+    };
+
+    server.restore_panes_without_layout(
+        session_id,
+        "restored".to_string(),
+        &[
+            (first_pane_id, first_pty_size),
+            (second_pane_id, second_pty_size),
+        ],
+        SystemTime::UNIX_EPOCH,
+    );
+
+    let session = &server.session_by_id[&session_id];
+    assert_eq!(session.session_name, "restored");
+    assert_eq!(session.clients.count_clients(), 0);
+    let mut tabs: Vec<_> = session.tabs.values().collect();
+    tabs.sort_by_key(|tab| tab.get_tab_index());
+    let tab_pane_ids: Vec<Vec<PaneId>> = tabs
+        .iter()
+        .map(|tab| tab.get_layout_tree().list_leaf_pane_ids())
+        .collect();
+    assert_eq!(
+        tab_pane_ids,
+        vec![vec![first_pane_id], vec![second_pane_id]]
+    );
+    assert_eq!(
+        server.live_pane_ids,
+        HashSet::from([first_pane_id, second_pane_id])
+    );
+    assert_eq!(
+        server.pty_size_by_pane_id,
+        HashMap::from([
+            (first_pane_id, first_pty_size),
+            (second_pane_id, second_pty_size)
+        ])
+    );
+    for pane_id in [first_pane_id, second_pane_id] {
+        let terminal_state = server.terminal_engine_by_pane_id[&pane_id].get_terminal_state();
+        let (_, column_count) = terminal_state.get_active_grid().get_grid_dimensions();
+        let first_row_text: String = (0..column_count)
+            .map(|column_index| {
+                terminal_state
+                    .get_active_grid()
+                    .get_cell(0, column_index)
+                    .map_or(' ', |cell| cell.get_character())
+            })
+            .collect();
+        assert_eq!(
+            first_row_text.trim_end(),
+            "[koshi] The session's layout could not be restored after the restart. Each pane now has its own tab, and the program in it is still running.",
+            "pane {pane_id} shows the notice"
+        );
+    }
 }

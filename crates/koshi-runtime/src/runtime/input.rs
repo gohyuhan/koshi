@@ -1,11 +1,12 @@
-//! The session's half of keyboard input: running a binding the viewer already
-//! resolved, and writing a press the viewer did not bind.
+//! The session's half of keyboard input: writing a press the viewer did not
+//! bind.
 //!
 //! **What a key means is decided by the viewer that received it.** The viewer
 //! (`koshi-client`) holds the keymap, the input mode and any sequence being
-//! typed. It hands the session one of two things: a [`BoundAction`] to run,
-//! carrying the split direction the viewer's own settings hold, or a chord to
-//! write. Nothing here consults a keymap. A raw chord that reaches the session
+//! typed. A binding the viewer resolves reaches the session as the command it
+//! stands for, submitted like any other command. A press the viewer does not
+//! bind reaches this module as a chord to write. Nothing here consults a
+//! keymap. A raw chord that reaches the session
 //! belongs to no attached viewer and is dropped before this module sees it.
 //!
 //! Text the outer terminal pastes routes here too
@@ -17,39 +18,42 @@
 //! read at the instant of the write: a program that turns
 //! application-cursor-keys on gets `ESC O A` for the very next `<Up>`.
 //!
-//! **A press reaches only a pane the client can see, and only a terminal.** A
-//! focused pane the tab draws no content for — suppressed for want of space,
-//! hidden behind a fullscreen pane, collapsed to a stack header — takes
-//! nothing, and neither does a plugin pane, which has no PTY. The pane a press
-//! may reach is the one `Server::find_typed_pane` names; when it names none, the
-//! press is dropped.
-
-use std::time::SystemTime;
+//! **A press reaches only a pane the client can see.** A focused pane the tab
+//! draws no content for — suppressed for want of space, hidden behind a
+//! fullscreen pane, collapsed to a stack header — takes nothing. The pane a
+//! press may reach is the one `Server::find_typed_pane` names; when it names
+//! none, the press is dropped.
 
 use crate::runtime::snapshot::solve_tab_layout;
 use crate::server::Server;
-use koshi_config::types::BoundAction;
-use koshi_core::command::{CommandEnvelope, CommandSource};
-use koshi_core::geometry::Direction;
-use koshi_core::ids::{ClientId, CommandId, PaneId};
+use koshi_core::ids::{ClientId, PaneId};
 use koshi_core::key::KeyInput;
-use koshi_core::resolve::{resolve_action, DispatchPlan};
 use koshi_input::keyboard::encode_key_input;
 use koshi_layout::content::list_content_rects;
-use koshi_pane::pane::state::PaneKind;
 
 impl Server {
     /// React to input reaching `pane_id`'s child from `client_id`: drop the
     /// client's highlight in that pane, then return the client's view to live
     /// output.
     ///
-    /// Three paths call it: a keystroke ([`Server::handle_key_press`]), pasted
+    /// Three paths call it: a keystroke ([`Server::handle_key_input`]), pasted
     /// text ([`Server::handle_host_paste`]), and a `core:write-to-pane` write.
     /// A forwarded mouse report drops the highlight itself and does not call
     /// this.
-    pub(crate) fn on_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
+    pub(crate) fn handle_input_reached_pane(&mut self, client_id: ClientId, pane_id: PaneId) {
+        self.clear_session_recovery_notice_after_pane_input(pane_id);
         self.clear_selection_on_pane_input(client_id, pane_id);
         self.snap_view_to_bottom_on_input(client_id, pane_id);
+    }
+
+    /// Hide the recovery notice after a successful user write to a pane in its session.
+    pub(crate) fn clear_session_recovery_notice_after_pane_input(&mut self, pane_id: PaneId) {
+        if let Some(session) = self.get_session_for_pane_mut(pane_id) {
+            if session.is_recovery_notice_visible {
+                session.is_recovery_notice_visible = false;
+                self.render_scheduler.invalidate();
+            }
+        }
     }
 
     /// Return this client's scrollback view of `pane_id` to the newest line.
@@ -82,7 +86,7 @@ impl Server {
     /// markers when the pane turned that mode on, raw bytes otherwise, line
     /// breaks as the byte the Enter key sends.
     ///
-    /// Nothing is written when `text` is empty, when the client's lock mode
+    /// Nothing is written when `pasted_text` is empty, when the client's lock mode
     /// does not pass input to the pane
     /// (`LockMode::should_pass_unbound_input_to_pane`), or when
     /// `Server::find_typed_pane` names no pane. A write clears the client's
@@ -91,7 +95,7 @@ impl Server {
         if pasted_text.is_empty() {
             return;
         }
-        let can_pass_input_to_pane = self
+        let can_pass_unbound_input_to_pane = self
             .get_session_for_client(client_id)
             .and_then(|session| session.clients.get_client_by_id(client_id))
             .is_some_and(|attached_client| {
@@ -99,7 +103,7 @@ impl Server {
                     .get_lock_mode()
                     .should_pass_unbound_input_to_pane()
             });
-        if !can_pass_input_to_pane {
+        if !can_pass_unbound_input_to_pane {
             return;
         }
         let Some(pane_id) = self.find_typed_pane(client_id) else {
@@ -115,10 +119,13 @@ impl Server {
                 });
         let paste_output_bytes =
             crate::runtime::clipboard::build_paste_bytes(pasted_text, is_bracketed_paste_enabled);
-        let _ = self
+        if self
             .get_pty_backend()
-            .write_pane_input(pane_id, &paste_output_bytes);
-        self.on_input_reached_pane(client_id, pane_id);
+            .write_pane_input(pane_id, &paste_output_bytes)
+            .is_ok()
+        {
+            self.handle_input_reached_pane(client_id, pane_id);
+        }
     }
 
     /// The pane a keystroke from `client_id` types into: the pane it has focused
@@ -126,45 +133,34 @@ impl Server {
     ///
     /// Yields `None` for an unknown client, an active tab with no focused pane,
     /// a focused pane the session no longer holds, a missing tab, and a tab with
-    /// no viewport. Two kinds of focused pane also yield `None`:
+    /// no tab size.
     ///
-    /// - **A pane this client draws no content for** — suppressed for want of
-    ///   space, hidden behind a pane this client has zoomed, or collapsed to a
-    ///   stack header. Shrink the terminal until the focused pane is
-    ///   suppressed, type `l`, and the shell inside it stays untouched. The
-    ///   question is asked with [`list_content_rects`], the same function the
-    ///   renderer asks, in THIS client's layout mode: another client's zoom
-    ///   never silences this client's keys.
-    /// - **A pane that is not a [`PaneKind::Terminal`]** — a plugin pane, which
-    ///   has no PTY behind it.
+    /// A focused pane this client draws no content for also yields `None` —
+    /// suppressed for want of space, hidden behind a pane this client has
+    /// zoomed, or collapsed to a stack header. Shrink the terminal until the
+    /// focused pane is suppressed, type `l`, and the shell inside it stays
+    /// untouched. The question is asked with [`list_content_rects`], the same
+    /// function the renderer asks, in THIS client's layout mode: another
+    /// client's zoom never silences this client's keys.
     ///
-    /// The tab is solved against [`Session::tab_viewport`], the size every
+    /// The tab is solved against [`Session::get_tab_size`], the size every
     /// client viewing it shares: every viewer of the tab agrees on which panes
     /// are drawn, exactly as they agree on the frame.
     ///
-    /// [`Session::tab_viewport`]: koshi_session::session::state::Session::tab_viewport
+    /// [`Session::get_tab_size`]: koshi_session::session::state::Session::get_tab_size
     pub(crate) fn find_typed_pane(&self, client_id: ClientId) -> Option<PaneId> {
         let session = self.get_session_for_client(client_id)?;
         let attached_client = session.clients.get_client_by_id(client_id)?;
-        let tab_id = attached_client.get_active_tab();
-        let pane_id = attached_client.get_focused_pane(tab_id)?;
-
-        if !matches!(
-            session
-                .panes
-                .get_pane_record_by_id(pane_id)?
-                .get_pane_kind(),
-            PaneKind::Terminal
-        ) {
-            return None;
-        }
+        let tab_id = attached_client.get_active_tab_id();
+        let pane_id = attached_client.get_focused_pane_id(tab_id)?;
+        session.panes.get_pane_record_by_id(pane_id)?;
 
         let tab_record = session.tabs.get(&tab_id)?;
-        let tab_viewport_size = session.get_tab_viewport(tab_id)?;
+        let tab_size = session.get_tab_size(tab_id)?;
         list_content_rects(&solve_tab_layout(
             tab_record,
             attached_client.get_layout_mode(tab_id),
-            tab_viewport_size,
+            tab_size,
             self.get_pane_sizing(),
         ))
         .into_iter()
@@ -172,40 +168,6 @@ impl Server {
             candidate_pane_id == pane_id && content_rect.is_some()
         })
         .then_some(pane_id)
-    }
-
-    /// Run the action a viewer's keypress resolved to: look
-    /// `bound.action_reference` up
-    /// in the action table, turn it into commands, dispatch them, and mark the
-    /// status line stale. The viewer decided which binding fired; the session
-    /// decides what that binding does.
-    ///
-    /// An action that does not resolve — unregistered, not yet implemented,
-    /// given arguments it does not accept, or nested past
-    /// [`MAX_SEQUENCE_DEPTH`] — dispatches nothing and marks nothing stale.
-    ///
-    /// `new_pane_direction` is the viewer's own `layout.new-pane-direction`
-    /// setting, handed in with the action: a pane-opening action that names no
-    /// direction splits toward it. The session keeps no split direction of its
-    /// own, and two viewers of one session each open panes their own way.
-    ///
-    /// [`MAX_SEQUENCE_DEPTH`]: koshi_core::resolve::MAX_SEQUENCE_DEPTH
-    pub fn handle_bound_action(
-        &mut self,
-        client_id: ClientId,
-        bound_action: BoundAction,
-        new_pane_direction: Direction,
-    ) {
-        let Ok(dispatch_action_plan) = resolve_action(
-            &bound_action.action_reference,
-            &bound_action.action_arguments,
-            &self.action_registry,
-            new_pane_direction,
-        ) else {
-            return;
-        };
-        self.dispatch_action_plan(client_id, dispatch_action_plan);
-        self.render_scheduler.invalidate();
     }
 
     /// Write one key the viewer did not bind to the pane it is typing into,
@@ -229,44 +191,24 @@ impl Server {
                 let terminal_state = terminal_engine.get_terminal_state();
                 (
                     terminal_state.get_keyboard_flags(),
-                    terminal_state.are_application_cursor_keys_enabled(),
+                    terminal_state.is_application_cursor_keys_enabled(),
                 )
             });
-        let key_bytes = encode_key_input(
+        let encoded_key_input_bytes = encode_key_input(
             key_input,
             keyboard_flags,
             is_application_cursor_keys_enabled,
             self.config.terminal.extended_keys_mode,
         );
-        if key_bytes.is_empty() {
+        if encoded_key_input_bytes.is_empty() {
             return;
         }
-        let _ = self.get_pty_backend().write_pane_input(pane_id, &key_bytes);
-        self.on_input_reached_pane(client_id, pane_id);
-    }
-
-    /// Dispatch every command `plan` names, in order, attributed to
-    /// `client_id`'s keybinding. A command the dispatcher rejects does not stop
-    /// the ones after it. Viewer-local actions and
-    /// [`DispatchPlan::PluginHostCall`] run nothing in the session runtime.
-    fn dispatch_action_plan(&mut self, client_id: ClientId, dispatch_action_plan: DispatchPlan) {
-        match dispatch_action_plan {
-            DispatchPlan::Command(command) => {
-                let command_envelope = CommandEnvelope::from_parts(
-                    CommandId::new(),
-                    CommandSource::from_key_binding(client_id),
-                    SystemTime::now(),
-                    command,
-                );
-                let _ = self.dispatch(command_envelope);
-            }
-            DispatchPlan::Sequence(dispatch_plans) => {
-                for dispatch_action_plan in dispatch_plans {
-                    self.dispatch_action_plan(client_id, dispatch_action_plan);
-                }
-            }
-            DispatchPlan::ClientAction(_) => {}
-            DispatchPlan::PluginHostCall { .. } => {}
+        if self
+            .get_pty_backend()
+            .write_pane_input(pane_id, &encoded_key_input_bytes)
+            .is_ok()
+        {
+            self.handle_input_reached_pane(client_id, pane_id);
         }
     }
 }

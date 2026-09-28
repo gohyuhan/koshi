@@ -26,8 +26,7 @@ enum RouterScript {
     /// The endpoint file carries the router's own token, so the Hello opens
     /// the connection and the request behind it is answered with this result.
     AcceptAndAnswer(RouterResult),
-    /// The same, and the Hello reports the build named here. An empty string
-    /// is what a router that predates the build field answers.
+    /// The same, and the Hello reports the build named here.
     AcceptAndAnswerAs(String, RouterResult),
     /// The endpoint file carries a token the router does not hold, so the
     /// Hello is refused and the request behind it is refused too.
@@ -244,41 +243,6 @@ fn a_refused_restart_reports_the_reason_the_router_gave() {
             "this build has no request kind named Restart — the running router is koshi 9.9.9 \
              and this command is koshi {}; the router serves its own build until it restarts, \
              which it does once no session is left running",
-            env!("CARGO_PKG_VERSION")
-        )
-    );
-    router.join().expect("the stand-in router exits");
-}
-
-#[test]
-fn a_router_that_reports_no_build_is_named_as_an_older_koshi() {
-    let runtime_directory = build_test_runtime_directory();
-    let router = spawn_fake_router(
-        runtime_directory.path(),
-        RouterScript::AcceptAndAnswerAs(
-            String::new(),
-            RouterResult::Error(IpcErrorPayload {
-                code: IpcErrorCode::UnsupportedKind,
-                message: "this build has no request kind named Restart".to_string(),
-            }),
-        ),
-    );
-
-    let router_restart_error =
-        restart_running_router(runtime_directory.path()).expect_err("the restart is refused");
-
-    let CliError::IpcUnavailable {
-        detail: error_detail,
-    } = router_restart_error
-    else {
-        panic!("expected IpcUnavailable, got {router_restart_error:?}");
-    };
-    assert_eq!(
-        error_detail,
-        format!(
-            "this build has no request kind named Restart — the running router is an older koshi \
-             that does not report its build and this command is koshi {}; the router serves its \
-             own build until it restarts, which it does once no session is left running",
             env!("CARGO_PKG_VERSION")
         )
     );

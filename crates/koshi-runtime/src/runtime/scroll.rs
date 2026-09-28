@@ -2,15 +2,15 @@
 //! into history or back down to live output, and re-anchoring held views as new
 //! output pushes lines into scrollback.
 //!
-//! The offset is per-client view state ([`Client::get_scroll_offset`](koshi_session::client::Client::get_scroll_offset)), so two
-//! clients scroll a shared pane independently. Every public entry point keeps
-//! the offset inside `[0, scrollback len]` and marks the frame stale when the
-//! offset moves.
+//! The offset is per-client view state
+//! ([`Client::get_scroll_offset`](koshi_session::client::Client::get_scroll_offset)), so two
+//! clients scroll a shared pane independently. Every public entry point keeps the offset inside
+//! `[0, scrollback len]` and marks the frame stale when the offset moves.
 //!
-//! Scrolling moves a view; it never decides whether the view is *held* against
-//! live output. That is [`koshi_session::client::Client::is_view_held`], derived from the offset and
-//! the client's highlight: scrolling back to the bottom follows live again only
-//! when no highlight is holding the view there.
+//! Scrolling moves a view; it never decides whether the view is *held* against live output. That is
+//! [`koshi_session::client::Client::is_view_held`], derived from the offset and the client's
+//! highlight: scrolling back to the bottom follows live again only when no highlight is holding the
+//! view there.
 
 use koshi_core::ids::{ClientId, PaneId};
 
@@ -61,13 +61,6 @@ impl Server {
         }
     }
 
-    /// Jump `client_id`'s view of `pane_id` to the oldest retained line: a
-    /// [`scroll_up`](Self::scroll_up) by the maximum, which the clamp lands
-    /// exactly on the retained count.
-    pub fn scroll_to_top(&mut self, client_id: ClientId, pane_id: PaneId) {
-        self.scroll_up(client_id, pane_id, usize::MAX);
-    }
-
     /// Snap `client_id`'s view of `pane_id` back to the newest line: a
     /// [`scroll_down`](Self::scroll_down) by the maximum.
     pub fn scroll_to_bottom(&mut self, client_id: ClientId, pane_id: PaneId) {
@@ -82,10 +75,9 @@ impl Server {
     /// the oldest surviving line). A view that is not held follows live output
     /// and is left alone.
     ///
-    /// Held is [`koshi_session::client::Client::is_view_held`] — scrolled up, or a highlight up in this
-    /// pane. That covers a view held on the *newest* line, which an offset alone
-    /// could not express: it rises with the text it holds instead of staying at
-    /// the bottom and showing whatever arrives next.
+    /// Held is [`koshi_session::client::Client::is_view_held`] — scrolled up, or a highlight up in
+    /// this pane. That covers a view held on the *newest* line: it rises with the text it holds
+    /// instead of staying at the bottom and showing whatever arrives next.
     ///
     /// The walk covers only the session that owns the pane — a pane belongs to
     /// exactly one — and each client is re-anchored on its own, so one client's

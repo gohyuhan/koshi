@@ -7,9 +7,9 @@ use super::*;
 /// Asserts that `sanitize_reported_text("a{c}b")` is `"ab"`.
 #[track_caller]
 fn assert_refused_character(character: char) {
-    let title = format!("a{character}b");
+    let reported_text_sample = format!("a{character}b");
     assert_eq!(
-        sanitize_reported_text(&title),
+        sanitize_reported_text(&reported_text_sample),
         "ab",
         "U+{:04X} survived sanitizing",
         character as u32
@@ -19,10 +19,10 @@ fn assert_refused_character(character: char) {
 /// Asserts that `sanitize_reported_text("a{c}b")` is `"a{c}b"`.
 #[track_caller]
 fn assert_kept_character(character: char) {
-    let title = format!("a{character}b");
+    let reported_text_sample = format!("a{character}b");
     assert_eq!(
-        sanitize_reported_text(&title),
-        title,
+        sanitize_reported_text(&reported_text_sample),
+        reported_text_sample,
         "U+{:04X} was removed",
         character as u32
     );
@@ -93,13 +93,16 @@ fn tag_characters_are_removed() {
     assert_refused_character('\u{E0020}');
     assert_refused_character('\u{E0072}');
     assert_refused_character('\u{E007F}');
-    // `hidden` is `rm -rf /` spelled in tag characters: readable text that
+    // `hidden_tag_sequence` is `rm -rf /` spelled in tag characters: readable text that
     // takes zero display columns.
-    let hidden: String = "rm -rf /"
+    let hidden_tag_sequence: String = "rm -rf /"
         .chars()
         .map(|character| char::from_u32(0xE0000 + character as u32).expect("tag is a scalar value"))
         .collect();
-    assert_eq!(sanitize_reported_text(&format!("bash{hidden}")), "bash");
+    assert_eq!(
+        sanitize_reported_text(&format!("bash{hidden_tag_sequence}")),
+        "bash"
+    );
 }
 
 #[test]
@@ -153,7 +156,7 @@ fn an_escape_sequence_loses_only_its_escape_byte() {
 }
 
 #[test]
-fn the_cap_is_exactly_max_pane_title_bytes() {
+fn the_reported_text_byte_cap_is_exactly_512_bytes() {
     assert_eq!(MAX_REPORTED_TEXT_BYTE_COUNT, 512);
     // One byte under, exactly at, and one over.
     assert_eq!(sanitize_reported_text(&"a".repeat(511)), "a".repeat(511));
@@ -162,7 +165,7 @@ fn the_cap_is_exactly_max_pane_title_bytes() {
 }
 
 #[test]
-fn a_long_title_is_cut_to_the_byte_cap() {
+fn long_reported_text_is_cut_to_the_byte_cap() {
     assert_eq!(
         sanitize_reported_text(&"a".repeat(5_000_000)),
         "a".repeat(MAX_REPORTED_TEXT_BYTE_COUNT)
@@ -203,12 +206,12 @@ fn the_cut_stops_at_the_first_character_that_does_not_fit() {
 
 #[test]
 fn removed_characters_do_not_count_toward_the_cap() {
-    let title = format!("{}{}", "\u{7f}".repeat(1_000), "shell");
-    assert_eq!(sanitize_reported_text(&title), "shell");
+    let reported_text = format!("{}{}", "\u{7f}".repeat(1_000), "shell");
+    assert_eq!(sanitize_reported_text(&reported_text), "shell");
 }
 
 #[test]
-fn a_title_of_only_refused_characters_becomes_empty() {
+fn reported_text_with_only_refused_characters_becomes_empty() {
     assert_eq!(
         sanitize_reported_text("\u{1b}\u{7f}\u{9b}\u{202e}\u{2028}"),
         ""
@@ -216,7 +219,7 @@ fn a_title_of_only_refused_characters_becomes_empty() {
 }
 
 #[test]
-fn a_sanitized_title_is_stable_under_a_second_pass() {
+fn sanitized_reported_text_is_stable_under_a_second_pass() {
     for reported_text in [
         "~/Projects/koshi",
         "a\u{7f}b",

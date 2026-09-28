@@ -81,14 +81,14 @@ fn every_scroll_direction_maps() {
         (66, ScrollDirection::Left),
         (67, ScrollDirection::Right),
     ];
-    for (button_code, scroll_direction) in scroll_direction_cases {
-        let mouse_sequence = format!("\x1b[<{button_code};11;4M");
+    for (mouse_button_code, scroll_direction) in scroll_direction_cases {
+        let mouse_sequence = format!("\x1b[<{mouse_button_code};11;4M");
         assert_eq!(
             decode_mouse_bytes(mouse_sequence.as_bytes())
                 .expect("scroll")
                 .mouse_kind,
             MouseKind::Scroll(scroll_direction),
-            "button code {button_code}",
+            "mouse button code {mouse_button_code}",
         );
     }
 }
@@ -152,10 +152,13 @@ fn sgr_modifiers_map_individually_and_together() {
 
 #[test]
 fn scroll_keeps_modifiers_and_position() {
-    let scrolled = decode_mouse_bytes(b"\x1b[<80;5;3M").expect("control scroll");
-    assert_eq!(scrolled.mouse_kind, MouseKind::Scroll(ScrollDirection::Up));
-    assert_eq!(scrolled.modifier_flags, ModFlags::CTRL);
-    assert_eq!(scrolled.position, Point { column: 4, row: 2 });
+    let scroll_mouse_input = decode_mouse_bytes(b"\x1b[<80;5;3M").expect("control scroll");
+    assert_eq!(
+        scroll_mouse_input.mouse_kind,
+        MouseKind::Scroll(ScrollDirection::Up)
+    );
+    assert_eq!(scroll_mouse_input.modifier_flags, ModFlags::CTRL);
+    assert_eq!(scroll_mouse_input.position, Point { column: 4, row: 2 });
 }
 
 #[test]

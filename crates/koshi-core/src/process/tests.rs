@@ -206,7 +206,7 @@ fn the_default_shell_spec_passes_the_callers_working_directory_and_environment_v
     let mut environment_variables = BTreeMap::new();
     environment_variables.insert("KOSHI_SESSION_ID".to_string(), "abc".to_string());
 
-    let spawn_spec = SpawnSpec::default_shell(
+    let spawn_spec = SpawnSpec::build_default_shell(
         Some(working_directory.clone()),
         environment_variables.clone(),
     );
@@ -218,7 +218,7 @@ fn the_default_shell_spec_passes_the_callers_working_directory_and_environment_v
 
 #[test]
 fn the_default_shell_program_is_never_empty_and_its_kind_matches_that_program() {
-    let spawn_spec = SpawnSpec::default_shell(None, BTreeMap::new());
+    let spawn_spec = SpawnSpec::build_default_shell(None, BTreeMap::new());
 
     assert_ne!(spawn_spec.program, PathBuf::new());
     assert_eq!(

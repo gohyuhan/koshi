@@ -26,8 +26,8 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use koshi_core::discovery::{SessionDiscovery, SessionOverview};
+use koshi_ipc::endpoint::resolve_advertisement_marker_path;
 use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
-use koshi_ipc::endpoint::{compute_shared_socket_address, resolve_advertisement_marker_path};
 use koshi_ipc::protocol::{
     IncomingResponse, IpcRequest, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
@@ -433,7 +433,7 @@ fn advertise_foreign_session(
             .uid();
         let other_user_directory = shared_sessions_directory.join((own_user_id + 1).to_string());
         std::fs::create_dir_all(&other_user_directory).expect("create the other user's directory");
-        compute_shared_socket_address(&other_user_directory, session_id)
+        compute_socket_address(&other_user_directory, session_id)
     }
     #[cfg(windows)]
     {
@@ -444,7 +444,7 @@ fn advertise_foreign_session(
             b"",
         )
         .expect("plant the marker");
-        compute_shared_socket_address(shared_sessions_directory, session_id)
+        compute_socket_address(shared_sessions_directory, session_id)
     }
 }
 
@@ -452,7 +452,7 @@ fn advertise_foreign_session(
 /// exchange at `socket_address`: accept one caller, response the Hello whatever it
 /// presents, and describe a session named `session_name` created at
 /// `session_created_at`.
-fn foreign_session_server(
+fn spawn_foreign_session_server(
     socket_address: &str,
     session_id: SessionId,
     session_name: &str,
@@ -504,7 +504,7 @@ fn the_rebuild_registers_a_session_another_local_user_started() {
     let created_at = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let foreign_socket_address =
         advertise_foreign_session(shared.path(), runtime_directory.path(), foreign_session_id);
-    let server = foreign_session_server(
+    let server = spawn_foreign_session_server(
         &foreign_socket_address,
         foreign_session_id,
         "S-quiet-lake",
@@ -565,11 +565,11 @@ fn get_test_executable_path() -> PathBuf {
 /// Remote access as a machine that has none holds it: no listen address, no
 /// data directory, no listener, and nothing carried. No test here opens a
 /// remote connection.
-fn no_remote() -> RemoteState {
+fn build_no_remote_state() -> RemoteState {
     RemoteState {
         remote_listen_address: None,
         data_directory: None,
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -590,7 +590,7 @@ fn an_idle_window_that_passes_with_no_session_running_ends_the_loop() {
         &router_events_receiver,
         TEST_IDLE_EXIT_DURATION,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
     );
 
     assert_eq!(exit, RouterExit::Idle);
@@ -620,7 +620,7 @@ fn a_request_inside_the_idle_window_is_served_and_the_loop_goes_on() {
         &router_events_receiver,
         TEST_IDLE_EXIT_DURATION,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
     );
 
     assert_eq!(
@@ -654,7 +654,7 @@ fn a_delivered_restart_reply_ends_the_loop_for_the_swap() {
         &router_events_receiver,
         TEST_IDLE_EXIT_DURATION,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
     );
 
     assert_eq!(exit, RouterExit::Restart);
@@ -685,7 +685,7 @@ fn a_running_session_keeps_the_loop_alive_past_the_idle_window() {
             &router_events_receiver,
             TEST_IDLE_EXIT_DURATION,
             &mut registry,
-            &mut no_remote(),
+            &mut build_no_remote_state(),
         );
         (exit, registry)
     });
@@ -731,7 +731,7 @@ fn a_session_that_exits_while_another_runs_leaves_the_loop_serving() {
             &router_events_receiver,
             TEST_IDLE_EXIT_DURATION,
             &mut registry,
-            &mut no_remote(),
+            &mut build_no_remote_state(),
         );
         (exit, registry)
     });
@@ -815,7 +815,7 @@ fn a_lookup_finding_nothing_listening_drops_the_session_and_its_files() {
 /// settles the Hello on `PROTOCOL_VERSION + 1` — a version outside the range
 /// this build asks for, which fails the exchange without the session being
 /// gone.
-fn version_mismatched_session_server(socket_address: &str) -> JoinHandle<()> {
+fn spawn_version_mismatched_session_server(socket_address: &str) -> JoinHandle<()> {
     let listener = Listener::bind(socket_address).expect("bind the live session");
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the router");
@@ -844,7 +844,7 @@ fn a_listing_keeps_a_session_that_answers_with_a_version_this_build_does_not_rea
     }
     .write_to_path(&endpoint_path)
     .expect("the endpoint file is written");
-    let server = version_mismatched_session_server(&socket_address);
+    let server = spawn_version_mismatched_session_server(&socket_address);
 
     let mut registry = build_session_registry(&[(live, "S-quiet-lake")]);
     registry
@@ -884,7 +884,7 @@ fn the_rebuild_keeps_the_files_of_a_session_it_cannot_read_a_version_from() {
     }
     .write_to_path(&endpoint_path)
     .expect("the endpoint file is written");
-    let server = version_mismatched_session_server(&socket_address);
+    let server = spawn_version_mismatched_session_server(&socket_address);
 
     let registry = rebuild_session_registry(runtime_directory.path(), None);
     server.join().expect("the stand-in session ended");
@@ -971,7 +971,7 @@ fn a_listing_answers_the_sessions_that_describe_themselves_in_name_then_id_order
     let mut servers = Vec::new();
     for (session_id, session_name) in [(loud, "S-loud-river"), (quiet, "S-quiet-lake")] {
         let socket_address = compute_socket_address(runtime_directory.path(), session_id);
-        servers.push(foreign_session_server(
+        servers.push(spawn_foreign_session_server(
             &socket_address,
             session_id,
             session_name,
@@ -1255,7 +1255,7 @@ fn a_restart_request_is_answered_from_the_binary_on_disk() {
         &executable_path,
         None,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
         &router_events_sender,
         RouterRequestKind::Restart,
     );
@@ -1278,7 +1278,7 @@ fn a_restart_request_naming_a_binary_that_cannot_be_read_is_refused() {
         &executable_path,
         None,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
         &router_events_sender,
         RouterRequestKind::Restart,
     );
@@ -1315,7 +1315,7 @@ fn a_restart_request_naming_a_non_executable_binary_is_refused() {
         &executable_path,
         None,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
         &router_events_sender,
         RouterRequestKind::Restart,
     );
@@ -1336,7 +1336,7 @@ fn a_restart_request_naming_a_non_executable_binary_is_refused() {
 /// its three standard streams going nowhere. Dropping the handle waits on
 /// nothing; the caller collects the exit.
 #[cfg(unix)]
-fn child_running(script: &str) -> Child {
+fn spawn_running_child(script: &str) -> Child {
     std::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
@@ -1349,8 +1349,8 @@ fn child_running(script: &str) -> Child {
 
 /// A process this test is the parent of, which ends at once.
 #[cfg(unix)]
-fn short_lived_child() -> Child {
-    child_running("exit 0")
+fn spawn_short_lived_child() -> Child {
+    spawn_running_child("exit 0")
 }
 
 /// After a restart in place, the sessions the previous image started are still
@@ -1364,7 +1364,11 @@ fn the_watcher_reports_the_exit_of_a_session_this_process_is_the_parent_of() {
     let session_id = SessionId::new();
     let (router_events_sender, router_events_receiver) = mpsc::channel();
 
-    watch_session_process_exit(short_lived_child().id(), session_id, router_events_sender);
+    watch_session_process_exit(
+        spawn_short_lived_child().id(),
+        session_id,
+        router_events_sender,
+    );
 
     match router_events_receiver.recv() {
         Ok(RouterEvent::ChildExited(reported_session_id)) => {
@@ -1386,7 +1390,7 @@ fn the_reaper_reports_the_exit_of_the_session_server_it_started() {
     let session_id = SessionId::new();
     let (router_events_sender, router_events_receiver) = mpsc::channel();
 
-    start_session_reaper_thread(short_lived_child(), session_id, router_events_sender);
+    start_session_reaper_thread(spawn_short_lived_child(), session_id, router_events_sender);
 
     match router_events_receiver.recv() {
         Ok(RouterEvent::ChildExited(reported_session_id)) => {
@@ -1405,7 +1409,7 @@ fn the_reaper_reports_the_exit_of_the_session_server_it_started() {
 fn a_child_that_never_became_a_session_is_killed_and_collected() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    let mut child_process = child_running("sleep 30");
+    let mut child_process = spawn_running_child("sleep 30");
 
     terminate_child_process(&mut child_process);
 
@@ -1484,8 +1488,8 @@ fn the_accept_loop_serves_a_connection_this_user_opened() {
     let listener = Listener::bind(&router_socket_address).expect("the router socket is bound");
     let router_connection_token = ConnectionToken::generate();
     let (router_events_sender, router_events_receiver) = mpsc::channel();
-    let shutting_down = Arc::new(AtomicBool::new(false));
-    let shutdown_flag = Arc::clone(&shutting_down);
+    let is_shutting_down = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = Arc::clone(&is_shutting_down);
     let accepted_connection_token = router_connection_token.clone();
     let accepting = std::thread::spawn(move || {
         run_router_accept_loop(
@@ -1533,7 +1537,7 @@ fn the_accept_loop_serves_a_connection_this_user_opened() {
     };
     assert_eq!(request_kind, RouterRequestKind::ListSessions);
 
-    shutting_down.store(true, Ordering::SeqCst);
+    is_shutting_down.store(true, Ordering::SeqCst);
     drop(caller_connection);
     let _ = Connection::connect(&router_socket_address);
     accepting.join().expect("the accept loop ends");
@@ -1555,7 +1559,7 @@ fn answer_token_request(
         &get_test_executable_path(),
         token_store_path,
         &mut registry,
-        &mut no_remote(),
+        &mut build_no_remote_state(),
         &router_events_sender,
         request_kind,
     )
@@ -1645,7 +1649,7 @@ fn a_grant_writes_one_record_holding_the_hash_of_the_secret_it_hands_back() {
 
     let RouterResult::Granted {
         connection_token,
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
     } = response
     else {
         panic!("the grant was refused: {response:?}")
@@ -1670,7 +1674,8 @@ fn a_grant_writes_one_record_holding_the_hash_of_the_secret_it_hands_back() {
     let token_store_file_bytes =
         std::fs::read(&token_store_path).expect("the store file is on disk");
     assert!(
-        !String::from_utf8_lossy(&token_store_file_bytes).contains(connection_token.expose()),
+        !String::from_utf8_lossy(&token_store_file_bytes)
+            .contains(connection_token.expose_secret()),
         "the secret itself never reaches the disk"
     );
 }
@@ -1692,7 +1697,7 @@ fn a_second_grant_replaces_the_one_on_the_same_scope_and_adds_one_on_another() {
 
     let RouterResult::Granted {
         connection_token: replacement_connection_token,
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
     } = again
     else {
         panic!("the second grant was refused: {again:?}")
@@ -1720,7 +1725,7 @@ fn a_second_grant_replaces_the_one_on_the_same_scope_and_adds_one_on_another() {
     );
 
     let RouterResult::Granted {
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
         ..
     } = other_scope
     else {
@@ -1751,7 +1756,7 @@ fn a_grant_expires_the_given_span_after_the_clock_reading_it_was_issued_at() {
     );
 
     let RouterResult::Granted {
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
         ..
     } = response
     else {
@@ -1780,7 +1785,7 @@ fn a_grant_expires_the_given_span_after_the_clock_reading_it_was_issued_at() {
     );
 
     let RouterResult::Granted {
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
         ..
     } = no_expiry
     else {
@@ -2231,7 +2236,10 @@ fn enable_remote_on_a_free_port(
 /// connection the router opens, response the Hello the router presents on the
 /// remote client's behalf, and hold the connection open until `stop_receiver` is
 /// dropped.
-fn bridged_session_server(socket_address: &str, stop_receiver: Receiver<()>) -> JoinHandle<()> {
+fn spawn_bridged_session_server(
+    socket_address: &str,
+    stop_receiver: Receiver<()>,
+) -> JoinHandle<()> {
     let listener = Listener::bind(socket_address).expect("bind the session behind the bridge");
     std::thread::spawn(move || {
         let mut connection = listener.accept().expect("accept the router's bridge");
@@ -2332,7 +2340,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
 
     let socket_address = compute_socket_address(runtime_directory.path(), session_id);
     let (stop_sender, stop_receiver) = mpsc::channel();
-    let session_server = bridged_session_server(&socket_address, stop_receiver);
+    let session_server = spawn_bridged_session_server(&socket_address, stop_receiver);
     EndpointFile {
         socket_address,
         connection_token: ConnectionToken::generate(),
@@ -2356,7 +2364,7 @@ fn a_revoke_ends_the_connection_it_admitted_attached_or_not() {
         let mut remote_state = RemoteState {
             remote_listen_address: Some(held_address),
             data_directory: Some(held_data),
-            listening: true,
+            is_listening: true,
             admitted_remote_connections: Vec::new(),
             next_remote_connection_id: 0,
             full_capacity_warning: WarningRateLimiter::new(),
@@ -2532,7 +2540,7 @@ fn a_grant_cuts_only_the_standing_connection_of_its_identity_and_scope() {
         .write_token_store_to_path(&token_store_path)
         .expect("the store is written");
 
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let mut held_connection_streams = Vec::new();
     for (remote_connection_index, token_hash_character) in
         ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate()
@@ -2558,7 +2566,7 @@ fn a_grant_cuts_only_the_standing_connection_of_its_identity_and_scope() {
 
     let RouterResult::Granted {
         connection_token,
-        did_replace_active_grant: has_replaced_active_grant,
+        has_replaced_active_grant,
     } = grant_result
     else {
         panic!("the grant was refused: {grant_result:?}")
@@ -2606,7 +2614,7 @@ fn an_attach_that_arrives_after_the_cut_is_refused_rather_than_bridged() {
     let session_id = SessionId::new();
     let registry = build_session_registry(&[(session_id, "S-quiet-lake")]);
     let token_hash = "b".repeat(64);
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (_caller_stream, served_stream) = build_loopback_connection_pair();
     remote_state
         .admitted_remote_connections
@@ -2738,7 +2746,7 @@ fn an_attach_to_a_session_the_secret_does_not_reach_is_refused() {
         (reached_session_id, "S-quiet-lake"),
         (other_session_id, "S-loud-river"),
     ]);
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (_caller_stream, served_stream) = build_loopback_connection_pair();
     remote_state
         .admitted_remote_connections
@@ -2806,7 +2814,7 @@ fn an_attach_naming_a_session_this_machine_does_not_run_reaches_nothing() {
     let running = SessionId::new();
     let runtime_directory = build_test_runtime_directory();
     let registry = build_session_registry(&[(running, "S-quiet-lake")]);
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (_caller_stream, served_stream) = build_loopback_connection_pair();
     remote_state
         .admitted_remote_connections
@@ -2870,7 +2878,7 @@ fn a_session_another_local_user_started_is_neither_listed_nor_reached_from_a_rem
             process_id: 0,
         },
     );
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (_caller_stream, served_stream) = build_loopback_connection_pair();
     remote_state
         .admitted_remote_connections
@@ -2929,7 +2937,7 @@ fn the_report_that_one_connection_ended_drops_that_registration_and_no_other() {
     // frees lets the next caller in, and the numbers beside it have to
     // survive: a subsequent attach finds its connection by number.
     let runtime_directory = build_test_runtime_directory();
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let mut held_connection_streams = Vec::new();
     for remote_connection_id in 0..3u64 {
         let (near_stream, far_stream) = build_loopback_connection_pair();
@@ -2978,10 +2986,10 @@ fn a_caller_speaking_no_doorway_version_this_build_has_is_told_both_ranges() {
 
     let offered_remote_protocol_version = REMOTE_PROTOCOL_VERSION + 1;
     let hello = RemoteClientFrame::Hello {
-        min_remote_version: offered_remote_protocol_version,
-        max_remote_version: offered_remote_protocol_version + 1,
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_remote_version: offered_remote_protocol_version,
+        maximum_remote_version: offered_remote_protocol_version + 1,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: ConnectionToken::generate(),
     };
     let (_reader, _writer, _presented, remote_server_response) =
@@ -3034,7 +3042,7 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
         let mut remote_state = RemoteState {
             remote_listen_address: Some(held_address),
             data_directory: Some(held_data),
-            listening: true,
+            is_listening: true,
             admitted_remote_connections: Vec::new(),
             next_remote_connection_id: 0,
             full_capacity_warning: WarningRateLimiter::new(),
@@ -3053,10 +3061,10 @@ fn a_caller_whose_doorway_range_covers_this_build_settles_on_what_both_speak() {
 
     // A caller that speaks this build's version and one above it.
     let hello = RemoteClientFrame::Hello {
-        min_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
-        max_remote_version: REMOTE_PROTOCOL_VERSION + 1,
-        min_protocol_version: MIN_PROTOCOL_VERSION,
-        max_protocol_version: PROTOCOL_VERSION,
+        minimum_remote_version: MIN_REMOTE_PROTOCOL_VERSION,
+        maximum_remote_version: REMOTE_PROTOCOL_VERSION + 1,
+        minimum_protocol_version: MIN_PROTOCOL_VERSION,
+        maximum_protocol_version: PROTOCOL_VERSION,
         connection_token: secret.clone(),
     };
     let (_reader, _writer, _presented, remote_server_response) =
@@ -3088,7 +3096,7 @@ fn an_admitted_secret_is_registered_with_its_scope_and_stamped_in_the_store() {
     let runtime_directory = build_test_runtime_directory();
     let token_store_path = resolve_token_store_path(&runtime_directory.path().join("data"));
     let secret = build_token_store_with_alice_grant(&token_store_path);
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (caller_stream, _served_stream) = build_loopback_connection_pair();
 
     let admit_started_at = SystemTime::now();
@@ -3138,7 +3146,7 @@ fn a_secret_the_store_does_not_hold_admits_nothing_and_writes_nothing() {
     let _ = build_token_store_with_alice_grant(&token_store_path);
     let token_store_bytes_before_unknown_secret =
         rewrite_token_store_with_spacing(&token_store_path);
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (caller_stream, _served_stream) = build_loopback_connection_pair();
 
     assert!(
@@ -3171,7 +3179,7 @@ fn a_secret_the_store_does_not_hold_admits_nothing_and_writes_nothing() {
 fn a_machine_with_no_token_store_admits_no_remote_connection() {
     // With no data directory there is no store to check a secret against, and
     // every remote caller is refused.
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let (caller_stream, _served_stream) = build_loopback_connection_pair();
 
     assert!(admit_remote_token(
@@ -3202,7 +3210,7 @@ fn a_full_list_of_admitted_connections_admits_nothing_more() {
 
     let secret = build_token_store_with_alice_grant(&token_store_path);
 
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     for admission_index in 0..MAX_LIVE_REMOTE_CONNECTION_COUNT {
         let (caller_stream, served_stream) = build_loopback_connection_pair();
         let admitted = admit_remote_token(
@@ -3259,7 +3267,7 @@ fn a_connection_that_ends_makes_room_for_the_next_one() {
 
     let secret = build_token_store_with_alice_grant(&token_store_path);
 
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     let mut first_remote_connection_id = None;
     for _ in 0..MAX_LIVE_REMOTE_CONNECTION_COUNT {
         let (caller_stream, served_stream) = build_loopback_connection_pair();
@@ -3319,7 +3327,7 @@ fn switching_remote_access_on_with_no_listen_address_is_refused() {
     // `koshi.kdl` names where the port would be. With no address the refusal
     // names the line to add.
     let (router_events_sender, _router_events_receiver) = mpsc::channel();
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
 
     let response = enable_remote_access(&mut remote_state, &router_events_sender);
 
@@ -3332,7 +3340,7 @@ fn switching_remote_access_on_with_no_listen_address_is_refused() {
                 .to_string(),
         })
     );
-    assert!(!remote_state.listening, "nothing was taken");
+    assert!(!remote_state.is_listening, "nothing was taken");
 }
 
 #[test]
@@ -3340,7 +3348,7 @@ fn switching_remote_access_on_with_no_data_directory_is_refused() {
     // The certificate and the token record of the response both live in the data
     // directory. A machine with none holds neither.
     let (router_events_sender, _router_events_receiver) = mpsc::channel();
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
     remote_state.remote_listen_address = Some("127.0.0.1:7654".to_string());
 
     let response = enable_remote_access(&mut remote_state, &router_events_sender);
@@ -3353,7 +3361,7 @@ fn switching_remote_access_on_with_no_data_directory_is_refused() {
                 .to_string(),
         })
     );
-    assert!(!remote_state.listening, "nothing was taken");
+    assert!(!remote_state.is_listening, "nothing was taken");
 }
 
 #[test]
@@ -3373,7 +3381,7 @@ fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_ser
     let mut remote_state = RemoteState {
         remote_listen_address: Some(remote_listen_address.clone()),
         data_directory: Some(data_directory.clone()),
-        listening: true,
+        is_listening: true,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3389,7 +3397,7 @@ fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_ser
         }
     );
     assert!(
-        remote_state.listening,
+        remote_state.is_listening,
         "the port it already held stays open"
     );
     assert!(
@@ -3403,11 +3411,11 @@ fn switching_remote_access_on_while_this_router_already_holds_the_port_keeps_ser
 #[test]
 fn the_start_up_open_with_no_listen_address_takes_no_port() {
     let (router_events_sender, _router_events_receiver) = mpsc::channel();
-    let mut remote_state = no_remote();
+    let mut remote_state = build_no_remote_state();
 
     open_remote_listener(&mut remote_state, &router_events_sender);
 
-    assert!(!remote_state.listening, "no address, so no port");
+    assert!(!remote_state.is_listening, "no address, so no port");
 }
 
 #[test]
@@ -3420,7 +3428,7 @@ fn the_start_up_open_takes_no_port_until_the_operator_has_said_yes() {
     let mut remote_state = RemoteState {
         remote_listen_address: Some(free_loopback_address()),
         data_directory: Some(data_directory.clone()),
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3429,7 +3437,7 @@ fn the_start_up_open_takes_no_port_until_the_operator_has_said_yes() {
     open_remote_listener(&mut remote_state, &router_events_sender);
 
     assert!(
-        !remote_state.listening,
+        !remote_state.is_listening,
         "no token record of a yes, so no port"
     );
     assert!(
@@ -3454,7 +3462,7 @@ fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
     let mut remote_state = RemoteState {
         remote_listen_address: None,
         data_directory: Some(data_directory),
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3463,13 +3471,13 @@ fn the_start_up_open_takes_the_port_again_once_the_answer_is_written_down() {
     for _ in 0..MAX_ADDRESS_ATTEMPT_COUNT {
         remote_state.remote_listen_address = Some(free_loopback_address());
         open_remote_listener(&mut remote_state, &router_events_sender);
-        if remote_state.listening {
+        if remote_state.is_listening {
             break;
         }
     }
 
     assert!(
-        remote_state.listening,
+        remote_state.is_listening,
         "no loopback port could be opened in {MAX_ADDRESS_ATTEMPT_COUNT} tries"
     );
     let address = remote_state
@@ -3501,7 +3509,7 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
     let mut remote_state = RemoteState {
         remote_listen_address: Some(occupied_socket_address.to_string()),
         data_directory: Some(data_directory.clone()),
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3521,7 +3529,7 @@ fn an_address_that_cannot_be_taken_writes_no_record_of_the_answer() {
         })
     );
     assert!(
-        !remote_state.listening,
+        !remote_state.is_listening,
         "nothing is being served on an address that was never taken"
     );
     assert!(
@@ -3545,7 +3553,7 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
     let mut remote_state = RemoteState {
         remote_listen_address: None,
         data_directory: Some(data_directory.clone()),
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3573,7 +3581,7 @@ fn taking_the_address_writes_the_record_and_serves_on_it() {
         certificate_fingerprint, disk_certificate_fingerprint,
         "the response names the certificate this machine now presents"
     );
-    assert!(remote_state.listening, "the port is being served");
+    assert!(remote_state.is_listening, "the port is being served");
     assert!(
         is_remote_enabled(&data_directory),
         "the response is written down, so the next start opens the port again"
@@ -3597,7 +3605,7 @@ fn the_status_separates_the_answer_given_from_the_port_being_open() {
     let remote_state = RemoteState {
         remote_listen_address: Some("127.0.0.1:7654".to_string()),
         data_directory: Some(data_directory),
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3627,7 +3635,7 @@ fn the_status_names_this_machines_certificate_and_how_many_connections_it_holds(
     let mut remote_state = RemoteState {
         remote_listen_address: Some("127.0.0.1:7654".to_string()),
         data_directory: Some(data_directory),
-        listening: true,
+        is_listening: true,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3673,7 +3681,7 @@ fn a_listener_that_cannot_start_serving_writes_no_record_of_the_answer() {
     let mut remote_state = RemoteState {
         remote_listen_address: Some(occupied_socket_address.to_string()),
         data_directory: Some(data_directory.clone()),
-        listening: false,
+        is_listening: false,
         admitted_remote_connections: Vec::new(),
         next_remote_connection_id: 0,
         full_capacity_warning: WarningRateLimiter::new(),
@@ -3691,7 +3699,7 @@ fn a_listener_that_cannot_start_serving_writes_no_record_of_the_answer() {
         })
     );
     assert!(!EnabledFile::resolve_enabled_file_path(&data_directory).exists());
-    assert!(!remote_state.listening);
+    assert!(!remote_state.is_listening);
 
     drop(occupied);
 }

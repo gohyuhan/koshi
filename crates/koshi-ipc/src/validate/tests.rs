@@ -77,9 +77,10 @@ fn an_address_outside_the_runtime_directory_is_untrusted() {
         .join("elsewhere.sock")
         .to_string_lossy()
         .into_owned();
-    let error = validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
     );
 }
@@ -90,9 +91,10 @@ fn an_address_nested_below_the_runtime_directory_is_untrusted() {
     let runtime_directory = build_private_runtime_directory("nested");
     let socket_address = runtime_directory.join("sub").join("session.sock");
     let socket_address = socket_address.to_string_lossy();
-    let error = validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
     );
 }
@@ -102,9 +104,10 @@ fn an_address_nested_below_the_runtime_directory_is_untrusted() {
 fn a_dot_dot_step_cannot_escape_the_runtime_directory() {
     let runtime_directory = build_private_runtime_directory("dotdot");
     let socket_address = format!("{}/../evil.sock", runtime_directory.display());
-    let error = validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
     );
 }
@@ -114,9 +117,10 @@ fn a_dot_dot_step_cannot_escape_the_runtime_directory() {
 fn an_address_that_is_the_runtime_directory_itself_is_untrusted() {
     let runtime_directory = build_private_runtime_directory("self");
     let socket_address = runtime_directory.to_string_lossy().into_owned();
-    let error = validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
     );
 }
@@ -130,9 +134,10 @@ fn a_runtime_directory_open_to_the_group_is_untrusted() {
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let error = validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: runtime directory mode is 750, expected 700")
     );
 }
@@ -146,9 +151,10 @@ fn a_missing_runtime_directory_is_untrusted() {
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let error = validate_socket_address(&socket_address, &missing_runtime_directory).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &missing_runtime_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!(
             "untrusted socket address {socket_address}: runtime directory is unreadable: \
              No such file or directory (os error 2)"
@@ -168,10 +174,11 @@ fn a_regular_file_standing_in_for_the_runtime_directory_is_untrusted() {
         .to_string_lossy()
         .into_owned();
 
-    let error = validate_socket_address(&socket_address, &blocking_directory_path).unwrap_err();
+    let validation_error =
+        validate_socket_address(&socket_address, &blocking_directory_path).unwrap_err();
 
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: runtime directory is not a directory")
     );
 }
@@ -189,10 +196,10 @@ fn a_symbolic_link_standing_in_for_the_runtime_directory_is_untrusted() {
     std::os::unix::fs::symlink(&linked_directory, &link).expect("symlink");
     let socket_address = link.join("session.sock").to_string_lossy().into_owned();
 
-    let error = validate_socket_address(&socket_address, &link).unwrap_err();
+    let validation_error = validate_socket_address(&socket_address, &link).unwrap_err();
 
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: runtime directory is a symbolic link")
     );
 }
@@ -250,9 +257,10 @@ fn an_address_outside_the_shared_dir_is_untrusted() {
         .join("elsewhere.sock")
         .to_string_lossy()
         .into_owned();
-    let error = validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+    let validation_error =
+        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!(
             "untrusted socket address {socket_address}: \
              not directly inside the koshi shared session directory"
@@ -265,9 +273,10 @@ fn an_address_outside_the_shared_dir_is_untrusted() {
 fn a_dot_dot_step_cannot_escape_the_shared_dir() {
     let shared_directory = build_shared_session_directory("dotdot");
     let socket_address = format!("{}/../evil.sock", shared_directory.display());
-    let error = validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+    let validation_error =
+        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!(
             "untrusted socket address {socket_address}: \
              not directly inside the koshi shared session directory"
@@ -286,10 +295,10 @@ fn a_missing_shared_dir_is_untrusted() {
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let error =
+    let validation_error =
         validate_shared_socket_address(&socket_address, &missing_shared_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!(
             "untrusted socket address {socket_address}: shared session directory is unreadable: \
              No such file or directory (os error 2)"
@@ -307,10 +316,10 @@ fn a_regular_file_standing_in_for_the_shared_dir_is_untrusted() {
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let error =
+    let validation_error =
         validate_shared_socket_address(&socket_address, &blocking_directory_path).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: shared session directory is not a directory")
     );
 }
@@ -324,9 +333,10 @@ fn a_shared_dir_other_users_may_write_is_untrusted() {
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let error = validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+    let validation_error =
+        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!(
             "untrusted socket address {socket_address}: shared session directory mode is 775, expected 755"
         )
@@ -342,9 +352,10 @@ fn a_shared_dir_closed_to_other_users_is_untrusted() {
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let error = validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+    let validation_error =
+        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!(
             "untrusted socket address {socket_address}: shared session directory mode is 700, expected 755"
         )
@@ -377,10 +388,10 @@ fn a_symbolic_link_standing_in_for_the_shared_dir_is_untrusted() {
     std::os::unix::fs::symlink(&linked_directory, &link).expect("symlink");
     let socket_address = link.join("session.sock").to_string_lossy().into_owned();
 
-    let error = validate_shared_socket_address(&socket_address, &link).unwrap_err();
+    let validation_error = validate_shared_socket_address(&socket_address, &link).unwrap_err();
 
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         format!("untrusted socket address {socket_address}: shared session directory is a symbolic link")
     );
 }
@@ -396,9 +407,10 @@ fn a_koshi_prefixed_pipe_name_passes() {
 #[cfg(windows)]
 #[test]
 fn a_pipe_name_outside_the_koshi_namespace_is_untrusted() {
-    let error = validate_socket_address("other-session-abc", Path::new("unused")).unwrap_err();
+    let validation_error =
+        validate_socket_address("other-session-abc", Path::new("unused")).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         "untrusted socket address other-session-abc: pipe name is outside the koshi- namespace"
     );
 }
@@ -412,10 +424,10 @@ fn a_koshi_prefixed_shared_pipe_name_passes() {
 #[cfg(windows)]
 #[test]
 fn a_shared_pipe_name_outside_the_koshi_namespace_is_untrusted() {
-    let error =
+    let validation_error =
         validate_shared_socket_address("other-session-abc", Path::new("unused")).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        validation_error.to_string(),
         "untrusted socket address other-session-abc: pipe name is outside the koshi- namespace"
     );
 }
@@ -481,10 +493,10 @@ fn reclaiming_an_address_holding_a_directory_reports_the_unlink_failure() {
     std::fs::create_dir_all(&control).expect("create control dir");
     let expected_detail = std::fs::remove_file(&control).unwrap_err().to_string();
 
-    let error = reclaim_stale_socket(&socket_address).unwrap_err();
+    let reclaim_error = reclaim_stale_socket(&socket_address).unwrap_err();
 
-    let IpcError::Transport { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let IpcError::Transport { error_detail } = reclaim_error else {
+        panic!("wrong error: {reclaim_error}");
     };
     assert_eq!(error_detail, expected_detail);
     assert!(Path::new(&socket_address).is_dir());
@@ -508,9 +520,9 @@ fn reclaiming_an_address_with_a_live_listener_is_refused() {
     let socket_address = build_test_socket_address("busy");
     let _listener = Listener::bind(&socket_address).expect("bind");
 
-    let error = reclaim_stale_socket(&socket_address).unwrap_err();
+    let reclaim_error = reclaim_stale_socket(&socket_address).unwrap_err();
     assert_eq!(
-        error.to_string(),
+        reclaim_error.to_string(),
         format!("another process is already listening at {socket_address}")
     );
     // The refused reclaim leaves the live listener's socket file in place.

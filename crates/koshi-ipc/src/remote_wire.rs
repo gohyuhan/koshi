@@ -1,27 +1,24 @@
 //! What a remote client and the machine serving it say to each other over the
 //! TLS stream, before any session is reached.
 //!
-//! The client opens with
-//! [`Hello`](crate::remote_wire::RemoteClientFrame::Hello), which names the
-//! doorway versions it speaks, the session protocol versions it speaks, and
-//! the secret from a grant. The server settles the doorway version from the
-//! first pair: the highest both ends speak. The second pair it relays, unread,
-//! into the session-plane Hello it sends on the client's behalf; the session
-//! server refuses a mismatch there by name. The server answers
-//! [`Welcome`](crate::remote_wire::RemoteServerFrame::Welcome) carrying the
-//! settled doorway version, or
-//! [`Refused`](crate::remote_wire::RemoteServerFrame::Refused). After that the
-//! client either lists the sessions its secret reaches, or asks to attach to
-//! one. [`open_remote_connection`](crate::remote_wire::open_remote_connection) is the dialling side of that
-//! opening: it dials, sends the Hello and reads the one frame answering it,
-//! all inside one deadline.
+//! The client opens with [`Hello`](crate::remote_wire::RemoteClientFrame::Hello), which names the
+//! doorway versions it speaks, the session protocol versions it speaks, and the secret from a
+//! grant. The server settles the doorway version from the first pair: the highest both ends speak.
+//! The second pair it relays, unread, into the session-plane Hello it sends on the client's behalf;
+//! the session server refuses a mismatch there by name. The server answers
+//! [`Welcome`](crate::remote_wire::RemoteServerFrame::Welcome) carrying the settled doorway
+//! version, or [`Refused`](crate::remote_wire::RemoteServerFrame::Refused). After that the client
+//! either lists the sessions its secret reaches, or asks to attach to one.
+//! [`open_remote_connection`](crate::remote_wire::open_remote_connection) is the dialling side of
+//! that opening: it dials, sends the Hello and reads the one frame answering it, all inside one
+//! deadline.
 //!
 //! Once an [`Attach`](crate::remote_wire::RemoteClientFrame::Attach) is
 //! admitted, these frames stop. The next bytes on the stream are the session
 //! server's own answer frames, carried through unparsed.
 //!
-//! How long the halves [`open_remote_connection`](crate::remote_wire::open_remote_connection) hands back may block
-//! is the caller's choice, made when it dials.
+//! How long the halves [`open_remote_connection`](crate::remote_wire::open_remote_connection) hands
+//! back may block is the caller's choice, made when it dials.
 //!
 //! Every refusal carries the same sentence,
 //! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED).
@@ -36,7 +33,7 @@ use crate::error::IpcError;
 use crate::protocol::ConnectionToken;
 use crate::router::SessionSelector;
 use crate::tls;
-use crate::transport::{frame_halves, read_message, write_message, FrameReader, FrameWriter};
+use crate::transport::{build_frame_halves, read_message, write_message, FrameReader, FrameWriter};
 
 /// The highest doorway version this build speaks, and the one it uses when the
 /// caller speaks it too.
@@ -71,11 +68,11 @@ pub const REMOTE_REFUSED: &str = "this server did not admit the connection";
 /// `"the caller speaks remote doorway 2 to 3, this koshi speaks 1 to 1"`.
 #[must_use]
 pub fn format_version_refusal(
-    caller_min_protocol_version: u32,
-    caller_max_protocol_version: u32,
+    caller_minimum_protocol_version: u32,
+    caller_maximum_protocol_version: u32,
 ) -> String {
     format!(
-        "the caller speaks remote doorway {caller_min_protocol_version} to {caller_max_protocol_version}, \
+        "the caller speaks remote doorway {caller_minimum_protocol_version} to {caller_maximum_protocol_version}, \
          this koshi speaks {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}"
     )
 }
@@ -91,19 +88,19 @@ pub enum RemoteClientFrame {
     /// versions the client speaks, and presents the secret from a grant. Sent
     /// before any other frame.
     ///
-    /// The server settles the doorway version from `min_remote_version` and
-    /// `max_remote_version`. It carries `min_protocol_version` and
-    /// `max_protocol_version` into the session-plane Hello it sends for this
+    /// The server settles the doorway version from `minimum_remote_version` and
+    /// `maximum_remote_version`. It carries `minimum_protocol_version` and
+    /// `maximum_protocol_version` into the session-plane Hello it sends for this
     /// client, and never reads them itself.
     Hello {
         /// The lowest doorway version the client speaks.
-        min_remote_version: u32,
+        minimum_remote_version: u32,
         /// The highest doorway version the client speaks.
-        max_remote_version: u32,
+        maximum_remote_version: u32,
         /// The lowest session protocol version the client speaks.
-        min_protocol_version: u32,
+        minimum_protocol_version: u32,
         /// The highest session protocol version the client speaks.
-        max_protocol_version: u32,
+        maximum_protocol_version: u32,
         /// The secret the operator handed out with a grant.
         connection_token: ConnectionToken,
     },
@@ -146,8 +143,8 @@ pub enum RemoteServerFrame {
 /// Open a TLS stream to `server_address`, send `hello_frame`, and read the one frame the
 /// server answers it with.
 ///
-/// `pinned_certificate_fingerprint` is the fingerprint saved from an earlier connection, or `None` on
-/// the first connection to this server.
+/// `pinned_certificate_fingerprint` is the fingerprint saved from an earlier connection, or `None`
+/// on the first connection to this server.
 ///
 /// `connection_timeout` bounds everything after the name lookup: the connect, the TLS
 /// handshake, the Hello and the answer share one deadline. A server that
@@ -190,7 +187,7 @@ pub fn open_remote_connection(
     let reply_deadline = reply_timeout.map(|reply_timeout| Instant::now() + reply_timeout);
     reader.set_deadline(reply_deadline);
     writer.set_deadline(reply_deadline);
-    let (reader, writer) = frame_halves(Box::new(reader), Box::new(writer));
+    let (reader, writer) = build_frame_halves(Box::new(reader), Box::new(writer));
     Ok((
         reader,
         writer,

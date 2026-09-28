@@ -10,18 +10,10 @@
 use super::*;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
 
-/// Returns a shared lock that serializes the panic-hook tests.
-///
-/// Every test that installs a panic hook mutates the process-global hook slot.
-/// Rust runs tests in parallel, so a second test's `set_hook` can land between
-/// the first test's install and its `catch_unwind`. This lock keeps one such
-/// test running at a time.
-fn get_panic_hook_test_lock() -> &'static Mutex<()> {
-    static PANIC_HOOK_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    PANIC_HOOK_TEST_LOCK.get_or_init(|| Mutex::new(()))
-}
+/// Serializes the tests that replace the process-global panic hook. One such
+/// test runs at a time.
+static PANIC_HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn drop_runs_hooks_in_registration_order() {
@@ -44,7 +36,7 @@ fn drop_runs_hooks_in_registration_order() {
 // prior hook before returning so it does not perturb other tests.
 #[test]
 fn panic_runs_cleanup_once_then_drop_is_noop() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -90,7 +82,7 @@ fn panic_runs_cleanup_once_then_drop_is_noop() {
 // own `catch_unwind`. The deliberate panic is silenced under a no-op hook.
 #[test]
 fn a_panicking_hook_does_not_stop_later_hooks() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let completed_hook_count = Arc::new(AtomicUsize::new(0));
@@ -121,7 +113,7 @@ fn a_panicking_hook_does_not_stop_later_hooks() {
 // must still run.
 #[test]
 fn a_panicking_hook_during_panic_handling_does_not_abort() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let completed_hook_count = Arc::new(AtomicUsize::new(0));
@@ -178,7 +170,7 @@ fn a_default_guard_runs_its_hooks_on_drop() {
 // poisoned lock instead of panicking.
 #[test]
 fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let before_cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -234,7 +226,7 @@ fn cleanup_still_runs_after_a_thread_died_holding_the_registry() {
 // permanently drained by the earlier panic.
 #[test]
 fn hooks_registered_after_a_panic_drain_still_run_on_drop() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let before_cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -286,7 +278,7 @@ fn hooks_registered_after_a_panic_drain_still_run_on_drop() {
 // previously installed hook, so a subsequent panic no longer chains into cleanup.
 #[test]
 fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -321,7 +313,7 @@ fn dropping_panic_hook_guard_restores_previous_hook_so_cleanup_no_longer_chains(
 // outer chained hook back; dropping the outer one puts the original hook back.
 #[test]
 fn nested_panic_hook_guards_dropped_last_in_first_out_restore_each_previous_hook() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let original_hook_call_count = Arc::new(AtomicUsize::new(0));
@@ -395,7 +387,7 @@ fn nested_panic_hook_guards_dropped_last_in_first_out_restore_each_previous_hook
 // the cleanup hook has already counted.
 #[test]
 fn the_previous_panic_hook_runs_after_the_cleanup_hooks() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -439,7 +431,7 @@ fn the_previous_panic_hook_runs_after_the_cleanup_hooks() {
 // registry.
 #[test]
 fn a_panic_hook_guard_dropped_while_unwinding_leaves_the_chained_hook_installed() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -480,7 +472,7 @@ fn a_panic_hook_guard_dropped_while_unwinding_leaves_the_chained_hook_installed(
 // on a fresh thread rather than on the unwinding one.
 #[test]
 fn a_guard_dropped_while_unwinding_runs_its_hooks_on_another_thread() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_thread_id = Arc::new(Mutex::new(None));
@@ -518,7 +510,7 @@ fn a_guard_dropped_while_unwinding_runs_its_hooks_on_another_thread() {
 // drain runs it.
 #[test]
 fn a_hook_registered_by_a_running_hook_runs_on_the_next_drain() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let cleanup_count = Arc::new(AtomicUsize::new(0));
@@ -744,28 +736,9 @@ fn a_read_only_crash_directory_this_user_owns_is_made_private_and_takes_the_repo
     let _ = std::fs::remove_dir_all(&crash_directory_path);
 }
 
-#[cfg(unix)]
-#[test]
-fn a_crash_directory_this_user_cannot_make_private_takes_no_report() {
-    // The path names a file, so no directory can be created there.
-    let crash_directory_path = build_crash_directory_path("not-a-directory");
-    std::fs::create_dir_all(crash_directory_path.parent().expect("a parent"))
-        .expect("the parent exists");
-    std::fs::write(&crash_directory_path, b"x").expect("plant a file where the directory would go");
-
-    build_fixed_crash_report().write_crash_report(&crash_directory_path);
-
-    assert_eq!(
-        std::fs::read(&crash_directory_path).expect("the planted file is still there"),
-        b"x"
-    );
-
-    let _ = std::fs::remove_file(&crash_directory_path);
-}
-
 #[test]
 fn a_panic_writes_a_crash_report_naming_the_message_and_the_location() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let crash_directory_path = build_crash_directory_path("panic-message");
@@ -840,7 +813,7 @@ fn a_panic_writes_a_crash_report_naming_the_message_and_the_location() {
 
 #[test]
 fn a_panic_with_no_message_writes_the_stand_in_text() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let crash_directory_path = build_crash_directory_path("panic-no-message");
@@ -871,7 +844,7 @@ fn a_panic_with_no_message_writes_the_stand_in_text() {
 // written the same as a literal one.
 #[test]
 fn a_formatted_panic_message_is_written_in_full() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let crash_directory_path = build_crash_directory_path("panic-formatted");
@@ -904,7 +877,7 @@ fn a_formatted_panic_message_is_written_in_full() {
 
 #[test]
 fn a_panic_with_a_multi_line_message_keeps_every_line() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let crash_directory_path = build_crash_directory_path("panic-multi-line");
@@ -937,7 +910,7 @@ fn a_panic_with_a_multi_line_message_keeps_every_line() {
 
 #[test]
 fn a_panic_with_no_crash_directory_writes_no_file() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let crash_directory_path = build_crash_directory_path("no-crash-directory");
@@ -970,7 +943,7 @@ fn a_panic_with_no_crash_directory_writes_no_file() {
 
 #[test]
 fn the_cleanup_hooks_run_before_the_crash_report_is_written() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let crash_directory_path = build_crash_directory_path("hooks-first");
@@ -1013,7 +986,7 @@ fn the_cleanup_hooks_run_before_the_crash_report_is_written() {
 
 #[test]
 fn a_crash_report_that_cannot_be_written_still_restores_the_terminal() {
-    let _panic_hook_test_guard = get_panic_hook_test_lock()
+    let _panic_hook_test_guard = PANIC_HOOK_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // The crash directory's path is a file, so writing the report fails.

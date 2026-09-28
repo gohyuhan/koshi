@@ -49,21 +49,21 @@ fn osc133_exit_code_accepts_every_decimal_i32_form() {
 
 #[test]
 fn osc133_exit_code_rejects_anything_that_is_not_a_decimal_i32() {
-    assert_invalid(&[b"133", b"D", b"2147483648"]);
-    assert_invalid(&[b"133", b"D", b" 0"]);
-    assert_invalid(&[b"133", b"D", b"0 "]);
-    assert_invalid(&[b"133", b"D", b"0x1"]);
-    assert_invalid(&[b"133", b"D", b"1.0"]);
-    assert_invalid(&[b"133", b"D", b"\xff"]);
-    assert_invalid(&[b"133", b"D", "１".as_bytes()]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b"2147483648"]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b" 0"]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b"0 "]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b"0x1"]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b"1.0"]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b"\xff"]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", "１".as_bytes()]);
 }
 
 #[test]
 fn osc133_rejects_unrelated_and_malformed_payloads() {
-    assert_invalid(&[b"7", b"A"]);
-    assert_invalid(&[b"133"]);
-    assert_invalid(&[b"133", b"E"]);
-    assert_invalid(&[b"133", b"D", b"not-a-number"]);
+    assert_osc133_parse_returns_none(&[b"7", b"A"]);
+    assert_osc133_parse_returns_none(&[b"133"]);
+    assert_osc133_parse_returns_none(&[b"133", b"E"]);
+    assert_osc133_parse_returns_none(&[b"133", b"D", b"not-a-number"]);
 }
 
 #[test]
@@ -92,16 +92,16 @@ fn osc133_markers_carrying_shell_options_are_still_recognized() {
 
 #[test]
 fn osc133_rejects_a_malformed_command_number_or_marker() {
-    assert_invalid(&[]);
-    assert_invalid(&[b"133", b""]);
-    assert_invalid(&[b"133", b"a"]);
-    assert_invalid(&[b"133", b"AB"]);
-    assert_invalid(&[b"0133", b"A"]);
-    assert_invalid(&[b"1330", b"A"]);
-    assert_invalid(&[b"", b"A"]);
+    assert_osc133_parse_returns_none(&[]);
+    assert_osc133_parse_returns_none(&[b"133", b""]);
+    assert_osc133_parse_returns_none(&[b"133", b"a"]);
+    assert_osc133_parse_returns_none(&[b"133", b"AB"]);
+    assert_osc133_parse_returns_none(&[b"0133", b"A"]);
+    assert_osc133_parse_returns_none(&[b"1330", b"A"]);
+    assert_osc133_parse_returns_none(&[b"", b"A"]);
 }
 
-fn assert_invalid(osc_parameters: &[&[u8]]) {
+fn assert_osc133_parse_returns_none(osc_parameters: &[&[u8]]) {
     assert_eq!(
         parse_osc133(osc_parameters),
         None,

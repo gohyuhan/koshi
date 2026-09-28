@@ -7,19 +7,18 @@ use std::path::{Path, PathBuf};
 use koshi_core::geometry::SplitDirection;
 use koshi_layout::size::{SizeConstraint, SizeWeight};
 use koshi_layout::template::{
-    CommandTemplate, LeafTemplate, PluginTemplate, ProfileTemplate, TabTemplate, TemplateNode,
-    TemplateSplit, TerminalTemplate,
+    CommandTemplate, ProfileTemplate, TabTemplate, TemplateNode, TemplateSplit, TerminalTemplate,
 };
 
 use super::*;
 
-fn parse_profile_text(profile_text: &str) -> Result<ProfileTemplate, ProfileError> {
-    parse_profile(Path::new("profile/dev.kdl"), profile_text)
+fn parse_profile_text(profile_source_text: &str) -> Result<ProfileTemplate, ProfileError> {
+    parse_profile(Path::new("profile/dev.kdl"), profile_source_text)
 }
 
 /// The diagnostics of an `Invalid` outcome, as their messages.
-fn collect_profile_diagnostic_messages(profile_text: &str) -> Vec<String> {
-    match parse_profile_text(profile_text) {
+fn collect_profile_diagnostic_messages(profile_source_text: &str) -> Vec<String> {
+    match parse_profile_text(profile_source_text) {
         Err(ProfileError::Invalid { diagnostics, .. }) => diagnostics
             .iter()
             .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
@@ -29,15 +28,15 @@ fn collect_profile_diagnostic_messages(profile_text: &str) -> Vec<String> {
     }
 }
 
-/// The diagnostics of an `Invalid` outcome, as the exact profile_text text each
+/// The diagnostics of an `Invalid` outcome, as the exact source text each
 /// one's caret span covers.
-fn collect_profile_diagnostic_spans(profile_text: &str) -> Vec<String> {
-    match parse_profile_text(profile_text) {
+fn collect_profile_diagnostic_spans(profile_source_text: &str) -> Vec<String> {
+    match parse_profile_text(profile_source_text) {
         Err(ProfileError::Invalid { diagnostics, .. }) => diagnostics
             .iter()
             .map(|diagnostic| {
                 let span = diagnostic.get_source_span();
-                profile_text[span.offset()..span.offset() + span.len()].to_string()
+                profile_source_text[span.offset()..span.offset() + span.len()].to_string()
             })
             .collect(),
         Err(ProfileError::Syntax(_)) => panic!("expected schema diagnostics, got syntax error"),
@@ -46,7 +45,7 @@ fn collect_profile_diagnostic_spans(profile_text: &str) -> Vec<String> {
 }
 
 fn build_shell_leaf() -> TemplateNode {
-    TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate::default()))
+    TemplateNode::Leaf(TerminalTemplate::default())
 }
 
 fn build_default_size_weight() -> SizeWeight {
@@ -57,9 +56,9 @@ fn build_default_size_weight() -> SizeWeight {
 
 #[test]
 fn minimal_profile_is_one_shell_tab() {
-    let template = parse_profile_text("version 1\ntab {pane}").unwrap();
+    let profile_template = parse_profile_text("version 1\ntab {pane}").unwrap();
     assert_eq!(
-        template,
+        profile_template,
         ProfileTemplate {
             tabs: vec![TabTemplate {
                 root: build_shell_leaf(),
@@ -73,7 +72,7 @@ fn minimal_profile_is_one_shell_tab() {
 
 #[test]
 fn nested_profile_parses_every_config_kind() {
-    let profile_text = r#"
+    let profile_source_text = r#"
 version 1
 
 tab {
@@ -96,15 +95,15 @@ tab {
                     command "htop"
                     expanded
                 }
-                plugin "session-manager"
+                pane
             }
         }
     }
 }
 "#;
-    let template = parse_profile_text(profile_text).unwrap();
+    let profile_template = parse_profile_text(profile_source_text).unwrap();
 
-    let editor = TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate {
+    let editor_pane = TemplateNode::Leaf(TerminalTemplate {
         command: Some(CommandTemplate {
             program: PathBuf::from("nvim"),
             arguments: vec!["+42".to_string(), "src/main.rs".to_string()],
@@ -114,27 +113,22 @@ tab {
             ("RUST_LOG".to_string(), "debug".to_string()),
             ("NO_COLOR".to_string(), "1".to_string()),
         ]),
-    }));
-    let monitor = TemplateNode::Leaf(LeafTemplate::Terminal(TerminalTemplate {
+    });
+    let monitor_pane = TemplateNode::Leaf(TerminalTemplate {
         command: Some(CommandTemplate {
             program: PathBuf::from("htop"),
             arguments: Vec::new(),
         }),
         working_directory: None,
         environment_variables: BTreeMap::new(),
-    }));
+    });
     let stack = TemplateNode::Split(TemplateSplit {
         direction: SplitDirection::Stacked,
-        children: vec![
-            monitor,
-            TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate {
-                plugin_name: "session-manager".to_string(),
-            })),
-        ],
+        children: vec![monitor_pane, build_shell_leaf()],
         weights: vec![build_default_size_weight(), build_default_size_weight()],
         active_child_index: 0,
     });
-    let right = TemplateNode::Split(TemplateSplit {
+    let right_vertical_split = TemplateNode::Split(TemplateSplit {
         direction: SplitDirection::Vertical,
         children: vec![build_shell_leaf(), stack],
         weights: vec![
@@ -152,7 +146,7 @@ tab {
         tabs: vec![TabTemplate {
             root: TemplateNode::Split(TemplateSplit {
                 direction: SplitDirection::Horizontal,
-                children: vec![editor, right],
+                children: vec![editor_pane, right_vertical_split],
                 weights: vec![
                     SizeWeight::from_primary_constraint(SizeConstraint::Percent(60)),
                     SizeWeight::from_primary_constraint(SizeConstraint::Percent(40)),
@@ -164,12 +158,12 @@ tab {
         focused_tab_index: 0,
         is_locked: false,
     };
-    assert_eq!(template, expected_profile_template);
+    assert_eq!(profile_template, expected_profile_template);
 }
 
 #[test]
 fn multiple_tabs_with_tab_focus_and_per_tab_pane_focus() {
-    let profile_text = r#"
+    let profile_source_text = r#"
 version 1
 tab {
     horizontal {
@@ -182,18 +176,18 @@ tab {
     pane { command "htop" }
 }
 "#;
-    let template = parse_profile_text(profile_text).unwrap();
-    assert_eq!(template.tabs.len(), 2);
-    assert_eq!(template.focused_tab_index, 1);
-    assert_eq!(template.tabs[0].focused_leaf_index, 1);
-    assert_eq!(template.tabs[1].focused_leaf_index, 0);
+    let profile_template = parse_profile_text(profile_source_text).unwrap();
+    assert_eq!(profile_template.tabs.len(), 2);
+    assert_eq!(profile_template.focused_tab_index, 1);
+    assert_eq!(profile_template.tabs[0].focused_leaf_index, 1);
+    assert_eq!(profile_template.tabs[1].focused_leaf_index, 0);
 }
 
 #[test]
 fn fixed_cell_size_parses_as_fixed_constraint() {
-    let template =
+    let profile_template =
         parse_profile_text("version 1\ntab { horizontal { pane {size 30}; pane } }").unwrap();
-    let TemplateNode::Split(split) = &template.tabs[0].root else {
+    let TemplateNode::Split(split) = &profile_template.tabs[0].root else {
         panic!("expected split root");
     };
     assert_eq!(
@@ -207,8 +201,9 @@ fn fixed_cell_size_parses_as_fixed_constraint() {
 
 #[test]
 fn stack_defaults_to_first_member_expanded() {
-    let template = parse_profile_text("version 1\ntab { stack { pane; pane; pane } }").unwrap();
-    let TemplateNode::Split(split) = &template.tabs[0].root else {
+    let profile_template =
+        parse_profile_text("version 1\ntab { stack { pane; pane; pane } }").unwrap();
+    let TemplateNode::Split(split) = &profile_template.tabs[0].root else {
         panic!("expected stack root");
     };
     assert_eq!(split.direction, SplitDirection::Stacked);
@@ -218,7 +213,7 @@ fn stack_defaults_to_first_member_expanded() {
 
 #[test]
 fn expanded_member_becomes_active_and_may_hold_focus() {
-    let profile_text = r#"
+    let profile_source_text = r#"
 version 1
 tab {
     stack {
@@ -227,28 +222,28 @@ tab {
     }
 }
 "#;
-    let template = parse_profile_text(profile_text).unwrap();
-    let TemplateNode::Split(split) = &template.tabs[0].root else {
+    let profile_template = parse_profile_text(profile_source_text).unwrap();
+    let TemplateNode::Split(split) = &profile_template.tabs[0].root else {
         panic!("expected stack root");
     };
     assert_eq!(split.active_child_index, 1);
-    assert_eq!(template.tabs[0].focused_leaf_index, 1);
+    assert_eq!(profile_template.tabs[0].focused_leaf_index, 1);
 }
 
 #[test]
 fn default_focus_skips_collapsed_stack_members() {
     // No `focus` marker anywhere: initial focus must land on the expanded
     // member (leaf 1), never the collapsed leaf 0.
-    let template =
+    let profile_template =
         parse_profile_text("version 1\ntab { stack { pane; pane {expanded} } }").unwrap();
-    assert_eq!(template.tabs[0].focused_leaf_index, 1);
+    assert_eq!(profile_template.tabs[0].focused_leaf_index, 1);
 }
 
 #[test]
 fn default_focus_descends_into_a_nested_stack() {
     // First child of the horizontal split is a stack expanding its second
     // member: the visible pane is leaf 1, so default focus is 1.
-    let profile_text = r#"
+    let profile_source_text = r#"
 version 1
 tab {
     horizontal {
@@ -260,20 +255,21 @@ tab {
     }
 }
 "#;
-    let template = parse_profile_text(profile_text).unwrap();
-    assert_eq!(template.tabs[0].focused_leaf_index, 1);
+    let profile_template = parse_profile_text(profile_source_text).unwrap();
+    assert_eq!(profile_template.tabs[0].focused_leaf_index, 1);
 }
 
 #[test]
 fn focus_on_first_stack_member_without_expanded_is_allowed() {
     // The first member is the default expanded one, so focusing it is
     // consistent without an explicit `expanded`.
-    let template = parse_profile_text("version 1\ntab { stack { pane {focus}; pane } }").unwrap();
-    assert_eq!(template.tabs[0].focused_leaf_index, 0);
+    let profile_template =
+        parse_profile_text("version 1\ntab { stack { pane {focus}; pane } }").unwrap();
+    assert_eq!(profile_template.tabs[0].focused_leaf_index, 0);
 }
 
 #[test]
-fn older_version_is_accepted() {
+fn version_zero_is_rejected_as_too_old() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 0\ntab {pane}"),
         ["config schema version must be at least 1"]
@@ -281,12 +277,13 @@ fn older_version_is_accepted() {
 }
 
 #[test]
-fn min_and_max_percent_size_are_accepted() {
+fn percent_sizes_at_one_and_one_hundred_are_accepted() {
     // 0% and 101% are already proven invalid; 1% and 100% are the boundary
     // just inside the valid range on either side.
-    let minimum_percent_template =
+    let minimum_percent_profile_template =
         parse_profile_text("version 1\ntab { horizontal { pane { size \"1%\" }; pane } }").unwrap();
-    let TemplateNode::Split(minimum_percent_split) = &minimum_percent_template.tabs[0].root else {
+    let TemplateNode::Split(minimum_percent_split) = &minimum_percent_profile_template.tabs[0].root
+    else {
         panic!("expected split root");
     };
     assert_eq!(
@@ -294,10 +291,11 @@ fn min_and_max_percent_size_are_accepted() {
         SizeWeight::from_primary_constraint(SizeConstraint::Percent(1))
     );
 
-    let maximum_percent_template =
+    let maximum_percent_profile_template =
         parse_profile_text("version 1\ntab { horizontal { pane { size \"100%\" }; pane } }")
             .unwrap();
-    let TemplateNode::Split(maximum_percent_split) = &maximum_percent_template.tabs[0].root else {
+    let TemplateNode::Split(maximum_percent_split) = &maximum_percent_profile_template.tabs[0].root
+    else {
         panic!("expected split root");
     };
     assert_eq!(
@@ -307,12 +305,13 @@ fn min_and_max_percent_size_are_accepted() {
 }
 
 #[test]
-fn min_and_max_cell_size_are_accepted() {
+fn cell_sizes_at_one_and_u16_max_are_accepted() {
     // 0 and 70000 are already proven invalid; 1 and 65535 (u16::MAX) are the
     // boundary just inside the valid range on either side.
-    let minimum_cell_template =
+    let minimum_cell_profile_template =
         parse_profile_text("version 1\ntab { horizontal { pane {size 1}; pane } }").unwrap();
-    let TemplateNode::Split(minimum_cell_split) = &minimum_cell_template.tabs[0].root else {
+    let TemplateNode::Split(minimum_cell_split) = &minimum_cell_profile_template.tabs[0].root
+    else {
         panic!("expected split root");
     };
     assert_eq!(
@@ -320,9 +319,10 @@ fn min_and_max_cell_size_are_accepted() {
         SizeWeight::from_primary_constraint(SizeConstraint::Fixed(1))
     );
 
-    let maximum_cell_template =
+    let maximum_cell_profile_template =
         parse_profile_text("version 1\ntab { horizontal { pane {size 65535}; pane } }").unwrap();
-    let TemplateNode::Split(maximum_cell_split) = &maximum_cell_template.tabs[0].root else {
+    let TemplateNode::Split(maximum_cell_split) = &maximum_cell_profile_template.tabs[0].root
+    else {
         panic!("expected split root");
     };
     assert_eq!(
@@ -332,89 +332,21 @@ fn min_and_max_cell_size_are_accepted() {
 }
 
 #[test]
-fn unicode_plugin_name_is_accepted() {
-    let template =
-        parse_profile_text("version 1\ntab { horizontal { plugin \"\u{1f389}\"; pane } }").unwrap();
-    let TemplateNode::Split(split) = &template.tabs[0].root else {
-        panic!("expected split root");
-    };
-    assert_eq!(
-        split.children[0],
-        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate {
-            plugin_name: "\u{1f389}".to_string(),
-        }))
-    );
-}
-
-#[test]
-fn plugin_carries_sizing_and_focus_in_a_split() {
-    let profile_text = r#"
-version 1
-tab {
-    horizontal {
-        pane
-        plugin "session-manager" {
-            size "30%"
-            focus
-        }
-    }
-}
-"#;
-    let template = parse_profile_text(profile_text).unwrap();
-    let TemplateNode::Split(split) = &template.tabs[0].root else {
-        panic!("expected split root");
-    };
-    assert_eq!(
-        split.weights,
-        vec![
-            build_default_size_weight(),
-            SizeWeight::from_primary_constraint(SizeConstraint::Percent(30))
-        ]
-    );
-    assert_eq!(template.tabs[0].focused_leaf_index, 1);
-}
-
-#[test]
-fn expanded_plugin_member_becomes_the_active_one() {
-    let profile_text = r#"
-version 1
-tab {
-    stack {
-        pane
-        plugin "session-manager" {expanded}
-    }
-}
-"#;
-    let template = parse_profile_text(profile_text).unwrap();
-    let TemplateNode::Split(split) = &template.tabs[0].root else {
-        panic!("expected stack root");
-    };
-    assert_eq!(split.active_child_index, 1);
-    assert_eq!(
-        split.children[1],
-        TemplateNode::Leaf(LeafTemplate::Plugin(PluginTemplate {
-            plugin_name: "session-manager".to_string(),
-        }))
-    );
-    assert_eq!(split.children.len(), 2);
-}
-
-#[test]
 fn lock_marker_sets_the_starting_lock() {
-    let template = parse_profile_text("version 1\nlock\ntab {pane}").unwrap();
-    assert!(template.is_locked);
+    let profile_template = parse_profile_text("version 1\nlock\ntab {pane}").unwrap();
+    assert!(profile_template.is_locked);
 }
 
 #[test]
 fn the_lock_marker_is_read_before_version_too() {
-    let template = parse_profile_text("lock\nversion 1\ntab {pane}").unwrap();
-    assert!(template.is_locked);
+    let profile_template = parse_profile_text("lock\nversion 1\ntab {pane}").unwrap();
+    assert!(profile_template.is_locked);
 }
 
 #[test]
 fn a_profile_without_the_lock_marker_starts_unlocked() {
-    let template = parse_profile_text("version 1\ntab {pane}").unwrap();
-    assert!(!template.is_locked);
+    let profile_template = parse_profile_text("version 1\ntab {pane}").unwrap();
+    assert!(!profile_template.is_locked);
 }
 
 // -------------------------------------------------------------- invalid files
@@ -450,7 +382,7 @@ fn missing_version_is_reported() {
 }
 
 #[test]
-fn newer_version_is_reported() {
+fn version_newer_than_schema_is_reported() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 999\ntab {pane}"),
         ["config schema version 999 is newer than this koshi supports (2)"]
@@ -535,7 +467,7 @@ fn unknown_top_level_node_is_reported() {
 fn empty_tab_is_reported() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\ntab {}"),
-        ["`tab` needs one layout node (`pane`, `plugin`, `horizontal`, `vertical`, or `stack`)"]
+        ["`tab` needs one layout node (`pane`, `horizontal`, `vertical`, or `stack`)"]
     );
 }
 
@@ -545,7 +477,18 @@ fn a_tab_without_a_children_block_is_reported() {
     // empty one; both reach the same missing-root report.
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\ntab"),
-        ["`tab` needs one layout node (`pane`, `plugin`, `horizontal`, `vertical`, or `stack`)"]
+        ["`tab` needs one layout node (`pane`, `horizontal`, `vertical`, or `stack`)"]
+    );
+}
+
+#[test]
+fn a_plugin_node_is_reported_as_an_unknown_key() {
+    assert_eq!(
+        collect_profile_diagnostic_messages("version 1\ntab { plugin \"session-manager\" }"),
+        [
+            "unknown key `tab.plugin`; did you mean `tab.pane`?",
+            "`tab` needs one layout node (`pane`, `horizontal`, `vertical`, or `stack`)",
+        ]
     );
 }
 
@@ -677,7 +620,7 @@ fn split_inside_stack_is_reported() {
         collect_profile_diagnostic_messages(
             "version 1\ntab { stack { pane; vertical { pane; pane } } }"
         ),
-        ["`vertical` cannot be a stack member; stack members are `pane` or `plugin`"]
+        ["`vertical` cannot be a stack member; stack members are `pane`"]
     );
 }
 
@@ -689,7 +632,7 @@ fn focus_inside_an_invalid_stack_member_adds_no_extra_diagnostic() {
         collect_profile_diagnostic_messages(
             "version 1\ntab { stack { pane {expanded}; vertical { pane {focus}; pane } } }"
         ),
-        ["`vertical` cannot be a stack member; stack members are `pane` or `plugin`"]
+        ["`vertical` cannot be a stack member; stack members are `pane`"]
     );
 }
 
@@ -1048,14 +991,14 @@ fn empty_command_program_with_arguments_is_reported() {
 fn empty_command_argument_is_allowed() {
     // Only the program word must be non-empty; `""` is a legitimate
     // argument value for programs that take one.
-    let template =
+    let profile_template =
         parse_profile_text("version 1\ntab { pane { command \"printf\" \"\" } }").unwrap();
-    let TemplateNode::Leaf(LeafTemplate::Terminal(terminal)) = &template.tabs[0].root else {
+    let TemplateNode::Leaf(terminal_template) = &profile_template.tabs[0].root else {
         panic!("expected terminal leaf root");
     };
-    let command = terminal.command.as_ref().unwrap();
-    assert_eq!(command.program, PathBuf::from("printf"));
-    assert_eq!(command.arguments, vec![String::new()]);
+    let command_template = terminal_template.command.as_ref().unwrap();
+    assert_eq!(command_template.program, PathBuf::from("printf"));
+    assert_eq!(command_template.arguments, vec![String::new()]);
 }
 
 #[test]
@@ -1207,12 +1150,13 @@ fn env_given_as_properties_is_reported() {
 fn an_empty_env_value_is_allowed() {
     // Only the name must be non-empty. `""` sets the variable to the empty
     // string.
-    let template = parse_profile_text("version 1\ntab { pane { env \"A\" \"\" } }").unwrap();
-    let TemplateNode::Leaf(LeafTemplate::Terminal(terminal)) = &template.tabs[0].root else {
+    let profile_template =
+        parse_profile_text("version 1\ntab { pane { env \"A\" \"\" } }").unwrap();
+    let TemplateNode::Leaf(terminal_template) = &profile_template.tabs[0].root else {
         panic!("expected terminal leaf root");
     };
     assert_eq!(
-        terminal.environment_variables,
+        terminal_template.environment_variables,
         BTreeMap::from([("A".to_string(), String::new())])
     );
 }
@@ -1266,62 +1210,6 @@ fn unknown_pane_config_is_reported() {
 }
 
 #[test]
-fn plugin_without_name_is_reported() {
-    assert_eq!(
-        collect_profile_diagnostic_messages("version 1\ntab { horizontal { plugin; pane } }"),
-        ["`plugin` takes exactly one name string, like `plugin \"session-manager\"`"]
-    );
-}
-
-#[test]
-fn empty_plugin_name_is_reported() {
-    assert_eq!(
-        collect_profile_diagnostic_messages("version 1\ntab { horizontal { plugin \"\"; pane } }"),
-        ["`plugin` takes one non-empty name string"]
-    );
-}
-
-#[test]
-fn plugin_with_extra_arguments_is_reported() {
-    assert_eq!(
-        collect_profile_diagnostic_messages(
-            "version 1\ntab { horizontal { plugin \"files\" \"tree\"; pane } }"
-        ),
-        ["`plugin` takes exactly one name string, like `plugin \"session-manager\"`"]
-    );
-}
-
-#[test]
-fn non_string_plugin_name_is_reported() {
-    // One positional argument of the wrong kind. The arity is right, and the
-    // report names the value rather than the count.
-    assert_eq!(
-        collect_profile_diagnostic_messages("version 1\ntab { horizontal { plugin 42; pane } }"),
-        ["`plugin` takes one non-empty name string"]
-    );
-}
-
-#[test]
-fn plugin_name_as_a_property_is_reported() {
-    assert_eq!(
-        collect_profile_diagnostic_messages(
-            "version 1\ntab { horizontal { plugin name=\"files\"; pane } }"
-        ),
-        ["`plugin` takes exactly one name string, like `plugin \"session-manager\"`"]
-    );
-}
-
-#[test]
-fn command_inside_plugin_is_reported() {
-    assert_eq!(
-        collect_profile_diagnostic_messages(
-            "version 1\ntab { horizontal { plugin \"files\" { command \"ls\" }; pane } }"
-        ),
-        ["unknown key `plugin.command`; did you mean `plugin.min`?"]
-    );
-}
-
-#[test]
 fn focus_with_arguments_is_reported() {
     assert_eq!(
         collect_profile_diagnostic_messages("version 1\ntab { pane { focus #true } }"),
@@ -1331,14 +1219,14 @@ fn focus_with_arguments_is_reported() {
 
 #[test]
 fn every_violation_is_collected_not_just_the_first() {
-    let profile_text = r#"
+    let profile_source_text = r#"
 version 999
 tab { pane; pane }
 tab { stack {pane} }
 "#;
-    let diagnostic_messages = collect_profile_diagnostic_messages(profile_text);
+    let profile_diagnostic_messages = collect_profile_diagnostic_messages(profile_source_text);
     assert_eq!(
-        diagnostic_messages,
+        profile_diagnostic_messages,
         [
             "config schema version 999 is newer than this koshi supports (2)",
             "`tab` holds one root node; wrap multiple panes in `horizontal`, `vertical`, or \

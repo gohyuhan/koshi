@@ -4,19 +4,18 @@
 //! refused when absent.
 
 use koshi_core::geometry::SplitDirection;
-use koshi_core::ids::{PaneId, PluginId, SessionId, TabId};
+use koshi_core::ids::{PaneId, SessionId, TabId};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 
 use super::*;
 
 /// A two-tab session: one stacked tab of three panes with the middle one
-/// expanded, one single-pane tab, and a plugin pane alongside the terminals.
+/// expanded, and one single-pane tab.
 fn build_attached_session_structure_snapshot() -> AttachedSessionStructureSnapshot {
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let third_pane_id = PaneId::new();
     let logs_pane_id = PaneId::new();
-    let plugin_id = PluginId::new();
 
     AttachedSessionStructureSnapshot {
         session_id: SessionId::new(),
@@ -38,24 +37,6 @@ fn build_attached_session_structure_snapshot() -> AttachedSessionStructureSnapsh
                 tab_index: 1,
                 layout: LayoutNode::Pane(logs_pane_id),
                 focus_mru: vec![logs_pane_id],
-            },
-        ],
-        panes: vec![
-            PaneStructure {
-                pane_id: first_pane_id,
-                pane_kind: PaneKind::Terminal,
-            },
-            PaneStructure {
-                pane_id: second_pane_id,
-                pane_kind: PaneKind::Terminal,
-            },
-            PaneStructure {
-                pane_id: third_pane_id,
-                pane_kind: PaneKind::Plugin { plugin_id },
-            },
-            PaneStructure {
-                pane_id: logs_pane_id,
-                pane_kind: PaneKind::Terminal,
             },
         ],
     }
@@ -133,16 +114,6 @@ fn a_directional_split_arrives_with_its_direction_and_child_order() {
             )),
             focus_mru: vec![left_pane_id],
         }],
-        panes: vec![
-            PaneStructure {
-                pane_id: left_pane_id,
-                pane_kind: PaneKind::Terminal,
-            },
-            PaneStructure {
-                pane_id: right_pane_id,
-                pane_kind: PaneKind::Terminal,
-            },
-        ],
     };
 
     let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
@@ -163,12 +134,11 @@ fn a_directional_split_arrives_with_its_direction_and_child_order() {
 }
 
 #[test]
-fn a_session_with_no_tabs_and_no_panes_survives_a_round_trip() {
+fn a_session_with_no_tabs_survives_a_round_trip() {
     let expected_structure = AttachedSessionStructureSnapshot {
         session_id: SessionId::new(),
         session_name: String::new(),
         tabs: Vec::new(),
-        panes: Vec::new(),
     };
 
     let encoded_json = serde_json::to_string(&expected_structure).expect("encodes");
@@ -190,10 +160,6 @@ fn a_tab_that_has_focused_nothing_yet_arrives_with_an_empty_focus_list() {
             tab_index: 0,
             layout: LayoutNode::Pane(pane_id),
             focus_mru: Vec::new(),
-        }],
-        panes: vec![PaneStructure {
-            pane_id,
-            pane_kind: PaneKind::Terminal,
         }],
     };
 
@@ -218,19 +184,4 @@ fn a_tab_missing_its_focus_list_is_refused() {
         .expect_err("a tab without its focus list decoded instead of failing");
 
     assert_eq!(decode_error.to_string(), "missing field `focus_mru`");
-}
-
-#[test]
-fn a_pane_missing_its_kind_is_refused() {
-    let mut encoded_json =
-        serde_json::to_value(build_attached_session_structure_snapshot()).expect("encodes");
-    encoded_json["panes"][0]
-        .as_object_mut()
-        .expect("a pane encodes as an object")
-        .remove("pane_kind");
-
-    let decode_error = serde_json::from_value::<AttachedSessionStructureSnapshot>(encoded_json)
-        .expect_err("a pane without its kind decoded instead of failing");
-
-    assert_eq!(decode_error.to_string(), "missing field `pane_kind`");
 }

@@ -230,11 +230,11 @@ fn parse_portable_exit_status_maps_a_signal_through_parse_signal_number() {
 /// Nothing received the stop request. The 3-second window is not spent.
 #[test]
 fn is_child_stopped_within_grace_returns_false_for_an_undelivered_stop_request() {
-    let child_exited = AtomicBool::new(false);
+    let has_child_exited = AtomicBool::new(false);
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::NotDelivered,
-        &child_exited,
+        &has_child_exited,
         Duration::from_secs(3),
     );
     let elapsed_duration = wait_started_at.elapsed();
@@ -252,11 +252,11 @@ fn is_child_stopped_within_grace_returns_false_for_an_undelivered_stop_request()
 /// while the child stays alive.
 #[test]
 fn is_child_stopped_within_grace_waits_when_a_delivered_child_stays() {
-    let child_exited = AtomicBool::new(false);
+    let has_child_exited = AtomicBool::new(false);
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::Delivered,
-        &child_exited,
+        &has_child_exited,
         Duration::from_millis(200),
     );
     let elapsed_duration = wait_started_at.elapsed();
@@ -274,11 +274,11 @@ fn is_child_stopped_within_grace_waits_when_a_delivered_child_stays() {
 /// while the leader stays alive.
 #[test]
 fn is_child_stopped_within_grace_waits_for_a_partly_delivered_stop_request() {
-    let child_exited = AtomicBool::new(false);
+    let has_child_exited = AtomicBool::new(false);
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::Unknown,
-        &child_exited,
+        &has_child_exited,
         Duration::from_millis(200),
     );
     let elapsed_duration = wait_started_at.elapsed();
@@ -296,11 +296,11 @@ fn is_child_stopped_within_grace_waits_for_a_partly_delivered_stop_request() {
 /// out the 3-second window.
 #[test]
 fn is_child_stopped_within_grace_returns_true_for_an_exited_child() {
-    let child_exited = AtomicBool::new(true);
+    let has_child_exited = AtomicBool::new(true);
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::Delivered,
-        &child_exited,
+        &has_child_exited,
         Duration::from_secs(3),
     );
     assert!(
@@ -318,8 +318,8 @@ fn is_child_stopped_within_grace_returns_true_for_an_exited_child() {
 /// the end of the window.
 #[test]
 fn is_child_stopped_within_grace_ends_when_the_child_exits_during_the_window() {
-    let child_exited = Arc::new(AtomicBool::new(false));
-    let child_exit_flag = Arc::clone(&child_exited);
+    let has_child_exited = Arc::new(AtomicBool::new(false));
+    let child_exit_flag = Arc::clone(&has_child_exited);
     let child_exit_flag_thread = thread::spawn(move || {
         thread::sleep(Duration::from_millis(100));
         child_exit_flag.store(true, Ordering::SeqCst);
@@ -328,7 +328,7 @@ fn is_child_stopped_within_grace_ends_when_the_child_exits_during_the_window() {
     let wait_started_at = Instant::now();
     let is_stopped = is_child_stopped_within_grace(
         StopRequest::Delivered,
-        &child_exited,
+        &has_child_exited,
         Duration::from_secs(3),
     );
     let elapsed_duration = wait_started_at.elapsed();
@@ -423,16 +423,16 @@ fn should_publish_exit_after_wait(
     )
 }
 
-/// [`ReaderSignals`] over `reader_waker`, `child_exited` and `reader_gate`.
+/// [`ReaderSignals`] over `reader_waker`, `has_child_exited` and `reader_gate`.
 #[cfg(unix)]
 fn build_reader_signals<'a>(
     reader_waker: &'a Waker,
-    child_exited: &'a AtomicBool,
+    has_child_exited: &'a AtomicBool,
     reader_gate: &'a ReaderGate,
 ) -> ReaderSignals<'a> {
     ReaderSignals {
         reader_waker,
-        child_exited,
+        has_child_exited,
         reader_gate,
     }
 }
@@ -448,7 +448,7 @@ fn build_reader_gate() -> ReaderGate {
 fn build_sink_delivery(pty_sink: Arc<dyn PtySink>) -> (Delivery, Arc<Mutex<ExitHandover>>) {
     let (_exit_sender, exit_receiver) = channel::<ExitStatus>();
     let exit_handover_state = Arc::new(Mutex::new(ExitHandover::default()));
-    let delivery = Delivery::Sink {
+    let delivery = Delivery {
         pty_sink,
         exit_receiver,
         exit_handover_state: Arc::clone(&exit_handover_state),
@@ -553,7 +553,7 @@ fn a_settled_pane_finishes_without_waiting_for_the_exit_status() {
     // `exit_sender` is held for the whole test and never sent on. `finish` on
     // a settled pane returns without reading the status channel.
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
-    let delivery = Delivery::Sink {
+    let delivery = Delivery {
         pty_sink: CountingSink::new(),
         exit_receiver,
         exit_handover_state: Arc::new(Mutex::new(ExitHandover {
@@ -584,7 +584,7 @@ fn a_reader_at_the_end_of_its_terminal_hands_the_watchers_status_over_once() {
     let pty_sink = CountingSink::new();
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
     let exit_handover_state = Arc::new(Mutex::new(ExitHandover::default()));
-    let delivery = Delivery::Sink {
+    let delivery = Delivery {
         pty_sink: pty_sink.clone(),
         exit_receiver,
         exit_handover_state: Arc::clone(&exit_handover_state),
@@ -620,7 +620,7 @@ fn a_watcher_that_ends_without_a_status_tells_the_consumer_nothing() {
     let pty_sink = CountingSink::new();
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
     drop(exit_sender);
-    let delivery = Delivery::Sink {
+    let delivery = Delivery {
         pty_sink: pty_sink.clone(),
         exit_receiver,
         exit_handover_state: Arc::new(Mutex::new(ExitHandover::default())),
@@ -633,18 +633,6 @@ fn a_watcher_that_ends_without_a_status_tells_the_consumer_nothing() {
         0,
         "a status that never arrived must not be published"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_channel_delivery_never_reads_as_settled() {
-    let pane_id = PaneId::new();
-    let (pty_handle, output_receiver, _exit_receiver) = PtyHandle::from_pane_id(pane_id);
-    let delivery = Delivery::Channel(output_receiver);
-
-    assert!(!delivery.is_settled(), "a held handle settles nothing");
-    drop(pty_handle);
-    assert!(!delivery.is_settled(), "a dropped handle settles nothing");
 }
 
 /// [`wait_for_reader_before_publishing`] over `exit_handover_state`, publishing
@@ -1223,7 +1211,7 @@ fn a_woken_reader_hands_over_the_last_output_then_stops() {
         .write_all(b"bye")
         .expect("child prints on the way out");
     // The watcher's order: the flag first, then the ring.
-    let child_exited = AtomicBool::new(true);
+    let has_child_exited = AtomicBool::new(true);
     waker.wake_reader();
 
     let pump_started_at = Instant::now();
@@ -1231,7 +1219,7 @@ fn a_woken_reader_hands_over_the_last_output_then_stops() {
         &delivery,
         PaneId::new(),
         &terminal_fd,
-        build_reader_signals(&waker, &child_exited, &reader_gate),
+        build_reader_signals(&waker, &has_child_exited, &reader_gate),
         EXIT_PUBLISH_GRACE_DURATION,
         EXIT_PUBLISH_LIMIT_DURATION,
     );
@@ -1277,13 +1265,13 @@ fn a_closed_pane_brings_its_reader_straight_back() {
 
     let (completion_sender, completion_receiver) = channel::<Instant>();
     thread::spawn(move || {
-        let child_exited = AtomicBool::new(false);
+        let has_child_exited = AtomicBool::new(false);
         let reader_gate = build_reader_gate();
         pump_waited(
             &delivery,
             PaneId::new(),
             &terminal_fd,
-            build_reader_signals(&waker, &child_exited, &reader_gate),
+            build_reader_signals(&waker, &has_child_exited, &reader_gate),
             grace,
             limit,
         );
@@ -1313,13 +1301,13 @@ fn a_reader_waits_on_a_live_terminal_with_no_timer() {
 
     let (completion_sender, completion_receiver) = channel::<()>();
     thread::spawn(move || {
-        let child_exited = AtomicBool::new(false);
+        let has_child_exited = AtomicBool::new(false);
         let reader_gate = build_reader_gate();
         pump_waited(
             &delivery,
             PaneId::new(),
             &terminal_fd,
-            build_reader_signals(&waker, &child_exited, &reader_gate),
+            build_reader_signals(&waker, &has_child_exited, &reader_gate),
             EXIT_PUBLISH_GRACE_DURATION,
             EXIT_PUBLISH_LIMIT_DURATION,
         );
@@ -1357,7 +1345,7 @@ fn output_arriving_after_the_child_has_gone_is_still_handed_over() {
     let grace = Duration::from_millis(400);
     let limit = Duration::from_secs(5);
 
-    let child_exited = AtomicBool::new(true);
+    let has_child_exited = AtomicBool::new(true);
     waker.wake_reader(); // the child has gone
     let printer_thread = thread::spawn(move || {
         for output_byte in [b'a', b'b', b'c'] {
@@ -1374,7 +1362,7 @@ fn output_arriving_after_the_child_has_gone_is_still_handed_over() {
         &delivery,
         PaneId::new(),
         &terminal_fd,
-        build_reader_signals(&waker, &child_exited, &reader_gate),
+        build_reader_signals(&waker, &has_child_exited, &reader_gate),
         grace,
         limit,
     );
@@ -1406,7 +1394,7 @@ fn a_descendant_that_never_stops_printing_still_ends_the_reader() {
     let grace = Duration::from_millis(200);
     let limit = Duration::from_secs(1);
 
-    let child_exited = AtomicBool::new(true);
+    let has_child_exited = AtomicBool::new(true);
     waker.wake_reader(); // the child has gone
                          // The printer never sleeps: the socket buffer always holds something
                          // between the pump's reads. `far` is nonblocking: a full buffer refuses
@@ -1428,7 +1416,7 @@ fn a_descendant_that_never_stops_printing_still_ends_the_reader() {
         &delivery,
         PaneId::new(),
         &terminal_fd,
-        build_reader_signals(&waker, &child_exited, &reader_gate),
+        build_reader_signals(&waker, &has_child_exited, &reader_gate),
         grace,
         limit,
     );
@@ -1510,8 +1498,8 @@ fn a_blocking_reader_stops_when_the_consumer_lets_the_pane_go() {
     struct Endless;
 
     impl Read for Endless {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            buffer[0] = b'x';
+        fn read(&mut self, destination_bytes: &mut [u8]) -> std::io::Result<usize> {
+            destination_bytes[0] = b'x';
             Ok(1)
         }
     }
@@ -1858,7 +1846,7 @@ fn a_reader_waiting_for_an_exit_that_never_comes_is_no_longer_counted() {
 
     // Held for the whole test and never sent on.
     let (exit_sender, exit_receiver) = channel::<ExitStatus>();
-    let delivery = Delivery::Sink {
+    let delivery = Delivery {
         pty_sink: CountingSink::new(),
         exit_receiver,
         exit_handover_state: Arc::new(Mutex::new(ExitHandover::default())),
@@ -1918,7 +1906,7 @@ fn a_reader_waiting_for_an_exit_that_never_comes_is_no_longer_counted() {
 fn a_pane_whose_reader_cannot_park_refuses_the_pause() {
     // A pane with no doorbell (`reader_wake: None`) refuses the pause by name,
     // and the gate stays open.
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let (writer_sender, _writer_receiver) = channel::<WriterMessage>();
     backend.pane_by_id.lock().expect("panes").insert(
@@ -2022,7 +2010,7 @@ fn build_pane_entry(terminal: Terminal, writer_sender: Sender<WriterMessage>) ->
         writer_sender,
         // This test process's own id.
         kill_control: PtyChildKillControl::from_process_id(std::process::id()),
-        child_exited: Arc::new(AtomicBool::new(true)),
+        has_child_exited: Arc::new(AtomicBool::new(true)),
         child_exit_status: Arc::new(OnceLock::new()),
         exit_handover_state: Arc::new(Mutex::new(ExitHandover::default())),
         exit_wait_cancel_sender,
@@ -2040,7 +2028,7 @@ fn a_flush_answers_only_once_the_terminal_holds_every_byte_the_backend_took() {
     let (peer_socket, terminal_socket) =
         std::os::unix::net::UnixStream::pair().expect("terminal pair");
     let terminal_fd = Arc::new(std::os::fd::OwnedFd::from(terminal_socket));
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let writer_sender = start_writer(WriteSide::Owned(Arc::clone(&terminal_fd)));
     backend.pane_by_id.lock().expect("panes").insert(
@@ -2071,7 +2059,7 @@ fn a_pane_whose_writer_cannot_finish_refuses_the_flush() {
     // The pane's writer is blocked inside its write. The flush refuses after
     // its limit and names that pane.
     let (release_sender, release_receiver) = channel::<()>();
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let writer_sender = start_writer(WriteSide::Crate(Box::new(HeldTerminal {
         release_receiver,
@@ -2527,10 +2515,10 @@ fn a_child_that_ends_while_its_reader_is_held_publishes_its_exit_once_on_release
 
     let child_exit_deadline = Instant::now() + HANG_GUARD_DURATION;
     loop {
-        let child_exited = backend.pane_by_id.lock().expect("panes")[&pane_id]
-            .child_exited
+        let has_child_exited = backend.pane_by_id.lock().expect("panes")[&pane_id]
+            .has_child_exited
             .load(Ordering::SeqCst);
-        if child_exited {
+        if has_child_exited {
             break;
         }
         assert!(
@@ -2631,7 +2619,7 @@ fn input_written_while_the_readers_are_held_reaches_the_child_and_its_answer_com
 /// The numbers a bursting child printed, in the order they reached a sink.
 /// Panics on a non-empty line that is not one number.
 #[cfg(unix)]
-fn printed_numbers(output_bytes: &[u8]) -> Vec<u32> {
+fn parse_printed_numbers(output_bytes: &[u8]) -> Vec<u32> {
     String::from_utf8_lossy(output_bytes)
         .split('\n')
         .map(|line| line.trim_matches(['\r', '\0']))
@@ -2718,7 +2706,7 @@ fn every_byte_a_child_is_printing_crosses_the_hand_over_once_and_in_order() {
         "the held reader must take none of the bytes the taken-back pane is owed"
     );
 
-    let printed_output_numbers = printed_numbers(&combined_output_bytes);
+    let printed_output_numbers = parse_printed_numbers(&combined_output_bytes);
     assert_eq!(
         printed_output_numbers,
         (1..=BURST_LINE_COUNT).collect::<Vec<u32>>(),
@@ -2746,7 +2734,7 @@ fn a_pane_taken_back_on_a_terminal_already_at_its_end_reports_its_child_gone() {
 
     // A process id this process has no child under: `waitpid` answers
     // `ECHILD`.
-    let handle = backend
+    backend
         .adopt(
             pane_id,
             terminal_fd,
@@ -2755,11 +2743,6 @@ fn a_pane_taken_back_on_a_terminal_already_at_its_end_reports_its_child_gone() {
             None,
         )
         .expect("take the pane back");
-    assert_eq!(
-        handle.get_pane_id(),
-        pane_id,
-        "the handle must name the pane"
-    );
 
     assert_eq!(
         read_exit_status_or_fail(
@@ -3036,7 +3019,7 @@ fn compute_partial_tail_length_never_counts_the_complete_request() {
 
 #[test]
 fn a_pane_this_backend_does_not_hold_is_refused_by_every_call() {
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
 
     assert_eq!(
@@ -3063,7 +3046,7 @@ fn a_pane_this_backend_does_not_hold_is_refused_by_every_call() {
 
 #[test]
 fn a_backend_with_no_panes_carries_nothing_and_flushes_at_once() {
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
 
     assert_eq!(backend.list_carried_panes(), Vec::new());
 
@@ -3078,7 +3061,7 @@ fn a_backend_with_no_panes_carries_nothing_and_flushes_at_once() {
 #[cfg(unix)]
 #[test]
 fn pausing_a_backend_with_no_readers_settles_at_once() {
-    let backend = Arc::new(PortablePtyBackend::new());
+    let backend = Arc::new(PortablePtyBackend::with_pty_sink(CountingSink::new()));
 
     assert_eq!(pause_readers_or_fail(&backend), Ok(()));
     assert!(
@@ -3175,7 +3158,7 @@ fn wait_for_child_reports_the_code_the_child_ended_with() {
 #[cfg(unix)]
 #[test]
 fn get_child_process_id_returns_the_panes_child_process_id() {
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let (writer_sender, _writer_receiver) = channel::<WriterMessage>();
     backend.pane_by_id.lock().expect("panes").insert(
@@ -3219,31 +3202,6 @@ fn resizing_through_the_crates_master_retunes_the_terminal() {
     assert_eq!((portable_pty_size.cols, portable_pty_size.rows), (132, 43));
 }
 
-#[test]
-fn a_channel_consumer_that_dropped_its_handle_stops_its_readers_pump() {
-    // A channel delivery answers `true` while the handle is held and `false`
-    // once it is dropped.
-    let pane_id = PaneId::new();
-    let (pty_handle, output_receiver, _exit_receiver) = PtyHandle::from_pane_id(pane_id);
-    let delivery = Delivery::Channel(output_receiver);
-
-    assert!(
-        delivery.deliver_output(pane_id, b"printed"),
-        "a handle the caller still holds must keep the pump running"
-    );
-    assert_eq!(
-        pty_handle.try_receive_output_chunk(),
-        Some(b"printed".to_vec()),
-        "the chunk must reach the handle unchanged"
-    );
-
-    drop(pty_handle);
-    assert!(
-        !delivery.deliver_output(pane_id, b"more"),
-        "a handle the caller has let go must stop the pump"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn a_resize_the_kernel_refuses_leaves_the_pane_at_its_old_size() {
@@ -3255,7 +3213,7 @@ fn a_resize_the_kernel_refuses_leaves_the_pane_at_its_old_size() {
     };
     let (_peer_socket, terminal_socket) = build_fake_terminal();
     let terminal_fd = Arc::new(terminal_socket);
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let (writer_sender, writer_receiver) = channel::<WriterMessage>();
     drop(writer_receiver);
@@ -3291,7 +3249,7 @@ fn a_pane_whose_writer_has_already_ended_does_not_hold_up_the_flush() {
     // Two panes with no writer left: one whose channel is closed, one whose
     // writer takes the barrier and ends without answering it. The flush
     // answers `Ok(())`.
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
 
     // The barrier cannot be queued for this pane.
     let closed_pane_id = PaneId::new();
@@ -3336,7 +3294,7 @@ fn a_pane_whose_writer_has_already_ended_does_not_hold_up_the_flush() {
 fn only_a_pane_with_a_live_child_answers_a_directory() {
     // `live_working_directory` answers `None` for an unknown pane and for a pane whose child
     // is marked exited, and the child's directory for a live one.
-    let backend = PortablePtyBackend::new();
+    let backend = PortablePtyBackend::with_pty_sink(CountingSink::new());
     let pane_id = PaneId::new();
     let (writer_sender, writer_receiver) = channel::<WriterMessage>();
     drop(writer_receiver);
@@ -3363,7 +3321,7 @@ fn only_a_pane_with_a_live_child_answers_a_directory() {
         .expect("panes")
         .get(&pane_id)
         .expect("the pane just inserted")
-        .child_exited
+        .has_child_exited
         .store(false, Ordering::SeqCst);
 
     let current_working_directory =

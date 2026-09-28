@@ -1,11 +1,11 @@
 //! What a `koshi` verb typed inside a session does, from the words on the
 //! command line to the number the process exits with.
 //!
-//! Each test walks one verb the whole way: `Cli::try_parse_from` reads the real
-//! argv, [`CliCommand::build_action_command`](koshi::cli::CliCommand::build_action_command) maps it to
-//! the core command, that command crosses a real control socket inside a
-//! [`CommandEnvelope`], the dispatcher applies it, the attached client is told
-//! what changed, and the answer becomes the exit code the binary reports.
+//! Each test walks one verb the whole way: `Cli::try_parse_from` reads the real argv,
+//! [`CliCommand::build_action_command`](koshi::cli::CliCommand::build_action_command) maps it to
+//! the core command, that command crosses a real control socket inside a [`CommandEnvelope`], the
+//! dispatcher applies it, the attached client is told what changed, and the answer becomes the exit
+//! code the binary reports.
 //!
 //! The session server runs on a thread of this process, over a
 //! [`FakePtyBackend`] in place of the panes' real children. The backend
@@ -48,14 +48,14 @@ use koshi_core::process::{KillPolicy, PtySize};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
 use koshi_link::error::CliError;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_test_runtime_directory;
@@ -86,7 +86,7 @@ struct RunningSession {
     /// what was spawned, resized and killed.
     pty: Arc<FakePtyBackend>,
     /// The runtime inbox, for the hangup that ends the serving thread.
-    inbox_tx: mpsc::Sender<RuntimeEvent>,
+    inbox_sender: mpsc::Sender<RuntimeEvent>,
     /// The serving thread, joined at drop. `Option` so the drop can take it
     /// out of the otherwise-borrowed struct.
     dispatcher: Option<JoinHandle<()>>,
@@ -98,19 +98,21 @@ impl RunningSession {
     fn start_session() -> RunningSession {
         let runtime_directory = build_test_runtime_directory();
         let session_id = SessionId::new();
-        let pty = Arc::new(FakePtyBackend::new());
-        let (inbox_tx, inbox_rx) = mpsc::channel();
+        let (inbox_sender, inbox_receiver) = mpsc::channel();
+        let pty = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+            InboxSink::from_event_sender(inbox_sender.clone()),
+        )));
 
         let serving_runtime_directory = runtime_directory.path().to_path_buf();
         let serving_pty = Arc::clone(&pty);
-        let serving_tx = inbox_tx.clone();
+        let serving_sender = inbox_sender.clone();
         let dispatcher = std::thread::spawn(move || {
             serve_session(
                 &serving_runtime_directory,
                 session_id,
                 serving_pty,
-                inbox_rx,
-                serving_tx,
+                inbox_receiver,
+                serving_sender,
             );
         });
 
@@ -118,7 +120,7 @@ impl RunningSession {
             runtime_directory,
             session_id,
             pty,
-            inbox_tx,
+            inbox_sender,
             dispatcher: Some(dispatcher),
         };
         // The endpoint file is written after the socket binds, so a readable
@@ -159,7 +161,7 @@ impl Drop for RunningSession {
     fn drop(&mut self) {
         // The serving loop stops on a `Quit`; a loop that already stopped on
         // its own leaves a closed inbox, and the send fails harmlessly.
-        let _ = self.inbox_tx.send(RuntimeEvent::Quit);
+        let _ = self.inbox_sender.send(RuntimeEvent::Quit);
         if let Some(handle) = self.dispatcher.take() {
             let _ = handle.join();
         }
@@ -175,11 +177,11 @@ fn serve_session(
     runtime_directory: &Path,
     session_id: SessionId,
     pty: Arc<FakePtyBackend>,
-    inbox_rx: mpsc::Receiver<RuntimeEvent>,
-    inbox_tx: mpsc::Sender<RuntimeEvent>,
+    inbox_receiver: mpsc::Receiver<RuntimeEvent>,
+    inbox_sender: mpsc::Sender<RuntimeEvent>,
 ) {
     let backend: Arc<dyn PtyBackend> = pty;
-    let mut server = Server::from_runtime_parts(backend, inbox_rx, inbox_tx.clone());
+    let mut server = Server::from_runtime_parts(backend, inbox_receiver);
     server.load_startup_config(None);
     server
         .bootstrap_session(
@@ -191,7 +193,7 @@ fn serve_session(
         )
         .expect("the session is seeded");
 
-    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_tx, None)
+    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_sender, None)
         .expect("the control socket binds");
     server.attach_ipc_server(ipc_server);
 
@@ -208,13 +210,15 @@ fn serve_session(
 fn run_session_event_loop(server: &mut Server) {
     loop {
         let now = Instant::now();
-        let pending_event = match server.next_render_wakeup(now) {
-            Some(timeout_duration) => match server.inbox_rx().recv_timeout(timeout_duration) {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-            None => match server.inbox_rx().recv() {
+        let pending_event = match server.compute_next_render_wakeup(now) {
+            Some(timeout_duration) => {
+                match server.get_inbox_receiver().recv_timeout(timeout_duration) {
+                    Ok(runtime_event) => Some(runtime_event),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            None => match server.get_inbox_receiver().recv() {
                 Ok(runtime_event) => Some(runtime_event),
                 Err(_) => break,
             },
@@ -223,7 +227,7 @@ fn run_session_event_loop(server: &mut Server) {
         if let Some(runtime_event) = pending_event {
             is_quit_requested |= server.handle_runtime_event(runtime_event).is_break();
         }
-        while let Ok(runtime_event) = server.inbox_rx().try_recv() {
+        while let Ok(runtime_event) = server.get_inbox_receiver().try_recv() {
             is_quit_requested |= server.handle_runtime_event(runtime_event).is_break();
         }
         server.resync_lagged();
@@ -264,8 +268,8 @@ fn open_session_connection(endpoint: &EndpointFile) -> Connection {
     let hello = IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: endpoint.connection_token.clone(),
             is_remote: false,
         },
@@ -289,8 +293,7 @@ fn attach_test_client(session: &RunningSession) -> AttachedClient {
     let request = IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Attach {
-            viewport: ATTACH_VIEWPORT_SIZE,
-            event_filter: EventFilterSpec::All,
+            viewport_size: ATTACH_VIEWPORT_SIZE,
             resume_client_id: None,
             resume_token: None,
             pane_area: None,
@@ -316,13 +319,13 @@ fn attach_test_client(session: &RunningSession) -> AttachedClient {
     };
     assert_eq!(session_id, session.session_id);
 
-    let (events_tx, events) = mpsc::channel();
+    let (events_sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(event) = connection.recv::<SessionEvent>() {
             if matches!(event, SessionEvent::Painted { .. }) {
                 continue;
             }
-            if events_tx.send(event).is_err() {
+            if events_sender.send(event).is_err() {
                 break;
             }
         }
@@ -374,12 +377,11 @@ fn run_cli_invocation(
     (command_result, exit_code)
 }
 
-/// The same walk as [`run_cli_invocation`] for a verb typed OUTSIDE any pane: the real
-/// argv, the core command
-/// [`CliCommand::build_action_command`](koshi::cli::CliCommand::build_action_command) builds, and the
-/// client
-/// [`CliCommand::get_source_client_id`](koshi::cli::CliCommand::get_source_client_id) reads
-/// off the same parse, all the way to the session's answer and the exit code.
+/// The same walk as [`run_cli_invocation`] for a verb typed OUTSIDE any pane: the real argv, the
+/// core command [`CliCommand::build_action_command`](koshi::cli::CliCommand::build_action_command)
+/// builds, and the client
+/// [`CliCommand::get_source_client_id`](koshi::cli::CliCommand::get_source_client_id) reads off the
+/// same parse, all the way to the session's answer and the exit code.
 ///
 /// The command travels as [`CommandSource::ExternalCli`], the only source that
 /// carries a target client.
@@ -426,7 +428,6 @@ fn submit_session_command(
             pane,
             PathBuf::from(session_endpoint.socket_address),
         ),
-        SystemTime::now(),
         command,
     );
     let request = IpcRequest {

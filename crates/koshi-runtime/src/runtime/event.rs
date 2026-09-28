@@ -2,9 +2,9 @@
 //!
 //! [`RuntimeEvent`] is the single typed channel the dispatcher thread drains.
 //! Every asynchronous trigger the runtime must react to — child output, child
-//! exit, a client resize, a periodic tick, terminal input, an IPC command, a
-//! plugin command — arrives as one variant, so the dispatcher consumes every
-//! trigger from one shared `std::sync::mpsc` inbox.
+//! exit, a client resize, terminal input, an IPC command — arrives as one
+//! variant, so the dispatcher consumes every trigger from one shared
+//! `std::sync::mpsc` inbox.
 //!
 //! These are *input* triggers, distinct from the *output* facts the dispatcher
 //! emits ([`koshi_core::event::Event`]): a [`RuntimeEvent::ChildExit`] is the raw
@@ -34,14 +34,12 @@ use koshi_ipc::layout::SessionLayout;
 use koshi_ipc::protocol::{ConnectionToken, WireMouseAction};
 use koshi_renderer::snapshot::Delivery;
 
-use crate::runtime::bus::EventFilter;
-
 /// A trigger the dispatcher thread reacts to, drained from the runtime inbox.
 ///
 /// One variant per runtime event source. Construction is the producer's job
-/// (the per-pane PTY threads, the input reader, the IPC server, the plugin
-/// host, the timer); the dispatcher matches on the variant to decide what to
-/// mutate and which [`koshi_core::event::Event`] facts to emit.
+/// (the per-pane PTY threads, the input reader, the IPC server); the
+/// dispatcher matches on the variant to decide what to mutate and which
+/// [`koshi_core::event::Event`] facts to emit.
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     /// Raw bytes a child process wrote to its PTY.
@@ -90,8 +88,6 @@ pub enum RuntimeEvent {
         /// the client no token; the view it was looking at is dropped.
         is_streamed: bool,
     },
-    /// A periodic tick for time-driven refreshes such as cursor blink.
-    Timer,
     /// A request to stop the event loop and shut the process down. Produced
     /// when reading a client's outer terminal fails, which is that terminal
     /// reaching end of stream. Explicit quit travels through the `core:quit`
@@ -166,7 +162,7 @@ pub enum RuntimeEvent {
     /// thread writes that result back over the socket.
     Ipc {
         /// The command as it arrived over the socket.
-        envelope: CommandEnvelope,
+        envelope: Box<CommandEnvelope>,
         /// Where the dispatcher sends the command's result.
         response_sender: Sender<CommandResult>,
     },
@@ -195,8 +191,6 @@ pub enum RuntimeEvent {
         pane_area: Option<PaneArea>,
         /// The cell dimensions measured before this attach, if available.
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
-        /// Which of the session's events the client receives.
-        event_filter: EventFilter,
         /// When the producer received the request, carried on the event so the
         /// handler never reads the clock itself.
         attached_at: SystemTime,
@@ -255,8 +249,6 @@ pub enum RuntimeEvent {
         /// never reads the clock itself.
         unclaimed_client_deadline: Instant,
     },
-    /// A capability-checked command issued by a plugin.
-    Plugin(CommandEnvelope),
 }
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client

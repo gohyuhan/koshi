@@ -30,7 +30,7 @@ use crate::state::{MouseEncoding, MouseTracking};
 mod tests;
 
 /// The bytes a program expects for one mouse event at a 1-based pane-local
-/// cell (`column_index`, `row_index`), or [`None`] when `tracking` does not
+/// cell (`column_index`, `row_index`), or [`None`] when `mouse_tracking` does not
 /// report this event kind.
 ///
 /// A left press at the top-left cell under SGR encoding is `CSI < 0 ; 1 ; 1 M`
@@ -41,35 +41,39 @@ pub fn encode_mouse(
     modifier_flags: ModFlags,
     column_index: u16,
     row_index: u16,
-    tracking: MouseTracking,
-    encoding: MouseEncoding,
+    mouse_tracking: MouseTracking,
+    mouse_encoding: MouseEncoding,
 ) -> Option<Vec<u8>> {
-    if !is_mouse_kind_reported(tracking, mouse_kind) {
+    if !is_mouse_kind_reported(mouse_tracking, mouse_kind) {
         return None;
     }
     // X10 compatibility mode (`?9`) carries only the button in its report; the
     // modifier bits enter at normal tracking (`?1000`) and beyond.
-    let modifier_bits = if tracking == MouseTracking::X10 {
+    let mouse_modifier_bits = if mouse_tracking == MouseTracking::X10 {
         0
     } else {
-        compute_modifier_bits(modifier_flags)
+        compute_mouse_modifier_bits(modifier_flags)
     };
-    let is_release = matches!(mouse_kind, MouseKind::Release(_));
-    let should_drop_button_on_release = encoding != MouseEncoding::Sgr;
-    let button_code_with_modifiers =
-        compute_mouse_button_code(mouse_kind, should_drop_button_on_release) + modifier_bits;
-    Some(match encoding {
-        MouseEncoding::Sgr => encode_sgr(
-            button_code_with_modifiers,
+    let is_mouse_release = matches!(mouse_kind, MouseKind::Release(_));
+    let should_drop_button_on_release = mouse_encoding != MouseEncoding::Sgr;
+    let mouse_button_code_with_modifiers =
+        compute_mouse_button_code(mouse_kind, should_drop_button_on_release) + mouse_modifier_bits;
+    Some(match mouse_encoding {
+        MouseEncoding::Sgr => encode_sgr_mouse_report(
+            mouse_button_code_with_modifiers,
             column_index,
             row_index,
-            is_release,
+            is_mouse_release,
         ),
         MouseEncoding::Default => {
-            encode_legacy(button_code_with_modifiers, column_index, row_index)
+            encode_legacy_mouse_report(mouse_button_code_with_modifiers, column_index, row_index)
         }
-        MouseEncoding::Utf8 => encode_utf8(button_code_with_modifiers, column_index, row_index),
-        MouseEncoding::Urxvt => encode_urxvt(button_code_with_modifiers, column_index, row_index),
+        MouseEncoding::Utf8 => {
+            encode_utf8_mouse_report(mouse_button_code_with_modifiers, column_index, row_index)
+        }
+        MouseEncoding::Urxvt => {
+            encode_urxvt_mouse_report(mouse_button_code_with_modifiers, column_index, row_index)
+        }
     })
 }
 
@@ -80,23 +84,25 @@ pub fn encode_mouse(
 fn compute_mouse_button_code(mouse_kind: MouseKind, should_drop_button_on_release: bool) -> u16 {
     const MOTION_FLAG_BIT: u16 = 32;
     match mouse_kind {
-        MouseKind::Press(button) => compute_button_number(button),
-        MouseKind::Drag(button) => compute_button_number(button) + MOTION_FLAG_BIT,
+        MouseKind::Press(mouse_button) => compute_mouse_button_number(mouse_button),
+        MouseKind::Drag(mouse_button) => {
+            compute_mouse_button_number(mouse_button) + MOTION_FLAG_BIT
+        }
         MouseKind::Motion => 3 + MOTION_FLAG_BIT,
-        MouseKind::Release(button) => {
+        MouseKind::Release(mouse_button) => {
             if should_drop_button_on_release {
                 3
             } else {
-                compute_button_number(button)
+                compute_mouse_button_number(mouse_button)
             }
         }
-        MouseKind::Scroll(direction) => compute_wheel_number(direction),
+        MouseKind::Scroll(scroll_direction) => compute_mouse_wheel_number(scroll_direction),
     }
 }
 
 /// Left `0`, middle `1`, right `2`.
-fn compute_button_number(button: MouseButton) -> u16 {
-    match button {
+fn compute_mouse_button_number(mouse_button: MouseButton) -> u16 {
+    match mouse_button {
         MouseButton::Left => 0,
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
@@ -104,8 +110,8 @@ fn compute_button_number(button: MouseButton) -> u16 {
 }
 
 /// Wheel up `64`, down `65`, left `66`, right `67`.
-fn compute_wheel_number(direction: ScrollDirection) -> u16 {
-    match direction {
+fn compute_mouse_wheel_number(scroll_direction: ScrollDirection) -> u16 {
+    match scroll_direction {
         ScrollDirection::Up => 64,
         ScrollDirection::Down => 65,
         ScrollDirection::Left => 66,
@@ -114,64 +120,85 @@ fn compute_wheel_number(direction: ScrollDirection) -> u16 {
 }
 
 /// Shift `4`, alt `8`, ctrl `16`, summed. Super adds nothing.
-fn compute_modifier_bits(modifier_flags: ModFlags) -> u16 {
-    let mut modifier_bits = 0;
+fn compute_mouse_modifier_bits(modifier_flags: ModFlags) -> u16 {
+    let mut mouse_modifier_bits = 0;
     if modifier_flags.has_all_modifiers(ModFlags::SHIFT) {
-        modifier_bits += 4;
+        mouse_modifier_bits += 4;
     }
     if modifier_flags.has_all_modifiers(ModFlags::ALT) {
-        modifier_bits += 8;
+        mouse_modifier_bits += 8;
     }
     if modifier_flags.has_all_modifiers(ModFlags::CTRL) {
-        modifier_bits += 16;
+        mouse_modifier_bits += 16;
     }
-    modifier_bits
+    mouse_modifier_bits
 }
 
-/// `CSI < button_code ; column_index ; row_index M` (or a trailing `m` for a release).
-fn encode_sgr(button_code: u16, column_index: u16, row_index: u16, is_release: bool) -> Vec<u8> {
-    let release_terminator = if is_release { 'm' } else { 'M' };
-    format!("\x1b[<{button_code};{column_index};{row_index}{release_terminator}").into_bytes()
+/// `CSI < mouse_button_code ; column_index ; row_index M` (or a trailing `m` for a release).
+fn encode_sgr_mouse_report(
+    mouse_button_code: u16,
+    column_index: u16,
+    row_index: u16,
+    is_mouse_release: bool,
+) -> Vec<u8> {
+    let mouse_release_terminator = if is_mouse_release { 'm' } else { 'M' };
+    format!("\x1b[<{mouse_button_code};{column_index};{row_index}{mouse_release_terminator}")
+        .into_bytes()
 }
 
-/// `CSI M` then `button_code+32`, `column_index+32`, `row_index+32` as one byte each, saturating at
+/// `CSI M` then `mouse_button_code+32`, `column_index+32`, `row_index+32` as one byte each, saturating at
 /// `255`.
-fn encode_legacy(button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
+fn encode_legacy_mouse_report(
+    mouse_button_code: u16,
+    column_index: u16,
+    row_index: u16,
+) -> Vec<u8> {
     vec![
         0x1b,
         b'[',
         b'M',
-        compute_mouse_coordinate_byte(button_code),
-        compute_mouse_coordinate_byte(column_index),
-        compute_mouse_coordinate_byte(row_index),
+        compute_legacy_mouse_report_byte(mouse_button_code),
+        compute_legacy_mouse_report_byte(column_index),
+        compute_legacy_mouse_report_byte(row_index),
     ]
 }
 
-/// `CSI M` then `button_code+32`, `column_index+32`, `row_index+32`, each written as UTF-8: one byte
+/// `CSI M` then `mouse_button_code+32`, `column_index+32`, `row_index+32`, each written as UTF-8: one byte
 /// below `128`, two bytes up to `2047`, three up to `65535`, four above.
-fn encode_utf8(button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
+fn encode_utf8_mouse_report(mouse_button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
     let mut encoded_mouse_bytes = vec![0x1b, b'[', b'M'];
-    for coordinate_value in [button_code, column_index, row_index] {
-        append_utf8_code_point(&mut encoded_mouse_bytes, u32::from(coordinate_value) + 32);
+    for mouse_report_number in [mouse_button_code, column_index, row_index] {
+        append_utf8_character_encoding(
+            &mut encoded_mouse_bytes,
+            u32::from(mouse_report_number) + 32,
+        );
     }
     encoded_mouse_bytes
 }
 
-/// `CSI (button_code+32) ; column_index ; row_index M`, every value in decimal.
-fn encode_urxvt(button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
-    format!("\x1b[{};{column_index};{row_index}M", button_code + 32).into_bytes()
+/// `CSI (mouse_button_code+32) ; column_index ; row_index M`, every value in decimal.
+fn encode_urxvt_mouse_report(mouse_button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
+    format!(
+        "\x1b[{};{column_index};{row_index}M",
+        mouse_button_code + 32
+    )
+    .into_bytes()
 }
 
-/// `coordinate_value + 32`, summed in `u32`, capped at `255`, then narrowed to
+/// `mouse_report_number + 32`, summed in `u32`, capped at `255`, then narrowed to
 /// one byte.
-fn compute_mouse_coordinate_byte(coordinate_value: u16) -> u8 {
-    (u32::from(coordinate_value) + 32).min(255) as u8
+fn compute_legacy_mouse_report_byte(mouse_report_number: u16) -> u8 {
+    (u32::from(mouse_report_number) + 32).min(255) as u8
 }
 
-/// Append `code_point` as UTF-8. A `code_point` that is not a valid `char` — a
+/// Append `unicode_code_point` as UTF-8. A code point that is not a valid `char` — a
 /// surrogate in `0xD800..=0xDFFF`, or above `0x10FFFF` — is written as `?`.
-fn append_utf8_code_point(encoded_bytes: &mut Vec<u8>, code_point: u32) {
-    let character = char::from_u32(code_point).unwrap_or('?');
-    let mut utf8_code_point_bytes = [0; 4];
-    encoded_bytes.extend_from_slice(character.encode_utf8(&mut utf8_code_point_bytes).as_bytes());
+fn append_utf8_character_encoding(mouse_report_bytes: &mut Vec<u8>, unicode_code_point: u32) {
+    let mouse_report_character = char::from_u32(unicode_code_point).unwrap_or('?');
+    let mut unicode_character_bytes = [0; 4];
+    mouse_report_bytes.extend_from_slice(
+        mouse_report_character
+            .encode_utf8(&mut unicode_character_bytes)
+            .as_bytes(),
+    );
 }

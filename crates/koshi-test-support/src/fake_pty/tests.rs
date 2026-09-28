@@ -4,7 +4,16 @@ use super::*;
 use koshi_core::process::ShellKind;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// A backend delivering into a fresh [`PaneDeliveryRecorder`], and that
+/// recorder.
+fn build_fake_pty_backend() -> (FakePtyBackend, Arc<PaneDeliveryRecorder>) {
+    let pane_delivery_recorder = Arc::new(PaneDeliveryRecorder::default());
+    let fake_pty_backend = FakePtyBackend::with_pty_sink(Arc::clone(&pane_delivery_recorder) as _);
+    (fake_pty_backend, pane_delivery_recorder)
+}
 
 fn build_spawn_spec() -> SpawnSpec {
     SpawnSpec {
@@ -25,7 +34,7 @@ fn build_pty_size(column_count: u16, row_count: u16) -> PtySize {
 
 #[test]
 fn spawn_records_spawn_spec_and_initial_pty_size() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -44,9 +53,9 @@ fn spawn_records_spawn_spec_and_initial_pty_size() {
 
 #[test]
 fn spawning_into_a_live_pane_id_is_refused() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
@@ -60,7 +69,7 @@ fn spawning_into_a_live_pane_id_is_refused() {
     );
 
     // The refused spawn changed nothing: the live pane keeps its record, its
-    // pane handle, and its single place in the spawn order.
+    // single place in the spawn order, and its output delivery.
     assert_eq!(
         fake_pty_backend.list_pane_sizes(pane_id).unwrap(),
         vec![build_pty_size(80, 24)]
@@ -70,14 +79,14 @@ fn spawning_into_a_live_pane_id_is_refused() {
         .push_output(pane_id, b"still mine".to_vec())
         .unwrap();
     assert_eq!(
-        pane_handle.try_receive_output_chunk(),
+        pane_delivery_recorder.take_output_chunk(pane_id),
         Some(b"still mine".to_vec())
     );
 }
 
 #[test]
 fn a_killed_pane_id_can_be_spawned_again() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -89,13 +98,12 @@ fn a_killed_pane_id_can_be_spawned_again() {
         .kill_pane(pane_id, KillPolicy::Force)
         .unwrap();
 
-    let respawned_pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(100, 30))
         .unwrap();
 
     // The record starts over at the new spawn's size, and the spawn order
     // names the id once per spawn.
-    assert_eq!(respawned_pane_handle.get_pane_id(), pane_id);
     assert_eq!(
         fake_pty_backend.list_pane_sizes(pane_id).unwrap(),
         vec![build_pty_size(100, 30)]
@@ -125,13 +133,13 @@ fn a_killed_pane_id_can_be_spawned_again() {
 
 #[test]
 fn output_chunks_are_delivered_in_order() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
-    assert_eq!(pane_handle.try_receive_output_chunk(), None);
+    assert_eq!(pane_delivery_recorder.take_output_chunk(pane_id), None);
     fake_pty_backend
         .push_output(pane_id, b"hello".to_vec())
         .unwrap();
@@ -140,19 +148,19 @@ fn output_chunks_are_delivered_in_order() {
         .unwrap();
 
     assert_eq!(
-        pane_handle.try_receive_output_chunk(),
+        pane_delivery_recorder.take_output_chunk(pane_id),
         Some(b"hello".to_vec())
     );
     assert_eq!(
-        pane_handle.try_receive_output_chunk(),
+        pane_delivery_recorder.take_output_chunk(pane_id),
         Some(b" world".to_vec())
     );
-    assert_eq!(pane_handle.try_receive_output_chunk(), None);
+    assert_eq!(pane_delivery_recorder.take_output_chunk(pane_id), None);
 }
 
 #[test]
 fn pane_input_writes_are_captured() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -171,7 +179,7 @@ fn pane_input_writes_are_captured() {
 
 #[test]
 fn resizes_are_captured_after_initial_spawn() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -196,7 +204,7 @@ fn resizes_are_captured_after_initial_spawn() {
 
 #[test]
 fn kill_policies_are_captured() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let (forced_pane_id, graceful_pane_id) = (PaneId::new(), PaneId::new());
     fake_pty_backend
         .spawn_pane(forced_pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -235,27 +243,27 @@ fn kill_policies_are_captured() {
 
 #[test]
 fn child_exit_status_is_delivered_once() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
-    assert_eq!(pane_handle.try_receive_exit_status(), None);
+    assert_eq!(pane_delivery_recorder.take_exit_status(pane_id), None);
     fake_pty_backend
         .trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
         .unwrap();
 
     assert_eq!(
-        pane_handle.try_receive_exit_status(),
+        pane_delivery_recorder.take_exit_status(pane_id),
         Some(ExitStatus::ExitCode(0))
     );
-    assert_eq!(pane_handle.try_receive_exit_status(), None);
+    assert_eq!(pane_delivery_recorder.take_exit_status(pane_id), None);
 }
 
 #[test]
 fn operations_on_unknown_pane_return_unknown_pane_errors() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let unknown_pane_id = PaneId::new();
 
     assert_eq!(
@@ -292,51 +300,51 @@ fn operations_on_unknown_pane_return_unknown_pane_errors() {
 
 #[test]
 fn multiple_panes_keep_output_and_input_isolated() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let first_pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(first_pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
-    let second_pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(second_pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
     fake_pty_backend
-        .write_pane_input(first_pane_handle.get_pane_id(), b"a")
+        .write_pane_input(first_pane_id, b"a")
         .unwrap();
     fake_pty_backend
-        .push_output(second_pane_handle.get_pane_id(), b"b".to_vec())
+        .push_output(second_pane_id, b"b".to_vec())
         .unwrap();
 
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(first_pane_handle.get_pane_id())
+            .list_pane_write_bytes(first_pane_id)
             .unwrap(),
         vec![b"a".to_vec()]
     );
     assert_eq!(
         fake_pty_backend
-            .list_pane_write_bytes(second_pane_handle.get_pane_id())
+            .list_pane_write_bytes(second_pane_id)
             .unwrap(),
         Vec::<Vec<u8>>::new()
     );
-    assert_eq!(first_pane_handle.try_receive_output_chunk(), None);
     assert_eq!(
-        second_pane_handle.try_receive_output_chunk(),
+        pane_delivery_recorder.take_output_chunk(first_pane_id),
+        None
+    );
+    assert_eq!(
+        pane_delivery_recorder.take_output_chunk(second_pane_id),
         Some(b"b".to_vec())
     );
     assert_eq!(
         fake_pty_backend.list_spawned_pane_ids(),
-        vec![
-            first_pane_handle.get_pane_id(),
-            second_pane_handle.get_pane_id()
-        ]
+        vec![first_pane_id, second_pane_id]
     );
 }
 
 #[test]
 fn killed_pane_rejects_each_subsequent_backend_call() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -384,7 +392,7 @@ fn killed_pane_rejects_each_subsequent_backend_call() {
 
 #[test]
 fn resize_to_zero_size_is_recorded_without_backend_validation() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -401,41 +409,10 @@ fn resize_to_zero_size_is_recorded_without_backend_validation() {
 }
 
 #[test]
-fn pushing_output_after_close_discards_the_output() {
-    let fake_pty_backend = FakePtyBackend::new();
-    let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
-        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
-        .unwrap();
-
-    fake_pty_backend.close_output(pane_id).unwrap();
-    // Push after close must still return Ok (mirrors a real child writing to
-    // a closed reader), but the bytes go nowhere.
-    fake_pty_backend
-        .push_output(pane_id, b"lost".to_vec())
-        .unwrap();
-
-    assert_eq!(pane_handle.try_receive_output_chunk(), None);
-}
-
-#[test]
-fn closing_output_for_unknown_pane_returns_unknown_pane_error() {
-    let fake_pty_backend = FakePtyBackend::new();
-    let unknown_pane_id = PaneId::new();
-
-    assert_eq!(
-        fake_pty_backend.close_output(unknown_pane_id),
-        Err(PtyError::UnknownPane {
-            pane_id: unknown_pane_id,
-        })
-    );
-}
-
-#[test]
 fn triggering_child_exit_twice_queues_both_statuses_in_order() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
@@ -447,14 +424,14 @@ fn triggering_child_exit_twice_queues_both_statuses_in_order() {
         .unwrap();
 
     assert_eq!(
-        pane_handle.try_receive_exit_status(),
+        pane_delivery_recorder.take_exit_status(pane_id),
         Some(ExitStatus::ExitCode(0))
     );
     assert_eq!(
-        pane_handle.try_receive_exit_status(),
+        pane_delivery_recorder.take_exit_status(pane_id),
         Some(ExitStatus::Signaled(9))
     );
-    assert_eq!(pane_handle.try_receive_exit_status(), None);
+    assert_eq!(pane_delivery_recorder.take_exit_status(pane_id), None);
 }
 
 #[test]
@@ -462,11 +439,11 @@ fn fake_pty_backend_is_usable_as_a_pty_backend_trait_object() {
     // The fake stands in for any `PtyBackend`, so it must work behind a trait
     // object the way the real backend will. Drive a full spawn/resize/write/
     // kill/exit cycle through `&dyn PtyBackend` plus the inherent queries.
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pty_backend: &dyn PtyBackend = &fake_pty_backend;
 
     let pane_id = PaneId::new();
-    let pane_handle = pty_backend
+    pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
     pty_backend
@@ -489,19 +466,19 @@ fn fake_pty_backend_is_usable_as_a_pty_backend_trait_object() {
         vec![KillPolicy::Force]
     );
 
-    // The pane handle the trait object returned streams exit status canonically.
+    // The pane's exit reaches the sink.
     fake_pty_backend
         .trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
         .unwrap();
     assert_eq!(
-        pane_handle.try_receive_exit_status(),
+        pane_delivery_recorder.take_exit_status(pane_id),
         Some(ExitStatus::ExitCode(0))
     );
 }
 
 #[test]
 fn armed_spawn_failure_is_returned_and_registers_no_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend.fail_spawns_with(PtyError::Spawn {
         detail: "no such file".to_string(),
@@ -539,7 +516,7 @@ fn armed_spawn_failure_is_returned_and_registers_no_pane() {
 
 #[test]
 fn armed_resize_failure_hits_only_the_named_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let failing_pane_id = PaneId::new();
     let healthy_pane_id = PaneId::new();
     fake_pty_backend
@@ -578,7 +555,7 @@ fn armed_resize_failure_hits_only_the_named_pane() {
 
 #[test]
 fn armed_write_failure_hits_only_the_named_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let failing_pane_id = PaneId::new();
     let healthy_pane_id = PaneId::new();
     fake_pty_backend
@@ -621,7 +598,7 @@ fn armed_write_failure_hits_only_the_named_pane() {
 
 #[test]
 fn live_working_directory_returns_the_set_directory_only_for_the_named_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let directory_pane_id = PaneId::new();
     let other_pane_id = PaneId::new();
     fake_pty_backend
@@ -660,53 +637,25 @@ fn live_working_directory_returns_the_set_directory_only_for_the_named_pane() {
 }
 
 #[test]
-fn pushing_output_after_handle_drop_returns_ok_and_discards_bytes() {
-    let fake_pty_backend = FakePtyBackend::new();
-    let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
-        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
-        .unwrap();
-    drop(pane_handle);
-
-    assert_eq!(
-        fake_pty_backend.push_output(pane_id, b"gone".to_vec()),
-        Ok(())
-    );
-    assert_eq!(fake_pty_backend.list_spawned_pane_ids(), vec![pane_id]);
-}
-
-#[test]
-fn triggering_child_exit_after_handle_drop_returns_ok() {
-    let fake_pty_backend = FakePtyBackend::new();
-    let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
-        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
-        .unwrap();
-    drop(pane_handle);
-
-    assert_eq!(
-        fake_pty_backend.trigger_child_exit(pane_id, ExitStatus::ExitCode(1)),
-        Ok(())
-    );
-}
-
-#[test]
 fn pushing_empty_output_delivers_an_empty_chunk() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
     fake_pty_backend.push_output(pane_id, Vec::new()).unwrap();
 
-    assert_eq!(pane_handle.try_receive_output_chunk(), Some(Vec::new()));
-    assert_eq!(pane_handle.try_receive_output_chunk(), None);
+    assert_eq!(
+        pane_delivery_recorder.take_output_chunk(pane_id),
+        Some(Vec::new())
+    );
+    assert_eq!(pane_delivery_recorder.take_output_chunk(pane_id), None);
 }
 
 #[test]
 fn writing_empty_input_records_an_empty_chunk() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -721,46 +670,10 @@ fn writing_empty_input_records_an_empty_chunk() {
 }
 
 #[test]
-fn closing_output_twice_on_one_pane_returns_ok_both_times() {
-    let fake_pty_backend = FakePtyBackend::new();
+fn output_and_exit_status_reach_the_sink_after_kill() {
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
-        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
-        .unwrap();
-
-    assert_eq!(fake_pty_backend.close_output(pane_id), Ok(()));
-    assert_eq!(fake_pty_backend.close_output(pane_id), Ok(()));
     fake_pty_backend
-        .push_output(pane_id, b"lost".to_vec())
-        .unwrap();
-
-    assert_eq!(pane_handle.try_receive_output_chunk(), None);
-}
-
-#[test]
-fn closing_output_leaves_exit_status_delivery_open() {
-    let fake_pty_backend = FakePtyBackend::new();
-    let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
-        .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
-        .unwrap();
-
-    fake_pty_backend.close_output(pane_id).unwrap();
-    fake_pty_backend
-        .trigger_child_exit(pane_id, ExitStatus::ExitCode(0))
-        .unwrap();
-
-    assert_eq!(
-        pane_handle.try_receive_exit_status(),
-        Some(ExitStatus::ExitCode(0))
-    );
-}
-
-#[test]
-fn output_and_exit_status_reach_handle_after_kill() {
-    let fake_pty_backend = FakePtyBackend::new();
-    let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
 
@@ -775,20 +688,20 @@ fn output_and_exit_status_reach_handle_after_kill() {
         .unwrap();
 
     assert_eq!(
-        pane_handle.try_receive_output_chunk(),
+        pane_delivery_recorder.take_output_chunk(pane_id),
         Some(b"late".to_vec())
     );
     assert_eq!(
-        pane_handle.try_receive_exit_status(),
+        pane_delivery_recorder.take_exit_status(pane_id),
         Some(ExitStatus::Signaled(9))
     );
 }
 
 #[test]
 fn armed_spawn_failure_leaves_earlier_panes_working() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
     let pane_id = PaneId::new();
-    let pane_handle = fake_pty_backend
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
         .unwrap();
     fake_pty_backend.fail_spawns_with(PtyError::Spawn {
@@ -819,14 +732,14 @@ fn armed_spawn_failure_leaves_earlier_panes_working() {
         vec![KillPolicy::Force]
     );
     assert_eq!(
-        pane_handle.try_receive_output_chunk(),
+        pane_delivery_recorder.take_output_chunk(pane_id),
         Some(b"out".to_vec())
     );
 }
 
 #[test]
 fn second_spawn_failure_replaces_the_armed_error() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     fake_pty_backend.fail_spawns_with(PtyError::Spawn {
         detail: "first".to_string(),
     });
@@ -846,7 +759,7 @@ fn second_spawn_failure_replaces_the_armed_error() {
 
 #[test]
 fn live_pane_spawn_with_armed_failure_returns_error_without_panicking() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_pty_size(80, 24))
@@ -868,7 +781,7 @@ fn live_pane_spawn_with_armed_failure_returns_error_without_panicking() {
 
 #[test]
 fn armed_resize_failure_on_unspawned_pane_returns_armed_error() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let unknown_pane_id = PaneId::new();
     fake_pty_backend.fail_resizes_on(
         unknown_pane_id,
@@ -887,7 +800,7 @@ fn armed_resize_failure_on_unspawned_pane_returns_armed_error() {
 
 #[test]
 fn armed_write_failure_on_unspawned_pane_returns_armed_error() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let unknown_pane_id = PaneId::new();
     fake_pty_backend.fail_writes_on(
         unknown_pane_id,
@@ -906,7 +819,7 @@ fn armed_write_failure_on_unspawned_pane_returns_armed_error() {
 
 #[test]
 fn second_resize_failure_moves_to_the_new_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     fake_pty_backend
@@ -949,7 +862,7 @@ fn second_resize_failure_moves_to_the_new_pane() {
 
 #[test]
 fn second_write_failure_moves_to_the_new_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     fake_pty_backend
@@ -996,7 +909,7 @@ fn second_write_failure_moves_to_the_new_pane() {
 
 #[test]
 fn setting_live_working_directory_supports_unspawned_pane() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let pane_id = PaneId::new();
 
     fake_pty_backend.set_live_working_directory(pane_id, "/srv");
@@ -1013,7 +926,7 @@ fn setting_live_working_directory_supports_unspawned_pane() {
 
 #[test]
 fn each_pane_keeps_its_own_spawn_spec() {
-    let fake_pty_backend = FakePtyBackend::new();
+    let (fake_pty_backend, _) = build_fake_pty_backend();
     let zsh_pane_id = PaneId::new();
     let bash_pane_id = PaneId::new();
     let bash_spec = SpawnSpec {

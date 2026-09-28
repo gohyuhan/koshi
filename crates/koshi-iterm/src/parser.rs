@@ -15,7 +15,7 @@ const ITERM2_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Iterm2;
 /// callers start one with [`parse_iterm_command`] and `None`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ItermTransfer {
-    display_options: ItermDisplayOptions,
+    image_display: ImageDisplay,
     encoded_payload_bytes: Vec<u8>,
 }
 
@@ -23,7 +23,7 @@ impl std::fmt::Debug for ItermTransfer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ItermTransfer")
-            .field("display_options", &self.display_options)
+            .field("image_display", &self.image_display)
             .field(
                 "encoded_payload_byte_count",
                 &self.encoded_payload_bytes.len(),
@@ -105,10 +105,10 @@ fn parse_file_command(
         .ok_or(GraphicsError::InvalidHeader {
             protocol: ITERM2_PROTOCOL,
         })?;
-    let display_options = parse_iterm_display_options(parameter_bytes, true)?;
+    let image_display = parse_iterm_image_display(parameter_bytes)?;
     let decoded_media_bytes = decode_base64(ITERM2_PROTOCOL, encoded_payload_bytes)?;
     Ok(Some(decode_iterm_graphics(
-        display_options,
+        image_display,
         &decoded_media_bytes,
     )?))
 }
@@ -122,14 +122,14 @@ fn parse_multipart_file_command(
     }
     let (parameter_bytes, encoded_payload_bytes) =
         split_bytes_at_delimiter(command_payload, b':').unwrap_or((command_payload, &[]));
-    let display_options = parse_iterm_display_options(parameter_bytes, true)?;
+    let image_display = parse_iterm_image_display(parameter_bytes)?;
     if encoded_payload_bytes.len() > MAX_GRAPHICS_TRANSFER_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
             protocol: ITERM2_PROTOCOL,
         });
     }
     *multipart_transfer = Some(ItermTransfer {
-        display_options,
+        image_display,
         encoded_payload_bytes: encoded_payload_bytes.to_vec(),
     });
     Ok(None)
@@ -161,13 +161,13 @@ fn parse_file_end_command(
     let decoded_media_bytes =
         decode_base64(ITERM2_PROTOCOL, &iterm_transfer.encoded_payload_bytes)?;
     Ok(Some(decode_iterm_graphics(
-        iterm_transfer.display_options,
+        iterm_transfer.image_display,
         &decoded_media_bytes,
     )?))
 }
 
 fn decode_iterm_graphics(
-    display_options: ItermDisplayOptions,
+    image_display: ImageDisplay,
     decoded_media_bytes: &[u8],
 ) -> Result<DecodedGraphics, GraphicsError> {
     let (decoded_image, animation) = match decode_media(ITERM2_PROTOCOL, decoded_media_bytes)? {
@@ -183,19 +183,14 @@ fn decode_iterm_graphics(
         image: decoded_image,
         animation,
         action: ImageAction::Display,
-        display: display_options.display,
+        display: image_display,
     })
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ItermDisplayOptions {
-    display: ImageDisplay,
-}
-
-fn parse_iterm_display_options(
-    control_bytes: &[u8],
-    is_inline_required: bool,
-) -> Result<ItermDisplayOptions, GraphicsError> {
+/// Parse the `key=value;...` options before the `:` of a `File` or
+/// `MultipartFile` command. A command without `inline=1` returns
+/// `UnsupportedAction` with action `inline=0`.
+fn parse_iterm_image_display(control_bytes: &[u8]) -> Result<ImageDisplay, GraphicsError> {
     if control_bytes.len() > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
         return Err(GraphicsError::TransferTooLarge {
             protocol: ITERM2_PROTOCOL,
@@ -239,19 +234,16 @@ fn parse_iterm_display_options(
                     })
                 }
             },
-            b"name" => validate_iterm_control_value(parameter_value)?,
             _ => validate_iterm_control_value(parameter_value)?,
         }
     }
-    if is_inline_required && !is_inline {
+    if !is_inline {
         return Err(GraphicsError::UnsupportedAction {
             protocol: ITERM2_PROTOCOL,
             action: "inline=0".to_string(),
         });
     }
-    Ok(ItermDisplayOptions {
-        display: image_display,
-    })
+    Ok(image_display)
 }
 
 fn validate_iterm_control_value(control_value: &[u8]) -> Result<(), GraphicsError> {

@@ -4,12 +4,9 @@
 //! valid transitions and rejects all others. Tests enumerate the full
 //! state × lifecycle-event matrix with the exact outcome of every pair, walk one
 //! session from `Starting` to `Stopped`, and pin the stored form of every
-//! session state, session event and [`TabLifecycle`] state to its bare
-//! variant name.
+//! session state and session event to its bare variant name.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
-
-use super::{SessionLifecycle, SessionLifecycleEvent, TabLifecycle};
+use super::{SessionLifecycle, SessionLifecycleEvent};
 use crate::error::InvalidTransition;
 
 /// Every session lifecycle state and event, for exhaustive sweeps.
@@ -247,16 +244,6 @@ fn an_illegal_transition_reports_its_origin() {
 }
 
 #[test]
-fn an_invalid_transition_is_a_recoverable_session_error() {
-    let transition_error = SessionLifecycle::Stopped
-        .transition(SessionLifecycleEvent::FirstTabCreated)
-        .expect_err("a stopped session rejects every event");
-
-    assert_eq!(transition_error.category(), DomainCategory::Session);
-    assert_eq!(transition_error.get_severity(), Severity::Recoverable);
-}
-
-#[test]
 fn lifecycle_states_survive_a_serde_round_trip() {
     for &session_lifecycle in &SESSION_LIFECYCLE_STATES {
         let lifecycle_json = serde_json::to_string(&session_lifecycle).expect("serialize");
@@ -323,33 +310,16 @@ fn a_lifecycle_event_is_stored_as_its_bare_variant_name() {
 }
 
 #[test]
-fn a_tab_lifecycle_state_is_stored_as_its_bare_variant_name() {
-    for (tab_lifecycle, lifecycle_json) in [
-        (TabLifecycle::Creating, "\"Creating\""),
-        (TabLifecycle::Active, "\"Active\""),
-        (TabLifecycle::Inactive, "\"Inactive\""),
-        (TabLifecycle::Closing, "\"Closing\""),
-        (TabLifecycle::Closed, "\"Closed\""),
-    ] {
-        assert_eq!(
-            serde_json::to_string(&tab_lifecycle).expect("serialize"),
-            lifecycle_json
-        );
-        assert_eq!(
-            serde_json::from_str::<TabLifecycle>(lifecycle_json).expect("deserialize"),
-            tab_lifecycle
-        );
-    }
-}
-
-#[test]
 fn a_lifecycle_state_this_build_does_not_know_is_rejected() {
-    let error = serde_json::from_str::<SessionLifecycle>("\"Paused\"")
+    let deserialize_error = serde_json::from_str::<SessionLifecycle>("\"Paused\"")
         .expect_err("`Paused` is not a state this build knows");
 
-    assert_eq!(error.classify(), serde_json::error::Category::Data);
     assert_eq!(
-        error.to_string(),
+        deserialize_error.classify(),
+        serde_json::error::Category::Data
+    );
+    assert_eq!(
+        deserialize_error.to_string(),
         "unknown variant `Paused`, expected one of `Starting`, `Running`, `Detaching`, `Stopping`, `Stopped` at line 1 column 8"
     );
 }

@@ -4,7 +4,7 @@
 //! and, when a newer one exists, downloads the prebuilt archive for this
 //! OS/arch, verifies its SHA-256 checksum, unpacks the `koshi` binary, and swaps it
 //! for the running executable in place. An interactive launch also calls
-//! `maybe_prompt_startup_update`, which does the same check on a timer and offers to install.
+//! `prompt_startup_update`, which does the same check on a timer and offers to install.
 //!
 //! Two small files back this. The user's hand-authored `koshi.kdl` holds every
 //! preference koshi only reads — `update.auto-check`,
@@ -78,7 +78,9 @@ pub fn run_update_command() -> Result<(), CliError> {
         check_for_update(should_allow_prerelease_updates).map_err(build_update_error)?;
     // A completed check counts toward the interval whether or not it found a
     // newer release, so the next startup check waits the full interval.
-    persist_last_check();
+    let mut update_state = load_update_state();
+    update_state.last_check_unix_seconds = Some(get_current_unix_seconds());
+    let _ = save_update_state(&update_state);
     let Some(release_tag) = available_release_tag else {
         println!("koshi {APP_VERSION} is already the latest version");
         return Ok(());
@@ -94,7 +96,7 @@ pub fn run_update_command() -> Result<(), CliError> {
 /// look for a newer release and offer to install it. Every failure is
 /// swallowed and the launch continues. Runs before the terminal enters raw
 /// mode, and reads the answer from plain standard input.
-pub fn maybe_prompt_startup_update() {
+pub fn prompt_startup_update() {
     remove_stale_backup();
     let update_config = load_update_config();
     if !update_config.should_auto_check_for_updates {
@@ -147,10 +149,10 @@ const RESTART_CONFIRM_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2
 const RESTART_PROBE_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
 /// Ask the running router to restart into the binary just installed, confirm
-/// the router now reports the `installed` version, and say what happened.
+/// the router now reports `installed_version`, and say what happened.
 ///
 /// Prints nothing when no router is running. Success is printed only after
-/// the router's Hello reports `installed`. A refusal, a router still on the
+/// the router's Hello reports `installed_version`. A refusal, a router still on the
 /// previous build, or no answer within [`RESTART_CONFIRM_WAIT_DURATION`] prints a note
 /// on standard error; the install itself stands.
 fn restart_router_after_install(installed_version: &str) {
@@ -283,7 +285,7 @@ enum SessionOutcome {
 /// installed, and print one line per session.
 ///
 /// Prints nothing for a session that is no longer listening. Success is printed
-/// only after that session's Hello reports `installed`. Every other result
+/// only after that session's Hello reports `installed_version`. Every other result
 /// prints a note on standard error, and the install itself stands.
 fn restart_sessions_after_install(installed_version: &str) {
     let runtime_directory = match ipc_client::resolve_runtime_directory() {
@@ -327,7 +329,7 @@ fn restart_sessions_after_install(installed_version: &str) {
 
 /// Ask every session `runtime_directory` advertises to restart, waiting up to
 /// `wait_duration`
-/// on each for a Hello reporting `installed`, and hand back each result.
+/// on each for a Hello reporting `installed_version`, and hand back each result.
 ///
 /// A session no longer listening is left out. One session's failure never ends
 /// the walk: every advertised session is asked, whatever the one before it
@@ -474,7 +476,9 @@ fn install_release(release_tag: &str) -> Result<(), String> {
         archive_file_name,
         &expected_checksum,
     )?;
-    install_binary(release_binary.as_ref())
+    let executable_path = std::env::current_exe()
+        .map_err(|executable_path_error| executable_path_error.to_string())?;
+    swap_executable(release_binary.as_ref(), &executable_path)
 }
 
 /// The download URL for this platform's release archive at `release_tag`, or `None`
@@ -651,8 +655,8 @@ fn extract_tar_gz_archive(archive_path: &Path) -> Result<TempPath, String> {
     {
         let mut archive_entry =
             archive_entry.map_err(|archive_entry_error| archive_entry_error.to_string())?;
-        // Only a regular file counts: a directory or symlink named `koshi`
-        // would otherwise be "saved" as an empty or wrong binary.
+        // Only a regular file counts: a directory or symlink named `koshi` is
+        // skipped.
         if !archive_entry.header().entry_type().is_file() {
             continue;
         }
@@ -728,16 +732,9 @@ fn remove_stale_backup() {
     }
 }
 
-/// Swaps the running executable for `new_binary`.
-fn install_binary(new_binary: &Path) -> Result<(), String> {
-    let executable_path = std::env::current_exe()
-        .map_err(|executable_path_error| executable_path_error.to_string())?;
-    swap_executable(new_binary, &executable_path)
-}
-
 /// Replaces the executable on Unix atomically. The new binary is staged as a
-/// sibling of `exe` — same directory, so the same filesystem — then renamed
-/// over `exe`. Renaming a running binary is safe on Unix: the live process
+/// sibling of `executable_path` — same directory, so the same filesystem — then
+/// renamed over `executable_path`. Renaming a running binary is safe on Unix: the live process
 /// keeps the old inode. The swap is a single rename: an interrupted copy never
 /// touches the running binary, and the replacement either fully happens or not
 /// at all. A permission error on the staging directory escalates
@@ -813,7 +810,7 @@ fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Installs `new_binary` over `exe` with `sudo`, for a binary in a root-owned
+/// Installs `new_binary` over `executable_path` with `sudo`, for a binary in a root-owned
 /// directory. `install -m 755` writes the file and sets its mode in one step.
 #[cfg(unix)]
 fn replace_with_sudo(new_binary: &Path, executable_path: &Path) -> Result<(), String> {
@@ -836,7 +833,7 @@ fn replace_with_sudo(new_binary: &Path, executable_path: &Path) -> Result<(), St
     Ok(())
 }
 
-/// Sets the Unix executable bit (`0755`) on `path`.
+/// Sets the Unix executable bit (`0755`) on `executable_path`.
 #[cfg(unix)]
 fn set_executable_permissions(executable_path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -845,7 +842,7 @@ fn set_executable_permissions(executable_path: &Path) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// State file (koshi-owned): last check time + pre-release opt-in
+// State file (koshi-owned): last check time
 // ---------------------------------------------------------------------------
 
 /// The update state koshi owns and rewrites, stored as `update.json` in the
@@ -891,13 +888,6 @@ fn save_update_state(update_state: &UpdateState) -> io::Result<()> {
     let serialized_update_state =
         serde_json::to_string_pretty(update_state).map_err(io::Error::other)?;
     fs::write(&update_state_file_path, serialized_update_state)
-}
-
-/// Records the current time as the last check, ignoring a write failure.
-fn persist_last_check() {
-    let mut update_state = load_update_state();
-    update_state.last_check_unix_seconds = Some(get_current_unix_seconds());
-    let _ = save_update_state(&update_state);
 }
 
 /// True when the interval has elapsed since the last check, or none has run.
@@ -967,7 +957,7 @@ fn build_http_agent(timeout_duration: Duration) -> Agent {
     )
 }
 
-/// Fetches `url` and decodes the JSON body, sending the User-Agent and Accept
+/// Fetches `request_url` and decodes the JSON body, sending the User-Agent and Accept
 /// headers GitHub's API requires.
 fn fetch_json<ResponseBody: serde::de::DeserializeOwned>(
     request_url: &str,

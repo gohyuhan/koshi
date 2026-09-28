@@ -70,9 +70,9 @@ fn render_statusline(keymap_hints: &KeymapHints, column_count: u16) -> Buffer {
     render_statusline_with_theme(keymap_hints, &Theme::default(), column_count)
 }
 
-/// Paint `keymap_hints` into `render_buffer` over `render_area`, in `theme`'s colors. `pending_key_sequence` carries
-/// the chords already pressed of an open key sequence, and is `None` when no
-/// sequence is open.
+/// Paint `keymap_hints` into `render_buffer` over `render_area`, in `theme`'s colors.
+/// `pending_key_sequence` carries the chords already pressed of an open key sequence, and is `None`
+/// when no sequence is open.
 fn paint_statusline(
     keymap_hints: &KeymapHints,
     theme: &Theme,
@@ -85,11 +85,51 @@ fn paint_statusline(
             keymap_hints,
             pending_key_sequence,
             placement_status: None,
+            is_recovery_notice_visible: false,
         },
         theme,
         render_area,
         render_buffer,
     );
+}
+
+#[test]
+fn recovery_notice_replaces_other_statusline_content_at_full_and_narrow_widths() {
+    let keymap_hints = build_keymap_hints(Vec::new(), &[], Vec::new(), false);
+    let placement_status = PlacementStatus {
+        placement_status_kind: PlacementStatusKind::Valid,
+        status_text: "PLACE shell".to_string(),
+    };
+    for (column_count, expected_text) in [
+        (
+            80,
+            "Restore failed: new shell; previous panes unavailable. Input clears notice.",
+        ),
+        (15, "Restore failed:"),
+        (1, "R"),
+    ] {
+        let statusline_area = RatatuiRect {
+            x: 0,
+            y: 0,
+            width: column_count,
+            height: 1,
+        };
+        let mut screen_buffer = Buffer::empty(statusline_area);
+        draw_statusline(
+            StatuslineInputs {
+                keymap_hints: &keymap_hints,
+                pending_key_sequence: None,
+                placement_status: Some(&placement_status),
+                is_recovery_notice_visible: true,
+            },
+            &Theme::default(),
+            statusline_area,
+            &mut screen_buffer,
+        );
+        assert_eq!(format_rendered_row(&screen_buffer), expected_text);
+        assert_eq!(screen_buffer[(0, 0)].fg, Color::White);
+        assert_eq!(screen_buffer[(0, 0)].bg, Color::Red);
+    }
 }
 
 /// Draw in `theme`'s colors with an open sequence.
@@ -174,7 +214,7 @@ fn build_painted_cells(text: &str, style: Style) -> Vec<Cell> {
 
 /// The default-shaped fixture: two sequences under `<C-p>` labeled `PANE`,
 /// plus a single-chord `Lock` binding.
-fn build_pane_keymap_hints(user_close: bool) -> KeymapHints {
+fn build_pane_keymap_hints(has_user_close_binding: bool) -> KeymapHints {
     build_keymap_hints(
         vec![
             build_hint_binding(
@@ -192,7 +232,7 @@ fn build_pane_keymap_hints(user_close: bool) -> KeymapHints {
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('p'), build_plain_chord('x')]),
                 "Close Pane",
-                user_close,
+                has_user_close_binding,
                 false,
             ),
         ],
@@ -851,13 +891,13 @@ fn the_bar_paints_only_the_cells_of_the_area_it_is_given() {
         Vec::new(),
         false,
     );
-    let buf_area = RatatuiRect {
+    let buffer_area = RatatuiRect {
         x: 0,
         y: 0,
         width: 20,
         height: 3,
     };
-    let mut render_buffer = Buffer::empty(buf_area);
+    let mut render_buffer = Buffer::empty(buffer_area);
     for row_index in 0..3 {
         render_buffer.set_string(0, row_index, "X".repeat(20), Style::default());
     }
@@ -1036,8 +1076,8 @@ fn only_the_opening_chord_of_a_pending_sequence_shows_a_prefix_label() {
 
 #[test]
 fn a_pending_sequence_that_is_itself_bound_lists_only_its_continuations() {
-    // `<C-p>` runs an action of its own and also opens deeper bindings. Once it
-    // is pending_key_sequence, its own build_hint_binding is behind the viewer, so only `n` is listed.
+    // `<C-p>` runs an action of its own and also opens deeper bindings. Once it is
+    // pending_key_sequence, its own build_hint_binding is behind the viewer, so only `n` is listed.
     let keymap = build_keymap_hints(
         vec![
             build_hint_binding(
@@ -1322,6 +1362,7 @@ fn placement_statusline_reserves_the_right_edge_and_styles_each_status_kind() {
                 keymap_hints: &keymap_hints,
                 pending_key_sequence: None,
                 placement_status: Some(placement_status),
+                is_recovery_notice_visible: false,
             },
             &Theme::default(),
             render_area,

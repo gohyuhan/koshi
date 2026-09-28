@@ -9,8 +9,13 @@
 
 use super::*;
 
-use koshi_core::event::{PaneCreated, PaneTyped, QuitCause, TypedPayload};
-use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+/// Remove every record from the ring.
+fn clear_recent_events() {
+    lock_recent_event_ring().clear();
+}
+
+use koshi_core::event::{PaneCreated, QuitCause};
+use koshi_core::ids::{PaneId, TabId};
 
 /// Held for the length of one test; two tests never hold the ring at once.
 static RECENT_EVENT_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -80,48 +85,9 @@ fn a_record_carries_the_ids_its_event_named() {
             client_id: None,
             tab_id: Some(tab_id),
             pane_id: Some(pane_id),
-            plugin_id: None,
             command_id: None,
-            subscriber_id: None,
         }
     );
-}
-
-#[test]
-fn a_typed_character_leaves_the_character_behind() {
-    let _serialization_guard = lock_recent_events_for_test();
-    let pane_id = PaneId::new();
-    let tab_id = TabId::new();
-    let session_id = SessionId::new();
-    let client_id = ClientId::new();
-
-    record_event(&Event::PaneTyped(PaneTyped {
-        pane_id,
-        tab_id,
-        session_id,
-        client_id,
-        typed_payload: TypedPayload::SafePublic('z'),
-        accepted_at: SystemTime::now(),
-    }));
-
-    let recent_events = list_recent_events();
-    assert_eq!(recent_events.len(), 1);
-    assert_eq!(
-        recent_events[0],
-        RecentEvent {
-            occurred_at: recent_events[0].occurred_at,
-            event_name: "PaneTyped".into(),
-            session_id: Some(session_id),
-            client_id: Some(client_id),
-            tab_id: Some(tab_id),
-            pane_id: Some(pane_id),
-            plugin_id: None,
-            command_id: None,
-            subscriber_id: None,
-        }
-    );
-    let debug_output = format!("{:?}", recent_events[0]);
-    assert!(!debug_output.contains('z'), "{debug_output}");
 }
 
 #[test]

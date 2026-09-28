@@ -8,29 +8,24 @@
 //!
 //! Events are append-only facts; none requests a mutation. Every variant and
 //! payload holds only serde-friendly types that mean the same thing in another
-//! process (IPC watchers, plugin host, storage). Timestamps are `SystemTime`,
-//! never `Instant`. No raw OS handles and no `&mut` references.
-//!
-//! Privacy is structural: each input payload variant encodes the classified
-//! context and the resulting [`PrivacyTier`] together, and every non-public
-//! variant is unit-shaped with no content field.
+//! process (IPC watchers, storage). Timestamps are `SystemTime`, never
+//! `Instant`. No raw OS handles and no `&mut` references.
 
 use crate::command::PanePlacementTarget;
-use crate::geometry::{PaneArea, Point, Size};
-use crate::ids::{ClientId, CommandId, PaneId, PluginId, SessionId, SubscriberId, TabId};
+use crate::geometry::{PaneArea, Size};
+use crate::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
 use crate::lock::LockMode;
-use crate::mouse::{MouseButton, ScrollDirection};
 use crate::process::PtySize;
-use crate::selection::{CopyTarget, Selection};
+use crate::selection::Selection;
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
 
 /// A completed fact emitted by the runtime.
 ///
 /// Variants are grouped to match the sections further down the file: pane/tab
-/// lifecycle, input modes, input privacy, mouse, delivery, selection/copy, and
-/// plugins. Each variant wraps a like-named payload struct. `Quit` wraps its
-/// [`QuitCause`]; `Restarting` carries nothing.
+/// lifecycle, input modes, shell integration, selection, and session
+/// lifecycle. Each variant wraps a like-named
+/// payload struct. `Quit` wraps its [`QuitCause`]; `Restarting` carries
+/// nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     // Pane and tab lifecycle.
@@ -46,8 +41,6 @@ pub enum Event {
     PaneFocused(PaneFocused),
     /// A pane's PTY was resized (emitted per affected pane after a layout solve).
     PtyResized(PtyResized),
-    /// A lossy damage tick for changed terminal content. Carries no content.
-    PaneOutputUpdated(PaneOutputUpdated),
     /// A tab's layout tree changed.
     LayoutChanged(LayoutChanged),
     /// A checked pane placement committed in the session.
@@ -60,46 +53,16 @@ pub enum Event {
     TabFocused(TabFocused),
     /// A tab moved to a new index.
     TabMoved(TabMoved),
-    /// A pane became invisible: the terminal is too small to show it.
-    PaneSuppressed(PaneSuppressed),
-    /// A suppressed pane became visible again after a resize.
-    PaneResumed(PaneResumed),
     /// A client has no visible pane: every pane in its tab is suppressed.
     TerminalTooSmallEntered(TerminalTooSmallEntered),
-    /// At least one of the client's panes regained visible area after the
-    /// terminal grew. A visibility change from a mode toggle (e.g. leaving
-    /// fullscreen) does not emit this.
-    TerminalTooSmallExited(TerminalTooSmallExited),
     /// Configuration reload succeeded and was atomically swapped in.
     ConfigReloaded(ConfigReloaded),
 
-    // Input modes and keybindings.
+    // Input modes.
     /// The active input mode changed (normal or locked).
     InputModeChanged(InputModeChanged),
     /// A client's mouse-select mode was turned on or off.
     MouseSelectChanged(MouseSelectChanged),
-    /// A keybinding matched and resolved to a command.
-    KeybindingMatched(KeybindingMatched),
-
-    // Input privacy.
-    /// A printable character was accepted for a focused pane (privacy-gated).
-    PaneTyped(PaneTyped),
-    /// Enter was accepted for a focused pane (privacy-gated).
-    PaneEnterPressed(PaneEnterPressed),
-
-    // Mouse input.
-    /// A mouse button was pressed (client-local, hit-tested).
-    MousePressed(MousePressed),
-    /// A mouse button was released.
-    MouseReleased(MouseReleased),
-    /// The mouse was dragged with a button held.
-    MouseDragged(MouseDragged),
-    /// The mouse wheel scrolled.
-    MouseScrolled(MouseScrolled),
-    /// A mouse event was encoded and forwarded to a pane's PTY.
-    PaneMouseForwarded(PaneMouseForwarded),
-    /// A mouse event was delivered to a capable plugin.
-    PluginMouseInput(PluginMouseInput),
 
     // Shell integration (OSC 133 semantic prompts).
     /// A command began running in a pane (OSC 133;C). Carries no command text.
@@ -108,25 +71,11 @@ pub enum Event {
     /// shell reports one. Carries no command text.
     PaneCommandFinished(PaneCommandFinished),
 
-    // Delivery and rejection.
-    /// A pane's bounded scrollback dropped lines on overflow.
-    PaneScrollbackTruncated(PaneScrollbackTruncated),
-    /// A subscriber's bounded queue overflowed and dropped events.
-    SubscriberLagged(SubscriberLagged),
-    /// A command was rejected by validation or target resolution.
-    CommandRejected(CommandRejected),
-
-    // Selection and copy.
+    // Selection.
     /// The active selection changed or was cleared. A selection appearing
     /// enters visual mode; a selection clearing leaves it. No other event
     /// reports entering or leaving visual mode.
     SelectionChanged(SelectionChanged),
-    /// A selection was copied to a clipboard target.
-    Copied(Copied),
-
-    // Plugin lifecycle.
-    /// A plugin lifecycle fact.
-    Plugin(PluginEvent),
 
     // Session lifecycle.
     /// The session is over. The payload names what ended it: a quit request,
@@ -152,37 +101,19 @@ impl Event {
             Event::PaneRemoved(_) => "PaneRemoved",
             Event::PaneFocused(_) => "PaneFocused",
             Event::PtyResized(_) => "PtyResized",
-            Event::PaneOutputUpdated(_) => "PaneOutputUpdated",
             Event::LayoutChanged(_) => "LayoutChanged",
             Event::PanePlacementCommitted(_) => "PanePlacementCommitted",
             Event::TabCreated(_) => "TabCreated",
             Event::TabClosed(_) => "TabClosed",
             Event::TabFocused(_) => "TabFocused",
             Event::TabMoved(_) => "TabMoved",
-            Event::PaneSuppressed(_) => "PaneSuppressed",
-            Event::PaneResumed(_) => "PaneResumed",
             Event::TerminalTooSmallEntered(_) => "TerminalTooSmallEntered",
-            Event::TerminalTooSmallExited(_) => "TerminalTooSmallExited",
             Event::ConfigReloaded(_) => "ConfigReloaded",
             Event::InputModeChanged(_) => "InputModeChanged",
             Event::MouseSelectChanged(_) => "MouseSelectChanged",
-            Event::KeybindingMatched(_) => "KeybindingMatched",
-            Event::PaneTyped(_) => "PaneTyped",
-            Event::PaneEnterPressed(_) => "PaneEnterPressed",
-            Event::MousePressed(_) => "MousePressed",
-            Event::MouseReleased(_) => "MouseReleased",
-            Event::MouseDragged(_) => "MouseDragged",
-            Event::MouseScrolled(_) => "MouseScrolled",
-            Event::PaneMouseForwarded(_) => "PaneMouseForwarded",
-            Event::PluginMouseInput(_) => "PluginMouseInput",
             Event::PaneCommandStarted(_) => "PaneCommandStarted",
             Event::PaneCommandFinished(_) => "PaneCommandFinished",
-            Event::PaneScrollbackTruncated(_) => "PaneScrollbackTruncated",
-            Event::SubscriberLagged(_) => "SubscriberLagged",
-            Event::CommandRejected(_) => "CommandRejected",
             Event::SelectionChanged(_) => "SelectionChanged",
-            Event::Copied(_) => "Copied",
-            Event::Plugin(_) => "Plugin",
             Event::Quit(_) => "Quit",
             Event::Restarting => "Restarting",
         }
@@ -287,13 +218,6 @@ pub struct PtyResized {
     pub pty_size: PtySize,
 }
 
-/// Payload for [`Event::PaneOutputUpdated`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneOutputUpdated {
-    /// The pane whose terminal content changed.
-    pub pane_id: PaneId,
-}
-
 /// Payload for [`Event::LayoutChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutChanged {
@@ -356,24 +280,6 @@ pub struct TabMoved {
     pub new_tab_index: usize,
 }
 
-/// Payload for [`Event::PaneSuppressed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSuppressed {
-    /// The pane that became invisible.
-    pub pane_id: PaneId,
-    /// The tab containing the pane.
-    pub tab_id: TabId,
-}
-
-/// Payload for [`Event::PaneResumed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneResumed {
-    /// The pane that became visible again.
-    pub pane_id: PaneId,
-    /// The tab containing the pane.
-    pub tab_id: TabId,
-}
-
 /// Why a client has no visible pane area.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalTooSmallCause {
@@ -389,7 +295,7 @@ pub enum TerminalTooSmallCause {
 /// Payload for [`Event::TerminalTooSmallEntered`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalTooSmallEntered {
-    /// The affected client viewport.
+    /// The affected client.
     pub client_id: ClientId,
     /// The viewport size that could not fit any pane.
     pub viewport_size: Size,
@@ -401,15 +307,6 @@ pub struct TerminalTooSmallEntered {
     pub cause: TerminalTooSmallCause,
 }
 
-/// Payload for [`Event::TerminalTooSmallExited`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalTooSmallExited {
-    /// The affected client viewport.
-    pub client_id: ClientId,
-    /// The viewport size after recovery.
-    pub viewport_size: Size,
-}
-
 /// Payload for [`Event::ConfigReloaded`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigReloaded {
@@ -418,7 +315,7 @@ pub struct ConfigReloaded {
 }
 
 // ============================================================================
-// Input modes and keybindings
+// Input modes
 // ============================================================================
 
 /// Payload for [`Event::InputModeChanged`].
@@ -446,223 +343,6 @@ pub struct MouseSelectChanged {
     pub is_enabled: bool,
 }
 
-/// Payload for [`Event::KeybindingMatched`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeybindingMatched {
-    /// The client whose input matched.
-    pub client_id: ClientId,
-    /// The command the binding resolved to.
-    pub command_id: CommandId,
-}
-
-// ============================================================================
-// Input privacy: typed characters and submitted lines
-// ============================================================================
-
-/// How much of an input event's content its payload carries.
-///
-/// Every [`TypedPayload`] and [`SubmittedLinePayload`] variant maps to exactly
-/// one tier, read with `tier()`. [`SensitiveBlocked`] is a unit variant and
-/// carries no content.
-///
-/// [`SensitiveBlocked`]: PrivacyTier::SensitiveBlocked
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PrivacyTier {
-    /// Safe content may be delivered: the character in
-    /// [`TypedPayload::SafePublic`] or the line in
-    /// [`SubmittedLinePayload::SafePublic`].
-    Public,
-    /// Shape/timing only; no content.
-    MetadataOnly,
-    /// Content existed but is withheld.
-    Redacted,
-    /// Sensitive context; not even metadata leaves core.
-    SensitiveBlocked,
-}
-
-/// The character payload of a [`PaneTyped`] event.
-///
-/// Each variant encodes the classified input context and its privacy tier in
-/// one value. A character is only present in [`SafePublic`]; every other
-/// context is unit-shaped and carries none.
-///
-/// [`SafePublic`]: TypedPayload::SafePublic
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TypedPayload {
-    /// Safe context (echo-enabled shell line mode): the printable character.
-    SafePublic(char),
-    /// Sensitive context (password heuristic or protected window): redacted.
-    SensitiveRedacted,
-    /// Alternate-screen application: metadata only, no character.
-    AlternateScreenMetadataOnly,
-    /// Raw/cbreak-mode application: metadata only, no character.
-    RawModeMetadataOnly,
-    /// Context could not be classified (fails closed): metadata only.
-    UnknownMetadataOnly,
-    /// Sensitive context that must not leave core: no content, not even metadata.
-    SensitiveBlocked,
-}
-
-impl TypedPayload {
-    /// The [`PrivacyTier`] this payload encodes.
-    #[must_use]
-    pub const fn get_privacy_tier(&self) -> PrivacyTier {
-        match self {
-            TypedPayload::SafePublic(_) => PrivacyTier::Public,
-            TypedPayload::SensitiveRedacted => PrivacyTier::Redacted,
-            TypedPayload::AlternateScreenMetadataOnly
-            | TypedPayload::RawModeMetadataOnly
-            | TypedPayload::UnknownMetadataOnly => PrivacyTier::MetadataOnly,
-            TypedPayload::SensitiveBlocked => PrivacyTier::SensitiveBlocked,
-        }
-    }
-}
-
-/// Payload for [`Event::PaneTyped`].
-///
-/// A privacy-gated domain event, not a raw key event: a character is only
-/// present when the context was safe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneTyped {
-    /// The pane that received the input.
-    pub pane_id: PaneId,
-    /// The pane's tab.
-    pub tab_id: TabId,
-    /// The session.
-    pub session_id: SessionId,
-    /// The client that produced the input.
-    pub client_id: ClientId,
-    /// The classified, privacy-tiered character payload.
-    pub typed_payload: TypedPayload,
-    /// When the input was accepted.
-    pub accepted_at: SystemTime,
-}
-
-/// The submitted-line payload of a [`PaneEnterPressed`] event.
-///
-/// As with [`TypedPayload`], each variant encodes context and tier together:
-/// the line text is only present in [`SafePublic`].
-///
-/// [`SafePublic`]: SubmittedLinePayload::SafePublic
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SubmittedLinePayload {
-    /// Safe context: a reconstructed shell command line.
-    SafePublic(String),
-    /// Sensitive context (the line may contain a secret): redacted.
-    SensitiveRedacted,
-    /// The line could not be confidently reconstructed (fails closed): metadata only.
-    UnknownMetadataOnly,
-    /// Sensitive context that must not leave core: no content, not even metadata.
-    SensitiveBlocked,
-}
-
-impl SubmittedLinePayload {
-    /// The [`PrivacyTier`] this payload encodes. [`UnknownMetadataOnly`] fails
-    /// closed: a line was submitted, but its content is never exposed.
-    ///
-    /// [`UnknownMetadataOnly`]: SubmittedLinePayload::UnknownMetadataOnly
-    #[must_use]
-    pub const fn get_privacy_tier(&self) -> PrivacyTier {
-        match self {
-            SubmittedLinePayload::SafePublic(_) => PrivacyTier::Public,
-            SubmittedLinePayload::SensitiveRedacted => PrivacyTier::Redacted,
-            SubmittedLinePayload::UnknownMetadataOnly => PrivacyTier::MetadataOnly,
-            SubmittedLinePayload::SensitiveBlocked => PrivacyTier::SensitiveBlocked,
-        }
-    }
-}
-
-/// Payload for [`Event::PaneEnterPressed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneEnterPressed {
-    /// The pane that received Enter.
-    pub pane_id: PaneId,
-    /// The pane's tab.
-    pub tab_id: TabId,
-    /// The session.
-    pub session_id: SessionId,
-    /// The client that produced the input.
-    pub client_id: ClientId,
-    /// The classified, privacy-tiered submitted-line payload.
-    pub submitted_line: SubmittedLinePayload,
-    /// When Enter was accepted.
-    pub accepted_at: SystemTime,
-}
-
-// ============================================================================
-// Mouse input
-// ============================================================================
-
-/// Payload for [`Event::MousePressed`].
-///
-/// Position is a client-local cell coordinate; the runtime never sees raw
-/// screen coordinates. `pane` is `None` when the press landed on a Koshi-owned
-/// region (border, tabline, statusline) rather than pane content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MousePressed {
-    /// The client that produced the event.
-    pub client_id: ClientId,
-    /// The hit-tested pane, if any.
-    pub pane_id: Option<PaneId>,
-    /// The client-local cell position.
-    pub position: Point,
-    /// The button pressed.
-    pub button: MouseButton,
-}
-
-/// Payload for [`Event::MouseReleased`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MouseReleased {
-    /// The client that produced the event.
-    pub client_id: ClientId,
-    /// The hit-tested pane, if any.
-    pub pane_id: Option<PaneId>,
-    /// The client-local cell position.
-    pub position: Point,
-    /// The button released.
-    pub button: MouseButton,
-}
-
-/// Payload for [`Event::MouseDragged`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MouseDragged {
-    /// The client that produced the event.
-    pub client_id: ClientId,
-    /// The hit-tested pane, if any.
-    pub pane_id: Option<PaneId>,
-    /// The client-local cell position.
-    pub position: Point,
-    /// The button held during the drag.
-    pub button: MouseButton,
-}
-
-/// Payload for [`Event::MouseScrolled`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MouseScrolled {
-    /// The client that produced the event.
-    pub client_id: ClientId,
-    /// The hit-tested pane, if any.
-    pub pane_id: Option<PaneId>,
-    /// The client-local cell position.
-    pub position: Point,
-    /// The wheel direction.
-    pub direction: ScrollDirection,
-}
-
-/// Payload for [`Event::PaneMouseForwarded`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneMouseForwarded {
-    /// The pane the encoded mouse sequence was sent to.
-    pub pane_id: PaneId,
-}
-
-/// Payload for [`Event::PluginMouseInput`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginMouseInput {
-    /// The plugin the mouse input was delivered to.
-    pub plugin_id: PluginId,
-}
-
 // ============================================================================
 // Shell integration (OSC 133 semantic prompts)
 // ============================================================================
@@ -688,86 +368,17 @@ pub struct PaneCommandFinished {
 }
 
 // ============================================================================
-// Delivery and rejection
+// Delivery and rejection reasons
 // ============================================================================
 
-/// Payload for [`Event::PaneScrollbackTruncated`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneScrollbackTruncated {
-    /// The pane whose scrollback overflowed.
-    pub pane_id: PaneId,
-    /// How many lines were dropped from the bounded buffer.
-    pub dropped_lines: u64,
-    /// How many bytes were dropped from the bounded buffer.
-    pub dropped_bytes: u64,
-}
-
-/// The delivery class of an event, used when reporting drops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EventClass {
-    /// High-frequency, value-only events that may coalesce or drop.
-    Lossy,
-    /// State-transition facts that must not be silently lost.
-    Critical,
-}
-
-/// Returns an event's delivery class.
-///
-/// `Lossy` events may coalesce or drop during delivery. `Critical` events must
-/// not silently disappear.
-pub fn classify_event(event: &Event) -> EventClass {
-    match event {
-        Event::PaneOutputUpdated(_)
-        | Event::PaneTyped(_)
-        | Event::MouseDragged(_)
-        | Event::MouseScrolled(_)
-        | Event::PaneMouseForwarded(_)
-        | Event::PluginMouseInput(_)
-        | Event::PaneScrollbackTruncated(_) => EventClass::Lossy,
-        Event::PaneCreated(_)
-        | Event::PaneProcessExited(_)
-        | Event::PaneClosing(_)
-        | Event::PaneRemoved(_)
-        | Event::PaneFocused(_)
-        | Event::PtyResized(_)
-        | Event::LayoutChanged(_)
-        | Event::PanePlacementCommitted(_)
-        | Event::TabCreated(_)
-        | Event::TabClosed(_)
-        | Event::TabFocused(_)
-        | Event::TabMoved(_)
-        | Event::PaneSuppressed(_)
-        | Event::PaneResumed(_)
-        | Event::TerminalTooSmallEntered(_)
-        | Event::TerminalTooSmallExited(_)
-        | Event::ConfigReloaded(_)
-        | Event::InputModeChanged(_)
-        | Event::MouseSelectChanged(_)
-        | Event::KeybindingMatched(_)
-        | Event::PaneEnterPressed(_)
-        | Event::MousePressed(_)
-        | Event::MouseReleased(_)
-        | Event::PaneCommandStarted(_)
-        | Event::PaneCommandFinished(_)
-        | Event::SubscriberLagged(_)
-        | Event::CommandRejected(_)
-        | Event::SelectionChanged(_)
-        | Event::Copied(_)
-        | Event::Plugin(_)
-        | Event::Quit(_)
-        | Event::Restarting => EventClass::Critical,
-    }
-}
-
-/// Payload for [`Event::SubscriberLagged`].
+/// A subscriber's report of the deliveries it missed while its queue was full,
+/// carried by the snapshot that returns it to live delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriberLagged {
     /// The subscriber whose queue overflowed.
     pub subscriber_id: SubscriberId,
-    /// How many events were dropped.
+    /// How many deliveries were dropped.
     pub dropped_event_count: u64,
-    /// The class of the dropped events.
-    pub event_class: EventClass,
 }
 
 /// Why a command was rejected.
@@ -786,32 +397,23 @@ pub enum RejectReason {
     /// The command is invalid in the current state.
     InvalidState,
     /// A resize would drop a pane below its minimum size.
-    MinSize,
+    MinimumSize,
 }
 
 impl std::fmt::Display for RejectReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RejectReason::TargetGone => f.write_str("target no longer exists"),
+            RejectReason::TargetGone => formatter.write_str("target no longer exists"),
             RejectReason::TargetAmbiguous => {
-                f.write_str("target matched more than one; specify an explicit id")
+                formatter.write_str("target matched more than one; specify an explicit id")
             }
-            RejectReason::TargetNotFound => f.write_str("no target matched"),
-            RejectReason::SourceClientStale => f.write_str("source client has detached"),
-            RejectReason::Unauthorized => f.write_str("command not permitted"),
-            RejectReason::InvalidState => f.write_str("invalid in the current state"),
-            RejectReason::MinSize => f.write_str("below minimum size"),
+            RejectReason::TargetNotFound => formatter.write_str("no target matched"),
+            RejectReason::SourceClientStale => formatter.write_str("source client has detached"),
+            RejectReason::Unauthorized => formatter.write_str("command not permitted"),
+            RejectReason::InvalidState => formatter.write_str("invalid in the current state"),
+            RejectReason::MinimumSize => formatter.write_str("below minimum size"),
         }
     }
-}
-
-/// Payload for [`Event::CommandRejected`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandRejected {
-    /// The command that was rejected.
-    pub command_id: CommandId,
-    /// Why it was rejected.
-    pub rejection_reason: RejectReason,
 }
 
 // ============================================================================
@@ -828,126 +430,6 @@ pub struct SelectionChanged {
     pub pane_id: PaneId,
     /// The current selection, or `None` when cleared.
     pub selection: Option<Selection>,
-}
-
-/// Payload for [`Event::Copied`].
-///
-/// Carries only the byte length of the copied text, never the text itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Copied {
-    /// The client that copied. For [`CopyTarget::Osc52`] this names the one
-    /// outer terminal the escape reached.
-    pub client_id: ClientId,
-    /// The pane the text was copied from.
-    pub pane_id: PaneId,
-    /// Where the text was copied to.
-    pub clipboard_target: CopyTarget,
-    /// The byte length of the copied text.
-    pub byte_count: usize,
-}
-
-// ============================================================================
-// Plugin lifecycle
-// ============================================================================
-
-/// Plugin lifecycle facts. Internal/runtime events; not delivered to plugins
-/// without management-read capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PluginEvent {
-    /// A plugin was installed.
-    Installed(PluginInstalled),
-    /// A plugin was uninstalled.
-    Uninstalled(PluginUninstalled),
-    /// A plugin was enabled.
-    Enabled(PluginEnabled),
-    /// A plugin was disabled.
-    Disabled(PluginDisabled),
-    /// A plugin was updated.
-    Updated(PluginUpdated),
-    /// A plugin was reloaded in place.
-    Reloaded(PluginReloaded),
-    /// A plugin failed to load.
-    LoadFailed(PluginLoadFailed),
-    /// A plugin was unloaded.
-    Unloaded(PluginUnloaded),
-    /// A plugin was marked broken after repeated failures.
-    Broken(PluginBroken),
-    /// A plugin doctor/diagnostic run completed.
-    DoctorCompleted(PluginDoctorCompleted),
-}
-
-/// Payload for [`PluginEvent::Installed`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginInstalled {
-    /// The installed plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::Uninstalled`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginUninstalled {
-    /// The uninstalled plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::Enabled`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginEnabled {
-    /// The enabled plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::Disabled`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginDisabled {
-    /// The disabled plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::Updated`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginUpdated {
-    /// The updated plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::Reloaded`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginReloaded {
-    /// The reloaded plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::LoadFailed`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginLoadFailed {
-    /// The plugin that failed to load.
-    pub plugin_id: PluginId,
-    /// A human-readable failure reason.
-    pub failure_reason: String,
-}
-
-/// Payload for [`PluginEvent::Unloaded`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginUnloaded {
-    /// The unloaded plugin.
-    pub plugin_id: PluginId,
-}
-
-/// Payload for [`PluginEvent::Broken`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginBroken {
-    /// The plugin marked broken.
-    pub plugin_id: PluginId,
-    /// A human-readable reason it was disabled.
-    pub failure_reason: String,
-}
-
-/// Payload for [`PluginEvent::DoctorCompleted`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginDoctorCompleted {
-    /// The plugin the diagnostic ran against.
-    pub plugin_id: PluginId,
 }
 
 #[cfg(test)]

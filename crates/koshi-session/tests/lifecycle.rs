@@ -2,14 +2,16 @@
 //!
 //! Each test spawns its children on a [`FakePtyBackend`], builds the session
 //! around the pane ids the backend mints, and then drives behaviour the way a
-//! real runtime would: a child-exit fired on the backend is read back off the
-//! pane's handle and handed to [`on_child_exit`]; an output chunk pushed to a
-//! pane is read back and routed by looking the pane up in the session. The
+//! real runtime would: a child-exit fired on the backend is taken back from the
+//! sink the backend delivers to and handed to [`apply_child_exit`]; an output
+//! chunk pushed to a pane is taken back and routed by looking the pane up in
+//! the session. The
 //! backend and the session share one pane id per child, so a signal the backend
 //! drives lands on the pane the session tracks.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use koshi_core::event::{
@@ -22,16 +24,14 @@ use koshi_core::process::{PtySize, ShellKind, SpawnSpec};
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
 use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
-use koshi_pane::pane::policy::PaneExitPolicy;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::{Client, ClientOrigin, ClientRegistry};
-use koshi_session::session::cascade::{on_child_exit, remove_pane_cascade};
+use koshi_session::session::cascade::{apply_child_exit, remove_pane_cascade};
 use koshi_session::session::lifecycle::SessionLifecycle;
-use koshi_session::session::policy::EmptyTabPolicy;
 use koshi_session::session::state::{Session, Tab};
 use koshi_session::session::tab_ops::close_tab;
 use koshi_test_support::event_assert::assert_events;
-use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PtyBackend, PtyHandle};
+use koshi_test_support::fake_pty::{ExitStatus, FakePtyBackend, PaneDeliveryRecorder, PtyBackend};
 
 /// A fixed epoch timestamp so every lifecycle transition stays deterministic.
 const UNIX_EPOCH_TIME: SystemTime = SystemTime::UNIX_EPOCH;
@@ -76,23 +76,30 @@ fn build_spawn_pty_size() -> PtySize {
     }
 }
 
-/// Spawn a child on the backend, returning the pane id it was spawned under and
-/// the live handle that streams its output and exit. The session pane built for
-/// this child reuses the same id, so the two refer to one pane.
-fn spawn_test_child(pty: &FakePtyBackend) -> (PaneId, PtyHandle) {
+/// A backend delivering into a fresh [`PaneDeliveryRecorder`], and that
+/// recorder.
+fn build_fake_pty_backend() -> (FakePtyBackend, Arc<PaneDeliveryRecorder>) {
+    let pane_delivery_recorder = Arc::new(PaneDeliveryRecorder::default());
+    let fake_pty_backend = FakePtyBackend::with_pty_sink(Arc::clone(&pane_delivery_recorder) as _);
+    (fake_pty_backend, pane_delivery_recorder)
+}
+
+/// Spawn a child on the backend under a new pane id, and return that id. The
+/// session pane built for this child reuses the same id, so the two refer to one
+/// pane.
+fn spawn_test_child(fake_pty_backend: &FakePtyBackend) -> PaneId {
     let pane_id = PaneId::new();
-    let pane_handle = pty
+    fake_pty_backend
         .spawn_pane(pane_id, build_spawn_spec(), build_spawn_pty_size())
         .expect("spawn succeeds");
-    (pane_handle.get_pane_id(), pane_handle)
+    pane_id
 }
 
 /// A `Running` terminal pane record sharing the id its fake child was minted
 /// with. The fresh `Spawning` record is walked to `Running` through the one
 /// legal transition, matching a child whose process has come live.
-fn build_running_pane_record(pane_id: PaneId, exit_policy: PaneExitPolicy) -> PaneRecord {
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, UNIX_EPOCH_TIME);
-    pane_record.exit_policy = exit_policy;
+fn build_running_pane_record(pane_id: PaneId) -> PaneRecord {
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
         .expect("Spawning -> Running is a legal transition");
@@ -166,20 +173,20 @@ fn build_session_with(tabs: Vec<Tab>, pane_records: Vec<PaneRecord>) -> Session 
     session
 }
 
-/// Read a pane's exit status off its handle and, if its child has exited, drive
-/// the session's child-exit cascade — the work a real runtime performs between
+/// Take the next exit status of pane `pane_id` from
+/// `pane_delivery_recorder` and, if its child has exited, drive the session's
+/// child-exit cascade — the work a real runtime performs between
 /// the PTY backend and the session. Returns the emitted events, or none when the
 /// child has not exited (the cascade is edge-driven, not polled).
 fn process_child_exit(
     session: &mut Session,
-    pane_handle: &PtyHandle,
+    pane_delivery_recorder: &PaneDeliveryRecorder,
+    pane_id: PaneId,
     tab_id: TabId,
     tab_rect: Rect,
-    empty_tab_policy: EmptyTabPolicy,
 ) -> Vec<Event> {
-    match pane_handle.try_receive_exit_status() {
+    match pane_delivery_recorder.take_exit_status(pane_id) {
         Some(exit_status) => {
-            let pane_id = pane_handle.get_pane_id();
             let pane_exit = match exit_status {
                 ExitStatus::ExitCode(exit_code) => PaneProcessExited {
                     pane_id,
@@ -192,7 +199,7 @@ fn process_child_exit(
                     signal: Some(signal),
                 },
             };
-            on_child_exit(
+            apply_child_exit(
                 session,
                 tab_id,
                 pane_exit,
@@ -201,42 +208,44 @@ fn process_child_exit(
                     minimum_size: MIN_PANE_SIZE,
                     gap_cell_count: 0,
                 },
-                empty_tab_policy,
             )
         }
         None => Vec::new(),
     }
 }
 
-/// Read one pending output chunk off a pane handle and route it by looking the
-/// pane up in the session — the runtime's output path. Returns:
+/// Take one pending output chunk of pane `pane_id` from
+/// `pane_delivery_recorder` and route it by looking the pane up in the session — the runtime's output path. Returns:
 /// - `None` when no chunk was pending,
 /// - `Some((chunk, true))` when the chunk reached a live pane,
 /// - `Some((chunk, false))` when the chunk arrived but its pane is gone, so it is
 ///   dropped.
-fn route_pane_output(session: &Session, pane_handle: &PtyHandle) -> Option<(Vec<u8>, bool)> {
-    pane_handle.try_receive_output_chunk().map(|output_chunk| {
-        (
-            output_chunk,
-            session
-                .panes
-                .get_pane_record_by_id(pane_handle.get_pane_id())
-                .is_some(),
-        )
-    })
+fn route_pane_output(
+    session: &Session,
+    pane_delivery_recorder: &PaneDeliveryRecorder,
+    pane_id: PaneId,
+) -> Option<(Vec<u8>, bool)> {
+    pane_delivery_recorder
+        .take_output_chunk(pane_id)
+        .map(|output_chunk| {
+            (
+                output_chunk,
+                session.panes.get_pane_record_by_id(pane_id).is_some(),
+            )
+        })
 }
 
 #[test]
 fn child_exit_in_focused_pane_refocuses_a_survivor() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -247,21 +256,22 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     // exit edge, never on an idle poll.
     assert!(process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab
     )
     .is_empty());
 
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The exiting pane is gone; the survivor inherits focus on the client.
@@ -282,7 +292,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
             .clients
             .get_client_by_id(client_id)
             .expect("the client stays attached")
-            .get_focused_pane(tab_id),
+            .get_focused_pane_id(tab_id),
         Some(survivor_pane_id)
     );
 
@@ -316,27 +326,28 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
 
 #[test]
 fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
 
     // A signal-killed child carries the signal number and no exit code.
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::Signaled(9))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::Signaled(9))
         .expect("the exited pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     assert!(session
@@ -365,36 +376,38 @@ fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
 
 #[test]
 fn a_second_exit_for_an_already_removed_pane_only_reports_the_exit() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
 
-    // Two exits queued for one child: the handle hands them back one per read.
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    // Two exits delivered for one child: the recorder hands them back one per read.
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let _ = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
     let second_exit_events = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The pane left the registry on the first exit, so the second reports the
@@ -415,29 +428,30 @@ fn a_second_exit_for_an_already_removed_pane_only_reports_the_exit() {
 
 #[test]
 fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, survivor_pane_id);
     let client_id = client.get_client_id();
     session.attach_client(client);
 
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The exit is still reported, but the focused survivor is untouched and no
@@ -451,7 +465,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
             .clients
             .get_client_by_id(client_id)
             .expect("the client stays attached")
-            .get_focused_pane(tab_id),
+            .get_focused_pane_id(tab_id),
         Some(survivor_pane_id)
     );
     assert_events(
@@ -476,15 +490,15 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
 
 #[test]
 fn child_exit_refocuses_every_client_that_watched_the_pane() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
     let first_client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -494,14 +508,15 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
     session.attach_client(first_client);
     session.attach_client(second_client);
 
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let _ = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // Every client that was looking at the gone pane is moved to the survivor,
@@ -511,7 +526,7 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
             .clients
             .get_client_by_id(first_client_id)
             .expect("the first client stays attached")
-            .get_focused_pane(tab_id),
+            .get_focused_pane_id(tab_id),
         Some(survivor_pane_id)
     );
     assert_eq!(
@@ -519,22 +534,22 @@ fn child_exit_refocuses_every_client_that_watched_the_pane() {
             .clients
             .get_client_by_id(second_client_id)
             .expect("the second client stays attached")
-            .get_focused_pane(tab_id),
+            .get_focused_pane_id(tab_id),
         Some(survivor_pane_id)
     );
 }
 
 #[test]
 fn child_exit_with_no_room_to_refocus_clears_focus() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
@@ -542,14 +557,15 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     session.attach_client(client);
 
     // Drive the exit against a viewport too small to fit the survivor.
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_minimum_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The too-small overlay is reported and the client's stale focus on the gone
@@ -559,7 +575,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
             .clients
             .get_client_by_id(client_id)
             .expect("the client stays attached")
-            .get_focused_pane(tab_id),
+            .get_focused_pane_id(tab_id),
         None
     );
     // The survivor stays — the tab is not empty, only unfocusable at this size.
@@ -602,30 +618,28 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
 
 #[test]
 fn last_pane_exit_closes_the_tab_and_quits() {
-    let pty = FakePtyBackend::new();
-    let (only_pane_id, only_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let only_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, only_pane_id)],
-        vec![build_running_pane_record(
-            only_pane_id,
-            PaneExitPolicy::CloseOnExit,
-        )],
+        vec![build_running_pane_record(only_pane_id)],
     );
 
-    pty.trigger_child_exit(only_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(only_pane_id, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &only_pane_handle,
+        &pane_delivery_recorder,
+        only_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The empty tab closes and, as the last tab, the session winds down.
     assert!(session.tabs.is_empty());
-    assert!(!session.panes.has_pane_records());
+    assert_eq!(session.panes.count_pane_records(), 0);
     assert_eq!(session.get_lifecycle(), &SessionLifecycle::Stopping);
 
     // The events report the chain in order: the exit, the pane teardown, the tab
@@ -661,9 +675,9 @@ fn last_pane_exit_closes_the_tab_and_quits() {
 
 #[test]
 fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
-    let pty = FakePtyBackend::new();
-    let (closing_pane_id, closing_pane_handle) = spawn_test_child(&pty);
-    let (other_tab_pane_id, _other_tab_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let closing_pane_id = spawn_test_child(&fake_pty_backend);
+    let other_tab_pane_id = spawn_test_child(&fake_pty_backend);
     let (closing_tab_id, other_tab_id) = (TabId::new(), TabId::new());
     let mut session = build_session_with(
         vec![
@@ -671,19 +685,20 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
             build_tab_at_index(other_tab_id, other_tab_pane_id, 1),
         ],
         vec![
-            build_running_pane_record(closing_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(other_tab_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(closing_pane_id),
+            build_running_pane_record(other_tab_pane_id),
         ],
     );
 
-    pty.trigger_child_exit(closing_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(closing_pane_id, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &closing_pane_handle,
+        &pane_delivery_recorder,
+        closing_pane_id,
         closing_tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The emptied tab closes; the sibling tab keeps the session alive and the
@@ -729,25 +744,23 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
 
 #[test]
 fn a_failing_last_pane_is_removed_and_the_session_quits() {
-    let pty = FakePtyBackend::new();
-    let (failed_pane_id, failed_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let failed_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_single_pane_tab(tab_id, failed_pane_id)],
-        vec![build_running_pane_record(
-            failed_pane_id,
-            PaneExitPolicy::CloseOnExit,
-        )],
+        vec![build_running_pane_record(failed_pane_id)],
     );
 
-    pty.trigger_child_exit(failed_pane_id, ExitStatus::ExitCode(1))
+    fake_pty_backend
+        .trigger_child_exit(failed_pane_id, ExitStatus::ExitCode(1))
         .expect("the pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &failed_pane_handle,
+        &pane_delivery_recorder,
+        failed_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // A non-zero exit tears down exactly like a clean one: the pane goes, its
@@ -784,15 +797,15 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
 
 #[test]
 fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
-    let pty = FakePtyBackend::new();
-    let (closed_pane_id, _closed_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, _) = build_fake_pty_backend();
+    let closed_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, closed_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(closed_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(closed_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, closed_pane_id);
@@ -810,7 +823,6 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
             minimum_size: MIN_PANE_SIZE,
             gap_cell_count: 0,
         },
-        EmptyTabPolicy::CloseTab,
         None,
     );
 
@@ -837,7 +849,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
             .clients
             .get_client_by_id(client_id)
             .expect("the client stays attached")
-            .get_focused_pane(tab_id),
+            .get_focused_pane_id(tab_id),
         Some(survivor_pane_id)
     );
 
@@ -864,7 +876,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
 
     // Closing is a pure state op: the session layer drops the record but never
     // kills the real process, so the backend recorded no kill.
-    assert!(pty
+    assert!(fake_pty_backend
         .list_pane_kill_policies(closed_pane_id)
         .expect("the closed pane is known to the backend")
         .is_empty());
@@ -872,10 +884,10 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
 
 #[test]
 fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
-    let pty = FakePtyBackend::new();
-    let (first_tab_pane_id, _first_tab_pane_handle) = spawn_test_child(&pty);
-    let (second_tab_pane_id, _second_tab_pane_handle) = spawn_test_child(&pty);
-    let (other_tab_pane_id, _other_tab_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, _) = build_fake_pty_backend();
+    let first_tab_pane_id = spawn_test_child(&fake_pty_backend);
+    let second_tab_pane_id = spawn_test_child(&fake_pty_backend);
+    let other_tab_pane_id = spawn_test_child(&fake_pty_backend);
     let (multi_tab_id, other_tab_id) = (TabId::new(), TabId::new());
     let mut multi_tab_state =
         build_two_pane_tab(multi_tab_id, first_tab_pane_id, second_tab_pane_id);
@@ -886,9 +898,9 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
             build_tab_at_index(other_tab_id, other_tab_pane_id, 1),
         ],
         vec![
-            build_running_pane_record(first_tab_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(second_tab_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(other_tab_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(first_tab_pane_id),
+            build_running_pane_record(second_tab_pane_id),
+            build_running_pane_record(other_tab_pane_id),
         ],
     );
 
@@ -949,11 +961,11 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
 
     // Closing a tab is a pure state op: it drops the records and never kills the
     // real processes, so the backend recorded no kills against either pane.
-    assert!(pty
+    assert!(fake_pty_backend
         .list_pane_kill_policies(first_tab_pane_id)
         .expect("the first tab pane is known to the backend")
         .is_empty());
-    assert!(pty
+    assert!(fake_pty_backend
         .list_pane_kill_policies(second_tab_pane_id)
         .expect("the second tab pane is known to the backend")
         .is_empty());
@@ -961,9 +973,9 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
 
 #[test]
 fn child_exit_drops_the_pane_from_focus_history() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut tab_state = build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id);
     tab_state.record_focus_mru(survivor_pane_id);
@@ -971,19 +983,20 @@ fn child_exit_drops_the_pane_from_focus_history() {
     let mut session = build_session_with(
         vec![tab_state],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
 
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The removed pane leaves the tab's focus history; the survivor stays, at the
@@ -1017,9 +1030,9 @@ fn child_exit_drops_the_pane_from_focus_history() {
 
 #[test]
 fn output_for_a_removed_pane_is_dropped() {
-    let pty = FakePtyBackend::new();
-    let (removed_pane_id, removed_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let removed_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(
@@ -1028,28 +1041,30 @@ fn output_for_a_removed_pane_is_dropped() {
             survivor_pane_id,
         )],
         vec![
-            build_running_pane_record(removed_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(removed_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
 
     // While the pane is live, its output routes to a real pane.
-    pty.push_output(removed_pane_id, b"before".to_vec())
+    fake_pty_backend
+        .push_output(removed_pane_id, b"before".to_vec())
         .expect("the removed pane is known to the backend");
     assert_eq!(
-        route_pane_output(&session, &removed_pane_handle),
+        route_pane_output(&session, &pane_delivery_recorder, removed_pane_id),
         Some((b"before".to_vec(), true))
     );
 
     // Remove the pane through a child-exit.
-    pty.trigger_child_exit(removed_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(removed_pane_id, ExitStatus::ExitCode(0))
         .expect("the removed pane is known to the backend");
     let events = process_child_exit(
         &mut session,
-        &removed_pane_handle,
+        &pane_delivery_recorder,
+        removed_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
     assert!(session
         .panes
@@ -1078,65 +1093,68 @@ fn output_for_a_removed_pane_is_dropped() {
     // backend never knew about the session-side removal — but the session has no
     // pane to route it to, so the chunk arrives (`Some`) and is dropped
     // (`false`).
-    pty.push_output(removed_pane_id, b"after".to_vec())
+    fake_pty_backend
+        .push_output(removed_pane_id, b"after".to_vec())
         .expect("the backend still tracks the spawned child");
     assert_eq!(
-        route_pane_output(&session, &removed_pane_handle),
+        route_pane_output(&session, &pane_delivery_recorder, removed_pane_id),
         Some((b"after".to_vec(), false))
     );
 
     // The surviving pane still receives its output — one pane's removal does not
     // poison routing for the rest.
-    pty.push_output(survivor_pane_id, b"live".to_vec())
+    fake_pty_backend
+        .push_output(survivor_pane_id, b"live".to_vec())
         .expect("the survivor pane is known to the backend");
     assert_eq!(
-        route_pane_output(&session, &survivor_pane_handle),
+        route_pane_output(&session, &pane_delivery_recorder, survivor_pane_id),
         Some((b"live".to_vec(), true))
     );
 }
 
 #[test]
 fn a_pane_with_no_pending_output_reads_back_nothing() {
-    let pty = FakePtyBackend::new();
-    let (pane_id, pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let session = build_session_with(
         vec![build_single_pane_tab(tab_id, pane_id)],
-        vec![build_running_pane_record(
-            pane_id,
-            PaneExitPolicy::CloseOnExit,
-        )],
+        vec![build_running_pane_record(pane_id)],
     );
 
     // A spawn queues no output, so the live pane reads back no chunk at all —
     // the case a dropped chunk (`Some((_, false))`) has to be told apart from.
-    assert_eq!(route_pane_output(&session, &pane_handle), None);
+    assert_eq!(
+        route_pane_output(&session, &pane_delivery_recorder, pane_id),
+        None
+    );
 }
 
 #[test]
 fn the_session_still_validates_after_a_child_exit_refocuses_a_client() {
-    let pty = FakePtyBackend::new();
-    let (exited_pane_id, exited_pane_handle) = spawn_test_child(&pty);
-    let (survivor_pane_id, _survivor_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, pane_delivery_recorder) = build_fake_pty_backend();
+    let exited_pane_id = spawn_test_child(&fake_pty_backend);
+    let survivor_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, exited_pane_id, survivor_pane_id)],
         vec![
-            build_running_pane_record(exited_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(survivor_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(exited_pane_id),
+            build_running_pane_record(survivor_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, exited_pane_id);
     session.attach_client(client);
 
-    pty.trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
+    fake_pty_backend
+        .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
     let _ = process_child_exit(
         &mut session,
-        &exited_pane_handle,
+        &pane_delivery_recorder,
+        exited_pane_id,
         tab_id,
         build_viewport_rect(),
-        EmptyTabPolicy::CloseTab,
     );
 
     // The cascade leaves no dangling reference behind: the removed pane is out
@@ -1147,15 +1165,15 @@ fn the_session_still_validates_after_a_child_exit_refocuses_a_client() {
 
 #[test]
 fn fixtures_build_a_consistent_session() {
-    let pty = FakePtyBackend::new();
-    let (first_pane_id, _first_pane_handle) = spawn_test_child(&pty);
-    let (second_pane_id, _second_pane_handle) = spawn_test_child(&pty);
+    let (fake_pty_backend, _) = build_fake_pty_backend();
+    let first_pane_id = spawn_test_child(&fake_pty_backend);
+    let second_pane_id = spawn_test_child(&fake_pty_backend);
     let tab_id = TabId::new();
     let mut session = build_session_with(
         vec![build_two_pane_tab(tab_id, first_pane_id, second_pane_id)],
         vec![
-            build_running_pane_record(first_pane_id, PaneExitPolicy::CloseOnExit),
-            build_running_pane_record(second_pane_id, PaneExitPolicy::CloseOnExit),
+            build_running_pane_record(first_pane_id),
+            build_running_pane_record(second_pane_id),
         ],
     );
     let client = build_focused_client(session.session_id, tab_id, first_pane_id);

@@ -5,7 +5,6 @@
 //! constraints and no solved cell rectangles. Every constraint solves to
 //! whole cells.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -44,22 +43,6 @@ pub enum ConstraintError {
     /// The fixed size is `0` cells.
     #[error("fixed size must be at least one cell")]
     ZeroFixedCellCount,
-    /// The minimum is `0` cells.
-    #[error("minimum size must be at least one cell")]
-    ZeroMinimumCellCount,
-    /// The preferred size is `0` cells.
-    #[error("preferred size must be at least one cell")]
-    ZeroPreferredCellCount,
-}
-
-impl DomainError for ConstraintError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
 }
 
 impl SizeConstraint {
@@ -101,32 +84,6 @@ impl SizeConstraint {
             Err(ConstraintError::ZeroFixedCellCount)
         } else {
             Ok(Self::Fixed(cell_count))
-        }
-    }
-
-    /// A validated floor in cells (at least one).
-    ///
-    /// # Errors
-    ///
-    /// [`ConstraintError::ZeroMinimumCellCount`] when `cell_count` is zero.
-    pub fn from_minimum_cell_count(cell_count: u16) -> Result<Self, ConstraintError> {
-        if cell_count == 0 {
-            Err(ConstraintError::ZeroMinimumCellCount)
-        } else {
-            Ok(Self::Minimum(cell_count))
-        }
-    }
-
-    /// A validated target in cells (at least one).
-    ///
-    /// # Errors
-    ///
-    /// [`ConstraintError::ZeroPreferredCellCount`] when `cell_count` is zero.
-    pub fn from_preferred_cell_count(cell_count: u16) -> Result<Self, ConstraintError> {
-        if cell_count == 0 {
-            Err(ConstraintError::ZeroPreferredCellCount)
-        } else {
-            Ok(Self::Preferred(cell_count))
         }
     }
 }

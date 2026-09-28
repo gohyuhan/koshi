@@ -47,10 +47,10 @@ pub fn build_key_input_for_chord(chord: KeyChord) -> KeyInput {
 #[must_use]
 pub fn build_test_runtime_directory() -> TempDir {
     #[cfg(unix)]
-    let base = std::path::PathBuf::from("/tmp");
+    let base_directory = std::path::PathBuf::from("/tmp");
     #[cfg(windows)]
-    let base = std::env::temp_dir();
-    TempDir::new_in(base).expect("a temporary runtime directory")
+    let base_directory = std::env::temp_dir();
+    TempDir::new_in(base_directory).expect("a temporary runtime directory")
 }
 
 #[cfg(test)]

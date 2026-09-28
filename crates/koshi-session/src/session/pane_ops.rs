@@ -7,7 +7,6 @@
 //! [`commit_new_pane`] to apply it.
 
 use std::path::PathBuf;
-use std::time::SystemTime;
 
 use koshi_core::event::{Event, LayoutChanged, PaneCreated, PaneFocused, TabFocused};
 use koshi_core::ids::{ClientId, PaneId, TabId};
@@ -31,47 +30,44 @@ pub struct NewPaneSpec {
 }
 
 /// Register `pane_id` in the session's pane registry as `Running`, carrying
-/// `pane_spec`'s working directory and spawn specification and stamped
-/// `created_at`. A pane id already in the registry keeps its existing record.
+/// `new_pane_spec`'s working directory and spawn specification. A pane id already
+/// in the registry keeps its existing record.
 pub(crate) fn register_running_pane(
     session: &mut Session,
     pane_id: PaneId,
-    pane_spec: NewPaneSpec,
-    created_at: SystemTime,
+    new_pane_spec: NewPaneSpec,
 ) {
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, created_at);
-    pane_record.working_directory = pane_spec.working_directory;
-    pane_record.spawn_spec = pane_spec.spawn_spec;
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
+    pane_record.working_directory = new_pane_spec.working_directory;
+    pane_record.spawn_spec = new_pane_spec.spawn_spec;
     let _ = pane_record.update_lifecycle(PaneLifecycleEvent::ProcessStarted);
     let _ = session.panes.register_pane_record(pane_record);
 }
 
 /// Apply an already-built, already-spawned layout edit to `tab_id`: switch the
-/// focused client onto the tab (if it is not already there), register the new
+/// designated client onto the tab (if it is not already there), register the new
 /// pane as `Running`, swap in `candidate_layout_tree` as the tab's layout — dropping the zoom
 /// that would have hidden the new pane, so it lands visible — and focus the new
-/// pane for `focus_client` when one is given and still attached.
+/// pane for `focus_client_id` when one is given and still attached.
 ///
-/// Whose zoom drops depends on who made the split: with a `focus_client`, only
+/// Whose zoom drops depends on who made the split: with a `focus_client_id`, only
 /// that client's zoom of `tab_id`; with none, every attached client's zoom of
-/// `tab_id`. A `focus_client` that is no longer attached counts as none.
+/// `tab_id`. A `focus_client_id` that is no longer attached counts as none.
 ///
 /// The caller (the runtime) has minted `new_pane_id`, built `candidate_layout_tree` with
 /// [`koshi_layout::edit::split_leaf`] or [`koshi_layout::edit::add_pane_to_stack`],
-/// preflighted its fit against the sizing viewport, and spawned the child under
+/// preflighted its fit against the tab size, and spawned the child under
 /// `new_pane_id`.
 ///
 /// This is the single place a new pane's session state is committed: no session
 /// field is written for `NewPane` outside this op. `new_pane_spec` carries the working
-/// directory and spawn specification recorded on the new pane; `created_at` is
-/// the caller's timestamp,
-/// never read from the clock here.
+/// directory and spawn specification recorded on the new pane.
 ///
-/// Returns the focused client's *previous* tab when this op switched it onto
+/// Returns the designated client's *previous* tab when this op switched it onto
 /// `tab_id` (so the caller can reflow the tab it left), and the events to emit —
 /// [`Event::TabFocused`] (only when a client was switched), then
 /// [`Event::PaneCreated`], [`Event::LayoutChanged`], and — only when
-/// `focus_client` applies — [`Event::PaneFocused`], in that order.
+/// `focus_client_id` applies — [`Event::PaneFocused`], in that order.
 ///
 /// An unknown `tab_id` is a no-op with no events: nothing is registered and
 /// nothing is emitted.
@@ -81,40 +77,39 @@ pub fn commit_new_pane(
     new_pane_id: PaneId,
     tab_id: TabId,
     candidate_layout_tree: LayoutNode,
-    focus_client: Option<ClientId>,
+    focus_client_id: Option<ClientId>,
     new_pane_spec: NewPaneSpec,
-    created_at: SystemTime,
 ) -> (Option<TabId>, Vec<Event>) {
     if !session.tabs.contains_key(&tab_id) {
         return (None, Vec::new());
     }
 
-    // A `focus_client` that is not attached resolves to `None`: no tab switch,
+    // A `focus_client_id` that is not attached resolves to `None`: no tab switch,
     // no focus-MRU record, and no `PaneFocused` event.
     let focused_client_id =
-        focus_client.filter(|client_id| session.clients.get_client_by_id(*client_id).is_some());
+        focus_client_id.filter(|client_id| session.clients.get_client_by_id(*client_id).is_some());
 
     let mut events = Vec::new();
 
     // Switch the focused client onto the tab when it is not already viewing it,
     // and record the tab it left.
-    let mut previous_tab = None;
+    let mut previous_tab_id = None;
     if let Some(client_id) = focused_client_id {
         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            if client.get_active_tab() != tab_id {
-                let previous_tab_id = client.get_active_tab();
-                previous_tab = Some(previous_tab_id);
-                client.update_active_tab(tab_id);
+            if client.get_active_tab_id() != tab_id {
+                let client_previous_tab_id = client.get_active_tab_id();
+                previous_tab_id = Some(client_previous_tab_id);
+                client.update_active_tab_id(tab_id);
                 events.push(Event::TabFocused(TabFocused {
                     client_id,
                     tab_id,
-                    previous_tab_id,
+                    previous_tab_id: client_previous_tab_id,
                 }));
             }
         }
     }
 
-    register_running_pane(session, new_pane_id, new_pane_spec, created_at);
+    register_running_pane(session, new_pane_id, new_pane_spec);
 
     // Swap in the pre-built tree; record the new pane in the tab's focus
     // history when a client focuses it.
@@ -127,7 +122,7 @@ pub fn commit_new_pane(
 
     // Drop the zoom that would hide the new pane, then focus it:
     //
-    // - **With a `focus_client`**: that client's zoom of `tab_id` drops and it
+    // - **With a `focus_client_id`**: that client's zoom of `tab_id` drops and it
     //   focuses the new pane. Every other client keeps its zoom and its focus.
     // - **With none**: every attached client's zoom of `tab_id` drops, and no
     //   client's focus moves.
@@ -159,7 +154,7 @@ pub fn commit_new_pane(
             previous_pane_id,
         }));
     }
-    (previous_tab, events)
+    (previous_tab_id, events)
 }
 
 #[cfg(test)]

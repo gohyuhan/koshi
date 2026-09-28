@@ -1,14 +1,13 @@
 //! Tests for the attach-structure builder: mapping a live session's tabs,
-//! layout trees, focus history and pane registry into the structure a client
-//! attaches with.
+//! layout trees and focus history into the structure a client attaches with.
 
 use std::time::SystemTime;
 
 use koshi_core::geometry::SplitDirection;
 use koshi_core::ids::{PaneId, SessionId, TabId};
-use koshi_ipc::attach::{PaneStructure, TabStructure};
+use koshi_ipc::attach::TabStructure;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::state::{PaneKind, PaneRecord};
+use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::ClientRegistry;
 use koshi_session::session::state::{Session, Tab};
 
@@ -29,16 +28,13 @@ fn register_test_pane(session: &mut Session) -> PaneId {
     let pane_id = PaneId::new();
     session
         .panes
-        .register_pane_record(PaneRecord::from_terminal_pane(
-            pane_id,
-            SystemTime::UNIX_EPOCH,
-        ))
+        .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
         .expect("unique pane id");
     pane_id
 }
 
 #[test]
-fn an_empty_session_carries_its_identity_and_no_tabs_or_panes() {
+fn an_empty_session_carries_its_identity_and_no_tabs() {
     let session = build_test_session("koshi-dev");
 
     let session_structure = build_session_structure_snapshot(&session);
@@ -46,7 +42,6 @@ fn an_empty_session_carries_its_identity_and_no_tabs_or_panes() {
     assert_eq!(session_structure.session_id, session.session_id);
     assert_eq!(session_structure.session_name, "koshi-dev");
     assert_eq!(session_structure.tabs, Vec::<TabStructure>::new());
-    assert_eq!(session_structure.panes, Vec::<PaneStructure>::new());
 }
 
 #[test]
@@ -68,13 +63,6 @@ fn a_single_pane_tab_carries_its_name_index_layout_and_focus() {
             tab_index: 0,
             layout: LayoutNode::Pane(pane_id),
             focus_mru: vec![pane_id],
-        }]
-    );
-    assert_eq!(
-        session_structure.panes,
-        vec![PaneStructure {
-            pane_id,
-            pane_kind: PaneKind::Terminal,
         }]
     );
 }
@@ -191,61 +179,6 @@ fn every_tab_is_carried_not_only_the_first() {
     );
 }
 
-/// How many panes the ordering tests register. Twelve ids, minted in ascending
-/// order and registered in that order, prove the snapshot carries every one of
-/// them in id order.
-const PANE_ORDER_SAMPLE_COUNT: usize = 12;
-
-#[test]
-fn every_registered_pane_is_carried_ordered_by_id() {
-    let mut session = build_test_session("session");
-    let mut registered_pane_ids: Vec<PaneId> = (0..PANE_ORDER_SAMPLE_COUNT)
-        .map(|_| register_test_pane(&mut session))
-        .collect();
-    registered_pane_ids.sort();
-
-    let session_structure = build_session_structure_snapshot(&session);
-
-    assert_eq!(
-        session_structure.panes,
-        registered_pane_ids
-            .iter()
-            .map(|&pane_id| PaneStructure {
-                pane_id,
-                pane_kind: PaneKind::Terminal,
-            })
-            .collect::<Vec<PaneStructure>>()
-    );
-}
-
-#[test]
-fn the_pane_list_is_strictly_ascending_by_id() {
-    let mut session = build_test_session("session");
-    for _ in 0..PANE_ORDER_SAMPLE_COUNT {
-        register_test_pane(&mut session);
-    }
-
-    let session_structure = build_session_structure_snapshot(&session);
-
-    let out_of_order_pane_pairs: Vec<(PaneId, PaneId)> = session_structure
-        .panes
-        .windows(2)
-        .filter(|pane_id_pair| pane_id_pair[0].pane_id >= pane_id_pair[1].pane_id)
-        .map(|pane_id_pair| (pane_id_pair[0].pane_id, pane_id_pair[1].pane_id))
-        .collect();
-    assert_eq!(
-        out_of_order_pane_pairs,
-        Vec::new(),
-        "pane list is not strictly ascending: {:?}",
-        session_structure
-            .panes
-            .iter()
-            .map(|pane_structure| pane_structure.pane_id)
-            .collect::<Vec<PaneId>>()
-    );
-    assert_eq!(session_structure.panes.len(), PANE_ORDER_SAMPLE_COUNT);
-}
-
 #[test]
 fn the_tab_list_is_strictly_ascending_by_display_index() {
     let mut session = build_test_session("session");
@@ -298,63 +231,7 @@ fn a_tab_nothing_has_focused_carries_an_empty_focus_history() {
 }
 
 #[test]
-fn a_plugin_pane_reports_its_plugin_id() {
-    use koshi_core::ids::PluginId;
-
-    let mut session = build_test_session("session");
-    let plugin_id = PluginId::new();
-    let pane_id = PaneId::new();
-    session
-        .panes
-        .register_pane_record(PaneRecord::from_pane_kind(
-            pane_id,
-            PaneKind::Plugin { plugin_id },
-            SystemTime::UNIX_EPOCH,
-        ))
-        .expect("unique pane id");
-
-    let session_structure = build_session_structure_snapshot(&session);
-
-    assert_eq!(
-        session_structure.panes,
-        vec![PaneStructure {
-            pane_id,
-            pane_kind: PaneKind::Plugin { plugin_id },
-        }]
-    );
-}
-
-#[test]
-fn a_pane_no_tab_layout_names_is_still_carried() {
-    let mut session = build_test_session("session");
-    let layout_pane_id = register_test_pane(&mut session);
-    let unlisted_pane_id = register_test_pane(&mut session);
-    let tab_id = TabId::new();
-    session.tabs.insert(
-        tab_id,
-        Tab::from_root_pane(tab_id, "edit".to_string(), 0, layout_pane_id),
-    );
-
-    let session_structure = build_session_structure_snapshot(&session);
-
-    let mut all_pane_ids = vec![layout_pane_id, unlisted_pane_id];
-    all_pane_ids.sort();
-    assert_eq!(
-        session_structure
-            .panes
-            .iter()
-            .map(|pane_structure| pane_structure.pane_id)
-            .collect::<Vec<PaneId>>(),
-        all_pane_ids
-    );
-    assert_eq!(
-        session_structure.tabs[0].layout,
-        LayoutNode::Pane(layout_pane_id)
-    );
-}
-
-#[test]
-fn focus_history_carries_an_id_the_pane_list_no_longer_holds() {
+fn focus_history_carries_an_id_the_registry_no_longer_holds() {
     let mut session = build_test_session("session");
     let retained_pane_id = register_test_pane(&mut session);
     let removed_pane_id = register_test_pane(&mut session);
@@ -373,13 +250,6 @@ fn focus_history_carries_an_id_the_pane_list_no_longer_holds() {
     assert_eq!(
         session_structure.tabs[0].focus_mru,
         vec![removed_pane_id, retained_pane_id]
-    );
-    assert_eq!(
-        session_structure.panes,
-        vec![PaneStructure {
-            pane_id: retained_pane_id,
-            pane_kind: PaneKind::Terminal,
-        }]
     );
 }
 

@@ -10,11 +10,11 @@ use super::*;
 fn path_prints_the_given_config_directory() {
     let config_directory = TempDir::new().unwrap();
 
-    let command_output =
+    let config_command_output =
         run_config_command_in_directory(&ConfigCommand::Path, config_directory.path()).unwrap();
 
     assert_eq!(
-        command_output,
+        config_command_output,
         format!("{}\n", config_directory.path().display())
     );
 }
@@ -516,7 +516,7 @@ fn a_themes_entry_that_is_not_kdl_is_left_out_of_the_scan() {
 fn run_config_command_in_directory_routes_explain_to_the_field_table() {
     let config_directory = TempDir::new().unwrap();
 
-    let command_output = run_config_command_in_directory(
+    let config_command_output = run_config_command_in_directory(
         &ConfigCommand::Explain {
             config_key: "koshi.pane.gap".to_string(),
         },
@@ -525,7 +525,7 @@ fn run_config_command_in_directory_routes_explain_to_the_field_table() {
     .unwrap();
 
     assert_eq!(
-        command_output,
+        config_command_output,
         "koshi.pane.gap\nfile: koshi.kdl\ndefault: 0\n\
          Blank cells between two panes that meet along a split.\n"
     );
@@ -537,11 +537,11 @@ fn run_config_command_in_directory_routes_check_to_the_directory_scan() {
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 2\n").unwrap();
 
-    let command_output =
+    let config_command_output =
         run_config_command_in_directory(&ConfigCommand::Check, config_directory.path()).unwrap();
 
     assert_eq!(
-        command_output,
+        config_command_output,
         format!("{}: valid (version 2)\n", app_config_path.display())
     );
 }
@@ -554,11 +554,11 @@ fn run_config_command_in_directory_migrate_leaves_a_file_already_on_this_schema_
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 2\n").unwrap();
 
-    let command_output =
+    let config_command_output =
         run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
 
     assert_eq!(
-        command_output,
+        config_command_output,
         format!("{}: current (version 2)\n", app_config_path.display())
     );
     assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 2\n");

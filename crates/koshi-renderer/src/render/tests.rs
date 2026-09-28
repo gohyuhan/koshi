@@ -9,10 +9,11 @@
 //! rows draw and where the pane rectangle sits.
 //!
 //! The focused pane's cursor cell is reported, clamped inside its content
-//! area, and hidden for unfocused, plugin, hidden, or app-hidden cursors. The
+//! area, and hidden for an unfocused pane, a pane with no grid, and a hidden or
+//! app-hidden cursor. The
 //! cursor style follows the focused pane. A centered too-small overlay
 //! replaces the frame when the tab has no room for any pane. A viewport larger
-//! than the effective size centers the layout and letterboxes the margin, with
+//! than the tab size centers the layout and letterboxes the margin, with
 //! the cursor shifted to match. Degenerate sizes are safe, including a buffer
 //! shorter than the laid-out frame. Pane placement mode shows pane id suffixes instead
 //! of `/work/koshi` and `nvim`, then restores those titles.
@@ -32,13 +33,12 @@ use koshi_terminal::state::CursorShape;
 
 use crate::snapshot::{
     ClientSnapshot, CommittedRegions, CursorSnapshot, CursorStyle, GridView, KeymapHints, PaneSlot,
-    PaneSnapshot, PluginUiSnapshot, ScrollbackMeta, SelectionSpans, SessionSnapshot, TabMeta,
-    TabSnapshot, ViewerChrome,
+    PaneSnapshot, ScrollbackMetadata, SelectionSpans, SessionSnapshot, TabMetadata, TabSnapshot,
+    ViewerChrome,
 };
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
 use koshi_layout::solver::StackHeader;
-use koshi_pane::pane::state::PaneKind;
 
 /// A cell rectangle: origin `(origin_column, origin_row)`, size `column_count x row_count`.
 fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
@@ -47,7 +47,7 @@ fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_c
             column: origin_column,
             row: origin_row,
         },
-        cell_size: Size {
+        size: Size {
             column_count,
             row_count,
         },
@@ -72,10 +72,8 @@ fn build_render_snapshot(
             pane_id: *pane_id,
             outer_rect: *outer_rect,
             content_rect: is_visible.then(|| outer_rect.compute_inner_with_border()),
-            pane_kind: PaneKind::Terminal,
             is_visible: *is_visible,
             is_suppressed: false,
-            is_dead: false,
         })
         .collect();
 
@@ -100,8 +98,7 @@ fn build_render_snapshot(
             is_on_alternate_screen: false,
             selection_spans: None,
             has_selection: false,
-            scrollback_meta: ScrollbackMeta {
-                is_truncated: false,
+            scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },
         })
@@ -110,7 +107,7 @@ fn build_render_snapshot(
     let tabs_metadata = tab_names_and_activity
         .iter()
         .enumerate()
-        .map(|(tab_index, (tab_name, is_active))| TabMeta {
+        .map(|(tab_index, (tab_name, is_active))| TabMetadata {
             tab_id: TabId::new(),
             tab_name: (*tab_name).to_string(),
             tab_index,
@@ -119,6 +116,7 @@ fn build_render_snapshot(
         .collect();
 
     RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -127,10 +125,10 @@ fn build_render_snapshot(
                 tab_id,
                 tab_name: "active".to_string(),
                 pane_slots,
-                effective_cell_size: viewport_size,
+                tab_size: viewport_size,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
             tabs_metadata,
@@ -145,13 +143,12 @@ fn build_render_snapshot(
             lock_mode,
             is_mouse_selection_enabled: false,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     }
 }
 
 /// The compiled-in region solve for a viewport-sized test area.
 fn build_core_regions(column_count: u16, row_count: u16) -> CommittedRegions {
-    CommittedRegions::core(
+    CommittedRegions::build_core(
         Size {
             column_count,
             row_count,
@@ -187,7 +184,7 @@ fn build_legacy_regions(column_count: u16, row_count: u16) -> CommittedRegions {
             },
         )
     } else {
-        Rect::empty_at_origin()
+        Rect::build_empty_at_origin()
     };
     CommittedRegions::from_solved_regions(
         viewport_size,
@@ -227,6 +224,10 @@ fn render_test_snapshot_with_theme(
         &KeymapHints::default(),
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -255,6 +256,10 @@ fn render_snapshot_with_viewer_chrome(
         &KeymapHints::default(),
         None,
         viewer_chrome,
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -284,6 +289,10 @@ fn render_snapshot_with_peeking(
         &KeymapHints::default(),
         None,
         viewer_chrome,
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -320,6 +329,10 @@ fn render_snapshot_with_hover(
             reconnecting: None,
             ..ViewerChrome::default()
         },
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -349,6 +362,10 @@ fn render_snapshot_with_hints(
         keymap_hints,
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -385,6 +402,10 @@ fn render_snapshot_with_regions_and_hints(
         keymap_hints,
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -419,10 +440,7 @@ fn committed_core_regions_keep_the_default_frame_byte_identical() {
         LockMode::Normal,
         viewport_size,
     );
-    snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .effective_cell_size = Size {
+    snapshot.session_snapshot.active_tab_snapshot.tab_size = Size {
         column_count: 80,
         row_count: 22,
     };
@@ -441,7 +459,7 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
         column_count: 120,
         row_count: 40,
     };
-    let effective_cell_size = Size {
+    let tab_size = Size {
         column_count: 100,
         row_count: 38,
     };
@@ -450,24 +468,16 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
         &[("shell", true)],
         &[(
             pane_id,
-            build_cell_rect(
-                0,
-                0,
-                effective_cell_size.column_count,
-                effective_cell_size.row_count,
-            ),
+            build_cell_rect(0, 0, tab_size.column_count, tab_size.row_count),
             true,
         )],
         Some(pane_id),
         LockMode::Normal,
         viewport_size,
     );
-    snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .effective_cell_size = effective_cell_size;
+    snapshot.session_snapshot.active_tab_snapshot.tab_size = tab_size;
     snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(36, 98, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(36, 98, TermStyle::default())),
         view_row_offset: 0,
     });
     let committed_regions = CommittedRegions::from_solved_regions(
@@ -663,7 +673,7 @@ fn a_solve_that_leaves_no_pane_rectangle_letterboxes_everything_but_the_chrome()
                     },
                 ),
             ],
-            pane_rect: Rect::empty_at_origin(),
+            pane_rect: Rect::build_empty_at_origin(),
         },
         0,
     );
@@ -715,7 +725,7 @@ fn format_rendered_row_text(render_buffer: &Buffer, row_index: u16) -> String {
 #[test]
 fn renders_tabline_pane_border_and_reserved_hint_bar() {
     let pane = PaneId::new();
-    let column_count = version_badge_column_count() + 31;
+    let column_count = compute_version_badge_column_count() + 31;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -825,7 +835,7 @@ fn two_rows_is_enough_for_both_chrome_rows() {
 #[test]
 fn tabline_lists_tabs_with_active_marker() {
     let pane = PaneId::new();
-    let column_count = version_badge_column_count() + 51;
+    let column_count = compute_version_badge_column_count() + 51;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("code", true), ("logs", false)],
@@ -842,7 +852,7 @@ fn tabline_lists_tabs_with_active_marker() {
     // The session block ` sess `, then the version badge, a gap, each padded
     // tab with one blank cell between them, blanks, and the ` BASE ` mode tag
     // on the last six cells.
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(
@@ -891,7 +901,7 @@ fn tabline_lists_tabs_with_active_marker() {
 #[test]
 fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     let pane = PaneId::new();
-    let column_count = version_badge_column_count() + 31;
+    let column_count = compute_version_badge_column_count() + 31;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[
@@ -915,7 +925,7 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     // (alpha, index 0) fits from the left, so the window starts there and the
     // four tabs hidden off the right sit behind a `▶` scroll arrow. The blank
     // cell where a `◀` would sit stays blank: nothing is hidden to the left.
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(" sess {version_badge_text}   #1  alpha      ▶ BASE ")
@@ -926,17 +936,18 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
 /// actually paints. A semver version is ASCII, so counting characters counts
 /// display cells.
 ///
-/// A test that needs room beside the version badge asks for `version_badge_column_count() + <room>`
-/// rather than a fixed count: the room beside the version badge stays the same however
-/// long the version string is.
-fn version_badge_column_count() -> u16 {
-    crate::render::create_version_badge_text().chars().count() as u16
+/// A test that needs room beside the version badge asks for `compute_version_badge_column_count() +
+/// <room>` rather than a fixed count: the room beside the version badge stays the same however long
+/// the version string is.
+fn compute_version_badge_column_count() -> u16 {
+    format!("[v{}] ", env!("CARGO_PKG_VERSION")).chars().count() as u16
 }
 
 /// The whole tabline row a session named `sess` with the single active tab
 /// `shell` paints into a `column_count`-wide row, with ` BASE ` as the mode tag.
 ///
-/// `column_count` must leave room for all of it — at least `version_badge_column_count() + 24`.
+/// `column_count` must leave room for all of it — at least `compute_version_badge_column_count() +
+/// 24`.
 fn format_session_shell_tabline(column_count: u16) -> String {
     format_session_shell_tabline_with_mode_tag(column_count, " BASE ")
 }
@@ -949,7 +960,7 @@ fn format_session_shell_tabline(column_count: u16) -> String {
 /// `mode_tag_text` is the mode block with its own padding spaces, such as ` BASE ` or
 /// ` LOCK `. `column_count` must leave room for all of it.
 fn format_session_shell_tabline_with_mode_tag(column_count: u16, mode_tag_text: &str) -> String {
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     let blanks = column_count as usize
         - 6
         - version_badge_text.chars().count()
@@ -986,24 +997,28 @@ fn tabline_follows_focus_into_the_overflow() {
         ],
         &[(
             pane,
-            build_cell_rect(0, 1, version_badge_column_count() + 21, 6),
+            build_cell_rect(0, 1, compute_version_badge_column_count() + 21, 6),
             true,
         )],
         Some(pane),
         LockMode::Normal,
         Size {
-            column_count: version_badge_column_count() + 21,
+            column_count: compute_version_badge_column_count() + 21,
             row_count: 8,
         },
     );
     let tabline = format_rendered_row_text(
-        &render_test_snapshot(&render_snapshot, version_badge_column_count() + 21, 8),
+        &render_test_snapshot(
+            &render_snapshot,
+            compute_version_badge_column_count() + 21,
+            8,
+        ),
         0,
     );
 
     // Only the active tab `t5` fits, as tab six: `t0`..`t4` sit behind the `◀`
     // arrow and `t6`, `t7` behind the `▶` one.
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         tabline,
         format!(" s {version_badge_text} ◀ #6  t5  ▶ BASE ")
@@ -1030,13 +1045,13 @@ fn tabline_peek_offset_ignores_the_active_tab() {
         ],
         &[(
             pane,
-            build_cell_rect(0, 1, version_badge_column_count() + 21, 6),
+            build_cell_rect(0, 1, compute_version_badge_column_count() + 21, 6),
             true,
         )],
         Some(pane),
         LockMode::Normal,
         Size {
-            column_count: version_badge_column_count() + 21,
+            column_count: compute_version_badge_column_count() + 21,
             row_count: 8,
         },
     );
@@ -1052,7 +1067,7 @@ fn tabline_peek_offset_ignores_the_active_tab() {
         &render_snapshot_with_peeking(
             &render_snapshot,
             peeking,
-            version_badge_column_count() + 21,
+            compute_version_badge_column_count() + 21,
             8,
         ),
         0,
@@ -1061,7 +1076,7 @@ fn tabline_peek_offset_ignores_the_active_tab() {
     // The strip windows from index 0, so only `t0` shows and the active `t5`
     // stays hidden behind the `▶` arrow. The `◀` cell stays blank: nothing is
     // hidden to the left of index 0.
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         tabline,
         format!(" s {version_badge_text}   #1  t0  ▶ BASE ")
@@ -1107,7 +1122,7 @@ fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
     // the reconnecting mode tag is 37 cells wide, so on a 46-cell-plus-version-badge row it
     // leaves nothing for the tab ribbon.
     let pane = PaneId::new();
-    let column_count = version_badge_column_count() + 46;
+    let column_count = compute_version_badge_column_count() + 46;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -1132,7 +1147,7 @@ fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
     };
     let render_buffer = render_snapshot_with_peeking(&render_snapshot, dialing, column_count, 8);
 
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(" sess {version_badge_text}  RECONNECTING (attempt 3, retry in 8s) ")
@@ -1185,13 +1200,13 @@ fn placement_preview_keeps_pane_ids_content_and_source_focus_visible() {
             row_count: 8,
         },
     );
-    let mut source_grid = Grid::blank(4, 38, TermStyle::default());
+    let mut source_grid = Grid::build_blank(4, 38, TermStyle::default());
     *source_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('S', 1, TermStyle::default());
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
         grid: Arc::new(source_grid),
         view_row_offset: 0,
     });
-    let mut target_grid = Grid::blank(4, 38, TermStyle::default());
+    let mut target_grid = Grid::build_blank(4, 38, TermStyle::default());
     *target_grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('T', 1, TermStyle::default());
     render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
         grid: Arc::new(target_grid),
@@ -1212,7 +1227,7 @@ fn placement_preview_keeps_pane_ids_content_and_source_focus_visible() {
     let mut render_buffer = Buffer::empty(viewport_area);
     let theme = Theme::default();
 
-    render_frame_with_placement_target(
+    render_frame(
         &render_snapshot,
         &build_legacy_regions(80, 8),
         &theme,
@@ -1299,11 +1314,11 @@ fn scroll_indicator_shown_only_when_scrolled_back() {
     // Scrolled back three lines with 100 retained: the count sits right-aligned
     // in this pane's own bottom border. The tabline keeps the ` BASE ` mode tag.
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(6, 40, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(6, 40, TermStyle::default())),
         view_row_offset: 3,
     });
     render_snapshot.pane_snapshots[0]
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count = 100;
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
     assert_eq!(
@@ -1338,18 +1353,18 @@ fn each_pane_shows_its_own_scroll_position() {
     );
     // A is scrolled 3 up of 100; B is scrolled 7 up of 50 — different views.
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(6, 20, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(6, 20, TermStyle::default())),
         view_row_offset: 3,
     });
     render_snapshot.pane_snapshots[0]
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count = 100;
     render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(6, 20, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(6, 20, TermStyle::default())),
         view_row_offset: 7,
     });
     render_snapshot.pane_snapshots[1]
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count = 50;
 
     // Both bottom borders are row 6; each carries its own count, right-aligned
@@ -1376,11 +1391,11 @@ fn build_narrow_scrolled_render_snapshot(column_count: u16) -> RenderSnapshot {
         },
     );
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(2, column_count - 2, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(2, column_count - 2, TermStyle::default())),
         view_row_offset: 3,
     });
     render_snapshot.pane_snapshots[0]
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count = 100;
     render_snapshot
 }
@@ -1414,11 +1429,11 @@ fn a_scrolled_pane_that_retained_nothing_shows_a_zero_total() {
         },
     );
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(4, 38, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(4, 38, TermStyle::default())),
         view_row_offset: 3,
     });
     render_snapshot.pane_snapshots[0]
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count = 0;
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
 
@@ -1431,8 +1446,8 @@ fn a_scrolled_pane_that_retained_nothing_shows_a_zero_total() {
 #[test]
 fn a_pane_with_no_grid_shows_no_scroll_position() {
     // The scroll position comes from the pane's grid view. A pane that carries
-    // scrollback metadata but no grid — a plugin pane — reads as the live tail,
-    // so its bottom border stays unbroken.
+    // scrollback metadata but no grid reads as the live tail, so its bottom
+    // border stays unbroken.
     let pane = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
@@ -1446,7 +1461,7 @@ fn a_pane_with_no_grid_shows_no_scroll_position() {
         },
     );
     render_snapshot.pane_snapshots[0]
-        .scrollback_meta
+        .scrollback_metadata
         .retained_line_count = 100;
     assert_eq!(render_snapshot.pane_snapshots[0].terminal_grid_view, None);
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
@@ -1467,7 +1482,7 @@ fn reused_buffer_is_blanked_before_painting() {
         Some(pane),
         LockMode::Normal,
         Size {
-            column_count: version_badge_column_count() + 15,
+            column_count: compute_version_badge_column_count() + 15,
             row_count: 6,
         },
     );
@@ -1477,7 +1492,7 @@ fn reused_buffer_is_blanked_before_painting() {
     let area = RatatuiRect {
         x: 0,
         y: 0,
-        width: version_badge_column_count() + 15,
+        width: compute_version_badge_column_count() + 15,
         height: 6,
     };
     let mut render_buffer = Buffer::empty(area);
@@ -1495,18 +1510,22 @@ fn reused_buffer_is_blanked_before_painting() {
         &KeymapHints::default(),
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         area,
         &mut render_buffer,
     );
 
     // Tabline gap between the left tab list and the right status: blanked.
     assert_eq!(
-        render_buffer[(version_badge_column_count() + 3, 0)].symbol(),
+        render_buffer[(compute_version_badge_column_count() + 3, 0)].symbol(),
         " "
     );
     // A cell outside every pane box: blanked, not the stale glyph.
     assert_eq!(
-        render_buffer[(version_badge_column_count() + 13, 2)].symbol(),
+        render_buffer[(compute_version_badge_column_count() + 13, 2)].symbol(),
         " "
     );
     // Reserved hint row (bottom): every cell a space.
@@ -1666,6 +1685,10 @@ fn pane_placement_mode_keeps_focus_color_and_suppresses_hover_tint() {
             is_pane_placement_visible: true,
             ..ViewerChrome::default()
         },
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         viewport_area,
         &mut render_buffer,
     );
@@ -1931,7 +1954,7 @@ fn build_content_render_snapshot(
 
 #[test]
 fn pane_cells_render_with_glyphs_and_styles() {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     let mut style = TermStyle::default();
     style.set_foreground_color(TermColor::Rgb(10, 20, 30));
     style.set_background_color(TermColor::Indexed(4));
@@ -1966,7 +1989,7 @@ fn pane_cells_render_with_glyphs_and_styles() {
 
 #[test]
 fn wide_glyph_spans_two_columns_without_splitting() {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('中', 2, TermStyle::default());
     // The continuation half of the wide glyph (width 0).
     *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character(' ', 0, TermStyle::default());
@@ -1993,7 +2016,7 @@ fn wide_glyph_spans_two_columns_without_splitting() {
 fn wide_glyph_at_right_edge_is_padded() {
     // The content rect is 5 wide (outer 7 minus borders); a wide glyph in the
     // last column has no room for its second half.
-    let mut grid = Grid::blank(1, 5, TermStyle::default());
+    let mut grid = Grid::build_blank(1, 5, TermStyle::default());
     *grid.get_cell_mut(0, 4).unwrap() = Cell::from_character('中', 2, TermStyle::default());
     let render_snapshot = build_content_render_snapshot(
         grid,
@@ -2013,7 +2036,7 @@ fn wide_glyph_at_right_edge_is_padded() {
 
 #[test]
 fn combining_marks_join_the_base_into_one_symbol() {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     let mut cell = Cell::from_character('e', 1, TermStyle::default());
     cell.push_combining('\u{0301}'); // combining acute accent
     *grid.get_cell_mut(0, 0).unwrap() = cell;
@@ -2033,7 +2056,7 @@ fn combining_marks_join_the_base_into_one_symbol() {
 
 #[test]
 fn several_marks_join_one_base_into_one_symbol_in_push_order() {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     let mut cell = Cell::from_character('e', 1, TermStyle::default());
     cell.push_combining('\u{0301}'); // combining acute accent
     cell.push_combining('\u{0308}'); // combining diaeresis
@@ -2054,15 +2077,15 @@ fn several_marks_join_one_base_into_one_symbol_in_push_order() {
 
 #[test]
 fn every_cell_attribute_maps_to_its_own_modifier() {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     let mut every = TermStyle::default();
     every.set_bold(true);
     every.set_faint(true);
     every.set_italic(true);
     every.set_underline(UnderlineStyle::Single);
-    every.set_blink(true);
-    every.set_conceal(true);
-    every.set_strike(true);
+    every.set_blinking(true);
+    every.set_concealed(true);
+    every.set_strikethrough(true);
     every.set_reverse(true);
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, every);
 
@@ -2074,7 +2097,7 @@ fn every_cell_attribute_maps_to_its_own_modifier() {
 
     // Overline and underline color have no ratatui modifier and draw nothing.
     let mut lines = TermStyle::default();
-    lines.set_overline(true);
+    lines.set_overlined(true);
     lines.set_underline_color(Some(TermColor::Indexed(9)));
     *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, lines);
 
@@ -2106,7 +2129,7 @@ fn every_cell_attribute_maps_to_its_own_modifier() {
 
 #[test]
 fn reverse_video_toggles_reverse_per_cell() {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, TermStyle::default());
     let mut reversed = TermStyle::default();
     reversed.set_reverse(true);
@@ -2142,7 +2165,7 @@ fn visible_pane_without_grid_draws_no_content() {
             row_count: 8,
         },
     );
-    // `grid_view` is None (a plugin pane or an empty slot): interior stays blank.
+    // `grid_view` is None (the pane has no grid): interior stays blank.
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
     assert_eq!(
         format_rendered_row_text(&render_buffer, 2),
@@ -2155,7 +2178,7 @@ fn visible_pane_without_grid_draws_no_content() {
 fn grid_larger_than_content_rect_clips_without_bleeding() {
     // A grid wider and taller than the content header_rect: only the cells that fit are
     // drawn and nothing writes onto the border or past the pane.
-    let mut grid = Grid::blank(20, 100, TermStyle::default());
+    let mut grid = Grid::build_blank(20, 100, TermStyle::default());
     for column_index in 0..100u16 {
         *grid.get_cell_mut(0, column_index).unwrap() =
             Cell::from_character('#', 1, TermStyle::default());
@@ -2180,7 +2203,7 @@ fn grid_larger_than_content_rect_clips_without_bleeding() {
 
 #[test]
 fn grid_smaller_than_content_rect_leaves_remainder_blank() {
-    let mut grid = Grid::blank(1, 2, TermStyle::default());
+    let mut grid = Grid::build_blank(1, 2, TermStyle::default());
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('h', 1, TermStyle::default());
     *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('i', 1, TermStyle::default());
     let render_snapshot = build_content_render_snapshot(
@@ -2206,7 +2229,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
     // Pane box (0,1) 40x6 → content origin (1,2). Cursor at row 2, col 5 within
     // the content area → absolute buffer cell (1+5, 2+2).
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2234,7 +2257,7 @@ fn cursor_past_content_rect_is_clamped_inside_it() {
     // rect, never onto the border or a neighbour. Content rect origin (1,2),
     // 38x4 → last cell (38, 5).
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2260,7 +2283,7 @@ fn cursor_style_reports_the_focused_panes_shape_and_blink() {
     // vim in insert mode asked for a blinking bar; the caller passes that style
     // out to the terminal koshi is running in.
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2279,7 +2302,7 @@ fn cursor_style_reports_the_focused_panes_shape_and_blink() {
         get_cursor_style(&render_snapshot),
         Some(CursorStyle::Shaped {
             shape: CursorShape::Bar,
-            blink: true
+            is_blinking: true
         })
     );
 }
@@ -2290,7 +2313,7 @@ fn a_pane_that_asked_for_no_shape_leaves_the_users_own_cursor_alone() {
     // over the cursor the user configured in their own terminal — it hands the
     // cursor back to them.
     let render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2311,7 +2334,7 @@ fn a_pane_that_asked_for_no_shape_leaves_the_users_own_cursor_alone() {
 #[test]
 fn cursor_style_is_none_without_a_focused_terminal_pane() {
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2323,7 +2346,7 @@ fn cursor_style_is_none_without_a_focused_terminal_pane() {
     let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id.take();
     assert_eq!(get_cursor_style(&render_snapshot), None);
 
-    // A plugin pane has no terminal, so it has no opinion on the cursor either.
+    // A focused pane with no grid gives no cursor style.
     render_snapshot.client_snapshot.focused_pane_id = focused_pane_id;
     render_snapshot.pane_snapshots[0].terminal_grid_view = None;
     assert_eq!(get_cursor_style(&render_snapshot), None);
@@ -2332,7 +2355,7 @@ fn cursor_style_is_none_without_a_focused_terminal_pane() {
 #[test]
 fn hidden_cursor_places_nothing() {
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2349,7 +2372,7 @@ fn a_scrolled_back_view_places_no_cursor() {
     // The app's cursor is visible, but the view is scrolled into history, so the
     // live cursor cell is off-screen and no hardware cursor is placed.
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -2384,9 +2407,8 @@ fn no_focused_pane_places_no_cursor() {
 }
 
 #[test]
-fn plugin_pane_places_no_cursor() {
-    // A visible focused pane with a visible cursor but no grid is a plugin
-    // pane_id: it places no cursor.
+fn a_focused_pane_with_no_grid_places_no_cursor() {
+    // A visible focused pane with a visible cursor but no grid places no cursor.
     let pane = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "s",
@@ -2443,7 +2465,7 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
     // Both panes carry a grid and a visible cursor at their own content origin.
     for pane in &mut render_snapshot.pane_snapshots {
         pane.terminal_grid_view = Some(GridView {
-            grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
+            grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
             view_row_offset: 0,
         });
     }
@@ -2486,7 +2508,7 @@ fn cursor_style_follows_focus_between_panes() {
     );
     for pane in &mut render_snapshot.pane_snapshots {
         pane.terminal_grid_view = Some(GridView {
-            grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
+            grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
             view_row_offset: 0,
         });
     }
@@ -2500,7 +2522,7 @@ fn cursor_style_follows_focus_between_panes() {
         get_cursor_style(&render_snapshot),
         Some(CursorStyle::Shaped {
             shape: CursorShape::Bar,
-            blink: true
+            is_blinking: true
         })
     );
 
@@ -2526,7 +2548,7 @@ fn build_too_small_render_snapshot(viewport_size: Size) -> RenderSnapshot {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .are_all_panes_suppressed = true;
+        .is_every_pane_suppressed = true;
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -2602,6 +2624,39 @@ fn too_small_overlay_clips_on_narrow_screen() {
 }
 
 #[test]
+fn recovery_notice_returns_after_a_too_small_viewport_gains_a_statusline() {
+    let mut too_small_snapshot = build_too_small_render_snapshot(Size {
+        column_count: 100,
+        row_count: 1,
+    });
+    too_small_snapshot.is_recovery_notice_visible = true;
+    let too_small_screen = render_test_snapshot(&too_small_snapshot, 100, 1);
+    assert_eq!(
+        format_rendered_row_text(&too_small_screen, 0).trim(),
+        "Terminal too small — enlarge window"
+    );
+
+    let pane_id = PaneId::new();
+    let mut resized_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[(pane_id, build_cell_rect(0, 1, 100, 38), true)],
+        Some(pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 100,
+            row_count: 40,
+        },
+    );
+    resized_snapshot.is_recovery_notice_visible = true;
+    let resized_screen = render_test_snapshot(&resized_snapshot, 100, 40);
+    assert_eq!(
+        format_rendered_row_text(&resized_screen, 39).trim(),
+        "Restore failed: new shell; previous panes unavailable. Input clears notice."
+    );
+}
+
+#[test]
 fn small_and_zero_size_areas_are_safe() {
     let pane = PaneId::new();
     let render_snapshot = build_render_snapshot(
@@ -2649,6 +2704,10 @@ fn small_and_zero_size_areas_are_safe() {
         &KeymapHints::default(),
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         RatatuiRect {
             x: 0,
             y: 0,
@@ -2659,19 +2718,19 @@ fn small_and_zero_size_areas_are_safe() {
     );
 }
 
-/// A letterbox snapshot: a client `viewport` larger than the effective middle
+/// A letterbox snapshot: a client `viewport_size` larger than the `tab_size` middle
 /// pane region, with one visible pane laid out from that region's origin.
 fn build_letterbox_render_snapshot(
     pane_id: PaneId,
     viewport_size: Size,
-    effective: Size,
+    tab_size: Size,
 ) -> RenderSnapshot {
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
         &[(
             pane_id,
-            build_cell_rect(0, 0, effective.column_count, effective.row_count),
+            build_cell_rect(0, 0, tab_size.column_count, tab_size.row_count),
             true,
         )],
         Some(pane_id),
@@ -2681,7 +2740,7 @@ fn build_letterbox_render_snapshot(
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .effective_cell_size = effective;
+        .tab_size = tab_size;
     render_snapshot
 }
 
@@ -2746,7 +2805,7 @@ fn cursor_shifts_into_centered_content() {
         },
     );
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(4, 38, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(4, 38, TermStyle::default())),
         view_row_offset: 0,
     });
     render_snapshot.pane_snapshots[0].cursor_snapshot = CursorSnapshot {
@@ -2782,7 +2841,7 @@ fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
         },
     );
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(4, 1, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(4, 1, TermStyle::default())),
         view_row_offset: 0,
     });
     assert_eq!(
@@ -2792,7 +2851,7 @@ fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
             .pane_slots[0]
             .content_rect
             .expect("the slot is visible")
-            .cell_size,
+            .size,
         Size {
             column_count: 0,
             row_count: 0
@@ -2832,6 +2891,10 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         &KeymapHints::default(),
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         RatatuiRect {
             x: 0,
             y: 0,
@@ -2878,6 +2941,10 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
         &KeymapHints::default(),
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         area,
         &mut render_buffer,
     );
@@ -2895,7 +2962,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     // must be skipped, not written out of bounds.
     let active_pane_id = PaneId::new();
     let collapsed_pane_id = PaneId::new();
-    let column_count = version_badge_column_count() + 16;
+    let column_count = compute_version_badge_column_count() + 16;
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
@@ -2942,6 +3009,10 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
         &KeymapHints::default(),
         None,
         ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
         area,
         &mut render_buffer,
     );
@@ -2950,7 +3021,7 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     // tabline (too narrow for the tab, so only the `▶` arrow and the mode tag),
     // row 3 the pane box's top border, row 4 the blanked hint row, and the rest
     // blank.
-    let version_badge_text = crate::render::create_version_badge_text();
+    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(" sess {version_badge_text}   ▶ BASE ")
@@ -3021,7 +3092,7 @@ fn an_effective_size_larger_than_the_pane_area_draws_no_letterbox() {
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .effective_cell_size = Size {
+        .tab_size = Size {
         column_count: 80,
         row_count: 20,
     };
@@ -3087,15 +3158,16 @@ fn a_custom_theme_recolors_the_chrome() {
         &[
             (
                 left_pane_id,
-                build_cell_rect(0, 1, (version_badge_column_count() + 31) / 2, 6),
+                build_cell_rect(0, 1, (compute_version_badge_column_count() + 31) / 2, 6),
                 true,
             ),
             (
                 right_pane_id,
                 build_cell_rect(
-                    (version_badge_column_count() + 31) / 2,
+                    (compute_version_badge_column_count() + 31) / 2,
                     1,
-                    version_badge_column_count() + 31 - (version_badge_column_count() + 31) / 2,
+                    compute_version_badge_column_count() + 31
+                        - (compute_version_badge_column_count() + 31) / 2,
                     6,
                 ),
                 true,
@@ -3104,7 +3176,7 @@ fn a_custom_theme_recolors_the_chrome() {
         Some(left_pane_id),
         LockMode::Normal,
         Size {
-            column_count: version_badge_column_count() + 31,
+            column_count: compute_version_badge_column_count() + 31,
             row_count: 8,
         },
     );
@@ -3115,7 +3187,7 @@ fn a_custom_theme_recolors_the_chrome() {
         unfocused_border_color: Color::Rgb(0x11, 0x22, 0x33),
         ..Theme::default()
     };
-    let column_count = version_badge_column_count() + 31;
+    let column_count = compute_version_badge_column_count() + 31;
     let render_buffer = render_test_snapshot_with_theme(&render_snapshot, &theme, column_count, 8);
 
     // Borders take the theme's border colors.
@@ -3160,7 +3232,7 @@ fn overlapping_panes_draw_in_layout_order_last_wins() {
             row_count: 8,
         },
     );
-    let mut first_pane_grid = Grid::blank(4, 18, TermStyle::default());
+    let mut first_pane_grid = Grid::build_blank(4, 18, TermStyle::default());
     *first_pane_grid.get_cell_mut(0, 0).unwrap() =
         Cell::from_character('Z', 1, TermStyle::default());
     *first_pane_grid.get_cell_mut(0, 15).unwrap() =
@@ -3169,7 +3241,7 @@ fn overlapping_panes_draw_in_layout_order_last_wins() {
         grid: Arc::new(first_pane_grid),
         view_row_offset: 0,
     });
-    let mut second_pane_grid = Grid::blank(4, 18, TermStyle::default());
+    let mut second_pane_grid = Grid::build_blank(4, 18, TermStyle::default());
     *second_pane_grid.get_cell_mut(0, 0).unwrap() =
         Cell::from_character('Y', 1, TermStyle::default());
     *second_pane_grid.get_cell_mut(0, 17).unwrap() =
@@ -3430,7 +3502,7 @@ fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
     // `Some` position (using the wrong slot's rect) rather than `None` by
     // coincidence of some other, unrelated guard.
     render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
-        grid: Arc::new(Grid::blank(4, 18, TermStyle::default())),
+        grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
         view_row_offset: 0,
     });
     assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
@@ -3442,7 +3514,7 @@ fn a_visible_slot_with_no_content_rect_places_no_cursor() {
     // says it is visible but carries no content rect has nowhere to put the
     // cursor, so none is placed.
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -3472,7 +3544,7 @@ fn a_slot_whose_pane_snapshot_is_gone_places_no_cursor() {
     // frame carries no pane snapshot for it: nothing says where the cursor is,
     // so none is placed.
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -3506,7 +3578,7 @@ fn cursor_style_is_none_when_the_focused_pane_has_no_snapshot() {
     // The focused id names a pane the frame carries no content for: nothing
     // speaks for the cursor, so the outer terminal keeps the style it has.
     let mut render_snapshot = build_content_render_snapshot(
-        Grid::blank(4, 38, TermStyle::default()),
+        Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
         false,
         Size {
@@ -3562,7 +3634,7 @@ fn build_highlighted_render_snapshot(grid: Grid, spans: Vec<(u16, u16, u16)>) ->
 
 /// A grid whose row 0 reads `abcdef`.
 fn build_abcdef_grid() -> Grid {
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     for (column_index, character) in "abcdef".chars().enumerate() {
         *grid.get_cell_mut(0, column_index as u16).unwrap() =
             Cell::from_character(character, 1, TermStyle::default());
@@ -3662,7 +3734,7 @@ fn highlighting_a_cell_that_is_already_reverse_swaps_it_back() {
     // The highlight combines with the cell's own reverse by exclusive-or, so
     // highlighted reverse text still reads against its surroundings rather than
     // vanishing into them.
-    let mut grid = Grid::blank(4, 38, TermStyle::default());
+    let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     let mut style = TermStyle::default();
     style.set_reverse(true);
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, style);

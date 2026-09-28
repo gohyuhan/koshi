@@ -27,7 +27,7 @@ pub fn assert_events(actual_events: &[Event], expected_events: &[Event]) {
 /// Build an index-aligned expected-versus-actual diff, with one line per
 /// position and a final length line.
 fn format_event_sequence_diff(expected_events: &[Event], actual_events: &[Event]) -> String {
-    let mut diff = String::new();
+    let mut event_sequence_diff = String::new();
     let event_count = expected_events.len().max(actual_events.len());
     for event_index in 0..event_count {
         match (
@@ -35,33 +35,35 @@ fn format_event_sequence_diff(expected_events: &[Event], actual_events: &[Event]
             actual_events.get(event_index),
         ) {
             (Some(expected_event), Some(actual_event)) if expected_event == actual_event => {
-                diff.push_str(&format!("  [{event_index}] ok       {expected_event:?}\n"));
+                event_sequence_diff
+                    .push_str(&format!("  [{event_index}] ok       {expected_event:?}\n"));
             }
             (Some(expected_event), Some(actual_event)) => {
-                diff.push_str(&format!(
+                event_sequence_diff.push_str(&format!(
                     "  [{event_index}] MISMATCH expected {expected_event:?}\n"
                 ));
-                diff.push_str(&format!("               actual   {actual_event:?}\n"));
+                event_sequence_diff
+                    .push_str(&format!("               actual   {actual_event:?}\n"));
             }
             (Some(expected_event), None) => {
-                diff.push_str(&format!(
+                event_sequence_diff.push_str(&format!(
                     "  [{event_index}] MISSING  expected {expected_event:?}\n"
                 ));
             }
             (None, Some(actual_event)) => {
-                diff.push_str(&format!(
+                event_sequence_diff.push_str(&format!(
                     "  [{event_index}] EXTRA    actual   {actual_event:?}\n"
                 ));
             }
             (None, None) => unreachable!("index is bounded by the longer slice"),
         }
     }
-    diff.push_str(&format!(
+    event_sequence_diff.push_str(&format!(
         "  length: expected {}, actual {}",
         expected_events.len(),
         actual_events.len()
     ));
-    diff
+    event_sequence_diff
 }
 
 #[cfg(test)]

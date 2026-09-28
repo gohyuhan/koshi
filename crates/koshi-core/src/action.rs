@@ -1,25 +1,21 @@
-//! Action vocabulary — the stable, plugin-extensible user surface.
+//! Action vocabulary — the stable user surface.
 //!
-//! An *action* is what a user binds a key to, types as a CLI subcommand, or a
-//! plugin contributes. It is not a [`Command`](crate::command::Command): a
-//! `Command` is the runtime's internal mutation type, an action is the public
-//! name config files and the plugin SDK use. Each action maps to a command.
+//! An *action* is what a user binds a key to or types as a CLI subcommand. It
+//! is not a [`Command`](crate::command::Command): a `Command` is the runtime's
+//! internal mutation type, an action is the public name config files use. Each
+//! action maps to a command or to a viewer-local action.
 //!
-//! The action set is open. Built-in actions live in the `core:` namespace,
-//! plugins own `plugin:<id>:*`, and `user:` is reserved for user-defined
-//! macros. This file holds the primitives — [`ActionReference`], [`ActionNamespace`],
-//! [`ActionMetadata`], [`ActionHandlerReference`], and the static
-//! [`build_core_action_seeds`] table. The mutable runtime table that loads those seeds
-//! and accepts plugin registrations is
-//! [`ActionRegistry`](crate::registry::ActionRegistry).
+//! Every action lives in the `core:` namespace. This file holds the
+//! primitives — [`ActionReference`], [`ActionMetadata`],
+//! [`ActionHandlerReference`], and the static [`build_core_action_seeds`]
+//! table. [`ActionRegistry`](crate::registry::ActionRegistry) loads that table
+//! for lookup.
 
 use crate::command::CommandKind;
 use crate::geometry::Direction;
-use crate::ids::PluginId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use uuid::Uuid;
 
 /// The maximum length of an [`ActionName`], from the grammar
 /// `^[a-z][a-z0-9-]{0,30}$` (1 leading letter + up to 30 trailing chars).
@@ -52,20 +48,20 @@ pub enum ActionNameError {
 }
 
 impl fmt::Display for ActionNameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ActionNameError::Empty => f.write_str("action name is empty"),
+            ActionNameError::Empty => formatter.write_str("action name is empty"),
             ActionNameError::TooLong { character_count } => write!(
-                f,
+                formatter,
                 "action name is {character_count} chars; the maximum is {MAX_ACTION_NAME_CHARACTER_COUNT}"
             ),
             ActionNameError::InvalidStart { invalid_character } => write!(
-                f,
+                formatter,
                 "action name must start with a lowercase letter, found {invalid_character:?}"
             ),
             ActionNameError::InvalidChar { invalid_character } => {
                 write!(
-                    f,
+                    formatter,
                     "action name may only contain [a-z0-9-], found {invalid_character:?}"
                 )
             }
@@ -80,7 +76,7 @@ impl std::error::Error for ActionNameError {}
 ///
 /// [`ActionName::parse_action_name`] and deserialization (via
 /// [`TryFrom<String>`]) both run the grammar check: a name decoded from a
-/// config file, the IPC socket, or a plugin is always valid.
+/// config file or the IPC socket is always valid.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActionName(String);
@@ -138,36 +134,21 @@ impl From<ActionName> for String {
 }
 
 impl fmt::Display for ActionName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
     }
 }
 
-/// Which family an action belongs to. A `core:` and a `plugin:` action with
-/// the same local name are two different actions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ActionNamespace {
-    /// Built-in actions shipped by Koshi. Plugins may never register here.
-    Core,
-    /// Actions contributed by a plugin; the id scopes the name.
-    Plugin(PluginId),
-    /// Reserved for user-defined macros.
-    User,
-}
-
-/// A fully-qualified reference to an action: its namespace plus local name.
+/// A reference to a built-in action.
 ///
 /// `Display` renders the canonical wire form used everywhere an action is named
-/// by string — config files, CLI output, and plugin messages: `core:new-pane`,
-/// `plugin:<uuid>:open-status`, `user:my-macro`. Serde reads and writes that
-/// same string (not a `{namespace, name}` struct) via [`FromStr`]: a keymap
-/// entry `"<C-p>n" action="core:new-pane"` decodes to exactly this type.
+/// by string — config files and CLI output: `core:new-pane`. Serde reads and
+/// writes that same string via [`FromStr`]: a keymap entry
+/// `"<C-p>n" action="core:new-pane"` decodes to exactly this type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ActionReference {
-    /// The namespace that owns the action.
-    pub namespace: ActionNamespace,
-    /// The local name within the namespace.
+    /// The action's name after the `core:` prefix.
     pub action_name: ActionName,
 }
 
@@ -178,46 +159,14 @@ impl ActionReference {
     /// Returns an [`ActionNameError`] if `action_name` violates the grammar.
     pub fn from_core_action_name(action_name: &str) -> Result<Self, ActionNameError> {
         Ok(ActionReference {
-            namespace: ActionNamespace::Core,
-            action_name: ActionName::parse_action_name(action_name)?,
-        })
-    }
-
-    /// Build a reference to an action owned by `plugin_id`.
-    ///
-    /// # Errors
-    /// Returns an [`ActionNameError`] if `action_name` violates the grammar.
-    pub fn from_plugin_action_name(
-        plugin_id: PluginId,
-        action_name: &str,
-    ) -> Result<Self, ActionNameError> {
-        Ok(ActionReference {
-            namespace: ActionNamespace::Plugin(plugin_id),
-            action_name: ActionName::parse_action_name(action_name)?,
-        })
-    }
-
-    /// Build a reference to a `user:` macro action.
-    ///
-    /// # Errors
-    /// Returns an [`ActionNameError`] if `action_name` violates the grammar.
-    pub fn from_user_action_name(action_name: &str) -> Result<Self, ActionNameError> {
-        Ok(ActionReference {
-            namespace: ActionNamespace::User,
             action_name: ActionName::parse_action_name(action_name)?,
         })
     }
 }
 
 impl fmt::Display for ActionReference {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.namespace {
-            ActionNamespace::Core => write!(f, "core:{}", self.action_name),
-            ActionNamespace::Plugin(plugin_id) => {
-                write!(f, "plugin:{}:{}", plugin_id.get_uuid(), self.action_name)
-            }
-            ActionNamespace::User => write!(f, "user:{}", self.action_name),
-        }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "core:{}", self.action_name)
     }
 }
 
@@ -226,37 +175,27 @@ impl fmt::Display for ActionReference {
 pub enum ActionReferenceParseError {
     /// No `namespace:` prefix was present.
     MissingNamespace,
-    /// The namespace prefix was not one of `core`, `plugin`, or `user`.
+    /// The namespace prefix was not `core`.
     UnknownNamespace {
         /// The unrecognized prefix.
         unknown_namespace: String,
     },
-    /// A `plugin:` reference was missing the `:<name>` after its id.
-    MissingPluginName,
-    /// A `plugin:` reference's id was not a valid UUID.
-    InvalidPluginId,
-    /// The local name failed the action-name grammar.
+    /// The name after `core:` failed the action-name grammar.
     InvalidActionName(ActionNameError),
 }
 
 impl fmt::Display for ActionReferenceParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ActionReferenceParseError::MissingNamespace => {
-                f.write_str("action reference is missing a 'namespace:' prefix")
+                formatter.write_str("action reference is missing a 'namespace:' prefix")
             }
             ActionReferenceParseError::UnknownNamespace { unknown_namespace } => write!(
-                f,
-                "unknown action namespace {unknown_namespace:?}; expected core, plugin, or user"
+                formatter,
+                "unknown action namespace {unknown_namespace:?}; expected core"
             ),
-            ActionReferenceParseError::MissingPluginName => {
-                f.write_str("plugin action reference must be 'plugin:<uuid>:<name>'")
-            }
-            ActionReferenceParseError::InvalidPluginId => {
-                f.write_str("plugin action reference has an invalid UUID")
-            }
             ActionReferenceParseError::InvalidActionName(action_name_error) => {
-                write!(f, "{action_name_error}")
+                write!(formatter, "{action_name_error}")
             }
         }
     }
@@ -277,32 +216,16 @@ impl FromStr for ActionReference {
     type Err = ActionReferenceParseError;
 
     fn from_str(action_reference_text: &str) -> Result<Self, Self::Err> {
-        // Split off the "core"/"user"/"plugin" prefix from everything after its colon.
-        let (namespace, reference_tail) = action_reference_text
+        let (namespace, action_name) = action_reference_text
             .split_once(':')
             .ok_or(ActionReferenceParseError::MissingNamespace)?;
-        match namespace {
-            "core" => ActionReference::from_core_action_name(reference_tail)
-                .map_err(ActionReferenceParseError::InvalidActionName),
-            "user" => ActionReference::from_user_action_name(reference_tail)
-                .map_err(ActionReferenceParseError::InvalidActionName),
-            "plugin" => {
-                // A plugin reference has one more segment than core/user: "<uuid>:<name>".
-                let (plugin_id_text, action_name) = reference_tail
-                    .split_once(':')
-                    .ok_or(ActionReferenceParseError::MissingPluginName)?;
-                let plugin_uuid = Uuid::parse_str(plugin_id_text)
-                    .map_err(|_| ActionReferenceParseError::InvalidPluginId)?;
-                ActionReference::from_plugin_action_name(
-                    PluginId::from_uuid(plugin_uuid),
-                    action_name,
-                )
-                .map_err(ActionReferenceParseError::InvalidActionName)
-            }
-            unknown_namespace => Err(ActionReferenceParseError::UnknownNamespace {
-                unknown_namespace: unknown_namespace.to_string(),
-            }),
+        if namespace != "core" {
+            return Err(ActionReferenceParseError::UnknownNamespace {
+                unknown_namespace: namespace.to_string(),
+            });
         }
+        ActionReference::from_core_action_name(action_name)
+            .map_err(ActionReferenceParseError::InvalidActionName)
     }
 }
 
@@ -322,7 +245,7 @@ impl From<ActionReference> for String {
 
 /// How broad an action's effect is. `koshi keys` and `koshi actions` output
 /// print it as a label.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionScope {
     /// Acts on a pane within the current session.
     PaneSession,
@@ -330,13 +253,11 @@ pub enum ActionScope {
     Client,
     /// Acts on a tab.
     Tab,
-    /// Acts on the whole session/instance.
-    Global,
 }
 
 /// A kind of entity an action can target. [`ActionMetadata::target_kinds`]
 /// lists the kinds an action accepts; `koshi actions explain` prints them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TargetKind {
     /// The session.
     Session,
@@ -348,34 +269,17 @@ pub enum TargetKind {
     Client,
 }
 
-/// Whether the runtime implements an action. It serializes with the variant
-/// names `Available` and `ComingSoon`.
-///
-/// Introspection (`koshi actions list`/`explain`) hides `ComingSoon` actions,
-/// and resolving one is rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ActionStatus {
-    /// The runtime implements this action; binding and invoking it work.
-    Available,
-    /// The action is seeded but the runtime has no handler for it.
-    ComingSoon,
-}
-
 /// How an action is dispatched once it fires.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionHandlerReference {
     /// Build and dispatch the named core [`Command`](crate::command::Command).
     CoreCommand(CommandKind),
     /// Run a viewer-local action without sending a session command.
     CoreClient(ClientActionKind),
-    /// Route to a plugin via a host command request.
-    PluginHostCall(PluginId),
-    /// Fire a sequence of actions in order (a macro); halts on first failure.
-    Sequence(Vec<ActionReference>),
 }
 
 /// A core action handled by the attached viewer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientActionKind {
     /// Open persistent pane placement mode for the focused pane.
     BeginPanePlacement,
@@ -397,15 +301,8 @@ pub enum ClientActionKind {
 
 /// Everything the registry knows about one action: how to show it, what it can
 /// target, and how to dispatch it.
-///
-/// `namespace` repeats the owning [`ActionReference`]'s namespace, so metadata handed
-/// out on its own still names its owner.
-/// [`ActionRegistry::register_action`](crate::registry::ActionRegistry::register_action)
-/// refuses an entry whose two namespaces disagree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionMetadata {
-    /// The namespace the action belongs to.
-    pub namespace: ActionNamespace,
     /// Human-facing name, e.g. "Create Pane to the Right".
     pub display_name: String,
     /// One-line description for `describe`/which-key output.
@@ -416,21 +313,17 @@ pub struct ActionMetadata {
     pub target_kinds: Vec<TargetKind>,
     /// How the action is dispatched.
     pub handler: ActionHandlerReference,
-    /// Whether the runtime implements the action.
-    pub action_status: ActionStatus,
     /// Whether the action repeats from a held prefix: fired from a
     /// multi-chord binding, the binding's prefix stays armed and the next
     /// chord alone fires again (`<C-s> h h h` resizes three times). Declared
-    /// per action here, never in a binding. Absent on the wire means `false`.
-    #[serde(default)]
+    /// per action here, never in a binding.
     pub is_continuous: bool,
 }
 
-/// Build one `core:` seed entry, with `namespace` set to
-/// [`ActionNamespace::Core`] and `is_continuous` `false`.
+/// Build one `core:` seed entry with `is_continuous` `false`.
 ///
 /// # Panics
-/// Panics if `name` violates the action-name grammar.
+/// Panics if `action_name` violates the action-name grammar.
 fn build_core_action_seed(
     action_name: &'static str,
     display_name: &str,
@@ -438,21 +331,18 @@ fn build_core_action_seed(
     scope: ActionScope,
     target_kinds: Vec<TargetKind>,
     handler: ActionHandlerReference,
-    action_status: ActionStatus,
 ) -> (ActionReference, ActionMetadata) {
     let action_reference = ActionReference::from_core_action_name(action_name)
         .expect("core seed action name must satisfy the action-name grammar");
-    let metadata = ActionMetadata {
-        namespace: ActionNamespace::Core,
+    let action_metadata = ActionMetadata {
         display_name: display_name.to_string(),
         description: description.to_string(),
         scope,
         target_kinds,
         handler,
-        action_status,
         is_continuous: false,
     };
-    (action_reference, metadata)
+    (action_reference, action_metadata)
 }
 
 /// The hint-bar label for `core:mouse-select` while the mode is **off**, and
@@ -465,24 +355,22 @@ pub const MOUSE_SELECT_HINT: &str = "Mouse Select";
 pub const MOUSE_UNSELECT_HINT: &str = "Mouse Unselect";
 
 /// The built-in action table, loaded into the runtime registry at startup.
-/// `koshi actions list` prints the `Available` entries in this order.
+/// `koshi actions list` prints the entries in this order.
 ///
-/// Every entry is in the `core:` namespace. The `begin-pane-placement` action
-/// starts the viewer-local pane placement mode. Its placement actions select
-/// and confirm viewer-local targets; the other command-backed actions use values
-/// their NAME bakes into the command the resolver builds — `lock`/`unlock`
-/// both build `SetLockMode`; the `new-pane-*`, `focus-pane-*`, and
-/// `resize-pane-*` families each build their family's command with the named
-/// direction; `next-tab`/`previous-tab`/`focus-tab` all build `FocusTab`.
+/// The `begin-pane-placement` action starts the viewer-local pane placement
+/// mode. Its placement actions select and confirm viewer-local targets; the
+/// other command-backed actions use values their NAME bakes into the command
+/// the resolver builds — `lock`/`unlock` both build `SetLockMode`; the
+/// `new-pane-*`, `focus-pane-*`, and `resize-pane-*` families each build their
+/// family's command with the named direction; `next-tab`/`previous-tab`/
+/// `focus-tab` all build `FocusTab`.
 ///
-/// The `copy-selection` and `plugin-*` actions are seeded `ComingSoon`; every
-/// other action is `Available`. The `resize-pane*`, `focus-pane*`, and
-/// `scroll-pane*` actions are `continuous`; every other action is not.
+/// The `resize-pane*`, `focus-pane*`, and `scroll-pane-up`/`scroll-pane-down`
+/// actions are `is_continuous`; every other action is not.
 #[must_use]
 pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
     use ActionHandlerReference::{CoreClient, CoreCommand};
-    use ActionScope::{Client, Global, PaneSession, Tab};
-    use ActionStatus::{Available, ComingSoon};
+    use ActionScope::{Client, PaneSession, Tab};
     use TargetKind::{Client as ClientTarget, Pane, Session, Tab as TabTarget};
 
     let mut action_seeds = vec![
@@ -494,7 +382,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            Available,
         ),
         build_core_action_seed(
             "new-pane-left",
@@ -503,7 +390,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            Available,
         ),
         build_core_action_seed(
             "new-pane-down",
@@ -512,7 +398,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            Available,
         ),
         build_core_action_seed(
             "new-pane-up",
@@ -521,7 +406,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            Available,
         ),
         build_core_action_seed(
             "new-pane-right",
@@ -530,7 +414,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            Available,
         ),
         build_core_action_seed(
             "new-pane-stacked",
@@ -539,7 +422,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::NewPane),
-            Available,
         ),
         build_core_action_seed(
             "close-pane",
@@ -548,7 +430,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ClosePane),
-            Available,
         ),
         build_core_action_seed(
             "close-pane-tree",
@@ -557,7 +438,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ClosePane),
-            Available,
         ),
         build_core_action_seed(
             "resize-pane",
@@ -566,7 +446,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
-            Available,
         ),
         build_core_action_seed(
             "resize-pane-left",
@@ -575,7 +454,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
-            Available,
         ),
         build_core_action_seed(
             "resize-pane-down",
@@ -584,7 +462,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
-            Available,
         ),
         build_core_action_seed(
             "resize-pane-up",
@@ -593,7 +470,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
-            Available,
         ),
         build_core_action_seed(
             "resize-pane-right",
@@ -602,7 +478,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::ResizePane),
-            Available,
         ),
         build_core_action_seed(
             "begin-pane-placement",
@@ -611,7 +486,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreClient(ClientActionKind::BeginPanePlacement),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-target-left",
@@ -620,7 +494,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneTarget(Direction::Left)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-target-down",
@@ -629,7 +502,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneTarget(Direction::Down)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-target-up",
@@ -638,7 +510,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneTarget(Direction::Up)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-target-right",
@@ -647,7 +518,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneTarget(Direction::Right)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-insertion-left",
@@ -656,7 +526,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Left)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-insertion-down",
@@ -665,7 +534,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Down)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-insertion-up",
@@ -674,7 +542,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Up)),
-            Available,
         ),
         build_core_action_seed(
             "select-pane-insertion-right",
@@ -683,7 +550,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPaneInsertion(Direction::Right)),
-            Available,
         ),
         build_core_action_seed(
             "cycle-pane-placement-span",
@@ -692,7 +558,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::CyclePanePlacementSpan),
-            Available,
         ),
         build_core_action_seed(
             "select-next-placement-tab",
@@ -701,7 +566,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectNextPlacementTab),
-            Available,
         ),
         build_core_action_seed(
             "select-previous-placement-tab",
@@ -710,7 +574,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::SelectPreviousPlacementTab),
-            Available,
         ),
         build_core_action_seed(
             "confirm-pane-placement",
@@ -719,7 +582,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::ConfirmPanePlacement),
-            Available,
         ),
         build_core_action_seed(
             "cancel-pane-placement",
@@ -728,7 +590,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreClient(ClientActionKind::CancelPanePlacement),
-            Available,
         ),
         build_core_action_seed(
             "move-pane",
@@ -737,7 +598,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::MovePane),
-            Available,
         ),
         build_core_action_seed(
             "place-pane",
@@ -746,7 +606,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane, TabTarget],
             CoreCommand(CommandKind::PlacePane),
-            Available,
         ),
         build_core_action_seed(
             "focus-pane",
@@ -755,7 +614,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![Pane, ClientTarget],
             CoreCommand(CommandKind::FocusPane),
-            Available,
         ),
         build_core_action_seed(
             "focus-pane-left",
@@ -764,7 +622,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
-            Available,
         ),
         build_core_action_seed(
             "focus-pane-down",
@@ -773,7 +630,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
-            Available,
         ),
         build_core_action_seed(
             "focus-pane-up",
@@ -782,7 +638,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
-            Available,
         ),
         build_core_action_seed(
             "focus-pane-right",
@@ -791,7 +646,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusPane),
-            Available,
         ),
         build_core_action_seed(
             "scroll-pane",
@@ -800,7 +654,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget, Pane],
             CoreCommand(CommandKind::ScrollPane),
-            Available,
         ),
         build_core_action_seed(
             "scroll-pane-up",
@@ -809,7 +662,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::ScrollPane),
-            Available,
         ),
         build_core_action_seed(
             "scroll-pane-down",
@@ -818,7 +670,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::ScrollPane),
-            Available,
         ),
         build_core_action_seed(
             "toggle-pane-fullscreen",
@@ -827,7 +678,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::TogglePaneFullscreen),
-            Available,
         ),
         build_core_action_seed(
             "write-to-pane",
@@ -836,7 +686,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::WriteToPane),
-            Available,
         ),
         // --- Tabs ---
         build_core_action_seed(
@@ -846,7 +695,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::NewTab),
-            Available,
         ),
         build_core_action_seed(
             "close-tab",
@@ -855,7 +703,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::CloseTab),
-            Available,
         ),
         build_core_action_seed(
             "focus-tab",
@@ -864,7 +711,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![TabTarget, ClientTarget],
             CoreCommand(CommandKind::FocusTab),
-            Available,
         ),
         build_core_action_seed(
             "next-tab",
@@ -873,7 +719,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusTab),
-            Available,
         ),
         build_core_action_seed(
             "previous-tab",
@@ -882,7 +727,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::FocusTab),
-            Available,
         ),
         build_core_action_seed(
             "move-tab",
@@ -891,7 +735,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Tab,
             vec![TabTarget],
             CoreCommand(CommandKind::MoveTab),
-            Available,
         ),
         // --- Session ---
         build_core_action_seed(
@@ -901,7 +744,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget, Session],
             CoreCommand(CommandKind::Quit),
-            Available,
         ),
         // --- Lock mode ---
         build_core_action_seed(
@@ -911,7 +753,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::ToggleLockMode),
-            Available,
         ),
         build_core_action_seed(
             "lock",
@@ -920,7 +761,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
-            Available,
         ),
         build_core_action_seed(
             "unlock",
@@ -929,7 +769,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::SetLockMode),
-            Available,
         ),
         // --- Mouse select ---
         build_core_action_seed(
@@ -940,7 +779,6 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             Client,
             vec![ClientTarget],
             CoreCommand(CommandKind::ToggleMouseSelect),
-            Available,
         ),
         // --- Run ---
         build_core_action_seed(
@@ -950,69 +788,8 @@ pub fn build_core_action_seeds() -> Vec<(ActionReference, ActionMetadata)> {
             PaneSession,
             vec![Pane],
             CoreCommand(CommandKind::RunCommandPane),
-            Available,
         ),
     ];
-
-    // --- Copy the selection --- (PaneSession scope, Pane target, Visual command,
-    // ComingSoon)
-    //
-    // The only action of visual mode. Starting a selection (a mouse drag) and
-    // dropping it (a click, or any input reaching the pane's program) have no
-    // action name. The mouse layer issues `SetSelection` and `ClearSelection`
-    // directly.
-    action_seeds.push(build_core_action_seed(
-        "copy-selection",
-        "Copy Selection",
-        "Copy the highlighted text to a clipboard target",
-        PaneSession,
-        vec![Pane],
-        CoreCommand(CommandKind::Visual),
-        ComingSoon,
-    ));
-
-    // --- Plugin lifecycle --- (all: Global scope, no targets, Plugin command, ComingSoon)
-    let plugin_action_seeds = [
-        (
-            "plugin-install",
-            "Install Plugin",
-            "Install a plugin from a source",
-        ),
-        (
-            "plugin-uninstall",
-            "Uninstall Plugin",
-            "Remove an installed plugin",
-        ),
-        (
-            "plugin-enable",
-            "Enable Plugin",
-            "Enable an installed plugin",
-        ),
-        (
-            "plugin-disable",
-            "Disable Plugin",
-            "Disable an installed plugin",
-        ),
-        (
-            "plugin-update",
-            "Update Plugin",
-            "Update a plugin to its latest version",
-        ),
-        ("plugin-reload", "Reload Plugin", "Reload a plugin in place"),
-    ];
-    action_seeds.extend(
-        plugin_action_seeds.map(|(action_name, display_name, description)| {
-            build_core_action_seed(
-                action_name,
-                display_name,
-                description,
-                Global,
-                vec![],
-                CoreCommand(CommandKind::Plugin),
-                ComingSoon,
-            )
-        }),
-    );
 
     // Repeat-from-prefix actions: fired from a multi-chord binding, the
     // prefix stays armed and the next chord alone fires again (`<C-s> h h h`,

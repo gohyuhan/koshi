@@ -55,15 +55,13 @@ impl ItermOutputOptions {
     }
 }
 
-/// Errors returned while constructing or emitting an iTerm2 image command.
+/// Errors returned while constructing an iTerm2 image command.
 #[derive(Debug)]
 pub enum ItermEncodeError {
     /// The image or output dimensions violate the shared graphics limits.
     Graphics(GraphicsError),
     /// The PNG encoder rejected validated RGBA input.
     Png(image::ImageError),
-    /// The destination writer rejected output.
-    Io(io::Error),
 }
 
 impl std::fmt::Display for ItermEncodeError {
@@ -71,7 +69,6 @@ impl std::fmt::Display for ItermEncodeError {
         match self {
             Self::Graphics(graphics_error) => graphics_error.fmt(formatter),
             Self::Png(png_error) => write!(formatter, "iTerm2 PNG encoding failed: {png_error}"),
-            Self::Io(io_error) => write!(formatter, "iTerm2 image output failed: {io_error}"),
         }
     }
 }
@@ -81,7 +78,6 @@ impl std::error::Error for ItermEncodeError {
         match self {
             Self::Graphics(graphics_error) => Some(graphics_error),
             Self::Png(png_error) => Some(png_error),
-            Self::Io(io_error) => Some(io_error),
         }
     }
 }
@@ -90,12 +86,6 @@ impl From<GraphicsError> for ItermEncodeError {
     fn from(graphics_error: GraphicsError) -> Self {
         Self::Graphics(graphics_error)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TransferMode {
-    File,
-    Multipart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +104,6 @@ pub struct ItermEncoder {
     metadata_bytes: Vec<u8>,
     packet_bytes: Vec<u8>,
     png_byte_offset: usize,
-    transfer_mode: TransferMode,
     packet_phase: PacketPhase,
 }
 
@@ -126,7 +115,6 @@ impl std::fmt::Debug for ItermEncoder {
             .field("metadata_byte_count", &self.metadata_bytes.len())
             .field("packet_byte_count", &self.packet_bytes.len())
             .field("png_byte_offset", &self.png_byte_offset)
-            .field("transfer_mode", &self.transfer_mode)
             .field("packet_phase", &self.packet_phase)
             .finish()
     }
@@ -139,7 +127,10 @@ impl ItermEncoder {
         decoded_image: &DecodedImage,
         output_options: ItermOutputOptions,
     ) -> Result<Self, ItermEncodeError> {
-        validate_iterm_output_options(output_options)?;
+        ItermOutputOptions::from_cell_dimensions(
+            output_options.width_cells,
+            output_options.height_cells,
+        )?;
         let encoded_png_bytes = encode_png(decoded_image)?;
         let metadata_bytes = build_iterm_metadata_bytes(output_options, encoded_png_bytes.len());
         if metadata_bytes.len() > MAX_GRAPHICS_CONTROL_BYTE_COUNT {
@@ -157,8 +148,8 @@ impl ItermEncoder {
             encoded_png_byte_count,
         ])?;
         let file_packet_byte_count = compute_framed_byte_count(file_body_byte_count)?;
-        let transfer_mode = if file_packet_byte_count <= MAX_ITERM_PACKET_BYTE_COUNT {
-            TransferMode::File
+        let packet_phase = if file_packet_byte_count <= MAX_ITERM_PACKET_BYTE_COUNT {
+            PacketPhase::File
         } else {
             let multipart_body_byte_count =
                 compute_checked_byte_count_sum(&[b"MultipartFile=".len(), metadata_bytes.len()])?;
@@ -168,18 +159,14 @@ impl ItermEncoder {
                 }
                 .into());
             }
-            TransferMode::Multipart
+            PacketPhase::MultipartHeader
         };
         Ok(Self {
             encoded_png_bytes,
             metadata_bytes,
             packet_bytes: Vec::with_capacity(MAX_ITERM_PACKET_BYTE_COUNT),
             png_byte_offset: 0,
-            transfer_mode,
-            packet_phase: match transfer_mode {
-                TransferMode::File => PacketPhase::File,
-                TransferMode::Multipart => PacketPhase::MultipartHeader,
-            },
+            packet_phase,
         })
     }
 
@@ -194,39 +181,6 @@ impl ItermEncoder {
         self.build_packet();
         self.advance_packet_phase();
         Some(&self.packet_bytes)
-    }
-
-    /// Write one complete packet and report whether a packet was written.
-    ///
-    /// The phase does not advance when `write_all` returns an error. A writer
-    /// that reports a partial write may have received part of the packet; the
-    /// caller must discard that transport and restart the encoder before
-    /// retrying.
-    pub fn write_next_packet<W: Write>(&mut self, mut writer: W) -> Result<bool, ItermEncodeError> {
-        if self.packet_phase == PacketPhase::Complete {
-            return Ok(false);
-        }
-        self.build_packet();
-        writer
-            .write_all(&self.packet_bytes)
-            .map_err(ItermEncodeError::Io)?;
-        self.advance_packet_phase();
-        Ok(true)
-    }
-
-    /// Reset packet emission to the beginning of this image transfer.
-    pub fn reset_packet_emission(&mut self) {
-        self.png_byte_offset = 0;
-        self.packet_bytes.clear();
-        self.packet_phase = match self.transfer_mode {
-            TransferMode::File => PacketPhase::File,
-            TransferMode::Multipart => PacketPhase::MultipartHeader,
-        };
-    }
-
-    /// Return whether every packet has been returned or written.
-    pub fn is_complete(&self) -> bool {
-        self.packet_phase == PacketPhase::Complete
     }
 
     fn build_packet(&mut self) {
@@ -281,17 +235,6 @@ impl ItermEncoder {
             PacketPhase::Complete => PacketPhase::Complete,
         };
     }
-}
-
-fn validate_iterm_output_options(
-    output_options: ItermOutputOptions,
-) -> Result<(), ItermEncodeError> {
-    ItermOutputOptions::from_cell_dimensions(
-        output_options.width_cells,
-        output_options.height_cells,
-    )
-    .map(|_| ())?;
-    Ok(())
 }
 
 fn build_iterm_metadata_bytes(
@@ -368,17 +311,17 @@ fn compute_bounded_base64_encoded_byte_count(raw_byte_count: usize) -> usize {
 }
 
 fn encode_png(decoded_image: &DecodedImage) -> Result<Vec<u8>, ItermEncodeError> {
-    let column_count =
+    let pixel_width =
         usize::try_from(decoded_image.pixel_width).map_err(|_| GraphicsError::ImageTooLarge {
             protocol: ITERM2_PROTOCOL,
         })?;
-    let row_count =
+    let pixel_height =
         usize::try_from(decoded_image.pixel_height).map_err(|_| GraphicsError::ImageTooLarge {
             protocol: ITERM2_PROTOCOL,
         })?;
-    validate_image_dimensions(ITERM2_PROTOCOL, column_count, row_count)?;
+    validate_image_dimensions(ITERM2_PROTOCOL, pixel_width, pixel_height)?;
     let expected_rgba_byte_count =
-        compute_rgba_byte_count(ITERM2_PROTOCOL, column_count, row_count)?;
+        compute_rgba_byte_count(ITERM2_PROTOCOL, pixel_width, pixel_height)?;
     if decoded_image.rgba_bytes.len() != expected_rgba_byte_count {
         return Err(GraphicsError::DeclaredSizeMismatch {
             protocol: ITERM2_PROTOCOL,
@@ -401,7 +344,7 @@ fn encode_png(decoded_image: &DecodedImage) -> Result<Vec<u8>, ItermEncodeError>
         ExtendedColorType::Rgba8,
     );
     encode_result.map_err(|png_error| {
-        if encoded_png_output.has_overflowed() {
+        if encoded_png_output.has_overflowed {
             ItermEncodeError::Graphics(GraphicsError::TransferTooLarge {
                 protocol: ITERM2_PROTOCOL,
             })
@@ -409,7 +352,7 @@ fn encode_png(decoded_image: &DecodedImage) -> Result<Vec<u8>, ItermEncodeError>
             ItermEncodeError::Png(png_error)
         }
     })?;
-    Ok(encoded_png_output.into_encoded_output_bytes())
+    Ok(encoded_png_output.encoded_output_bytes)
 }
 
 struct BoundedByteBuffer {
@@ -425,14 +368,6 @@ impl BoundedByteBuffer {
             maximum_byte_count,
             has_overflowed: false,
         }
-    }
-
-    fn has_overflowed(&self) -> bool {
-        self.has_overflowed
-    }
-
-    fn into_encoded_output_bytes(self) -> Vec<u8> {
-        self.encoded_output_bytes
     }
 }
 

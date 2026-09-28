@@ -4,16 +4,10 @@
 //! **outer terminal** — the program koshi itself runs in — which owns the real
 //! clipboard. The payload is base64. Base64 carries every byte value.
 //!
-//! OSC 52 is the only clipboard koshi writes to. A copy naming
-//! `CopyTarget::Native` writes nothing.
-//!
-//! The copy command carries which clipboard it means: the viewer that decided
-//! the copy fills it in from its own `copy.clipboard` setting, and the session
-//! writes where the command says.
+//! OSC 52 is the only clipboard koshi writes to.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use koshi_core::command::CopyTarget;
 use koshi_core::ids::ClientId;
 
 use crate::server::Server;
@@ -23,7 +17,7 @@ use crate::server::Server;
 ///
 /// `hello` → `\x1b]52;c;aGVsbG8=\x07`. `""` → `\x1b]52;c;\x07`.
 #[must_use]
-pub(crate) fn osc52_copy(copied_text: &str) -> Vec<u8> {
+pub(crate) fn encode_osc52_copy(copied_text: &str) -> Vec<u8> {
     let mut osc52_sequence_bytes = b"\x1b]52;c;".to_vec();
     osc52_sequence_bytes.extend_from_slice(STANDARD.encode(copied_text).as_bytes());
     osc52_sequence_bytes.push(0x07);
@@ -31,26 +25,11 @@ pub(crate) fn osc52_copy(copied_text: &str) -> Vec<u8> {
 }
 
 impl Server {
-    /// Write `copied_text` to the clipboard the copy command named.
-    ///
-    /// `clipboard_target` comes from the command, which the viewer filled in from its own
-    /// `copy.clipboard` setting: two viewers of one session send their copies to
-    /// the clipboards their own settings name.
-    ///
-    /// [`CopyTarget::Osc52`] queues the escape for `client_id`'s outer terminal,
-    /// behind anything already queued for that client. An empty `copied_text` still
-    /// queues the sequence. [`CopyTarget::Native`] queues nothing: koshi builds
-    /// no native operating-system clipboard backend.
-    pub(crate) fn copy_to_clipboard(
-        &mut self,
-        client_id: ClientId,
-        clipboard_target: CopyTarget,
-        copied_text: &str,
-    ) {
-        match clipboard_target {
-            CopyTarget::Osc52 => self.queue_host_write(client_id, &osc52_copy(copied_text)),
-            CopyTarget::Native => {}
-        }
+    /// Queue the OSC 52 escape carrying `copied_text` for `client_id`'s outer
+    /// terminal, behind anything already queued for that client. An empty
+    /// `copied_text` still queues the sequence.
+    pub(crate) fn copy_to_clipboard(&mut self, client_id: ClientId, copied_text: &str) {
+        self.queue_host_write(client_id, &encode_osc52_copy(copied_text));
     }
 }
 

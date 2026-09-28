@@ -12,7 +12,7 @@ use koshi_core::ids::{ClientId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use crate::snapshot::{ClientSnapshot, PluginUiSnapshot, SessionSnapshot, TabMeta, TabSnapshot};
+use crate::snapshot::{ClientSnapshot, SessionSnapshot, TabMetadata, TabSnapshot};
 
 /// Build a tabline-only snapshot. `tab_names_and_activity` are `(name, active)`.
 /// It carries no
@@ -29,7 +29,7 @@ fn build_tabline_frame(
     let tabs_metadata = tab_names_and_activity
         .iter()
         .enumerate()
-        .map(|(tab_index, (tab_name, is_active))| TabMeta {
+        .map(|(tab_index, (tab_name, is_active))| TabMetadata {
             tab_id: TabId::new(),
             tab_name: (*tab_name).to_string(),
             tab_index,
@@ -41,6 +41,7 @@ fn build_tabline_frame(
         row_count: 1,
     };
     let render_snapshot = RenderSnapshot {
+        is_recovery_notice_visible: false,
         session_snapshot: SessionSnapshot {
             session_id: SessionId::new(),
             session_revision: 0,
@@ -49,10 +50,10 @@ fn build_tabline_frame(
                 tab_id,
                 tab_name: "active".to_string(),
                 pane_slots: Vec::new(),
-                effective_cell_size: viewport_size,
+                tab_size: viewport_size,
                 stack_headers: Vec::new(),
                 layout_mode: LayoutMode::Tiled,
-                are_all_panes_suppressed: false,
+                is_every_pane_suppressed: false,
                 gap_cell_count: 0,
             },
             tabs_metadata,
@@ -67,7 +68,6 @@ fn build_tabline_frame(
             lock_mode,
             is_mouse_selection_enabled,
         },
-        plugin_ui_snapshot: PluginUiSnapshot::default(),
     };
     TablineTestFrame {
         render_snapshot,

@@ -5,12 +5,8 @@
 
 use std::time::{Duration, SystemTime};
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
-use koshi_core::ids::PluginId;
-
 use super::{PaneLifecycle, PaneLifecycleEvent};
 use crate::error::InvalidTransitionError;
-use crate::pane::state::PaneKind;
 
 /// One instance of each lifecycle state. The payloads differ from the ones in
 /// `list_lifecycle_events()`: `Exited` carries `exit_code: Some(7)` and
@@ -31,8 +27,8 @@ fn list_lifecycle_states() -> [PaneLifecycle; 5] {
 }
 
 /// One instance of each lifecycle event. The payloads differ from the ones in
-/// `list_lifecycle_states()`: `ProcessExited` carries `exit_code: Some(3)` and
-/// `exited_at = UNIX_EPOCH + 10s`; `CloseRequested` carries `close_requested_at = UNIX_EPOCH + 20s`.
+/// `list_lifecycle_states()`: `ProcessExited` carries `exit_code: Some(3)` and `exited_at =
+/// UNIX_EPOCH + 10s`; `CloseRequested` carries `close_requested_at = UNIX_EPOCH + 20s`.
 fn list_lifecycle_events() -> [PaneLifecycleEvent; 4] {
     [
         PaneLifecycleEvent::ProcessStarted,
@@ -80,8 +76,7 @@ fn compute_expected_lifecycle(
 
 #[test]
 fn spawning_advances_to_running_when_the_process_starts() {
-    let transition_result =
-        PaneLifecycle::Spawning.transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal);
+    let transition_result = PaneLifecycle::Spawning.transition(PaneLifecycleEvent::ProcessStarted);
 
     assert_eq!(transition_result, Ok(PaneLifecycle::Running));
 }
@@ -90,10 +85,8 @@ fn spawning_advances_to_running_when_the_process_starts() {
 fn a_spawning_pane_can_be_closed_before_it_runs() {
     let close_requested_at = SystemTime::UNIX_EPOCH;
 
-    let transition_result = PaneLifecycle::Spawning.transition(
-        PaneLifecycleEvent::CloseRequested { close_requested_at },
-        PaneKind::Terminal,
-    );
+    let transition_result = PaneLifecycle::Spawning
+        .transition(PaneLifecycleEvent::CloseRequested { close_requested_at });
 
     assert_eq!(
         transition_result,
@@ -105,13 +98,10 @@ fn a_spawning_pane_can_be_closed_before_it_runs() {
 fn a_running_pane_exits_carrying_its_code_and_time() {
     let exited_at = SystemTime::UNIX_EPOCH;
 
-    let transition_result = PaneLifecycle::Running.transition(
-        PaneLifecycleEvent::ProcessExited {
-            exit_code: Some(2),
-            exited_at,
-        },
-        PaneKind::Terminal,
-    );
+    let transition_result = PaneLifecycle::Running.transition(PaneLifecycleEvent::ProcessExited {
+        exit_code: Some(2),
+        exited_at,
+    });
 
     assert_eq!(
         transition_result,
@@ -126,10 +116,8 @@ fn a_running_pane_exits_carrying_its_code_and_time() {
 fn a_running_pane_starts_closing_on_request() {
     let close_requested_at = SystemTime::UNIX_EPOCH;
 
-    let transition_result = PaneLifecycle::Running.transition(
-        PaneLifecycleEvent::CloseRequested { close_requested_at },
-        PaneKind::Terminal,
-    );
+    let transition_result = PaneLifecycle::Running
+        .transition(PaneLifecycleEvent::CloseRequested { close_requested_at });
 
     assert_eq!(
         transition_result,
@@ -145,10 +133,8 @@ fn a_held_exited_pane_can_later_be_closed() {
     };
     let close_requested_at = SystemTime::UNIX_EPOCH + Duration::from_secs(4);
 
-    let transition_result = exited.transition(
-        PaneLifecycleEvent::CloseRequested { close_requested_at },
-        PaneKind::Terminal,
-    );
+    let transition_result =
+        exited.transition(PaneLifecycleEvent::CloseRequested { close_requested_at });
 
     // `Closing` carries the request time, not the exit time.
     assert_eq!(
@@ -164,7 +150,7 @@ fn a_closing_pane_is_removed_once_cleaned() {
     };
 
     assert_eq!(
-        closing.transition(PaneLifecycleEvent::Cleaned, PaneKind::Terminal),
+        closing.transition(PaneLifecycleEvent::Cleaned),
         Ok(PaneLifecycle::Removed)
     );
 }
@@ -180,11 +166,10 @@ fn a_dead_pane_never_returns_to_a_live_state() {
     // place is rejected, so the exit code and time stay readable until the
     // close.
     assert_eq!(
-        exited.transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal),
+        exited.transition(PaneLifecycleEvent::ProcessStarted),
         Err(InvalidTransitionError {
             previous_lifecycle: exited,
             lifecycle_event: PaneLifecycleEvent::ProcessStarted,
-            pane_kind: PaneKind::Terminal,
         })
     );
 }
@@ -194,10 +179,7 @@ fn a_close_during_spawn_wins_over_a_late_child_exit() {
     // The pane is closed while `Spawning`; the child then exits anyway.
     let close_requested_at = SystemTime::UNIX_EPOCH;
     let closing = PaneLifecycle::Spawning
-        .transition(
-            PaneLifecycleEvent::CloseRequested { close_requested_at },
-            PaneKind::Terminal,
-        )
+        .transition(PaneLifecycleEvent::CloseRequested { close_requested_at })
         .unwrap();
     assert_eq!(closing, PaneLifecycle::Closing { close_requested_at });
 
@@ -207,17 +189,16 @@ fn a_close_during_spawn_wins_over_a_late_child_exit() {
         exited_at: close_requested_at,
     };
     assert_eq!(
-        closing.transition(late_exit, PaneKind::Terminal),
+        closing.transition(late_exit),
         Err(InvalidTransitionError {
             previous_lifecycle: closing,
             lifecycle_event: late_exit,
-            pane_kind: PaneKind::Terminal,
         })
     );
 
     // The close still completes to `Removed`.
     assert_eq!(
-        closing.transition(PaneLifecycleEvent::Cleaned, PaneKind::Terminal),
+        closing.transition(PaneLifecycleEvent::Cleaned),
         Ok(PaneLifecycle::Removed)
     );
 }
@@ -232,11 +213,10 @@ fn a_second_close_request_while_closing_is_rejected() {
     };
 
     assert_eq!(
-        closing.transition(lifecycle_event, PaneKind::Terminal),
+        closing.transition(lifecycle_event),
         Err(InvalidTransitionError {
             previous_lifecycle: closing,
             lifecycle_event,
-            pane_kind: PaneKind::Terminal,
         })
     );
 }
@@ -244,11 +224,10 @@ fn a_second_close_request_while_closing_is_rejected() {
 #[test]
 fn a_running_pane_rejects_a_second_process_start() {
     assert_eq!(
-        PaneLifecycle::Running.transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal),
+        PaneLifecycle::Running.transition(PaneLifecycleEvent::ProcessStarted),
         Err(InvalidTransitionError {
             previous_lifecycle: PaneLifecycle::Running,
             lifecycle_event: PaneLifecycleEvent::ProcessStarted,
-            pane_kind: PaneKind::Terminal,
         })
     );
 }
@@ -259,11 +238,10 @@ fn a_removed_pane_rejects_every_event() {
 
     for lifecycle_event in list_lifecycle_events() {
         assert_eq!(
-            previous_lifecycle.transition(lifecycle_event, PaneKind::Terminal),
+            previous_lifecycle.transition(lifecycle_event),
             Err(InvalidTransitionError {
                 previous_lifecycle,
                 lifecycle_event,
-                pane_kind: PaneKind::Terminal
             }),
             "Removed must stay terminal under {lifecycle_event:?}"
         );
@@ -279,11 +257,10 @@ fn a_spawning_pane_cannot_exit_before_it_runs() {
     };
 
     assert_eq!(
-        previous_lifecycle.transition(lifecycle_event, PaneKind::Terminal),
+        previous_lifecycle.transition(lifecycle_event),
         Err(InvalidTransitionError {
             previous_lifecycle,
             lifecycle_event,
-            pane_kind: PaneKind::Terminal
         })
     );
 }
@@ -298,11 +275,10 @@ fn an_exited_pane_cannot_skip_the_close_transaction() {
     let lifecycle_event = PaneLifecycleEvent::Cleaned;
 
     assert_eq!(
-        previous_lifecycle.transition(lifecycle_event, PaneKind::Terminal),
+        previous_lifecycle.transition(lifecycle_event),
         Err(InvalidTransitionError {
             previous_lifecycle,
             lifecycle_event,
-            pane_kind: PaneKind::Terminal
         })
     );
 }
@@ -318,7 +294,7 @@ fn an_exited_pane_is_never_silently_removed() {
     // `Exited` -> `CloseRequested` -> `Closing` -> `Cleaned` -> `Removed`.
     for lifecycle_event in list_lifecycle_events() {
         assert_ne!(
-            previous_lifecycle.transition(lifecycle_event, PaneKind::Terminal),
+            previous_lifecycle.transition(lifecycle_event),
             Ok(PaneLifecycle::Removed)
         );
     }
@@ -334,12 +310,11 @@ fn only_the_specified_transitions_are_accepted() {
                     None => Err(InvalidTransitionError {
                         previous_lifecycle,
                         lifecycle_event,
-                        pane_kind: PaneKind::Terminal,
                     }),
                 };
 
             assert_eq!(
-                previous_lifecycle.transition(lifecycle_event, PaneKind::Terminal),
+                previous_lifecycle.transition(lifecycle_event),
                 expected_lifecycle,
                 "{previous_lifecycle:?} on {lifecycle_event:?}"
             );
@@ -357,9 +332,7 @@ fn exactly_six_transitions_are_legal() {
                 .map(move |lifecycle_event| (previous_lifecycle, lifecycle_event))
         })
         .filter(|&(previous_lifecycle, lifecycle_event)| {
-            previous_lifecycle
-                .transition(lifecycle_event, PaneKind::Terminal)
-                .is_ok()
+            previous_lifecycle.transition(lifecycle_event).is_ok()
         })
         .count();
 
@@ -372,13 +345,10 @@ fn an_exit_code_passes_through_unchanged_at_the_i32_bounds() {
 
     for exit_code in [i32::MIN, -1, 0, 1, i32::MAX] {
         assert_eq!(
-            PaneLifecycle::Running.transition(
-                PaneLifecycleEvent::ProcessExited {
-                    exit_code: Some(exit_code),
-                    exited_at
-                },
-                PaneKind::Terminal,
-            ),
+            PaneLifecycle::Running.transition(PaneLifecycleEvent::ProcessExited {
+                exit_code: Some(exit_code),
+                exited_at
+            },),
             Ok(PaneLifecycle::Exited {
                 exit_code: Some(exit_code),
                 exited_at
@@ -389,37 +359,13 @@ fn an_exit_code_passes_through_unchanged_at_the_i32_bounds() {
 }
 
 #[test]
-fn an_invalid_transition_is_recoverable_and_classified_by_pane_kind() {
-    // The error's domain follows the pane's kind.
-    let terminal = PaneLifecycle::Removed
-        .transition(PaneLifecycleEvent::ProcessStarted, PaneKind::Terminal)
-        .unwrap_err();
-    assert_eq!(terminal.category(), DomainCategory::Terminal);
-    assert_eq!(terminal.get_severity(), Severity::Recoverable);
-
-    let plugin = PaneLifecycle::Removed
-        .transition(
-            PaneLifecycleEvent::ProcessStarted,
-            PaneKind::Plugin {
-                plugin_id: PluginId::new(),
-            },
-        )
-        .unwrap_err();
-    assert_eq!(plugin.category(), DomainCategory::Plugin);
-    assert_eq!(plugin.get_severity(), Severity::Recoverable);
-}
-
-#[test]
 fn a_signal_killed_pane_exits_with_no_code() {
     let exited_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(7);
 
-    let transition_result = PaneLifecycle::Running.transition(
-        PaneLifecycleEvent::ProcessExited {
-            exit_code: None,
-            exited_at,
-        },
-        PaneKind::Terminal,
-    );
+    let transition_result = PaneLifecycle::Running.transition(PaneLifecycleEvent::ProcessExited {
+        exit_code: None,
+        exited_at,
+    });
 
     // `exit_code` stays `None`; the state does not stand in a `0`.
     assert_eq!(

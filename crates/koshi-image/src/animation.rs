@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::codec::{
-    build_raster_limits, decode_static_raster, guess_image_format, map_image_error,
-    png_is_animated, webp_is_animated,
+    build_raster_limits, decode_static_raster, guess_image_format, is_png_animated,
+    is_webp_animated, map_image_error,
 };
 use crate::{
     compute_rgba_byte_count, validate_image_dimensions, DecodedImage, GraphicsError,
@@ -111,7 +111,8 @@ pub enum LoopPolicy {
 }
 
 impl LoopPolicy {
-    /// Return a finite policy, or [`AnimationError::InvalidPlaybackCount`] when `total_playbacks == 0`.
+    /// Return a finite policy, or [`AnimationError::InvalidPlaybackCount`] when `total_playbacks ==
+    /// 0`.
     pub fn from_finite_playback_count(total_playbacks: u32) -> Result<Self, AnimationError> {
         if total_playbacks == 0 {
             return Err(AnimationError::InvalidPlaybackCount);
@@ -126,12 +127,6 @@ impl LoopPolicy {
             Self::Finite(total_playbacks) => Some(total_playbacks),
             Self::Infinite => None,
         }
-    }
-
-    /// Return whether this policy repeats without a finite end.
-    #[must_use]
-    pub fn is_infinite(self) -> bool {
-        matches!(self, Self::Infinite)
     }
 }
 
@@ -181,7 +176,8 @@ impl AnimationFrame {
         })
     }
 
-    /// Return a zero-delay gapless frame, or [`AnimationError::InvalidFrameImage`] for invalid RGBA dimensions.
+    /// Return a zero-delay gapless frame, or [`AnimationError::InvalidFrameImage`] for invalid RGBA
+    /// dimensions.
     pub fn from_gapless_image<ImageSource>(
         decoded_image: ImageSource,
     ) -> Result<Self, AnimationError>
@@ -316,15 +312,6 @@ impl DecodedAnimation {
     #[must_use]
     pub fn get_loop_policy(&self) -> LoopPolicy {
         self.loop_policy
-    }
-
-    /// Return the shared canvas dimensions in pixels.
-    #[must_use]
-    pub fn get_image_pixel_dimensions(&self) -> (u32, u32) {
-        (
-            self.frames[0].decoded_image.pixel_width,
-            self.frames[0].decoded_image.pixel_height,
-        )
     }
 }
 
@@ -740,14 +727,14 @@ fn decode_media_inner(
             }
         }
         image::ImageFormat::Png => {
-            if png_is_animated(protocol, encoded_media_bytes)? {
+            if is_png_animated(protocol, encoded_media_bytes)? {
                 decode_apng_animation(protocol, encoded_media_bytes)
             } else {
                 decode_static_raster(protocol, encoded_media_bytes).map(DecodedMedia::Static)
             }
         }
         image::ImageFormat::WebP => {
-            if webp_is_animated(protocol, encoded_media_bytes)? {
+            if is_webp_animated(protocol, encoded_media_bytes)? {
                 decode_webp_animation(protocol, encoded_media_bytes)
             } else {
                 decode_static_raster(protocol, encoded_media_bytes).map(DecodedMedia::Static)

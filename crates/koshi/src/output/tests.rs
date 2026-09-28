@@ -8,22 +8,16 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use koshi_config::types::{BoundAction, ModeName};
-use koshi_core::action::{
-    build_core_action_seeds, ActionHandlerReference, ActionReference, ActionScope, ActionStatus,
-    TargetKind,
-};
+use koshi_core::action::{build_core_action_seeds, ActionReference, ActionScope, TargetKind};
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
 };
-use koshi_core::event::{
-    Event, PaneCreated, PaneEnterPressed, PaneTyped, SubmittedLinePayload, TypedPayload,
-};
+use koshi_core::event::{Event, PaneCreated, PaneFocused};
 use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
-use koshi_core::ids::{ClientId, PaneId, PluginId, SessionId, TabId};
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_core::recent_event::{self, RecentEvent};
-use koshi_core::resolve::ActionArgs;
 use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeWeight;
@@ -543,37 +537,24 @@ fn a_reported_pane_area_prints_as_cols_by_rows() {
 
 // --- Action introspection ---
 
-/// The count of seeded actions the runtime supports today.
-fn count_available_seeded_actions() -> usize {
-    build_core_action_seeds()
-        .iter()
-        .filter(|(_, metadata)| metadata.action_status == ActionStatus::Available)
-        .count()
-}
-
 #[test]
-fn actions_list_table_shows_only_supported_actions() {
+fn actions_list_table_shows_every_seeded_action() {
     let rendered_text = render_actions_list(OutputFormat::Table);
     let rendered_lines: Vec<&str> = rendered_text.lines().collect();
-    assert_eq!(rendered_lines.len(), count_available_seeded_actions() + 1);
+    assert_eq!(rendered_lines.len(), build_core_action_seeds().len() + 1);
     assert_eq!(
         rendered_lines[0].split_whitespace().collect::<Vec<_>>(),
         vec!["action", "command", "scope"]
     );
-    // The first supported action is new-pane.
+    // The first seeded action is new-pane.
     assert_eq!(
         rendered_lines[1].split_whitespace().collect::<Vec<_>>(),
         vec!["core:new-pane", "NewPane", "pane-session"]
     );
-    // Coming-soon actions never appear.
-    assert!(
-        !rendered_text.contains("copy-selection") && !rendered_text.contains("plugin-"),
-        "coming-soon actions leaked into the list:\n{rendered_text}"
-    );
 }
 
 #[test]
-fn actions_list_json_is_an_array_of_supported_summaries() {
+fn actions_list_json_is_an_array_of_every_seeded_summary() {
     let rendered_text = render_actions_list(OutputFormat::Json);
     assert!(
         rendered_text.starts_with("[\n"),
@@ -582,14 +563,10 @@ fn actions_list_json_is_an_array_of_supported_summaries() {
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
     let action_records = json_document.as_array().expect("a JSON array");
-    assert_eq!(action_records.len(), count_available_seeded_actions());
+    assert_eq!(action_records.len(), build_core_action_seeds().len());
     assert_eq!(action_records[0]["action"], "core:new-pane");
     assert_eq!(action_records[0]["command"], "NewPane");
     assert_eq!(action_records[0]["scope"], "pane-session");
-    assert!(
-        !rendered_text.contains("copy-selection") && !rendered_text.contains("plugin-"),
-        "coming-soon actions leaked into JSON:\n{rendered_text}"
-    );
 }
 
 #[test]
@@ -665,27 +642,6 @@ fn explain_run_omits_the_koshi_example() {
 }
 
 #[test]
-fn explain_of_a_coming_soon_action_is_hidden() {
-    // The selection and plugin actions are registered but have no
-    // runtime handler yet, so explain treats them as unknown — by bare name and
-    // by full ref. These are seeded actions on purpose: an unregistered name is
-    // hidden_session_overview too, but for a different reason, which
-    // `explain_of_an_unknown_action_is_none` covers.
-    assert_eq!(
-        render_action_explain("copy-selection", OutputFormat::Json),
-        None
-    );
-    assert_eq!(
-        render_action_explain("core:copy-selection", OutputFormat::Json),
-        None
-    );
-    assert_eq!(
-        render_action_explain("plugin-install", OutputFormat::Json),
-        None
-    );
-}
-
-#[test]
 fn explain_of_an_unknown_action_is_none() {
     assert_eq!(
         render_action_explain("does-not-exist", OutputFormat::Json),
@@ -742,11 +698,10 @@ fn format_time_cell_before_the_unix_epoch_renders_as_a_dash() {
 }
 
 #[test]
-fn format_scope_label_renders_tab_and_global() {
+fn format_scope_label_renders_tab() {
     // PaneSession and Client are covered indirectly by the `new-pane` and
-    // `focus-pane` explain tests above; Tab and Global are not.
+    // `focus-pane` explain tests above; Tab is not.
     assert_eq!(format_scope_label(ActionScope::Tab), "tab");
-    assert_eq!(format_scope_label(ActionScope::Global), "global");
 }
 
 #[test]
@@ -755,22 +710,6 @@ fn format_target_label_renders_session_and_tab() {
     // above; Session and Tab are not.
     assert_eq!(format_target_label(TargetKind::Session), "session");
     assert_eq!(format_target_label(TargetKind::Tab), "tab");
-}
-
-#[test]
-fn format_command_label_renders_plugin_host_and_sequence() {
-    // Every seeded core action dispatches through `CoreCommand`, so the
-    // plugin-host and sequence handler kinds are never reachable through
-    // `render_actions_list`/`render_action_explain` today; exercise the
-    // helper directly so those two arms stay covered.
-    assert_eq!(
-        format_command_label(&ActionHandlerReference::PluginHostCall(PluginId::new())),
-        "plugin-host"
-    );
-    assert_eq!(
-        format_command_label(&ActionHandlerReference::Sequence(vec![])),
-        "sequence"
-    );
 }
 
 #[test]
@@ -850,7 +789,6 @@ fn build_test_keymap_view_with_binding(
         koshi_config::types::BoundAction {
             action_reference: koshi_core::action::ActionReference::from_str(action_name)
                 .expect("valid ref"),
-            action_arguments: koshi_core::resolve::ActionArgs::None,
         },
     );
     let mut mode_bindings_by_name = BTreeMap::new();
@@ -931,15 +869,6 @@ fn keys_list_mode_filter_keeps_only_the_named_mode() {
 }
 
 #[test]
-fn keys_recommended_is_empty_until_plugins_exist() {
-    assert_eq!(render_keys_recommended(OutputFormat::Json), "[]\n");
-    assert_eq!(
-        render_keys_recommended(OutputFormat::Table),
-        "key  action  plugin\n"
-    );
-}
-
-#[test]
 fn keys_describe_renders_the_binding_and_source() {
     let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
     let rendered_text = render_keys_describe(&keymap_view, "<C-p> x", OutputFormat::Table)
@@ -952,7 +881,6 @@ action: core:close-pane-tree
 display_name: Close Pane Tree
 description: Close the focused pane and kill every process it started
 scope: pane-session
-args: -
 source: defaults
 continuous: false
 ";
@@ -960,63 +888,31 @@ continuous: false
 }
 
 #[test]
-fn keys_describe_renders_system_authored_args_as_json() {
-    // No shipped binding carries arguments; system-authored layers (plugin
-    // manifests) may. Build that state directly to pin the args rendering.
-    let mut keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
-    let key_sequence = KeySequence::from(KeyChord::from_parts(ModFlags::ALT, Key::Char('r')));
-    keymap_view
-        .merged_keymap
-        .mode_map_by_name
-        .get_mut(&ModeName::from_text("normal"))
-        .expect("normal mode is merged")
-        .default_bindings_by_key_sequence
-        .insert(
-            key_sequence,
-            BoundAction {
-                action_reference: ActionReference::from_core_action_name("run")
-                    .expect("valid name"),
-                action_arguments: ActionArgs::Run {
-                    program: PathBuf::from("/usr/bin/htop"),
-                    arguments: vec!["--tree".to_string()],
-                    direction: None,
-                    should_stack: false,
-                },
-            },
-        );
-    let rendered_text = render_keys_describe(&keymap_view, "<A-r>", OutputFormat::Json)
-        .expect("sequence parses")
-        .expect("bound in normal mode");
-    let json_document: serde_json::Value =
-        serde_json::from_str(&rendered_text).expect("valid JSON");
-    assert_eq!(
-        json_document[0]["action_reference"],
-        serde_json::json!("core:run")
-    );
-    assert_eq!(
-        json_document[0]["action_arguments"],
-        serde_json::json!({
-            "Run": {
-                "program": "/usr/bin/htop",
-                "arguments": ["--tree"],
-                "direction": null,
-                "should_stack": false,
-            }
-        })
-    );
-}
-
-#[test]
-fn keys_describe_renders_missing_args_as_null() {
+fn keys_describe_json_carries_exactly_its_fields() {
     let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
     let rendered_text = render_keys_describe(&keymap_view, "<A-f>", OutputFormat::Json)
         .expect("sequence parses")
         .expect("bound in normal mode");
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
+    let field_names: Vec<&str> = json_document[0]
+        .as_object()
+        .expect("each entry is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
-        json_document[0]["action_arguments"],
-        serde_json::Value::Null
+        field_names,
+        [
+            "action_reference",
+            "binding_source",
+            "description",
+            "display_name",
+            "input_mode",
+            "is_continuous",
+            "key_sequence",
+            "scope",
+        ]
     );
     assert_eq!(
         json_document[0]["action_reference"],
@@ -1115,15 +1011,15 @@ fn keys_validate_renders_both_outcome_shapes() {
 
     let clean_keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
     let checked = crate::keymap::KeymapValidationOutcome::Checked {
-        report: clean_keymap_view.report,
+        conflict_report: clean_keymap_view.conflict_report,
         is_applicable: true,
     };
     assert_eq!(
         render_keys_validate(&checked, OutputFormat::Table),
         "valid: a reload would apply this file\n"
     );
-    assert!(does_validation_apply(&checked));
-    assert!(!does_validation_apply(&failed));
+    assert!(is_validation_applicable(&checked));
+    assert!(!is_validation_applicable(&failed));
 }
 
 /// The offline view for a user file whose `unlock_alternative` sits on a chord
@@ -1200,7 +1096,6 @@ fn keys_describe_renders_one_field_block_per_mode_the_key_is_bound_in() {
                 BoundAction {
                     action_reference: ActionReference::from_core_action_name("new-tab")
                         .expect("valid name"),
-                    action_arguments: ActionArgs::None,
                 },
             );
     }
@@ -1214,7 +1109,6 @@ action: core:new-tab
 display_name: New Tab
 description: Create a new tab
 scope: tab
-args: -
 source: defaults
 continuous: false
 
@@ -1224,7 +1118,6 @@ action: core:new-tab
 display_name: New Tab
 description: Create a new tab
 scope: tab
-args: -
 source: defaults
 continuous: false
 ";
@@ -1288,7 +1181,7 @@ fn keys_validate_checked_carries_the_conflict_findings() {
     let keymap_view = build_test_keymap_view_with_binding("<C-y>", "core:not-a-real-action");
     let is_applicable = !keymap_view.is_reverted_to_defaults;
     let checked = crate::keymap::KeymapValidationOutcome::Checked {
-        report: keymap_view.report,
+        conflict_report: keymap_view.conflict_report,
         is_applicable,
     };
     let json_document: serde_json::Value =
@@ -1726,7 +1619,7 @@ fn dump_layout_table_lists_the_panes_with_no_room() {
             },
             SolvedPane {
                 pane_id: build_test_second_pane_id(),
-                outer_rect: Rect::empty_at_origin(),
+                outer_rect: Rect::build_empty_at_origin(),
             },
         ],
         suppressed_pane_ids: vec![build_test_second_pane_id()],
@@ -1761,7 +1654,7 @@ fn dump_layout_table_says_when_no_pane_has_room() {
     let solved_tab = SolvedTab {
         pane_rects: vec![SolvedPane {
             pane_id: build_test_first_pane_id(),
-            outer_rect: Rect::empty_at_origin(),
+            outer_rect: Rect::build_empty_at_origin(),
         }],
         suppressed_pane_ids: vec![build_test_first_pane_id()],
         is_every_pane_suppressed: true,
@@ -2052,7 +1945,7 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
                         "pane_id": "00000000-0000-0000-0000-000000000004",
                         "outer_rect": {
                             "origin": { "column": 0, "row": 0 },
-                            "cell_size": { "column_count": 80, "row_count": 22 }
+                            "size": { "column_count": 80, "row_count": 22 }
                         }
                     }],
                     "suppressed_pane_ids": [],
@@ -2175,54 +2068,36 @@ fn debug_events_json_carries_the_name_the_ids_and_the_time() {
                 "client_id": null,
                 "tab_id": "00000000-0000-0000-0000-000000000002",
                 "pane_id": "00000000-0000-0000-0000-000000000004",
-                "plugin_id": null,
-                "command_id": null,
-                "subscriber_id": null
+                "command_id": null
             }]
         }])
     );
 }
 
 #[test]
-fn debug_events_table_of_typed_input_shows_ids_and_no_typed_content() {
-    let typed_event = recent_event::record_event(
-        &Event::PaneTyped(PaneTyped {
-            pane_id: build_test_first_pane_id(),
-            tab_id: build_test_layout_tab_id(),
-            session_id: build_test_layout_session_id(),
+fn debug_events_table_lists_the_client_tab_and_pane_ids_in_that_order() {
+    let focused_event = recent_event::record_event(
+        &Event::PaneFocused(PaneFocused {
             client_id: build_test_layout_client_id(),
-            typed_payload: TypedPayload::SafePublic('%'),
-            accepted_at: build_fixed_test_time(),
-        }),
-        build_fixed_test_time(),
-    );
-    let submitted_event = recent_event::record_event(
-        &Event::PaneEnterPressed(PaneEnterPressed {
-            pane_id: build_test_first_pane_id(),
             tab_id: build_test_layout_tab_id(),
-            session_id: build_test_layout_session_id(),
-            client_id: build_test_layout_client_id(),
-            submitted_line: SubmittedLinePayload::SafePublic("mysql -u root -phunter2".to_string()),
-            accepted_at: build_fixed_test_time(),
+            pane_id: build_test_first_pane_id(),
+            previous_pane_id: None,
         }),
         build_fixed_test_time(),
     );
 
     let rendered_text = render_recent_events(
-        &[build_session_events(vec![typed_event, submitted_event])],
+        &[build_session_events(vec![focused_event])],
         OutputFormat::Table,
     );
 
     assert_eq!(
         rendered_text,
         "\
-session                                       name        at    event             ids
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneTyped         session-00000000-0000-0000-0000-000000000001 client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
-session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneEnterPressed  session-00000000-0000-0000-0000-000000000001 client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session                                       name        at    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneFocused  client-00000000-0000-0000-0000-000000000003 tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
 "
     );
-    assert!(!rendered_text.contains('%'), "{rendered_text}");
-    assert!(!rendered_text.contains("hunter2"), "{rendered_text}");
 }
 
 /// A record for `Event::TabCreated`, stamped `at`.
@@ -2288,7 +2163,7 @@ fn narrowing_by_name_ignores_case_and_matches_any_part_of_it() {
     assert_eq!(tab_events[0].event_name, "TabCreated");
 
     assert_eq!(
-        filter_recent_events(recent_events, None, Some("Copied")),
+        filter_recent_events(recent_events, None, Some("NoSuchEvent")),
         Vec::new()
     );
 }

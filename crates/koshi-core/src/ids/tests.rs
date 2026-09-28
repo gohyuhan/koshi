@@ -22,7 +22,7 @@ fn serde_uses_bare_uuid_wire_form() {
 }
 
 #[test]
-fn display_is_prefixed() {
+fn id_display_includes_each_type_prefix() {
     let uuid = Uuid::nil();
     assert_eq!(
         SessionId::from_uuid(uuid).to_string(),
@@ -41,10 +41,6 @@ fn display_is_prefixed() {
         "pane-00000000-0000-0000-0000-000000000000"
     );
     assert_eq!(
-        PluginId::from_uuid(uuid).to_string(),
-        "plugin-00000000-0000-0000-0000-000000000000"
-    );
-    assert_eq!(
         CommandId::from_uuid(uuid).to_string(),
         "command-00000000-0000-0000-0000-000000000000"
     );
@@ -55,7 +51,7 @@ fn display_is_prefixed() {
 }
 
 #[test]
-fn debug_shows_type_and_uuid() {
+fn pane_id_debug_includes_type_and_uuid() {
     let pane_id = PaneId::from_uuid(Uuid::nil());
     assert_eq!(
         format!("{pane_id:?}"),
@@ -64,7 +60,7 @@ fn debug_shows_type_and_uuid() {
 }
 
 #[test]
-fn from_uuid_preserves_value() {
+fn from_uuid_preserves_uuid() {
     let uuid = Uuid::now_v7();
     assert_eq!(PaneId::from_uuid(uuid).get_uuid(), &uuid);
 }
@@ -92,22 +88,22 @@ fn default_mints_a_fresh_id_not_a_fixed_one() {
 
 #[test]
 fn generated_pane_ids_are_unique() {
-    const GENERATED_ID_COUNT: usize = 10_000;
-    let generated_pane_ids: HashSet<PaneId> =
-        (0..GENERATED_ID_COUNT).map(|_| PaneId::new()).collect();
-    assert_eq!(generated_pane_ids.len(), GENERATED_ID_COUNT);
+    const GENERATED_PANE_ID_COUNT: usize = 10_000;
+    let generated_pane_ids: HashSet<PaneId> = (0..GENERATED_PANE_ID_COUNT)
+        .map(|_| PaneId::new())
+        .collect();
+    assert_eq!(generated_pane_ids.len(), GENERATED_PANE_ID_COUNT);
 }
 
 #[test]
 fn get_uuid_returns_the_wrapped_value_for_every_id_type() {
     // Each type wraps the same nil UUID and hands it back unchanged, proving
-    // the per-type `get_uuid` accessor on all seven.
+    // the per-type `get_uuid` accessor on all six.
     let uuid = Uuid::nil();
     assert_eq!(SessionId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(ClientId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(TabId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(PaneId::from_uuid(uuid).get_uuid(), &uuid);
-    assert_eq!(PluginId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(CommandId::from_uuid(uuid).get_uuid(), &uuid);
     assert_eq!(SubscriberId::from_uuid(uuid).get_uuid(), &uuid);
 }
@@ -125,8 +121,6 @@ fn default_mints_a_fresh_non_nil_id_for_every_id_type() {
     assert_ne!(TabId::default().get_uuid(), &nil_uuid);
     assert_ne!(PaneId::default(), PaneId::default());
     assert_ne!(PaneId::default().get_uuid(), &nil_uuid);
-    assert_ne!(PluginId::default(), PluginId::default());
-    assert_ne!(PluginId::default().get_uuid(), &nil_uuid);
     assert_ne!(CommandId::default(), CommandId::default());
     assert_ne!(CommandId::default().get_uuid(), &nil_uuid);
     assert_ne!(SubscriberId::default(), SubscriberId::default());
@@ -134,25 +128,25 @@ fn default_mints_a_fresh_non_nil_id_for_every_id_type() {
 }
 
 #[test]
-fn an_id_reads_in_both_spellings_koshi_accepts() {
+fn session_id_accepts_prefixed_and_bare_uuid_text() {
     let session_id = SessionId::new();
-    let printed = session_id.to_string();
-    let bare = printed
+    let prefixed_session_id_text = session_id.to_string();
+    let bare_session_uuid_text = prefixed_session_id_text
         .strip_prefix("session-")
         .expect("a session id prints with its prefix");
 
     assert_eq!(
-        parse_prefixed_uuid(&printed, "session"),
+        parse_prefixed_uuid(&prefixed_session_id_text, "session"),
         Ok(*session_id.get_uuid())
     );
     assert_eq!(
-        parse_prefixed_uuid(bare, "session"),
+        parse_prefixed_uuid(bare_session_uuid_text, "session"),
         Ok(*session_id.get_uuid())
     );
 }
 
 #[test]
-fn a_uuid_written_without_hyphens_reads_in_both_spellings() {
+fn parse_prefixed_uuid_accepts_hyphenless_uuid_with_and_without_prefix() {
     assert_eq!(
         parse_prefixed_uuid("00000000000000000000000000000000", "session"),
         Ok(Uuid::nil())
@@ -164,7 +158,7 @@ fn a_uuid_written_without_hyphens_reads_in_both_spellings() {
 }
 
 #[test]
-fn empty_text_names_both_spellings() {
+fn empty_session_id_text_returns_uuid_format_error() {
     assert_eq!(
         parse_prefixed_uuid("", "session"),
         Err("expected `session-<uuid>` or a bare UUID".to_string())
@@ -172,7 +166,7 @@ fn empty_text_names_both_spellings() {
 }
 
 #[test]
-fn a_prefix_with_no_uuid_after_it_names_both_spellings() {
+fn a_session_prefix_without_uuid_returns_uuid_format_error() {
     assert_eq!(
         parse_prefixed_uuid("session-", "session"),
         Err("expected `session-<uuid>` or a bare UUID".to_string())
@@ -184,7 +178,7 @@ fn a_prefix_with_no_uuid_after_it_names_both_spellings() {
 }
 
 #[test]
-fn a_prefix_missing_its_hyphen_names_both_spellings() {
+fn a_session_prefix_without_hyphen_returns_uuid_format_error() {
     assert_eq!(
         parse_prefixed_uuid("session00000000-0000-0000-0000-000000000000", "session"),
         Err("expected `session-<uuid>` or a bare UUID".to_string())
@@ -192,7 +186,7 @@ fn a_prefix_missing_its_hyphen_names_both_spellings() {
 }
 
 #[test]
-fn the_prefix_is_matched_case_sensitively() {
+fn uppercase_session_prefix_is_rejected() {
     assert_eq!(
         parse_prefixed_uuid("SESSION-00000000-0000-0000-0000-000000000000", "session"),
         Err("expected `session-<uuid>` or a bare UUID".to_string())
@@ -228,7 +222,7 @@ fn deserializing_the_prefixed_display_form_is_refused() {
 }
 
 #[test]
-fn an_id_carrying_another_kinds_prefix_names_both_spellings() {
+fn pane_id_prefix_is_rejected_when_parsing_session_id() {
     let pane_id_text = PaneId::new().to_string();
 
     assert_eq!(
@@ -238,7 +232,7 @@ fn an_id_carrying_another_kinds_prefix_names_both_spellings() {
 }
 
 #[test]
-fn text_that_is_no_uuid_at_all_names_both_spellings() {
+fn non_uuid_text_is_rejected_for_a_session_id() {
     assert_eq!(
         parse_prefixed_uuid("quiet-lake", "session"),
         Err("expected `session-<uuid>` or a bare UUID".to_string())

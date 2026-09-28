@@ -397,37 +397,6 @@ fn a_delete_range_frees_uploads_without_placements() {
     );
 }
 
-#[test]
-fn restoring_old_placements_rebuilds_the_numbered_upload_store() {
-    let mut engine = build_terminal_engine();
-    assert_eq!(
-        engine.process_pty_output(b"\x1b_Ga=T,I=9,f=32,s=1,v=1,c=1,r=1,C=1,q=2;/wAA/w==\x1b\\"),
-        b""
-    );
-    let mut serialized_terminal_state =
-        serde_json::to_value(engine.get_terminal_state()).expect("serialize");
-    serialized_terminal_state
-        .as_object_mut()
-        .expect("object")
-        .remove("kitty_images");
-    let restored_terminal_state: TerminalState =
-        serde_json::from_value(serialized_terminal_state).expect("restore old state");
-    let mut engine = TerminalEngine::from_terminal_state(restored_terminal_state, &[]);
-    assert_eq!(
-        engine.process_pty_output(b"\x1b_Ga=d\x1b\\\x1b_Ga=p,I=9,c=2,r=3,C=1\x1b\\"),
-        b"\x1b_Gi=1,I=9;OK\x1b\\"
-    );
-    let image_placement = &engine.get_terminal_state().list_image_placements()[0];
-    assert_eq!(
-        (
-            image_placement.get_image_anchor(),
-            image_placement.column_count,
-            image_placement.row_count
-        ),
-        ((0, 0), 2, 3)
-    );
-}
-
 fn list_image_anchors(engine: &TerminalEngine) -> Vec<(u16, u16)> {
     engine
         .get_terminal_state()
@@ -1603,4 +1572,43 @@ fn a_hard_reset_removes_uploads_as_well_as_placements() {
     assert_eq!(engine.process_pty_output(b"\x1bc"), b"");
     assert_eq!(engine.get_terminal_state().kitty_images, []);
     assert_eq!(list_image_anchors(&engine), []);
+}
+
+#[test]
+fn frame_number_one_converts_to_index_zero() {
+    assert_eq!(convert_frame_number_to_index(1), Ok(0));
+}
+
+#[test]
+fn frame_number_zero_is_a_missing_frame() {
+    assert_eq!(
+        convert_frame_number_to_index(0),
+        Err(ImagePlacementError::AnimationFrameNotFound { frame_index: 0 })
+    );
+}
+
+#[test]
+fn the_largest_frame_number_converts_to_one_less() {
+    assert_eq!(
+        convert_frame_number_to_index(u32::MAX),
+        Ok(usize::try_from(u32::MAX - 1).expect("u32 fits in usize"))
+    );
+}
+
+#[test]
+fn a_frame_byte_count_is_four_bytes_per_pixel() {
+    assert_eq!(compute_frame_rgba_byte_count(3, 2), Ok(24));
+}
+
+#[test]
+fn a_zero_sized_frame_has_zero_bytes() {
+    assert_eq!(compute_frame_rgba_byte_count(0, 7), Ok(0));
+}
+
+#[test]
+fn a_frame_whose_pixel_count_overflows_is_invalid_animation_data() {
+    assert_eq!(
+        compute_frame_rgba_byte_count(65_536, 65_536),
+        Err(ImagePlacementError::InvalidAnimationData)
+    );
 }

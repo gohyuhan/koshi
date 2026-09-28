@@ -8,10 +8,9 @@
 //! [`get_verdict`](ConflictReport::get_verdict) tells the caller what to do with the
 //! user keymap as a whole:
 //!
-//! - **Warnings** (ambiguous prefix, orphan action or mode, a
-//!   not-yet-implemented action, arguments the action cannot take, typeable
-//!   keys, a binding shadowed by the reserved unlock, a sequence past the
-//!   chord-depth cap) inform; the keymap applies.
+//! - **Warnings** (ambiguous prefix, orphan action or mode, an action that
+//!   needs CLI arguments, typeable keys, a binding shadowed by the reserved
+//!   unlock, a sequence past the chord-depth cap) inform; the keymap applies.
 //! - **A key collision** — the same key sequence bound to different actions
 //!   by two user-authored layers in one mode — reverts the whole user keymap
 //!   to the built-in defaults ([`KeymapVerdict::RevertToDefaults`]).
@@ -26,13 +25,13 @@
 //! when the resolver accepts it as written AND a keypress can reach it. It
 //! is dead when its sequence contains the reserved unlock chord (the chord
 //! resolves the instant it is pressed, and the rest of the sequence is
-//! unreachable), when it is longer than `max_chord_depth`, or when a higher
+//! unreachable), when it is longer than `maximum_chord_depth`, or when a higher
 //! layer `remove`s its key. A dead binding is warned once per layer with the
 //! most specific reason, claims no key in the collision scan, and steals
 //! nothing. A binding voided by a `remove` gets no warning: removing a key
 //! in one layer and rebinding it in a higher layer moves the key between
 //! layers without a collision. A dead binding is judged again on every
-//! config load or reload and on every plugin load or unload.
+//! config load or reload.
 //!
 //! Detection reads the layers and writes nothing. Applying the verdict is
 //! the caller's step.
@@ -45,7 +44,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::registry::ActionRegistry;
-use koshi_core::resolve::{resolve_action, ActionArgs, ResolveError};
+use koshi_core::resolve::{resolve_action, ResolveError};
 
 use crate::key::Leader;
 use crate::types::{
@@ -78,8 +77,8 @@ impl LayerOrigin {
 }
 
 impl fmt::Display for LayerOrigin {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
             Self::Defaults => "defaults",
             Self::User => "user",
             Self::Session => "session",
@@ -97,35 +96,12 @@ pub struct KeymapLayer {
     pub mode_bindings_by_name: BTreeMap<ModeName, ModeBindings>,
 }
 
-impl KeymapLayer {
-    /// On a user-authored layer, replaces every binding's arguments with
-    /// [`ActionArgs::None`], keeping only the key → action mapping. Any
-    /// argument a user file carries (an unexpected KDL property, a
-    /// hand-edited node) is dropped. The defaults layer is returned
-    /// untouched, arguments included. [`build_keymap_layers`] applies this to the
-    /// user layer.
-    #[must_use]
-    pub fn strip_user_arguments(mut self) -> Self {
-        if !self.origin.is_user_authored() {
-            return self;
-        }
-        for mode_bindings in self.mode_bindings_by_name.values_mut() {
-            for bound_action in mode_bindings.bound_action_by_key_sequence.values_mut() {
-                bound_action.action_arguments = ActionArgs::None;
-            }
-        }
-        self
-    }
-}
-
 /// The ordered keymap layers: the built-in default binding table, plus the
 /// user's `keybinding.kdl` modes when present.
 ///
 /// The default table is built against `leader`: every leader-relative default
 /// moves with it, and a user file setting `leader "alt"` turns the `<C-p>`
-/// pane prefix into `<A-p>`. The user layer passes through
-/// [`KeymapLayer::strip_user_arguments`], which drops the binding
-/// arguments a user file carries.
+/// pane prefix into `<A-p>`.
 #[must_use]
 pub fn build_keymap_layers(
     user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
@@ -136,13 +112,10 @@ pub fn build_keymap_layers(
         mode_bindings_by_name: build_default_mode_bindings(leader),
     }];
     if let Some(user_mode_bindings) = user_modes {
-        layers.push(
-            KeymapLayer {
-                origin: LayerOrigin::User,
-                mode_bindings_by_name: user_mode_bindings,
-            }
-            .strip_user_arguments(),
-        );
+        layers.push(KeymapLayer {
+            origin: LayerOrigin::User,
+            mode_bindings_by_name: user_mode_bindings,
+        });
     }
     layers
 }
@@ -242,7 +215,7 @@ pub enum ConflictDiagnostic {
         /// The action it would have triggered.
         action_reference: ActionReference,
     },
-    /// A binding's sequence is longer than the `max_chord_depth` cap. No
+    /// A binding's sequence is longer than the `maximum_chord_depth` cap. No
     /// pending sequence grows long enough to reach it, and it never fires.
     ExceedsChordDepth {
         /// The layer holding the binding.
@@ -254,35 +227,22 @@ pub enum ConflictDiagnostic {
         /// The action it would have triggered.
         action_reference: ActionReference,
         /// The configured cap the sequence exceeds.
-        max_chord_depth: u8,
+        maximum_chord_depth: u8,
     },
-    /// A binding names a registered action the runtime does not implement in
-    /// this build. The binding cannot fire.
-    ComingSoonAction {
+    /// A binding names an action that needs arguments only its CLI verb
+    /// supplies, such as `core:run`. The binding never fires.
+    ArgumentsRequired {
         /// The layer holding the binding.
         layer_origin: LayerOrigin,
         /// The mode the binding lives in.
         mode_name: ModeName,
         /// The bound key sequence.
         key_sequence: KeySequence,
-        /// The not-yet-implemented action.
+        /// The action that needs arguments.
         action_reference: ActionReference,
     },
-    /// A binding carries arguments its action cannot take, or names a macro
-    /// the resolver refuses. The binding never fires as written.
-    UnresolvableArgs {
-        /// The layer holding the binding.
-        layer_origin: LayerOrigin,
-        /// The mode the binding lives in.
-        mode_name: ModeName,
-        /// The bound key sequence.
-        key_sequence: KeySequence,
-        /// The action whose arguments do not fit.
-        action_reference: ActionReference,
-    },
-    /// A binding names an action the registry does not hold (for example,
-    /// its plugin is not loaded). The binding is inactive until the action
-    /// is registered.
+    /// A binding names an action the registry does not hold. The binding is
+    /// inactive until the action is registered.
     OrphanAction {
         /// The layer holding the binding.
         layer_origin: LayerOrigin,
@@ -334,8 +294,7 @@ impl ConflictDiagnostic {
             Self::AmbiguousPrefix { .. }
             | Self::DeadUnderReservedUnlock { .. }
             | Self::ExceedsChordDepth { .. }
-            | Self::ComingSoonAction { .. }
-            | Self::UnresolvableArgs { .. }
+            | Self::ArgumentsRequired { .. }
             | Self::OrphanAction { .. }
             | Self::OrphanMode { .. }
             | Self::TypeableBinding { .. }
@@ -345,7 +304,7 @@ impl ConflictDiagnostic {
 }
 
 impl fmt::Display for ConflictDiagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::KeyCollision {
                 mode_name,
@@ -353,7 +312,7 @@ impl fmt::Display for ConflictDiagnostic {
                 binding_claims,
             } => {
                 write!(
-                    f,
+                    formatter,
                     "key `{key_sequence}` in mode `{}` is bound",
                     mode_name.get_name()
                 )?;
@@ -361,26 +320,15 @@ impl fmt::Display for ConflictDiagnostic {
                     binding_claims.iter().enumerate()
                 {
                     if claim_index > 0 {
-                        f.write_str(" and")?;
+                        formatter.write_str(" and")?;
                     }
                     write!(
-                        f,
+                        formatter,
                         " by {layer_origin} to `{}`",
                         bound_action.action_reference
                     )?;
                 }
-                // Claims that all name one action differ only in their
-                // arguments. Fewer than two claims name no difference.
-                let is_all_claims_for_same_action = binding_claims.len() >= 2
-                    && binding_claims
-                        .windows(2)
-                        .all(|claim_pair| {
-                            claim_pair[0].1.action_reference == claim_pair[1].1.action_reference
-                        });
-                if is_all_claims_for_same_action {
-                    f.write_str(" with different arguments")?;
-                }
-                f.write_str("; all user keybindings revert to defaults")
+                formatter.write_str("; all user keybindings revert to defaults")
             }
             Self::AmbiguousPrefix {
                 mode_name,
@@ -389,7 +337,7 @@ impl fmt::Display for ConflictDiagnostic {
                 longer_sequence,
                 longer_action_reference,
             } => write!(
-                f,
+                formatter,
                 "`{prefix_sequence}` (`{prefix_action_reference}`) is a prefix of `{longer_sequence}` (`{longer_action_reference}`) \
                  in mode `{}`; the shorter binding fires only on the chord timeout",
                 mode_name.get_name()
@@ -398,26 +346,26 @@ impl fmt::Display for ConflictDiagnostic {
                 layer_origin,
                 action_reference,
             } => write!(
-                f,
+                formatter,
                 "the reserved unlock key is bound by {layer_origin} to `{action_reference}` in locked mode; \
                  declare `unlock_alternative` before rebinding it"
             ),
             Self::ReservedUnlockMissing {
                 reserved_unlock_chord,
             } => write!(
-                f,
+                formatter,
                 "locked mode has no binding from `{reserved_unlock_chord}` to `core:unlock`; \
                  the unlock escape would be unreachable"
             ),
             Self::UnlockAlternativeTypeable {
                 unlock_alternative_chord,
             } => write!(
-                f,
+                formatter,
                 "`unlock_alternative` `{unlock_alternative_chord}` is a key plain typing produces; \
                  hold Ctrl, Alt, or Super"
             ),
             Self::PanePlacementCancelBindingMissing => write!(
-                f,
+                formatter,
                 "the `pane-placement` mode has no live `core:cancel-pane-placement` binding; \
                  bind that action to a key before removing its last cancellation key"
             ),
@@ -426,7 +374,7 @@ impl fmt::Display for ConflictDiagnostic {
                 key_sequence,
                 action_reference,
             } => write!(
-                f,
+                formatter,
                 "`{key_sequence}` ({layer_origin}, `{action_reference}`) in locked mode can never fire: \
                  it holds the reserved unlock chord, which resolves instantly \
                  wherever it is pressed"
@@ -436,34 +384,23 @@ impl fmt::Display for ConflictDiagnostic {
                 mode_name,
                 key_sequence,
                 action_reference,
-                max_chord_depth,
+                maximum_chord_depth,
             } => write!(
-                f,
+                formatter,
                 "`{key_sequence}` in mode `{}` ({layer_origin}, `{action_reference}`) is {} chords, over the \
-                 `max_chord_depth` cap of {max_chord_depth}; the binding can never fire",
+                 `maximum_chord_depth` cap of {maximum_chord_depth}; the binding can never fire",
                 mode_name.get_name(),
                 key_sequence.list_chords().len()
             ),
-            Self::ComingSoonAction {
+            Self::ArgumentsRequired {
                 layer_origin,
                 mode_name,
                 key_sequence,
                 action_reference,
             } => write!(
-                f,
-                "`{key_sequence}` in mode `{}` ({layer_origin}) binds `{action_reference}`, which is not \
-                 implemented yet; the binding cannot fire until it is",
-                mode_name.get_name()
-            ),
-            Self::UnresolvableArgs {
-                layer_origin,
-                mode_name,
-                key_sequence,
-                action_reference,
-            } => write!(
-                f,
-                "`{key_sequence}` in mode `{}` ({layer_origin}) binds `{action_reference}` with arguments it \
-                 cannot take; the binding can never fire as written",
+                formatter,
+                "`{key_sequence}` in mode `{}` ({layer_origin}) binds `{action_reference}`, which needs \
+                 arguments only its CLI verb supplies; the binding can never fire",
                 mode_name.get_name()
             ),
             Self::OrphanAction {
@@ -472,7 +409,7 @@ impl fmt::Display for ConflictDiagnostic {
                 key_sequence,
                 action_reference,
             } => write!(
-                f,
+                formatter,
                 "`{key_sequence}` in mode `{}` ({layer_origin}) names unknown action `{action_reference}`; \
                  the binding is inactive until the action is registered",
                 mode_name.get_name()
@@ -481,7 +418,7 @@ impl fmt::Display for ConflictDiagnostic {
                 layer_origin,
                 mode_name,
             } => write!(
-                f,
+                formatter,
                 "the {layer_origin} keymap binds keys in unregistered mode `{}`; \
                  those bindings are inactive until the mode is registered",
                 mode_name.get_name()
@@ -492,13 +429,13 @@ impl fmt::Display for ConflictDiagnostic {
                 key_sequence,
                 action_reference,
             } => write!(
-                f,
+                formatter,
                 "`{key_sequence}` in mode `{}` ({layer_origin}, `{action_reference}`) opens with a key plain typing \
                  produces; it steals that key from the pane",
                 mode_name.get_name()
             ),
             Self::TypeableLeader { leader } => write!(
-                f,
+                formatter,
                 "leader `{leader}` is reachable by plain typing; bindings that start with \
                  it steal those keys from panes"
             ),
@@ -534,7 +471,7 @@ impl ConflictReport {
 /// Inspects keybinding layers (ordered lowest precedence first) and reports
 /// every conflict finding.
 ///
-/// `leader`, `unlock_alternative`, and `max_chord_depth` come from the
+/// `leader`, `unlock_alternative`, and `maximum_chord_depth` come from the
 /// merged keybindings config; `registry` is the live action table each
 /// binding is resolved against for the liveness judgment. A binding whose mode
 /// is not one of the [`LockMode`] names is skipped. The reserved unlock chord
@@ -545,7 +482,7 @@ pub fn detect_conflicts(
     layers: &[KeymapLayer],
     leader: Leader,
     unlock_alternative: Option<KeyChord>,
-    max_chord_depth: u8,
+    maximum_chord_depth: u8,
     registry: &ActionRegistry,
 ) -> ConflictReport {
     let known_mode_names = &list_builtin_mode_names();
@@ -569,7 +506,7 @@ pub fn detect_conflicts(
         registry,
         reserved_unlock_chord,
         locked_mode_name: &locked_mode_name,
-        max_chord_depth,
+        maximum_chord_depth,
     };
 
     for (layer_index, layer) in layers
@@ -621,12 +558,9 @@ pub fn detect_conflicts(
 enum BindingState {
     /// Resolution accepts the binding as written; it fires.
     Live,
-    /// The action is not registered. Detection runs again on every plugin
-    /// load or unload, and the binding fires once its action is registered.
+    /// The action is not registered.
     Orphan,
-    /// The action is registered but not implemented in this build.
-    ComingSoon,
-    /// The arguments (or macro shape) can never resolve as written.
+    /// The action needs arguments only its CLI verb supplies.
     Unresolvable,
 }
 
@@ -672,18 +606,10 @@ pub(crate) fn is_removed_by_higher_layer(
 fn classify_bound_action(bound_action: &BoundAction, registry: &ActionRegistry) -> BindingState {
     // Only whether the action resolves is read. The plan is dropped, and the
     // `Direction::Right` handed in reaches nothing.
-    match resolve_action(
-        &bound_action.action_reference,
-        &bound_action.action_arguments,
-        registry,
-        Direction::Right,
-    ) {
+    match resolve_action(&bound_action.action_reference, registry, Direction::Right) {
         Ok(_) => BindingState::Live,
         Err(ResolveError::Unregistered { .. }) => BindingState::Orphan,
-        Err(ResolveError::ComingSoon { .. }) => BindingState::ComingSoon,
-        Err(ResolveError::ArgsMismatch { .. } | ResolveError::SequenceTooDeep { .. }) => {
-            BindingState::Unresolvable
-        }
+        Err(ResolveError::ArgumentsRequired { .. }) => BindingState::Unresolvable,
     }
 }
 
@@ -717,7 +643,7 @@ pub(crate) struct FiringRules<'a> {
     /// The locked mode's name.
     pub(crate) locked_mode_name: &'a ModeName,
     /// The chord-depth cap a firing sequence must fit.
-    pub(crate) max_chord_depth: u8,
+    pub(crate) maximum_chord_depth: u8,
 }
 
 /// True when the binding fires: the resolver accepts it as written, its
@@ -739,15 +665,15 @@ pub(crate) fn is_bound_action_firing(
             firing_rules.reserved_unlock_chord,
             firing_rules.locked_mode_name,
         )
-        && !is_over_chord_depth_limit(key_sequence, firing_rules.max_chord_depth)
+        && !is_over_chord_depth_limit(key_sequence, firing_rules.maximum_chord_depth)
 }
 
-/// True when the sequence holds more than `max_chord_depth` chords. The input
+/// True when the sequence holds more than `maximum_chord_depth` chords. The input
 /// path grows a pending sequence only while a longer live binding starts with
 /// it; with no live binding past the cap, no pending sequence grows past it,
 /// and a binding past the cap is never reached.
-fn is_over_chord_depth_limit(key_sequence: &KeySequence, max_chord_depth: u8) -> bool {
-    key_sequence.list_chords().len() > usize::from(max_chord_depth)
+fn is_over_chord_depth_limit(key_sequence: &KeySequence, maximum_chord_depth: u8) -> bool {
+    key_sequence.list_chords().len() > usize::from(maximum_chord_depth)
 }
 
 /// True when the leader is reachable by plain typing: a chord leader that is
@@ -803,17 +729,8 @@ fn scan_layer_bindings(
                     });
                     continue;
                 }
-                BindingState::ComingSoon => {
-                    conflict_diagnostics.push(ConflictDiagnostic::ComingSoonAction {
-                        layer_origin: layer.origin,
-                        mode_name: mode_name.clone(),
-                        key_sequence: key_sequence.clone(),
-                        action_reference: bound_action.action_reference.clone(),
-                    });
-                    continue;
-                }
                 BindingState::Unresolvable => {
-                    conflict_diagnostics.push(ConflictDiagnostic::UnresolvableArgs {
+                    conflict_diagnostics.push(ConflictDiagnostic::ArgumentsRequired {
                         layer_origin: layer.origin,
                         mode_name: mode_name.clone(),
                         key_sequence: key_sequence.clone(),
@@ -835,13 +752,13 @@ fn scan_layer_bindings(
                 });
                 continue;
             }
-            if is_over_chord_depth_limit(key_sequence, firing_rules.max_chord_depth) {
+            if is_over_chord_depth_limit(key_sequence, firing_rules.maximum_chord_depth) {
                 conflict_diagnostics.push(ConflictDiagnostic::ExceedsChordDepth {
                     layer_origin: layer.origin,
                     mode_name: mode_name.clone(),
                     key_sequence: key_sequence.clone(),
                     action_reference: bound_action.action_reference.clone(),
-                    max_chord_depth: firing_rules.max_chord_depth,
+                    maximum_chord_depth: firing_rules.maximum_chord_depth,
                 });
                 continue;
             }
@@ -862,13 +779,10 @@ fn scan_layer_bindings(
 /// actions in several layers pass. The defaults layer never collides: a
 /// user binding on a defaulted key is a steal.
 ///
-/// Only firing claims count ([`is_bound_action_firing`]): a binding that cannot fire
-/// claims no key, and [`scan_layer_bindings`] warns it instead. The collision appears
-/// on the detection run where the binding turns live: at plugin registration
-/// for an orphan action, at the first load of a build that implements a
-/// coming-soon action. A claim a higher layer removes claims no key either:
-/// removing a key and rebinding it in a higher layer takes the key without a
-/// collision.
+/// Only firing claims count ([`is_bound_action_firing`]): a binding that cannot
+/// fire claims no key, and [`scan_layer_bindings`] warns it instead. A claim a
+/// higher layer removes claims no key either: removing a key and rebinding it
+/// in a higher layer takes the key without a collision.
 fn scan_key_collisions(
     layers: &[KeymapLayer],
     removal_layer_index_by_mode_and_key: &BTreeMap<(&ModeName, &KeySequence), usize>,
@@ -969,7 +883,7 @@ fn build_effective_bindings<'a>(
 /// mode, a bound sequence that is a strict prefix of another bound sequence
 /// fires only on the chord timeout. One warning per prefix pair. Locked-mode
 /// sequences holding the reserved unlock chord are absent from the effective
-/// map and never pair here; [`scan_layer`] warns them as dead.
+/// map and never pair here; [`scan_layer_bindings`] warns them as dead.
 fn scan_ambiguous_prefixes(
     effective_bindings_by_mode: &BTreeMap<
         &ModeName,
@@ -1004,8 +918,7 @@ fn scan_ambiguous_prefixes(
 /// another action is [`ConflictDiagnostic::ReservedUnlockShadowed`], and no
 /// firing binding is [`ConflictDiagnostic::ReservedUnlockMissing`]. A dead
 /// binding on the reserved chord is transparent and cannot shadow the
-/// escape. The action alone is compared: the map holds firing bindings only,
-/// and `core:unlock` resolves only with [`ActionArgs::None`].
+/// escape. The map holds firing bindings only.
 fn validate_reserved_unlock_binding(
     effective_bindings_by_mode: &BTreeMap<
         &ModeName,

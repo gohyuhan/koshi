@@ -143,7 +143,7 @@ pub fn run_share_command(
             match router_client::submit_router_request(&runtime_directory, router_request_kind)? {
                 RouterResult::Granted {
                     connection_token,
-                    did_replace_active_grant: has_replaced_active_grant,
+                    has_replaced_active_grant,
                 } => {
                     let mut output_writer = io::stdout();
                     write_share_grant(
@@ -188,8 +188,11 @@ pub fn run_share_command(
                 &runtime_directory,
                 RouterRequestKind::ListTokens { scope: token_scope },
             )? {
-                RouterResult::Tokens(entries) => {
-                    print!("{}", output::render_share_list(&entries, *output_format));
+                RouterResult::Tokens(token_entries) => {
+                    print!(
+                        "{}",
+                        output::render_share_list(&token_entries, *output_format)
+                    );
                     Ok(())
                 }
                 unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
@@ -198,7 +201,7 @@ pub fn run_share_command(
     }
 }
 
-/// Stop the grants `identity` holds, narrowed to one session when `scope`
+/// Stop the grants `identity` holds, narrowed to one session when `token_scope`
 /// names one, and print what stopped.
 ///
 /// A revoke naming no session stops every grant the identity holds, so nothing
@@ -214,7 +217,7 @@ pub fn run_share_command(
 /// Grants on other sessions are never touched: each request names one scope.
 ///
 /// `confirm_revoke` is asked once, with the question to print; `prompt::read_yes_answer` is what
-/// the command passes. `ask` carries one control-plane request to the router
+/// the command passes. `request_router` carries one control-plane request to the router
 /// and hands back its answer; the command passes
 /// [`router_client::submit_router_request`].
 ///
@@ -285,7 +288,7 @@ fn revoke_share_grants(
     }
 }
 
-/// Ask the router to stop `identity`'s grants, narrowed to `scope` when it
+/// Ask the router to stop `identity`'s grants, narrowed to `token_scope` when it
 /// names one, and hand back the scope of each grant that stopped.
 ///
 /// # Errors
@@ -393,7 +396,7 @@ fn resolve_remote_ready_or_unknown(
 fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, CliError> {
     let remote_status_response =
         router_client::submit_router_request(runtime_directory, RouterRequestKind::RemoteStatus)?;
-    let (remote_address, is_remote_access_enabled, is_remote_listener_active) =
+    let (remote_listen_address, is_remote_access_enabled, is_remote_listener_active) =
         match remote_status_response {
             RouterResult::RemoteStatus {
                 remote_listen_address,
@@ -409,25 +412,25 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
                 return Err(build_router_refusal(&unexpected_router_result))
             }
         };
-    let Some(remote_address) = remote_address else {
+    let Some(remote_listen_address) = remote_listen_address else {
         return Ok(RemoteReady::NoAddress);
     };
     if is_remote_access_enabled && is_remote_listener_active {
         return Ok(RemoteReady::On {
-            remote_listen_address: remote_address,
+            remote_listen_address,
         });
     }
     let prompt_text = if is_remote_access_enabled {
-        println!("remote access is on, and nothing is listening on {remote_address}.");
-        format!("try to open {remote_address} now? [y/N] ")
+        println!("remote access is on, and nothing is listening on {remote_listen_address}.");
+        format!("try to open {remote_listen_address} now? [y/N] ")
     } else {
         println!("remote access is off.");
-        format!("turn it on and open {remote_address}? [y/N] ")
+        format!("turn it on and open {remote_listen_address}? [y/N] ")
     };
     if !prompt::read_yes_answer(&prompt_text) {
         return Ok(if is_remote_access_enabled {
             RemoteReady::Blocked {
-                remote_listen_address: remote_address,
+                remote_listen_address,
             }
         } else {
             RemoteReady::Off
@@ -442,7 +445,7 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
             remote_listen_address,
         }),
         RouterResult::Error(_) => Ok(RemoteReady::Blocked {
-            remote_listen_address: remote_address,
+            remote_listen_address,
         }),
         unexpected_router_result => Err(build_router_refusal(&unexpected_router_result)),
     }
@@ -485,7 +488,7 @@ fn build_router_refusal(router_result: &RouterResult) -> CliError {
         unexpected_router_result => CliError::IpcUnavailable {
             detail: format!(
                 "the router answered with an unexpected {} reply",
-                unexpected_router_result.wire_name()
+                unexpected_router_result.get_wire_name()
             ),
         },
     }

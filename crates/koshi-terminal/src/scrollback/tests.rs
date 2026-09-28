@@ -1,5 +1,5 @@
 //! Unit tests for the bounded scrollback buffer: byte accounting, the line and
-//! byte caps, oldest-first dropping, and the truncation tallies.
+//! byte caps, and oldest-first dropping.
 
 use super::*;
 use crate::style::Style;
@@ -8,7 +8,7 @@ use crate::style::Style;
 fn build_line_cells(line_text: &str) -> Vec<Cell> {
     line_text
         .chars()
-        .map(|character| Cell::from_character(character, 1, Style::default()))
+        .map(|line_character| Cell::from_character(line_character, 1, Style::default()))
         .collect()
 }
 
@@ -21,7 +21,7 @@ fn build_bounded_scrollback(maximum_line_count: usize, maximum_byte_count: usize
 }
 
 /// Replace the retained rows and preserve the current retained line count.
-fn replace_retained_rows(
+fn replace_retained_lines(
     scrollback: &mut Scrollback,
     retained_lines: Vec<(Vec<Cell>, RowMetadata)>,
 ) {
@@ -30,7 +30,7 @@ fn replace_retained_rows(
 }
 
 /// The base characters of every retained row, front (oldest) to back.
-fn list_retained_row_texts(scrollback: &Scrollback) -> Vec<String> {
+fn list_retained_line_texts(scrollback: &Scrollback) -> Vec<String> {
     scrollback
         .list_retained_lines()
         .iter()
@@ -39,24 +39,21 @@ fn list_retained_row_texts(scrollback: &Scrollback) -> Vec<String> {
 }
 
 #[test]
-fn a_new_buffer_is_empty_with_no_drops() {
+fn a_new_buffer_is_empty() {
     let scrollback = build_bounded_scrollback(10, 1000);
-    assert!(scrollback.is_empty());
     assert_eq!(scrollback.get_retained_line_count(), 0);
     assert_eq!(scrollback.retained_byte_count, 0);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
-    assert_eq!(scrollback.get_dropped_byte_count(), 0);
 }
 
 #[test]
 fn compute_line_byte_count_sums_base_and_combining_as_utf8_lengths() {
     // 'a' (1 byte) + '世' (3 bytes) + 'e' carrying a combining acute (1 + 2).
-    let mut accented = Cell::from_character('e', 1, Style::default());
-    accented.push_combining('\u{0301}'); // U+0301, two UTF-8 bytes
+    let mut accented_character_cell = Cell::from_character('e', 1, Style::default());
+    accented_character_cell.push_combining('\u{0301}'); // U+0301, two UTF-8 bytes
     let line_cells = vec![
         Cell::from_character('a', 1, Style::default()),
         Cell::from_character('世', 2, Style::default()),
-        accented,
+        accented_character_cell,
     ];
     assert_eq!(compute_line_byte_count(&line_cells), 1 + 3 + (1 + 2));
 }
@@ -81,11 +78,9 @@ fn pushing_within_both_caps_retains_every_row_in_order() {
     scrollback.push_row(&build_line_cells("three"), RowMetadata::default());
     assert_eq!(scrollback.get_retained_line_count(), 3);
     assert_eq!(
-        list_retained_row_texts(&scrollback),
+        list_retained_line_texts(&scrollback),
         vec!["one", "two", "three"]
     );
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
-    assert_eq!(scrollback.get_dropped_byte_count(), 0);
     assert_eq!(scrollback.retained_byte_count, 3 + 3 + 5);
 }
 
@@ -97,9 +92,10 @@ fn exceeding_the_line_cap_drops_oldest_first() {
     scrollback.push_row(&build_line_cells("L2"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("L3"), RowMetadata::default());
     assert_eq!(scrollback.get_retained_line_count(), 3);
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["L1", "L2", "L3"]);
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 2); // "L0" is two bytes
+    assert_eq!(
+        list_retained_line_texts(&scrollback),
+        vec!["L1", "L2", "L3"]
+    );
     assert_eq!(scrollback.retained_byte_count, 6); // three two-byte rows remain
 }
 
@@ -112,9 +108,7 @@ fn exceeding_the_byte_cap_drops_oldest_until_within_budget() {
     scrollback.push_row(&build_line_cells("bbbb"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("cccc"), RowMetadata::default());
     assert_eq!(scrollback.get_retained_line_count(), 2);
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["bbbb", "cccc"]);
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 4);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["bbbb", "cccc"]);
     assert_eq!(scrollback.retained_byte_count, 8);
 }
 
@@ -125,7 +119,6 @@ fn a_lone_row_larger_than_the_byte_cap_is_kept_not_dropped() {
     let mut scrollback = build_bounded_scrollback(100_000, 2);
     scrollback.push_row(&build_line_cells("oversized"), RowMetadata::default());
     assert_eq!(scrollback.get_retained_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
     assert_eq!(scrollback.retained_byte_count, 9);
 }
 
@@ -137,9 +130,7 @@ fn a_subsequent_push_drops_the_retained_oversized_row() {
     scrollback.push_row(&build_line_cells("oversized"), RowMetadata::default()); // 9 bytes, kept by the guard
     scrollback.push_row(&build_line_cells("x"), RowMetadata::default()); // 1 byte: total 10, len 2 -> drop the front
     assert_eq!(scrollback.get_retained_line_count(), 1);
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["x"]);
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 9);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["x"]);
     assert_eq!(scrollback.retained_byte_count, 1);
 }
 
@@ -148,9 +139,7 @@ fn the_line_cap_can_drop_to_empty_unlike_the_byte_cap() {
     // The line cap has no `len > 1` guard: a zero cap retains nothing.
     let mut scrollback = build_bounded_scrollback(0, 100_000);
     scrollback.push_row(&build_line_cells("gone"), RowMetadata::default());
-    assert!(scrollback.is_empty());
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 4);
+    assert_eq!(scrollback.get_retained_line_count(), 0);
     assert_eq!(scrollback.retained_byte_count, 0);
 }
 
@@ -169,31 +158,25 @@ fn retained_byte_count_stays_equal_to_the_sum_of_retained_rows() {
 }
 
 #[test]
-fn dropped_tallies_accumulate_across_many_drops() {
+fn a_one_line_cap_keeps_only_the_newest_row() {
     let mut scrollback = build_bounded_scrollback(1, 100_000); // every push past the first drops one row
     scrollback.push_row(&build_line_cells("aa"), RowMetadata::default()); // 2 bytes
     scrollback.push_row(&build_line_cells("bbb"), RowMetadata::default()); // 3 bytes, drops "aa"
     scrollback.push_row(&build_line_cells("c"), RowMetadata::default()); // 1 byte, drops "bbb"
     assert_eq!(scrollback.get_retained_line_count(), 1);
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["c"]);
-    assert_eq!(scrollback.get_dropped_line_count(), 2);
-    assert_eq!(scrollback.get_dropped_byte_count(), 5);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["c"]);
 }
 
 #[test]
-fn clear_scrollback_empties_the_buffer_but_keeps_the_drop_tallies() {
-    let mut scrollback = build_bounded_scrollback(1, 100_000); // line cap of 1 forces a drop
+fn clear_scrollback_empties_the_buffer_and_zeroes_the_byte_count() {
+    let mut scrollback = build_bounded_scrollback(10, 100_000);
     scrollback.push_row(&build_line_cells("aa"), RowMetadata::default());
-    scrollback.push_row(&build_line_cells("bbb"), RowMetadata::default()); // drops "aa": dropped_line_count 1, dropped_byte_count 2
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
+    scrollback.push_row(&build_line_cells("bbb"), RowMetadata::default());
+    assert_eq!(scrollback.retained_byte_count, 5);
 
     scrollback.clear_scrollback();
-    assert!(scrollback.is_empty());
     assert_eq!(scrollback.get_retained_line_count(), 0);
     assert_eq!(scrollback.retained_byte_count, 0);
-    // An explicit erase leaves the tallies as they were.
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 2);
 }
 
 #[test]
@@ -215,7 +198,7 @@ fn total_pushed_line_count_counts_every_push_and_survives_clear_scrollback() {
 /// row arrives in from the screen.
 fn build_padded_line_cells(line_text: &str, column_count: usize) -> Vec<Cell> {
     let mut line_cells = build_line_cells(line_text);
-    line_cells.resize(column_count, Cell::blank());
+    line_cells.resize(column_count, Cell::build_blank());
     line_cells
 }
 
@@ -230,7 +213,7 @@ fn a_hard_row_drops_the_blanks_padding_it_out_to_the_screen_width() {
     let (retained_line_cells, _) = &scrollback.list_retained_lines()[0];
     assert_eq!(retained_line_cells.len(), 9);
     assert_eq!(
-        list_retained_row_texts(&scrollback),
+        list_retained_line_texts(&scrollback),
         vec!["README.md".to_string()]
     );
 }
@@ -288,11 +271,11 @@ fn a_wide_glyph_wrap_row_keeps_its_spacer() {
 fn a_background_colored_blank_is_content_and_survives() {
     // A prompt segment painting color into blank cells: the colored cells are
     // content and stay.
-    let mut red = Style::default();
-    red.set_background_color(crate::style::Color::Indexed(1));
+    let mut background_style = Style::default();
+    background_style.set_background_color(crate::style::Color::Indexed(1));
     let mut line_cells = build_line_cells("ab");
-    line_cells.push(Cell::blank_with(red));
-    line_cells.resize(200, Cell::blank());
+    line_cells.push(Cell::build_blank_with_style(background_style));
+    line_cells.resize(200, Cell::build_blank());
 
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
     scrollback.push_row(&line_cells, RowMetadata::default());
@@ -313,7 +296,7 @@ fn a_wide_glyphs_continuation_cell_is_content_and_survives() {
         Cell::from_character('漢', 2, Style::default()),
         Cell::from_character(' ', 0, Style::default()),
     ];
-    line_cells.resize(200, Cell::blank());
+    line_cells.resize(200, Cell::build_blank());
 
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
     scrollback.push_row(&line_cells, RowMetadata::default());
@@ -337,7 +320,7 @@ fn a_row_of_nothing_but_padding_stores_no_cells() {
 fn a_reflow_rebuild_trims_the_same_way_a_push_does() {
     // A replacement trims a hard-ended row the same way a push does.
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![
             (build_padded_line_cells("one", 200), RowMetadata::default()),
@@ -363,7 +346,7 @@ fn a_reflow_rebuild_releases_the_memory_the_padding_held() {
     // `Vec` never promises a capacity equal to the length: the check is a
     // bound, not an equality.
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![(build_padded_line_cells("hi", 200), RowMetadata::default())],
     );
@@ -382,18 +365,17 @@ fn trimming_lets_the_byte_cap_hold_the_text_it_was_set_for() {
     // The cap counts retained characters: a 200-column row of `hi` charges 2,
     // and ten of them fit a cap of 20.
     let mut scrollback = build_bounded_scrollback(1000, 20);
-    for _ in 0..10 {
+    for _push_number in 1..=10 {
         scrollback.push_row(&build_padded_line_cells("hi", 200), RowMetadata::default());
     }
     assert_eq!(scrollback.get_retained_line_count(), 10);
     assert_eq!(scrollback.retained_byte_count, 20);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
 }
 
 #[test]
 fn prompt_marks_stay_with_rows_through_history_replacement() {
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![
             (
@@ -435,7 +417,7 @@ fn prompt_marks_are_evicted_with_their_rows() {
         },
     );
 
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["output"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["output"]);
     assert!(!scrollback.list_retained_lines()[0].1.has_prompt_mark);
 }
 
@@ -466,7 +448,7 @@ fn current_scrollback_rows_round_trip_with_prompt_metadata() {
 }
 
 #[test]
-fn legacy_scrollback_rows_deserialize_as_unmarked() {
+fn scrollback_rows_carrying_a_bare_row_end_are_refused() {
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
     scrollback.push_row(
         &build_line_cells("prompt"),
@@ -490,24 +472,19 @@ fn legacy_scrollback_rows_deserialize_as_unmarked() {
             .expect("serialized row is an array")
             .pop()
             .expect("serialized row has metadata");
-        let row_end_value = serialized_row_metadata["row_end"].clone();
+        let serialized_row_end = serialized_row_metadata["row_end"].clone();
         serialized_line_row
             .as_array_mut()
             .expect("serialized row is an array")
-            .push(row_end_value);
+            .push(serialized_row_end);
     }
 
-    let restored_scrollback: Scrollback =
-        serde_json::from_value(serialized_scrollback).expect("legacy scrollback deserializes");
+    let parse_error = serde_json::from_value::<Scrollback>(serialized_scrollback)
+        .expect_err("a row without row metadata is refused");
 
     assert_eq!(
-        restored_scrollback.list_retained_lines()[0].1.row_end,
-        RowEnd::Soft
-    );
-    assert!(
-        !restored_scrollback.list_retained_lines()[0]
-            .1
-            .has_prompt_mark
+        parse_error.to_string(),
+        "invalid type: string \"Soft\", expected struct RowMetadata"
     );
 }
 
@@ -539,7 +516,7 @@ fn pushing_an_empty_row_counts_a_line_of_zero_bytes() {
     assert_eq!(scrollback.get_retained_line_count(), 1);
     assert_eq!(scrollback.retained_byte_count, 0);
     assert_eq!(scrollback.get_total_pushed_line_count(), 1);
-    assert_eq!(list_retained_row_texts(&scrollback), vec![String::new()]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec![String::new()]);
 }
 
 #[test]
@@ -549,13 +526,10 @@ fn a_retained_byte_count_exactly_at_the_cap_keeps_every_row() {
     scrollback.push_row(&build_line_cells("bbbb"), RowMetadata::default()); // total 8: at the cap, not past it
     assert_eq!(scrollback.get_retained_line_count(), 2);
     assert_eq!(scrollback.retained_byte_count, 8);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
 
     scrollback.push_row(&build_line_cells("c"), RowMetadata::default()); // total 9: one past, drops "aaaa"
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["bbbb", "c"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["bbbb", "c"]);
     assert_eq!(scrollback.retained_byte_count, 5);
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 4);
 }
 
 #[test]
@@ -564,7 +538,6 @@ fn a_row_count_exactly_at_the_line_cap_keeps_every_row() {
     scrollback.push_row(&build_line_cells("a"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("b"), RowMetadata::default());
     assert_eq!(scrollback.get_retained_line_count(), 2);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
 }
 
 #[test]
@@ -573,10 +546,8 @@ fn one_push_can_drop_for_the_line_cap_and_then_the_byte_cap() {
     scrollback.push_row(&build_line_cells("a"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("b"), RowMetadata::default()); // len 2, bytes 2: both caps hold
     scrollback.push_row(&build_line_cells("cc"), RowMetadata::default()); // len 3 drops "a"; bytes 3 then drops "b"
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["cc"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["cc"]);
     assert_eq!(scrollback.retained_byte_count, 2);
-    assert_eq!(scrollback.get_dropped_line_count(), 2);
-    assert_eq!(scrollback.get_dropped_byte_count(), 2);
 }
 
 #[test]
@@ -593,35 +564,25 @@ fn a_soft_row_charges_its_padding_against_the_byte_cap() {
 }
 
 #[test]
-fn dropped_byte_count_counts_the_stored_row_not_the_screen_row() {
-    let mut scrollback = build_bounded_scrollback(1, 1_000_000);
-    scrollback.push_row(&build_padded_line_cells("hi", 200), RowMetadata::default());
-    scrollback.push_row(&build_line_cells("x"), RowMetadata::default()); // drops the trimmed "hi"
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 2);
-}
-
-#[test]
 fn replacing_with_fewer_rows_leaves_total_pushed_line_count_unchanged() {
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
     for line_text in ["one", "two", "three"] {
         scrollback.push_row(&build_line_cells(line_text), RowMetadata::default());
     }
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![(build_line_cells("only"), RowMetadata::default())],
     );
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["only"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["only"]);
     assert_eq!(scrollback.retained_byte_count, 4);
     assert_eq!(scrollback.get_total_pushed_line_count(), 3);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
 }
 
 #[test]
 fn replacing_with_more_rows_grows_total_pushed_line_count_by_the_difference() {
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
     scrollback.push_row(&build_line_cells("one"), RowMetadata::default());
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![
             (build_line_cells("a"), RowMetadata::default()),
@@ -629,15 +590,15 @@ fn replacing_with_more_rows_grows_total_pushed_line_count_by_the_difference() {
             (build_line_cells("c"), RowMetadata::default()),
         ],
     );
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["a", "b", "c"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["a", "b", "c"]);
     assert_eq!(scrollback.retained_byte_count, 3);
     assert_eq!(scrollback.get_total_pushed_line_count(), 3);
 }
 
 #[test]
-fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
+fn replacing_past_the_line_cap_evicts_the_oldest() {
     let mut scrollback = build_bounded_scrollback(2, 1_000_000);
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![
             (build_line_cells("aa"), RowMetadata::default()),
@@ -646,10 +607,8 @@ fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
             (build_line_cells("dd"), RowMetadata::default()),
         ],
     );
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["c", "dd"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["c", "dd"]);
     assert_eq!(scrollback.retained_byte_count, 3);
-    assert_eq!(scrollback.get_dropped_line_count(), 2);
-    assert_eq!(scrollback.get_dropped_byte_count(), 5);
     // The increase is counted after eviction: two rows retained, none before.
     assert_eq!(scrollback.get_total_pushed_line_count(), 2);
 }
@@ -657,7 +616,7 @@ fn replacing_past_the_line_cap_evicts_the_oldest_and_tallies_them() {
 #[test]
 fn replacing_past_the_byte_cap_keeps_the_newest_rows_within_budget() {
     let mut scrollback = build_bounded_scrollback(100, 4);
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![
             (build_line_cells("aaa"), RowMetadata::default()),
@@ -665,10 +624,8 @@ fn replacing_past_the_byte_cap_keeps_the_newest_rows_within_budget() {
             (build_line_cells("cc"), RowMetadata::default()),
         ],
     );
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["bb", "cc"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["bb", "cc"]);
     assert_eq!(scrollback.retained_byte_count, 4);
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 3);
 }
 
 #[test]
@@ -676,18 +633,16 @@ fn replacing_with_nothing_empties_the_buffer_and_keeps_the_counters() {
     let mut scrollback = build_bounded_scrollback(1, 1_000_000);
     scrollback.push_row(&build_line_cells("aa"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("bb"), RowMetadata::default()); // drops "aa"
-    replace_retained_rows(&mut scrollback, Vec::new());
-    assert!(scrollback.is_empty());
+    replace_retained_lines(&mut scrollback, Vec::new());
+    assert_eq!(scrollback.get_retained_line_count(), 0);
     assert_eq!(scrollback.retained_byte_count, 0);
     assert_eq!(scrollback.get_total_pushed_line_count(), 2);
-    assert_eq!(scrollback.get_dropped_line_count(), 1);
-    assert_eq!(scrollback.get_dropped_byte_count(), 2);
 }
 
 #[test]
 fn a_wide_glyph_wrap_row_keeps_its_spacer_through_replace_retained_lines() {
     let mut scrollback = build_bounded_scrollback(10, 1_000_000);
-    replace_retained_rows(
+    replace_retained_lines(
         &mut scrollback,
         vec![(
             build_padded_line_cells("ab", 6),
@@ -709,7 +664,7 @@ fn a_push_after_clear_scrollback_starts_the_retained_byte_count_from_zero() {
     scrollback.push_row(&build_line_cells("abc"), RowMetadata::default());
     scrollback.clear_scrollback();
     scrollback.push_row(&build_line_cells("de"), RowMetadata::default());
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["de"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["de"]);
     assert_eq!(scrollback.retained_byte_count, 2);
     assert_eq!(scrollback.get_total_pushed_line_count(), 2);
 }
@@ -750,8 +705,6 @@ fn a_buffer_with_drops_round_trips_through_serde_field_for_field() {
     assert_eq!(restored_scrollback.maximum_byte_count, 1000);
     assert_eq!(restored_scrollback.retained_byte_count, 7);
     assert_eq!(restored_scrollback.get_total_pushed_line_count(), 4);
-    assert_eq!(restored_scrollback.get_dropped_line_count(), 2);
-    assert_eq!(restored_scrollback.get_dropped_byte_count(), 5);
 }
 
 #[test]
@@ -760,6 +713,20 @@ fn an_empty_buffer_round_trips_through_serde() {
     let serialized_scrollback = serde_json::to_value(&scrollback).expect("scrollback serializes");
     let restored_scrollback: Scrollback =
         serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");
+    assert_eq!(restored_scrollback, scrollback);
+}
+
+#[test]
+fn a_stored_buffer_carrying_a_dropped_line_count_key_still_reads() {
+    let mut scrollback = build_bounded_scrollback(3, 1000);
+    scrollback.push_row(&build_line_cells("ab"), RowMetadata::default());
+    let mut serialized_scrollback =
+        serde_json::to_value(&scrollback).expect("scrollback serializes");
+    serialized_scrollback["dropped_line_count"] = serde_json::json!(7);
+
+    let restored_scrollback: Scrollback =
+        serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");
+
     assert_eq!(restored_scrollback, scrollback);
 }
 
@@ -780,14 +747,14 @@ fn a_stored_retained_byte_count_that_does_not_match_the_rows_is_recomputed() {
     restored_scrollback.push_row(&build_line_cells("d"), RowMetadata::default());
 
     assert_eq!(restored_scrollback.retained_byte_count, 1);
-    assert_eq!(list_retained_row_texts(&restored_scrollback), vec!["d"]);
+    assert_eq!(list_retained_line_texts(&restored_scrollback), vec!["d"]);
 }
 
 #[test]
 fn stored_rows_over_the_line_cap_are_dropped_on_the_way_in() {
     // A buffer serialized at a 4-line cap, re-read with the cap edited down to
-    // 2: the two oldest rows are dropped at load and tallied, and the load is
-    // already within the cap.
+    // 2: the two oldest rows are dropped at load, and the load is already
+    // within the cap.
     let mut scrollback = build_bounded_scrollback(4, 1_000_000);
     for line_text in ["a", "bb", "ccc", "dddd"] {
         scrollback.push_row(&build_line_cells(line_text), RowMetadata::default());
@@ -800,13 +767,11 @@ fn stored_rows_over_the_line_cap_are_dropped_on_the_way_in() {
         serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");
 
     assert_eq!(
-        list_retained_row_texts(&restored_scrollback),
+        list_retained_line_texts(&restored_scrollback),
         vec!["ccc", "dddd"]
     );
     assert_eq!(restored_scrollback.get_retained_line_count(), 2);
     assert_eq!(restored_scrollback.retained_byte_count, 7);
-    assert_eq!(restored_scrollback.get_dropped_line_count(), 2);
-    assert_eq!(restored_scrollback.get_dropped_byte_count(), 3);
     assert_eq!(restored_scrollback.get_total_pushed_line_count(), 4);
 }
 
@@ -824,16 +789,14 @@ fn stored_rows_over_the_byte_cap_are_dropped_on_the_way_in() {
         serde_json::from_value(serialized_scrollback).expect("scrollback deserializes");
 
     assert_eq!(
-        list_retained_row_texts(&restored_scrollback),
+        list_retained_line_texts(&restored_scrollback),
         vec!["bbbb", "cc"]
     );
     assert_eq!(restored_scrollback.retained_byte_count, 6);
-    assert_eq!(restored_scrollback.get_dropped_line_count(), 1);
-    assert_eq!(restored_scrollback.get_dropped_byte_count(), 4);
 }
 
 #[test]
-fn take_retained_lines_empties_the_buffer_and_keeps_the_tallies() {
+fn take_retained_lines_empties_the_buffer_and_keeps_total_pushed_line_count() {
     let mut scrollback = build_bounded_scrollback(10, 1000);
     scrollback.push_row(&build_line_cells("one"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("two"), RowMetadata::default());
@@ -845,14 +808,12 @@ fn take_retained_lines_empties_the_buffer_and_keeps_the_tallies() {
         .map(|(line_cells, _)| line_cells.iter().map(Cell::get_character).collect())
         .collect();
     assert_eq!(taken_line_texts, vec!["one", "two"]);
-    assert!(scrollback.is_empty());
+    assert_eq!(scrollback.get_retained_line_count(), 0);
     assert_eq!(scrollback.get_total_pushed_line_count(), 2);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
-    assert_eq!(scrollback.get_dropped_byte_count(), 0);
 
     scrollback.replace_retained_lines(Vec::from(taken_retained_lines), 2);
     assert_eq!(scrollback.get_total_pushed_line_count(), 2);
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["one", "two"]);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["one", "two"]);
 }
 
 #[test]
@@ -864,6 +825,5 @@ fn pushes_after_take_retained_lines_start_from_a_zero_retained_byte_count() {
 
     scrollback.push_row(&build_line_cells("1234"), RowMetadata::default());
     scrollback.push_row(&build_line_cells("1234"), RowMetadata::default());
-    assert_eq!(list_retained_row_texts(&scrollback), vec!["1234", "1234"]);
-    assert_eq!(scrollback.get_dropped_line_count(), 0);
+    assert_eq!(list_retained_line_texts(&scrollback), vec!["1234", "1234"]);
 }

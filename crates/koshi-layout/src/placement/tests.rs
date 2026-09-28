@@ -64,7 +64,7 @@ fn build_sorted_pane_ids() -> [PaneId; 4] {
 
 const FIXTURE_TAB_RECT: Rect = Rect {
     origin: Point { column: 0, row: 0 },
-    cell_size: Size {
+    size: Size {
         column_count: 120,
         row_count: 40,
     },
@@ -1355,10 +1355,10 @@ fn a_suppressed_pane_is_neither_a_slot_nor_part_of_a_group() {
             (pane_a, build_cell_rect(0, 0, 40, 40)),
             (pane_b, build_cell_rect(40, 0, 80, 20)),
             (pane_c, build_cell_rect(40, 20, 80, 20)),
-            (pane_d, Rect::empty_at_origin()),
+            (pane_d, Rect::build_empty_at_origin()),
         ],
         suppressed_pane_ids: vec![pane_d],
-        is_all_panes_suppressed: false,
+        is_every_pane_suppressed: false,
         stack_headers: Vec::new(),
     };
 
@@ -1454,15 +1454,6 @@ fn a_tree_holding_only_the_source_lists_nothing() {
             insertion_spans: Vec::new(),
         }
     );
-}
-
-#[test]
-fn placement_error_is_a_recoverable_layout_error() {
-    let placement_error = PlacementError::AnchorIsSource {
-        pane_id: PaneId::new(),
-    };
-    assert_eq!(placement_error.category(), DomainCategory::Layout);
-    assert_eq!(placement_error.get_severity(), Severity::Recoverable);
 }
 
 // ── breaking attempts ───────────────────────────────────────────────────
@@ -1688,7 +1679,7 @@ fn a_group_rectangle_near_u16_max_saturates_instead_of_overflowing() {
             (pane_c, build_cell_rect(65530, 10, 10, 10)),
         ],
         suppressed_pane_ids: Vec::new(),
-        is_all_panes_suppressed: false,
+        is_every_pane_suppressed: false,
         stack_headers: Vec::new(),
     };
     let tab_rect = build_cell_rect(0, 0, 65535, 20);

@@ -65,8 +65,8 @@ mod tests;
 /// Example: overwriting `cfg.kdl` that contains `a=1` with `a=2` leaves it
 /// containing exactly `a=2`; a crash before replacement leaves exactly `a=1`.
 pub fn write_atomic(destination_path: &Path, file_bytes: &[u8]) -> Result<(), StorageError> {
-    // Resolve a relative path against the current directory once. Both the
-    // Staging-file creation and replacement use this path if the working directory changes.
+    // Resolves a relative path against the current directory once. Staging-file
+    // creation and replacement both use the resolved path.
     if destination_path.as_os_str().is_empty() {
         return Err(build_storage_io_error("empty destination path".to_string()));
     }
@@ -202,8 +202,8 @@ fn replace_destination_with_staged_file(
 /// Returns [`StorageError::Io`] when stat fails with an error other than
 /// not-found, such as when a regular file blocks a directory component.
 ///
-/// Example: a regular `destination_path` at `0644` returns `Some(0644)`; a missing `destination_path`, a
-/// symlink, or a FIFO returns `None` and leaves the replacement at `0600`.
+/// Example: a regular `destination_path` at `0644` returns `Some(0644)`; a missing
+/// `destination_path`, a symlink, or a FIFO returns `None` and leaves the replacement at `0600`.
 #[cfg(unix)]
 fn get_target_permissions(
     destination_path: &Path,
@@ -230,9 +230,9 @@ fn get_target_permissions(
     Ok(None)
 }
 
-/// Syncs the directory `parent_directory_path` that holds `destination_path` on Unix. Names `destination_path` in errors
-/// and returns [`StorageError::Io`] when opening or syncing the directory
-/// fails.
+/// Syncs the directory `parent_directory_path` that holds `destination_path` on Unix. Names
+/// `destination_path` in errors and returns [`StorageError::Io`] when opening or syncing the
+/// directory fails.
 #[cfg(unix)]
 fn fsync_parent_directory(
     parent_directory_path: &Path,

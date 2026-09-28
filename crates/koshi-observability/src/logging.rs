@@ -1,11 +1,11 @@
 //! `logging` domain — the tracing subscriber that writes koshi's log file.
 //!
 //! Every `tracing::info!` / `warn!` / `error!` call anywhere in the workspace
-//! routes to the one process-wide subscriber [`logging::init_tracing`] installs. That
+//! routes to the one process-wide subscriber [`logging::initialize_tracing`] installs. That
 //! subscriber is the single place three questions are answered, all from the
 //! `logging` section of `koshi.kdl` — nothing is read from the environment:
 //!
-//! - **Should this line be written?** [`logging::LoggingParams::is_enabled`] — disabled
+//! - **Should this line be written?** [`logging::LoggingParameters::is_enabled`] — disabled
 //!   installs no subscriber at all, so no line is written and no file or
 //!   `logs/` directory is ever created.
 //! - **Where does it go?** A per-session file `logs/koshi-log-<id>.log` under
@@ -15,7 +15,7 @@
 //!   Two processes write one session's file — the session server
 //!   and the client attached to it — and every line is one open-append-close;
 //!   the two processes' lines interleave whole.
-//! - **What passes the bar?** [`logging::LoggingParams::log_level`] — the lowest severity
+//! - **What passes the bar?** [`logging::LoggingParameters::log_level`] — the lowest severity
 //!   that gets written; a line below it is dropped before it reaches the file.
 //!
 //! # Logging policy
@@ -24,7 +24,7 @@
 //! of *what happened and what triggered it*, not a narration of *what the code
 //! was doing*. Each line should carry only the minimum needed to correlate it
 //! back to its cause: the correlation IDs it has — `session_id`, `client_id`,
-//! `tab_id`, `pane_id`, `command_id`, `plugin_id`, `subscriber_id` — plus an
+//! `tab_id`, `pane_id`, `command_id`, `subscriber_id` — plus an
 //! event or error kind. No payloads, no command arguments, no environment
 //! values, no terminal/PTY output, no per-frame or per-keystroke activity.
 //! Anything high-frequency or content-like belongs in the recent-events buffer
@@ -35,7 +35,7 @@
 //! The three levels answer one question: *did koshi know what to do about it?*
 //!
 //! - **`info`** — it worked. A thing koshi does finished: the config applied,
-//!   a pane opened, a session started, a plugin loaded.
+//!   a pane opened, a session started.
 //! - **`warn`** — it failed, koshi expected that it might, and koshi had an
 //!   answer ready. It kept running on the fallback. A profile that will not
 //!   parse starts one plain shell instead; a `keybinding.kdl` with a conflict
@@ -69,7 +69,7 @@ pub mod recent_events;
 
 /// Everything the subscriber needs, resolved from the `logging` config section.
 #[derive(Debug, Clone)]
-pub struct LoggingParams {
+pub struct LoggingParameters {
     /// Whether to install a subscriber and write a file at all.
     pub is_enabled: bool,
     /// The lowest severity that gets written.
@@ -98,7 +98,7 @@ pub fn resolve_log_directory() -> Option<PathBuf> {
 /// Example: session `…446655440000` resolves on Linux to
 /// `~/.local/state/koshi/logs/koshi-log-…446655440000.log`.
 #[must_use]
-pub fn session_log_path(session_id: SessionId) -> PathBuf {
+pub fn resolve_session_log_path(session_id: SessionId) -> PathBuf {
     let log_file_name = format!("koshi-log-{}.log", session_id.get_uuid());
     match resolve_log_directory() {
         Some(log_directory) => log_directory.join(log_file_name),
@@ -106,7 +106,7 @@ pub fn session_log_path(session_id: SessionId) -> PathBuf {
     }
 }
 
-/// An error from [`init_tracing`].
+/// An error from [`initialize_tracing`].
 #[derive(Debug, Error)]
 pub enum TracingError {
     /// A global subscriber was already installed for this process.
@@ -122,18 +122,18 @@ pub enum TracingError {
 ///
 /// Returns [`TracingError::AlreadyInitialized`] if a subscriber is already
 /// installed.
-pub fn init_tracing(logging_params: LoggingParams) -> Result<(), TracingError> {
-    if !logging_params.is_enabled {
+pub fn initialize_tracing(logging_parameters: LoggingParameters) -> Result<(), TracingError> {
+    if !logging_parameters.is_enabled {
         return Ok(());
     }
     initialize_tracing_at_path(
-        &session_log_path(logging_params.session_id),
-        logging_params.log_level,
-        logging_params.log_format,
+        &resolve_session_log_path(logging_parameters.session_id),
+        logging_parameters.log_level,
+        logging_parameters.log_format,
     )
 }
 
-/// Install a subscriber writing to `log_file_path`. [`init_tracing`] resolves the path
+/// Install a subscriber writing to `log_file_path`. [`initialize_tracing`] resolves the path
 /// from the session id; this takes the path as given.
 fn initialize_tracing_at_path(
     log_file_path: &Path,

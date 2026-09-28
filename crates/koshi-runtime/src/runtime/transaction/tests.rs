@@ -9,12 +9,19 @@ use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_renderer::snapshot::Delivery;
 
 use super::*;
-use crate::runtime::bus::EventFilter;
+
+impl TransactionScope {
+    /// The buffered events, in emission order.
+    #[must_use]
+    pub(crate) fn list_emitted_events(&self) -> &[Event] {
+        &self.emitted_events
+    }
+}
 
 #[test]
 fn a_new_scope_buffers_no_events() {
     let scope = TransactionScope::new();
-    assert!(scope.emitted_events().is_empty());
+    assert!(scope.list_emitted_events().is_empty());
 }
 
 #[test]
@@ -32,7 +39,7 @@ fn emit_appends_in_call_order() {
     scope.emit(Event::Quit(QuitCause::Requested));
 
     assert_eq!(
-        scope.emitted_events(),
+        scope.list_emitted_events(),
         &[
             Event::TabCreated(TabCreated { tab_id }),
             Event::TabFocused(TabFocused {
@@ -53,7 +60,7 @@ fn emit_keeps_a_repeated_event_as_its_own_entry() {
     scope.emit(Event::TabCreated(TabCreated { tab_id }));
 
     assert_eq!(
-        scope.emitted_events(),
+        scope.list_emitted_events(),
         &[
             Event::TabCreated(TabCreated { tab_id }),
             Event::TabCreated(TabCreated { tab_id }),
@@ -108,7 +115,7 @@ fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_id, rx) = bus.subscribe(EventFilter::All);
+    let (_id, event_receiver) = bus.subscribe();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
     scope.emit(Event::LayoutChanged(LayoutChanged { tab_id: tab }));
@@ -116,7 +123,7 @@ fn commit_delivers_the_batch_to_a_subscriber_in_emission_order() {
     let _ = scope.commit(command_id, &mut bus);
 
     assert_eq!(
-        rx.try_iter().collect::<Vec<_>>(),
+        event_receiver.try_iter().collect::<Vec<_>>(),
         vec![
             Delivery::Event(Event::TabCreated(TabCreated { tab_id: tab })),
             Delivery::Event(Event::LayoutChanged(LayoutChanged { tab_id: tab })),
@@ -129,8 +136,8 @@ fn commit_delivers_the_batch_to_every_subscriber() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_first_id, first_rx) = bus.subscribe(EventFilter::All);
-    let (_second_id, second_rx) = bus.subscribe(EventFilter::All);
+    let (_first_id, first_rx) = bus.subscribe();
+    let (_second_id, second_rx) = bus.subscribe();
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
 
@@ -155,8 +162,8 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     let command_id = CommandId::new();
     let tab = TabId::new();
     let mut bus = EventBus::new();
-    let (_gone_id, gone_rx) = bus.subscribe(EventFilter::All);
-    let (_live_id, live_rx) = bus.subscribe(EventFilter::All);
+    let (_gone_id, gone_rx) = bus.subscribe();
+    let (_live_id, live_rx) = bus.subscribe();
     drop(gone_rx);
     let mut scope = TransactionScope::new();
     scope.emit(Event::TabCreated(TabCreated { tab_id: tab }));
@@ -172,7 +179,7 @@ fn commit_still_applies_when_a_subscribers_receiver_is_gone() {
     );
     // The bus dropped the subscriber whose receiver is gone, and the other one
     // still got the batch.
-    assert_eq!(bus.subscriber_count(), 1);
+    assert_eq!(bus.count_subscribers(), 1);
     assert_eq!(
         live_rx.try_iter().collect::<Vec<_>>(),
         vec![Delivery::Event(Event::TabCreated(TabCreated {
@@ -197,7 +204,7 @@ fn two_scopes_commit_independently_with_no_shared_state() {
 
     // Scope A's buffer is untouched by scope B's later emits.
     assert_eq!(
-        scope_a.emitted_events(),
+        scope_a.list_emitted_events(),
         &[Event::TabCreated(TabCreated { tab_id: tab_a })]
     );
 

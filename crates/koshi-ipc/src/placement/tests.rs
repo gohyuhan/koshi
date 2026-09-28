@@ -1,14 +1,13 @@
 //! Tests for bounded placement-preview validation.
 
 use crate::frame::{
-    FrameAttrs, FrameCell, FrameImageAction, FrameImagePlacement, FrameImageRecordHeader, FrameRow,
-    FrameRun, FrameStyle, FrameWindow,
+    FrameAttributes, FrameCell, FrameImageAction, FrameImagePlacement, FrameImageRecordHeader,
+    FrameRow, FrameRun, FrameStyle, FrameWindow,
 };
 use koshi_core::geometry::{Rect, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
-use koshi_pane::pane::state::PaneKind;
 
 use super::*;
 
@@ -21,7 +20,7 @@ fn build_test_frame_cell() -> FrameCell {
             foreground_color: Default::default(),
             background_color: Default::default(),
             underline_color: None,
-            text_attributes: FrameAttrs {
+            text_attributes: FrameAttributes {
                 is_bold: false,
                 is_italic: false,
                 is_reverse: false,
@@ -95,12 +94,10 @@ fn build_test_snapshot() -> PanePlacementSnapshot {
                 pane_id,
                 outer_rect: Rect::from_size_at_origin(viewport_size),
                 content_rect: Some(Rect::from_size_at_origin(viewport_size)),
-                pane_kind: PaneKind::Terminal,
                 is_visible: true,
                 is_suppressed: false,
-                is_dead: false,
             }],
-            effective_cell_size: viewport_size,
+            tab_size: viewport_size,
             stack_headers: Vec::new(),
             layout_mode: LayoutMode::Tiled,
             is_every_pane_suppressed: false,
@@ -236,7 +233,7 @@ fn snapshot_rejects_cells_over_the_preview_limit() {
         row_count: 5,
     };
     let oversized_rect = Rect::from_size_at_origin(oversized_size);
-    snapshot.source_tab_snapshot.effective_cell_size = oversized_size;
+    snapshot.source_tab_snapshot.tab_size = oversized_size;
     snapshot.source_tab_snapshot.pane_slots[0].outer_rect = oversized_rect;
     snapshot.source_tab_snapshot.pane_slots[0].content_rect = Some(oversized_rect);
     snapshot.source_tab_snapshot.pane_snapshots[0].terminal_window =

@@ -64,7 +64,7 @@ impl ModFlags {
     pub const SUPER: Self = Self(1 << 3);
 
     /// The raw bit pattern.
-    pub const fn bits(self) -> u8 {
+    pub const fn get_bits(self) -> u8 {
         self.0
     }
 
@@ -73,12 +73,12 @@ impl ModFlags {
         self.0 == 0
     }
 
-    /// True when every modifier in `other` is held.
+    /// True when every modifier in `required_modifiers` is held.
     pub const fn has_all_modifiers(self, required_modifiers: Self) -> bool {
         self.0 & required_modifiers.0 == required_modifiers.0
     }
 
-    /// True when at least one modifier in `other` is held.
+    /// True when at least one modifier in `candidate_modifiers` is held.
     pub const fn has_shared_modifier(self, candidate_modifiers: Self) -> bool {
         self.0 & candidate_modifiers.0 != 0
     }
@@ -92,26 +92,26 @@ impl ModFlags {
 impl std::ops::BitOr for ModFlags {
     type Output = Self;
 
-    fn bitor(self, rhs: Self) -> Self {
-        self.union(rhs)
+    fn bitor(self, right_modifier_flags: Self) -> Self {
+        self.union(right_modifier_flags)
     }
 }
 
 impl fmt::Display for ModFlags {
     /// Writes the modifier prefix run in canonical `C-A-S-D-` order, empty when
     /// no modifier is held.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.has_all_modifiers(Self::CTRL) {
-            f.write_str("C-")?;
+            formatter.write_str("C-")?;
         }
         if self.has_all_modifiers(Self::ALT) {
-            f.write_str("A-")?;
+            formatter.write_str("A-")?;
         }
         if self.has_all_modifiers(Self::SHIFT) {
-            f.write_str("S-")?;
+            formatter.write_str("S-")?;
         }
         if self.has_all_modifiers(Self::SUPER) {
-            f.write_str("D-")?;
+            formatter.write_str("D-")?;
         }
         Ok(())
     }
@@ -120,7 +120,7 @@ impl fmt::Display for ModFlags {
 /// The modifiers that make a chord something ordinary typing cannot produce.
 /// Shift is absent: Shift plus a key is still typing — it gives the key's
 /// capital or shifted variant.
-const NON_TEXT_MODIFIER_FLAGS: ModFlags =
+const NON_TYPING_MODIFIER_FLAGS: ModFlags =
     ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
 
 impl ModFlags {
@@ -129,7 +129,7 @@ impl ModFlags {
     /// types — it gives the key's capital or shifted variant.
     #[must_use]
     pub const fn is_typing(self) -> bool {
-        !self.has_shared_modifier(NON_TEXT_MODIFIER_FLAGS)
+        !self.has_shared_modifier(NON_TYPING_MODIFIER_FLAGS)
     }
 }
 
@@ -167,7 +167,7 @@ pub enum NamedKey {
     /// Down arrow.
     Down,
     /// Function key `F1` through `F24`.
-    F(#[serde(deserialize_with = "function_key_number")] u8),
+    F(#[serde(deserialize_with = "deserialize_function_key_number")] u8),
 }
 
 /// The lowest and highest function key a terminal names.
@@ -175,40 +175,40 @@ const FIRST_FUNCTION_KEY: u8 = 1;
 const LAST_FUNCTION_KEY: u8 = 24;
 
 /// Decode a [`NamedKey::F`] number, refusing one no function key carries.
-fn function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Error>
+fn deserialize_function_key_number<'de, D>(deserializer: D) -> Result<u8, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let function_key_number_value = u8::deserialize(deserializer)?;
-    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&function_key_number_value) {
-        Ok(function_key_number_value)
+    let function_key_number = u8::deserialize(deserializer)?;
+    if (FIRST_FUNCTION_KEY..=LAST_FUNCTION_KEY).contains(&function_key_number) {
+        Ok(function_key_number)
     } else {
         Err(serde::de::Error::custom(format!(
-            "F{function_key_number_value} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
+            "F{function_key_number} is not a function key; they run F{FIRST_FUNCTION_KEY} through F{LAST_FUNCTION_KEY}"
         )))
     }
 }
 
 impl fmt::Display for NamedKey {
     /// Writes the single canonical spelling the chord parser accepts for this key.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Enter => f.write_str("CR"),
-            Self::Tab => f.write_str("Tab"),
-            Self::Backspace => f.write_str("BS"),
-            Self::Esc => f.write_str("Esc"),
-            Self::Space => f.write_str("Space"),
-            Self::Insert => f.write_str("Insert"),
-            Self::Delete => f.write_str("Del"),
-            Self::Home => f.write_str("Home"),
-            Self::End => f.write_str("End"),
-            Self::PageUp => f.write_str("PageUp"),
-            Self::PageDown => f.write_str("PageDown"),
-            Self::Left => f.write_str("Left"),
-            Self::Right => f.write_str("Right"),
-            Self::Up => f.write_str("Up"),
-            Self::Down => f.write_str("Down"),
-            Self::F(function_key_number) => write!(f, "F{function_key_number}"),
+            Self::Enter => formatter.write_str("CR"),
+            Self::Tab => formatter.write_str("Tab"),
+            Self::Backspace => formatter.write_str("BS"),
+            Self::Esc => formatter.write_str("Esc"),
+            Self::Space => formatter.write_str("Space"),
+            Self::Insert => formatter.write_str("Insert"),
+            Self::Delete => formatter.write_str("Del"),
+            Self::Home => formatter.write_str("Home"),
+            Self::End => formatter.write_str("End"),
+            Self::PageUp => formatter.write_str("PageUp"),
+            Self::PageDown => formatter.write_str("PageDown"),
+            Self::Left => formatter.write_str("Left"),
+            Self::Right => formatter.write_str("Right"),
+            Self::Up => formatter.write_str("Up"),
+            Self::Down => formatter.write_str("Down"),
+            Self::F(function_key_number) => write!(formatter, "F{function_key_number}"),
         }
     }
 }
@@ -224,10 +224,10 @@ pub enum Key {
 }
 
 impl fmt::Display for Key {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Char(character) => write!(f, "{character}"),
-            Self::Named(named_key) => write!(f, "{named_key}"),
+            Self::Char(character) => write!(formatter, "{character}"),
+            Self::Named(named_key) => write!(formatter, "{named_key}"),
         }
     }
 }
@@ -306,13 +306,13 @@ impl fmt::Display for KeyChord {
     /// named key (e.g. `Tab`, `Left`), or the key is the literal `<`
     /// character (`<<>`). Any other character with no modifiers is written
     /// bare: `n`, `-`, `>`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let is_bracketed =
             !self.modifier_flags.is_empty() || matches!(self.key, Key::Named(_) | Key::Char('<'));
         if is_bracketed {
-            write!(f, "<{}{}>", self.modifier_flags, self.key)
+            write!(formatter, "<{}{}>", self.modifier_flags, self.key)
         } else {
-            write!(f, "{}", self.key)
+            write!(formatter, "{}", self.key)
         }
     }
 }
@@ -352,12 +352,12 @@ impl From<KeyChord> for KeySequence {
 
 impl fmt::Display for KeySequence {
     /// Writes each chord's canonical text form, space-separated.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (chord_index, chord) in self.0.iter().enumerate() {
             if chord_index > 0 {
-                f.write_str(" ")?;
+                formatter.write_str(" ")?;
             }
-            write!(f, "{chord}")?;
+            write!(formatter, "{chord}")?;
         }
         Ok(())
     }
@@ -373,11 +373,11 @@ impl fmt::Display for KeySequence {
 pub struct PendingKeySequence {
     /// Canonical chords pressed so far.
     pub sequence: KeySequence,
-    /// Disambiguation instant, set only when the chords so far are BOTH a
+    /// Ambiguity deadline, set only when the chords so far are BOTH a
     /// complete binding and the prefix of a longer one — reaching it fires the
     /// complete binding. A prefix-only sequence carries `None` and waits for
     /// the next chord indefinitely.
-    pub deadline: Option<Instant>,
+    pub ambiguity_deadline: Option<Instant>,
 }
 
 /// The modifier keys the outer terminal reported with one keyboard event,
@@ -414,7 +414,7 @@ impl KeyModifierFlags {
 
     /// The raw bit pattern. Every one of the eight bits names a modifier.
     #[must_use]
-    pub const fn bits(self) -> u8 {
+    pub const fn get_bits(self) -> u8 {
         self.0
     }
 
@@ -589,26 +589,27 @@ impl KeyInput {
         if self.key_event_kind == KeyEventKind::Release {
             return None;
         }
-        let KeyIdentity::Key(key) = self.key else {
+        let KeyIdentity::Key(binding_key) = self.key else {
             return None;
         };
-        let binding_modifiers = self.modifier_flags.to_binding_modifiers();
-        let is_shift_held = binding_modifiers.has_all_modifiers(ModFlags::SHIFT);
-        let modifiers_without_shift = ModFlags(binding_modifiers.0 & !ModFlags::SHIFT.0);
+        let binding_modifier_flags = self.modifier_flags.to_binding_modifiers();
+        let is_shift_held = binding_modifier_flags.has_all_modifiers(ModFlags::SHIFT);
+        let binding_modifier_flags_without_shift =
+            ModFlags(binding_modifier_flags.0 & !ModFlags::SHIFT.0);
         // A reported shifted character stands for the key itself: Shift plus
         // `1` reports `!`, and `!` is the character a binding names.
         if let (true, Key::Char(_), Some(shifted_character)) =
-            (is_shift_held, key, self.shifted_key)
+            (is_shift_held, binding_key, self.shifted_key)
         {
             return Some(build_canonical_chord(
                 Key::Char(shifted_character),
-                modifiers_without_shift,
+                binding_modifier_flags_without_shift,
                 false,
             ));
         }
         Some(build_canonical_chord(
-            key,
-            modifiers_without_shift,
+            binding_key,
+            binding_modifier_flags_without_shift,
             is_shift_held,
         ))
     }
@@ -622,16 +623,17 @@ impl KeyInput {
 /// character drops it, because a shifted `1` arrives as `!`.
 #[must_use]
 fn build_canonical_chord(
-    input_key: Key,
+    reported_key: Key,
     modifier_flags: ModFlags,
     is_shift_held: bool,
 ) -> KeyChord {
-    let (normalized_key, is_shift_active) = match input_key {
+    let (canonical_key, is_shift_active) = match reported_key {
         Key::Char(' ') => (Key::Named(NamedKey::Space), is_shift_held),
-        Key::Named(_) => (input_key, is_shift_held),
+        Key::Named(_) => (reported_key, is_shift_held),
         Key::Char(character) => {
-            let (folded_character, was_shifted) = fold_uppercase_character(character);
-            let is_shift_active = was_shifted || (folded_character.is_lowercase() && is_shift_held);
+            let (folded_character, is_uppercase_folded) = fold_uppercase_character(character);
+            let is_shift_active =
+                is_uppercase_folded || (folded_character.is_lowercase() && is_shift_held);
             (Key::Char(folded_character), is_shift_active)
         }
     };
@@ -640,7 +642,7 @@ fn build_canonical_chord(
     } else {
         modifier_flags
     };
-    KeyChord::from_parts(modifier_flags, normalized_key)
+    KeyChord::from_parts(modifier_flags, canonical_key)
 }
 
 #[cfg(test)]

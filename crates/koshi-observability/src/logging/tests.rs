@@ -26,7 +26,6 @@ fn a_line_carries_every_correlation_id_field_it_was_given() {
         tab_id = "tab-1",
         pane_id = "pane-1",
         command_id = "cmd-1",
-        plugin_id = "plugin-1",
         subscriber_id = "sub-1",
         "sample event"
     );
@@ -48,10 +47,6 @@ fn a_line_carries_every_correlation_id_field_it_was_given() {
         "{log_output}"
     );
     assert!(
-        log_output.contains(r#""plugin_id":"plugin-1""#),
-        "{log_output}"
-    );
-    assert!(
         log_output.contains(r#""subscriber_id":"sub-1""#),
         "{log_output}"
     );
@@ -64,7 +59,7 @@ fn a_line_carries_every_correlation_id_field_it_was_given() {
 #[test]
 fn session_log_path_is_the_named_file_in_the_logs_folder() {
     let session_id = SessionId::new();
-    let log_file_path = session_log_path(session_id);
+    let log_file_path = resolve_session_log_path(session_id);
     let log_file_name = format!("koshi-log-{}.log", session_id.get_uuid());
 
     // Pins the `logs/<file>` tail on every OS, then the full path when the
@@ -74,18 +69,18 @@ fn session_log_path_is_the_named_file_in_the_logs_folder() {
         "unexpected log path: {}",
         log_file_path.display()
     );
-    if let Some(state_directory) = koshi_paths::resolve_state_directory() {
+    if let Some(state_directory_path) = koshi_paths::resolve_state_directory() {
         assert_eq!(
             log_file_path,
-            state_directory.join("logs").join(&log_file_name)
+            state_directory_path.join("logs").join(&log_file_name)
         );
     }
 }
 
 #[test]
 fn two_sessions_get_two_distinct_log_files() {
-    let first_log_file_path = session_log_path(SessionId::new());
-    let second_log_file_path = session_log_path(SessionId::new());
+    let first_log_file_path = resolve_session_log_path(SessionId::new());
+    let second_log_file_path = resolve_session_log_path(SessionId::new());
     assert_ne!(
         first_log_file_path, second_log_file_path,
         "each session must name its own log file"
@@ -102,7 +97,7 @@ fn initialize_tracing_at_path_creates_file_lazily_and_installs_once() {
     let log_file_path = test_directory_path.join("logs").join("koshi-log-test.log");
     let _ = std::fs::remove_dir_all(&test_directory_path);
 
-    init_tracing(LoggingParams {
+    initialize_tracing(LoggingParameters {
         is_enabled: false,
         log_level: LogLevel::Error,
         log_format: LogFormat::Json,
@@ -148,15 +143,16 @@ fn initialize_tracing_at_path_creates_file_lazily_and_installs_once() {
 // no file is created for the session.
 #[test]
 fn init_tracing_disabled_writes_no_file_and_is_a_noop() {
-    let logging_params = LoggingParams {
+    let logging_parameters = LoggingParameters {
         is_enabled: false,
         log_level: LogLevel::Warning,
         log_format: LogFormat::Pretty,
         session_id: SessionId::new(),
     };
-    let log_file_path = session_log_path(logging_params.session_id);
-    init_tracing(logging_params.clone()).expect("disabled logging installs nothing");
-    init_tracing(logging_params).expect("a second disabled install also installs nothing");
+    let log_file_path = resolve_session_log_path(logging_parameters.session_id);
+    initialize_tracing(logging_parameters.clone()).expect("disabled logging installs nothing");
+    initialize_tracing(logging_parameters)
+        .expect("a second disabled install also installs nothing");
     assert!(
         !log_file_path.exists(),
         "disabled logging must create no file"
@@ -350,9 +346,10 @@ fn session_log_writer_reports_the_error_when_its_parent_is_a_regular_file() {
         std::env::temp_dir().join(format!("koshi-writer-blocked-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&test_directory_path);
     std::fs::create_dir_all(&test_directory_path).expect("create the test directory");
-    let blocking_path = test_directory_path.join("logs");
-    std::fs::write(&blocking_path, b"not a directory").expect("create the blocking file");
-    let log_file_path = blocking_path.join("koshi-log-writer.log");
+    let logs_directory_blocking_file_path = test_directory_path.join("logs");
+    std::fs::write(&logs_directory_blocking_file_path, b"not a directory")
+        .expect("create the file that blocks the logs directory");
+    let log_file_path = logs_directory_blocking_file_path.join("koshi-log-writer.log");
 
     let mut log_writer = SessionLogWriter {
         log_file_path: log_file_path.clone(),
@@ -366,7 +363,8 @@ fn session_log_writer_reports_the_error_when_its_parent_is_a_regular_file() {
         "nothing is created under a regular file"
     );
 
-    std::fs::remove_file(&blocking_path).expect("remove the blocking file");
+    std::fs::remove_file(&logs_directory_blocking_file_path)
+        .expect("remove the file that blocks the logs directory");
     let written_byte_count = log_writer
         .write(b"line two\n")
         .expect("the write after the removal creates the directory and the file");
@@ -489,9 +487,9 @@ fn two_capture_writers_append_to_one_buffer_in_write_order() {
 }
 
 // A thread that dies while holding the capture buffer poisons its lock.
-// `contents`, `lines` and the next write all recover it.
+// `contents`, `lines` and the next write recover the captured output.
 #[test]
-fn a_capture_answers_after_a_writer_thread_died_holding_its_buffer() {
+fn captured_logs_recover_after_a_writer_thread_panics_while_holding_the_lock() {
     use std::io::Write as _;
 
     let captured_logs = CapturedLogs::default();

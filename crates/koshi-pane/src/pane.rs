@@ -1,6 +1,6 @@
 //! Pane domain modules: metadata, policies, and the lifecycle state machine.
 //!
-//! - [`state`]: the per-pane runtime record, and the pane kind.
+//! - [`state`]: the per-pane runtime record.
 //! - [`policy`]: how a pane closes, and what happens when its process ends.
 //! - [`lifecycle`]: the state machine from spawn to removal.
 

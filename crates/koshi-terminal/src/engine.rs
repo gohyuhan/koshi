@@ -9,12 +9,13 @@
 //! the reply bytes the chunk's device queries produced, for the caller to
 //! write into the PTY.
 //!
-//! The engine also keeps the bytes that put another parser where this one
-//! stands — see [`undecoded_terminal_bytes`](TerminalEngine::undecoded_terminal_bytes) and
-//! [`undecoded_graphics_bytes`](TerminalEngine::undecoded_graphics_bytes). A process-image
-//! swap carries those bytes to the next image's parsers, and a sequence the
-//! swap cut in half completes there. Graphics wrapper nesting and a transfer
-//! that cannot be rebuilt within 64 KiB use the complete transport state.
+//! The engine also keeps what puts another engine's parsers where this one
+//! stands: the VTE parser bytes from
+//! [`get_undecoded_terminal_bytes`](TerminalEngine::get_undecoded_terminal_bytes), and the
+//! graphics parser state from
+//! [`get_graphics_transport_state`](TerminalEngine::get_graphics_transport_state), which holds
+//! wrapper nesting and a transfer that cannot be rebuilt within 64 KiB. A process-image swap
+//! carries both to the next image's engine, and a sequence the swap cut in half completes there.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -56,8 +57,8 @@ const STRING_OPENING_BYTE_COUNT: usize = 2;
 /// chunk: a four-byte code point whose last byte has not arrived.
 const CODE_POINT_TAIL_BYTE_COUNT: usize = 3;
 
-/// The most bytes [`undecoded`](TerminalEngine::undecoded) holds, 64 KiB. The
-/// engine stops holding a sequence that passes this size and reports nothing
+/// The most bytes [`get_undecoded_terminal_bytes`](TerminalEngine::get_undecoded_terminal_bytes)
+/// holds, 64 KiB. The engine stops holding a sequence that passes this size and reports nothing
 /// until that sequence ends.
 pub(crate) const MAX_UNDECODED_BYTE_COUNT: usize = 64 * 1024;
 
@@ -86,18 +87,6 @@ pub struct SynchronizedOutputTransport {
     terminal_input: C1InputNormalizer,
     normalized_bytes: Vec<u8>,
     deadline: Option<SystemTime>,
-}
-
-impl SynchronizedOutputTransport {
-    /// The normalized bytes held inside the open synchronized update.
-    pub fn get_normalized_bytes(&self) -> &[u8] {
-        &self.normalized_bytes
-    }
-
-    /// The wall-clock deadline for releasing the open update.
-    pub fn get_deadline(&self) -> Option<SystemTime> {
-        self.deadline
-    }
 }
 
 impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
@@ -440,12 +429,6 @@ struct NormalizedTerminalInput<'a> {
     synchronized_controls: Vec<(usize, SynchronizedControl)>,
 }
 
-impl<'a> NormalizedTerminalInput<'a> {
-    fn get_normalized_bytes(&self) -> &[u8] {
-        &self.normalized_bytes
-    }
-}
-
 fn remove_terminal_inert_bytes<'a>(
     input_bytes: &'a [u8],
     terminal_inert_ranges: &[Range<usize>],
@@ -756,23 +739,21 @@ pub struct TerminalEngine {
     /// The screen model the parser's decoded actions mutate.
     terminal_state: TerminalState,
     /// The canonical bytes that put another parser where `parser` stands, as
-    /// [`undecoded_terminal_bytes`](TerminalEngine::undecoded_terminal_bytes) describes them. Eight-bit
-    /// string controls use their seven-bit `ESC` forms so the VTE parser can
-    /// replay them.
+    /// [`get_undecoded_terminal_bytes`](TerminalEngine::get_undecoded_terminal_bytes) describes
+    /// them. Eight-bit string controls use their seven-bit `ESC` forms so the VTE parser can replay
+    /// them.
     undecoded_terminal_bytes: Vec<u8>,
-    /// The raw bytes that put the graphics parser where it stands.
-    undecoded_graphics_bytes: Vec<u8>,
     /// A second parser fed the same bytes as `parser`, driving no screen. It
     /// reports where each sequence ends. One chunk costs one pass over that
     /// chunk, however long the sequence it continues.
     undecoded_parser: vte::Parser<OSC_BUFFER_BYTE_CAPACITY>,
-    /// Set while `undecoded_parser` sits on a sequence boundary, where `undecoded_terminal_bytes`
-    /// holds at most the first bytes of a UTF-8 code point.
+    /// Set while `undecoded_parser` sits on a sequence boundary, where
+    /// `get_undecoded_terminal_bytes` holds at most the first bytes of a UTF-8 code point.
     is_at_sequence_boundary: bool,
     /// Set while `undecoded_parser` sits in the body of a string whose bytes
-    /// `undecoded_terminal_bytes` does not hold: a device control string, a start of string, a
-    /// privacy message, an application program command, or any sequence that
-    /// passed [`MAX_UNDECODED_BYTE_COUNT`]. `undecoded` holds the opening bytes of the
+    /// `get_undecoded_terminal_bytes` does not hold: a device control string, a start of string, a
+    /// privacy message, an application program command, or any sequence that passed
+    /// [`MAX_UNDECODED_BYTE_COUNT`]. `get_undecoded_terminal_bytes` holds the opening bytes of the
     /// first four kinds and nothing of the fifth.
     is_in_string_body: bool,
     /// The raw terminal-image parser that observes the same bytes as the VTE
@@ -791,14 +772,6 @@ pub struct TerminalEngine {
     dropped_graphics_event_count: usize,
     /// Number of dropped events that were graphics errors.
     dropped_graphics_error_count: usize,
-    /// Set when the next DCS is a GNU Screen continuation wrapper.
-    is_graphics_screen_continuation: bool,
-    /// Set when the carried bytes belong to an open GNU Screen wrapper.
-    is_graphics_screen_wrapper_active: bool,
-    /// Set when the next DCS is a tmux continuation wrapper.
-    is_graphics_tmux_continuation: bool,
-    /// Set when the carried bytes belong to an open tmux wrapper.
-    is_graphics_tmux_wrapper_active: bool,
 }
 
 impl TerminalEngine {
@@ -820,7 +793,6 @@ impl TerminalEngine {
             parser: vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size(),
             terminal_state,
             undecoded_terminal_bytes: Vec::new(),
-            undecoded_graphics_bytes: Vec::new(),
             undecoded_parser: vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size(),
             is_at_sequence_boundary: true,
             is_in_string_body: false,
@@ -831,10 +803,6 @@ impl TerminalEngine {
             queued_graphics_rgba_byte_count: 0,
             dropped_graphics_event_count: 0,
             dropped_graphics_error_count: 0,
-            is_graphics_screen_continuation: false,
-            is_graphics_screen_wrapper_active: false,
-            is_graphics_tmux_continuation: false,
-            is_graphics_tmux_wrapper_active: false,
         }
     }
 
@@ -844,11 +812,11 @@ impl TerminalEngine {
     /// DECRQM (Request Mode) queries the app sent; empty when the chunk held
     /// no query. The caller writes the replies back into the pane's PTY.
     ///
-    /// Chunks may split an escape sequence or a UTF-8 code point at any byte;
-    /// the parser resumes the partial decode on the next call, and
-    /// [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes) is set to the canonical bytes that put
-    /// another parser where this one now stands. This method drains shell-integration
-    /// facts without returning them; use
+    /// Chunks may split an escape sequence or a UTF-8 code point at any byte; the parser resumes
+    /// the partial decode on the next call, and
+    /// [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes) is set to the canonical
+    /// bytes that put another parser where this one now stands. This method drains
+    /// shell-integration facts without returning them; use
     /// [`Self::process_pty_output_with_shell_integration`] when the caller handles those facts.
     #[must_use = "undelivered replies hang the querying app"]
     pub fn process_pty_output(&mut self, pty_output_bytes: &[u8]) -> Vec<u8> {
@@ -885,7 +853,7 @@ impl TerminalEngine {
             .normalize_terminal_input_bytes(pty_output_bytes);
         let mut synchronized_output = mem::take(&mut self.synchronized_output);
         let has_advanced = synchronized_output.process_normalized_bytes(
-            normalized_terminal_input.get_normalized_bytes(),
+            &normalized_terminal_input.normalized_bytes,
             &normalized_terminal_input.synchronized_controls,
             monotonic_timestamp,
             |normalized_bytes| self.process_normalized_terminal_bytes(normalized_bytes),
@@ -928,12 +896,11 @@ impl TerminalEngine {
             );
         }
         self.capture_undecoded_terminal_bytes(terminal_bytes);
-        self.update_graphics_transport_state();
     }
 
     /// An engine wrapped around an existing `terminal_state`, with a parser fed
-    /// `terminal_undecoded_bytes` — the bytes that put a parser where the previous
-    /// engine's parser stood, from [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes).
+    /// `terminal_undecoded_bytes` — the bytes that put a parser where the previous engine's parser
+    /// stood, from [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes).
     ///
     /// The replay reaches no screen: every action those bytes dispatch is
     /// dropped, and `terminal_state` stays as passed. The replay leaves the parser at
@@ -944,97 +911,32 @@ impl TerminalEngine {
         terminal_state: TerminalState,
         terminal_undecoded_bytes: &[u8],
     ) -> Self {
-        Self::from_terminal_state_with_graphics(terminal_state, terminal_undecoded_bytes, &[])
-    }
-
-    /// An engine around `terminal_state` with the VTE and graphics parser positions
-    /// carried from another engine.
-    pub fn from_terminal_state_with_graphics(
-        terminal_state: TerminalState,
-        terminal_undecoded_bytes: &[u8],
-        graphics_undecoded_bytes: &[u8],
-    ) -> Self {
-        Self::from_terminal_state_with_graphics_and_events(
+        Self::from_carried_state(
             terminal_state,
             terminal_undecoded_bytes,
-            graphics_undecoded_bytes,
             &[],
-        )
-    }
-
-    /// An engine around `terminal_state` with parser positions and queued graphics
-    /// events carried from another engine.
-    pub fn from_terminal_state_with_graphics_and_events(
-        terminal_state: TerminalState,
-        terminal_undecoded_bytes: &[u8],
-        graphics_undecoded_bytes: &[u8],
-        graphics_events: &[GraphicsEvent],
-    ) -> Self {
-        Self::from_terminal_state_with_graphics_and_events_and_screen(
-            terminal_state,
-            terminal_undecoded_bytes,
-            graphics_undecoded_bytes,
-            graphics_events,
-            false,
-            false,
-        )
-    }
-
-    /// An engine around `terminal_state` with parser positions, queued graphics events,
-    /// and GNU Screen continuation state carried from another engine. This is
-    /// the compatibility form for the two legacy wrapper flags; use
-    /// [`from_terminal_state_with_graphics_and_events_and_wrappers`](Self::from_terminal_state_with_graphics_and_events_and_wrappers)
-    /// when nested parser state or bounded-transfer graphics_abandonment is present.
-    pub fn from_terminal_state_with_graphics_and_events_and_screen(
-        terminal_state: TerminalState,
-        terminal_undecoded_bytes: &[u8],
-        graphics_undecoded_bytes: &[u8],
-        graphics_events: &[GraphicsEvent],
-        is_graphics_screen_continuation: bool,
-        is_graphics_screen_wrapper_active: bool,
-    ) -> Self {
-        Self::from_terminal_state_with_graphics_and_events_and_wrappers(
-            terminal_state,
-            terminal_undecoded_bytes,
-            graphics_undecoded_bytes,
-            graphics_events,
-            GraphicsTransportState {
-                is_screen_continuation: is_graphics_screen_continuation,
-                is_screen_wrapper_active: is_graphics_screen_wrapper_active,
-                ..GraphicsTransportState::default()
-            },
-        )
-    }
-
-    /// An engine around `terminal_state` with parser positions, queued graphics events,
-    /// and the complete graphics transport state carried from another engine.
-    /// A split Screen wrapper such as `ESC P ESC ] 1337;File=... ESC \` is
-    /// restored from its nested parser record before the next PTY bytes arrive.
-    pub fn from_terminal_state_with_graphics_and_events_and_wrappers(
-        terminal_state: TerminalState,
-        terminal_undecoded_bytes: &[u8],
-        graphics_undecoded_bytes: &[u8],
-        graphics_events: &[GraphicsEvent],
-        graphics_transport_state: GraphicsTransportState,
-    ) -> Self {
-        Self::from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
-            terminal_state,
-            terminal_undecoded_bytes,
-            graphics_undecoded_bytes,
-            graphics_events,
-            graphics_transport_state,
+            GraphicsTransportState::default(),
             None,
             Instant::now(),
             SystemTime::now(),
         )
     }
 
-    /// Restore parser, graphics, and synchronized-output transport state.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_terminal_state_with_graphics_events_wrappers_and_synchronized_output(
+    /// An engine around `terminal_state` with what a process-image swap carried
+    /// from the previous engine restored, at `monotonic_timestamp` and
+    /// `wall_clock_timestamp`:
+    ///
+    /// - the VTE parser is fed `terminal_undecoded_bytes`, as
+    ///   [`from_terminal_state`](Self::from_terminal_state) feeds them;
+    /// - the graphics parser is rebuilt from `graphics_transport_state`;
+    /// - each of `graphics_events` is queued again, except a
+    ///   `GraphicsError::QueueFull`, whose `dropped_event_count` is added to the
+    ///   dropped-event count;
+    /// - an open synchronized-output group comes back from
+    ///   `synchronized_output_transport`.
+    pub fn from_carried_state(
         terminal_state: TerminalState,
         terminal_undecoded_bytes: &[u8],
-        graphics_undecoded_bytes: &[u8],
         graphics_events: &[GraphicsEvent],
         graphics_transport_state: GraphicsTransportState,
         synchronized_output_transport: Option<SynchronizedOutputTransport>,
@@ -1044,7 +946,7 @@ impl TerminalEngine {
         let mut terminal_engine = Self::from_idle_parsers(terminal_state);
         terminal_engine
             .graphics_parser
-            .restore_graphics_carry_state(graphics_undecoded_bytes, graphics_transport_state);
+            .restore_graphics_transport_state(graphics_transport_state);
         let normalized_terminal_input_bytes = if synchronized_output_transport.is_some() {
             C1InputNormalizer::default()
                 .normalize_terminal_input_bytes(terminal_undecoded_bytes)
@@ -1061,7 +963,6 @@ impl TerminalEngine {
             .parser
             .advance(&mut NoScreen, &normalized_terminal_input_bytes);
         terminal_engine.capture_undecoded_terminal_bytes(&normalized_terminal_input_bytes);
-        terminal_engine.update_graphics_transport_state();
         for graphics_event in graphics_events {
             if let Err(GraphicsError::QueueFull {
                 dropped_event_count,
@@ -1089,8 +990,8 @@ impl TerminalEngine {
     }
 
     /// Take the engine apart and hand back its screen model, dropping the
-    /// parser. Read [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes),
-    /// [`undecoded_graphics_bytes`](Self::undecoded_graphics_bytes), and
+    /// parser. Read [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes),
+    /// [`get_graphics_transport_state`](Self::get_graphics_transport_state), and
     /// [`take_graphics_events`](Self::take_graphics_events) first to carry parser positions
     /// and queued image events.
     pub fn into_terminal_state(self) -> TerminalState {
@@ -1146,11 +1047,6 @@ impl TerminalEngine {
         for graphics_event in self.graphics_parser.finish_graphics_stream() {
             self.process_graphics_operation(graphics_event, cursor_position);
         }
-        self.undecoded_graphics_bytes.clear();
-        self.is_graphics_screen_continuation = false;
-        self.is_graphics_screen_wrapper_active = false;
-        self.is_graphics_tmux_continuation = false;
-        self.is_graphics_tmux_wrapper_active = false;
         self.terminal_input_normalizer = C1InputNormalizer::default();
         self.take_graphics_events()
     }
@@ -1187,27 +1083,17 @@ impl TerminalEngine {
     /// 64 KiB the engine stops holding it and reports empty until it ends. A
     /// swap in that window leaves the next parser on a sequence boundary, and
     /// the rest of the body prints as text.
-    pub fn undecoded_terminal_bytes(&self) -> &[u8] {
+    pub fn get_undecoded_terminal_bytes(&self) -> &[u8] {
         &self.undecoded_terminal_bytes
     }
 
-    /// The raw bytes that put the graphics parser where it stands.
+    /// The complete graphics-parser state needed by a process-image swap, or
+    /// `None` while the graphics parser sits in ground state with no open
+    /// transfer, wrapper continuation, abandoned transfer, or partial UTF-8.
     ///
-    /// A caller carrying a simple process-image swap passes these bytes to
-    /// [`from_terminal_state_with_graphics`](Self::from_terminal_state_with_graphics). A swap
-    /// that cuts a tmux or GNU Screen wrapper, or abandons a large transfer,
-    /// uses [`get_graphics_transport_state`](Self::get_graphics_transport_state).
-    /// Ordinary VTE parser bytes are returned by
-    /// [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes).
-    pub fn undecoded_graphics_bytes(&self) -> &[u8] {
-        &self.undecoded_graphics_bytes
-    }
-
-    /// The complete graphics-parser state needed by a process-image swap.
-    ///
-    /// Example: a split Screen wrapper returns a state with
-    /// `screen_inner_transport`; `undecoded_graphics_bytes` contains the raw
-    /// bytes without wrapper state.
+    /// Example: a GNU Screen wrapper that ended inside an iTerm2 command
+    /// returns a state whose `screen_inner_transport` holds that command's
+    /// parser.
     pub fn get_graphics_transport_state(&self) -> Option<GraphicsTransportState> {
         self.graphics_parser.get_graphics_transport_state()
     }
@@ -1261,26 +1147,6 @@ impl TerminalEngine {
                 self.terminal_state.take_shell_integration_facts(),
             )
         })
-    }
-
-    /// Whether the next DCS belongs to an unfinished GNU Screen wrapper.
-    pub fn is_graphics_screen_continuation(&self) -> bool {
-        self.is_graphics_screen_continuation
-    }
-
-    /// Whether a carried GNU Screen wrapper is still open.
-    pub fn is_graphics_screen_wrapper_active(&self) -> bool {
-        self.is_graphics_screen_wrapper_active
-    }
-
-    /// Whether the next DCS belongs to an unfinished tmux continuation.
-    pub fn is_graphics_tmux_continuation(&self) -> bool {
-        self.is_graphics_tmux_continuation
-    }
-
-    /// Whether a carried tmux wrapper is still open.
-    pub fn is_graphics_tmux_wrapper_active(&self) -> bool {
-        self.is_graphics_tmux_wrapper_active
     }
 
     /// The screen model, for reads (rendering, cursor and mode queries).
@@ -1434,24 +1300,12 @@ impl TerminalEngine {
         self.graphics_events.push_back(graphics_event);
     }
 
-    fn update_graphics_transport_state(&mut self) {
-        self.undecoded_graphics_bytes.clear();
-        if let Some(graphics_carry_bytes) = self.graphics_parser.get_graphics_carry_bytes() {
-            self.undecoded_graphics_bytes
-                .extend_from_slice(graphics_carry_bytes);
-        }
-        self.is_graphics_screen_continuation = self.graphics_parser.is_screen_continuation();
-        self.is_graphics_screen_wrapper_active = self.graphics_parser.is_screen_wrapper_active();
-        self.is_graphics_tmux_continuation = self.graphics_parser.is_tmux_continuation();
-        self.is_graphics_tmux_wrapper_active = self.graphics_parser.is_tmux_wrapper_active();
-    }
-
     /// Move `undecoded_parser` over `normalized_bytes` and update
-    /// [`undecoded_terminal_bytes`](Self::undecoded_terminal_bytes) from where it stops.
+    /// [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes) from where it stops.
     ///
     /// A parser leaves a sequence boundary only at [`ESCAPE_BYTE`]. The scan drops
     /// what it holds and restarts on a fresh parser at the last `ESCAPE_BYTE` in
-    /// `pty_output_chunk`; the last sequence opens there and everything before it is
+    /// `normalized_bytes`; the last sequence opens there and everything before it is
     /// decoded. A chunk with no `ESCAPE_BYTE` carries on from where the previous
     /// chunk stopped. A sequence spread over many chunks is read once.
     ///
@@ -1538,7 +1392,7 @@ struct ActionProbe {
 }
 
 impl vte::Perform for ActionProbe {
-    fn print(&mut self, _c: char) {
+    fn print(&mut self, _character: char) {
         self.is_at_sequence_boundary = true;
     }
 
@@ -1548,7 +1402,13 @@ impl vte::Perform for ActionProbe {
         }
     }
 
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    fn hook(
+        &mut self,
+        _dcs_parameters: &vte::Params,
+        _intermediates: &[u8],
+        _should_ignore: bool,
+        _action: char,
+    ) {
         self.is_string_started = true;
     }
 
@@ -1556,21 +1416,21 @@ impl vte::Perform for ActionProbe {
         self.is_at_sequence_boundary = true;
     }
 
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, _osc_parameters: &[&[u8]], _is_bell_terminated: bool) {
         self.is_at_sequence_boundary = true;
     }
 
     fn csi_dispatch(
         &mut self,
-        _params: &vte::Params,
+        _csi_parameters: &vte::Params,
         _intermediates: &[u8],
-        _ignore: bool,
+        _should_ignore: bool,
         _action: char,
     ) {
         self.is_at_sequence_boundary = true;
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _should_ignore: bool, _final_byte: u8) {
         self.is_at_sequence_boundary = true;
     }
 

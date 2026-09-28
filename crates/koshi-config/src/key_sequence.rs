@@ -17,7 +17,7 @@ use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
 use crate::key::{create_key_parse_error, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
 
 /// True when `word_fragment` holds a `-` between two alphanumeric characters.
-fn holds_dash_form(word_fragment: &str) -> bool {
+fn has_dash_form(word_fragment: &str) -> bool {
     let fragment_characters: Vec<char> = word_fragment.chars().collect();
     fragment_characters.windows(3).any(|character_window| {
         character_window[0].is_alphanumeric()
@@ -26,18 +26,18 @@ fn holds_dash_form(word_fragment: &str) -> bool {
     })
 }
 
-/// True when `word` is written in the dash form the grammar rejects, such as
+/// True when `word_text` is written in the dash form the grammar rejects, such as
 /// `Ctrl-g`: a `-` between two alphanumeric characters, outside every
 /// angle-bracketed run. A bare `-` chord next to others stays legal when
 /// whitespace-separated (`a - b`) or at a word's edge (`g-`).
 ///
 /// Each `<…>` run is stepped over, so `<C-p>` is not a dash form and
 /// `<leader>Ctrl-g` is. A `<` that never closes ends the walk: the unclosed
-/// bracket is reported by [`split_token`] instead.
+/// bracket is reported by [`split_key_token`] instead.
 fn is_dash_form(word_text: &str) -> bool {
     let mut remaining_word_text = word_text;
     while let Some(open_bracket_index) = remaining_word_text.find('<') {
-        if holds_dash_form(&remaining_word_text[..open_bracket_index]) {
+        if has_dash_form(&remaining_word_text[..open_bracket_index]) {
             return true;
         }
         let Some(close_bracket_relative_index) =
@@ -48,7 +48,7 @@ fn is_dash_form(word_text: &str) -> bool {
         remaining_word_text =
             &remaining_word_text[open_bracket_index + close_bracket_relative_index + 1..];
     }
-    holds_dash_form(remaining_word_text)
+    has_dash_form(remaining_word_text)
 }
 
 /// Splits the next key token off `remaining_sequence_text`: a `<...>` run
@@ -113,7 +113,7 @@ fn merge_leader_modifier_flags(
 ///
 /// Each token parses with [`parse_chord`]; a leading `<leader>` substitutes
 /// the configured `leader`. The finished sequence holds at most
-/// `max_chord_depth` chords, counted after the leader substitutes — a
+/// `maximum_chord_depth` chords, counted after the leader substitutes — a
 /// modifier-run leader adds no chord of its own, a chord leader adds one.
 ///
 /// # Errors
@@ -122,11 +122,11 @@ fn merge_leader_modifier_flags(
 /// in `<C-g>`), a `<` that never closes, any token [`parse_chord`] rejects,
 /// `<leader>` past the first position, a modifier-run leader with no chord
 /// after it, a merge landing `S-` on a non-letter character, or more chords
-/// than `max_chord_depth`.
+/// than `maximum_chord_depth`.
 pub fn parse_sequence(
     sequence_text: &str,
     leader: Leader,
-    max_chord_depth: u8,
+    maximum_chord_depth: u8,
 ) -> Result<KeySequence, KeyParseError> {
     for sequence_word in sequence_text.split_whitespace() {
         if is_dash_form(sequence_word) {
@@ -205,12 +205,12 @@ pub fn parse_sequence(
         ));
     }
     let chord_count = chords.len();
-    if chord_count > usize::from(max_chord_depth) {
+    if chord_count > usize::from(maximum_chord_depth) {
         return Err(create_key_parse_error(
             sequence_text,
             KeyParseErrorKind::SequenceTooLong {
                 chord_count,
-                max_chord_depth,
+                maximum_chord_depth,
             },
         ));
     }

@@ -16,7 +16,6 @@ use koshi_core::registry::ActionRegistry;
 use koshi_ipc::frame::FrameSlot;
 use koshi_ipc::placement::PanePlacementPaneSnapshot;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_renderer::snapshot::PaneKind;
 
 use crate::{Client, PlacementMode, PlacementModeLifetime};
 
@@ -53,7 +52,6 @@ fn build_keymap_for_modes(
                     BoundAction {
                         action_reference: ActionReference::from_core_action_name(action_name)
                             .expect("valid core action name"),
-                        action_arguments: ActionArgs::None,
                     },
                 )
             })
@@ -66,7 +64,7 @@ fn build_keymap_for_modes(
             },
         );
     }
-    KeymapHintCatalog::from_parts(
+    KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &[KeymapLayer {
             origin: LayerOrigin::Defaults,
             mode_bindings_by_name,
@@ -192,7 +190,7 @@ fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
             removed_key_sequences: BTreeSet::new(),
         },
     );
-    client.keymap_catalog = KeymapHintCatalog::from_parts(
+    client.keymap_catalog = KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &[KeymapLayer {
             origin: LayerOrigin::Defaults,
             mode_bindings_by_name,
@@ -782,10 +780,8 @@ fn build_solved_placement_snapshot(
                 pane_id,
                 outer_rect,
                 content_rect: is_visible.then_some(outer_rect),
-                pane_kind: PaneKind::Terminal,
                 is_visible,
                 is_suppressed: false,
-                is_dead: false,
             }
         })
         .collect();
@@ -1050,7 +1046,7 @@ fn a_prefix_only_sequence_never_wakes_the_loop() {
     let current_instant = Instant::now();
     client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), current_instant);
 
-    assert_eq!(client.next_key_wakeup(current_instant), None);
+    assert_eq!(client.compute_next_key_wakeup(current_instant), None);
     assert_eq!(client.expire_key_sequence(current_instant), None);
 }
 
@@ -1089,7 +1085,7 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
         "the prefix alone is held again, not the whole sequence"
     );
     assert_eq!(
-        client.next_key_wakeup(current_instant),
+        client.compute_next_key_wakeup(current_instant),
         None,
         "the re-opened prefix waits for its next chord with no deadline"
     );
@@ -1160,7 +1156,6 @@ fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
         KeyOutcome::Fire(BoundAction {
             action_reference: ActionReference::from_core_action_name("cancel-pane-placement")
                 .expect("valid name"),
-            action_arguments: ActionArgs::None,
         })
     );
 }
@@ -1211,7 +1206,7 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
 
     assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
     assert_eq!(
-        client.next_key_wakeup(now),
+        client.compute_next_key_wakeup(now),
         Some(timeout),
         "the ambiguity arms a deadline one chord timeout out"
     );
@@ -1236,7 +1231,7 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
         "the sequence is spent"
     );
     assert_eq!(
-        client.next_key_wakeup(due),
+        client.compute_next_key_wakeup(due),
         None,
         "and it wakes the loop no more"
     );
@@ -1334,7 +1329,7 @@ fn a_deadline_already_past_asks_the_loop_to_wake_at_once() {
     assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
 
     assert_eq!(
-        client.next_key_wakeup(now + timeout + Duration::from_secs(1)),
+        client.compute_next_key_wakeup(now + timeout + Duration::from_secs(1)),
         Some(Duration::ZERO),
         "a deadline already behind the clock asks for no further wait"
     );
@@ -1455,7 +1450,7 @@ fn a_continuous_three_chord_binding_re_opens_its_two_chord_prefix() {
         )),
         "the two-chord prefix is held again, not the whole sequence"
     );
-    assert_eq!(client.next_key_wakeup(now), None);
+    assert_eq!(client.compute_next_key_wakeup(now), None);
 
     let outcome = client.resolve_key(second_following_chord, now);
 

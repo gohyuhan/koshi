@@ -23,7 +23,7 @@ fn row_metadata_defaults_to_a_hard_end_with_no_prompt_mark() {
 
 #[test]
 fn each_row_end_kind_round_trips_through_set_and_read() {
-    let mut grid = Grid::blank(2, 3, Style::default());
+    let mut grid = Grid::build_blank(2, 3, Style::default());
 
     grid.set_row_end(0, RowEnd::Soft);
     assert_eq!(grid.get_row_end(0), RowEnd::Soft);
@@ -37,7 +37,7 @@ fn each_row_end_kind_round_trips_through_set_and_read() {
 
 #[test]
 fn a_soft_wide_row_end_travels_with_a_scrolled_row() {
-    let mut grid = Grid::blank(3, 4, Style::default());
+    let mut grid = Grid::build_blank(3, 4, Style::default());
     grid.set_row_end(1, RowEnd::SoftWide);
     // Scroll the whole grid up one line: old row 1 lands on row 0 keeping its
     // wide-glyph continuation; the fresh bottom row ends hard.
@@ -48,7 +48,7 @@ fn a_soft_wide_row_end_travels_with_a_scrolled_row() {
 
 #[test]
 fn partial_line_scroll_moves_cells_without_moving_row_metadata() {
-    let mut grid = Grid::blank(3, 3, Style::default());
+    let mut grid = Grid::build_blank(3, 3, Style::default());
     grid.set_row_end(0, RowEnd::Soft);
     grid.set_row_end(1, RowEnd::SoftWide);
     grid.set_prompt_mark(2, true);
@@ -65,19 +65,22 @@ fn partial_line_scroll_moves_cells_without_moving_row_metadata() {
 
 #[test]
 fn cells_differing_only_by_a_combining_mark_are_not_equal() {
-    let plain = Cell::from_character('e', 1, Style::default());
-    let mut accented = Cell::from_character('e', 1, Style::default());
-    accented.push_combining('\u{0301}'); // combining acute accent
-    assert_ne!(plain, accented);
+    let plain_cell = Cell::from_character('e', 1, Style::default());
+    let mut accented_cell = Cell::from_character('e', 1, Style::default());
+    accented_cell.push_combining('\u{0301}'); // combining acute accent
+    assert_ne!(plain_cell, accented_cell);
 
-    let mut same_accent = Cell::from_character('e', 1, Style::default());
-    same_accent.push_combining('\u{0301}');
-    assert_eq!(accented, same_accent);
+    let mut same_accent_cell = Cell::from_character('e', 1, Style::default());
+    same_accent_cell.push_combining('\u{0301}');
+    assert_eq!(accented_cell, same_accent_cell);
 }
 
 #[test]
 fn a_blank_cell_carries_no_combining_marks() {
-    assert_eq!(Cell::blank().list_combining_characters(), &[] as &[char]);
+    assert_eq!(
+        Cell::build_blank().list_combining_characters(),
+        &[] as &[char]
+    );
 }
 
 #[test]

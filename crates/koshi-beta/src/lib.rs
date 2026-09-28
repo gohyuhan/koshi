@@ -16,17 +16,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static BETA_FEATURES_ALLOWED: AtomicBool = AtomicBool::new(false);
 
-/// Sets the process-wide value returned by [`are_beta_features_allowed`]. Each call replaces it.
+/// Sets the process-wide value returned by [`should_allow_beta_features`]. Each call replaces it.
 /// Koshi passes the loaded `allow-beta-features` value once during startup.
-pub fn set_beta_features_allowed(is_allowed: bool) {
-    BETA_FEATURES_ALLOWED.store(is_allowed, Ordering::Relaxed);
+pub fn set_beta_features_allowed(is_beta_features_allowed: bool) {
+    BETA_FEATURES_ALLOWED.store(is_beta_features_allowed, Ordering::Relaxed);
 }
 
 /// Returns whether beta-gated entry points may run. It returns the last value
 /// passed to [`set_beta_features_allowed`], or `false` when no call has happened in the
 /// process.
 #[must_use]
-pub fn are_beta_features_allowed() -> bool {
+pub fn should_allow_beta_features() -> bool {
     BETA_FEATURES_ALLOWED.load(Ordering::Relaxed)
 }
 

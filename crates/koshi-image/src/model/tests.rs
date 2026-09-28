@@ -2,7 +2,7 @@
 
 use super::*;
 
-fn build_test_image(image_pixel_width: u32, image_pixel_height: u32) -> Arc<DecodedImage> {
+fn build_test_decoded_image(image_pixel_width: u32, image_pixel_height: u32) -> Arc<DecodedImage> {
     Arc::new(DecodedImage {
         pixel_width: image_pixel_width,
         pixel_height: image_pixel_height,
@@ -14,13 +14,13 @@ fn build_test_image(image_pixel_width: u32, image_pixel_height: u32) -> Arc<Deco
     })
 }
 
-fn build_image_record(protocol: GraphicsProtocol, display: ImageDisplay) -> ImageRecord {
+fn build_image_record(protocol: GraphicsProtocol, image_display: ImageDisplay) -> ImageRecord {
     ImageRecord {
         protocol,
-        image: build_test_image(8, 6),
+        image: build_test_decoded_image(8, 6),
         animation: None,
         action: ImageAction::Display,
-        display,
+        display: image_display,
         anchor: (2, 3),
     }
 }
@@ -52,22 +52,22 @@ fn decoded_image_round_trips_with_rgba_bytes() {
 
 #[test]
 fn decoded_image_rejects_zero_dimensions_and_mismatched_bytes() {
-    let zero_pixel_width =
+    let zero_width_image_json =
         serde_json::json!({"pixel_width": 0, "pixel_height": 1, "rgba_bytes": []});
-    let mismatched_rgba_length = serde_json::json!({
+    let mismatched_rgba_length_image_json = serde_json::json!({
         "pixel_width": 2,
         "pixel_height": 1,
         "rgba_bytes": [1, 2, 3, 4]
     });
 
     assert_eq!(
-        serde_json::from_value::<DecodedImage>(zero_pixel_width)
+        serde_json::from_value::<DecodedImage>(zero_width_image_json)
             .expect_err("zero width must be rejected")
             .to_string(),
         "decoded image dimensions exceed graphics limits"
     );
     assert_eq!(
-        serde_json::from_value::<DecodedImage>(mismatched_rgba_length)
+        serde_json::from_value::<DecodedImage>(mismatched_rgba_length_image_json)
             .expect_err("wrong RGBA length must be rejected")
             .to_string(),
         "decoded image RGBA length does not match its dimensions"
@@ -104,14 +104,14 @@ fn compute_source_rect_uses_the_complete_image_for_non_kitty_records() {
 
 #[test]
 fn compute_source_rect_crops_and_clamps_kitty_pixel_dimensions() {
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         source_pixel_offset_x: Some(2),
         source_pixel_offset_y: Some(1),
         requested_width: Some(ImageDimension::Pixels(20)),
         requested_height: Some(ImageDimension::Pixels(3)),
         ..ImageDisplay::default()
     };
-    let image_record = build_image_record(GraphicsProtocol::Kitty, display);
+    let image_record = build_image_record(GraphicsProtocol::Kitty, image_display);
 
     assert_eq!(
         image_record
@@ -123,11 +123,11 @@ fn compute_source_rect_crops_and_clamps_kitty_pixel_dimensions() {
 
 #[test]
 fn compute_source_rect_rejects_a_kitty_origin_outside_the_image() {
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         source_pixel_offset_x: Some(8),
         ..ImageDisplay::default()
     };
-    let image_record = build_image_record(GraphicsProtocol::Kitty, display);
+    let image_record = build_image_record(GraphicsProtocol::Kitty, image_display);
 
     assert_eq!(
         image_record

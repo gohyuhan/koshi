@@ -10,7 +10,7 @@
 //! Sealing is also where each event becomes a log line, via
 //! [`koshi_observability::logging::event_log::log_event`], where it is added to
 //! the recent-events ring, via
-//! [`koshi_observability::logging::recent_events::record`], and where the batch
+//! [`koshi_observability::logging::recent_events::record_event`], and where the batch
 //! is delivered to subscribers over the [`EventBus`]. Every committed event
 //! passes through here; an uncommitted scope logs nothing, records nothing and
 //! delivers nothing.
@@ -23,7 +23,7 @@ use crate::runtime::bus::EventBus;
 
 /// An ordered buffer of the [`Event`]s one command emits, sealed by
 /// [`commit`](TransactionScope::commit) into a [`CommandResult`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct TransactionScope {
     /// Buffered events, in emission order.
     emitted_events: Vec<Event>,
@@ -36,13 +36,6 @@ impl TransactionScope {
         TransactionScope {
             emitted_events: Vec::new(),
         }
-    }
-
-    /// The buffered events, in emission order.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn emitted_events(&self) -> &[Event] {
-        &self.emitted_events
     }
 
     /// Append `event` to the batch, after the events already emitted.

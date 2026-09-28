@@ -481,14 +481,14 @@ fn read_hidden_terminal_line_reports_an_entry_that_ended_before_anything_was_typ
 // sorted by server name.
 #[test]
 fn a_server_not_heard_from_comes_back_unreachable() {
-    let heard_reach_results = vec![Reach::Reached {
+    let received_reaches = vec![Reach::Reached {
         server_label: "desk".to_string(),
         session_rows: Vec::new(),
     }];
-    let requested_server_names = vec!["desk".to_string(), "work".to_string()];
+    let requested_server_labels = vec!["desk".to_string(), "work".to_string()];
 
     assert_eq!(
-        complete_reach_results(heard_reach_results, requested_server_names),
+        complete_reach_results(received_reaches, requested_server_labels),
         vec![
             Reach::Reached {
                 server_label: "desk".to_string(),
@@ -503,7 +503,7 @@ fn a_server_not_heard_from_comes_back_unreachable() {
 
 #[test]
 fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
-    let heard_reach_results = vec![
+    let received_reaches = vec![
         Reach::Refused {
             server_label: "work".to_string(),
         },
@@ -512,10 +512,10 @@ fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
             session_rows: Vec::new(),
         },
     ];
-    let requested_server_names = vec!["desk".to_string(), "work".to_string()];
+    let requested_server_labels = vec!["desk".to_string(), "work".to_string()];
 
     assert_eq!(
-        complete_reach_results(heard_reach_results, requested_server_names),
+        complete_reach_results(received_reaches, requested_server_labels),
         vec![
             Reach::Reached {
                 server_label: "desk".to_string(),
@@ -530,10 +530,10 @@ fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
 
 #[test]
 fn a_sweep_that_heard_nothing_reports_every_asked_server() {
-    let requested_server_names = vec!["work".to_string(), "desk".to_string()];
+    let requested_server_labels = vec!["work".to_string(), "desk".to_string()];
 
     assert_eq!(
-        complete_reach_results(Vec::new(), requested_server_names),
+        complete_reach_results(Vec::new(), requested_server_labels),
         vec![
             Reach::Unreachable {
                 server_label: "desk".to_string(),
@@ -587,11 +587,11 @@ type SharedWrittenByteBufferHandle = std::sync::Arc<std::sync::Mutex<Vec<u8>>>;
 /// Build a link reading `server_frame_bytes` as the bytes the server sent,
 /// together with the buffer this side's own writes go into.
 fn build_remote_link(server_frame_bytes: Vec<u8>) -> (RemoteLink, SharedWrittenByteBufferHandle) {
-    use koshi_ipc::transport::frame_halves;
+    use koshi_ipc::transport::build_frame_halves;
 
     let written_bytes: SharedWrittenByteBufferHandle =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (reader, writer) = frame_halves(
+    let (reader, writer) = build_frame_halves(
         Box::new(ServerFrameByteStream(std::io::Cursor::new(
             server_frame_bytes,
         ))),
@@ -784,7 +784,7 @@ fn a_pinned_server_nothing_answers_for_is_unreachable() {
 // Every entry the sweep produces sorts by server name, whatever it says.
 #[test]
 fn an_unchecked_server_takes_its_place_among_the_answers() {
-    let heard = vec![
+    let received_reaches = vec![
         Reach::Unchecked {
             server_label: "work".to_string(),
         },
@@ -795,7 +795,10 @@ fn an_unchecked_server_takes_its_place_among_the_answers() {
     ];
 
     assert_eq!(
-        complete_reach_results(heard, vec!["desk".to_string(), "work".to_string()]),
+        complete_reach_results(
+            received_reaches,
+            vec!["desk".to_string(), "work".to_string()]
+        ),
         vec![
             Reach::Reached {
                 server_label: "desk".to_string(),
@@ -812,20 +815,26 @@ fn an_unchecked_server_takes_its_place_among_the_answers() {
 // bytes reach the same place.
 #[test]
 fn read_hidden_terminal_line_takes_a_backspace_before_anything_was_typed() {
-    let mut leading = std::io::Cursor::new(b"\x7f\x08secret\n".to_vec());
-    assert_eq!(read_hidden_terminal_line(&mut leading).unwrap(), "secret");
+    let mut leading_backspace_bytes = std::io::Cursor::new(b"\x7f\x08secret\n".to_vec());
+    assert_eq!(
+        read_hidden_terminal_line(&mut leading_backspace_bytes).unwrap(),
+        "secret"
+    );
 
-    let mut both = std::io::Cursor::new(b"secretxy\x08\x7f\n".to_vec());
-    assert_eq!(read_hidden_terminal_line(&mut both).unwrap(), "secret");
+    let mut trailing_backspace_bytes = std::io::Cursor::new(b"secretxy\x08\x7f\n".to_vec());
+    assert_eq!(
+        read_hidden_terminal_line(&mut trailing_backspace_bytes).unwrap(),
+        "secret"
+    );
 }
 
 // A secret is bytes until it is read back, so bytes that are not UTF-8 come
 // back as the replacement character instead of ending the entry.
 #[test]
 fn read_hidden_terminal_line_replaces_bytes_that_are_not_utf_8() {
-    let mut broken = std::io::Cursor::new(b"se\xffcret\n".to_vec());
+    let mut non_utf8_secret_bytes = std::io::Cursor::new(b"se\xffcret\n".to_vec());
     assert_eq!(
-        read_hidden_terminal_line(&mut broken).unwrap(),
+        read_hidden_terminal_line(&mut non_utf8_secret_bytes).unwrap(),
         "se\u{fffd}cret"
     );
 }

@@ -453,11 +453,16 @@ the machine connecting to it.
 | `koshi server-version [--session <NAME_OR_ID>] [--format table\|json]` | Print the build each running koshi server runs |
 | `koshi update` | Check for and install a newer release |
 
-Each running session that can restarts into the new release, and then the
-background process that tracks sessions does. A session keeps its panes, the
+Each compatible running session restarts into the new release. The background
+process that tracks sessions then restarts. A session keeps its panes, the
 programs running in them and their scrollback, and an attached terminal rejoins
 on its own. A session that refuses the restart is named on standard error and
 keeps the old build.
+
+If a session cannot read its restart record, it opens one new shell and the
+previous panes are unavailable. Koshi shows `Restore failed` in the statusline
+until input reaches a pane in that session. If the new shell clears its screen at
+startup, the statusline still reports the failed restore.
 
 `koshi server-version` is how you see that: one row per running server, so a
 session still on the old build shows beside the ones that moved.

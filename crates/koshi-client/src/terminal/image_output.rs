@@ -25,7 +25,7 @@ use koshi_renderer::{
 };
 use koshi_sixel::{
     PreparedSixelPalette, SixelEncodeOptions, SixelEncoder, MAX_PALETTE_COLOR_COUNT,
-    MAX_SIXEL_OUTPUT_BYTE_COUNT, MAX_SIXEL_TILE_BYTE_COUNT, MIN_PALETTE_COLOR_COUNT,
+    MAX_SIXEL_CHUNK_BYTE_COUNT, MAX_SIXEL_OUTPUT_BYTE_COUNT, MIN_PALETTE_COLOR_COUNT,
 };
 use koshi_terminal::graphics::{ImageRecord, SixelBackground};
 
@@ -54,9 +54,9 @@ pub(crate) enum ImageOutputKind {
         /// Maximum palette entries accepted by the host.
         palette_color_count: usize,
         /// Maximum Sixel width in pixels.
-        max_pixel_width: Option<u32>,
+        maximum_pixel_width: Option<u32>,
         /// Maximum Sixel height in pixels.
-        max_pixel_height: Option<u32>,
+        maximum_pixel_height: Option<u32>,
     },
 }
 
@@ -73,12 +73,6 @@ pub(crate) struct ImageCompatibility {
     pub(crate) has_sixel_terminal_background_mismatch: bool,
 }
 
-impl ImageCompatibility {
-    fn exact() -> Self {
-        Self::default()
-    }
-}
-
 impl ImageOutputKind {
     /// Return the output protocol for a terminal capability.
     pub(crate) fn from_support(support: GraphicsSupport) -> Option<Self> {
@@ -87,12 +81,12 @@ impl ImageOutputKind {
             GraphicsSupport::Iterm => Some(Self::Iterm),
             GraphicsSupport::Sixel {
                 palette_color_count,
-                max_pixel_width,
-                max_pixel_height,
+                maximum_pixel_width,
+                maximum_pixel_height,
             } => Some(Self::Sixel {
                 palette_color_count,
-                max_pixel_width,
-                max_pixel_height,
+                maximum_pixel_width,
+                maximum_pixel_height,
             }),
             GraphicsSupport::Unsupported => None,
         }
@@ -105,7 +99,7 @@ impl ImageOutputKind {
 
     /// Return whether the protocol blends image pixels with the cells the
     /// image covers. Kitty places pixels by z-index, so it reads no cell.
-    pub(crate) const fn uses_cell_composition(self) -> bool {
+    pub(crate) const fn needs_cell_composition(self) -> bool {
         !matches!(self, Self::Kitty)
     }
 }
@@ -154,18 +148,13 @@ impl OutputPaint {
         }
     }
 
-    #[cfg(test)]
-    fn set_placement_key(&mut self, placement_key: ImagePlacementKey) {
-        self.placement_key = placement_key;
-    }
-
     /// Return whether this paint's encoded pixels read the cells it covers.
     ///
     /// A fully opaque image at a z-index at or above zero replaces every cell
     /// it covers, so its pixels and its host compatibility read no cell. An
     /// unknown alpha coverage reads the cells.
     fn needs_target_cell_composition(&self, output_kind: ImageOutputKind) -> bool {
-        if !output_kind.uses_cell_composition() {
+        if !output_kind.needs_cell_composition() {
             return false;
         }
         !(self.z_index >= 0 && self.alpha_stats.is_some_and(AlphaStats::is_fully_opaque))
@@ -346,7 +335,7 @@ struct WorkerRequest {
     encode_keys: Vec<EncodeKey>,
     /// One entry per output paint, in the same order. Empty for every other protocol.
     kitty_paint_images: Vec<KittyPaintImage>,
-    cancellation_token: Arc<AtomicBool>,
+    is_cancellation_requested: Arc<AtomicBool>,
 }
 
 /// A worker output unit with relative cell geometry.
@@ -381,7 +370,7 @@ enum WorkerMessage {
 /// One active request and its cancellation token.
 struct ActiveJob {
     frame_generation: u64,
-    cancellation_token: Arc<AtomicBool>,
+    is_cancellation_requested: Arc<AtomicBool>,
 }
 
 /// Bounded image output state owned by one terminal connection.
@@ -446,7 +435,7 @@ impl ImageOutputState {
             let (message_sender, message_receiver) = mpsc::sync_channel(1);
             match thread::Builder::new()
                 .name(String::from("koshi-image-output"))
-                .spawn(move || worker_loop(request_receiver, message_sender))
+                .spawn(move || run_worker_loop(request_receiver, message_sender))
             {
                 Ok(worker) => (Some(request_sender), Some(message_receiver), Some(worker)),
                 Err(worker_spawn_error) => {
@@ -491,14 +480,8 @@ impl ImageOutputState {
         }
     }
 
-    /// Return an inactive state for tests and terminals without image output.
-    #[cfg(test)]
-    pub(crate) fn disabled() -> Self {
-        Self::from_output_kind(None)
-    }
-
     /// Return the connection's output protocol, if it has one.
-    pub(crate) const fn output_kind(&self) -> Option<ImageOutputKind> {
+    pub(crate) const fn get_output_kind(&self) -> Option<ImageOutputKind> {
         self.output_kind
     }
 
@@ -518,14 +501,14 @@ impl ImageOutputState {
     }
 
     /// Return whether this state needs another attachment-loop pass.
-    pub(crate) fn work_pending(&self) -> bool {
+    pub(crate) fn is_work_pending(&self) -> bool {
         !self.is_ready || self.active_job.is_some() || self.pending_worker_request.is_some()
     }
 
     /// Return whether the newest frame can re-emit the encoded output the
     /// committed frame already holds.
     ///
-    /// [`frame_output`](Self::frame_output) reads each unit's screen position
+    /// [`build_frame_output`](Self::build_frame_output) reads each unit's screen position
     /// from the latest output paints when it writes the frame, so output whose encode keys and
     /// placement identities are unchanged stays correct at a new position.
     /// Kitty writes each placement's position into its own unit, so its output
@@ -682,7 +665,7 @@ impl ImageOutputState {
             return true;
         }
         if !image_paints.is_empty()
-            && output_kind.uses_cell_composition()
+            && output_kind.needs_cell_composition()
             && cell_snapshot.as_ref().is_none_or(|cell_snapshot| {
                 usize::try_from(cell_snapshot.screen_area.area()).ok()
                     > Some(MAX_IMAGE_CELL_SNAPSHOT_CELL_COUNT)
@@ -714,7 +697,7 @@ impl ImageOutputState {
                 .copied()
             {
                 Some(alpha_stats) => alpha_stats,
-                None if output_kind.uses_cell_composition() => {
+                None if output_kind.needs_cell_composition() => {
                     compute_alpha_stats(&image_paint.image_record.image, image_paint.source_rect)
                 }
                 None => None,
@@ -746,7 +729,7 @@ impl ImageOutputState {
                         && (has_lower_overlap
                             || cell_snapshot.as_ref().is_some_and(|cell_snapshot| {
                                 let composition_details =
-                                    compute_composition_info(cell_snapshot, output_paint);
+                                    compute_composition_details(cell_snapshot, output_paint);
                                 !composition_details.is_default_blank
                                     && composition_details.solid_background_color.is_none()
                             }))
@@ -796,16 +779,16 @@ impl ImageOutputState {
         self.cancel_active();
         if let Some(previous_request) = self.pending_worker_request.take() {
             previous_request
-                .cancellation_token
+                .is_cancellation_requested
                 .store(true, Ordering::Release);
         }
         if self.is_ready {
-            self.next_generation();
+            self.advance_frame_generation();
             return true;
         }
         let request_cancellation_token = Arc::new(AtomicBool::new(false));
         let worker_request = WorkerRequest {
-            frame_generation: self.next_generation(),
+            frame_generation: self.advance_frame_generation(),
             output_kind,
             pixel_cell_size,
             measured_pixel_cell_size,
@@ -813,7 +796,7 @@ impl ImageOutputState {
             output_paints: self.latest_output_paints.clone(),
             encode_keys: encode_keys.clone(),
             kitty_paint_images,
-            cancellation_token: Arc::clone(&request_cancellation_token),
+            is_cancellation_requested: Arc::clone(&request_cancellation_token),
         };
         if self.active_job.is_none() {
             self.start_worker_request(worker_request);
@@ -915,7 +898,7 @@ impl ImageOutputState {
     }
 
     /// Return whether the newest frame changes native terminal image state.
-    pub(crate) const fn native_commit_pending(&self) -> bool {
+    pub(crate) const fn is_native_commit_pending(&self) -> bool {
         !self.is_settled
     }
 
@@ -954,16 +937,16 @@ impl ImageOutputState {
                 }
             }
         }
-        let clears_screen = self.needs_screen_reset && !is_kitty_output;
-        if clears_screen {
+        let should_clear_screen = self.needs_screen_reset && !is_kitty_output;
+        if should_clear_screen {
             writer.write_all(SCREEN_RESET_BYTES)?;
         }
         writer.flush()?;
-        Ok(clears_screen)
+        Ok(should_clear_screen)
     }
 
     /// Build all native bytes written after the newest base-cell frame.
-    pub(crate) fn frame_output(&self, cursor: Option<Position>) -> io::Result<Vec<u8>> {
+    pub(crate) fn build_frame_output(&self, cursor: Option<Position>) -> io::Result<Vec<u8>> {
         let mut output_bytes = Vec::new();
         let overhead = self
             .output_units
@@ -972,7 +955,9 @@ impl ImageOutputState {
             .saturating_add(32);
         output_bytes
             .try_reserve(self.output_unit_byte_count.saturating_add(overhead))
-            .map_err(|_| invalid_output("image output storage could not be allocated"))?;
+            .map_err(|_| {
+                build_invalid_output_error("image output storage could not be allocated")
+            })?;
         for output_unit in &self.output_units {
             let Some(&paint_index) = self
                 .latest_paint_index_by_placement_key
@@ -985,12 +970,16 @@ impl ImageOutputState {
                 .target_area
                 .x
                 .checked_add(output_unit.tile_offset.0)
-                .ok_or_else(|| invalid_output("image tile x coordinate overflows the frame"))?;
+                .ok_or_else(|| {
+                    build_invalid_output_error("image tile x coordinate overflows the frame")
+                })?;
             let screen_row = output_paint
                 .target_area
                 .y
                 .checked_add(output_unit.tile_offset.1)
-                .ok_or_else(|| invalid_output("image tile y coordinate overflows the frame"))?;
+                .ok_or_else(|| {
+                    build_invalid_output_error("image tile y coordinate overflows the frame")
+                })?;
             match output_unit.output_kind {
                 ImageOutputKind::Kitty => output_bytes.extend_from_slice(&output_unit.output_bytes),
                 ImageOutputKind::Iterm => {
@@ -1011,7 +1000,7 @@ impl ImageOutputState {
             restore_cursor_state(&mut output_bytes, cursor)?;
         }
         if output_bytes.len() > MAX_NATIVE_FRAME_OUTPUT_BYTE_COUNT {
-            return Err(invalid_output(
+            return Err(build_invalid_output_error(
                 "native image frame exceeds its output limit",
             ));
         }
@@ -1036,10 +1025,10 @@ impl ImageOutputState {
         self.cancel_active();
         if let Some(pending_request) = self.pending_worker_request.take() {
             pending_request
-                .cancellation_token
+                .is_cancellation_requested
                 .store(true, Ordering::Release);
         }
-        self.next_generation();
+        self.advance_frame_generation();
         self.clear_prepared_output();
         self.latest_output_paints.clear();
         self.latest_paint_index_by_placement_key.clear();
@@ -1060,7 +1049,7 @@ impl ImageOutputState {
         self.cancel_active();
         if let Some(pending_request) = self.pending_worker_request.take() {
             pending_request
-                .cancellation_token
+                .is_cancellation_requested
                 .store(true, Ordering::Release);
         }
         self.frame_generation = self.frame_generation.wrapping_add(1).max(1);
@@ -1095,7 +1084,7 @@ impl ImageOutputState {
             .iter()
             .enumerate()
             .map(|(paint_index, output_paint)| {
-                if !output_kind.uses_cell_composition() {
+                if !output_kind.needs_cell_composition() {
                     return 0;
                 }
                 active_placement_keys.insert(output_paint.placement_key);
@@ -1127,7 +1116,7 @@ impl ImageOutputState {
         revisions
     }
 
-    fn next_generation(&mut self) -> u64 {
+    fn advance_frame_generation(&mut self) -> u64 {
         self.frame_generation = self.frame_generation.wrapping_add(1).max(1);
         self.frame_generation
     }
@@ -1135,7 +1124,7 @@ impl ImageOutputState {
     fn start_worker_request(&mut self, worker_request: WorkerRequest) {
         let active_job = ActiveJob {
             frame_generation: worker_request.frame_generation,
-            cancellation_token: Arc::clone(&worker_request.cancellation_token),
+            is_cancellation_requested: Arc::clone(&worker_request.is_cancellation_requested),
         };
         let Some(worker_request_sender) = &self.worker_request_sender else {
             self.fail_current_generation();
@@ -1175,10 +1164,10 @@ impl ImageOutputState {
         self.cancel_active();
         if let Some(pending_request) = self.pending_worker_request.take() {
             pending_request
-                .cancellation_token
+                .is_cancellation_requested
                 .store(true, Ordering::Release);
         }
-        self.next_generation();
+        self.advance_frame_generation();
         self.latest_output_paints = image_paints
             .iter()
             .map(|image_paint| OutputPaint::from_paint(image_paint, None))
@@ -1198,10 +1187,10 @@ impl ImageOutputState {
         self.cancel_active();
         if let Some(pending_request) = self.pending_worker_request.take() {
             pending_request
-                .cancellation_token
+                .is_cancellation_requested
                 .store(true, Ordering::Release);
         }
-        self.next_generation();
+        self.advance_frame_generation();
         self.clear_prepared_output();
         self.latest_encode_keys.clear();
         self.latest_composition_revisions.clear();
@@ -1211,7 +1200,9 @@ impl ImageOutputState {
 
     fn cancel_active(&mut self) {
         if let Some(active_job) = self.active_job.as_ref() {
-            active_job.cancellation_token.store(true, Ordering::Release);
+            active_job
+                .is_cancellation_requested
+                .store(true, Ordering::Release);
         }
     }
 }
@@ -1219,11 +1210,13 @@ impl ImageOutputState {
 impl Drop for ImageOutputState {
     fn drop(&mut self) {
         if let Some(active_job) = self.active_job.take() {
-            active_job.cancellation_token.store(true, Ordering::Release);
+            active_job
+                .is_cancellation_requested
+                .store(true, Ordering::Release);
         }
         if let Some(pending_request) = self.pending_worker_request.take() {
             pending_request
-                .cancellation_token
+                .is_cancellation_requested
                 .store(true, Ordering::Release);
         }
         self.worker_messages.take();
@@ -1342,7 +1335,7 @@ fn compute_alpha_stats(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CompositionInfo {
+struct CompositionDetails {
     has_glyph: bool,
     has_non_default_background: bool,
     has_known_per_cell_backgrounds: bool,
@@ -1353,7 +1346,7 @@ struct CompositionInfo {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ItermComposition {
     background_color: Option<[u8; 3]>,
-    uses_per_cell_composition: bool,
+    needs_per_cell_composition: bool,
     has_known_per_cell_backgrounds: bool,
 }
 
@@ -1371,17 +1364,17 @@ enum BackgroundAccumulator {
     Incompatible,
 }
 
-fn cell_has_glyph(cell: Option<&ImageCellState>) -> bool {
+fn has_cell_glyph(cell: Option<&ImageCellState>) -> bool {
     let Some(cell) = cell else {
         return true;
     };
     cell.character != ' ' || cell.cell_width != 1 || !cell.combining_characters.is_empty()
 }
 
-fn compute_composition_info(
+fn compute_composition_details(
     cell_snapshot: &ImageCellSnapshot,
     output_paint: &OutputPaint,
-) -> CompositionInfo {
+) -> CompositionDetails {
     let mut has_glyph = false;
     let mut has_non_default_background = false;
     let mut has_known_per_cell_backgrounds = true;
@@ -1402,7 +1395,7 @@ fn compute_composition_info(
             has_non_default_background |=
                 cell.style.get_background_color() != koshi_terminal::style::Color::Default;
             is_default_blank &= cell == &ImageCellState::default();
-            let glyph = cell_has_glyph(Some(cell));
+            let glyph = has_cell_glyph(Some(cell));
             has_glyph |= glyph;
             if cell == &ImageCellState::default() {
                 background_accumulator = BackgroundAccumulator::Incompatible;
@@ -1434,7 +1427,7 @@ fn compute_composition_info(
             }
         }
     }
-    CompositionInfo {
+    CompositionDetails {
         has_glyph,
         has_non_default_background,
         has_known_per_cell_backgrounds,
@@ -1486,15 +1479,16 @@ fn classify_output_paint<'a>(
     encode_key: EncodeKey,
 ) -> Result<Plan<'a>, TemplateError> {
     let alpha_stats = output_paint.alpha_stats.ok_or(TemplateError::Failed)?;
-    let composition_details = compute_composition_info(cell_snapshot, output_paint);
+    let composition_details = compute_composition_details(cell_snapshot, output_paint);
     let is_overlapping_lower =
         has_covered_target_cell(output_paint.target_area, covered_cell_positions);
     let has_known_cell_background = has_known_cell_background(cell_snapshot, output_paint);
-    let mut image_compatibility = ImageCompatibility::exact();
-    image_compatibility.has_text_layer_order_mismatch = (output_paint.z_index < 0
-        && composition_details.has_glyph)
-        || (output_paint.z_index < KITTY_BACKGROUND_LAYER_Z_INDEX
-            && composition_details.has_non_default_background);
+    let mut image_compatibility = ImageCompatibility {
+        has_text_layer_order_mismatch: (output_paint.z_index < 0 && composition_details.has_glyph)
+            || (output_paint.z_index < KITTY_BACKGROUND_LAYER_Z_INDEX
+                && composition_details.has_non_default_background),
+        ..ImageCompatibility::default()
+    };
     match output_kind {
         ImageOutputKind::Kitty => Ok(Plan {
             output_paint,
@@ -1515,7 +1509,7 @@ fn classify_output_paint<'a>(
                         && composition_details.solid_background_color.is_none())
                 {
                     image_compatibility.has_iterm_alpha_mismatch = true;
-                    iterm_composition.uses_per_cell_composition = true;
+                    iterm_composition.needs_per_cell_composition = true;
                     iterm_composition.has_known_per_cell_backgrounds =
                         composition_details.has_known_per_cell_backgrounds;
                 } else if let Some(background_color) = composition_details.solid_background_color {
@@ -1570,7 +1564,7 @@ fn classify_output_paint<'a>(
     }
 }
 
-fn lower_images_cover_target(output_paint: &OutputPaint, lower_plans: &[Plan<'_>]) -> bool {
+fn is_target_covered_by_lower_images(output_paint: &OutputPaint, lower_plans: &[Plan<'_>]) -> bool {
     let mut covered_cell_positions = HashSet::new();
     for lower_plan in lower_plans {
         if !lower_plan.is_opaque || lower_plan.image_compatibility != ImageCompatibility::default()
@@ -1611,14 +1605,14 @@ fn resolve_image_compatibility(
     image_plans: &mut [Plan<'_>],
 ) {
     for plan_index in 0..image_plans.len() {
-        let is_covered_by_lower_images = lower_images_cover_target(
+        let is_covered_by_lower_images = is_target_covered_by_lower_images(
             image_plans[plan_index].output_paint,
             &image_plans[..plan_index],
         );
         if matches!(output_kind, ImageOutputKind::Iterm) {
             if image_plans[plan_index]
                 .iterm_composition
-                .uses_per_cell_composition
+                .needs_per_cell_composition
                 && image_plans[plan_index]
                     .iterm_composition
                     .has_known_per_cell_backgrounds
@@ -1682,12 +1676,15 @@ fn add_target_area_cells(target_area: Rect, covered_cell_positions: &mut HashSet
     }
 }
 
-fn worker_loop(
+fn run_worker_loop(
     worker_request_receiver: Receiver<WorkerRequest>,
     worker_message_sender: SyncSender<WorkerMessage>,
 ) {
     while let Ok(worker_request) = worker_request_receiver.recv() {
-        if worker_request.cancellation_token.load(Ordering::Acquire) {
+        if worker_request
+            .is_cancellation_requested
+            .load(Ordering::Acquire)
+        {
             let _ = worker_message_sender.send(WorkerMessage::Finished {
                 frame_generation: worker_request.frame_generation,
                 has_failed: false,
@@ -1741,7 +1738,10 @@ fn run_worker_job_with_limit(
         .iter()
         .zip(&worker_request.encode_keys)
     {
-        if worker_request.cancellation_token.load(Ordering::Acquire) {
+        if worker_request
+            .is_cancellation_requested
+            .load(Ordering::Acquire)
+        {
             return Ok(());
         }
         let image_plan = classify_output_paint(
@@ -1766,13 +1766,16 @@ fn run_worker_job_with_limit(
     let mut template_byte_count = 0usize;
     let mut emitted_byte_count = 0usize;
     for (plan_index, image_plan) in image_plans.iter().enumerate() {
-        if worker_request.cancellation_token.load(Ordering::Acquire) {
+        if worker_request
+            .is_cancellation_requested
+            .load(Ordering::Acquire)
+        {
             return Ok(());
         }
         if image_plan.image_compatibility != ImageCompatibility::default() {
             send_worker_message(
                 worker_message_sender,
-                &worker_request.cancellation_token,
+                &worker_request.is_cancellation_requested,
                 WorkerMessage::Unavailable {
                     frame_generation: worker_request.frame_generation,
                     placement_key: image_plan.output_paint.placement_key,
@@ -1809,7 +1812,9 @@ fn run_worker_job_with_limit(
                     Some(template_units)
                 }
                 Err(TemplateError::Unavailable)
-                    if worker_request.cancellation_token.load(Ordering::Acquire) =>
+                    if worker_request
+                        .is_cancellation_requested
+                        .load(Ordering::Acquire) =>
                 {
                     return Ok(())
                 }
@@ -1824,7 +1829,7 @@ fn run_worker_job_with_limit(
         let Some(template_units) = &encoded_templates[template_index] else {
             send_worker_message(
                 worker_message_sender,
-                &worker_request.cancellation_token,
+                &worker_request.is_cancellation_requested,
                 WorkerMessage::Unavailable {
                     frame_generation: worker_request.frame_generation,
                     placement_key: image_plan.output_paint.placement_key,
@@ -1844,7 +1849,7 @@ fn run_worker_job_with_limit(
             .ok_or(())?;
         send_worker_message(
             worker_message_sender,
-            &worker_request.cancellation_token,
+            &worker_request.is_cancellation_requested,
             WorkerMessage::Prepared {
                 frame_generation: worker_request.frame_generation,
                 placement_key: image_plan.output_paint.placement_key,
@@ -1854,7 +1859,7 @@ fn run_worker_job_with_limit(
         for template_unit in template_units {
             send_worker_message(
                 worker_message_sender,
-                &worker_request.cancellation_token,
+                &worker_request.is_cancellation_requested,
                 WorkerMessage::Unit(OutputUnit {
                     frame_generation: worker_request.frame_generation,
                     placement_key: image_plan.output_paint.placement_key,
@@ -1891,7 +1896,10 @@ fn run_kitty_worker_job(
         )
         .map_err(|_| ())?;
         while !kitty_upload.is_upload_complete() {
-            if worker_request.cancellation_token.load(Ordering::Acquire) {
+            if worker_request
+                .is_cancellation_requested
+                .load(Ordering::Acquire)
+            {
                 return Ok(());
             }
             kitty_upload
@@ -1905,7 +1913,10 @@ fn run_kitty_worker_job(
         .zip(&worker_request.kitty_paint_images)
         .enumerate()
     {
-        if worker_request.cancellation_token.load(Ordering::Acquire) {
+        if worker_request
+            .is_cancellation_requested
+            .load(Ordering::Acquire)
+        {
             return Ok(());
         }
         write_cursor_position(
@@ -1929,18 +1940,18 @@ fn run_kitty_worker_job(
     for output_paint in &worker_request.output_paints {
         send_worker_message(
             worker_message_sender,
-            &worker_request.cancellation_token,
+            &worker_request.is_cancellation_requested,
             WorkerMessage::Prepared {
                 frame_generation: worker_request.frame_generation,
                 placement_key: output_paint.placement_key,
-                image_compatibility: ImageCompatibility::exact(),
+                image_compatibility: ImageCompatibility::default(),
             },
         )?;
     }
     let first_output_paint = worker_request.output_paints.first().ok_or(())?;
     send_worker_message(
         worker_message_sender,
-        &worker_request.cancellation_token,
+        &worker_request.is_cancellation_requested,
         WorkerMessage::Unit(OutputUnit {
             frame_generation: worker_request.frame_generation,
             placement_key: first_output_paint.placement_key,
@@ -1976,10 +1987,14 @@ impl Write for BoundedOutput {
             .len()
             .checked_add(chunk_bytes.len())
             .filter(|byte_count| *byte_count <= self.output_byte_limit)
-            .ok_or_else(|| invalid_output("native image frame exceeds its output limit"))?;
+            .ok_or_else(|| {
+                build_invalid_output_error("native image frame exceeds its output limit")
+            })?;
         self.output_bytes
             .try_reserve(next_output_byte_count - self.output_bytes.len())
-            .map_err(|_| invalid_output("native image output storage could not be allocated"))?;
+            .map_err(|_| {
+                build_invalid_output_error("native image output storage could not be allocated")
+            })?;
         self.output_bytes.extend_from_slice(chunk_bytes);
         Ok(chunk_bytes.len())
     }
@@ -2018,10 +2033,10 @@ fn convert_kitty_output_error(kitty_output_error: KittyOutputError) -> io::Error
 
 fn send_worker_message(
     worker_message_sender: &SyncSender<WorkerMessage>,
-    cancellation_token: &AtomicBool,
+    is_cancellation_requested: &AtomicBool,
     worker_message: WorkerMessage,
 ) -> Result<(), ()> {
-    if cancellation_token.load(Ordering::Acquire) {
+    if is_cancellation_requested.load(Ordering::Acquire) {
         return Err(());
     }
     worker_message_sender.send(worker_message).map_err(|_| ())
@@ -2052,15 +2067,15 @@ fn encode_output_template(
         }
         ImageOutputKind::Sixel {
             palette_color_count,
-            max_pixel_width,
-            max_pixel_height,
+            maximum_pixel_width,
+            maximum_pixel_height,
         } => encode_sixel_template(
             worker_request,
             image_plan,
             lower_plans,
             palette_color_count,
-            max_pixel_width,
-            max_pixel_height,
+            maximum_pixel_width,
+            maximum_pixel_height,
             output_byte_limit,
         ),
     }
@@ -2072,7 +2087,7 @@ fn encode_iterm_template(
     lower_plans: &[Plan<'_>],
     output_byte_limit: usize,
 ) -> Result<Vec<TemplateUnit>, TemplateError> {
-    let decoded_image = if image_plan.iterm_composition.uses_per_cell_composition {
+    let decoded_image = if image_plan.iterm_composition.needs_per_cell_composition {
         compose_iterm_image(worker_request, image_plan, lower_plans)?
     } else {
         crop_output_image(
@@ -2224,7 +2239,7 @@ fn get_iterm_cell_background(
     if cell == &ImageCellState::default() {
         return Some([0, 0, 0, 0]);
     }
-    if cell_has_glyph(Some(cell)) || cell.style.get_attributes() != Default::default() {
+    if has_cell_glyph(Some(cell)) || cell.style.get_attributes() != Default::default() {
         return None;
     }
     let koshi_terminal::style::Color::Rgb(red, green, blue) = cell.style.get_background_color()
@@ -2247,8 +2262,8 @@ fn encode_sixel_template(
     image_plan: &Plan<'_>,
     lower_plans: &[Plan<'_>],
     palette_color_count: usize,
-    max_pixel_width: Option<u32>,
-    max_pixel_height: Option<u32>,
+    maximum_pixel_width: Option<u32>,
+    maximum_pixel_height: Option<u32>,
     output_byte_limit: usize,
 ) -> Result<Vec<TemplateUnit>, TemplateError> {
     let cropped_image =
@@ -2260,20 +2275,23 @@ fn encode_sixel_template(
         .map_err(|_| TemplateError::Failed)?;
     let cell_pixel_width = u32::from(worker_request.pixel_cell_size.get_pixel_width());
     let cell_pixel_height = u32::from(worker_request.pixel_cell_size.get_pixel_height());
-    let max_columns = max_pixel_width
+    let maximum_column_count = maximum_pixel_width
         .map(|pixel_width| pixel_width / cell_pixel_width)
         .unwrap_or(u32::from(image_plan.output_paint.target_area.width));
-    let max_rows = max_pixel_height
+    let maximum_row_count = maximum_pixel_height
         .map(|pixel_height| pixel_height / cell_pixel_height)
         .unwrap_or(u32::from(image_plan.output_paint.target_area.height));
-    let max_columns = max_columns.min(u32::from(image_plan.output_paint.target_area.width));
-    let max_rows = max_rows.min(u32::from(image_plan.output_paint.target_area.height));
-    if max_columns == 0 || max_rows == 0 {
+    let maximum_column_count =
+        maximum_column_count.min(u32::from(image_plan.output_paint.target_area.width));
+    let maximum_row_count =
+        maximum_row_count.min(u32::from(image_plan.output_paint.target_area.height));
+    if maximum_column_count == 0 || maximum_row_count == 0 {
         return Err(TemplateError::Failed);
     }
     let mut template_units = Vec::new();
-    let tile_column_count = u16::try_from(max_columns).map_err(|_| TemplateError::Failed)?;
-    let tile_row_count = u16::try_from(max_rows).map_err(|_| TemplateError::Failed)?;
+    let tile_column_count =
+        u16::try_from(maximum_column_count).map_err(|_| TemplateError::Failed)?;
+    let tile_row_count = u16::try_from(maximum_row_count).map_err(|_| TemplateError::Failed)?;
     let target_column_count = image_plan.output_paint.target_area.width;
     let target_row_count = image_plan.output_paint.target_area.height;
     let mut template_output_byte_count = 0usize;
@@ -2324,7 +2342,10 @@ fn append_sixel_tiles(
     template_output_byte_count: &mut usize,
     output_byte_limit: usize,
 ) -> Result<(), TemplateError> {
-    if worker_request.cancellation_token.load(Ordering::Acquire) {
+    if worker_request
+        .is_cancellation_requested
+        .load(Ordering::Acquire)
+    {
         return Err(TemplateError::Unavailable);
     }
     let tile_image = scale_output_tile(
@@ -2364,10 +2385,13 @@ fn append_sixel_tiles(
     .map_err(|_| TemplateError::Failed)?;
     let mut tile_output_bytes = Vec::new();
     while let Some(chunk_bytes) = encoder
-        .take_next_chunk(MAX_SIXEL_TILE_BYTE_COUNT)
+        .take_next_chunk(MAX_SIXEL_CHUNK_BYTE_COUNT)
         .map_err(|_| TemplateError::Failed)?
     {
-        if worker_request.cancellation_token.load(Ordering::Acquire) {
+        if worker_request
+            .is_cancellation_requested
+            .load(Ordering::Acquire)
+        {
             return Err(TemplateError::Unavailable);
         }
         let next_output_byte_count = tile_output_bytes
@@ -2409,7 +2433,7 @@ fn compose_sixel_tile(
 ) -> Result<Arc<DecodedImage>, TemplateError> {
     let cell_pixel_width = u32::from(worker_request.pixel_cell_size.get_pixel_width());
     let cell_pixel_height = u32::from(worker_request.pixel_cell_size.get_pixel_height());
-    let mut output_rgba = tile_image.rgba_bytes.clone();
+    let mut output_rgba_bytes = tile_image.rgba_bytes.clone();
     let tile_pixel_width =
         usize::try_from(tile_image.pixel_width).map_err(|_| TemplateError::Failed)?;
     for tile_pixel_row in 0..tile_image.pixel_height {
@@ -2463,7 +2487,7 @@ fn compose_sixel_tile(
                 * tile_pixel_width
                 + usize::try_from(tile_pixel_column).map_err(|_| TemplateError::Failed)?)
                 * 4;
-            let image_pixel: [u8; 4] = output_rgba[rgba_byte_index..rgba_byte_index + 4]
+            let image_pixel: [u8; 4] = output_rgba_bytes[rgba_byte_index..rgba_byte_index + 4]
                 .try_into()
                 .map_err(|_| TemplateError::Failed)?;
             let composited_pixel = apply_current_sixel_layer(
@@ -2472,13 +2496,14 @@ fn compose_sixel_tile(
                 terminal_background_color,
                 underlying_pixel,
             );
-            output_rgba[rgba_byte_index..rgba_byte_index + 4].copy_from_slice(&composited_pixel);
+            output_rgba_bytes[rgba_byte_index..rgba_byte_index + 4]
+                .copy_from_slice(&composited_pixel);
         }
     }
     Ok(Arc::new(DecodedImage {
         pixel_width: tile_image.pixel_width,
         pixel_height: tile_image.pixel_height,
-        rgba_bytes: output_rgba,
+        rgba_bytes: output_rgba_bytes,
     }))
 }
 
@@ -2729,11 +2754,11 @@ fn crop_output_image(
         crop_pixel_height,
     )
     .map_err(|_| ())?;
-    let mut cropped_rgba = Vec::new();
-    cropped_rgba
+    let mut cropped_rgba_bytes = Vec::new();
+    cropped_rgba_bytes
         .try_reserve_exact(crop_rgba_byte_count)
         .map_err(|_| ())?;
-    cropped_rgba.resize(crop_rgba_byte_count, 0);
+    cropped_rgba_bytes.resize(crop_rgba_byte_count, 0);
     for crop_row in 0..crop_pixel_height {
         let source_pixel_row =
             usize::try_from(output_paint.source_rect.pixel_y).map_err(|_| ())? + crop_row;
@@ -2745,7 +2770,7 @@ fn crop_output_image(
             let source_pixel_bytes = &decoded_image.rgba_bytes[source_rgba_byte_index
                 + crop_column * 4
                 ..source_rgba_byte_index + crop_column * 4 + 4];
-            let destination_pixel_bytes = &mut cropped_rgba[destination_rgba_byte_index
+            let destination_pixel_bytes = &mut cropped_rgba_bytes[destination_rgba_byte_index
                 + crop_column * 4
                 ..destination_rgba_byte_index + crop_column * 4 + 4];
             if let Some(background_color) = background_color {
@@ -2762,7 +2787,7 @@ fn crop_output_image(
     Ok(Arc::new(DecodedImage {
         pixel_width: output_paint.source_rect.pixel_width,
         pixel_height: output_paint.source_rect.pixel_height,
-        rgba_bytes: cropped_rgba,
+        rgba_bytes: cropped_rgba_bytes,
     }))
 }
 
@@ -2815,15 +2840,17 @@ fn scale_output_tile(
         .ok_or(())?;
     let tile_pixel_width_usize = usize::try_from(tile_pixel_width).map_err(|_| ())?;
     let tile_pixel_height_usize = usize::try_from(tile_pixel_height).map_err(|_| ())?;
-    let bytes_len = compute_rgba_byte_count(
+    let rgba_byte_count = compute_rgba_byte_count(
         GraphicsProtocol::Sixel,
         tile_pixel_width_usize,
         tile_pixel_height_usize,
     )
     .map_err(|_| ())?;
-    let mut scaled_rgba = Vec::new();
-    scaled_rgba.try_reserve_exact(bytes_len).map_err(|_| ())?;
-    scaled_rgba.resize(bytes_len, 0);
+    let mut scaled_rgba_bytes = Vec::new();
+    scaled_rgba_bytes
+        .try_reserve_exact(rgba_byte_count)
+        .map_err(|_| ())?;
+    scaled_rgba_bytes.resize(rgba_byte_count, 0);
     let source_image_pixel_width = usize::try_from(source_image.pixel_width).map_err(|_| ())?;
     for tile_pixel_row in 0..tile_pixel_height {
         let target_pixel_row = u32::from(tile.row_offset)
@@ -2861,8 +2888,8 @@ fn scale_output_tile(
                 * 4;
             let source_pixel_bytes =
                 &source_image.rgba_bytes[source_rgba_byte_index..source_rgba_byte_index + 4];
-            let destination_pixel_bytes =
-                &mut scaled_rgba[destination_rgba_byte_index..destination_rgba_byte_index + 4];
+            let destination_pixel_bytes = &mut scaled_rgba_bytes
+                [destination_rgba_byte_index..destination_rgba_byte_index + 4];
             if let Some(background_color) = background_color {
                 blend_onto_background(
                     source_pixel_bytes,
@@ -2877,7 +2904,7 @@ fn scale_output_tile(
     Ok(Arc::new(DecodedImage {
         pixel_width: tile_pixel_width,
         pixel_height: tile_pixel_height,
-        rgba_bytes: scaled_rgba,
+        rgba_bytes: scaled_rgba_bytes,
     }))
 }
 
@@ -2894,7 +2921,7 @@ fn write_cursor_position<W: Write>(
     )
 }
 
-fn invalid_output(message: &'static str) -> io::Error {
+fn build_invalid_output_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 

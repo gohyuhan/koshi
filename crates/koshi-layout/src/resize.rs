@@ -3,15 +3,14 @@
 //! A resize permanently shifts cells between two siblings by updating their
 //! weights' `resize_delta`, then lets the solver re-derive geometry.
 //!
-//! The signed cell delta names the border by direction: `resize_layout(pane,
-//! Right, 5)` moves the pane's right border outward (the pane grows,
-//! the right neighbor donates), and `resize_layout(pane, Right, -5)` moves the
-//! same border inward (the pane donates, the right neighbor gains).
+//! The signed cell delta names the border by direction: a resize of `pane`
+//! toward `Right` by `5` moves the pane's right border outward (the pane
+//! grows, the right neighbor donates), and by `-5` moves the same border
+//! inward (the pane donates, the right neighbor gains).
 //!
 //! Panes inside a stack resize as a unit: the border that moves is the
 //! stack's outer one, never a border between two stack members.
 
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::geometry::{Direction, Rect, SplitDirection};
 use koshi_core::ids::PaneId;
 use thiserror::Error;
@@ -47,20 +46,10 @@ pub enum ResizeError {
     },
 }
 
-impl DomainError for ResizeError {
-    fn category(&self) -> DomainCategory {
-        DomainCategory::Layout
-    }
-
-    fn get_severity(&self) -> Severity {
-        Severity::Recoverable
-    }
-}
-
-/// Moves `pane_id`'s border on the `direction` side by `cell_delta`: positive
+/// Moves `pane_id`'s border on the `direction` side by `resize_cell_delta`: positive
 /// moves it outward (the pane grows and the adjacent sibling on that side
 /// donates the cells), negative moves it inward (the pane donates and that
-/// sibling gains them). A `cell_delta` of `0` runs the same lookups and checks
+/// sibling gains them). A `resize_cell_delta` of `0` runs the same lookups and checks
 /// and moves no cells.
 ///
 /// The border that moves belongs to the deepest ancestor split that runs on
@@ -70,6 +59,10 @@ impl DomainError for ResizeError {
 /// member are skipped. `tab_rect` is the rect the tree solves into; the
 /// donor's solved size above its floor bounds the move.
 ///
+/// `pane_sizing.minimum_size` is the per-pane content floor the donor's spare
+/// is measured against, and the donor's solved size excludes the
+/// [`PaneSizing::gap_cell_count`] beside it.
+///
 /// # Errors
 ///
 /// - [`ResizeError::PaneNotFound`] when `pane_id` is not in the tree.
@@ -77,33 +70,12 @@ impl DomainError for ResizeError {
 ///   that side.
 /// - [`ResizeError::MinimumSizeExceeded`] when the donating side would drop below its
 ///   floor.
-pub fn resize_layout(
-    layout_tree: &LayoutNode,
-    tab_rect: Rect,
-    pane_id: PaneId,
-    direction: Direction,
-    cell_delta: i16,
-) -> Result<LayoutNode, ResizeError> {
-    resize_layout_with_sizing(
-        layout_tree,
-        tab_rect,
-        pane_id,
-        direction,
-        cell_delta,
-        PaneSizing::default(),
-    )
-}
-
-/// Like [`resize_layout`] with an explicit [`PaneSizing`]: `pane_sizing.minimum_size` is the
-/// per-pane content floor the donor's spare is measured against, and the
-/// donor's solved size excludes the [`PaneSizing::gap_cell_count`] beside it.
-/// [`resize_layout`] passes [`PaneSizing::default`].
 pub fn resize_layout_with_sizing(
     layout_tree: &LayoutNode,
     tab_rect: Rect,
     pane_id: PaneId,
     direction: Direction,
-    cell_delta: i16,
+    resize_cell_delta: i16,
     pane_sizing: PaneSizing,
 ) -> Result<LayoutNode, ResizeError> {
     let pane_path = layout_tree
@@ -115,34 +87,34 @@ pub fn resize_layout_with_sizing(
 
     // The deepest ancestor split on the wanted axis with a neighbor on the
     // resize side owns the border being moved.
-    let (ancestor_depth, target_child_index, neighbor_child_index) =
+    let (resize_split_depth, target_pane_child_index, adjacent_child_index) =
         find_resize_border(layout_tree, &pane_path, split_direction, direction)
             .ok_or(ResizeError::NoAdjacentBorder { pane_id, direction })?;
 
     // The sign picks who donates the cells across the border: on a grow the
     // neighbor gives them to the pane, on a shrink the pane gives them to
     // the neighbor.
-    let requested_cell_count = cell_delta.unsigned_abs();
-    let (receiving_child_index, donating_child_index) = if cell_delta < 0 {
-        (neighbor_child_index, target_child_index)
+    let requested_cell_count = resize_cell_delta.unsigned_abs();
+    let (receiving_child_index, donating_child_index) = if resize_cell_delta < 0 {
+        (adjacent_child_index, target_pane_child_index)
     } else {
-        (target_child_index, neighbor_child_index)
+        (target_pane_child_index, adjacent_child_index)
     };
 
     // The donor can give only what its solved size holds above its floor.
-    let split_node = layout_tree.get_split_at_path(&pane_path[..ancestor_depth]);
+    let split_node = layout_tree.get_split_at_path(&pane_path[..resize_split_depth]);
     let split_rect = compute_rect_at_path(
         layout_tree,
         tab_rect,
-        &pane_path[..ancestor_depth],
+        &pane_path[..resize_split_depth],
         pane_sizing,
     );
-    let donating_rect =
+    let donating_pane_rect =
         compute_directional_child_rects(split_node, split_rect, pane_sizing)[donating_child_index];
     let donating_cell_count = if is_horizontal_split {
-        donating_rect.cell_size.column_count
+        donating_pane_rect.size.column_count
     } else {
-        donating_rect.cell_size.row_count
+        donating_pane_rect.size.row_count
     };
     let spare_cell_count = donating_cell_count.saturating_sub(compute_slot_floor(
         split_node,
@@ -158,7 +130,7 @@ pub fn resize_layout_with_sizing(
     }
 
     let mut updated_layout_tree = layout_tree.clone();
-    let split_node = updated_layout_tree.get_split_at_path_mut(&pane_path[..ancestor_depth]);
+    let split_node = updated_layout_tree.get_split_at_path_mut(&pane_path[..resize_split_depth]);
     // Missing weights are padded with the default share up to the child
     // count.
     if split_node.weights.len() < split_node.children.len() {
@@ -209,15 +181,15 @@ fn find_resize_border(
         if split_node.direction != split_direction {
             continue;
         }
-        let target_child_index = pane_path[ancestor_depth];
-        let neighbor_child_index = match direction {
-            Direction::Left | Direction::Up => target_child_index.checked_sub(1),
-            Direction::Right | Direction::Down => (target_child_index + 1
+        let pane_path_child_index = pane_path[ancestor_depth];
+        let adjacent_child_index = match direction {
+            Direction::Left | Direction::Up => pane_path_child_index.checked_sub(1),
+            Direction::Right | Direction::Down => (pane_path_child_index + 1
                 < split_node.children.len())
-            .then_some(target_child_index + 1),
+            .then_some(pane_path_child_index + 1),
         };
-        if let Some(neighbor_child_index) = neighbor_child_index {
-            return Some((ancestor_depth, target_child_index, neighbor_child_index));
+        if let Some(adjacent_child_index) = adjacent_child_index {
+            return Some((ancestor_depth, pane_path_child_index, adjacent_child_index));
         }
     }
     None
@@ -225,8 +197,8 @@ fn find_resize_border(
 
 /// The rect the node at `pane_path` solves into, starting from `tab_rect`.
 ///
-/// A directional level takes the child rect [`directional_child_rects`]
-/// derives; a stacked level the child rect [`stacked_child_rects`] derives.
+/// A directional level takes the child rect [`compute_directional_child_rects`]
+/// derives; a stacked level the child rect [`compute_stacked_child_rects`] derives.
 fn compute_rect_at_path(
     layout_tree: &LayoutNode,
     tab_rect: Rect,
@@ -234,22 +206,24 @@ fn compute_rect_at_path(
     pane_sizing: PaneSizing,
 ) -> Rect {
     let mut layout_node = layout_tree;
-    let mut current_rect = tab_rect;
+    let mut current_layout_node_rect = tab_rect;
     for &child_index in pane_path {
         let LayoutNode::Split(split) = layout_node else {
             unreachable!("pane path was built over this tree");
         };
-        current_rect = match split.direction {
+        current_layout_node_rect = match split.direction {
             SplitDirection::Horizontal | SplitDirection::Vertical => {
-                compute_directional_child_rects(split, current_rect, pane_sizing)[child_index]
+                compute_directional_child_rects(split, current_layout_node_rect, pane_sizing)
+                    [child_index]
             }
             SplitDirection::Stacked => {
-                compute_stacked_child_rects(split, current_rect, pane_sizing)[child_index]
+                compute_stacked_child_rects(split, current_layout_node_rect, pane_sizing)
+                    [child_index]
             }
         };
         layout_node = &split.children[child_index];
     }
-    current_rect
+    current_layout_node_rect
 }
 
 #[cfg(test)]

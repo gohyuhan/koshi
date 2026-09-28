@@ -5,8 +5,8 @@ use super::*;
 
 const ANY_MOTION_TRACKING: MouseTracking = MouseTracking::AnyMotion;
 
-fn build_press_mouse_kind(button: MouseButton) -> MouseKind {
-    MouseKind::Press(button)
+fn build_press_mouse_kind(mouse_button: MouseButton) -> MouseKind {
+    MouseKind::Press(mouse_button)
 }
 
 // --- SGR encoding: `CSI < button_code ; column ; row M/m` ------------------
@@ -40,9 +40,9 @@ fn sgr_left_press_and_release() {
 
 #[test]
 fn sgr_button_numbers() {
-    let encode_button = |button| {
+    let encode_mouse_button = |mouse_button| {
         encode_mouse(
-            build_press_mouse_kind(button),
+            build_press_mouse_kind(mouse_button),
             ModFlags::NONE,
             1,
             1,
@@ -51,14 +51,14 @@ fn sgr_button_numbers() {
         )
         .unwrap()
     };
-    assert_eq!(encode_button(MouseButton::Left), b"\x1b[<0;1;1M");
-    assert_eq!(encode_button(MouseButton::Middle), b"\x1b[<1;1;1M");
-    assert_eq!(encode_button(MouseButton::Right), b"\x1b[<2;1;1M");
+    assert_eq!(encode_mouse_button(MouseButton::Left), b"\x1b[<0;1;1M");
+    assert_eq!(encode_mouse_button(MouseButton::Middle), b"\x1b[<1;1;1M");
+    assert_eq!(encode_mouse_button(MouseButton::Right), b"\x1b[<2;1;1M");
 }
 
 #[test]
 fn sgr_modifier_bits_add_shift_alt_ctrl() {
-    let encode_with_modifiers = |modifier_flags| {
+    let encode_mouse_with_modifiers = |modifier_flags| {
         encode_mouse(
             build_press_mouse_kind(MouseButton::Left),
             modifier_flags,
@@ -69,16 +69,22 @@ fn sgr_modifier_bits_add_shift_alt_ctrl() {
         )
         .unwrap()
     };
-    assert_eq!(encode_with_modifiers(ModFlags::SHIFT), b"\x1b[<4;1;1M");
-    assert_eq!(encode_with_modifiers(ModFlags::ALT), b"\x1b[<8;1;1M");
-    assert_eq!(encode_with_modifiers(ModFlags::CTRL), b"\x1b[<16;1;1M");
     assert_eq!(
-        encode_with_modifiers(ModFlags::CTRL.union(ModFlags::SHIFT)),
+        encode_mouse_with_modifiers(ModFlags::SHIFT),
+        b"\x1b[<4;1;1M"
+    );
+    assert_eq!(encode_mouse_with_modifiers(ModFlags::ALT), b"\x1b[<8;1;1M");
+    assert_eq!(
+        encode_mouse_with_modifiers(ModFlags::CTRL),
+        b"\x1b[<16;1;1M"
+    );
+    assert_eq!(
+        encode_mouse_with_modifiers(ModFlags::CTRL.union(ModFlags::SHIFT)),
         b"\x1b[<20;1;1M",
         "modifier bits sum"
     );
     assert_eq!(
-        encode_with_modifiers(ModFlags::SUPER),
+        encode_mouse_with_modifiers(ModFlags::SUPER),
         b"\x1b[<0;1;1M",
         "super has no protocol bit"
     );
@@ -114,7 +120,7 @@ fn sgr_drag_and_motion_set_the_motion_bit() {
 
 #[test]
 fn sgr_wheel_directions() {
-    let encode_scroll = |scroll_direction| {
+    let encode_scroll_direction = |scroll_direction| {
         encode_mouse(
             MouseKind::Scroll(scroll_direction),
             ModFlags::NONE,
@@ -125,10 +131,22 @@ fn sgr_wheel_directions() {
         )
         .unwrap()
     };
-    assert_eq!(encode_scroll(ScrollDirection::Up), b"\x1b[<64;1;1M");
-    assert_eq!(encode_scroll(ScrollDirection::Down), b"\x1b[<65;1;1M");
-    assert_eq!(encode_scroll(ScrollDirection::Left), b"\x1b[<66;1;1M");
-    assert_eq!(encode_scroll(ScrollDirection::Right), b"\x1b[<67;1;1M");
+    assert_eq!(
+        encode_scroll_direction(ScrollDirection::Up),
+        b"\x1b[<64;1;1M"
+    );
+    assert_eq!(
+        encode_scroll_direction(ScrollDirection::Down),
+        b"\x1b[<65;1;1M"
+    );
+    assert_eq!(
+        encode_scroll_direction(ScrollDirection::Left),
+        b"\x1b[<66;1;1M"
+    );
+    assert_eq!(
+        encode_scroll_direction(ScrollDirection::Right),
+        b"\x1b[<67;1;1M"
+    );
 }
 
 #[test]
@@ -249,11 +267,11 @@ fn legacy_caps_a_cell_past_the_byte_limit() {
 
 #[test]
 fn legacy_saturates_at_the_last_cell_a_byte_holds_and_one_past_it() {
-    let encode_at_column = |column| {
+    let encode_mouse_at_column_index = |column_index| {
         encode_mouse(
             build_press_mouse_kind(MouseButton::Left),
             ModFlags::NONE,
-            column,
+            column_index,
             1,
             ANY_MOTION_TRACKING,
             MouseEncoding::Default,
@@ -262,8 +280,14 @@ fn legacy_saturates_at_the_last_cell_a_byte_holds_and_one_past_it() {
     };
     // Column 223 + 32 is exactly 255; column 224 would be 256, which stays 255
     // rather than wrapping to 0.
-    assert_eq!(encode_at_column(223), vec![0x1b, b'[', b'M', 32, 255, 33]);
-    assert_eq!(encode_at_column(224), vec![0x1b, b'[', b'M', 32, 255, 33]);
+    assert_eq!(
+        encode_mouse_at_column_index(223),
+        vec![0x1b, b'[', b'M', 32, 255, 33]
+    );
+    assert_eq!(
+        encode_mouse_at_column_index(224),
+        vec![0x1b, b'[', b'M', 32, 255, 33]
+    );
 }
 
 #[test]
@@ -298,7 +322,7 @@ fn legacy_writes_a_zero_cell_as_bare_offsets() {
 
 #[test]
 fn legacy_release_of_every_button_reports_three() {
-    let encode_release = |mouse_button| {
+    let encode_mouse_release = |mouse_button| {
         encode_mouse(
             MouseKind::Release(mouse_button),
             ModFlags::NONE,
@@ -310,11 +334,11 @@ fn legacy_release_of_every_button_reports_three() {
         .unwrap()
     };
     assert_eq!(
-        encode_release(MouseButton::Middle),
+        encode_mouse_release(MouseButton::Middle),
         vec![0x1b, b'[', b'M', 35, 33, 33]
     );
     assert_eq!(
-        encode_release(MouseButton::Right),
+        encode_mouse_release(MouseButton::Right),
         vec![0x1b, b'[', b'M', 35, 33, 33]
     );
 }
@@ -351,7 +375,7 @@ fn legacy_drag_and_wheel_add_their_bits_to_the_modifiers() {
 fn a_coordinate_near_u16_max_saturates_without_overflowing() {
     // `column + 32` must not overflow u16 before the byte cap: the legacy byte
     // saturates and the UTF-8 form does not panic.
-    let legacy = encode_mouse(
+    let legacy_mouse_report_bytes = encode_mouse(
         build_press_mouse_kind(MouseButton::Left),
         ModFlags::NONE,
         u16::MAX,
@@ -361,7 +385,7 @@ fn a_coordinate_near_u16_max_saturates_without_overflowing() {
     )
     .unwrap();
     assert_eq!(
-        legacy,
+        legacy_mouse_report_bytes,
         vec![0x1b, b'[', b'M', 32, 255, 33],
         "the column byte saturates at 255"
     );
@@ -383,11 +407,11 @@ fn a_coordinate_near_u16_max_saturates_without_overflowing() {
 
 #[test]
 fn utf8_switches_from_one_byte_to_two_at_cell_ninety_six() {
-    let encode_at_column = |column| {
+    let encode_mouse_at_column_index = |column_index| {
         encode_mouse(
             build_press_mouse_kind(MouseButton::Left),
             ModFlags::NONE,
-            column,
+            column_index,
             1,
             ANY_MOTION_TRACKING,
             MouseEncoding::Utf8,
@@ -395,20 +419,23 @@ fn utf8_switches_from_one_byte_to_two_at_cell_ninety_six() {
         .unwrap()
     };
     // 95 + 32 = 127 is the last one-byte code point; 96 + 32 = 128 is U+0080.
-    assert_eq!(encode_at_column(95), vec![0x1b, b'[', b'M', 32, 0x7f, 33]);
     assert_eq!(
-        encode_at_column(96),
+        encode_mouse_at_column_index(95),
+        vec![0x1b, b'[', b'M', 32, 0x7f, 33]
+    );
+    assert_eq!(
+        encode_mouse_at_column_index(96),
         vec![0x1b, b'[', b'M', 32, 0xc2, 0x80, 33]
     );
 }
 
 #[test]
 fn utf8_writes_a_cell_that_lands_on_a_surrogate_as_a_question_mark() {
-    let encode_at_column = |column| {
+    let encode_mouse_at_column_index = |column_index| {
         encode_mouse(
             build_press_mouse_kind(MouseButton::Left),
             ModFlags::NONE,
-            column,
+            column_index,
             1,
             ANY_MOTION_TRACKING,
             MouseEncoding::Utf8,
@@ -417,21 +444,21 @@ fn utf8_writes_a_cell_that_lands_on_a_surrogate_as_a_question_mark() {
     };
     // 55263 + 32 = U+D7FF, the last code point before the surrogates.
     assert_eq!(
-        encode_at_column(55263),
+        encode_mouse_at_column_index(55263),
         vec![0x1b, b'[', b'M', 32, 0xed, 0x9f, 0xbf, 33]
     );
     // 55264 + 32 = U+D800 and 57311 + 32 = U+DFFF are surrogates: not a `char`.
     assert_eq!(
-        encode_at_column(55264),
+        encode_mouse_at_column_index(55264),
         vec![0x1b, b'[', b'M', 32, b'?', 33]
     );
     assert_eq!(
-        encode_at_column(57311),
+        encode_mouse_at_column_index(57311),
         vec![0x1b, b'[', b'M', 32, b'?', 33]
     );
     // 57312 + 32 = U+E000, the first code point after them.
     assert_eq!(
-        encode_at_column(57312),
+        encode_mouse_at_column_index(57312),
         vec![0x1b, b'[', b'M', 32, 0xee, 0x80, 0x80, 33]
     );
 }
@@ -582,7 +609,7 @@ fn off_reports_nothing() {
 
 #[test]
 fn x10_reports_only_presses() {
-    let encode_x10_event = |mouse_kind| {
+    let encode_x10_mouse_event = |mouse_kind| {
         encode_mouse(
             mouse_kind,
             ModFlags::NONE,
@@ -593,20 +620,23 @@ fn x10_reports_only_presses() {
         )
     };
     assert_eq!(
-        encode_x10_event(build_press_mouse_kind(MouseButton::Left)),
+        encode_x10_mouse_event(build_press_mouse_kind(MouseButton::Left)),
         Some(b"\x1b[<0;1;1M".to_vec())
     );
     assert_eq!(
-        encode_x10_event(MouseKind::Scroll(ScrollDirection::Up)),
+        encode_x10_mouse_event(MouseKind::Scroll(ScrollDirection::Up)),
         None,
         "X10 predates the wheel"
     );
     assert_eq!(
-        encode_x10_event(MouseKind::Release(MouseButton::Left)),
+        encode_x10_mouse_event(MouseKind::Release(MouseButton::Left)),
         None
     );
-    assert_eq!(encode_x10_event(MouseKind::Drag(MouseButton::Left)), None);
-    assert_eq!(encode_x10_event(MouseKind::Motion), None);
+    assert_eq!(
+        encode_x10_mouse_event(MouseKind::Drag(MouseButton::Left)),
+        None
+    );
+    assert_eq!(encode_x10_mouse_event(MouseKind::Motion), None);
 }
 
 #[test]
@@ -656,7 +686,7 @@ fn x10_omits_modifier_bits_that_higher_modes_carry() {
 
 #[test]
 fn normal_adds_releases_but_not_motion() {
-    let encode_normal_tracking_event = |mouse_kind| {
+    let encode_normal_tracking_mouse_event = |mouse_kind| {
         encode_mouse(
             mouse_kind,
             ModFlags::NONE,
@@ -667,28 +697,28 @@ fn normal_adds_releases_but_not_motion() {
         )
     };
     assert_eq!(
-        encode_normal_tracking_event(build_press_mouse_kind(MouseButton::Left)),
+        encode_normal_tracking_mouse_event(build_press_mouse_kind(MouseButton::Left)),
         Some(b"\x1b[<0;1;1M".to_vec())
     );
     assert_eq!(
-        encode_normal_tracking_event(MouseKind::Release(MouseButton::Left)),
+        encode_normal_tracking_mouse_event(MouseKind::Release(MouseButton::Left)),
         Some(b"\x1b[<0;1;1m".to_vec())
     );
     assert_eq!(
-        encode_normal_tracking_event(MouseKind::Scroll(ScrollDirection::Down)),
+        encode_normal_tracking_mouse_event(MouseKind::Scroll(ScrollDirection::Down)),
         Some(b"\x1b[<65;1;1M".to_vec()),
         "a wheel tick reports from normal tracking up"
     );
     assert_eq!(
-        encode_normal_tracking_event(MouseKind::Drag(MouseButton::Left)),
+        encode_normal_tracking_mouse_event(MouseKind::Drag(MouseButton::Left)),
         None
     );
-    assert_eq!(encode_normal_tracking_event(MouseKind::Motion), None);
+    assert_eq!(encode_normal_tracking_mouse_event(MouseKind::Motion), None);
 }
 
 #[test]
 fn button_motion_adds_drag_but_not_bare_motion() {
-    let encode_button_motion_event = |mouse_kind| {
+    let encode_button_motion_mouse_event = |mouse_kind| {
         encode_mouse(
             mouse_kind,
             ModFlags::NONE,
@@ -699,10 +729,10 @@ fn button_motion_adds_drag_but_not_bare_motion() {
         )
     };
     assert_eq!(
-        encode_button_motion_event(MouseKind::Drag(MouseButton::Left)),
+        encode_button_motion_mouse_event(MouseKind::Drag(MouseButton::Left)),
         Some(b"\x1b[<32;1;1M".to_vec())
     );
-    assert_eq!(encode_button_motion_event(MouseKind::Motion), None);
+    assert_eq!(encode_button_motion_mouse_event(MouseKind::Motion), None);
 }
 
 #[test]

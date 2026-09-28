@@ -7,22 +7,21 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{mpsc, Arc};
 
+use crate::runtime::pty_inbox::InboxSink;
 use koshi_config::conflict::KeymapVerdict;
 use koshi_config::layer::{PartialKeybindingsConfig, PartialKoshiConfig, PartialLayoutDefaults};
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
 use koshi_core::command::{Command, CommandResult, FocusPaneArgs, FocusTarget, NewPaneArgs};
 use koshi_core::geometry::{Direction, PaneArea, Size};
-use koshi_core::ids::{PluginId, SessionId};
+use koshi_core::ids::SessionId;
 use koshi_core::key::{
     ExtendedKeysMode, Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags, KeySequence,
     ModFlags, NamedKey,
 };
 use koshi_core::lock::LockMode;
-use koshi_core::resolve::ActionArgs;
 use koshi_layout::edit::split_leaf;
 use koshi_layout::tree::{LayoutNode, SplitNode};
-use koshi_pane::pane::state::PaneRecord;
 use koshi_session::client::{Client, ClientOrigin};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_key_input_for_chord;
@@ -31,15 +30,150 @@ use std::time::{Duration, Instant};
 use koshi_client::input::KeyOutcome;
 use koshi_client::Client as ViewerClient;
 use koshi_observability::cleanup::TerminalCleanupGuard;
+use koshi_pty::error::PtyError;
 
-use crate::runtime::bus::EventFilter;
 use crate::server::Server;
 
+use koshi_core::command::{CommandEnvelope, CommandSource};
+use koshi_core::ids::CommandId;
+use koshi_core::registry::ActionRegistry;
+use koshi_core::resolve::{resolve_action, DispatchPlan};
+use std::time::SystemTime;
+
+#[test]
+fn recovery_notice_clears_only_after_pane_input_succeeds() {
+    let (mut runtime, fake_pty_backend, client_id, _) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible
+    );
+
+    fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
+    runtime.handle_key_input(
+        client_id,
+        &build_key_input_for_chord(build_key_chord(ModFlags::NONE, 'x')),
+    );
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible
+    );
+
+    let (mut runtime, _, client_id, _) = build_test_runtime();
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+    runtime.handle_key_input(
+        client_id,
+        &build_key_input_for_chord(build_key_chord(ModFlags::NONE, 'x')),
+    );
+    assert!(
+        !runtime
+            .build_snapshot(client_id)
+            .expect("painted snapshot")
+            .is_recovery_notice_visible
+    );
+}
+
+#[test]
+fn recovery_notice_stays_for_empty_or_failed_paste_and_clears_for_written_paste() {
+    let (mut runtime, fake_pty_backend, client_id, _) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+
+    runtime.handle_host_paste(client_id, "");
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("frame")
+            .is_recovery_notice_visible
+    );
+
+    fake_pty_backend.fail_writes_on(pane_id, PtyError::UnknownPane { pane_id });
+    runtime.handle_host_paste(client_id, "failed");
+    assert!(
+        runtime
+            .build_snapshot(client_id)
+            .expect("frame")
+            .is_recovery_notice_visible
+    );
+
+    let (mut runtime, fake_pty_backend, client_id, _) = build_test_runtime();
+    let pane_id = get_only_pane_id(&runtime);
+    let session_id = runtime
+        .get_session_for_client(client_id)
+        .expect("attached session")
+        .session_id;
+    runtime.show_session_recovery_notice(session_id);
+    runtime.handle_host_paste(client_id, "ready");
+    assert_eq!(
+        fake_pty_backend.list_pane_write_bytes(pane_id),
+        Ok(vec![b"ready".to_vec()])
+    );
+    assert!(
+        !runtime
+            .build_snapshot(client_id)
+            .expect("frame")
+            .is_recovery_notice_visible
+    );
+}
+
+impl Server {
+    /// Run the action a viewer's keypress resolved to, the way an attached
+    /// viewer does: resolve `bound_action.action_reference` against the
+    /// built-in table with `new_pane_direction`, dispatch the command it
+    /// stands for attributed to `client_id`'s keybinding, and mark the status
+    /// line stale. A viewer-local action dispatches nothing and still marks the
+    /// status line stale.
+    ///
+    /// An action that does not resolve dispatches nothing and marks nothing
+    /// stale.
+    fn handle_bound_action(
+        &mut self,
+        client_id: ClientId,
+        bound_action: BoundAction,
+        new_pane_direction: Direction,
+    ) {
+        let Ok(dispatch_plan) = resolve_action(
+            &bound_action.action_reference,
+            &ActionRegistry::new(),
+            new_pane_direction,
+        ) else {
+            return;
+        };
+        if let DispatchPlan::Command(command) = dispatch_plan {
+            let command_envelope = CommandEnvelope::from_parts(
+                CommandId::new(),
+                CommandSource::from_key_binding(client_id),
+                *command,
+            );
+            let _ = self.dispatch(command_envelope);
+        }
+        self.render_scheduler.invalidate();
+    }
+}
+
 fn build_test_runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient) {
-    let fake_pty_backend = Arc::new(FakePtyBackend::new());
     let (event_sender, inbox_receiver) = mpsc::channel();
-    let mut runtime =
-        Server::from_runtime_parts(fake_pty_backend.clone(), inbox_receiver, event_sender);
+    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(event_sender),
+    )));
+    let mut runtime = Server::from_runtime_parts(fake_pty_backend.clone(), inbox_receiver);
     let client_id = runtime
         .bootstrap_local(
             SessionId::new(),
@@ -57,13 +191,13 @@ fn build_test_runtime() -> (Server, Arc<FakePtyBackend>, ClientId, ViewerClient)
 /// The viewer half for `client_id`: it holds the keymap and resolves every
 /// press below before the session hears about it.
 fn build_viewer_client(runtime: &mut Server, client_id: ClientId) -> ViewerClient {
-    ViewerClient::from_client_id_and_viewport(
+    ViewerClient::from_client_id_and_viewport_size(
         client_id,
         Size {
             column_count: 80,
             row_count: 24,
         },
-        runtime.subscribe(client_id, EventFilter::All),
+        runtime.subscribe(client_id),
         TerminalCleanupGuard::new(),
     )
 }
@@ -114,11 +248,7 @@ fn build_named_key_chord(key: NamedKey) -> KeyChord {
 }
 
 fn get_only_pane_id(runtime: &Server) -> koshi_core::ids::PaneId {
-    *runtime
-        .pty_handle_by_pane_id
-        .keys()
-        .next()
-        .expect("one pane")
+    *runtime.live_pane_ids.iter().next().expect("one pane")
 }
 
 /// Whether the session still holds `client_id`.
@@ -168,7 +298,6 @@ fn dispatch_test_command(runtime: &mut Server, client_id: ClientId, command: Com
     let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
-        SystemTime::now(),
         command,
     );
     let dispatch_result = runtime.dispatch(command_envelope);
@@ -257,7 +386,6 @@ fn a_buffered_key_reaches_no_pane_at_all_even_after_focus_moves() {
         &mut viewer,
         KeySequence::from_first_and_rest(up_key_chord, vec![build_key_chord(ModFlags::NONE, 'x')]),
         ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-        ActionArgs::None,
     );
     apply_key_press(&mut runtime, &mut viewer, up_key_chord, now);
 
@@ -267,7 +395,6 @@ fn a_buffered_key_reaches_no_pane_at_all_even_after_focus_moves() {
     let envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::Mouse { client_id },
-        SystemTime::now(),
         Command::FocusPane(FocusPaneArgs {
             focus_target: FocusTarget::Pane(original_pane_id),
             client_id: Some(client_id),
@@ -343,7 +470,6 @@ fn a_buffered_arrow_is_never_written_even_when_its_pane_flips_cursor_mode() {
         &mut viewer,
         KeySequence::from_first_and_rest(up_key_chord, vec![build_key_chord(ModFlags::NONE, 'x')]),
         ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-        ActionArgs::None,
     );
 
     // Press `<Up>` while the pane is a plain shell: buffered, nothing written.
@@ -604,7 +730,7 @@ fn one_shot_bindings_clear_the_whole_sequence_after_firing() {
         build_key_chord(ModFlags::NONE, 'n'),
         now,
     );
-    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(runtime.live_pane_ids.len(), 2);
     assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
@@ -653,7 +779,7 @@ fn pane_prefix_updates_snapshot_then_new_pane_fires() {
         build_key_chord(ModFlags::NONE, 'n'),
         now,
     );
-    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(runtime.live_pane_ids.len(), 2);
     assert_eq!(viewer.get_pending_key_sequence().cloned(), None);
 }
 
@@ -670,7 +796,7 @@ fn prefix_pending_never_expires() {
     );
     // A prefix-only sequence arms no deadline and outlives any wait: the
     // continuation hints stay up until the user presses another key.
-    assert_eq!(viewer.next_key_wakeup(now), None);
+    assert_eq!(viewer.compute_next_key_wakeup(now), None);
     expire_pending_key_sequence(&mut runtime, &mut viewer, now + Duration::from_secs(3600));
     assert_eq!(
         fake_pty_backend
@@ -750,7 +876,7 @@ fn an_unmatched_continuation_is_discarded_and_the_sequence_stands() {
         build_key_chord(ModFlags::NONE, 'n'),
         now,
     );
-    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(runtime.live_pane_ids.len(), 2);
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -828,7 +954,7 @@ fn directional_new_pane_binding_splits_on_that_side() {
         build_key_chord(ModFlags::NONE, 'h'),
         now,
     );
-    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(runtime.live_pane_ids.len(), 2);
     let new_pane_id = get_focused_pane_id(&runtime, client_id);
     assert_ne!(new_pane_id, original_pane_id);
 
@@ -927,7 +1053,6 @@ fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
         &mut viewer,
         KeySequence::from(build_key_chord(ModFlags::ALT, 's')),
         ActionReference::from_core_action_name("new-pane-stacked").expect("valid name"),
-        ActionArgs::None,
     );
     apply_key_press(
         &mut runtime,
@@ -938,7 +1063,7 @@ fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
 
     // The leaf becomes a two-member stack: the source collapses to a header
     // and the new pane is the expanded, focused member.
-    assert_eq!(runtime.pty_handle_by_pane_id.len(), 2);
+    assert_eq!(runtime.live_pane_ids.len(), 2);
     let new_pane_id = get_focused_pane_id(&runtime, client_id);
     assert_ne!(new_pane_id, original_pane_id);
     let session = runtime.get_session_for_client(client_id).expect("session");
@@ -946,7 +1071,7 @@ fn a_user_bound_stacked_new_pane_key_builds_a_stack() {
         .clients
         .get_client_by_id(client_id)
         .expect("client")
-        .get_active_tab();
+        .get_active_tab_id();
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
         &LayoutNode::Split(SplitNode::from_stacked_pane_ids(
@@ -1004,7 +1129,7 @@ fn get_focused_pane_id(runtime: &Server, client_id: ClientId) -> koshi_core::ids
     let session = runtime.get_session_for_client(client_id).expect("session");
     let client_state = session.clients.get_client_by_id(client_id).expect("client");
     client_state
-        .get_focused_pane(client_state.get_active_tab())
+        .get_focused_pane_id(client_state.get_active_tab_id())
         .expect("a focused pane")
 }
 
@@ -1016,7 +1141,7 @@ fn get_active_tab_id(runtime: &Server, client_id: ClientId) -> koshi_core::ids::
         .clients
         .get_client_by_id(client_id)
         .expect("client")
-        .get_active_tab()
+        .get_active_tab_id()
 }
 
 #[test]
@@ -1264,11 +1389,10 @@ fn resize_binding_at_the_tab_edge_moves_the_opposite_border() {
 /// Bind one `normal`-mode sequence to `action` in the viewer's own keymap.
 fn configure_normal_keybinding(
     viewer: &mut ViewerClient,
-    sequence: KeySequence,
-    action: ActionReference,
-    action_arguments: ActionArgs,
+    key_sequence: KeySequence,
+    action_reference: ActionReference,
 ) {
-    configure_normal_keybindings(viewer, vec![(sequence, action, action_arguments)]);
+    configure_normal_keybindings(viewer, vec![(key_sequence, action_reference)]);
 }
 
 /// Bind one `locked`-mode sequence to `action`, keeping the shipped locked
@@ -1276,22 +1400,15 @@ fn configure_normal_keybinding(
 /// the unlock entry would be refused by conflict detection.
 fn configure_locked_keybinding(
     viewer: &mut ViewerClient,
-    sequence: KeySequence,
-    action: ActionReference,
-    action_arguments: ActionArgs,
+    key_sequence: KeySequence,
+    action_reference: ActionReference,
 ) {
     let mut key_binding_by_sequence = KeybindingsConfig::default()
         .mode_bindings_by_name
         .remove(&ModeName::from_text("locked"))
         .expect("the shipped config binds locked mode")
         .bound_action_by_key_sequence;
-    key_binding_by_sequence.insert(
-        sequence,
-        BoundAction {
-            action_reference: action,
-            action_arguments,
-        },
-    );
+    key_binding_by_sequence.insert(key_sequence, BoundAction { action_reference });
     let mut mode_bindings_by_name = BTreeMap::new();
     mode_bindings_by_name.insert(
         ModeName::from_text("locked"),
@@ -1335,23 +1452,17 @@ fn get_client_lock_mode(runtime: &Server, client_id: ClientId) -> LockMode {
         .get_lock_mode()
 }
 
-/// Bind every `(sequence, action, action_arguments)` triple in `bindings` under `normal`
-/// mode in one `keybinding.kdl` the viewer reads. Reading the file replaces
+/// Bind every `(key_sequence, action_reference)` pair in `bindings` under
+/// `normal` mode in one `keybinding.kdl` the viewer reads. Reading the file replaces
 /// the whole keybinding layer, so binding several sequences needs one call
 /// with every entry, not several calls that would each overwrite the last.
 fn configure_normal_keybindings(
     viewer: &mut ViewerClient,
-    bindings: Vec<(KeySequence, ActionReference, ActionArgs)>,
+    bindings: Vec<(KeySequence, ActionReference)>,
 ) {
     let mut key_binding_by_sequence = BTreeMap::new();
-    for (sequence, action, action_arguments) in bindings {
-        key_binding_by_sequence.insert(
-            sequence,
-            BoundAction {
-                action_reference: action,
-                action_arguments,
-            },
-        );
+    for (key_sequence, action_reference) in bindings {
+        key_binding_by_sequence.insert(key_sequence, BoundAction { action_reference });
     }
     let mut mode_bindings_by_name = BTreeMap::new();
     mode_bindings_by_name.insert(
@@ -1408,7 +1519,7 @@ fn a_key_writes_nothing_when_the_client_has_no_focused_pane() {
         .clients
         .get_client_by_id(client_id)
         .expect("client")
-        .get_active_tab();
+        .get_active_tab_id();
     runtime
         .get_session_for_client_mut(client_id)
         .expect("session")
@@ -1478,6 +1589,7 @@ fn a_key_writes_nothing_when_the_focused_pane_is_suppressed() {
             row_count: 3,
         },
         None,
+        None,
     );
     assert!(
         runtime
@@ -1485,7 +1597,7 @@ fn a_key_writes_nothing_when_the_focused_pane_is_suppressed() {
             .expect("snapshot")
             .session_snapshot
             .active_tab_snapshot
-            .are_all_panes_suppressed,
+            .is_every_pane_suppressed,
         "test setup: the sole pane must be suppressed at this size"
     );
 
@@ -1518,6 +1630,7 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
             row_count: 3,
         },
         None,
+        None,
     );
     apply_key_press(
         &mut runtime,
@@ -1539,6 +1652,7 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
             row_count: 24,
         },
         None,
+        None,
     );
     apply_key_press(
         &mut runtime,
@@ -1552,54 +1666,6 @@ fn a_key_reaches_the_pane_again_once_it_is_no_longer_suppressed() {
             .list_pane_write_bytes(pane_id)
             .expect("writes"),
         vec![vec![b'l']]
-    );
-}
-
-/// A plugin pane has no PTY behind it, so the bytes a chord encodes are not
-/// its to read — even though it is focused, on screen, and its id has a live
-/// PTY handle in the backend from when it was a terminal pane.
-#[test]
-fn a_key_writes_nothing_when_the_focused_pane_is_a_plugin_pane() {
-    let (mut runtime, fake_pty_backend, client_id, mut viewer) = build_test_runtime();
-    let pane_id = get_only_pane_id(&runtime);
-
-    // Re-file the focused pane's record under `Plugin`, keeping its id: the
-    // layout leaf, the focus, and the PTY handle all stay exactly as they were,
-    // so only the pane's KIND can explain a missing write.
-    let session_id = runtime
-        .get_session_for_client(client_id)
-        .expect("session")
-        .session_id;
-    let session = runtime.session_by_id.get_mut(&session_id).expect("session");
-    let created_at = session
-        .panes
-        .get_pane_record_by_id(pane_id)
-        .expect("pane record")
-        .get_created_at();
-    session.panes.remove_pane_record(pane_id);
-    session
-        .panes
-        .register_pane_record(PaneRecord::from_pane_kind(
-            pane_id,
-            PaneKind::Plugin {
-                plugin_id: PluginId::new(),
-            },
-            created_at,
-        ))
-        .expect("re-inserting a removed pane id");
-
-    apply_key_press(
-        &mut runtime,
-        &mut viewer,
-        build_key_chord(ModFlags::NONE, 'l'),
-        Instant::now(),
-    );
-
-    assert_eq!(
-        fake_pty_backend
-            .list_pane_write_bytes(pane_id)
-            .expect("writes"),
-        Vec::<Vec<u8>>::new()
     );
 }
 
@@ -1643,7 +1709,7 @@ fn one_client_zooming_does_not_stop_another_client_keys() {
                 .clients
                 .get_client_by_id(first_client_id)
                 .expect("client")
-                .get_active_tab(),
+                .get_active_tab_id(),
         )
     };
     let second_client_id = ClientId::new();
@@ -1747,7 +1813,7 @@ fn a_key_writes_nothing_when_the_focused_pane_collapsed_to_a_stack_header() {
                 .clients
                 .get_client_by_id(first_client_id)
                 .expect("client")
-                .get_active_tab(),
+                .get_active_tab_id(),
         )
     };
     let second_client_id = ClientId::new();
@@ -1853,7 +1919,7 @@ fn pending_sequences_stay_independent_across_clients_in_the_same_session() {
                 .clients
                 .get_client_by_id(first_client_id)
                 .expect("client")
-                .get_active_tab(),
+                .get_active_tab_id(),
         )
     };
     let second_client_id = ClientId::new();
@@ -1947,7 +2013,7 @@ fn one_viewer_open_sequence_is_invisible_to_another_viewer() {
                 .clients
                 .get_client_by_id(first_client_id)
                 .expect("client")
-                .get_active_tab(),
+                .get_active_tab_id(),
         )
     };
     let second_client_id = ClientId::new();
@@ -2001,7 +2067,7 @@ fn one_viewer_open_sequence_is_invisible_to_another_viewer() {
 fn a_sequence_grows_to_the_chord_depth_cap_and_no_further() {
     let (mut runtime, fake_pty_backend, _client_id, mut viewer) = build_test_runtime();
     let pane_id = get_only_pane_id(&runtime);
-    // A 4-chord binding, exactly the default `max_chord_depth`. The cap bounds
+    // A 4-chord binding, exactly the default `maximum_chord_depth`. The cap bounds
     // pending state without a check on the input path: a sequence only grows
     // while a longer live binding still starts with it, and the merge drops any
     // binding past the cap, so no pending sequence can outgrow it.
@@ -2017,7 +2083,6 @@ fn a_sequence_grows_to_the_chord_depth_cap_and_no_further() {
         &mut viewer,
         long_key_sequence.clone(),
         ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-        ActionArgs::None,
     );
     let tab_count_before = runtime
         .list_sessions()
@@ -2068,7 +2133,6 @@ fn the_unlock_chord_escapes_a_locked_client_from_inside_an_open_sequence() {
             vec![build_key_chord(ModFlags::NONE, 'a')],
         ),
         ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-        ActionArgs::None,
     );
     apply_key_press(
         &mut runtime,
@@ -2124,7 +2188,6 @@ fn a_locked_binding_holding_the_unlock_chord_never_fires_and_never_captures() {
             vec![KeybindingsConfig::RESERVED_UNLOCK],
         ),
         ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-        ActionArgs::None,
     );
     apply_key_press(
         &mut runtime,
@@ -2195,7 +2258,6 @@ fn expire_key_sequences_before_the_deadline_leaves_pending_intact() {
             (
                 KeySequence::from_first_and_rest(build_key_chord(ModFlags::CTRL, 'y'), Vec::new()),
                 ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-                ActionArgs::None,
             ),
             (
                 KeySequence::from_first_and_rest(
@@ -2203,7 +2265,6 @@ fn expire_key_sequences_before_the_deadline_leaves_pending_intact() {
                     vec![build_key_chord(ModFlags::NONE, 'x')],
                 ),
                 ActionReference::from_core_action_name("unlock").expect("valid core action name"),
-                ActionArgs::None,
             ),
         ],
     );
@@ -2254,7 +2315,6 @@ fn expire_key_sequences_at_the_deadline_fires_the_ambiguous_bindings_exact_match
             (
                 KeySequence::from_first_and_rest(build_key_chord(ModFlags::CTRL, 'y'), Vec::new()),
                 ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-                ActionArgs::None,
             ),
             (
                 KeySequence::from_first_and_rest(
@@ -2262,7 +2322,6 @@ fn expire_key_sequences_at_the_deadline_fires_the_ambiguous_bindings_exact_match
                     vec![build_key_chord(ModFlags::NONE, 'x')],
                 ),
                 ActionReference::from_core_action_name("unlock").expect("valid core action name"),
-                ActionArgs::None,
             ),
         ],
     );
@@ -2309,7 +2368,6 @@ fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline()
             (
                 KeySequence::from_first_and_rest(build_key_chord(ModFlags::CTRL, 'y'), Vec::new()),
                 ActionReference::from_core_action_name("new-tab").expect("valid core action name"),
-                ActionArgs::None,
             ),
             (
                 KeySequence::from_first_and_rest(
@@ -2317,7 +2375,6 @@ fn a_held_exact_binding_survives_a_key_it_cannot_use_and_fires_at_its_deadline()
                     vec![build_key_chord(ModFlags::NONE, 'x')],
                 ),
                 ActionReference::from_core_action_name("unlock").expect("valid core action name"),
-                ActionArgs::None,
             ),
         ],
     );
@@ -2515,6 +2572,7 @@ fn a_host_paste_writes_nothing_when_the_focused_pane_is_suppressed() {
             row_count: 3,
         },
         None,
+        None,
     );
     assert!(
         runtime
@@ -2522,7 +2580,7 @@ fn a_host_paste_writes_nothing_when_the_focused_pane_is_suppressed() {
             .expect("snapshot")
             .session_snapshot
             .active_tab_snapshot
-            .are_all_panes_suppressed,
+            .is_every_pane_suppressed,
         "test setup: the sole pane must be suppressed at this size"
     );
 
@@ -2556,7 +2614,6 @@ fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
         BoundAction {
             action_reference: ActionReference::from_core_action_name("no-such-action")
                 .expect("valid core action name"),
-            action_arguments: ActionArgs::None,
         },
         Direction::Right,
     );
@@ -2571,7 +2628,7 @@ fn a_bound_action_the_session_does_not_know_dispatches_nothing() {
             .len(),
         tab_count_before
     );
-    assert_eq!(runtime.pty_handle_by_pane_id.len(), 1);
+    assert_eq!(runtime.live_pane_ids.len(), 1);
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)

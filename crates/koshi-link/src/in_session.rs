@@ -44,15 +44,15 @@ impl InSessionContext {
     /// identity is missing or malformed. Presence of `KOSHI` is the marker;
     /// its value is not inspected.
     pub fn from_env() -> Result<Option<InSessionContext>, CliError> {
-        Self::from_lookup(|environment_variable_name| {
-            std::env::var_os(environment_variable_name).map(|environment_variable_value| {
-                environment_variable_value.to_string_lossy().into_owned()
+        Self::from_environment_lookup(|environment_variable_name| {
+            std::env::var_os(environment_variable_name).map(|environment_variable_text| {
+                environment_variable_text.to_string_lossy().into_owned()
             })
         })
     }
 
     /// Build the identity from one lookup per environment variable name.
-    fn from_lookup(
+    fn from_environment_lookup(
         lookup_environment_variable: impl Fn(&str) -> Option<String>,
     ) -> Result<Option<InSessionContext>, CliError> {
         if lookup_environment_variable("KOSHI").is_none() {
@@ -91,13 +91,13 @@ fn parse_required_environment_variable_id(
     environment_variable_name: &str,
     identifier_prefix: &str,
 ) -> Result<Uuid, CliError> {
-    let environment_variable_value = lookup_environment_variable(environment_variable_name)
+    let environment_variable_text = lookup_environment_variable(environment_variable_name)
         .ok_or_else(|| CliError::InSessionEnv {
             detail: format!("`KOSHI` is set but `{environment_variable_name}` is missing"),
         })?;
-    parse_environment_variable_value(
+    parse_environment_variable_id_text(
         environment_variable_name,
-        &environment_variable_value,
+        &environment_variable_text,
         identifier_prefix,
     )
 }
@@ -110,10 +110,10 @@ fn parse_optional_environment_variable_id(
     identifier_prefix: &str,
 ) -> Result<Option<Uuid>, CliError> {
     lookup_environment_variable(environment_variable_name)
-        .map(|environment_variable_value| {
-            parse_environment_variable_value(
+        .map(|environment_variable_text| {
+            parse_environment_variable_id_text(
                 environment_variable_name,
-                &environment_variable_value,
+                &environment_variable_text,
                 identifier_prefix,
             )
         })
@@ -122,15 +122,15 @@ fn parse_optional_environment_variable_id(
 
 /// Parse one variable's value as a `<prefix>-<uuid>` id or a bare UUID,
 /// reporting the variable name and the offending value on failure.
-fn parse_environment_variable_value(
+fn parse_environment_variable_id_text(
     environment_variable_name: &str,
-    environment_variable_value: &str,
+    environment_variable_text: &str,
     identifier_prefix: &str,
 ) -> Result<Uuid, CliError> {
-    parse_prefixed_uuid(environment_variable_value, identifier_prefix).map_err(|expected_format| {
+    parse_prefixed_uuid(environment_variable_text, identifier_prefix).map_err(|expected_format| {
         CliError::InSessionEnv {
             detail: format!(
-                "`{environment_variable_name}` is `{environment_variable_value}`: {expected_format}"
+                "`{environment_variable_name}` is `{environment_variable_text}`: {expected_format}"
             ),
         }
     })

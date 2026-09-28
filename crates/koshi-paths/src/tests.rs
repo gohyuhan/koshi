@@ -95,7 +95,7 @@ fn each_resolver_routes_to_its_own_platform_dir() {
 }
 
 #[test]
-fn koshi_dir_env_vars_are_ignored() {
+fn unrecognized_koshi_directory_environment_variables_are_ignored() {
     // Setting `KOSHI_CONFIG_DIR`, `KOSHI_DATA_DIR` and `KOSHI_STATE_DIR`
     // leaves every resolved directory at its platform default.
     let mut environment_guard = EnvGuard::new();
@@ -282,7 +282,7 @@ fn the_runtime_directory_is_named_after_the_effective_user_id() {
     assert_eq!(
         resolve_runtime_directory_with_rule(),
         Some((
-            PathBuf::from(format!("/tmp/koshi-{}", effective_user_id())),
+            PathBuf::from(format!("/tmp/koshi-{}", get_effective_user_id())),
             RuntimeDirectoryRule::UserId
         ))
     );
@@ -307,7 +307,7 @@ fn the_runtime_directory_is_run_under_the_data_directory() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_paths_land_under_library() {
+fn macos_project_directories_resolve_under_library_application_support() {
     let _environment_guard = EnvGuard::new();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
     let home_directory_path = platform_directories.home_dir();
@@ -328,7 +328,7 @@ fn macos_paths_land_under_library() {
 
 #[cfg(windows)]
 #[test]
-fn windows_config_dir_lands_under_appdata_config() {
+fn windows_config_directory_resolves_under_appdata_config() {
     let _environment_guard = EnvGuard::new();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
 
@@ -340,7 +340,7 @@ fn windows_config_dir_lands_under_appdata_config() {
 
 #[cfg(windows)]
 #[test]
-fn windows_state_dir_lands_under_local_appdata_data() {
+fn windows_state_directory_resolves_under_local_appdata_data() {
     let _environment_guard = EnvGuard::new();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
 
@@ -428,49 +428,6 @@ fn empty_xdg_variables_are_ignored() {
 }
 
 #[test]
-fn ensure_directory_creates_nested_and_accepts_existing() {
-    let test_directory = tempfile::tempdir().expect("tempdir");
-    let nested_directory_path = test_directory.path().join("a").join("b");
-
-    ensure_directory(&nested_directory_path).expect("first create");
-    ensure_directory(&nested_directory_path).expect("existing directory is success");
-    assert!(nested_directory_path.is_dir());
-}
-
-#[test]
-fn ensure_directory_reports_the_blocking_cause() {
-    // A file where a parent directory must go fails with the OS's own error
-    // kind: `NotADirectory` (`ENOTDIR`) on Unix, `AlreadyExists`
-    // (`ERROR_ALREADY_EXISTS`) on Windows.
-    let test_directory = tempfile::tempdir().expect("tempdir");
-    let blocking_file_path = test_directory.path().join("occupied");
-    std::fs::write(&blocking_file_path, b"x").expect("plant blocking file");
-
-    let directory_error =
-        ensure_directory(&blocking_file_path.join("child")).expect_err("file blocks the directory");
-    #[cfg(unix)]
-    assert_eq!(directory_error.kind(), std::io::ErrorKind::NotADirectory);
-    #[cfg(windows)]
-    assert_eq!(directory_error.kind(), std::io::ErrorKind::AlreadyExists);
-}
-
-#[test]
-fn ensure_directory_refuses_a_file_at_the_path() {
-    let test_directory = tempfile::tempdir().expect("tempdir");
-    let blocking_file_path = test_directory.path().join("occupied");
-    std::fs::write(&blocking_file_path, b"x").expect("plant the file");
-
-    let directory_error =
-        ensure_directory(&blocking_file_path).expect_err("a file is not a directory");
-
-    assert_eq!(directory_error.kind(), io::ErrorKind::AlreadyExists);
-    assert_eq!(
-        std::fs::read(&blocking_file_path).expect("read the planted file"),
-        b"x"
-    );
-}
-
-#[test]
 fn ensure_private_directory_creates_owner_only() {
     let test_directory = tempfile::tempdir().expect("tempdir");
     let private_directory_path = test_directory.path().join("run");
@@ -495,7 +452,7 @@ fn ensure_private_directory_creates_every_missing_parent() {
 }
 
 #[test]
-fn the_runtime_directory_the_variable_names_is_created_private() {
+fn runtime_directory_override_is_created_with_private_permissions() {
     // The startup path every consumer runs: `KOSHI_RUNTIME_DIR` names the
     // directory, `resolve_runtime_directory` answers it, `ensure_private_directory` creates it and
     // every missing parent below it.
@@ -521,12 +478,12 @@ fn ensure_private_directory_reports_a_file_parent() {
     let child_directory_path = blocking_file_path.join("child");
     std::fs::write(&blocking_file_path, b"x").expect("plant blocking file");
 
-    let error =
+    let io_error =
         ensure_private_directory(&child_directory_path).expect_err("file blocks the directory");
     #[cfg(unix)]
-    assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    assert_eq!(io_error.kind(), io::ErrorKind::NotADirectory);
     #[cfg(windows)]
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(io_error.kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(
         std::fs::read(&blocking_file_path).expect("read the blocking file"),
         b"x"
@@ -544,10 +501,10 @@ fn ensure_private_directory_refuses_a_regular_file_planted_in_its_place() {
     let private_directory_path = test_directory.path().join("run");
     std::fs::write(&private_directory_path, b"not a directory").expect("plant the file");
 
-    let error =
+    let io_error =
         ensure_private_directory(&private_directory_path).expect_err("a file is not a directory");
 
-    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(io_error.kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(
         std::fs::read(&private_directory_path).expect("read the planted file"),
         b"not a directory"
@@ -589,7 +546,7 @@ fn ensure_private_directory_clears_the_sticky_bit() {
 #[cfg(unix)]
 #[test]
 fn ensure_private_directory_refuses_a_directory_another_user_owns() {
-    if effective_user_id() != 0 {
+    if get_effective_user_id() != 0 {
         eprintln!(
             "skipped `ensure_private_directory_refuses_a_directory_another_user_owns`: \
              planting a directory owned by another user needs root; re-run under sudo"
@@ -611,7 +568,7 @@ fn ensure_private_directory_refuses_a_directory_another_user_owns() {
         format!(
             "{} is owned by uid 1, expected {}",
             private_directory_path.display(),
-            effective_user_id()
+            get_effective_user_id()
         )
     );
 }
@@ -831,7 +788,7 @@ fn ensure_shared_user_directory_hands_back_this_users_own_directory() {
     {
         assert_eq!(
             user_directory,
-            shared_base_path.join(effective_user_id().to_string())
+            shared_base_path.join(get_effective_user_id().to_string())
         );
         // Mode `0755`.
         assert_eq!(get_directory_mode(&user_directory), 0o755);
@@ -885,7 +842,7 @@ fn ensure_shared_user_directory_opens_a_directory_left_closed_to_other_users() {
     let shared_base_path = test_directory.path().join("koshi");
     ensure_shared_base(&shared_base_path).expect("create the shared base path");
     plant_directory(
-        &shared_base_path.join(effective_user_id().to_string()),
+        &shared_base_path.join(get_effective_user_id().to_string()),
         0o700,
     );
 
@@ -902,7 +859,7 @@ fn ensure_shared_user_directory_closes_a_directory_left_open_to_other_users_writ
     let shared_base_path = test_directory.path().join("koshi");
     ensure_shared_base(&shared_base_path).expect("create the shared base path");
     plant_directory(
-        &shared_base_path.join(effective_user_id().to_string()),
+        &shared_base_path.join(get_effective_user_id().to_string()),
         0o777,
     );
 
@@ -917,7 +874,7 @@ fn ensure_shared_user_directory_clears_the_sticky_bit() {
     let test_directory = tempfile::tempdir().expect("tempdir");
     let shared_base_path = test_directory.path().join("koshi");
     ensure_shared_base(&shared_base_path).expect("create the shared base path");
-    let planted = shared_base_path.join(effective_user_id().to_string());
+    let planted = shared_base_path.join(get_effective_user_id().to_string());
     plant_directory(&planted, 0o1755);
     assert_eq!(get_directory_mode(&planted), 0o1755);
 
@@ -935,7 +892,7 @@ fn ensure_shared_user_directory_refuses_a_symbolic_link_planted_in_its_place() {
     ensure_shared_base(&shared_base_path).expect("create the shared base path");
     let target_directory_path = test_directory.path().join("target");
     plant_directory(&target_directory_path, 0o755);
-    let user_directory = shared_base_path.join(effective_user_id().to_string());
+    let user_directory = shared_base_path.join(get_effective_user_id().to_string());
     std::os::unix::fs::symlink(&target_directory_path, &user_directory).expect("plant the link");
 
     let shared_user_directory_error =
@@ -957,7 +914,7 @@ fn ensure_shared_user_directory_refuses_a_regular_file_planted_in_its_place() {
     let test_directory = tempfile::tempdir().expect("tempdir");
     let shared_base_path = test_directory.path().join("koshi");
     ensure_shared_base(&shared_base_path).expect("create the shared base path");
-    let user_directory = shared_base_path.join(effective_user_id().to_string());
+    let user_directory = shared_base_path.join(get_effective_user_id().to_string());
     std::fs::write(&user_directory, b"not a directory").expect("plant the file");
 
     let shared_user_directory_error =
@@ -982,7 +939,7 @@ fn ensure_shared_user_directory_refuses_a_regular_file_planted_in_its_place() {
 #[cfg(unix)]
 #[test]
 fn ensure_shared_user_directory_refuses_a_directory_another_user_owns() {
-    if effective_user_id() != 0 {
+    if get_effective_user_id() != 0 {
         eprintln!(
             "skipped `ensure_shared_user_directory_refuses_a_directory_another_user_owns`: \
              planting a directory owned by another user needs root; re-run under sudo"
@@ -992,7 +949,7 @@ fn ensure_shared_user_directory_refuses_a_directory_another_user_owns() {
     let test_directory = tempfile::tempdir().expect("tempdir");
     let shared_base_path = test_directory.path().join("koshi");
     ensure_shared_base(&shared_base_path).expect("create the shared base path");
-    let user_directory = shared_base_path.join(effective_user_id().to_string());
+    let user_directory = shared_base_path.join(get_effective_user_id().to_string());
     plant_directory(&user_directory, 0o755);
     std::os::unix::fs::chown(&user_directory, Some(1), None)
         .expect("hand the directory to another user");
@@ -1006,7 +963,7 @@ fn ensure_shared_user_directory_refuses_a_directory_another_user_owns() {
         format!(
             "{} is owned by uid 1, expected {}",
             user_directory.display(),
-            effective_user_id()
+            get_effective_user_id()
         )
     );
 }

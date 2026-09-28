@@ -84,12 +84,12 @@ fn the_supervisor_link_wire_shape_belongs_to_this_protocol_version() {
         serialize_test_wire_message(&SupervisorRequest {
             request_id: 1,
             request_kind: SupervisorRequestKind::Hello {
-                min_protocol_version: 2,
-                max_protocol_version: 2,
+                minimum_protocol_version: 2,
+                maximum_protocol_version: 2,
                 connection_token: build_test_connection_token(),
             },
         }),
-        r#"{"request_id":1,"request_kind":{"Hello":{"min_protocol_version":2,"max_protocol_version":2,"connection_token":"k7QxSecret"}}}"#
+        r#"{"request_id":1,"request_kind":{"Hello":{"minimum_protocol_version":2,"maximum_protocol_version":2,"connection_token":"k7QxSecret"}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&SupervisorRequest {
@@ -336,8 +336,8 @@ fn a_hello_built_here_names_this_builds_range() {
     assert_eq!(
         SupervisorRequestKind::build_hello_request(build_test_connection_token()),
         SupervisorRequestKind::Hello {
-            min_protocol_version: 2,
-            max_protocol_version: 2,
+            minimum_protocol_version: 2,
+            maximum_protocol_version: 2,
             connection_token: build_test_connection_token(),
         }
     );
@@ -353,8 +353,8 @@ fn this_build_speaks_supervisor_link_version_two_only() {
 fn every_request_kind_names_itself_without_its_payload() {
     assert_eq!(
         SupervisorRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            minimum_protocol_version: 1,
+            maximum_protocol_version: 1,
             connection_token: build_test_connection_token(),
         }
         .get_request_kind_name(),
@@ -485,11 +485,11 @@ fn every_answer_names_itself_and_the_wire_list_holds_each_name_in_order() {
     ];
 
     for (supervisor_result, expected_wire_name) in &results {
-        assert_eq!(supervisor_result.wire_name(), *expected_wire_name);
+        assert_eq!(supervisor_result.get_wire_name(), *expected_wire_name);
     }
     let supervisor_result_names: Vec<&str> = results
         .iter()
-        .map(|(supervisor_result, _)| supervisor_result.wire_name())
+        .map(|(supervisor_result, _)| supervisor_result.get_wire_name())
         .collect();
     assert_eq!(supervisor_result_names, SupervisorResult::VARIANTS);
 }
@@ -536,18 +536,20 @@ fn every_request_kind_and_event_travels_under_the_name_it_reports() {
 
     for request_kind in &kinds {
         assert_eq!(
-            request_kind.wire_name(),
+            request_kind.get_wire_name(),
             request_kind.get_request_kind_name()
         );
     }
-    let request_kind_names: Vec<&str> =
-        kinds.iter().map(SupervisorRequestKind::wire_name).collect();
+    let request_kind_names: Vec<&str> = kinds
+        .iter()
+        .map(SupervisorRequestKind::get_wire_name)
+        .collect();
     assert_eq!(request_kind_names, SupervisorRequestKind::VARIANTS);
 
     for event in &events {
-        assert_eq!(event.wire_name(), event.get_event_name());
+        assert_eq!(event.get_wire_name(), event.get_event_name());
     }
-    let event_names: Vec<&str> = events.iter().map(SupervisorEvent::wire_name).collect();
+    let event_names: Vec<&str> = events.iter().map(SupervisorEvent::get_wire_name).collect();
     assert_eq!(event_names, SupervisorEvent::VARIANTS);
 }
 
@@ -731,8 +733,8 @@ fn a_hello_with_the_right_version_and_token_is_accepted() {
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-            max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+            maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
             connection_token: build_test_connection_token(),
         }),
         Ok(())
@@ -748,8 +750,8 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
     let mut gate = SupervisorHandshake::from_connection_token(build_test_connection_token());
 
     gate.validate_request_kind(&SupervisorRequestKind::Hello {
-        min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-        max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+        maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
         connection_token: build_test_connection_token(),
     })
     .expect("the Hello is accepted");
@@ -771,8 +773,8 @@ fn a_session_server_speaking_only_above_this_supervisor_is_refused_naming_both_r
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: above,
-            max_protocol_version: above,
+            minimum_protocol_version: above,
+            maximum_protocol_version: above,
             connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
@@ -796,8 +798,8 @@ fn a_session_server_reaching_above_this_supervisor_settles_on_the_supervisors_hi
     let mut gate = SupervisorHandshake::from_connection_token(build_test_connection_token());
 
     gate.validate_request_kind(&SupervisorRequestKind::Hello {
-        min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-        max_protocol_version: SUPERVISOR_PROTOCOL_VERSION + 3,
+        minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+        maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION + 3,
         connection_token: build_test_connection_token(),
     })
     .expect("a range covering this supervisor's is accepted");
@@ -815,8 +817,8 @@ fn a_session_server_speaking_only_below_this_supervisor_is_refused_naming_both_r
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: below,
-            max_protocol_version: below,
+            minimum_protocol_version: below,
+            maximum_protocol_version: below,
             connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
@@ -841,8 +843,8 @@ fn a_session_server_reaching_below_and_above_this_supervisor_settles_on_the_supe
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION - 1,
-            max_protocol_version: SUPERVISOR_PROTOCOL_VERSION + 3,
+            minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION - 1,
+            maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION + 3,
             connection_token: build_test_connection_token(),
         }),
         Ok(())
@@ -861,8 +863,8 @@ fn a_hello_whose_lowest_version_is_above_its_highest_is_refused_naming_both_rang
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: lowest,
-            max_protocol_version: highest,
+            minimum_protocol_version: lowest,
+            maximum_protocol_version: highest,
             connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
@@ -887,8 +889,8 @@ fn a_hello_with_a_wrong_token_is_refused_as_bad_build_test_connection_token() {
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-            max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+            maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
@@ -912,8 +914,8 @@ fn an_out_of_range_hello_with_a_wrong_token_is_refused_for_the_version() {
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: above,
-            max_protocol_version: above,
+            minimum_protocol_version: above,
+            maximum_protocol_version: above,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
@@ -976,8 +978,8 @@ fn a_wrong_token_arriving_on_an_open_link_is_refused_and_leaves_it_open() {
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-            max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+            maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("wrongToken"),
         }),
         Err(IpcErrorPayload {
@@ -1009,8 +1011,8 @@ fn a_version_range_arriving_on_an_open_link_that_misses_this_one_leaves_it_open(
 
     assert_eq!(
         gate.validate_request_kind(&SupervisorRequestKind::Hello {
-            min_protocol_version: above,
-            max_protocol_version: above,
+            minimum_protocol_version: above,
+            maximum_protocol_version: above,
             connection_token: build_test_connection_token(),
         }),
         Err(IpcErrorPayload {
@@ -1132,8 +1134,8 @@ fn an_unknown_kind_is_refused_by_name_once_the_gate_is_open() {
     );
 
     gate.validate_request_kind(&SupervisorRequestKind::Hello {
-        min_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
-        max_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
+        minimum_protocol_version: MIN_SUPERVISOR_PROTOCOL_VERSION,
+        maximum_protocol_version: SUPERVISOR_PROTOCOL_VERSION,
         connection_token: build_test_connection_token(),
     })
     .expect("the Hello is accepted");

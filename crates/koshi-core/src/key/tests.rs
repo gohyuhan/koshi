@@ -6,38 +6,38 @@
 use super::*;
 
 #[test]
-fn none_is_empty_and_every_flag_is_a_distinct_bit() {
+fn no_modifier_flags_are_empty_and_each_modifier_has_a_distinct_bit() {
     assert!(ModFlags::NONE.is_empty());
-    assert_eq!(ModFlags::NONE.bits(), 0);
-    assert_eq!(ModFlags::CTRL.bits(), 1);
-    assert_eq!(ModFlags::ALT.bits(), 2);
-    assert_eq!(ModFlags::SHIFT.bits(), 4);
-    assert_eq!(ModFlags::SUPER.bits(), 8);
+    assert_eq!(ModFlags::NONE.get_bits(), 0);
+    assert_eq!(ModFlags::CTRL.get_bits(), 1);
+    assert_eq!(ModFlags::ALT.get_bits(), 2);
+    assert_eq!(ModFlags::SHIFT.get_bits(), 4);
+    assert_eq!(ModFlags::SUPER.get_bits(), 8);
     assert!(!ModFlags::CTRL.is_empty());
 }
 
 #[test]
-fn union_sets_both_bits() {
+fn modifier_flag_union_keeps_both_bits() {
     let combined_modifier_flags = ModFlags::CTRL.union(ModFlags::SHIFT);
-    assert_eq!(combined_modifier_flags.bits(), 5);
+    assert_eq!(combined_modifier_flags.get_bits(), 5);
     assert_eq!(combined_modifier_flags, ModFlags::CTRL | ModFlags::SHIFT);
 }
 
 #[test]
-fn contains_is_subset_and_intersects_is_overlap() {
-    let ctrl_shift = ModFlags::CTRL | ModFlags::SHIFT;
+fn modifier_flag_queries_check_subset_and_overlap() {
+    let control_and_shift_modifier_flags = ModFlags::CTRL | ModFlags::SHIFT;
 
-    assert!(ctrl_shift.has_all_modifiers(ModFlags::CTRL));
-    assert!(ctrl_shift.has_all_modifiers(ModFlags::SHIFT));
-    assert!(ctrl_shift.has_all_modifiers(ctrl_shift));
-    assert!(ctrl_shift.has_all_modifiers(ModFlags::NONE));
-    assert!(!ctrl_shift.has_all_modifiers(ModFlags::ALT));
-    assert!(!ctrl_shift.has_all_modifiers(ModFlags::CTRL | ModFlags::ALT));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(ModFlags::CTRL));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(ModFlags::SHIFT));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(control_and_shift_modifier_flags));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(ModFlags::NONE));
+    assert!(!control_and_shift_modifier_flags.has_all_modifiers(ModFlags::ALT));
+    assert!(!control_and_shift_modifier_flags.has_all_modifiers(ModFlags::CTRL | ModFlags::ALT));
 
-    assert!(ctrl_shift.has_shared_modifier(ModFlags::CTRL));
-    assert!(ctrl_shift.has_shared_modifier(ModFlags::CTRL | ModFlags::ALT));
-    assert!(!ctrl_shift.has_shared_modifier(ModFlags::ALT));
-    assert!(!ctrl_shift.has_shared_modifier(ModFlags::NONE));
+    assert!(control_and_shift_modifier_flags.has_shared_modifier(ModFlags::CTRL));
+    assert!(control_and_shift_modifier_flags.has_shared_modifier(ModFlags::CTRL | ModFlags::ALT));
+    assert!(!control_and_shift_modifier_flags.has_shared_modifier(ModFlags::ALT));
+    assert!(!control_and_shift_modifier_flags.has_shared_modifier(ModFlags::NONE));
 }
 
 #[test]
@@ -320,13 +320,14 @@ fn decoding_refuses_a_function_key_number_no_terminal_names() {
     }
 
     // The two ends of the range still decode.
-    for number in [1_u8, 24] {
-        let chord_json = format!(r#"{{"modifier_flags":0,"key":{{"Named":{{"F":{number}}}}}}}"#);
+    for function_key_number in [1_u8, 24] {
+        let chord_json =
+            format!(r#"{{"modifier_flags":0,"key":{{"Named":{{"F":{function_key_number}}}}}}}"#);
         let decoded_chord: KeyChord =
             serde_json::from_str(&chord_json).expect("a real function key");
         assert_eq!(
             decoded_chord,
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::F(number)))
+            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::F(function_key_number)))
         );
     }
 }
@@ -341,15 +342,15 @@ fn the_chord_wire_form_is_the_field_names_the_modifier_bits_and_the_variant_name
 }
 
 #[test]
-fn every_combination_of_non_text_modifiers_makes_a_chord_untypeable() {
-    let non_text_modifier_combinations = [
+fn every_combination_of_non_typing_modifiers_makes_a_chord_untypeable() {
+    let non_typing_modifier_combinations = [
         ModFlags::CTRL | ModFlags::ALT,
         ModFlags::CTRL | ModFlags::SUPER,
         ModFlags::ALT | ModFlags::SUPER,
         ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER,
         ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER | ModFlags::SHIFT,
     ];
-    for modifier_flags in non_text_modifier_combinations {
+    for modifier_flags in non_typing_modifier_combinations {
         assert!(
             !KeyChord::from_parts(modifier_flags, Key::Char('p')).is_typeable(),
             "{modifier_flags} should be untypeable"
@@ -381,11 +382,14 @@ fn try_from_accepts_the_four_modifier_bits_and_refuses_every_other() {
 
 #[test]
 fn mod_flags_serde_wire_form_is_the_bit_number() {
-    let ctrl_super = ModFlags::CTRL | ModFlags::SUPER;
-    assert_eq!(serde_json::to_string(&ctrl_super).expect("serialize"), "9");
+    let control_and_super_modifier_flags = ModFlags::CTRL | ModFlags::SUPER;
+    assert_eq!(
+        serde_json::to_string(&control_and_super_modifier_flags).expect("serialize"),
+        "9"
+    );
     assert_eq!(
         serde_json::from_str::<ModFlags>("9").expect("deserialize"),
-        ctrl_super
+        control_and_super_modifier_flags
     );
 }
 
@@ -469,21 +473,21 @@ fn build_key_input(key: Key, modifier_flags: KeyModifierFlags) -> KeyInput {
 
 #[test]
 fn every_reported_modifier_is_a_distinct_bit() {
-    assert_eq!(KeyModifierFlags::SHIFT.bits(), 1);
-    assert_eq!(KeyModifierFlags::ALT.bits(), 2);
-    assert_eq!(KeyModifierFlags::CTRL.bits(), 4);
-    assert_eq!(KeyModifierFlags::SUPER.bits(), 8);
-    assert_eq!(KeyModifierFlags::HYPER.bits(), 16);
-    assert_eq!(KeyModifierFlags::META.bits(), 32);
-    assert_eq!(KeyModifierFlags::CAPS_LOCK.bits(), 64);
-    assert_eq!(KeyModifierFlags::NUM_LOCK.bits(), 128);
-    assert_eq!(KeyModifierFlags::NONE.bits(), 0);
+    assert_eq!(KeyModifierFlags::SHIFT.get_bits(), 1);
+    assert_eq!(KeyModifierFlags::ALT.get_bits(), 2);
+    assert_eq!(KeyModifierFlags::CTRL.get_bits(), 4);
+    assert_eq!(KeyModifierFlags::SUPER.get_bits(), 8);
+    assert_eq!(KeyModifierFlags::HYPER.get_bits(), 16);
+    assert_eq!(KeyModifierFlags::META.get_bits(), 32);
+    assert_eq!(KeyModifierFlags::CAPS_LOCK.get_bits(), 64);
+    assert_eq!(KeyModifierFlags::NUM_LOCK.get_bits(), 128);
+    assert_eq!(KeyModifierFlags::NONE.get_bits(), 0);
 }
 
 #[test]
 fn the_stored_bitmap_keeps_all_eight_bits() {
-    let every_modifier_flags = KeyModifierFlags::from_bits(0b1111_1111);
-    for one_modifier in [
+    let all_key_modifier_flags = KeyModifierFlags::from_bits(0b1111_1111);
+    for modifier_flag in [
         KeyModifierFlags::SHIFT,
         KeyModifierFlags::ALT,
         KeyModifierFlags::CTRL,
@@ -494,11 +498,11 @@ fn the_stored_bitmap_keeps_all_eight_bits() {
         KeyModifierFlags::NUM_LOCK,
     ] {
         assert!(
-            every_modifier_flags.has_all_modifiers(one_modifier),
-            "{one_modifier:?}"
+            all_key_modifier_flags.has_all_modifiers(modifier_flag),
+            "{modifier_flag:?}"
         );
     }
-    assert_eq!(every_modifier_flags.bits(), 255);
+    assert_eq!(all_key_modifier_flags.get_bits(), 255);
 }
 
 #[test]
@@ -616,13 +620,13 @@ fn a_shifted_alternative_never_replaces_a_named_key() {
 #[test]
 fn a_key_the_binding_grammar_cannot_name_projects_to_no_chord() {
     // Left Shift is codepoint 57441 and no binding names it.
-    let left_shift = KeyInput {
+    let left_shift_key_input = KeyInput {
         key: KeyIdentity::Codepoint(57_441),
         ..build_key_press(Key::Char('a'))
     };
-    assert_eq!(left_shift.to_binding_chord(), None);
+    assert_eq!(left_shift_key_input.to_binding_chord(), None);
     assert_ne!(
-        left_shift.key,
+        left_shift_key_input.key,
         KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT)
     );
 
@@ -635,20 +639,20 @@ fn a_key_the_binding_grammar_cannot_name_projects_to_no_chord() {
 
 #[test]
 fn a_text_only_event_names_codepoint_zero_and_projects_to_no_chord() {
-    let text_only = KeyInput {
+    let text_only_key_input = KeyInput {
         key: KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT),
         associated_text: "å".to_string(),
         ..build_key_press(Key::Char('a'))
     };
     assert_eq!(
-        text_only.key,
+        text_only_key_input.key,
         KeyIdentity::Codepoint(TEXT_ONLY_KEY_CODEPOINT)
     );
-    assert_eq!(text_only.to_binding_chord(), None);
+    assert_eq!(text_only_key_input.to_binding_chord(), None);
     // No physical key, alternative or modifier is invented for it.
-    assert_eq!(text_only.shifted_key, None);
-    assert_eq!(text_only.base_layout_key, None);
-    assert_eq!(text_only.modifier_flags, KeyModifierFlags::NONE);
+    assert_eq!(text_only_key_input.shifted_key, None);
+    assert_eq!(text_only_key_input.base_layout_key, None);
+    assert_eq!(text_only_key_input.modifier_flags, KeyModifierFlags::NONE);
 }
 
 #[test]

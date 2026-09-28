@@ -10,16 +10,16 @@
 
 use std::sync::Arc;
 
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
-use ratatui::style::{Color as RatatuiColor, Modifier, Style};
+use ratatui::style::Style;
 
 use koshi_core::ids::PaneId;
 use koshi_terminal::graphics::{GraphicsProtocol, ImageRecord};
 use koshi_terminal::state::ImagePlacementId;
-use koshi_terminal::style::{Color as CellColor, Style as CellStyle, UnderlineStyle};
+use koshi_terminal::style::Style as CellStyle;
 
-use crate::render::{compute_content_rect, compute_pane_area, find_pane_snapshot, place_cell_rect};
+use crate::render::{compute_layout_origin, find_pane_snapshot, place_cell_rect};
 use crate::snapshot::{CommittedRegions, ImagePlacementSnapshot, RenderSnapshot};
 
 /// The text a client paints when it cannot display terminal image pixels.
@@ -55,62 +55,6 @@ impl Default for ImageCellState {
     }
 }
 
-impl ImageCellState {
-    fn from_buffer_cell(buffer_cell: &Cell) -> Self {
-        let mut symbol_characters = buffer_cell.symbol().chars();
-        let character = symbol_characters.next().unwrap_or(' ');
-        let combining_characters = symbol_characters.collect();
-        let mut style = CellStyle::default();
-        style.set_foreground_color(convert_ratatui_color(buffer_cell.fg));
-        style.set_background_color(convert_ratatui_color(buffer_cell.bg));
-        let modifiers = buffer_cell.modifier;
-        style.set_bold(modifiers.contains(Modifier::BOLD));
-        style.set_faint(modifiers.contains(Modifier::DIM));
-        style.set_italic(modifiers.contains(Modifier::ITALIC));
-        style.set_underline(if modifiers.contains(Modifier::UNDERLINED) {
-            UnderlineStyle::Single
-        } else {
-            UnderlineStyle::None
-        });
-        style.set_blink(
-            modifiers.contains(Modifier::SLOW_BLINK) || modifiers.contains(Modifier::RAPID_BLINK),
-        );
-        style.set_conceal(modifiers.contains(Modifier::HIDDEN));
-        style.set_strike(modifiers.contains(Modifier::CROSSED_OUT));
-        style.set_reverse(modifiers.contains(Modifier::REVERSED));
-        Self {
-            character,
-            cell_width: 1,
-            combining_characters,
-            style,
-        }
-    }
-}
-
-fn convert_ratatui_color(color: RatatuiColor) -> CellColor {
-    match color {
-        RatatuiColor::Reset => CellColor::Default,
-        RatatuiColor::Black => CellColor::Indexed(0),
-        RatatuiColor::Red => CellColor::Indexed(1),
-        RatatuiColor::Green => CellColor::Indexed(2),
-        RatatuiColor::Yellow => CellColor::Indexed(3),
-        RatatuiColor::Blue => CellColor::Indexed(4),
-        RatatuiColor::Magenta => CellColor::Indexed(5),
-        RatatuiColor::Cyan => CellColor::Indexed(6),
-        RatatuiColor::Gray => CellColor::Indexed(7),
-        RatatuiColor::DarkGray => CellColor::Indexed(8),
-        RatatuiColor::LightRed => CellColor::Indexed(9),
-        RatatuiColor::LightGreen => CellColor::Indexed(10),
-        RatatuiColor::LightYellow => CellColor::Indexed(11),
-        RatatuiColor::LightBlue => CellColor::Indexed(12),
-        RatatuiColor::LightMagenta => CellColor::Indexed(13),
-        RatatuiColor::LightCyan => CellColor::Indexed(14),
-        RatatuiColor::White => CellColor::Indexed(15),
-        RatatuiColor::Rgb(red, green, blue) => CellColor::Rgb(red, green, blue),
-        RatatuiColor::Indexed(color_index) => CellColor::Indexed(color_index),
-    }
-}
-
 /// One bounded row-major snapshot of rendered cell facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageCellSnapshot {
@@ -137,35 +81,6 @@ impl ImageCellSnapshot {
             screen_area,
             cell_states,
         })
-    }
-
-    /// Overlay the rendered cells in one bounded rectangle.
-    pub fn overlay_buffer(&mut self, overlay_area: RatatuiRect, buffer: &Buffer) {
-        let target_area = overlay_area
-            .intersection(self.screen_area)
-            .intersection(buffer.area);
-        if target_area.width == 0 || target_area.height == 0 {
-            return;
-        }
-        for row_offset in 0..target_area.height {
-            for column_offset in 0..target_area.width {
-                let screen_column = target_area.x + column_offset;
-                let screen_row = target_area.y + row_offset;
-                let row_index = usize::from(screen_row - self.screen_area.y);
-                let column_index = usize::from(screen_column - self.screen_area.x);
-                let Some(cell_index) = row_index
-                    .checked_mul(usize::from(self.screen_area.width))
-                    .and_then(|cell_index| cell_index.checked_add(column_index))
-                else {
-                    continue;
-                };
-                let Some(cell_state) = self.cell_states.get_mut(cell_index) else {
-                    continue;
-                };
-                *cell_state =
-                    ImageCellState::from_buffer_cell(&buffer[(screen_column, screen_row)]);
-            }
-        }
     }
 
     /// Return the cell at an absolute frame position.
@@ -207,17 +122,7 @@ pub fn build_image_cell_snapshot(
         });
     }
 
-    let effective_layout_rect = compute_content_rect(
-        compute_pane_area(committed_regions, screen_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .effective_cell_size,
-    );
-    let layout_origin = koshi_core::geometry::Point {
-        column: effective_layout_rect.x,
-        row: effective_layout_rect.y,
-    };
+    let layout_origin = compute_layout_origin(render_snapshot, committed_regions, screen_area);
     for pane_slot in &render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -254,8 +159,9 @@ pub fn build_image_cell_snapshot(
                     .selection_spans
                     .as_ref()
                     .and_then(|selection_spans| selection_spans.find_row_span(grid_row_index))
-                    .is_some_and(|(start_column, end_column)| {
-                        grid_column_index >= start_column && grid_column_index <= end_column
+                    .is_some_and(|(start_grid_column, end_grid_column)| {
+                        grid_column_index >= start_grid_column
+                            && grid_column_index <= end_grid_column
                     });
                 let mut cell_style = cell.get_style();
                 cell_style.set_reverse(
@@ -313,7 +219,7 @@ pub struct ImagePaint {
     pub image_record: Arc<ImageRecord>,
     /// The destination cells after pane and frame clipping.
     pub target_area: RatatuiRect,
-    /// The source pixels that map to `target`.
+    /// The source pixels that map to `target_area`.
     pub source_rect: ImageSourceRect,
     /// The Kitty x offset inside the first destination cell.
     pub cell_pixel_offset_x: Option<u32>,
@@ -355,11 +261,6 @@ impl ImagePaint {
             draw_order: 0,
         }
     }
-
-    fn with_draw_order(mut self, draw_order: usize) -> Self {
-        self.draw_order = draw_order;
-        self
-    }
 }
 
 /// Return clipped image paints in their bottom-to-top draw order.
@@ -379,22 +280,12 @@ pub fn build_image_paints(
         || render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .are_all_panes_suppressed
+            .is_every_pane_suppressed
     {
         return Vec::new();
     }
 
-    let effective_layout_rect = compute_content_rect(
-        compute_pane_area(committed_regions, screen_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .effective_cell_size,
-    );
-    let layout_origin = koshi_core::geometry::Point {
-        column: effective_layout_rect.x,
-        row: effective_layout_rect.y,
-    };
+    let layout_origin = compute_layout_origin(render_snapshot, committed_regions, screen_area);
     let mut image_paints = Vec::new();
     let mut draw_order = 0;
 
@@ -420,14 +311,6 @@ pub fn build_image_paints(
             let Some(image_record) = image_placement_snapshot.clone_image_record() else {
                 continue;
             };
-            let (row_count, column_count) = image_placement_snapshot.get_cell_dimensions();
-            if column_count == 0
-                || row_count == 0
-                || image_record.image.pixel_width == 0
-                || image_record.image.pixel_height == 0
-            {
-                continue;
-            }
             let Some(image_rect) =
                 compute_image_placement_rect(placed_content_rect, image_placement_snapshot)
             else {
@@ -465,20 +348,18 @@ pub fn build_image_paints(
                 && image_placement_snapshot.get_cell_geometry().cell_offset.row == 0)
                 .then_some(image_record.display.cell_pixel_offset_y)
                 .flatten();
-            let z_index = image_record.display.z_index;
-            let mut image_paint = ImagePaint::from_image_placement(
-                pane_snapshot.pane_id,
-                image_placement_snapshot.get_placement_id(),
+            image_paints.push(ImagePaint {
+                pane_id: pane_snapshot.pane_id,
+                placement_id: image_placement_snapshot.get_placement_id(),
+                image_content_id: image_placement_snapshot.get_image_content_id(),
+                z_index: image_record.display.z_index,
                 image_record,
                 target_area,
                 source_rect,
-                z_index,
-            )
-            .with_draw_order(draw_order);
-            image_paint.image_content_id = image_placement_snapshot.get_image_content_id();
-            image_paint.cell_pixel_offset_x = cell_pixel_offset_x;
-            image_paint.cell_pixel_offset_y = cell_pixel_offset_y;
-            image_paints.push(image_paint);
+                cell_pixel_offset_x,
+                cell_pixel_offset_y,
+                draw_order,
+            });
             draw_order = draw_order.saturating_add(1);
         }
     }
@@ -494,82 +375,17 @@ pub fn build_image_paints(
     image_paints
 }
 
-/// Return the visible cell rectangles of image placements.
+/// Return the visible cell rectangles that show the unavailable-image text.
 ///
-/// With `only_unavailable`, a placement whose image record is present is
-/// omitted. This lets a native-image viewer mark a missing transfer while an
-/// unsupported viewer marks every image.
+/// In `Placeholder` mode every image placement shows it. In `Native` mode a
+/// placement shows it while its image record is missing, or while
+/// `available_image_keys` is `Some` and does not name the placement. `None`
+/// counts every placement with a record as ready.
 pub(crate) fn compute_image_placeholder_rects(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     screen_area: RatatuiRect,
-    is_unavailable_only: bool,
-) -> Vec<RatatuiRect> {
-    if screen_area.width == 0
-        || screen_area.height == 0
-        || render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .are_all_panes_suppressed
-    {
-        return Vec::new();
-    }
-
-    let effective_layout_rect = compute_content_rect(
-        compute_pane_area(committed_regions, screen_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .effective_cell_size,
-    );
-    let layout_origin = koshi_core::geometry::Point {
-        column: effective_layout_rect.x,
-        row: effective_layout_rect.y,
-    };
-    let mut placeholder_rects = Vec::new();
-    for pane_slot in &render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .pane_slots
-    {
-        if !pane_slot.is_visible {
-            continue;
-        }
-        let Some(content_rect) = pane_slot.content_rect else {
-            continue;
-        };
-        let Some(pane_snapshot) = find_pane_snapshot(render_snapshot, pane_slot.pane_id) else {
-            continue;
-        };
-        if pane_snapshot.terminal_grid_view.is_none() {
-            continue;
-        }
-        let placed_content_rect = place_cell_rect(content_rect, layout_origin);
-        for image_placement_snapshot in &pane_snapshot.image_placement_snapshots {
-            if is_unavailable_only && image_placement_snapshot.get_image_record().is_some() {
-                continue;
-            }
-            let Some(image_rect) =
-                compute_image_placement_rect(placed_content_rect, image_placement_snapshot)
-            else {
-                continue;
-            };
-            let target_area = image_rect
-                .intersection(placed_content_rect)
-                .intersection(screen_area);
-            if target_area.width > 0 && target_area.height > 0 {
-                placeholder_rects.push(target_area);
-            }
-        }
-    }
-    placeholder_rects
-}
-
-/// Return image rectangles that still use the unavailable marker.
-pub(crate) fn compute_selected_image_placeholder_rects(
-    render_snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
-    screen_area: RatatuiRect,
+    image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
 ) -> Vec<RatatuiRect> {
     if screen_area.width == 0
@@ -577,22 +393,12 @@ pub(crate) fn compute_selected_image_placeholder_rects(
         || render_snapshot
             .session_snapshot
             .active_tab_snapshot
-            .are_all_panes_suppressed
+            .is_every_pane_suppressed
     {
         return Vec::new();
     }
 
-    let effective_layout_rect = compute_content_rect(
-        compute_pane_area(committed_regions, screen_area),
-        render_snapshot
-            .session_snapshot
-            .active_tab_snapshot
-            .effective_cell_size,
-    );
-    let layout_origin = koshi_core::geometry::Point {
-        column: effective_layout_rect.x,
-        row: effective_layout_rect.y,
-    };
+    let layout_origin = compute_layout_origin(render_snapshot, committed_regions, screen_area);
     let mut placeholder_rects = Vec::new();
     for pane_slot in &render_snapshot
         .session_snapshot
@@ -613,13 +419,19 @@ pub(crate) fn compute_selected_image_placeholder_rects(
         }
         let placed_content_rect = place_cell_rect(content_rect, layout_origin);
         for image_placement_snapshot in &pane_snapshot.image_placement_snapshots {
-            let is_image_available = available_image_keys.is_some_and(|image_keys| {
-                image_keys.contains(&(
+            let has_image_record = image_placement_snapshot.get_image_record().is_some();
+            let is_image_ready = match available_image_keys {
+                Some(image_keys) => image_keys.contains(&(
                     pane_snapshot.pane_id,
                     image_placement_snapshot.get_placement_id(),
-                ))
-            });
-            if image_placement_snapshot.get_image_record().is_some() && is_image_available {
+                )),
+                None => true,
+            };
+            let should_show_placeholder = match image_mode {
+                ImageRenderMode::Placeholder => true,
+                ImageRenderMode::Native => !(has_image_record && is_image_ready),
+            };
+            if !should_show_placeholder {
                 continue;
             }
             let Some(image_rect) =
@@ -639,30 +451,30 @@ pub(crate) fn compute_selected_image_placeholder_rects(
 }
 
 /// Paint unsupported-image text over each image rectangle in draw order.
-pub fn draw_image_placeholders(placeholder_rects: &[RatatuiRect], buffer: &mut Buffer) {
+pub fn draw_image_placeholders(placeholder_rects: &[RatatuiRect], screen_buffer: &mut Buffer) {
     for placeholder_rect in placeholder_rects {
-        let target_area = placeholder_rect.intersection(buffer.area);
+        let target_area = placeholder_rect.intersection(screen_buffer.area);
         if target_area.width == 0 || target_area.height == 0 {
             continue;
         }
-        clear_screen_rect(target_area, buffer);
+        clear_screen_rect(target_area, screen_buffer);
         let mut message_characters = TERMINAL_IMAGE_UNAVAILABLE.chars();
         'paint: for row_offset in 0..target_area.height {
-            for column in 0..target_area.width {
+            for column_offset in 0..target_area.width {
                 let Some(message_character) = message_characters.next() else {
                     break 'paint;
                 };
-                buffer[(target_area.x + column, target_area.y + row_offset)]
+                screen_buffer[(target_area.x + column_offset, target_area.y + row_offset)]
                     .set_char(message_character);
             }
         }
     }
 }
 
-fn clear_screen_rect(target_area: RatatuiRect, buffer: &mut Buffer) {
+fn clear_screen_rect(target_area: RatatuiRect, screen_buffer: &mut Buffer) {
     for row_offset in 0..target_area.height {
         for column_offset in 0..target_area.width {
-            buffer[(target_area.x + column_offset, target_area.y + row_offset)]
+            screen_buffer[(target_area.x + column_offset, target_area.y + row_offset)]
                 .set_char(' ')
                 .set_style(Style::default());
         }
@@ -675,20 +487,21 @@ fn compute_image_placement_rect(
     image_placement_snapshot: &ImagePlacementSnapshot,
 ) -> Option<RatatuiRect> {
     let (anchor_row, anchor_column) = image_placement_snapshot.get_anchor_cell();
-    let (row_count, column_count) = image_placement_snapshot.get_cell_dimensions();
+    let (row_cell_count, column_cell_count) = image_placement_snapshot.get_cell_dimensions();
     let screen_column = u32::from(content_rect.x).checked_add(u32::from(anchor_column))?;
     let screen_row = u32::from(content_rect.y).checked_add(u32::from(anchor_row))?;
     let maximum_coordinate = u32::from(u16::MAX) + 1;
     if screen_column >= maximum_coordinate || screen_row >= maximum_coordinate {
         return None;
     }
-    let clipped_column_count = u32::from(column_count).min(maximum_coordinate - screen_column);
-    let clipped_row_count = u32::from(row_count).min(maximum_coordinate - screen_row);
-    (clipped_column_count > 0 && clipped_row_count > 0).then_some(RatatuiRect {
+    let clipped_column_cell_count =
+        u32::from(column_cell_count).min(maximum_coordinate - screen_column);
+    let clipped_row_cell_count = u32::from(row_cell_count).min(maximum_coordinate - screen_row);
+    (clipped_column_cell_count > 0 && clipped_row_cell_count > 0).then_some(RatatuiRect {
         x: u16::try_from(screen_column).ok()?,
         y: u16::try_from(screen_row).ok()?,
-        width: u16::try_from(clipped_column_count).ok()?,
-        height: u16::try_from(clipped_row_count).ok()?,
+        width: u16::try_from(clipped_column_cell_count).ok()?,
+        height: u16::try_from(clipped_row_cell_count).ok()?,
     })
 }
 
@@ -699,58 +512,68 @@ fn compute_image_source_rect(
     image_placement_snapshot: &ImagePlacementSnapshot,
     image_record: &ImageRecord,
 ) -> Option<ImageSourceRect> {
-    let (source_origin_x, source_origin_y, source_pixel_width, source_pixel_height) =
-        image_record.compute_source_rect().ok()?;
+    let (
+        source_pixel_origin_x,
+        source_pixel_origin_y,
+        image_source_pixel_width,
+        image_source_pixel_height,
+    ) = image_record.compute_source_rect().ok()?;
     let cell_geometry = image_placement_snapshot.get_cell_geometry();
-    let source_left = u32::from(target_area.x) - u32::from(image_rect.x)
+    let source_left_cell_column = u32::from(target_area.x) - u32::from(image_rect.x)
         + u32::from(cell_geometry.cell_offset.column);
-    let source_top = u32::from(target_area.y) - u32::from(image_rect.y)
+    let source_top_cell_row = u32::from(target_area.y) - u32::from(image_rect.y)
         + u32::from(cell_geometry.cell_offset.row);
-    let source_right = source_left + u32::from(target_area.width);
-    let source_bottom = source_top + u32::from(target_area.height);
-    let row_count = cell_geometry.full_size.row_count;
-    let column_count = cell_geometry.full_size.column_count;
-    let (pixel_x_offset, pixel_width) = compute_source_span(
-        source_left,
-        source_right,
-        u32::from(column_count),
-        source_pixel_width,
+    let source_right_cell_column = source_left_cell_column + u32::from(target_area.width);
+    let source_bottom_cell_row = source_top_cell_row + u32::from(target_area.height);
+    let source_row_cell_count = cell_geometry.full_size.row_count;
+    let source_column_cell_count = cell_geometry.full_size.column_count;
+    let (source_pixel_x_offset, clipped_source_pixel_width) = compute_source_pixel_span(
+        source_left_cell_column,
+        source_right_cell_column,
+        u32::from(source_column_cell_count),
+        image_source_pixel_width,
     );
-    let (pixel_y_offset, pixel_height) = compute_source_span(
-        source_top,
-        source_bottom,
-        u32::from(row_count),
-        source_pixel_height,
+    let (source_pixel_y_offset, clipped_source_pixel_height) = compute_source_pixel_span(
+        source_top_cell_row,
+        source_bottom_cell_row,
+        u32::from(source_row_cell_count),
+        image_source_pixel_height,
     );
     Some(ImageSourceRect {
-        pixel_x: source_origin_x.checked_add(pixel_x_offset)?,
-        pixel_y: source_origin_y.checked_add(pixel_y_offset)?,
-        pixel_width,
-        pixel_height,
+        pixel_x: source_pixel_origin_x.checked_add(source_pixel_x_offset)?,
+        pixel_y: source_pixel_origin_y.checked_add(source_pixel_y_offset)?,
+        pixel_width: clipped_source_pixel_width,
+        pixel_height: clipped_source_pixel_height,
     })
 }
 
 /// Map one half-open cell span to a half-open source-pixel span.
-fn compute_source_span(
-    source_start: u32,
-    source_end: u32,
-    cell_count: u32,
-    pixel_count: u32,
+fn compute_source_pixel_span(
+    source_start_cell_offset: u32,
+    source_end_cell_offset: u32,
+    source_cell_count: u32,
+    source_pixel_count: u32,
 ) -> (u32, u32) {
-    if cell_count == 0 || pixel_count == 0 || source_start >= source_end {
+    if source_cell_count == 0
+        || source_pixel_count == 0
+        || source_start_cell_offset >= source_end_cell_offset
+    {
         return (0, 0);
     }
-    let pixel_start = u64::from(source_start) * u64::from(pixel_count) / u64::from(cell_count);
-    let pixel_end =
-        (u64::from(source_end) * u64::from(pixel_count)).div_ceil(u64::from(cell_count));
-    let pixel_start = u32::try_from(pixel_start.min(u64::from(pixel_count))).unwrap_or(pixel_count);
-    let pixel_end = u32::try_from(pixel_end.min(u64::from(pixel_count))).unwrap_or(pixel_count);
-    if pixel_end > pixel_start {
-        (pixel_start, pixel_end - pixel_start)
-    } else if pixel_start < pixel_count {
-        (pixel_start, 1)
+    let source_pixel_start = u64::from(source_start_cell_offset) * u64::from(source_pixel_count)
+        / u64::from(source_cell_count);
+    let source_pixel_end = (u64::from(source_end_cell_offset) * u64::from(source_pixel_count))
+        .div_ceil(u64::from(source_cell_count));
+    let source_pixel_start = u32::try_from(source_pixel_start.min(u64::from(source_pixel_count)))
+        .unwrap_or(source_pixel_count);
+    let source_pixel_end = u32::try_from(source_pixel_end.min(u64::from(source_pixel_count)))
+        .unwrap_or(source_pixel_count);
+    if source_pixel_end > source_pixel_start {
+        (source_pixel_start, source_pixel_end - source_pixel_start)
+    } else if source_pixel_start < source_pixel_count {
+        (source_pixel_start, 1)
     } else {
-        (pixel_start, 0)
+        (source_pixel_start, 0)
     }
 }
 

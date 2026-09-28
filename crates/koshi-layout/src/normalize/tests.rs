@@ -20,12 +20,15 @@ fn build_flex_weight(weight_share: FlexWeight) -> SizeWeight {
     SizeWeight::from_primary_constraint(SizeConstraint::Flex(weight_share))
 }
 
-/// A horizontal split of `children` with the given `weights`.
-fn build_horizontal_split(children: Vec<LayoutNode>, weights: Vec<SizeWeight>) -> LayoutNode {
+/// A horizontal split of `split_children` with the given `child_size_weights`.
+fn build_horizontal_split(
+    split_children: Vec<LayoutNode>,
+    child_size_weights: Vec<SizeWeight>,
+) -> LayoutNode {
     LayoutNode::Split(SplitNode {
         direction: SplitDirection::Horizontal,
-        children,
-        weights,
+        children: split_children,
+        weights: child_size_weights,
         active_child_index: 0,
     })
 }
@@ -84,16 +87,16 @@ fn same_direction_splits_merge_and_preserve_solved_shares() {
         vec![build_pane_leaf(first_pane_id), inner_split],
     ));
 
-    let original_layout_solution = solve_layout(&layout_tree, build_test_tab_rect());
+    let original_layout_solve = solve_layout(&layout_tree, build_test_tab_rect());
     let normalized_layout_tree = normalize_layout_tree(
         &layout_tree,
         &build_live_pane_set(&[first_pane_id, second_pane_id, third_pane_id]),
     )
     .unwrap();
-    let normalized_layout_solution = solve_layout(&normalized_layout_tree, build_test_tab_rect());
+    let normalized_layout_solve = solve_layout(&normalized_layout_tree, build_test_tab_rect());
     assert_eq!(
-        original_layout_solution.pane_rects,
-        normalized_layout_solution.pane_rects
+        original_layout_solve.pane_rects,
+        normalized_layout_solve.pane_rects
     );
 
     let LayoutNode::Split(flattened_split) = &normalized_layout_tree else {
@@ -192,13 +195,13 @@ fn collapsing_a_unary_split_exposes_a_mergeable_child() {
             build_pane_leaf(third_pane_id),
         ],
     ));
-    let wrapper = LayoutNode::Split(SplitNode::with_equal_weights(
+    let vertical_wrapper_node = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![inner_horizontal_split],
     ));
     let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![build_pane_leaf(first_pane_id), wrapper],
+        vec![build_pane_leaf(first_pane_id), vertical_wrapper_node],
     ));
 
     let normalized_layout_tree = normalize_layout_tree(
@@ -255,14 +258,14 @@ fn dead_members_before_the_active_one_shift_its_index_down() {
         &build_live_pane_set(&[first_live_pane_id, active_pane_id]),
     )
     .unwrap();
-    let LayoutNode::Split(stack) = &normalized_layout_tree else {
+    let LayoutNode::Split(stack_node) = &normalized_layout_tree else {
         panic!("stack must survive");
     };
-    assert_eq!(stack.active_child_index, 1);
-    let is_collapsed_by_child_index: Vec<bool> = (0..stack.children.len())
-        .map(|child_index| stack.is_child_collapsed(child_index))
+    assert_eq!(stack_node.active_child_index, 1);
+    let collapsed_child_flags: Vec<bool> = (0..stack_node.children.len())
+        .map(|split_child_index| stack_node.is_child_collapsed(split_child_index))
         .collect();
-    assert_eq!(is_collapsed_by_child_index, [true, false]);
+    assert_eq!(collapsed_child_flags, [true, false]);
     assert_eq!(
         normalized_layout_tree.list_leaf_pane_ids(),
         [first_live_pane_id, active_pane_id]
@@ -283,15 +286,15 @@ fn dead_active_stack_child_hands_off_to_the_next_member() {
         &build_live_pane_set(&[first_pane_id, next_pane_id]),
     )
     .unwrap();
-    let LayoutNode::Split(stack) = &normalized_layout_tree else {
+    let LayoutNode::Split(stack_node) = &normalized_layout_tree else {
         panic!("stack must survive");
     };
     // The next pane slides into the dead pane's place and becomes expanded.
-    assert_eq!(stack.active_child_index, 1);
-    let is_collapsed_by_child_index: Vec<bool> = (0..stack.children.len())
-        .map(|child_index| stack.is_child_collapsed(child_index))
+    assert_eq!(stack_node.active_child_index, 1);
+    let collapsed_child_flags: Vec<bool> = (0..stack_node.children.len())
+        .map(|split_child_index| stack_node.is_child_collapsed(split_child_index))
         .collect();
-    assert_eq!(is_collapsed_by_child_index, [true, false]);
+    assert_eq!(collapsed_child_flags, [true, false]);
     assert_eq!(
         normalized_layout_tree.list_leaf_pane_ids(),
         [first_pane_id, next_pane_id]
@@ -388,13 +391,17 @@ fn normalization_is_idempotent() {
             build_pane_leaf(third_pane_id),
         ],
     ));
-    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let stack_layout_node = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![fourth_pane_id, PaneId::new()],
         1,
     ));
     let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![build_pane_leaf(first_pane_id), inner_split, stack],
+        vec![
+            build_pane_leaf(first_pane_id),
+            inner_split,
+            stack_layout_node,
+        ],
     ));
     let live_pane_ids =
         build_live_pane_set(&[first_pane_id, second_pane_id, third_pane_id, fourth_pane_id]);
@@ -460,18 +467,18 @@ fn merge_is_skipped_when_inner_flex_weights_would_overflow_their_sum() {
 
 /// Four horizontal child splits whose inner weight sums each reach
 /// `u32::MAX`, so the product of the four factors fills most of a `u128`.
-/// `extra` names the plain sibling placed before them, or `None` for no
+/// `extra_sibling` names the plain sibling placed before them, or `None` for no
 /// sibling.
 fn build_near_u128_product_tree(
     extra_sibling: Option<(PaneId, FlexWeight)>,
 ) -> (LayoutNode, Vec<PaneId>) {
-    let mut child_nodes = Vec::new();
-    let mut weights = Vec::new();
+    let mut split_child_nodes = Vec::new();
+    let mut child_size_weights = Vec::new();
     let mut pane_ids = Vec::new();
     if let Some((extra_pane_id, extra_weight_share)) = extra_sibling {
         pane_ids.push(extra_pane_id);
-        child_nodes.push(build_pane_leaf(extra_pane_id));
-        weights.push(build_flex_weight(extra_weight_share));
+        split_child_nodes.push(build_pane_leaf(extra_pane_id));
+        child_size_weights.push(build_flex_weight(extra_weight_share));
     }
     for _ in 0..4 {
         let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
@@ -484,10 +491,13 @@ fn build_near_u128_product_tree(
             ],
         );
         inner_split.weights = vec![build_flex_weight(u32::MAX - 1), build_flex_weight(1)];
-        child_nodes.push(LayoutNode::Split(inner_split));
-        weights.push(build_flex_weight(u32::MAX));
+        split_child_nodes.push(LayoutNode::Split(inner_split));
+        child_size_weights.push(build_flex_weight(u32::MAX));
     }
-    (build_horizontal_split(child_nodes, weights), pane_ids)
+    (
+        build_horizontal_split(split_child_nodes, child_size_weights),
+        pane_ids,
+    )
 }
 
 #[test]
@@ -633,12 +643,12 @@ fn a_dead_last_active_stack_member_hands_off_to_the_new_last_member() {
         &build_live_pane_set(&[first_pane_id, second_pane_id]),
     )
     .unwrap();
-    let LayoutNode::Split(stack) = &normalized_layout_tree else {
+    let LayoutNode::Split(stack_node) = &normalized_layout_tree else {
         panic!("stack must survive");
     };
-    assert_eq!(stack.active_child_index, 1);
-    let collapsed_child_flags: Vec<bool> = (0..stack.children.len())
-        .map(|child_index| stack.is_child_collapsed(child_index))
+    assert_eq!(stack_node.active_child_index, 1);
+    let collapsed_child_flags: Vec<bool> = (0..stack_node.children.len())
+        .map(|split_child_index| stack_node.is_child_collapsed(split_child_index))
         .collect();
     assert_eq!(collapsed_child_flags, [true, false]);
     assert_eq!(
@@ -668,9 +678,9 @@ fn a_dead_lone_pane_normalizes_to_nothing() {
 #[test]
 fn an_out_of_range_stack_active_index_expands_the_last_member() {
     let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
-    let mut stack = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
-    stack.active_child_index = 9;
-    let layout_tree = LayoutNode::Split(stack);
+    let mut stack_node = SplitNode::from_stacked_pane_ids(vec![first_pane_id, second_pane_id], 0);
+    stack_node.active_child_index = 9;
+    let layout_tree = LayoutNode::Split(stack_node);
 
     let normalized_layout_tree = normalize_layout_tree(
         &layout_tree,
@@ -768,7 +778,7 @@ fn three_nested_same_direction_splits_flatten_into_one() {
         vec![build_pane_leaf(first_pane_id), middle_split],
     ));
 
-    let original_layout_solution = solve_layout(&layout_tree, build_test_tab_rect());
+    let original_layout_solve = solve_layout(&layout_tree, build_test_tab_rect());
     let normalized_layout_tree = normalize_layout_tree(
         &layout_tree,
         &build_live_pane_set(&[first_pane_id, second_pane_id, third_pane_id, fourth_pane_id]),
@@ -776,7 +786,7 @@ fn three_nested_same_direction_splits_flatten_into_one() {
     .unwrap();
     assert_eq!(
         solve_layout(&normalized_layout_tree, build_test_tab_rect()).pane_rects,
-        original_layout_solution.pane_rects
+        original_layout_solve.pane_rects
     );
     assert_eq!(
         normalized_layout_tree,
@@ -819,7 +829,7 @@ fn merged_shares_keep_unequal_proportions() {
         row_count: 24,
     });
 
-    let original_layout_solution = solve_layout(&layout_tree, wide_tab_rect);
+    let original_layout_solve = solve_layout(&layout_tree, wide_tab_rect);
     let normalized_layout_tree = normalize_layout_tree(
         &layout_tree,
         &build_live_pane_set(&[first_pane_id, second_pane_id, third_pane_id]),
@@ -827,7 +837,7 @@ fn merged_shares_keep_unequal_proportions() {
     .unwrap();
     assert_eq!(
         solve_layout(&normalized_layout_tree, wide_tab_rect).pane_rects,
-        original_layout_solution.pane_rects
+        original_layout_solve.pane_rects
     );
     assert_eq!(
         normalized_layout_tree,
@@ -940,13 +950,13 @@ fn a_dead_leaf_inside_a_nested_split_collapses_it_into_the_parent() {
 fn a_stack_inside_a_directional_split_stays_nested() {
     let (first_pane_id, second_pane_id, third_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());
-    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let stack_layout_node = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![second_pane_id, third_pane_id],
         1,
     ));
     let layout_tree = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Horizontal,
-        vec![build_pane_leaf(first_pane_id), stack],
+        vec![build_pane_leaf(first_pane_id), stack_layout_node],
     ));
 
     let normalized_layout_tree = normalize_layout_tree(

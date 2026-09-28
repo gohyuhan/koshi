@@ -35,14 +35,14 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::frame::{FrameSlot, PaintedFrame};
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction, MIN_PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::Connection;
-use koshi_pane::pane::state::PaneKind;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -133,14 +133,12 @@ fn serve_test_session<T: Send + 'static>(
     ));
 
     let session_id = SessionId::new();
-    let fake_pty_backend = Arc::new(FakePtyBackend::new());
-    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
-    let mut server = Server::from_runtime_parts(
-        pty_backend,
-        runtime_event_receiver,
-        runtime_event_sender.clone(),
-    );
+    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
+    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
     server
         .bootstrap_session(
             session_id,
@@ -175,15 +173,18 @@ fn serve_test_session<T: Send + 'static>(
     // its frame when a render is due.
     loop {
         let current_time = Instant::now();
-        let runtime_event = match server.next_render_wakeup(current_time) {
+        let runtime_event = match server.compute_next_render_wakeup(current_time) {
             Some(render_wakeup_timeout) => {
-                match server.inbox_rx().recv_timeout(render_wakeup_timeout) {
+                match server
+                    .get_inbox_receiver()
+                    .recv_timeout(render_wakeup_timeout)
+                {
                     Ok(runtime_event) => Some(runtime_event),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            None => match server.inbox_rx().recv() {
+            None => match server.get_inbox_receiver().recv() {
                 Ok(runtime_event) => Some(runtime_event),
                 Err(_) => break,
             },
@@ -220,8 +221,8 @@ fn open_session_connection(runtime_directory: &Path, session_id: SessionId) -> C
         .send(&IpcRequest {
             request_id: 1,
             request_kind: IpcRequestKind::Hello {
-                min_protocol_version: MIN_PROTOCOL_VERSION,
-                max_protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_PROTOCOL_VERSION,
+                maximum_protocol_version: PROTOCOL_VERSION,
                 connection_token: endpoint_file.connection_token,
                 is_remote: false,
             },
@@ -241,7 +242,7 @@ fn open_session_connection(runtime_directory: &Path, session_id: SessionId) -> C
 /// Attach on `ipc_connection` reporting `viewport_size` and no pane area, and return
 /// what the reply carried. The IPC connection carries only the client's event
 /// stream afterwards.
-fn attach_test_client_with_viewport(
+fn attach_test_client_with_viewport_size(
     ipc_connection: &mut Connection,
     request_id: u64,
     viewport_size: Size,
@@ -268,8 +269,7 @@ fn attach_test_client_with_pane_area(
         .send(&IpcRequest {
             request_id,
             request_kind: IpcRequestKind::Attach {
-                viewport: viewport_size,
-                event_filter: EventFilterSpec::All,
+                viewport_size,
                 resume_client_id: None,
                 resume_token: None,
                 pane_area,
@@ -358,7 +358,6 @@ fn submit_test_command(
             session_id: Some(session_id),
             target_client_id: None,
         },
-        SystemTime::UNIX_EPOCH,
         command,
     );
     ipc_connection
@@ -389,7 +388,7 @@ fn read_session_frames_until(
     mut ipc_connection: Connection,
     accepts_session_event: impl Fn(&SessionEvent) -> bool + Send + 'static,
 ) -> (Connection, Vec<SessionEvent>) {
-    let (done_tx, done_rx) = mpsc::channel();
+    let (done_sender, done_receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut session_events = Vec::new();
         loop {
@@ -400,9 +399,9 @@ fn read_session_frames_until(
                 break;
             }
         }
-        let _ = done_tx.send((ipc_connection, session_events));
+        let _ = done_sender.send((ipc_connection, session_events));
     });
-    done_rx
+    done_receiver
         .recv_timeout(TEST_WAIT_TIMEOUT_DURATION)
         .expect("the awaited frame reaches the viewer")
 }
@@ -448,18 +447,22 @@ fn two_clients_on_one_tab_size_the_pty_to_the_per_axis_minimum() {
             // 38 rows, and the pane's PTY is that minus its 1-cell border.
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport(
+            let (_, _, session_structure) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             // The small client joins the same tab. It is narrower and shorter, so
             // it takes both axes and the pane's PTY shrinks on both.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            attach_test_client_with_viewport(&mut small_client_connection, 2, SMALL_VIEWPORT_SIZE);
+            attach_test_client_with_viewport_size(
+                &mut small_client_connection,
+                2,
+                SMALL_VIEWPORT_SIZE,
+            );
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             assert_eq!(get_attached_client_count(&mut caller_connection, 3), 2);
@@ -514,7 +517,7 @@ fn a_client_reporting_a_pane_area_sizes_the_pty_to_that_area() {
                 LARGE_VIEWPORT_SIZE,
                 Some(reported_pane_area),
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
             assert_eq!(echoed_pane_area, Some(reported_pane_area));
 
             (vec![client_connection], pane_id)
@@ -552,7 +555,7 @@ fn a_starving_client_does_not_shrink_the_tab() {
                 LARGE_VIEWPORT_SIZE,
                 None,
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             let mut starving_client_connection =
                 open_session_connection(&runtime_directory, session_id);
@@ -611,7 +614,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 LARGE_VIEWPORT_SIZE,
                 Some(PaneArea::Starving),
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
             assert_eq!(echoed_pane_area, Some(PaneArea::Starving));
 
             // The served loop renders between the two attaches, with the tab's
@@ -627,10 +630,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                 });
             let painted_frame = get_last_painted_frame(&session_events);
             assert_eq!(
-                painted_frame
-                    .session_snapshot
-                    .active_tab_snapshot
-                    .effective_cell_size,
+                painted_frame.session_snapshot.active_tab_snapshot.tab_size,
                 Size {
                     column_count: 0,
                     row_count: 0
@@ -651,16 +651,14 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
                     pane_id,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 0,
                             row_count: 0
                         },
                     },
                     content_rect: None,
-                    pane_kind: PaneKind::Terminal,
                     is_visible: false,
                     is_suppressed: true,
-                    is_dead: false,
                 }],
             );
 
@@ -729,19 +727,19 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
             // The narrow client alone: 70 columns by 38 rows of pane region.
             let mut narrow_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport(
+            let (_, _, session_structure) = attach_test_client_with_viewport_size(
                 &mut narrow_client_connection,
                 2,
                 NARROW_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             // The short client joins the same tab. It is wider but shorter, so the
             // columns stay pinned by the narrow client and the rows drop to this
             // one's: each axis takes its minimum from a different client.
             let mut short_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (short_client_id, _, _) = attach_test_client_with_viewport(
+            let (short_client_id, _, _) = attach_test_client_with_viewport_size(
                 &mut short_client_connection,
                 2,
                 SHORT_VIEWPORT_SIZE,
@@ -821,13 +819,13 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
             // The large client attaches to the seeded tab.
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (large_client_id, _, session_structure) = attach_test_client_with_viewport(
+            let (large_client_id, _, session_structure) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
             let first_tab_id = session_structure.tabs[0].tab_id;
-            let first_pane_id = session_structure.panes[0].pane_id;
+            let first_pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             // A second tab, created for the large client, which moves onto it.
             // Its root pane spawns at the large client's own region.
@@ -860,7 +858,7 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
             // share it and the small one takes both axes.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (small_client_id, _, _) = attach_test_client_with_viewport(
+            let (small_client_id, _, _) = attach_test_client_with_viewport_size(
                 &mut small_client_connection,
                 2,
                 SMALL_VIEWPORT_SIZE,
@@ -937,7 +935,8 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
 
 #[test]
 fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
-    // The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`], as a pane region.
+    // The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`], as a pane
+    // region.
     const SHARED_PANE_VIEWPORT_SIZE: Size = Size {
         column_count: 80,
         row_count: 28,
@@ -948,19 +947,23 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (large_client_id, _, session_structure) = attach_test_client_with_viewport(
+            let (large_client_id, _, session_structure) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
             let tab_id = session_structure.tabs[0].tab_id;
 
             // The small client joins the same tab, which invalidates the layout, so
             // the large client is sent a fresh frame at the size the two now share.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            attach_test_client_with_viewport(&mut small_client_connection, 2, SMALL_VIEWPORT_SIZE);
+            attach_test_client_with_viewport_size(
+                &mut small_client_connection,
+                2,
+                SMALL_VIEWPORT_SIZE,
+            );
 
             let (large_client_connection, session_events) =
                 read_session_frames_until(large_client_connection, move |session_event| {
@@ -968,10 +971,7 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                         SessionEvent::Painted {
                             frame: painted_frame,
                         } => {
-                            painted_frame
-                                .session_snapshot
-                                .active_tab_snapshot
-                                .effective_cell_size
+                            painted_frame.session_snapshot.active_tab_snapshot.tab_size
                                 == SHARED_PANE_VIEWPORT_SIZE
                         }
                         _ => false,
@@ -992,10 +992,7 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                 tab_id
             );
             assert_eq!(
-                painted_frame
-                    .session_snapshot
-                    .active_tab_snapshot
-                    .effective_cell_size,
+                painted_frame.session_snapshot.active_tab_snapshot.tab_size,
                 SHARED_PANE_VIEWPORT_SIZE
             );
 
@@ -1010,19 +1007,17 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
                     pane_id,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
-                        cell_size: SHARED_PANE_VIEWPORT_SIZE,
+                        size: SHARED_PANE_VIEWPORT_SIZE,
                     },
                     content_rect: Some(Rect {
                         origin: Point { column: 1, row: 1 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 78,
                             row_count: 26
                         },
                     }),
-                    pane_kind: PaneKind::Terminal,
                     is_visible: true,
                     is_suppressed: false,
-                    is_dead: false,
                 }],
             );
             assert!(
@@ -1044,7 +1039,7 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (large_client_id, _, _) = attach_test_client_with_viewport(
+            let (large_client_id, _, _) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
@@ -1052,7 +1047,7 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
 
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (small_client_id, _, _) = attach_test_client_with_viewport(
+            let (small_client_id, _, _) = attach_test_client_with_viewport_size(
                 &mut small_client_connection,
                 2,
                 SMALL_VIEWPORT_SIZE,
@@ -1118,8 +1113,11 @@ fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
         "repeat-lock",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut client_connection = open_session_connection(&runtime_directory, session_id);
-            let (client_id, _, _) =
-                attach_test_client_with_viewport(&mut client_connection, 2, LARGE_VIEWPORT_SIZE);
+            let (client_id, _, _) = attach_test_client_with_viewport_size(
+                &mut client_connection,
+                2,
+                LARGE_VIEWPORT_SIZE,
+            );
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             let build_lock_command = |is_locked| {
@@ -1259,16 +1257,20 @@ fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
         |runtime_directory, session_id, fake_pty_backend| {
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) = attach_test_client_with_viewport(
+            let (_, _, session_structure) = attach_test_client_with_viewport_size(
                 &mut large_client_connection,
                 2,
                 LARGE_VIEWPORT_SIZE,
             );
-            let pane_id = session_structure.panes[0].pane_id;
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
-            attach_test_client_with_viewport(&mut small_client_connection, 2, SMALL_VIEWPORT_SIZE);
+            attach_test_client_with_viewport_size(
+                &mut small_client_connection,
+                2,
+                SMALL_VIEWPORT_SIZE,
+            );
 
             // The program in the pane asks for mouse reports. Until it has, a
             // forwarded event is written nowhere.
@@ -1324,9 +1326,12 @@ fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
         "mouse-before-tracking",
         |runtime_directory, session_id, _fake_pty_backend| {
             let mut client_connection = open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) =
-                attach_test_client_with_viewport(&mut client_connection, 2, LARGE_VIEWPORT_SIZE);
-            let pane_id = session_structure.panes[0].pane_id;
+            let (_, _, session_structure) = attach_test_client_with_viewport_size(
+                &mut client_connection,
+                2,
+                LARGE_VIEWPORT_SIZE,
+            );
+            let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             // The tab's only viewer, so its content starts at column 1, row 2 of
             // its own terminal: one tabline row, then the pane's 1-cell border.
@@ -1347,8 +1352,8 @@ fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
 
 #[test]
 fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session() {
-    // The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`], as a pane region: the size
-    // the tab holds while both clients view it.
+    // The per-axis minimum of [`LARGE_VIEWPORT_SIZE`] and [`SMALL_VIEWPORT_SIZE`], as a pane
+    // region: the size the tab holds while both clients view it.
     const SHARED_PANE_VIEWPORT_SIZE: Size = Size {
         column_count: 80,
         row_count: 28,
@@ -1388,7 +1393,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                 let mut joining_connection =
                     open_session_connection(&runtime_directory, session_id);
                 let (joined_client_id, joined_session_id, session_structure) =
-                    attach_test_client_with_viewport(
+                    attach_test_client_with_viewport_size(
                         &mut joining_connection,
                         2,
                         SMALL_VIEWPORT_SIZE,
@@ -1399,7 +1404,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                     (
                         session_id,
                         joined_client_id,
-                        session_structure.panes[0].pane_id,
+                        session_structure.tabs[0].layout.list_leaf_pane_ids()[0],
                     ),
                 )
             },
@@ -1410,7 +1415,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
             .list_sessions()
             .get(&target_session_id)
             .expect("session running");
-        assert_eq!(session.clients.client_count(), 1);
+        assert_eq!(session.clients.count_clients(), 1);
         assert_eq!(
             session
                 .clients
@@ -1445,12 +1450,15 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
 
             let mut wide_connection = open_session_connection(&runtime_directory, session_id);
             let (_, _, session_structure) =
-                attach_test_client_with_viewport(&mut wide_connection, 2, LARGE_VIEWPORT_SIZE);
-            let source_pane_id = session_structure.panes[0].pane_id;
+                attach_test_client_with_viewport_size(&mut wide_connection, 2, LARGE_VIEWPORT_SIZE);
+            let source_pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
             let mut narrow_connection = open_session_connection(&runtime_directory, session_id);
-            let (narrow_client_id, _, _) =
-                attach_test_client_with_viewport(&mut narrow_connection, 2, SMALL_VIEWPORT_SIZE);
+            let (narrow_client_id, _, _) = attach_test_client_with_viewport_size(
+                &mut narrow_connection,
+                2,
+                SMALL_VIEWPORT_SIZE,
+            );
 
             // Read the large client's stream past the shared size, so the frame read
             // after the move is one the move caused.
@@ -1459,10 +1467,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                     SessionEvent::Painted {
                         frame: painted_frame,
                     } => {
-                        painted_frame
-                            .session_snapshot
-                            .active_tab_snapshot
-                            .effective_cell_size
+                        painted_frame.session_snapshot.active_tab_snapshot.tab_size
                             == SHARED_PANE_VIEWPORT_SIZE
                     }
                     _ => false,
@@ -1508,10 +1513,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                     SessionEvent::Painted {
                         frame: painted_frame,
                     } => {
-                        painted_frame
-                            .session_snapshot
-                            .active_tab_snapshot
-                            .effective_cell_size
+                        painted_frame.session_snapshot.active_tab_snapshot.tab_size
                             == SINGLE_CLIENT_PANE_VIEWPORT_SIZE
                     }
                     _ => false,
@@ -1525,19 +1527,17 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                     pane_id: source_pane_id,
                     outer_rect: Rect {
                         origin: Point { column: 0, row: 0 },
-                        cell_size: SINGLE_CLIENT_PANE_VIEWPORT_SIZE,
+                        size: SINGLE_CLIENT_PANE_VIEWPORT_SIZE,
                     },
                     content_rect: Some(Rect {
                         origin: Point { column: 1, row: 1 },
-                        cell_size: Size {
+                        size: Size {
                             column_count: 98,
                             row_count: 36
                         },
                     }),
-                    pane_kind: PaneKind::Terminal,
                     is_visible: true,
                     is_suppressed: false,
-                    is_dead: false,
                 }],
             );
 
@@ -1611,13 +1611,11 @@ fn run_server_until_quit(
     ));
 
     let session_id = SessionId::new();
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::new());
     let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
-    let mut server = Server::from_runtime_parts(
-        pty_backend,
-        runtime_event_receiver,
-        runtime_event_sender.clone(),
-    );
+    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+        InboxSink::from_event_sender(runtime_event_sender.clone()),
+    )));
+    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
     server.load_startup_config(Some(PartialKoshiConfig {
         should_auto_close_session: Some(should_auto_close_session),
         ..PartialKoshiConfig::default()
@@ -1647,7 +1645,10 @@ fn run_server_until_quit(
 
     let deadline = Instant::now() + QUIT_TIMEOUT_DURATION;
     while !server.is_quit_requested() && Instant::now() < deadline {
-        if let Ok(runtime_event) = server.inbox_rx().recv_timeout(QUIT_POLL_INTERVAL_DURATION) {
+        if let Ok(runtime_event) = server
+            .get_inbox_receiver()
+            .recv_timeout(QUIT_POLL_INTERVAL_DURATION)
+        {
             let _ = server.handle_runtime_event(runtime_event);
         }
         server.resync_lagged();
@@ -1673,7 +1674,7 @@ fn move_the_only_client_away(runtime_directory: PathBuf, session_id: SessionId) 
 
     let mut client_connection = open_session_connection(&runtime_directory, session_id);
     let (client_id, _, _) =
-        attach_test_client_with_viewport(&mut client_connection, 2, SMALL_VIEWPORT_SIZE);
+        attach_test_client_with_viewport_size(&mut client_connection, 2, SMALL_VIEWPORT_SIZE);
 
     let mut caller_connection = open_session_connection(&runtime_directory, session_id);
     let emitted_events = submit_test_command(

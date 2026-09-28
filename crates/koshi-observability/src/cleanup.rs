@@ -49,16 +49,16 @@ impl CrashReport {
     /// Read one panic into an owned report. A payload that is not a string
     /// reads as `a panic with no message`, a panic with no location as
     /// `unknown`, and a clock before the Unix epoch as timestamp `0`.
-    fn capture_crash_report(panic_info: &PanicHookInfo<'_>) -> CrashReport {
+    fn capture_crash_report(panic_hook_info: &PanicHookInfo<'_>) -> CrashReport {
         CrashReport {
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |elapsed_since_epoch| elapsed_since_epoch.as_secs()),
-            message: panic_info
+            message: panic_hook_info
                 .payload_as_str()
                 .unwrap_or("a panic with no message")
                 .to_string(),
-            location: panic_info
+            location: panic_hook_info
                 .location()
                 .map_or_else(|| "unknown".to_string(), ToString::to_string),
             backtrace: std::backtrace::Backtrace::force_capture().to_string(),

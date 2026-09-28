@@ -1,7 +1,6 @@
 //! Bounded RGBA-to-Sixel encoding.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Write};
 use std::sync::Arc;
 
 use koshi_image::{
@@ -16,20 +15,14 @@ mod tests;
 /// The smallest configurable palette limit.
 pub const MIN_PALETTE_COLOR_COUNT: usize = 2;
 
-/// The largest Sixel palette supported by the encoder.
+/// The largest Sixel palette supported by the encoder, and the default limit.
 pub const MAX_PALETTE_COLOR_COUNT: usize = 256;
-
-/// The default maximum number of colors in an encoded palette.
-pub const DEFAULT_PALETTE_COLOR_COUNT: usize = MAX_PALETTE_COLOR_COUNT;
 
 /// The largest chunk returned by the encoder.
 pub const MAX_SIXEL_CHUNK_BYTE_COUNT: usize = 16 * 1024;
 
 /// The largest cumulative Sixel transfer emitted by the encoder.
 pub const MAX_SIXEL_OUTPUT_BYTE_COUNT: usize = MAX_GRAPHICS_TRANSFER_BYTE_COUNT;
-
-/// The largest chunk requested while encoding one Sixel tile.
-pub const MAX_SIXEL_TILE_BYTE_COUNT: usize = MAX_SIXEL_CHUNK_BYTE_COUNT;
 
 const HISTOGRAM_BUCKET_COUNT_PER_CHANNEL: usize = 32;
 const HISTOGRAM_BUCKET_COUNT: usize = HISTOGRAM_BUCKET_COUNT_PER_CHANNEL
@@ -45,7 +38,7 @@ pub struct SixelEncodeOptions {
 
 impl Default for SixelEncodeOptions {
     fn default() -> Self {
-        Self::with_maximum_palette_color_count(DEFAULT_PALETTE_COLOR_COUNT)
+        Self::with_maximum_palette_color_count(MAX_PALETTE_COLOR_COUNT)
     }
 }
 
@@ -77,7 +70,7 @@ impl PreparedSixelPalette {
     /// unsupported palette size, or a failed bounded allocation.
     pub fn prepare(
         decoded_image: &DecodedImage,
-        background: [u8; 3],
+        background_rgb: [u8; 3],
         encode_options: SixelEncodeOptions,
     ) -> Result<Self, SixelEncodeError> {
         validate_sixel_encode_options(encode_options)?;
@@ -85,7 +78,7 @@ impl PreparedSixelPalette {
         Ok(Self {
             palette: prepare_sixel_palette(
                 &decoded_image.rgba_bytes,
-                background,
+                background_rgb,
                 encode_options.maximum_palette_color_count,
             )?,
         })
@@ -121,21 +114,12 @@ pub enum SixelEncodeError {
     /// A caller supplied a zero-sized output chunk.
     #[error("Sixel output chunk size must be greater than zero")]
     ZeroChunkSize,
-    /// The output writer rejected a byte range.
-    #[error("writing Sixel output failed: {0}")]
-    Io(#[source] io::Error),
     /// An internal palette lookup could not find a visible pixel color.
     #[error("Sixel pixel color could not be mapped to the prepared palette")]
     PaletteMapping,
     /// Output generation has failed and this encoder cannot continue.
     #[error("Sixel encoder has failed and cannot continue")]
     EncoderFailed,
-}
-
-impl From<io::Error> for SixelEncodeError {
-    fn from(io_error: io::Error) -> Self {
-        SixelEncodeError::Io(io_error)
-    }
 }
 
 /// A prepared Sixel encoder with bounded incremental output.
@@ -147,13 +131,13 @@ impl From<io::Error> for SixelEncodeError {
 #[derive(Debug)]
 pub struct SixelEncoder {
     decoded_image: Arc<DecodedImage>,
-    background: [u8; 3],
+    background_rgb: [u8; 3],
     image_width_pixels: usize,
     image_height_pixels: usize,
     palette: Palette,
     header_bytes: Vec<u8>,
     header_byte_offset: usize,
-    next_band_start_row: usize,
+    next_band_start_pixel_row: usize,
     current_band: Option<BandState>,
     has_emitted_sixel: bool,
     terminator_byte_offset: usize,
@@ -169,25 +153,26 @@ impl SixelEncoder {
     /// Prepare a Sixel encoder with the default 256-color palette limit.
     pub fn from_image(
         decoded_image: Arc<DecodedImage>,
-        background: [u8; 3],
+        background_rgb: [u8; 3],
     ) -> Result<Self, SixelEncodeError> {
-        Self::with_options(decoded_image, background, SixelEncodeOptions::default())
+        Self::with_options(decoded_image, background_rgb, SixelEncodeOptions::default())
     }
 
     /// Prepare a Sixel encoder with an explicit palette limit.
     pub fn with_options(
         decoded_image: Arc<DecodedImage>,
-        background: [u8; 3],
+        background_rgb: [u8; 3],
         encode_options: SixelEncodeOptions,
     ) -> Result<Self, SixelEncodeError> {
-        let palette = PreparedSixelPalette::prepare(&decoded_image, background, encode_options)?;
-        Self::with_palette(decoded_image, background, palette)
+        let palette =
+            PreparedSixelPalette::prepare(&decoded_image, background_rgb, encode_options)?;
+        Self::with_palette(decoded_image, background_rgb, palette)
     }
 
     /// Prepare a Sixel encoder with a palette shared by related image tiles.
     pub fn with_palette(
         decoded_image: Arc<DecodedImage>,
-        background: [u8; 3],
+        background_rgb: [u8; 3],
         palette: PreparedSixelPalette,
     ) -> Result<Self, SixelEncodeError> {
         let (image_width_pixels, image_height_pixels) = validate_decoded_image(&decoded_image)?;
@@ -199,13 +184,13 @@ impl SixelEncoder {
             .map_err(|_| SixelEncodeError::AllocationFailed)?;
         Ok(SixelEncoder {
             decoded_image,
-            background,
+            background_rgb,
             image_width_pixels,
             image_height_pixels,
             palette: palette.palette,
             header_bytes,
             header_byte_offset: 0,
-            next_band_start_row: 0,
+            next_band_start_pixel_row: 0,
             current_band: None,
             has_emitted_sixel: false,
             terminator_byte_offset: 0,
@@ -232,49 +217,14 @@ impl SixelEncoder {
         if self.pending_output_byte_offset == self.pending_output_bytes.len() {
             return Ok(None);
         }
-        let output_end_index = self.pending_output_byte_offset
+        let output_end_byte_index = self.pending_output_byte_offset
             + maximum_byte_count
                 .min(self.pending_output_bytes.len() - self.pending_output_byte_offset);
-        let output_start_index = self.pending_output_byte_offset;
-        self.pending_output_byte_offset = output_end_index;
+        let output_start_byte_index = self.pending_output_byte_offset;
+        self.pending_output_byte_offset = output_end_byte_index;
         Ok(Some(
-            &self.pending_output_bytes[output_start_index..output_end_index],
+            &self.pending_output_bytes[output_start_byte_index..output_end_byte_index],
         ))
-    }
-
-    /// Write all output in chunks of [`MAX_SIXEL_CHUNK_BYTE_COUNT`].
-    ///
-    /// Returns [`SixelEncodeError::Io`] when the writer rejects a chunk.
-    pub fn write_to<Writer: Write>(&mut self, writer: &mut Writer) -> Result<(), SixelEncodeError> {
-        while self.write_next_chunk(writer, MAX_SIXEL_CHUNK_BYTE_COUNT)? {}
-        Ok(())
-    }
-
-    /// Write one output chunk and advance only after `write_all` succeeds.
-    ///
-    /// A `maximum_byte_count` value of zero returns [`SixelEncodeError::ZeroChunkSize`].
-    /// A writer can report an error after writing part of the slice; the
-    /// pending bytes stay unchanged. Abort and discard the open transfer, then
-    /// restart with a new encoder instead of resuming this encoder, which would
-    /// emit an incomplete Sixel string.
-    pub fn write_next_chunk<Writer: Write>(
-        &mut self,
-        writer: &mut Writer,
-        maximum_byte_count: usize,
-    ) -> Result<bool, SixelEncodeError> {
-        let maximum_byte_count = resolve_chunk_byte_count(maximum_byte_count)?;
-        self.prepare_pending_output()?;
-        if self.pending_output_byte_offset == self.pending_output_bytes.len() {
-            return Ok(false);
-        }
-        let output_end_index = self.pending_output_byte_offset
-            + maximum_byte_count
-                .min(self.pending_output_bytes.len() - self.pending_output_byte_offset);
-        writer.write_all(
-            &self.pending_output_bytes[self.pending_output_byte_offset..output_end_index],
-        )?;
-        self.pending_output_byte_offset = output_end_index;
-        Ok(true)
     }
 
     fn prepare_pending_output(&mut self) -> Result<(), SixelEncodeError> {
@@ -323,40 +273,40 @@ impl SixelEncoder {
                 return Ok(true);
             }
 
-            if let Some(band) = self.current_band.as_mut() {
-                if let Some(output_byte) = band.take_next_byte() {
+            if let Some(current_band) = self.current_band.as_mut() {
+                if let Some(output_byte) = current_band.take_next_byte() {
                     self.append_output_byte(output_byte)?;
                     return Ok(true);
                 }
                 self.current_band = None;
-                if self.next_band_start_row < self.image_height_pixels {
+                if self.next_band_start_pixel_row < self.image_height_pixels {
                     self.append_output_byte(b'-')?;
                     return Ok(true);
                 }
                 continue;
             }
 
-            if self.next_band_start_row < self.image_height_pixels {
-                let band_start_row = self.next_band_start_row;
-                let band_height = (self.image_height_pixels - band_start_row).min(6);
-                self.next_band_start_row += band_height;
-                let built_band = build_sixel_band(
+            if self.next_band_start_pixel_row < self.image_height_pixels {
+                let band_start_pixel_row = self.next_band_start_pixel_row;
+                let band_pixel_height = (self.image_height_pixels - band_start_pixel_row).min(6);
+                self.next_band_start_pixel_row += band_pixel_height;
+                let next_sixel_band = build_sixel_band(
                     &self.decoded_image,
                     self.image_width_pixels,
-                    band_start_row,
-                    band_height,
-                    self.background,
+                    band_start_pixel_row,
+                    band_pixel_height,
+                    self.background_rgb,
                     &self.palette,
                 )?;
-                if built_band.has_pixel_data() {
+                if next_sixel_band.has_pixel_data {
                     self.has_emitted_sixel = true;
                 } else if !self.has_emitted_sixel {
                     self.has_emitted_sixel = true;
-                    self.current_band = Some(built_band);
+                    self.current_band = Some(next_sixel_band);
                     self.append_output_byte(b'?')?;
                     return Ok(true);
                 }
-                self.current_band = Some(built_band);
+                self.current_band = Some(next_sixel_band);
                 continue;
             }
 
@@ -389,12 +339,6 @@ impl SixelEncoder {
         self.generated_byte_count += 1;
         Ok(())
     }
-
-    #[cfg(test)]
-    pub(crate) fn inject_generation_failure_for_test(&mut self) {
-        self.is_generation_failed = true;
-        self.generation_error = Some(SixelEncodeError::PaletteMapping);
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -410,16 +354,16 @@ enum PaletteMapping {
 }
 
 impl Palette {
-    fn find_palette_color_index(&self, color: [u8; 3]) -> Result<usize, SixelEncodeError> {
+    fn find_palette_color_index(&self, pixel_color: [u8; 3]) -> Result<usize, SixelEncodeError> {
         match &self.palette_mapping {
             PaletteMapping::Exact(palette_index_by_color) => palette_index_by_color
-                .get(&color)
+                .get(&pixel_color)
                 .copied()
                 .map(usize::from)
                 .ok_or(SixelEncodeError::PaletteMapping),
             PaletteMapping::Quantized(palette_index_by_histogram_bin) => {
                 palette_index_by_histogram_bin
-                    .get(compute_histogram_bin_index(color))
+                    .get(compute_histogram_bin_index(pixel_color))
                     .copied()
                     .filter(|palette_index| usize::from(*palette_index) < self.colors.len())
                     .map(usize::from)
@@ -436,9 +380,9 @@ struct HistogramBin {
 }
 
 impl HistogramBin {
-    fn add_color_sample(&mut self, sampled_color: [u8; 3]) {
+    fn add_color_sample(&mut self, pixel_color_sample: [u8; 3]) {
         self.sample_count = self.sample_count.saturating_add(1);
-        for (channel_sum, color_channel) in self.channel_sums.iter_mut().zip(sampled_color) {
+        for (channel_sum, color_channel) in self.channel_sums.iter_mut().zip(pixel_color_sample) {
             *channel_sum = channel_sum.saturating_add(u64::from(color_channel));
         }
     }
@@ -512,10 +456,6 @@ impl BandState {
             output_token_byte_offset: 0,
             has_pixel_data,
         }
-    }
-
-    fn has_pixel_data(&self) -> bool {
-        self.has_pixel_data
     }
 
     fn take_next_byte(&mut self) -> Option<u8> {
@@ -774,7 +714,7 @@ fn write_decimal_number(output_bytes: &mut [u8], decimal_number: usize) -> usize
 
 fn prepare_sixel_palette(
     rgba_bytes: &[u8],
-    background: [u8; 3],
+    background_rgb: [u8; 3],
     maximum_palette_color_count: usize,
 ) -> Result<Palette, SixelEncodeError> {
     let mut seen_colors = BTreeSet::new();
@@ -783,7 +723,7 @@ fn prepare_sixel_palette(
         .try_reserve_exact(maximum_palette_color_count)
         .map_err(|_| SixelEncodeError::AllocationFailed)?;
     for pixel_rgba_bytes in rgba_bytes.chunks_exact(4) {
-        let Some(pixel_color) = blend_pixel_to_sixel_percentage(pixel_rgba_bytes, background)
+        let Some(pixel_color) = blend_pixel_to_sixel_percentage(pixel_rgba_bytes, background_rgb)
         else {
             continue;
         };
@@ -792,7 +732,7 @@ fn prepare_sixel_palette(
             if palette_colors.len() > maximum_palette_color_count {
                 return prepare_quantized_sixel_palette(
                     rgba_bytes,
-                    background,
+                    background_rgb,
                     maximum_palette_color_count,
                 );
             }
@@ -813,7 +753,7 @@ fn prepare_sixel_palette(
 
 fn prepare_quantized_sixel_palette(
     rgba_bytes: &[u8],
-    background: [u8; 3],
+    background_rgb: [u8; 3],
     maximum_palette_color_count: usize,
 ) -> Result<Palette, SixelEncodeError> {
     let mut histogram_bins = Vec::new();
@@ -822,7 +762,7 @@ fn prepare_quantized_sixel_palette(
         .map_err(|_| SixelEncodeError::AllocationFailed)?;
     histogram_bins.resize(HISTOGRAM_BUCKET_COUNT, HistogramBin::default());
     for pixel_rgba_bytes in rgba_bytes.chunks_exact(4) {
-        let Some(pixel_color) = blend_pixel_to_sixel_percentage(pixel_rgba_bytes, background)
+        let Some(pixel_color) = blend_pixel_to_sixel_percentage(pixel_rgba_bytes, background_rgb)
         else {
             continue;
         };
@@ -1014,9 +954,9 @@ fn choose_split_channel(color_box: &ColorBox) -> usize {
 fn build_sixel_band(
     decoded_image: &DecodedImage,
     image_width_pixels: usize,
-    band_start_row: usize,
-    band_height: usize,
-    background: [u8; 3],
+    band_start_pixel_row: usize,
+    band_pixel_height: usize,
+    background_rgb: [u8; 3],
     palette: &Palette,
 ) -> Result<BandState, SixelEncodeError> {
     let mut band_entries_by_color = Vec::new();
@@ -1025,13 +965,13 @@ fn build_sixel_band(
         .map_err(|_| SixelEncodeError::AllocationFailed)?;
     band_entries_by_color.resize_with(palette.colors.len(), Vec::new);
 
-    for band_row_offset in 0..band_height {
-        let image_row = band_start_row + band_row_offset;
-        for image_column in 0..image_width_pixels {
-            let rgba_byte_offset = (image_row * image_width_pixels + image_column) * 4;
+    for band_pixel_row_offset in 0..band_pixel_height {
+        let image_pixel_row = band_start_pixel_row + band_pixel_row_offset;
+        for image_pixel_column in 0..image_width_pixels {
+            let rgba_byte_offset = (image_pixel_row * image_width_pixels + image_pixel_column) * 4;
             let Some(pixel_color) = blend_pixel_to_sixel_percentage(
                 &decoded_image.rgba_bytes[rgba_byte_offset..rgba_byte_offset + 4],
-                background,
+                background_rgb,
             ) else {
                 continue;
             };
@@ -1041,8 +981,8 @@ fn build_sixel_band(
                 .try_reserve(1)
                 .map_err(|_| SixelEncodeError::AllocationFailed)?;
             color_entries.push(BandEntry {
-                pixel_column_index: image_column,
-                pixel_bit_mask: 1 << band_row_offset,
+                pixel_column_index: image_pixel_column,
+                pixel_bit_mask: 1 << band_pixel_row_offset,
             });
         }
     }
@@ -1069,40 +1009,45 @@ fn build_sixel_band(
 
 fn blend_pixel_to_sixel_percentage(
     pixel_rgba_bytes: &[u8],
-    background: [u8; 3],
+    background_rgb: [u8; 3],
 ) -> Option<[u8; 3]> {
     let alpha_byte = pixel_rgba_bytes[3];
     if alpha_byte == 0 {
         return None;
     }
-    let inverse_alpha = 255u16 - u16::from(alpha_byte);
+    let inverse_alpha_value = 255u16 - u16::from(alpha_byte);
     Some([
         convert_byte_to_percentage(blend_channel(
             pixel_rgba_bytes[0],
-            background[0],
+            background_rgb[0],
             alpha_byte,
-            inverse_alpha,
+            inverse_alpha_value,
         )),
         convert_byte_to_percentage(blend_channel(
             pixel_rgba_bytes[1],
-            background[1],
+            background_rgb[1],
             alpha_byte,
-            inverse_alpha,
+            inverse_alpha_value,
         )),
         convert_byte_to_percentage(blend_channel(
             pixel_rgba_bytes[2],
-            background[2],
+            background_rgb[2],
             alpha_byte,
-            inverse_alpha,
+            inverse_alpha_value,
         )),
     ])
 }
 
-fn blend_channel(source_byte: u8, background_byte: u8, alpha: u8, inverse_alpha: u16) -> u8 {
-    let numerator = u32::from(source_byte) * u32::from(alpha)
-        + u32::from(background_byte) * u32::from(inverse_alpha)
+fn blend_channel(
+    source_channel_byte: u8,
+    background_channel_byte: u8,
+    alpha_byte: u8,
+    inverse_alpha_value: u16,
+) -> u8 {
+    let weighted_channel_sum = u32::from(source_channel_byte) * u32::from(alpha_byte)
+        + u32::from(background_channel_byte) * u32::from(inverse_alpha_value)
         + 127;
-    (numerator / 255) as u8
+    (weighted_channel_sum / 255) as u8
 }
 
 fn convert_byte_to_percentage(color_channel_byte: u8) -> u8 {

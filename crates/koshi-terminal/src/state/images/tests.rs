@@ -7,6 +7,34 @@ use koshi_core::process::PtySize;
 use koshi_image::{AnimationFrame, DecodedAnimation, DecodedImage, FrameDelay, LoopPolicy};
 
 use super::*;
+
+impl ImagePlacement {
+    /// Whether (`row_index`, `column_index`) is one of the cells this placement
+    /// covers.
+    pub(crate) fn is_cell_covered(&self, row_index: u16, column_index: u16) -> bool {
+        u32::from(row_index) >= u32::from(self.anchor.0)
+            && u32::from(column_index) >= u32::from(self.anchor.1)
+            && u32::from(row_index) < u32::from(self.anchor.0) + u32::from(self.row_count)
+            && u32::from(column_index) < u32::from(self.anchor.1) + u32::from(self.column_count)
+    }
+
+    /// The covered cells, row by row, left to right.
+    pub(crate) fn list_covered_cells(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        let (anchor_row, anchor_column) = self.anchor;
+        (0..self.row_count).flat_map(move |row_offset| {
+            (0..self.column_count).map(move |column_offset| {
+                (
+                    anchor_row
+                        .checked_add(row_offset)
+                        .expect("validated image placement row fits in u16"),
+                    anchor_column
+                        .checked_add(column_offset)
+                        .expect("validated image placement column fits in u16"),
+                )
+            })
+        })
+    }
+}
 use crate::graphics::{GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord};
 
 fn build_animated_image_record(loop_policy: LoopPolicy, delay_milliseconds: u32) -> ImageRecord {
@@ -341,4 +369,45 @@ fn shared_animation_pixels_fill_the_storage_limit_once() {
         })
     );
     assert_eq!(terminal_state, terminal_state_before_additional_image);
+}
+
+fn build_raster_plan_with_canvas(canvas_size: (u32, u32)) -> RasterPlan {
+    RasterPlan {
+        geometry: koshi_core::geometry::ImageCellGeometry {
+            full_size: koshi_core::geometry::Size {
+                column_count: 1,
+                row_count: 1,
+            },
+            cell_offset: koshi_core::geometry::Point { column: 0, row: 0 },
+        },
+        source_rect: (0, 0, 1, 1),
+        target_size: (1, 1),
+        canvas_size,
+        pixel_offset: (0, 0),
+        needs_raster: true,
+    }
+}
+
+#[test]
+fn a_canvas_byte_count_is_four_bytes_per_pixel() {
+    assert_eq!(
+        build_raster_plan_with_canvas((3, 2)).compute_canvas_byte_count(),
+        Ok(24)
+    );
+}
+
+#[test]
+fn a_zero_width_canvas_has_zero_bytes() {
+    assert_eq!(
+        build_raster_plan_with_canvas((0, 7)).compute_canvas_byte_count(),
+        Ok(0)
+    );
+}
+
+#[test]
+fn a_canvas_whose_byte_count_overflows_is_refused() {
+    assert_eq!(
+        build_raster_plan_with_canvas((u32::MAX, u32::MAX)).compute_canvas_byte_count(),
+        Err("image raster plan byte count overflows".to_owned())
+    );
 }

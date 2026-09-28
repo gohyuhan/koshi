@@ -117,55 +117,55 @@ impl vte::Perform for TerminalState {
         // width scrolls only when the next glyph arrives). With autowrap off
         // the cursor stays on the bound and this glyph overwrites in place.
         // Either way the latch clears.
-        if self.active_cursor().pending_wrap {
-            if self.modes.autowrap {
+        if self.get_active_cursor().is_wrap_pending {
+            if self.modes.is_autowrap_enabled {
                 // The row the cursor leaves soft-wraps into the next, including
                 // when a bottom-margin scroll moves it above a fresh blank row.
                 let (first_wrap_column_index, _) = self.get_horizontal_wrap_bounds();
                 self.wrap_linefeed(RowEnd::Soft);
-                self.active_cursor_mut().column = first_wrap_column_index;
+                self.get_active_cursor_mut().column = first_wrap_column_index;
             }
             self.clear_wrap_latch();
         }
 
         let (first_column_index, last_column_index) = self.get_horizontal_wrap_bounds();
-        let style = self.active_render().style;
+        let style = self.get_active_render().style;
 
         // A wide glyph at the effective right bound of a multi-column region:
         // blank that bound and wrap, and the glyph begins the next line as one
         // whole cell. In a 1-column region (`last_column_index == 0`) this is
         // skipped and `place_glyph` stores the glyph narrow in place.
         if glyph_width == 2
-            && self.active_cursor().column == last_column_index
+            && self.get_active_cursor().column == last_column_index
             && first_column_index < last_column_index
         {
             // With autowrap off the glyph is dropped: the cursor rests on the
             // effective right bound with no wrap armed, and the next glyph
             // overwrites there. The cluster resets: a combining mark that
             // follows does not fold onto the previous cell.
-            if !self.modes.autowrap {
+            if !self.modes.is_autowrap_enabled {
                 self.reset_cluster();
                 return;
             }
-            let cursor_row_index = self.active_cursor().row;
+            let cursor_row_index = self.get_active_cursor().row;
             // When the effective right bound is the continuation of a wide glyph,
             // its base one column to the left is cleared too.
             self.clear_wide_glyph_at(cursor_row_index, last_column_index);
             if let Some(cell) = self
-                .active_grid_mut()
+                .get_active_grid_mut()
                 .get_cell_mut(cursor_row_index, last_column_index)
             {
-                *cell = Cell::blank_with(style.get_background_fill_style());
+                *cell = Cell::build_blank_with_style(style.get_background_fill_style());
             }
             // The freed right bound is a wide-glyph spacer; `SoftWide` marks the
             // row so a reflow re-joins the rows and drops the spacer.
             self.wrap_linefeed(RowEnd::SoftWide);
-            self.active_cursor_mut().column = first_column_index;
+            self.get_active_cursor_mut().column = first_column_index;
             self.clear_wrap_latch();
         }
 
-        let cursor_row_index = self.active_cursor().row;
-        let cursor_column_index = self.active_cursor().column;
+        let cursor_row_index = self.get_active_cursor().row;
+        let cursor_column_index = self.get_active_cursor().column;
 
         // Install the base glyph (and, when wide, its continuation), clearing any
         // wide pair the write would split — see `place_glyph`.
@@ -196,7 +196,7 @@ impl vte::Perform for TerminalState {
         if end_column_index >= last_column_index {
             self.arm_wrap_latch();
         } else {
-            self.active_cursor_mut().column = end_column_index + 1;
+            self.get_active_cursor_mut().column = end_column_index + 1;
         }
     }
 
@@ -209,21 +209,21 @@ impl vte::Perform for TerminalState {
             // LF, VT, FF, IND: move down one line, scrolling at the bottom
             // margin (VT and FF act as LF).
             0x0A..=0x0C | 0x84 => {
-                self.linefeed();
+                self.apply_linefeed();
                 self.clear_wrap_latch();
             }
             // CR: carriage return to the active left horizontal margin.
             0x0D => {
                 let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
-                self.active_cursor_mut().column = minimum_column_index;
+                self.get_active_cursor_mut().column = minimum_column_index;
                 self.clear_wrap_latch();
             }
             // BS: backspace one column (no erase), clamped to the active left
             // horizontal margin.
             0x08 => {
                 let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
-                self.active_cursor_mut().column = self
-                    .active_cursor()
+                self.get_active_cursor_mut().column = self
+                    .get_active_cursor()
                     .column
                     .saturating_sub(1)
                     .max(minimum_column_index);
@@ -235,31 +235,31 @@ impl vte::Perform for TerminalState {
                 let (minimum_column_index, maximum_column_index) =
                     self.get_horizontal_margin_bounds();
                 let cursor_column_index = self
-                    .active_cursor()
+                    .get_active_cursor()
                     .column
                     .max(minimum_column_index)
                     .min(maximum_column_index);
                 let next_column_index =
                     find_next_tab_stop(&self.tab_stops, cursor_column_index, maximum_column_index);
-                self.active_cursor_mut().column = next_column_index;
+                self.get_active_cursor_mut().column = next_column_index;
                 self.clear_wrap_latch();
             }
             // NEL: move down one line, then return to the active left
             // horizontal margin.
             0x85 => {
-                self.linefeed();
+                self.apply_linefeed();
                 let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
-                self.active_cursor_mut().column = minimum_column_index;
+                self.get_active_cursor_mut().column = minimum_column_index;
                 self.clear_wrap_latch();
             }
             // HTS: set a horizontal tab stop at the cursor.
             0x88 => self.set_tab_stop(),
             // RI: move up one line, scrolling at the top margin.
-            0x8D => self.reverse_index(),
+            0x8D => self.apply_reverse_index(),
             // SO (shift out): select G1 into the GL range for printing.
-            0x0E => self.active_render_mut().gl = 1,
+            0x0E => self.get_active_render_mut().gl = 1,
             // SI (shift in): select G0 into the GL range for printing.
-            0x0F => self.active_render_mut().gl = 0,
+            0x0F => self.get_active_render_mut().gl = 0,
             // BEL (0x07) and any other control byte: discarded, never rendered.
             _ => {}
         }
@@ -276,24 +276,24 @@ impl vte::Perform for TerminalState {
     /// reply bytes for the app.
     fn csi_dispatch(
         &mut self,
-        params: &vte::Params,
+        csi_parameters: &vte::Params,
         intermediates: &[u8],
-        ignore: bool,
+        should_ignore: bool,
         action: char,
     ) {
         // Every CSI but a style-only SGR ends the text run. A style-only SGR
-        // (`CSI Pm m`: no intermediates, not flagged `ignore` — the same
+        // (`CSI Pm m`: no intermediates, without `should_ignore` — the same
         // condition the SGR arm below applies) changes only the pen: a combining
         // mark or variation selector after it still folds onto the preceding
         // base (`e \x1b[31m \u{0301}` → an accented `e`). An overlong CSI
-        // flagged `ignore` breaks the cluster even when it ends in `m`.
-        let is_style_only_sgr = action == 'm' && intermediates.is_empty() && !ignore;
+        // with `should_ignore` breaks the cluster even when it ends in `m`.
+        let is_style_only_sgr = action == 'm' && intermediates.is_empty() && !should_ignore;
         if !is_style_only_sgr {
             self.reset_cluster();
         }
-        // `ignore` flags a sequence with more params or intermediates than vte
+        // `should_ignore` flags a sequence with more params or intermediates than vte
         // keeps; it is dropped.
-        if ignore {
+        if should_ignore {
             return;
         }
 
@@ -306,29 +306,29 @@ impl vte::Perform for TerminalState {
         // to the soft-reset check.
         match (intermediates, action) {
             // DA1 — primary device attributes.
-            (b"", 'c') => return self.report_primary_device_attributes(params),
+            (b"", 'c') => return self.report_primary_device_attributes(csi_parameters),
             // DA2 — secondary device attributes.
-            (b">", 'c') => return self.report_secondary_device_attributes(params),
+            (b">", 'c') => return self.report_secondary_device_attributes(csi_parameters),
             // DA3 — tertiary device attributes (unit id).
-            (b"=", 'c') => return self.report_tertiary_device_attributes(params),
+            (b"=", 'c') => return self.report_tertiary_device_attributes(csi_parameters),
             // DSR — operating status (5) / cursor position report (6).
-            (b"", 'n') => return self.report_device_status(params),
+            (b"", 'n') => return self.report_device_status(csi_parameters),
             // DEC-form DSR — cursor position, printer, UDK, keyboard,
             // locator, macro space, checksum, data integrity, multi-session.
-            (b"?", 'n') => return self.report_dec_device_status(params),
+            (b"?", 'n') => return self.report_dec_device_status(csi_parameters),
             // DECRQM — request DEC private mode state.
-            (b"?$", 'p') => return self.report_dec_mode(params),
+            (b"?$", 'p') => return self.report_dec_mode(csi_parameters),
             // RQM, ANSI form — request ANSI mode state.
-            (b"$", 'p') => return self.report_ansi_mode(params),
+            (b"$", 'p') => return self.report_ansi_mode(csi_parameters),
             // DECSCUSR — set the cursor style. The SPACE intermediate is part
             // of the sequence (`CSI Ps SP q`), not padding.
-            (b" ", 'q') => return self.set_cursor_style(params),
+            (b" ", 'q') => return self.set_cursor_style(csi_parameters),
             // Kitty keyboard protocol — push, pop and set the active screen's
             // flag stack, and report its current flags. `CSI u` with no
             // intermediate is SCORC and stays with the cursor arms below.
-            (b">", 'u') => return self.push_keyboard_flags(params),
-            (b"<", 'u') => return self.pop_keyboard_flags(params),
-            (b"=", 'u') => return self.set_keyboard_flags(params),
+            (b">", 'u') => return self.push_keyboard_flags(csi_parameters),
+            (b"<", 'u') => return self.pop_keyboard_flags(csi_parameters),
+            (b"=", 'u') => return self.set_keyboard_flags(csi_parameters),
             (b"?", 'u') => return self.report_keyboard_flags(),
             _ => {}
         }
@@ -337,10 +337,10 @@ impl vte::Perform for TerminalState {
         // as one zero value; any nonzero or additional parameter is not DECSTR.
         if intermediates == b"!"
             && action == 'p'
-            && params.len() <= 1
-            && get_first_parameter_number(params).unwrap_or(0) == 0
+            && csi_parameters.len() <= 1
+            && get_first_parameter_number(csi_parameters).unwrap_or(0) == 0
         {
-            self.soft_reset();
+            self.apply_soft_reset();
             return;
         }
 
@@ -359,9 +359,9 @@ impl vte::Perform for TerminalState {
             // same list already swapped. A repeated `?1049 h` in one list
             // re-runs the entry with the same result.
             let screen_at_start = self.active_screen;
-            for parameter_numbers in params.iter() {
-                let dec_private_mode = parameter_numbers.first().copied().unwrap_or(0);
-                self.apply_dec_private_mode(action, dec_private_mode, screen_at_start);
+            for csi_parameter_numbers in csi_parameters.iter() {
+                let dec_private_mode_number = csi_parameter_numbers.first().copied().unwrap_or(0);
+                self.apply_dec_private_mode(action, dec_private_mode_number, screen_at_start);
             }
             return;
         }
@@ -379,10 +379,10 @@ impl vte::Perform for TerminalState {
             // CUU — cursor up; absent/zero count means one.
             'A' => {
                 let (minimum_row_index, maximum_row_index) = self.get_cursor_row_bounds();
-                self.active_cursor_mut().row = self
-                    .active_cursor()
+                self.get_active_cursor_mut().row = self
+                    .get_active_cursor()
                     .row
-                    .saturating_sub(get_cursor_move_count(params))
+                    .saturating_sub(get_cursor_move_count(csi_parameters))
                     .max(minimum_row_index)
                     .min(maximum_row_index);
                 self.clear_wrap_latch();
@@ -390,10 +390,10 @@ impl vte::Perform for TerminalState {
             // CUD / VPR — cursor down, clamped to the active row bounds (VPR
             // `e` is the same vertical move as CUD).
             'B' | 'e' => {
-                let movement_count = get_cursor_move_count(params);
+                let movement_count = get_cursor_move_count(csi_parameters);
                 let (minimum_row_index, maximum_row_index) = self.get_cursor_row_bounds();
-                self.active_cursor_mut().row = self
-                    .active_cursor()
+                self.get_active_cursor_mut().row = self
+                    .get_active_cursor()
                     .row
                     .saturating_add(movement_count)
                     .max(minimum_row_index)
@@ -403,10 +403,10 @@ impl vte::Perform for TerminalState {
             // CUF / HPR — cursor forward, clamped to the active column bounds
             // (HPR `a` is the same horizontal move as CUF).
             'C' | 'a' => {
-                let movement_count = get_cursor_move_count(params);
+                let movement_count = get_cursor_move_count(csi_parameters);
                 let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
-                self.active_cursor_mut().column = self
-                    .active_cursor()
+                self.get_active_cursor_mut().column = self
+                    .get_active_cursor()
                     .column
                     .saturating_add(movement_count)
                     .max(minimum_column_index)
@@ -416,10 +416,10 @@ impl vte::Perform for TerminalState {
             // CUB — cursor back.
             'D' => {
                 let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
-                self.active_cursor_mut().column = self
-                    .active_cursor()
+                self.get_active_cursor_mut().column = self
+                    .get_active_cursor()
                     .column
-                    .saturating_sub(get_cursor_move_count(params))
+                    .saturating_sub(get_cursor_move_count(csi_parameters))
                     .max(minimum_column_index)
                     .min(maximum_column_index);
                 self.clear_wrap_latch();
@@ -429,38 +429,38 @@ impl vte::Perform for TerminalState {
             'H' | 'f' => {
                 let (row_offset, column_offset) = self.get_cursor_origin_offsets();
                 self.move_cursor_to(
-                    get_cursor_coordinate(params, 0).saturating_add(row_offset),
-                    get_cursor_coordinate(params, 1).saturating_add(column_offset),
+                    get_cursor_coordinate(csi_parameters, 0).saturating_add(row_offset),
+                    get_cursor_coordinate(csi_parameters, 1).saturating_add(column_offset),
                 );
             }
             // CHA / HPA — absolute column on the current row; 1-based → 0-based.
             'G' | '`' => {
-                let cursor_row_index = self.active_cursor().row;
-                self.move_cursor_to(cursor_row_index, get_cursor_coordinate(params, 0));
+                let cursor_row_index = self.get_active_cursor().row;
+                self.move_cursor_to(cursor_row_index, get_cursor_coordinate(csi_parameters, 0));
             }
             // VPA — absolute row in the current column; 1-based → 0-based.
             'd' => {
-                let cursor_column_index = self.active_cursor().column;
+                let cursor_column_index = self.get_active_cursor().column;
                 let (row_offset, _) = self.get_cursor_origin_offsets();
                 self.move_cursor_to(
-                    get_cursor_coordinate(params, 0).saturating_add(row_offset),
+                    get_cursor_coordinate(csi_parameters, 0).saturating_add(row_offset),
                     cursor_column_index,
                 );
             }
             // CNL — cursor next line: n rows down (clamped, no scroll) to col 0.
             'E' => {
                 let cursor_row_index = self
-                    .active_cursor()
+                    .get_active_cursor()
                     .row
-                    .saturating_add(get_cursor_move_count(params));
+                    .saturating_add(get_cursor_move_count(csi_parameters));
                 self.move_cursor_to(cursor_row_index, 0);
             }
             // CPL — cursor previous line: n rows up (clamped, no scroll) to col 0.
             'F' => {
                 let cursor_row_index = self
-                    .active_cursor()
+                    .get_active_cursor()
                     .row
-                    .saturating_sub(get_cursor_move_count(params));
+                    .saturating_sub(get_cursor_move_count(csi_parameters));
                 self.move_cursor_to(cursor_row_index, 0);
             }
             // CHT — advance n stored tab stops, clamped to the active column
@@ -468,11 +468,11 @@ impl vte::Perform for TerminalState {
             'I' => {
                 let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
                 let mut cursor_column_index = self
-                    .active_cursor()
+                    .get_active_cursor()
                     .column
                     .max(minimum_column_index)
                     .min(maximum_column_index);
-                for _ in 0..get_cursor_move_count(params) {
+                for _ in 0..get_cursor_move_count(csi_parameters) {
                     if cursor_column_index >= maximum_column_index {
                         break;
                     }
@@ -482,7 +482,7 @@ impl vte::Perform for TerminalState {
                         maximum_column_index,
                     );
                 }
-                self.active_cursor_mut().column = cursor_column_index;
+                self.get_active_cursor_mut().column = cursor_column_index;
                 self.clear_wrap_latch();
             }
             // CBT — retreat n stored tab stops, clamped to the active column
@@ -490,11 +490,11 @@ impl vte::Perform for TerminalState {
             'Z' => {
                 let (minimum_column_index, maximum_column_index) = self.get_cursor_column_bounds();
                 let mut cursor_column_index = self
-                    .active_cursor()
+                    .get_active_cursor()
                     .column
                     .max(minimum_column_index)
                     .min(maximum_column_index);
-                for _ in 0..get_cursor_move_count(params) {
+                for _ in 0..get_cursor_move_count(csi_parameters) {
                     if cursor_column_index <= minimum_column_index {
                         break;
                     }
@@ -503,12 +503,12 @@ impl vte::Perform for TerminalState {
                             .max(minimum_column_index)
                             .min(maximum_column_index);
                 }
-                self.active_cursor_mut().column = cursor_column_index;
+                self.get_active_cursor_mut().column = cursor_column_index;
                 self.clear_wrap_latch();
             }
             // TBC — clear the current tab stop (default/0) or every stop (3).
             // Only the first parameter applies.
-            'g' => match get_first_parameter_number(params).unwrap_or(0) {
+            'g' => match get_first_parameter_number(csi_parameters).unwrap_or(0) {
                 0 => self.clear_tab_stop(),
                 3 => self.clear_all_tab_stops(),
                 _ => {}
@@ -516,34 +516,35 @@ impl vte::Perform for TerminalState {
             // ED — erase in display (cursor unmoved; an erasing mode clears the
             // wrap latch, see below).
             'J' => {
-                let background_cell = self.active_render().style.get_background_fill_style();
-                let cursor_row_index = self.active_cursor().row;
-                let cursor_column_index = self.active_cursor().column;
-                let erase_display_mode = get_first_parameter_number(params).unwrap_or(0);
-                let mut did_remove_image_fragments = false;
+                let background_fill_style =
+                    self.get_active_render().style.get_background_fill_style();
+                let cursor_row_index = self.get_active_cursor().row;
+                let cursor_column_index = self.get_active_cursor().column;
+                let erase_display_mode = get_first_parameter_number(csi_parameters).unwrap_or(0);
+                let mut has_removed_image_fragments = false;
                 match erase_display_mode {
                     // Cursor to end of screen: rest of this row, then every row
                     // below. A row erased end to end also loses its prompt
                     // mark; the partly erased cursor row keeps its own.
                     0 => {
-                        did_remove_image_fragments |= self.clear_image_fragments_at_cells(
+                        has_removed_image_fragments |= self.clear_image_fragments_at_cells(
                             cursor_row_index,
                             cursor_column_index,
                             column_count,
                         );
                         for row_index in cursor_row_index.saturating_add(1)..row_count {
-                            did_remove_image_fragments |=
+                            has_removed_image_fragments |=
                                 self.clear_image_fragments_at_cells(row_index, 0, column_count);
                         }
-                        let grid = self.active_grid_mut();
+                        let grid = self.get_active_grid_mut();
                         grid.clear_line(
                             cursor_row_index,
                             cursor_column_index,
                             column_count,
-                            background_cell,
+                            background_fill_style,
                         );
                         for row_index in cursor_row_index.saturating_add(1)..row_count {
-                            grid.clear_line(row_index, 0, column_count, background_cell);
+                            grid.clear_line(row_index, 0, column_count, background_fill_style);
                             grid.set_prompt_mark(row_index, false);
                         }
                     }
@@ -551,35 +552,35 @@ impl vte::Perform for TerminalState {
                     // through the cursor column inclusive.
                     1 => {
                         for row_index in 0..cursor_row_index {
-                            did_remove_image_fragments |=
+                            has_removed_image_fragments |=
                                 self.clear_image_fragments_at_cells(row_index, 0, column_count);
                         }
-                        did_remove_image_fragments |= self.clear_image_fragments_at_cells(
+                        has_removed_image_fragments |= self.clear_image_fragments_at_cells(
                             cursor_row_index,
                             0,
                             cursor_column_index.saturating_add(1),
                         );
-                        let grid = self.active_grid_mut();
+                        let grid = self.get_active_grid_mut();
                         for row_index in 0..cursor_row_index {
-                            grid.clear_line(row_index, 0, column_count, background_cell);
+                            grid.clear_line(row_index, 0, column_count, background_fill_style);
                             grid.set_prompt_mark(row_index, false);
                         }
                         grid.clear_line(
                             cursor_row_index,
                             0,
                             cursor_column_index.saturating_add(1),
-                            background_cell,
+                            background_fill_style,
                         );
                     }
                     // Whole screen.
                     2 => {
                         for row_index in 0..row_count {
-                            did_remove_image_fragments |=
+                            has_removed_image_fragments |=
                                 self.clear_image_fragments_at_cells(row_index, 0, column_count);
                         }
-                        let grid = self.active_grid_mut();
+                        let grid = self.get_active_grid_mut();
                         for row_index in 0..row_count {
-                            grid.clear_line(row_index, 0, column_count, background_cell);
+                            grid.clear_line(row_index, 0, column_count, background_fill_style);
                             grid.set_prompt_mark(row_index, false);
                         }
                         self.clear_active_image_placements();
@@ -601,7 +602,7 @@ impl vte::Perform for TerminalState {
                 if matches!(erase_display_mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
-                self.finish_native_fragment_removal(did_remove_image_fragments);
+                self.finish_native_fragment_removal(has_removed_image_fragments);
                 // Only the cursor row can be partially cleared; repair its wide
                 // pairs.
                 self.normalize_wide_pairs(cursor_row_index);
@@ -609,11 +610,12 @@ impl vte::Perform for TerminalState {
             // EL — erase in line (cursor unmoved; an erasing mode clears the wrap
             // latch, see below).
             'K' => {
-                let background_cell = self.active_render().style.get_background_fill_style();
-                let cursor_row_index = self.active_cursor().row;
-                let cursor_column_index = self.active_cursor().column;
-                let erase_line_mode = get_first_parameter_number(params).unwrap_or(0);
-                let did_remove_image_fragments = match erase_line_mode {
+                let background_fill_style =
+                    self.get_active_render().style.get_background_fill_style();
+                let cursor_row_index = self.get_active_cursor().row;
+                let cursor_column_index = self.get_active_cursor().column;
+                let erase_line_mode = get_first_parameter_number(csi_parameters).unwrap_or(0);
+                let has_removed_image_fragments = match erase_line_mode {
                     0 => self.clear_image_fragments_at_cells(
                         cursor_row_index,
                         cursor_column_index,
@@ -629,24 +631,24 @@ impl vte::Perform for TerminalState {
                 };
                 match erase_line_mode {
                     // Cursor to end of line.
-                    0 => self.active_grid_mut().clear_line(
+                    0 => self.get_active_grid_mut().clear_line(
                         cursor_row_index,
                         cursor_column_index,
                         column_count,
-                        background_cell,
+                        background_fill_style,
                     ),
                     // Start of line through the cursor column inclusive.
-                    1 => self.active_grid_mut().clear_line(
+                    1 => self.get_active_grid_mut().clear_line(
                         cursor_row_index,
                         0,
                         cursor_column_index.saturating_add(1),
-                        background_cell,
+                        background_fill_style,
                     ),
                     // Whole line: the row is erased end to end and loses its
                     // prompt mark.
                     2 => {
-                        let grid = self.active_grid_mut();
-                        grid.clear_line(cursor_row_index, 0, column_count, background_cell);
+                        let grid = self.get_active_grid_mut();
+                        grid.clear_line(cursor_row_index, 0, column_count, background_fill_style);
                         grid.set_prompt_mark(cursor_row_index, false);
                     }
                     // Unknown EL mode: ignored.
@@ -658,7 +660,7 @@ impl vte::Perform for TerminalState {
                 if matches!(erase_line_mode, 0..=2) {
                     self.clear_wrap_latch();
                 }
-                self.finish_native_fragment_removal(did_remove_image_fragments);
+                self.finish_native_fragment_removal(has_removed_image_fragments);
                 self.normalize_wide_pairs(cursor_row_index);
             }
             // ECH — erase n cells in place from the cursor (BCE, background color
@@ -666,46 +668,48 @@ impl vte::Perform for TerminalState {
             // shift of the rest of the line, then repair any wide-glyph pair the
             // erase split. Clears the wrap latch.
             'X' => {
-                let requested_cell_count = get_cursor_move_count(params);
-                let background_cell = self.active_render().style.get_background_fill_style();
-                let cursor_row_index = self.active_cursor().row;
-                let cursor_column_index = self.active_cursor().column;
+                let requested_cell_count = get_cursor_move_count(csi_parameters);
+                let background_fill_style =
+                    self.get_active_render().style.get_background_fill_style();
+                let cursor_row_index = self.get_active_cursor().row;
+                let cursor_column_index = self.get_active_cursor().column;
                 let end_column_index = cursor_column_index
                     .saturating_add(requested_cell_count)
                     .min(column_count);
-                let did_remove_image_fragments = self.clear_image_fragments_at_cells(
+                let has_removed_image_fragments = self.clear_image_fragments_at_cells(
                     cursor_row_index,
                     cursor_column_index,
                     end_column_index,
                 );
-                self.active_grid_mut().clear_line(
+                self.get_active_grid_mut().clear_line(
                     cursor_row_index,
                     cursor_column_index,
                     end_column_index,
-                    background_cell,
+                    background_fill_style,
                 );
-                self.finish_native_fragment_removal(did_remove_image_fragments);
+                self.finish_native_fragment_removal(has_removed_image_fragments);
                 self.clear_wrap_latch();
                 self.normalize_wide_pairs(cursor_row_index);
             }
             // SGR — set graphic rendition: update the pen colors and text
             // attributes applied to subsequently printed cells.
-            'm' => apply_sgr(&mut self.active_render_mut().style, params),
-            't' => self.report_window_size(params),
+            'm' => apply_sgr(&mut self.get_active_render_mut().style, csi_parameters),
+            't' => self.report_window_size(csi_parameters),
             // ICH — insert n blank cells at the cursor, shifting the rest of the
             // line right; cells pushed past the right edge fall off.
             '@' => {
-                let requested_cell_count = get_cursor_move_count(params);
-                let background_cell = self.active_render().style.get_background_fill_style();
-                let cursor_row_index = self.active_cursor().row;
-                let cursor_column_index = self.active_cursor().column;
+                let requested_cell_count = get_cursor_move_count(csi_parameters);
+                let background_fill_style =
+                    self.get_active_render().style.get_background_fill_style();
+                let cursor_row_index = self.get_active_cursor().row;
+                let cursor_column_index = self.get_active_cursor().column;
                 let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
                 let operation_column_index = cursor_column_index.max(left_column_index);
-                let mut did_remove_image_fragments = false;
+                let mut has_removed_image_fragments = false;
                 if operation_column_index <= right_column_index {
                     let inserted_cell_count =
                         requested_cell_count.min(right_column_index - operation_column_index + 1);
-                    did_remove_image_fragments = self.discard_active_image_fragments(
+                    has_removed_image_fragments = self.discard_active_image_fragments(
                         cursor_row_index,
                         cursor_row_index.saturating_add(1),
                         right_column_index
@@ -713,56 +717,58 @@ impl vte::Perform for TerminalState {
                             .saturating_sub(inserted_cell_count),
                         right_column_index.saturating_add(1),
                     );
-                    self.active_grid_mut().insert_cells_in_columns(
+                    self.get_active_grid_mut().insert_cells_in_columns(
                         cursor_row_index,
                         operation_column_index,
                         right_column_index,
                         requested_cell_count,
-                        background_cell,
+                        background_fill_style,
                     );
                 }
-                self.finish_native_fragment_removal(did_remove_image_fragments);
+                self.finish_native_fragment_removal(has_removed_image_fragments);
                 self.normalize_wide_pairs(cursor_row_index);
                 self.clear_wrap_latch();
             }
             // DCH — delete n cells at the cursor, pulling the rest of the line
             // left; the right end is refilled with blanks.
             'P' => {
-                let requested_cell_count = get_cursor_move_count(params);
-                let background_cell = self.active_render().style.get_background_fill_style();
-                let cursor_row_index = self.active_cursor().row;
-                let cursor_column_index = self.active_cursor().column;
+                let requested_cell_count = get_cursor_move_count(csi_parameters);
+                let background_fill_style =
+                    self.get_active_render().style.get_background_fill_style();
+                let cursor_row_index = self.get_active_cursor().row;
+                let cursor_column_index = self.get_active_cursor().column;
                 let (left_column_index, right_column_index) = self.get_horizontal_margin_bounds();
                 let operation_column_index = cursor_column_index.max(left_column_index);
-                let mut did_remove_image_fragments = false;
+                let mut has_removed_image_fragments = false;
                 if operation_column_index <= right_column_index {
                     let deleted_cell_count =
                         requested_cell_count.min(right_column_index - operation_column_index + 1);
-                    did_remove_image_fragments = self.discard_active_image_fragments(
+                    has_removed_image_fragments = self.discard_active_image_fragments(
                         cursor_row_index,
                         cursor_row_index.saturating_add(1),
                         operation_column_index,
                         operation_column_index.saturating_add(deleted_cell_count),
                     );
-                    self.active_grid_mut().delete_cells_in_columns(
+                    self.get_active_grid_mut().delete_cells_in_columns(
                         cursor_row_index,
                         operation_column_index,
                         right_column_index,
                         requested_cell_count,
-                        background_cell,
+                        background_fill_style,
                     );
                 }
-                self.finish_native_fragment_removal(did_remove_image_fragments);
+                self.finish_native_fragment_removal(has_removed_image_fragments);
                 self.normalize_wide_pairs(cursor_row_index);
                 self.clear_wrap_latch();
             }
             // DECSLRM — set the left/right margins and home the cursor when
             // DECLRMM (`?69`) is enabled. With the mode off, the same final
             // byte remains SCOSC.
-            's' if self.modes.declrmm => {
+            's' if self.modes.is_left_right_margin_mode_enabled => {
                 let last_column_index = column_count.saturating_sub(1);
-                let left_column_index = get_cursor_coordinate(params, 0).min(last_column_index);
-                let right_column_index = get_parameter_number_at(params, 1)
+                let left_column_index =
+                    get_cursor_coordinate(csi_parameters, 0).min(last_column_index);
+                let right_column_index = get_parameter_number_at(csi_parameters, 1)
                     .filter(|&parameter_number| parameter_number != 0)
                     .map_or(last_column_index, |parameter_number| parameter_number - 1)
                     .min(last_column_index);
@@ -773,7 +779,7 @@ impl vte::Perform for TerminalState {
                         } else {
                             Some((left_column_index, right_column_index))
                         };
-                    *self.horizontal_margins_mut() = horizontal_margins;
+                    *self.get_horizontal_margins_mut() = horizontal_margins;
                     self.move_cursor_to(0, 0);
                 }
             }
@@ -786,15 +792,16 @@ impl vte::Perform for TerminalState {
             // The cursor (row, column, wrap latch) is left unchanged.
             'L' => {
                 let (top_row_index, bottom_row_index) = self.get_scroll_region_bounds();
-                if (top_row_index..=bottom_row_index).contains(&self.active_cursor().row) {
-                    let requested_line_count = get_cursor_move_count(params);
-                    let background_cell = self.active_render().style.get_background_fill_style();
-                    let cursor_row_index = self.active_cursor().row;
+                if (top_row_index..=bottom_row_index).contains(&self.get_active_cursor().row) {
+                    let requested_line_count = get_cursor_move_count(csi_parameters);
+                    let background_fill_style =
+                        self.get_active_render().style.get_background_fill_style();
+                    let cursor_row_index = self.get_active_cursor().row;
                     self.insert_lines_preserving_images(
                         cursor_row_index,
                         bottom_row_index,
                         requested_line_count,
-                        background_cell,
+                        background_fill_style,
                     );
                 }
             }
@@ -802,43 +809,46 @@ impl vte::Perform for TerminalState {
             // region up. Same region guard and cursor handling as IL.
             'M' => {
                 let (top_row_index, bottom_row_index) = self.get_scroll_region_bounds();
-                if (top_row_index..=bottom_row_index).contains(&self.active_cursor().row) {
-                    let requested_line_count = get_cursor_move_count(params);
-                    let background_cell = self.active_render().style.get_background_fill_style();
-                    let cursor_row_index = self.active_cursor().row;
+                if (top_row_index..=bottom_row_index).contains(&self.get_active_cursor().row) {
+                    let requested_line_count = get_cursor_move_count(csi_parameters);
+                    let background_fill_style =
+                        self.get_active_render().style.get_background_fill_style();
+                    let cursor_row_index = self.get_active_cursor().row;
                     self.delete_lines_into_scrollback(
                         cursor_row_index,
                         bottom_row_index,
                         requested_line_count,
-                        background_cell,
+                        background_fill_style,
                     );
                 }
             }
             // SU — scroll the region up by n (`CSI Ps S`); the cursor stays put.
             'S' => {
-                let requested_line_count = get_cursor_move_count(params);
-                let background_cell = self.active_render().style.get_background_fill_style();
+                let requested_line_count = get_cursor_move_count(csi_parameters);
+                let background_fill_style =
+                    self.get_active_render().style.get_background_fill_style();
                 let (top_row_index, bottom_row_index) = self.get_scroll_region_bounds();
                 self.delete_lines_into_scrollback(
                     top_row_index,
                     bottom_row_index,
                     requested_line_count,
-                    background_cell,
+                    background_fill_style,
                 );
             }
             // SD — scroll the region down by n; the cursor stays put. `CSI Ps T`
             // scrolls only with 0 or 1 parameter (`CSI <5 params> T` is xterm
             // highlight mouse tracking); `CSI Ps ^` (ECMA-48) always scrolls.
             'T' | '^' => {
-                if action == '^' || params.len() <= 1 {
-                    let requested_line_count = get_cursor_move_count(params);
-                    let background_cell = self.active_render().style.get_background_fill_style();
+                if action == '^' || csi_parameters.len() <= 1 {
+                    let requested_line_count = get_cursor_move_count(csi_parameters);
+                    let background_fill_style =
+                        self.get_active_render().style.get_background_fill_style();
                     let (top_row_index, bottom_row_index) = self.get_scroll_region_bounds();
                     self.insert_lines_preserving_images(
                         top_row_index,
                         bottom_row_index,
                         requested_line_count,
-                        background_cell,
+                        background_fill_style,
                     );
                 }
             }
@@ -847,8 +857,8 @@ impl vte::Perform for TerminalState {
             // ignored; a full-screen span clears the region to `None`. The cursor
             // is homed to the top-left.
             'r' => {
-                let top_row_index = get_cursor_coordinate(params, 0).min(last_row_index);
-                let bottom_row_index = get_parameter_number_at(params, 1)
+                let top_row_index = get_cursor_coordinate(csi_parameters, 0).min(last_row_index);
+                let bottom_row_index = get_parameter_number_at(csi_parameters, 1)
                     .filter(|&parameter_number| parameter_number != 0)
                     .map_or(last_row_index, |parameter_number| parameter_number - 1)
                     .min(last_row_index);
@@ -873,50 +883,50 @@ impl vte::Perform for TerminalState {
 
     /// Handle charset designation, cursor save/restore, line movement,
     /// tab-stop setup, and terminal reset ESC sequences.
-    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], should_ignore: bool, final_byte: u8) {
         // Any ESC sequence ends a text run, so no following glyph folds into it.
         self.reset_cluster();
-        if ignore {
+        if should_ignore {
             return;
         }
         // Charset designation: `ESC (`/`)`/`*`/`+` Fc designates G0/G1/G2/G3.
-        // vte collects the `(`/`)`/`*`/`+` into `intermediates`; the final `byte`
+        // vte collects the `(`/`)`/`*`/`+` into `intermediates`; `final_byte`
         // names the set. The plain-ESC match below runs only with no
         // intermediate.
         match intermediates {
-            b"(" => return self.designate_charset(0, byte),
-            b")" => return self.designate_charset(1, byte),
-            b"*" => return self.designate_charset(2, byte),
-            b"+" => return self.designate_charset(3, byte),
+            b"(" => return self.designate_charset(0, final_byte),
+            b")" => return self.designate_charset(1, final_byte),
+            b"*" => return self.designate_charset(2, final_byte),
+            b"+" => return self.designate_charset(3, final_byte),
             // Any other intermediate is ignored.
             [_, ..] => return,
             // No intermediate: fall through to the plain-ESC finals below.
             [] => {}
         }
-        match byte {
+        match final_byte {
             // DECSC — save cursor and pen.
             b'7' => self.save_cursor(),
             // DECRC — restore cursor and pen.
             b'8' => self.restore_cursor(),
             // IND — move down one line, scrolling at the bottom margin.
             b'D' => {
-                self.linefeed();
+                self.apply_linefeed();
                 self.clear_wrap_latch();
             }
             // NEL — move down one line, then return to the active left
             // horizontal margin.
             b'E' => {
-                self.linefeed();
+                self.apply_linefeed();
                 let (minimum_column_index, _) = self.get_horizontal_margin_bounds();
-                self.active_cursor_mut().column = minimum_column_index;
+                self.get_active_cursor_mut().column = minimum_column_index;
                 self.clear_wrap_latch();
             }
             // HTS — set a horizontal tab stop at the cursor.
             b'H' => self.set_tab_stop(),
             // RI — reverse index (reverse line feed).
-            b'M' => self.reverse_index(),
+            b'M' => self.apply_reverse_index(),
             // RIS — restore terminal display state to its initial values.
-            b'c' => self.hard_reset(),
+            b'c' => self.apply_hard_reset(),
             // Any other ESC final is ignored.
             _ => {}
         }
@@ -925,14 +935,14 @@ impl vte::Perform for TerminalState {
     /// Handle an Operating System Command (OSC) sequence: window/icon title
     /// (OSC 0/1/2), working-directory report (OSC 7, `file://` URI), or shell
     /// marker (OSC 133).
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], _is_bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
-        if let Some(marker) = parse_osc133(params) {
+        if let Some(marker) = parse_osc133(osc_parameters) {
             match marker {
                 Osc133::Prompt => {
-                    let prompt_row_index = self.active_cursor().row;
-                    self.active_grid_mut()
+                    let prompt_row_index = self.get_active_cursor().row;
+                    self.get_active_grid_mut()
                         .set_prompt_mark(prompt_row_index, true);
                     self.shell_integration_state = ShellIntegrationState::Prompt;
                 }
@@ -956,25 +966,25 @@ impl vte::Perform for TerminalState {
             }
             return;
         }
-        // `params[0]` is the command number. vte splits the payload on every
-        // `;`; each arm rejoins `params[1..]` with `;`, and a payload that
+        // `osc_parameters[0]` is the command number. vte splits the payload on every
+        // `;`; each arm rejoins `osc_parameters[1..]` with `;`, and a payload that
         // itself holds a `;` stays whole.
-        let Some(&command) = params.first() else {
+        let Some(&command) = osc_parameters.first() else {
             return;
         };
         match std::str::from_utf8(command) {
             // OSC 0/1/2 — set the window/icon title: lossy UTF-8 decode (a
             // non-UTF-8 title keeps replacement characters), then bounded and
             // filtered by `sanitize_reported_text`.
-            Ok("0" | "1" | "2") if params.len() > 1 => {
-                let title = params[1..].join(&b';');
+            Ok("0" | "1" | "2") if osc_parameters.len() > 1 => {
+                let title = osc_parameters[1..].join(&b';');
                 let title = String::from_utf8_lossy(&title);
                 self.title = Some(sanitize_reported_text(&title));
             }
             // OSC 7 — the shell's working directory as a `file://host/path`
             // URI. An unparseable URI leaves the last working directory unchanged.
-            Ok("7") if params.len() > 1 => {
-                let working_directory_uri = params[1..].join(&b';');
+            Ok("7") if osc_parameters.len() > 1 => {
+                let working_directory_uri = osc_parameters[1..].join(&b';');
                 if let Some(reported_working_directory) =
                     parse_osc7_working_directory(&working_directory_uri)
                 {
@@ -991,7 +1001,13 @@ impl vte::Perform for TerminalState {
     /// after the DCS does not fold onto the glyph before it. The body bytes
     /// arrive through `put` and print nothing; the DCS payload changes
     /// nothing.
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+    fn hook(
+        &mut self,
+        _dcs_parameters: &vte::Params,
+        _intermediates: &[u8],
+        _should_ignore: bool,
+        _action: char,
+    ) {
         self.reset_cluster();
     }
 
@@ -1054,7 +1070,7 @@ impl TerminalState {
             ('h', 1048) => self.save_cursor(),
             // DECSET `?25` (DECTCEM) — show the cursor. Visibility is per
             // screen: this sets only the active screen's.
-            ('h', 25) => self.active_cursor_mut().is_visible = true,
+            ('h', 25) => self.get_active_cursor_mut().is_visible = true,
             // DECRST `?47` — switch back to the primary buffer, leaving the
             // alternate's cells and cursor as they are.
             ('l', 47) => self.active_screen = Screen::Primary,
@@ -1082,36 +1098,24 @@ impl TerminalState {
             // DECRST `?1048` — restore the active screen's cursor only.
             ('l', 1048) => self.restore_cursor(),
             // DECRST `?25` (DECTCEM) — hide the cursor.
-            ('l', 25) => self.active_cursor_mut().is_visible = false,
+            ('l', 25) => self.get_active_cursor_mut().is_visible = false,
             // `?2004` — bracketed paste: the input layer wraps pasted text in
             // `ESC[200~`…`ESC[201~`.
-            ('h', 2004) => self.modes.bracketed_paste = true,
-            ('l', 2004) => self.modes.bracketed_paste = false,
+            ('h', 2004) => self.modes.is_bracketed_paste_enabled = true,
+            ('l', 2004) => self.modes.is_bracketed_paste_enabled = false,
             // `?69` (DECLRMM) gates DECSLRM. Resetting the gate also clears
             // both screens' horizontal margins and their stale wrap latches.
-            ('h', 69) => self.modes.declrmm = true,
-            ('l', 69) => {
-                let had_primary_horizontal_margins = self.primary_horizontal_margins.is_some();
-                let had_alternate_horizontal_margins = self.alternate_horizontal_margins.is_some();
-                self.modes.declrmm = false;
-                self.primary_horizontal_margins = None;
-                self.alternate_horizontal_margins = None;
-                if had_primary_horizontal_margins {
-                    self.primary_cursor.pending_wrap = false;
-                }
-                if had_alternate_horizontal_margins {
-                    self.alternate_cursor.pending_wrap = false;
-                }
-            }
+            ('h', 69) => self.modes.is_left_right_margin_mode_enabled = true,
+            ('l', 69) => self.clear_left_right_margin_mode(),
             // `?6` (DECOM) makes cursor coordinates relative to the active
             // vertical and horizontal margins and homes the cursor on each
             // toggle.
             ('h', 6) => {
-                self.active_cursor_mut().origin = true;
+                self.get_active_cursor_mut().is_origin_mode_enabled = true;
                 self.move_cursor_to(0, 0);
             }
             ('l', 6) => {
-                self.active_cursor_mut().origin = false;
+                self.get_active_cursor_mut().is_origin_mode_enabled = false;
                 self.move_cursor_to(0, 0);
             }
             // Mouse tracking level (`?9`/`?1000`/`?1002`/`?1003`): the four
@@ -1154,44 +1158,58 @@ impl TerminalState {
             }
             // `?1007` — alternate-screen scroll: wheel motion becomes
             // cursor arrow keys on the alternate screen.
-            ('h', 1007) => self.modes.alternate_scroll = true,
-            ('l', 1007) => self.modes.alternate_scroll = false,
+            ('h', 1007) => self.modes.is_alternate_scroll_enabled = true,
+            ('l', 1007) => self.modes.is_alternate_scroll_enabled = false,
             // `?80` — Sixel scrolling: a graphic may move the primary screen
             // content into scrollback when it reaches the bottom.
-            ('h', 80) => self.modes.sixel_scrolling = false,
-            ('l', 80) => self.modes.sixel_scrolling = true,
+            ('h', 80) => self.modes.is_sixel_scrolling_enabled = false,
+            ('l', 80) => self.modes.is_sixel_scrolling_enabled = true,
             // `?1070` — Sixel color registers: each graphic starts with
             // private registers when enabled and uses shared registers when
             // disabled.
-            ('h', 1070) => self.modes.sixel_private_color_registers = true,
-            ('l', 1070) => self.modes.sixel_private_color_registers = false,
+            ('h', 1070) => self.modes.is_sixel_private_color_registers_enabled = true,
+            ('l', 1070) => self.modes.is_sixel_private_color_registers_enabled = false,
             // `?8452` — Sixel cursor movement: leave the cursor to the right
             // of the graphic when enabled.
-            ('h', 8452) => self.modes.sixel_cursor_right = true,
-            ('l', 8452) => self.modes.sixel_cursor_right = false,
+            ('h', 8452) => self.modes.is_sixel_cursor_right_enabled = true,
+            ('l', 8452) => self.modes.is_sixel_cursor_right_enabled = false,
             // `?7` (DECAWM) — autowrap. On (the default): a glyph at the
             // last column parks there and the next glyph wraps to a new
             // line. Off: the cursor stays pinned and further glyphs
             // overwrite the last column in place.
-            ('h', 7) => self.modes.autowrap = true,
-            ('l', 7) => self.modes.autowrap = false,
+            ('h', 7) => self.modes.is_autowrap_enabled = true,
+            ('l', 7) => self.modes.is_autowrap_enabled = false,
             // `?1` (DECCKM) — application cursor keys. The input layer reads
             // this to pick the arrow-key byte form (`ESC O A` vs `ESC [ A`).
-            ('h', 1) => self.modes.application_cursor_keys = true,
-            ('l', 1) => self.modes.application_cursor_keys = false,
+            ('h', 1) => self.modes.is_application_cursor_keys_enabled = true,
+            ('l', 1) => self.modes.is_application_cursor_keys_enabled = false,
             // `?5` (DECSCNM) — reverse video. The renderer reads this to
             // swap foreground and background across the whole screen.
-            ('h', 5) => self.modes.reverse_video = true,
-            ('l', 5) => self.modes.reverse_video = false,
+            ('h', 5) => self.modes.is_reverse_video_enabled = true,
+            ('l', 5) => self.modes.is_reverse_video_enabled = false,
             // `?12` (att610) — cursor blink. The renderer reads this to
             // blink the cursor cell.
-            ('h', 12) => self.modes.cursor_blink = true,
-            ('l', 12) => self.modes.cursor_blink = false,
+            ('h', 12) => self.modes.is_cursor_blink_enabled = true,
+            ('l', 12) => self.modes.is_cursor_blink_enabled = false,
             // `?2` (DECANM, VT52), `?3` (DECCOLM, 132-column), `?8` (DECARM,
             // keyboard auto-repeat), and every other DEC private mode: not
             // implemented, ignored.
             _ => {}
         }
+    }
+
+    /// Turn DECLRMM (`?69`) off and clear both screens' horizontal margins. A
+    /// screen that had margins also loses its cursor's deferred-wrap latch.
+    fn clear_left_right_margin_mode(&mut self) {
+        if self.primary_horizontal_margins.is_some() {
+            self.primary_cursor.is_wrap_pending = false;
+        }
+        if self.alternate_horizontal_margins.is_some() {
+            self.alternate_cursor.is_wrap_pending = false;
+        }
+        self.primary_horizontal_margins = None;
+        self.alternate_horizontal_margins = None;
+        self.modes.is_left_right_margin_mode_enabled = false;
     }
 
     /// Apply DECSCUSR (`CSI Ps SP q`) — the sequence an editor sends to change
@@ -1200,29 +1218,29 @@ impl TerminalState {
     ///
     /// One value carries both the shape and whether it blinks. Values `1`–`6`
     /// name a style: the odd ones blink, the even ones are steady. The blink
-    /// half is written into
-    /// [`cursor_blink`](crate::state::TerminalState::cursor_blink), the same
-    /// field `?12` writes: `CSI 2 SP q` ("steady block") stops a blink an
-    /// earlier `CSI ? 12 h` started.
+    /// half is written into `modes.is_cursor_blink_enabled`, the same field `?12` writes:
+    /// `CSI 2 SP q` ("steady block") stops a blink an earlier `CSI ? 12 h`
+    /// started.
     ///
     /// `0` clears the shape to `None` and blink to off: the pane asks for no
     /// style, and the renderer keeps the user's own configured cursor.
     ///
     /// An unknown value (`CSI 9 SP q`) changes nothing; the style already set
     /// stands.
-    fn set_cursor_style(&mut self, params: &vte::Params) {
-        let (cursor_shape, is_blinking) = match get_first_parameter_number(params).unwrap_or(0) {
-            0 => (None, false),
-            1 => (Some(CursorShape::Block), true),
-            2 => (Some(CursorShape::Block), false),
-            3 => (Some(CursorShape::Underline), true),
-            4 => (Some(CursorShape::Underline), false),
-            5 => (Some(CursorShape::Bar), true),
-            6 => (Some(CursorShape::Bar), false),
-            _ => return,
-        };
+    fn set_cursor_style(&mut self, csi_parameters: &vte::Params) {
+        let (cursor_shape, is_blinking) =
+            match get_first_parameter_number(csi_parameters).unwrap_or(0) {
+                0 => (None, false),
+                1 => (Some(CursorShape::Block), true),
+                2 => (Some(CursorShape::Block), false),
+                3 => (Some(CursorShape::Underline), true),
+                4 => (Some(CursorShape::Underline), false),
+                5 => (Some(CursorShape::Bar), true),
+                6 => (Some(CursorShape::Bar), false),
+                _ => return,
+            };
         self.modes.cursor_shape = cursor_shape;
-        self.modes.cursor_blink = is_blinking;
+        self.modes.is_cursor_blink_enabled = is_blinking;
     }
 }
 

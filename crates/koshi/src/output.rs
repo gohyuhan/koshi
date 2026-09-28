@@ -1,10 +1,9 @@
-//! Rendering for CLI answers: created ids from applied commands, discovery
-//! (`list-*`, `inspect`), action introspection (`actions list`, `actions
-//! explain`), keymap introspection (the `keys` queries), the `debug`
-//! dumps and the `debug events` listing, the two version answers (`version`, `server-version`), the three
-//! `share` answers, the three `remote` answers, and the `doctor` answer.
-//! Read-only queries print as aligned columns (`--format table`, the default)
-//! or JSON (`--format json`).
+//! Rendering for CLI answers: created ids from applied commands, discovery (`list-*`, `inspect`),
+//! action introspection (`actions list`, `actions explain`), keymap introspection (the `keys`
+//! queries), the `debug` dumps and the `debug events` listing, the two version answers (`version`,
+//! `server-version`), the three `share` answers, the three `remote` answers, and the `doctor`
+//! answer. Read-only queries print as aligned columns (`--format table`, the default) or JSON
+//! (`--format json`).
 //!
 //! List queries render every item as one table row; `inspect`, `actions
 //! explain`, and `keys describe` render a single item as `field: value`
@@ -29,7 +28,7 @@ use std::time::SystemTime;
 
 use koshi_core::action::{
     build_core_action_seeds, ActionHandlerReference, ActionMetadata, ActionReference, ActionScope,
-    ActionStatus, TargetKind,
+    TargetKind,
 };
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,

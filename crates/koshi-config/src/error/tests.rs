@@ -1,5 +1,5 @@
 //! Tests for config domain errors: the version check and its diagnostic,
-//! the parse-diagnostic conversion, error messages, and classification.
+//! the parse-diagnostic conversion, and error messages.
 
 use super::*;
 
@@ -50,33 +50,33 @@ fn version_diagnostic_message_and_code() {
             SCHEMA_VERSION
         )
     );
-    let code = version_error
+    let diagnostic_code = version_error
         .code()
         .expect("diagnostic has a code")
         .to_string();
-    assert_eq!(code, "koshi::config::version");
+    assert_eq!(diagnostic_code, "koshi::config::version");
 }
 
 #[test]
 fn too_old_diagnostic_carries_the_version_code() {
     let version_error = validate_config_schema_version(0).expect_err("zero version must fail");
-    let code = version_error
+    let diagnostic_code = version_error
         .code()
         .expect("diagnostic has a code")
         .to_string();
-    assert_eq!(code, "koshi::config::version");
+    assert_eq!(diagnostic_code, "koshi::config::version");
 }
 
 #[test]
 fn version_diagnostic_offers_an_upgrade_hint() {
     let version_error =
         validate_config_schema_version(SCHEMA_VERSION + 1).expect_err("newer version must fail");
-    let help = version_error
+    let upgrade_help = version_error
         .help()
         .expect("diagnostic has a help line")
         .to_string();
     assert_eq!(
-        help,
+        upgrade_help,
         "upgrade koshi to a build that understands this config"
     );
 }
@@ -136,16 +136,6 @@ fn parse_conversion_without_sub_diagnostics_uses_the_kdl_display() {
     };
     assert_eq!(config_path, "koshi.kdl");
     assert_eq!(parse_error_detail, "Failed to parse KDL document");
-}
-
-#[test]
-fn config_errors_classify_as_recoverable_config_problems() {
-    let validation_error = ConfigError::Validation {
-        config_key: "scrollback".to_string(),
-        validation_detail: "x".to_string(),
-    };
-    assert_eq!(validation_error.category(), DomainCategory::Config);
-    assert_eq!(validation_error.get_severity(), Severity::Recoverable);
 }
 
 #[test]

@@ -5,7 +5,16 @@ use super::*;
 use image::ImageEncoder;
 use std::sync::Arc;
 
-fn one_pixel_image(red_channel: u8) -> DecodedImage {
+/// The pixel width and height of the first frame's canvas.
+fn get_animation_canvas_pixel_dimensions(decoded_animation: &DecodedAnimation) -> (u32, u32) {
+    let first_frame_image = decoded_animation.list_frames()[0].get_decoded_image();
+    (
+        first_frame_image.pixel_width,
+        first_frame_image.pixel_height,
+    )
+}
+
+fn build_one_pixel_image(red_channel: u8) -> DecodedImage {
     DecodedImage {
         pixel_width: 1,
         pixel_height: 1,
@@ -13,7 +22,7 @@ fn one_pixel_image(red_channel: u8) -> DecodedImage {
     }
 }
 
-fn gif_frame(pixel_channel: u8) -> Vec<u8> {
+fn build_gif_frame(red_pixel_channel: u8) -> Vec<u8> {
     vec![
         0x2c,
         0,
@@ -27,32 +36,32 @@ fn gif_frame(pixel_channel: u8) -> Vec<u8> {
         0,
         2,
         2,
-        if pixel_channel == 0 { 0x44 } else { 0x4c },
+        if red_pixel_channel == 0 { 0x44 } else { 0x4c },
         1,
         0,
     ]
 }
 
-fn gif_with_frames() -> Vec<u8> {
+fn build_gif_with_frames() -> Vec<u8> {
     let mut gif_bytes = b"GIF89a".to_vec();
     gif_bytes.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]);
     gif_bytes.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
-    gif_bytes.extend_from_slice(&gif_frame(0));
-    gif_bytes.extend_from_slice(&gif_frame(1));
+    gif_bytes.extend_from_slice(&build_gif_frame(0));
+    gif_bytes.extend_from_slice(&build_gif_frame(1));
     gif_bytes.push(0x3b);
     gif_bytes
 }
 
-fn gif_with_one_frame() -> Vec<u8> {
+fn build_gif_with_one_frame() -> Vec<u8> {
     let mut gif_bytes = b"GIF89a".to_vec();
     gif_bytes.extend_from_slice(&[1, 0, 1, 0, 0x80, 0, 0]);
     gif_bytes.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
-    gif_bytes.extend_from_slice(&gif_frame(0));
+    gif_bytes.extend_from_slice(&build_gif_frame(0));
     gif_bytes.push(0x3b);
     gif_bytes
 }
 
-fn gif_with_disposal() -> Vec<u8> {
+fn build_gif_with_disposal() -> Vec<u8> {
     let mut gif_bytes = b"GIF89a".to_vec();
     gif_bytes.extend_from_slice(&[2, 0, 1, 0, 0x80, 0, 0]);
     gif_bytes.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
@@ -64,45 +73,48 @@ fn gif_with_disposal() -> Vec<u8> {
     gif_bytes
 }
 
-fn loop_extension(identifier: &[u8; 11], repeat_count: u16) -> Vec<u8> {
+fn build_gif_loop_extension(application_identifier: &[u8; 11], repeat_count: u16) -> Vec<u8> {
     let mut extension_bytes = vec![0x21, 0xff, 11];
-    extension_bytes.extend_from_slice(identifier);
+    extension_bytes.extend_from_slice(application_identifier);
     extension_bytes.extend_from_slice(&[3, 1]);
     extension_bytes.extend_from_slice(&repeat_count.to_le_bytes());
     extension_bytes.push(0);
     extension_bytes
 }
 
-fn insert_before(source_bytes: &[u8], marker_byte: u8, insertion_bytes: &[u8]) -> Vec<u8> {
-    let marker_byte_offset = source_bytes
+fn insert_gif_extension_before_trailer(source_gif_bytes: &[u8], extension_bytes: &[u8]) -> Vec<u8> {
+    let trailer_byte_offset = source_gif_bytes
         .iter()
-        .rposition(|source_byte| *source_byte == marker_byte)
-        .expect("fixture marker exists");
-    let mut output_bytes = Vec::with_capacity(source_bytes.len() + insertion_bytes.len());
-    output_bytes.extend_from_slice(&source_bytes[..marker_byte_offset]);
-    output_bytes.extend_from_slice(insertion_bytes);
-    output_bytes.extend_from_slice(&source_bytes[marker_byte_offset..]);
-    output_bytes
+        .rposition(|gif_byte| *gif_byte == 0x3b)
+        .expect("GIF trailer exists");
+    let mut extended_gif_bytes = Vec::with_capacity(source_gif_bytes.len() + extension_bytes.len());
+    extended_gif_bytes.extend_from_slice(&source_gif_bytes[..trailer_byte_offset]);
+    extended_gif_bytes.extend_from_slice(extension_bytes);
+    extended_gif_bytes.extend_from_slice(&source_gif_bytes[trailer_byte_offset..]);
+    extended_gif_bytes
 }
 
-fn insert_before_second_frame(source_bytes: &[u8], insertion_bytes: &[u8]) -> Vec<u8> {
-    let first_frame_byte_offset = source_bytes
+fn insert_gif_extension_before_second_image_frame(
+    source_gif_bytes: &[u8],
+    extension_bytes: &[u8],
+) -> Vec<u8> {
+    let first_frame_byte_offset = source_gif_bytes
         .iter()
         .position(|source_byte| *source_byte == 0x2c)
         .expect("first frame marker exists");
-    let second_frame_byte_offset = source_bytes[first_frame_byte_offset + 1..]
+    let second_frame_byte_offset = source_gif_bytes[first_frame_byte_offset + 1..]
         .iter()
         .position(|source_byte| *source_byte == 0x2c)
         .map(|relative_byte_offset| first_frame_byte_offset + 1 + relative_byte_offset)
         .expect("second frame marker exists");
-    let mut output_bytes = Vec::with_capacity(source_bytes.len() + insertion_bytes.len());
-    output_bytes.extend_from_slice(&source_bytes[..second_frame_byte_offset]);
-    output_bytes.extend_from_slice(insertion_bytes);
-    output_bytes.extend_from_slice(&source_bytes[second_frame_byte_offset..]);
-    output_bytes
+    let mut extended_gif_bytes = Vec::with_capacity(source_gif_bytes.len() + extension_bytes.len());
+    extended_gif_bytes.extend_from_slice(&source_gif_bytes[..second_frame_byte_offset]);
+    extended_gif_bytes.extend_from_slice(extension_bytes);
+    extended_gif_bytes.extend_from_slice(&source_gif_bytes[second_frame_byte_offset..]);
+    extended_gif_bytes
 }
 
-fn png_chunk(chunk_type: &[u8; 4], chunk_payload_bytes: &[u8]) -> Vec<u8> {
+fn build_png_chunk(chunk_type: &[u8; 4], chunk_payload_bytes: &[u8]) -> Vec<u8> {
     let mut png_chunk_bytes = Vec::with_capacity(12 + chunk_payload_bytes.len());
     png_chunk_bytes.extend_from_slice(&(chunk_payload_bytes.len() as u32).to_be_bytes());
     png_chunk_bytes.extend_from_slice(chunk_type);
@@ -122,7 +134,7 @@ fn png_chunk(chunk_type: &[u8; 4], chunk_payload_bytes: &[u8]) -> Vec<u8> {
     png_chunk_bytes
 }
 
-fn png_frame_control(frame_sequence_number: u32) -> [u8; 26] {
+fn build_one_pixel_apng_frame_control(frame_sequence_number: u32) -> [u8; 26] {
     let mut frame_control_bytes = [0; 26];
     frame_control_bytes[..4].copy_from_slice(&frame_sequence_number.to_be_bytes());
     frame_control_bytes[4..8].copy_from_slice(&1u32.to_be_bytes());
@@ -132,7 +144,7 @@ fn png_frame_control(frame_sequence_number: u32) -> [u8; 26] {
     frame_control_bytes
 }
 
-fn animated_png(loop_count: u32) -> Vec<u8> {
+fn build_animated_png(animation_loop_count: u32) -> Vec<u8> {
     let mut source_png_bytes = Vec::new();
     image::codecs::png::PngEncoder::new(&mut source_png_bytes)
         .write_image(&[255, 0, 0, 255], 1, 1, image::ColorType::Rgba8.into())
@@ -140,7 +152,7 @@ fn animated_png(loop_count: u32) -> Vec<u8> {
 
     let mut animated_png_bytes = source_png_bytes[..8].to_vec();
     let mut png_byte_offset = 8;
-    let mut inserted_animation = false;
+    let mut has_inserted_animation = false;
     let mut first_frame_payload_bytes = Vec::new();
     while png_byte_offset < source_png_bytes.len() {
         let chunk_payload_byte_count = u32::from_be_bytes(
@@ -156,24 +168,34 @@ fn animated_png(loop_count: u32) -> Vec<u8> {
             .expect("PNG chunk type has four bytes");
         let chunk_payload_bytes = &source_png_bytes[png_byte_offset + 8..chunk_end_byte_offset - 4];
         match chunk_type {
-            b"IDAT" if !inserted_animation => {
+            b"IDAT" if !has_inserted_animation => {
                 let mut animation_control_bytes = [0; 8];
                 animation_control_bytes[..4].copy_from_slice(&2u32.to_be_bytes());
-                animation_control_bytes[4..].copy_from_slice(&loop_count.to_be_bytes());
-                animated_png_bytes.extend_from_slice(&png_chunk(b"acTL", &animation_control_bytes));
-                animated_png_bytes.extend_from_slice(&png_chunk(b"fcTL", &png_frame_control(0)));
-                animated_png_bytes.extend_from_slice(&png_chunk(chunk_type, chunk_payload_bytes));
+                animation_control_bytes[4..].copy_from_slice(&animation_loop_count.to_be_bytes());
+                animated_png_bytes
+                    .extend_from_slice(&build_png_chunk(b"acTL", &animation_control_bytes));
+                animated_png_bytes.extend_from_slice(&build_png_chunk(
+                    b"fcTL",
+                    &build_one_pixel_apng_frame_control(0),
+                ));
+                animated_png_bytes
+                    .extend_from_slice(&build_png_chunk(chunk_type, chunk_payload_bytes));
                 first_frame_payload_bytes.extend_from_slice(chunk_payload_bytes);
-                inserted_animation = true;
+                has_inserted_animation = true;
             }
-            b"IEND" if inserted_animation => {
-                animated_png_bytes.extend_from_slice(&png_chunk(b"fcTL", &png_frame_control(1)));
-                let mut frame_payload_bytes =
+            b"IEND" if has_inserted_animation => {
+                animated_png_bytes.extend_from_slice(&build_png_chunk(
+                    b"fcTL",
+                    &build_one_pixel_apng_frame_control(1),
+                ));
+                let mut second_frame_payload_bytes =
                     Vec::with_capacity(4 + first_frame_payload_bytes.len());
-                frame_payload_bytes.extend_from_slice(&2u32.to_be_bytes());
-                frame_payload_bytes.extend_from_slice(&first_frame_payload_bytes);
-                animated_png_bytes.extend_from_slice(&png_chunk(b"fdAT", &frame_payload_bytes));
-                animated_png_bytes.extend_from_slice(&png_chunk(chunk_type, chunk_payload_bytes));
+                second_frame_payload_bytes.extend_from_slice(&2u32.to_be_bytes());
+                second_frame_payload_bytes.extend_from_slice(&first_frame_payload_bytes);
+                animated_png_bytes
+                    .extend_from_slice(&build_png_chunk(b"fdAT", &second_frame_payload_bytes));
+                animated_png_bytes
+                    .extend_from_slice(&build_png_chunk(chunk_type, chunk_payload_bytes));
             }
             _ => animated_png_bytes
                 .extend_from_slice(&source_png_bytes[png_byte_offset..chunk_end_byte_offset]),
@@ -183,7 +205,7 @@ fn animated_png(loop_count: u32) -> Vec<u8> {
     animated_png_bytes
 }
 
-fn png_idat_data(rgba_bytes: &[u8], width_pixels: u32, height_pixels: u32) -> Vec<u8> {
+fn build_png_idat_bytes(rgba_bytes: &[u8], width_pixels: u32, height_pixels: u32) -> Vec<u8> {
     let mut source_png_bytes = Vec::new();
     image::codecs::png::PngEncoder::new(&mut source_png_bytes)
         .write_image(
@@ -214,7 +236,7 @@ fn png_idat_data(rgba_bytes: &[u8], width_pixels: u32, height_pixels: u32) -> Ve
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apng_frame_control(
+fn build_apng_frame_control(
     frame_sequence_number: u32,
     frame_width_pixels: u32,
     frame_height_pixels: u32,
@@ -238,9 +260,10 @@ fn apng_frame_control(
     frame_control_bytes
 }
 
-fn asymmetric_apng() -> Vec<u8> {
-    let first_frame_image_data_bytes = png_idat_data(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1);
-    let second_frame_image_data_bytes = png_idat_data(&[0, 0, 255, 128], 1, 1);
+fn build_asymmetric_apng() -> Vec<u8> {
+    let first_frame_image_data_bytes =
+        build_png_idat_bytes(&[255, 0, 0, 255, 0, 255, 0, 255], 2, 1);
+    let second_frame_image_data_bytes = build_png_idat_bytes(&[0, 0, 255, 128], 1, 1);
     let mut image_header_bytes = [0; 13];
     image_header_bytes[..4].copy_from_slice(&2u32.to_be_bytes());
     image_header_bytes[4..8].copy_from_slice(&1u32.to_be_bytes());
@@ -248,27 +271,27 @@ fn asymmetric_apng() -> Vec<u8> {
     image_header_bytes[9] = 6;
 
     let mut animated_png_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-    animated_png_bytes.extend_from_slice(&png_chunk(b"IHDR", &image_header_bytes));
-    animated_png_bytes.extend_from_slice(&png_chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]));
-    animated_png_bytes.extend_from_slice(&png_chunk(
+    animated_png_bytes.extend_from_slice(&build_png_chunk(b"IHDR", &image_header_bytes));
+    animated_png_bytes.extend_from_slice(&build_png_chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]));
+    animated_png_bytes.extend_from_slice(&build_png_chunk(
         b"fcTL",
-        &apng_frame_control(0, 2, 1, 0, 0, 1, 10, 1, 0),
+        &build_apng_frame_control(0, 2, 1, 0, 0, 1, 10, 1, 0),
     ));
-    animated_png_bytes.extend_from_slice(&png_chunk(b"IDAT", &first_frame_image_data_bytes));
-    animated_png_bytes.extend_from_slice(&png_chunk(
+    animated_png_bytes.extend_from_slice(&build_png_chunk(b"IDAT", &first_frame_image_data_bytes));
+    animated_png_bytes.extend_from_slice(&build_png_chunk(
         b"fcTL",
-        &apng_frame_control(1, 1, 1, 1, 0, 2, 10, 0, 0),
+        &build_apng_frame_control(1, 1, 1, 1, 0, 2, 10, 0, 0),
     ));
     let mut second_frame_payload_bytes =
         Vec::with_capacity(4 + second_frame_image_data_bytes.len());
     second_frame_payload_bytes.extend_from_slice(&2u32.to_be_bytes());
     second_frame_payload_bytes.extend_from_slice(&second_frame_image_data_bytes);
-    animated_png_bytes.extend_from_slice(&png_chunk(b"fdAT", &second_frame_payload_bytes));
-    animated_png_bytes.extend_from_slice(&png_chunk(b"IEND", &[]));
+    animated_png_bytes.extend_from_slice(&build_png_chunk(b"fdAT", &second_frame_payload_bytes));
+    animated_png_bytes.extend_from_slice(&build_png_chunk(b"IEND", &[]));
     animated_png_bytes
 }
 
-fn webp_chunk(chunk_type: &[u8; 4], chunk_payload_bytes: &[u8]) -> Vec<u8> {
+fn build_webp_chunk(chunk_type: &[u8; 4], chunk_payload_bytes: &[u8]) -> Vec<u8> {
     let mut webp_chunk_bytes =
         Vec::with_capacity(8 + chunk_payload_bytes.len() + chunk_payload_bytes.len() % 2);
     webp_chunk_bytes.extend_from_slice(chunk_type);
@@ -280,7 +303,7 @@ fn webp_chunk(chunk_type: &[u8; 4], chunk_payload_bytes: &[u8]) -> Vec<u8> {
     webp_chunk_bytes
 }
 
-fn animated_webp(loop_count: u16) -> Vec<u8> {
+fn build_animated_webp(animation_loop_count: u16) -> Vec<u8> {
     let mut source_webp_bytes = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut source_webp_bytes)
         .write_image(&[255, 0, 0, 255], 1, 1, image::ColorType::Rgba8.into())
@@ -305,17 +328,18 @@ fn animated_webp(loop_count: u16) -> Vec<u8> {
 
     let webp_extended_header_bytes = [0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let mut animation_control_bytes = [0; 6];
-    animation_control_bytes[4..].copy_from_slice(&loop_count.to_le_bytes());
+    animation_control_bytes[4..].copy_from_slice(&animation_loop_count.to_le_bytes());
     let mut animation_frame_header_bytes = [0; 16];
     animation_frame_header_bytes[12] = 1;
     let mut animation_frame_payload_bytes = animation_frame_header_bytes.to_vec();
-    animation_frame_payload_bytes.extend_from_slice(&webp_chunk(b"VP8L", &frame_image_data_bytes));
+    animation_frame_payload_bytes
+        .extend_from_slice(&build_webp_chunk(b"VP8L", &frame_image_data_bytes));
 
     let webp_chunks = [
-        webp_chunk(b"VP8X", &webp_extended_header_bytes),
-        webp_chunk(b"ANIM", &animation_control_bytes),
-        webp_chunk(b"ANMF", &animation_frame_payload_bytes),
-        webp_chunk(b"ANMF", &animation_frame_payload_bytes),
+        build_webp_chunk(b"VP8X", &webp_extended_header_bytes),
+        build_webp_chunk(b"ANIM", &animation_control_bytes),
+        build_webp_chunk(b"ANMF", &animation_frame_payload_bytes),
+        build_webp_chunk(b"ANMF", &animation_frame_payload_bytes),
     ];
     let riff_body_byte_count: usize = 4 + webp_chunks.iter().map(Vec::len).sum::<usize>();
     let mut animated_webp_bytes = b"RIFF".to_vec();
@@ -327,7 +351,7 @@ fn animated_webp(loop_count: u16) -> Vec<u8> {
     animated_webp_bytes
 }
 
-fn webp_vp8l_data(rgba_bytes: &[u8], width_pixels: u32, height_pixels: u32) -> Vec<u8> {
+fn build_webp_vp8l_bytes(rgba_bytes: &[u8], width_pixels: u32, height_pixels: u32) -> Vec<u8> {
     let mut source_webp_bytes = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut source_webp_bytes)
         .write_image(
@@ -355,7 +379,7 @@ fn webp_vp8l_data(rgba_bytes: &[u8], width_pixels: u32, height_pixels: u32) -> V
     panic!("lossless WebP has a VP8L chunk");
 }
 
-fn webp_frame_header(
+fn build_webp_frame_header(
     frame_left_pixels: u32,
     frame_top_pixels: u32,
     frame_width_pixels: u32,
@@ -374,28 +398,29 @@ fn webp_frame_header(
     frame_header_bytes.to_vec()
 }
 
-fn asymmetric_webp() -> Vec<u8> {
-    let first_frame_image_data_bytes = webp_vp8l_data(
+fn build_asymmetric_webp() -> Vec<u8> {
+    let first_frame_image_data_bytes = build_webp_vp8l_bytes(
         &[
             255, 0, 0, 255, 0, 255, 0, 255, 255, 255, 0, 255, 255, 0, 255, 255,
         ],
         4,
         1,
     );
-    let second_frame_image_data_bytes = webp_vp8l_data(&[0, 0, 255, 128, 255, 255, 255, 255], 2, 1);
+    let second_frame_image_data_bytes =
+        build_webp_vp8l_bytes(&[0, 0, 255, 128, 255, 255, 255, 255], 2, 1);
     let webp_extended_header_bytes = [0x12, 0, 0, 0, 3, 0, 0, 0, 0, 0];
     let animation_control_bytes = [0; 6];
-    let mut first_frame_payload_bytes = webp_frame_header(0, 0, 4, 1, 10, true, false);
+    let mut first_frame_payload_bytes = build_webp_frame_header(0, 0, 4, 1, 10, true, false);
     first_frame_payload_bytes
-        .extend_from_slice(&webp_chunk(b"VP8L", &first_frame_image_data_bytes));
-    let mut second_frame_payload_bytes = webp_frame_header(2, 0, 2, 1, 20, false, false);
+        .extend_from_slice(&build_webp_chunk(b"VP8L", &first_frame_image_data_bytes));
+    let mut second_frame_payload_bytes = build_webp_frame_header(2, 0, 2, 1, 20, false, false);
     second_frame_payload_bytes
-        .extend_from_slice(&webp_chunk(b"VP8L", &second_frame_image_data_bytes));
+        .extend_from_slice(&build_webp_chunk(b"VP8L", &second_frame_image_data_bytes));
     let webp_chunks = [
-        webp_chunk(b"VP8X", &webp_extended_header_bytes),
-        webp_chunk(b"ANIM", &animation_control_bytes),
-        webp_chunk(b"ANMF", &first_frame_payload_bytes),
-        webp_chunk(b"ANMF", &second_frame_payload_bytes),
+        build_webp_chunk(b"VP8X", &webp_extended_header_bytes),
+        build_webp_chunk(b"ANIM", &animation_control_bytes),
+        build_webp_chunk(b"ANMF", &first_frame_payload_bytes),
+        build_webp_chunk(b"ANMF", &second_frame_payload_bytes),
     ];
     let riff_body_byte_count: usize = 4 + webp_chunks.iter().map(Vec::len).sum::<usize>();
     let mut animated_webp_bytes = b"RIFF".to_vec();
@@ -419,7 +444,7 @@ fn frame_delay_and_loop_policy_reject_zero_values() {
         AnimationError::InvalidPlaybackCount
     );
     let frame = AnimationFrame::from_image_and_delay(
-        one_pixel_image(255),
+        build_one_pixel_image(255),
         FrameDelay::from_millisecond_ratio(1, 1).expect("delay is valid"),
     )
     .expect("frame is valid");
@@ -437,12 +462,13 @@ fn frame_delay_and_loop_policy_reject_zero_values() {
 }
 
 #[test]
-fn animation_constructor_validates_canvas_and_exposes_private_state() {
-    let delay = FrameDelay::from_millisecond_ratio(10, 1).expect("delay is valid");
-    let first_image = Arc::new(one_pixel_image(255));
-    let first_frame = AnimationFrame::from_image_and_delay(Arc::clone(&first_image), delay)
-        .expect("first frame is valid");
-    let second_frame = AnimationFrame::from_image_and_delay(one_pixel_image(0), delay)
+fn animation_constructor_keeps_frames_and_loop_policy() {
+    let frame_delay = FrameDelay::from_millisecond_ratio(10, 1).expect("delay is valid");
+    let first_decoded_image = Arc::new(build_one_pixel_image(255));
+    let first_frame =
+        AnimationFrame::from_image_and_delay(Arc::clone(&first_decoded_image), frame_delay)
+            .expect("first frame is valid");
+    let second_frame = AnimationFrame::from_image_and_delay(build_one_pixel_image(0), frame_delay)
         .expect("second frame is valid");
     let animation = DecodedAnimation::from_frames_and_loop_policy(
         vec![first_frame.clone(), second_frame.clone()],
@@ -451,7 +477,7 @@ fn animation_constructor_validates_canvas_and_exposes_private_state() {
     .expect("animation is valid");
 
     assert_eq!(animation.get_frame_count(), 2);
-    assert_eq!(animation.get_image_pixel_dimensions(), (1, 1));
+    assert_eq!(get_animation_canvas_pixel_dimensions(&animation), (1, 1));
     assert_eq!(animation.list_frames()[0], first_frame);
     assert_eq!(
         animation.list_frames()[1].get_decoded_image().rgba_bytes,
@@ -460,22 +486,23 @@ fn animation_constructor_validates_canvas_and_exposes_private_state() {
     assert_eq!(animation.get_loop_policy(), LoopPolicy::Finite(3));
     let first_shared_image = first_frame.clone_decoded_image();
     let cloned_shared_image = first_frame.clone().clone_decoded_image();
-    assert!(Arc::ptr_eq(&first_image, &first_shared_image));
+    assert!(Arc::ptr_eq(&first_decoded_image, &first_shared_image));
     assert!(Arc::ptr_eq(&first_shared_image, &cloned_shared_image));
 }
 
 #[test]
 fn gapless_frames_are_distinct_from_zero_delay_media_frames() {
-    let image = one_pixel_image(255);
-    let gapless = AnimationFrame::from_gapless_image(image).expect("the gapless frame is valid");
-    assert!(gapless.is_gapless());
+    let decoded_image = build_one_pixel_image(255);
+    let gapless_frame =
+        AnimationFrame::from_gapless_image(decoded_image).expect("the gapless frame is valid");
+    assert!(gapless_frame.is_gapless());
     assert_eq!(
-        gapless.get_frame_delay(),
+        gapless_frame.get_frame_delay(),
         FrameDelay::from_millisecond_ratio(0, 1).expect("zero delay is valid")
     );
 
     let zero_delay_frame = AnimationFrame::from_image_and_delay(
-        one_pixel_image(0),
+        build_one_pixel_image(0),
         FrameDelay::from_millisecond_ratio(0, 1).expect("zero delay is valid"),
     )
     .expect("the media frame is valid");
@@ -484,43 +511,50 @@ fn gapless_frames_are_distinct_from_zero_delay_media_frames() {
 
 #[test]
 fn animation_serde_round_trip_and_validation_are_bounded() {
-    let delay = FrameDelay::from_millisecond_ratio(7, 10).expect("delay is valid");
-    let frame =
-        AnimationFrame::from_image_and_delay(one_pixel_image(255), delay).expect("frame is valid");
+    let frame_delay = FrameDelay::from_millisecond_ratio(7, 10).expect("delay is valid");
+    let frame = AnimationFrame::from_image_and_delay(build_one_pixel_image(255), frame_delay)
+        .expect("frame is valid");
     let decoded_media = DecodedMedia::Animation(
         DecodedAnimation::from_frames_and_loop_policy(vec![frame], LoopPolicy::Infinite)
             .expect("animation is valid"),
     );
-    let serialized_media_value =
-        serde_json::to_value(&decoded_media).expect("animation serializes");
+    let serialized_media_json = serde_json::to_value(&decoded_media).expect("animation serializes");
     assert_eq!(
-        serde_json::from_value::<DecodedMedia>(serialized_media_value.clone())
+        serde_json::from_value::<DecodedMedia>(serialized_media_json.clone())
             .expect("animation deserializes"),
         decoded_media
     );
-    assert!(serde_json::from_value::<DecodedMedia>(serde_json::json!({
+    let empty_animation_error = serde_json::from_value::<DecodedMedia>(serde_json::json!({
         "Animation": {
             "frames": [],
             "loop_policy": "Infinite"
         }
     }))
-    .is_err());
-    assert!(serde_json::from_value::<DecodedMedia>(serde_json::json!({
+    .expect_err("an animation with no frames is refused");
+    assert_eq!(
+        empty_animation_error.to_string(),
+        "animation must contain at least one frame"
+    );
+    let zero_delay_denominator_error = serde_json::from_value::<DecodedMedia>(serde_json::json!({
         "Animation": {
             "frames": [{
-                "image": {"width": 1, "height": 1, "rgba": [255, 0, 0, 255]},
-                "delay": {"numerator_ms": 1, "denominator_ms": 0}
+                "decoded_image": {"pixel_width": 1, "pixel_height": 1, "rgba_bytes": [255, 0, 0, 255]},
+                "frame_delay": {"numerator_ms": 1, "denominator_ms": 0}
             }],
             "loop_policy": "Infinite"
         }
     }))
-    .is_err());
+    .expect_err("a zero delay denominator is refused");
+    assert_eq!(
+        zero_delay_denominator_error.to_string(),
+        "animation delay denominator must be nonzero"
+    );
 }
 
 #[test]
 fn gif_without_loop_extension_is_one_playback_and_pixels_are_coalesced() {
-    let decoded_media =
-        decode_media(GraphicsProtocol::Kitty, &gif_with_frames()).expect("two-frame GIF decodes");
+    let decoded_media = decode_media(GraphicsProtocol::Kitty, &build_gif_with_frames())
+        .expect("two-frame GIF decodes");
     let DecodedMedia::Animation(animation) = decoded_media else {
         panic!("two GIF frames must produce an animation");
     };
@@ -544,12 +578,12 @@ fn gif_without_loop_extension_is_one_playback_and_pixels_are_coalesced() {
 #[test]
 fn gif_disposal_produces_complete_canvas_frames() {
     let decoded_media =
-        decode_media(GraphicsProtocol::Kitty, &gif_with_disposal()).expect("GIF decodes");
+        decode_media(GraphicsProtocol::Kitty, &build_gif_with_disposal()).expect("GIF decodes");
     let DecodedMedia::Animation(animation) = decoded_media else {
         panic!("three GIF frames must produce an animation");
     };
 
-    assert_eq!(animation.get_image_pixel_dimensions(), (2, 1));
+    assert_eq!(get_animation_canvas_pixel_dimensions(&animation), (2, 1));
     assert_eq!(
         animation.list_frames()[1].get_decoded_image().rgba_bytes,
         vec![255, 0, 0, 255, 0, 0, 255, 255]
@@ -562,53 +596,60 @@ fn gif_disposal_produces_complete_canvas_frames() {
 
 #[test]
 fn gif_loop_extensions_use_total_playbacks_and_can_follow_a_frame() {
-    let after_frame =
-        insert_before_second_frame(&gif_with_frames(), &loop_extension(b"NETSCAPE2.0", 2));
-    let infinite = insert_before(
-        &gif_with_one_frame(),
-        0x3b,
-        &loop_extension(b"ANIMEXTS1.0", 0),
+    let gif_bytes_with_loop_extension_after_first_frame =
+        insert_gif_extension_before_second_image_frame(
+            &build_gif_with_frames(),
+            &build_gif_loop_extension(b"NETSCAPE2.0", 2),
+        );
+    let gif_bytes_with_infinite_loop_extension = insert_gif_extension_before_trailer(
+        &build_gif_with_one_frame(),
+        &build_gif_loop_extension(b"ANIMEXTS1.0", 0),
     );
 
-    let DecodedMedia::Animation(animation) =
-        decode_media(GraphicsProtocol::Kitty, &after_frame).expect("GIF loop metadata decodes")
-    else {
+    let DecodedMedia::Animation(animation) = decode_media(
+        GraphicsProtocol::Kitty,
+        &gif_bytes_with_loop_extension_after_first_frame,
+    )
+    .expect("GIF loop metadata decodes") else {
         panic!("loop metadata must produce an animation");
     };
     assert_eq!(animation.get_loop_policy(), LoopPolicy::Finite(3));
 
-    let DecodedMedia::Animation(animation) =
-        decode_media(GraphicsProtocol::Kitty, &infinite).expect("infinite GIF decodes")
-    else {
+    let DecodedMedia::Animation(animation) = decode_media(
+        GraphicsProtocol::Kitty,
+        &gif_bytes_with_infinite_loop_extension,
+    )
+    .expect("infinite GIF decodes") else {
         panic!("infinite loop metadata must produce an animation");
     };
     assert_eq!(animation.get_loop_policy(), LoopPolicy::Infinite);
 }
 
 #[test]
-fn malformed_gif_loop_metadata_is_typed_and_trailing_metadata_is_seen() {
-    let mut malformed = gif_with_one_frame();
+fn decode_gif_rejects_malformed_loop_metadata_and_reads_trailing_metadata() {
+    let mut malformed_gif_bytes = build_gif_with_one_frame();
     let malformed_extension = [
         0x21, 0xff, 11, b'N', b'E', b'T', b'S', b'C', b'A', b'P', b'E', b'2', b'.', b'0', 2, 1, 0,
         0,
     ];
-    malformed.splice(19..19, malformed_extension);
+    malformed_gif_bytes.splice(19..19, malformed_extension);
     assert_eq!(
-        decode_media(GraphicsProtocol::Kitty, &malformed)
+        decode_media(GraphicsProtocol::Kitty, &malformed_gif_bytes)
             .expect_err("short loop metadata must be rejected"),
         GraphicsError::DecodeFailure {
             protocol: GraphicsProtocol::Kitty
         }
     );
 
-    let trailing = insert_before(
-        &gif_with_one_frame(),
-        0x3b,
-        &loop_extension(b"NETSCAPE2.0", 0),
+    let gif_bytes_with_trailing_loop_extension = insert_gif_extension_before_trailer(
+        &build_gif_with_one_frame(),
+        &build_gif_loop_extension(b"NETSCAPE2.0", 0),
     );
-    let DecodedMedia::Animation(animation) =
-        decode_media(GraphicsProtocol::Kitty, &trailing).expect("trailing loop metadata decodes")
-    else {
+    let DecodedMedia::Animation(animation) = decode_media(
+        GraphicsProtocol::Kitty,
+        &gif_bytes_with_trailing_loop_extension,
+    )
+    .expect("trailing loop metadata decodes") else {
         panic!("trailing loop metadata must be retained");
     };
     assert_eq!(animation.get_loop_policy(), LoopPolicy::Infinite);
@@ -616,58 +657,72 @@ fn malformed_gif_loop_metadata_is_typed_and_trailing_metadata_is_seen() {
 
 #[test]
 fn apng_and_webp_preserve_format_loop_semantics() {
-    let DecodedMedia::Animation(apng) =
-        decode_media(GraphicsProtocol::Iterm2, &animated_png(2)).expect("APNG decodes")
+    let DecodedMedia::Animation(apng_animation) =
+        decode_media(GraphicsProtocol::Iterm2, &build_animated_png(2)).expect("APNG decodes")
     else {
         panic!("APNG must produce an animation");
     };
-    assert_eq!(apng.get_loop_policy(), LoopPolicy::Finite(2));
-    assert_eq!(apng.get_frame_count(), 2);
+    assert_eq!(apng_animation.get_loop_policy(), LoopPolicy::Finite(2));
+    assert_eq!(apng_animation.get_frame_count(), 2);
     assert_eq!(
-        apng.list_frames()[0].get_frame_delay(),
+        apng_animation.list_frames()[0].get_frame_delay(),
         FrameDelay::from_millisecond_ratio(100, 1).expect("delay is valid")
     );
 
-    let DecodedMedia::Animation(webp) =
-        decode_media(GraphicsProtocol::Iterm2, &animated_webp(0)).expect("WebP decodes")
+    let DecodedMedia::Animation(webp_animation) =
+        decode_media(GraphicsProtocol::Iterm2, &build_animated_webp(0)).expect("WebP decodes")
     else {
         panic!("animated WebP must produce an animation");
     };
-    assert_eq!(webp.get_loop_policy(), LoopPolicy::Infinite);
-    assert_eq!(webp.get_frame_count(), 2);
+    assert_eq!(webp_animation.get_loop_policy(), LoopPolicy::Infinite);
+    assert_eq!(webp_animation.get_frame_count(), 2);
 }
 
 #[test]
 fn apng_and_webp_coalesce_offsets_alpha_and_disposal() {
-    let DecodedMedia::Animation(apng) =
-        decode_media(GraphicsProtocol::Iterm2, &asymmetric_apng()).expect("APNG decodes")
+    let DecodedMedia::Animation(apng_animation) =
+        decode_media(GraphicsProtocol::Iterm2, &build_asymmetric_apng()).expect("APNG decodes")
     else {
         panic!("asymmetric APNG must produce an animation");
     };
-    assert_eq!(apng.get_image_pixel_dimensions(), (2, 1));
-    assert_eq!(apng.get_frame_count(), 2);
     assert_eq!(
-        apng.list_frames()[0].get_decoded_image().rgba_bytes,
+        get_animation_canvas_pixel_dimensions(&apng_animation),
+        (2, 1)
+    );
+    assert_eq!(apng_animation.get_frame_count(), 2);
+    assert_eq!(
+        apng_animation.list_frames()[0]
+            .get_decoded_image()
+            .rgba_bytes,
         vec![255, 0, 0, 255, 0, 255, 0, 255]
     );
     assert_eq!(
-        apng.list_frames()[1].get_decoded_image().rgba_bytes,
+        apng_animation.list_frames()[1]
+            .get_decoded_image()
+            .rgba_bytes,
         vec![0, 0, 0, 0, 0, 0, 255, 128]
     );
 
-    let DecodedMedia::Animation(webp) =
-        decode_media(GraphicsProtocol::Iterm2, &asymmetric_webp()).expect("WebP decodes")
+    let DecodedMedia::Animation(webp_animation) =
+        decode_media(GraphicsProtocol::Iterm2, &build_asymmetric_webp()).expect("WebP decodes")
     else {
         panic!("asymmetric WebP must produce an animation");
     };
-    assert_eq!(webp.get_image_pixel_dimensions(), (4, 1));
-    assert_eq!(webp.get_frame_count(), 2);
     assert_eq!(
-        webp.list_frames()[0].get_decoded_image().rgba_bytes,
+        get_animation_canvas_pixel_dimensions(&webp_animation),
+        (4, 1)
+    );
+    assert_eq!(webp_animation.get_frame_count(), 2);
+    assert_eq!(
+        webp_animation.list_frames()[0]
+            .get_decoded_image()
+            .rgba_bytes,
         vec![255, 0, 0, 255, 0, 255, 0, 255, 255, 255, 0, 255, 255, 0, 255, 255,]
     );
     assert_eq!(
-        webp.list_frames()[1].get_decoded_image().rgba_bytes,
+        webp_animation.list_frames()[1]
+            .get_decoded_image()
+            .rgba_bytes,
         vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 128, 255, 255, 255, 255,]
     );
 }
@@ -693,24 +748,27 @@ fn static_raster_uses_the_static_media_variant() {
 
 #[test]
 fn animation_frame_and_aggregate_limits_reject_invalid_values() {
-    let delay = FrameDelay::from_millisecond_ratio(1, 1).expect("delay is valid");
-    let invalid_image = DecodedImage {
+    let frame_delay = FrameDelay::from_millisecond_ratio(1, 1).expect("delay is valid");
+    let invalid_decoded_image = DecodedImage {
         pixel_width: 2,
         pixel_height: 1,
         rgba_bytes: vec![0, 0, 0, 255],
     };
     assert_eq!(
-        AnimationFrame::from_image_and_delay(invalid_image, delay)
+        AnimationFrame::from_image_and_delay(invalid_decoded_image, frame_delay)
             .expect_err("short RGBA data is invalid"),
         AnimationError::InvalidFrameImage
     );
 
-    let frame =
-        AnimationFrame::from_image_and_delay(one_pixel_image(255), delay).expect("frame is valid");
-    let excessive_frames = vec![frame; MAX_ANIMATION_FRAME_COUNT + 1];
+    let frame = AnimationFrame::from_image_and_delay(build_one_pixel_image(255), frame_delay)
+        .expect("frame is valid");
+    let too_many_animation_frames = vec![frame; MAX_ANIMATION_FRAME_COUNT + 1];
     assert_eq!(
-        DecodedAnimation::from_frames_and_loop_policy(excessive_frames, LoopPolicy::Finite(1))
-            .expect_err("frame count limit is enforced"),
+        DecodedAnimation::from_frames_and_loop_policy(
+            too_many_animation_frames,
+            LoopPolicy::Finite(1),
+        )
+        .expect_err("frame count limit is enforced"),
         AnimationError::TooManyFrames
     );
 
@@ -720,16 +778,21 @@ fn animation_frame_and_aggregate_limits_reject_invalid_values() {
             serialized_frames_json.push(',');
         }
         serialized_frames_json.push_str(
-            r#"{"image":{"width":1,"height":1,"rgba":[255,0,0,255]},"delay":{"numerator_ms":1,"denominator_ms":1}}"#,
+            r#"{"decoded_image":{"pixel_width":1,"pixel_height":1,"rgba_bytes":[255,0,0,255]},"frame_delay":{"numerator_ms":1,"denominator_ms":1}}"#,
         );
     }
     serialized_frames_json.push(']');
-    let serialized_media_value = serde_json::json!({
+    let too_many_frames_media_json = serde_json::json!({
         "Animation": {
             "frames": serde_json::from_str::<serde_json::Value>(&serialized_frames_json)
                 .expect("frames JSON"),
             "loop_policy": {"Finite": 1}
         }
     });
-    assert!(serde_json::from_value::<DecodedMedia>(serialized_media_value).is_err());
+    let too_many_frames_error = serde_json::from_value::<DecodedMedia>(too_many_frames_media_json)
+        .expect_err("one frame past the limit is refused");
+    assert_eq!(
+        too_many_frames_error.to_string(),
+        "animation frame count exceeds the graphics limit"
+    );
 }

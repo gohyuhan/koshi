@@ -15,7 +15,7 @@ use koshi_layout::tree::{LayoutNode, SplitNode};
 use koshi_pane::pane::lifecycle::{PaneLifecycle, PaneLifecycleEvent};
 use koshi_pane::pane::state::PaneRecord;
 
-use super::lifecycle::{SessionLifecycle, TabLifecycle};
+use super::lifecycle::SessionLifecycle;
 use super::pane_ops::NewPaneSpec;
 use super::state::{Session, Tab};
 use super::tab_ops::{close_tab, commit_new_tab};
@@ -24,7 +24,7 @@ use crate::error::SessionConsistencyError;
 
 /// Create a tab through [`commit_new_tab`] with freshly minted ids, no focus
 /// client, and an empty spec — the session-level fixture for these tests.
-fn commit_test_tab(session: &mut Session, tab_name: String, created_at: SystemTime) -> Vec<Event> {
+fn commit_test_tab(session: &mut Session, tab_name: String) -> Vec<Event> {
     commit_new_tab(
         session,
         TabId::new(),
@@ -32,14 +32,13 @@ fn commit_test_tab(session: &mut Session, tab_name: String, created_at: SystemTi
         tab_name,
         None,
         NewPaneSpec::default(),
-        created_at,
     )
     .1
 }
 
-/// A client viewing `active_tab`, with an 80x24 viewport, a fresh session id of
+/// A client viewing `active_tab_id`, with an 80x24 viewport, a fresh session id of
 /// its own, and `UNIX_EPOCH` as its attach time.
-fn client_viewing(active_tab: TabId) -> Client {
+fn build_client_viewing(active_tab_id: TabId) -> Client {
     Client::from_attachment(
         ClientId::new(),
         SessionId::new(),
@@ -49,7 +48,7 @@ fn client_viewing(active_tab: TabId) -> Client {
             row_count: 24,
         },
         None,
-        active_tab,
+        active_tab_id,
         ClientOrigin::Local,
         "C-test-client".to_string(),
         0,
@@ -59,8 +58,8 @@ fn client_viewing(active_tab: TabId) -> Client {
 #[test]
 fn tab_cell_size_uses_the_oldest_measured_viewer_and_changes_on_detach() {
     use koshi_core::geometry::PixelCellSize;
-    let tab = TabId::new();
-    let other_tab = TabId::new();
+    let tab_id = TabId::new();
+    let other_tab_id = TabId::new();
     let mut session = Session::from_identity_and_client_registry(
         SessionId::new(),
         "images".to_owned(),
@@ -68,43 +67,43 @@ fn tab_cell_size_uses_the_oldest_measured_viewer_and_changes_on_detach() {
         ClientRegistry::new(),
     );
     let mut clients = [
-        client_viewing(tab),
-        client_viewing(tab),
-        client_viewing(other_tab),
+        build_client_viewing(tab_id),
+        build_client_viewing(tab_id),
+        build_client_viewing(other_tab_id),
     ];
     clients.sort_by_key(Client::get_client_id);
     let first_client_id = clients[0].get_client_id();
     let second_client_id = clients[1].get_client_id();
-    clients[0].update_active_tab(tab);
-    clients[1].update_active_tab(tab);
-    clients[2].update_active_tab(other_tab);
-    clients[1].update_cell_size(PixelCellSize::from_pixel_dimensions(12, 24).expect("nonzero"));
-    clients[2].update_cell_size(PixelCellSize::from_pixel_dimensions(8, 16).expect("nonzero"));
+    clients[0].update_active_tab_id(tab_id);
+    clients[1].update_active_tab_id(tab_id);
+    clients[2].update_active_tab_id(other_tab_id);
+    clients[1].replace_cell_size(PixelCellSize::from_pixel_dimensions(12, 24));
+    clients[2].replace_cell_size(PixelCellSize::from_pixel_dimensions(8, 16));
     for client in clients {
         session.clients.attach_client(client);
     }
     assert_eq!(
-        session.get_tab_cell_size(tab),
+        session.get_tab_cell_size(tab_id),
         PixelCellSize::from_pixel_dimensions(12, 24)
     );
     session
         .clients
         .get_client_mut_by_id(first_client_id)
         .expect("client")
-        .update_cell_size(PixelCellSize::from_pixel_dimensions(10, 20).expect("nonzero"));
+        .replace_cell_size(PixelCellSize::from_pixel_dimensions(10, 20));
     assert_eq!(
-        session.get_tab_cell_size(tab),
+        session.get_tab_cell_size(tab_id),
         PixelCellSize::from_pixel_dimensions(10, 20)
     );
     session.clients.detach_client(first_client_id);
     assert_eq!(
-        session.get_tab_cell_size(tab),
+        session.get_tab_cell_size(tab_id),
         PixelCellSize::from_pixel_dimensions(12, 24)
     );
     session.clients.detach_client(second_client_id);
-    assert_eq!(session.get_tab_cell_size(tab), None);
+    assert_eq!(session.get_tab_cell_size(tab_id), None);
     assert_eq!(
-        session.get_tab_cell_size(other_tab),
+        session.get_tab_cell_size(other_tab_id),
         PixelCellSize::from_pixel_dimensions(8, 16)
     );
 }
@@ -133,7 +132,7 @@ fn a_new_session_starts_empty() {
     assert_eq!(session.session_id, session_id);
     assert_eq!(session.session_name, "main");
     assert!(session.tabs.is_empty());
-    assert!(!session.panes.has_pane_records());
+    assert_eq!(session.panes.count_pane_records(), 0);
     assert!(!session.clients.has_clients());
 }
 
@@ -146,11 +145,10 @@ fn a_new_tab_owns_its_layout_and_starts_unfocused() {
     assert_eq!(tab.get_tab_id(), tab_id);
     assert_eq!(tab.get_tab_name(), "code");
     assert_eq!(tab.get_tab_index(), 0);
-    // A fresh tab shows exactly its root pane, mid-creation, no focus yet. It
-    // carries no layout mode of its own: whether a pane is zoomed belongs to a
-    // client's view, not to the tab.
+    // A fresh tab shows exactly its root pane, no focus yet. It carries no
+    // layout mode of its own: whether a pane is zoomed belongs to a client's
+    // view, not to the tab.
     assert_eq!(*tab.get_layout_tree(), LayoutNode::Pane(root_pane_id));
-    assert_eq!(*tab.get_lifecycle(), TabLifecycle::Creating);
     assert!(tab.list_focus_mru().is_empty());
 }
 
@@ -198,19 +196,19 @@ fn re_focusing_moves_to_front_without_duplicating() {
 #[test]
 fn focus_mru_is_capped_dropping_the_oldest() {
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let focus_history_capacity = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
+    let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
 
     // Record one more distinct pane than the cap allows.
-    let panes: Vec<PaneId> = (0..=focus_history_capacity)
+    let pane_ids: Vec<PaneId> = (0..=focus_history_entry_count)
         .map(|_| PaneId::new())
         .collect();
-    for &pane in &panes {
-        tab.record_focus_mru(pane);
+    for &pane_id in &pane_ids {
+        tab.record_focus_mru(pane_id);
     }
 
     // Newest first, with the first-recorded pane evicted: every other pane keeps
     // its place in recording order.
-    let surviving_newest_first: Vec<PaneId> = panes[1..].iter().rev().copied().collect();
+    let surviving_newest_first: Vec<PaneId> = pane_ids[1..].iter().rev().copied().collect();
     assert_eq!(tab.list_focus_mru().to_vec(), surviving_newest_first);
 }
 
@@ -219,15 +217,17 @@ fn focus_mru_at_exactly_the_cap_evicts_nothing() {
     // The boundary just below the eviction case above: recording exactly
     // `MAX_TAB_FOCUS_MRU_ENTRY_COUNT` distinct panes must keep every one of them.
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let focus_history_capacity = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
+    let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
 
-    let panes: Vec<PaneId> = (0..focus_history_capacity).map(|_| PaneId::new()).collect();
-    for &pane in &panes {
-        tab.record_focus_mru(pane);
+    let pane_ids: Vec<PaneId> = (0..focus_history_entry_count)
+        .map(|_| PaneId::new())
+        .collect();
+    for &pane_id in &pane_ids {
+        tab.record_focus_mru(pane_id);
     }
 
-    let newest_first: Vec<PaneId> = panes.iter().rev().copied().collect();
-    assert_eq!(tab.list_focus_mru().to_vec(), newest_first);
+    let newest_first_pane_ids: Vec<PaneId> = pane_ids.iter().rev().copied().collect();
+    assert_eq!(tab.list_focus_mru().to_vec(), newest_first_pane_ids);
 }
 
 #[test]
@@ -235,33 +235,38 @@ fn re_recording_an_existing_pane_at_the_cap_moves_it_front_without_evicting() {
     // Re-recording an entry a full history already holds evicts nothing: the
     // duplicate is dropped before the length is checked.
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let focus_history_capacity = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
-    let panes: Vec<PaneId> = (0..focus_history_capacity).map(|_| PaneId::new()).collect();
-    for &pane in &panes {
-        tab.record_focus_mru(pane);
+    let focus_history_entry_count = MAX_TAB_FOCUS_MRU_ENTRY_COUNT as usize;
+    let pane_ids: Vec<PaneId> = (0..focus_history_entry_count)
+        .map(|_| PaneId::new())
+        .collect();
+    for &pane_id in &pane_ids {
+        tab.record_focus_mru(pane_id);
     }
     // The re-recorded pane comes from the middle of the history. The back entry
     // is the one the cap evicts on its own.
-    let middle_pane_id = panes[focus_history_capacity / 2];
+    let middle_pane_id = pane_ids[focus_history_entry_count / 2];
 
     tab.record_focus_mru(middle_pane_id);
 
     // `middle_pane_id` moves to the front and every other pane keeps its order behind it.
-    let mut expected_focus_history: Vec<PaneId> = panes.iter().rev().copied().collect();
-    expected_focus_history.retain(|&pane_id| pane_id != middle_pane_id);
-    expected_focus_history.insert(0, middle_pane_id);
-    assert_eq!(tab.list_focus_mru().to_vec(), expected_focus_history);
+    let mut expected_focus_history_pane_ids: Vec<PaneId> = pane_ids.iter().rev().copied().collect();
+    expected_focus_history_pane_ids.retain(|&pane_id| pane_id != middle_pane_id);
+    expected_focus_history_pane_ids.insert(0, middle_pane_id);
+    assert_eq!(
+        tab.list_focus_mru().to_vec(),
+        expected_focus_history_pane_ids
+    );
 }
 
 #[test]
 fn recording_the_same_pane_twice_keeps_one_entry() {
     let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, PaneId::new());
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
 
-    tab.record_focus_mru(pane);
-    tab.record_focus_mru(pane);
+    tab.record_focus_mru(pane_id);
+    tab.record_focus_mru(pane_id);
 
-    assert_eq!(tab.list_focus_mru().to_vec(), vec![pane]);
+    assert_eq!(tab.list_focus_mru().to_vec(), vec![pane_id]);
 }
 
 #[test]
@@ -309,11 +314,11 @@ fn the_starting_lock_is_taken_once() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    session.start_locked = true;
+    session.should_start_locked = true;
 
     assert!(session.take_start_lock(), "the first read takes the lock");
     assert!(!session.take_start_lock(), "the second read finds none");
-    assert!(!session.start_locked);
+    assert!(!session.should_start_locked);
 }
 
 #[test]
@@ -336,20 +341,48 @@ fn the_starting_lock_survives_a_serde_round_trip() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    session.start_locked = true;
+    session.should_start_locked = true;
 
     let json = serde_json::to_string(&session).expect("serialize");
     let restored_session: Session = serde_json::from_str(&json).expect("deserialize");
 
     assert!(
-        restored_session.start_locked,
+        restored_session.should_start_locked,
         "a session server that restarts before any client attaches still locks the first one"
     );
 }
 
 #[test]
+fn recovery_notice_survives_serialization_and_absent_field_reads_as_hidden() {
+    let mut session = Session::from_identity_and_client_registry(
+        SessionId::new(),
+        "work".to_owned(),
+        SystemTime::UNIX_EPOCH,
+        ClientRegistry::new(),
+    );
+    session.is_recovery_notice_visible = true;
+    let serialized_session = serde_json::to_value(&session).expect("serialize session");
+    assert_eq!(
+        serialized_session["is_recovery_notice_visible"],
+        serde_json::Value::Bool(true)
+    );
+    let restored_session: Session =
+        serde_json::from_value(serialized_session.clone()).expect("restore session");
+    assert!(restored_session.is_recovery_notice_visible);
+
+    let mut session_without_notice_field = serialized_session;
+    session_without_notice_field
+        .as_object_mut()
+        .expect("session object")
+        .remove("is_recovery_notice_visible");
+    let restored_session: Session =
+        serde_json::from_value(session_without_notice_field).expect("restore older session");
+    assert!(!restored_session.is_recovery_notice_visible);
+}
+
+#[test]
 fn the_starting_lock_is_stored_as_a_plain_json_bool() {
-    // Pins the stored shape: the member is named `start_locked` and holds a
+    // Pins the stored shape: the member is named `should_start_locked` and holds a
     // JSON boolean.
     let mut session = Session::from_identity_and_client_registry(
         SessionId::new(),
@@ -357,19 +390,19 @@ fn the_starting_lock_is_stored_as_a_plain_json_bool() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    session.start_locked = true;
+    session.should_start_locked = true;
 
     let serialized_session = serde_json::to_value(&session).expect("serialize");
 
     assert_eq!(
-        serialized_session["start_locked"],
+        serialized_session["should_start_locked"],
         serde_json::Value::Bool(true)
     );
 }
 
 #[test]
 fn a_stored_session_without_the_lock_key_reads_back_unlocked() {
-    // A stored session with no `start_locked` member reads the field back as
+    // A stored session with no `should_start_locked` member reads the field back as
     // `false` through `#[serde(default)]`.
     let session = Session::from_identity_and_client_registry(
         SessionId::new(),
@@ -381,21 +414,21 @@ fn a_stored_session_without_the_lock_key_reads_back_unlocked() {
     serialized_session
         .as_object_mut()
         .expect("a session serializes to a JSON object")
-        .remove("start_locked")
+        .remove("should_start_locked")
         .expect("the key is present before it is dropped");
 
     let mut restored_session: Session =
         serde_json::from_value(serialized_session).expect("a session without the key deserializes");
 
-    assert!(!restored_session.start_locked);
+    assert!(!restored_session.should_start_locked);
     assert!(!restored_session.take_start_lock());
 }
 
 #[test]
 fn a_tab_survives_a_serde_round_trip() {
-    let root = PaneId::new();
-    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, root);
-    tab.record_focus_mru(root);
+    let root_pane_id = PaneId::new();
+    let mut tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 2, root_pane_id);
+    tab.record_focus_mru(root_pane_id);
 
     let json = serde_json::to_string(&tab).expect("serialize");
     let restored_tab: Tab = serde_json::from_str(&json).expect("deserialize");
@@ -438,11 +471,11 @@ fn the_first_tab_moves_the_session_to_running() {
         ClientRegistry::new(),
     );
 
-    let _ = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let _ = commit_test_tab(&mut session, "code".to_owned());
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
 
     // A second tab does not re-fire the start transition.
-    let _ = commit_test_tab(&mut session, "logs".to_owned(), SystemTime::UNIX_EPOCH);
+    let _ = commit_test_tab(&mut session, "logs".to_owned());
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
 }
 
@@ -454,11 +487,11 @@ fn detaching_the_last_client_parks_the_session_without_destroying_state() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
-    let client = client_viewing(tab);
+    let client = build_client_viewing(tab);
     let client_id = client.get_client_id();
     session.attach_client(client);
     // Attaching to a running session leaves it running.
@@ -489,16 +522,16 @@ fn re_attaching_resumes_a_detached_session() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
 
-    let detached_client = client_viewing(tab);
+    let detached_client = build_client_viewing(tab);
     let detached_client_id = detached_client.get_client_id();
     session.attach_client(detached_client);
     session.detach_client(detached_client_id);
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Detaching);
 
-    session.attach_client(client_viewing(tab));
+    session.attach_client(build_client_viewing(tab));
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Running);
 }
 
@@ -510,12 +543,12 @@ fn detaching_one_of_several_clients_keeps_the_session_running() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
 
-    let first_client = client_viewing(tab);
+    let first_client = build_client_viewing(tab);
     let first_client_id = first_client.get_client_id();
-    let second_client = client_viewing(tab);
+    let second_client = build_client_viewing(tab);
     let second_client_id = second_client.get_client_id();
     session.attach_client(first_client);
     session.attach_client(second_client);
@@ -536,7 +569,7 @@ fn requesting_then_completing_a_stop_walks_to_stopped() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    let _ = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let _ = commit_test_tab(&mut session, "code".to_owned());
 
     session.request_session_stop();
     assert_eq!(*session.get_lifecycle(), SessionLifecycle::Stopping);
@@ -553,9 +586,9 @@ fn closing_the_last_tab_requests_a_stop() {
         SystemTime::UNIX_EPOCH,
         ClientRegistry::new(),
     );
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
     let teardown = close_tab(&mut session, tab);
 
@@ -592,7 +625,7 @@ fn build_empty_session() -> Session {
 /// valid layout leaf, so on its own it trips no pane-level consistency check.
 fn register_live_pane(session: &mut Session) -> PaneId {
     let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
         .expect("Spawning -> Running is a legal transition");
@@ -606,7 +639,7 @@ fn register_live_pane(session: &mut Session) -> PaneId {
 /// A `Removed` pane record registered in `session`, returned by id.
 fn register_removed_pane(session: &mut Session) -> PaneId {
     let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record
         .update_lifecycle(PaneLifecycleEvent::CloseRequested {
             close_requested_at: SystemTime::UNIX_EPOCH,
@@ -626,7 +659,7 @@ fn register_removed_pane(session: &mut Session) -> PaneId {
 /// holds a record and is still a legal layout leaf.
 fn register_closing_pane(session: &mut Session) -> PaneId {
     let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record
         .update_lifecycle(PaneLifecycleEvent::CloseRequested {
             close_requested_at: SystemTime::UNIX_EPOCH,
@@ -640,7 +673,7 @@ fn register_closing_pane(session: &mut Session) -> PaneId {
 }
 
 /// The id of the pane a `new_tab` call just created, read off its `PaneCreated`.
-fn created_pane_id(events: &[Event]) -> PaneId {
+fn find_created_pane_id(events: &[Event]) -> PaneId {
     events
         .iter()
         .find_map(|event| match event {
@@ -671,23 +704,12 @@ fn attach_viewing(session: &mut Session, active_tab: TabId) -> ClientId {
     client_id
 }
 
-/// A clone of `source_tab` whose private `lifecycle` field is set to
-/// `target_tab_lifecycle`,
-/// built by rewriting that member of the tab's JSON and reading it back.
-/// `target_tab_lifecycle` is a [`TabLifecycle`] variant name, such as
-/// `"Closed"`. Panics when the name is not one of them.
-fn force_tab_lifecycle(source_tab: &Tab, target_tab_lifecycle: &str) -> Tab {
-    let mut tab_value = serde_json::to_value(source_tab).expect("a tab serializes");
-    tab_value["lifecycle"] = serde_json::Value::String(target_tab_lifecycle.to_owned());
-    serde_json::from_value(tab_value).expect("a tab with a forced lifecycle deserializes")
-}
-
 #[test]
 fn a_freshly_built_session_is_consistent() {
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
     let client_id = attach_viewing(&mut session, tab);
     session
@@ -846,7 +868,7 @@ fn two_tabs_sharing_a_bar_index_are_reported() {
 #[test]
 fn a_client_belonging_to_another_session_is_reported() {
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
 
     let foreign = SessionId::new();
@@ -880,7 +902,7 @@ fn a_client_belonging_to_another_session_is_reported() {
 #[test]
 fn a_client_active_tab_that_does_not_exist_is_reported() {
     let mut session = build_empty_session();
-    let _ = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let _ = commit_test_tab(&mut session, "code".to_owned());
 
     let phantom = TabId::new();
     let client_id = attach_viewing(&mut session, phantom);
@@ -900,7 +922,7 @@ fn every_client_with_a_missing_active_tab_is_reported() {
     // trips a check. Clients are reported in ascending id order, the order
     // `ClientRegistry` iterates.
     let mut session = build_empty_session();
-    let _ = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let _ = commit_test_tab(&mut session, "code".to_owned());
 
     let phantom = TabId::new();
     let mut viewers = [
@@ -930,7 +952,7 @@ fn a_client_viewing_a_gone_tab_is_not_reported_once_the_session_has_no_tabs() {
     // viewers at, so every client's `active_tab` names the closed tab until the
     // transport disconnects it. That state is not a violation.
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
     let client_id = attach_viewing(&mut session, tab);
 
@@ -942,7 +964,7 @@ fn a_client_viewing_a_gone_tab_is_not_reported_once_the_session_has_no_tabs() {
             .clients
             .get_client_by_id(client_id)
             .expect("the client stays attached")
-            .get_active_tab(),
+            .get_active_tab_id(),
         tab
     );
     assert_eq!(session.validate_session_consistency(), Ok(()));
@@ -951,7 +973,7 @@ fn a_client_viewing_a_gone_tab_is_not_reported_once_the_session_has_no_tabs() {
 #[test]
 fn a_client_focus_on_an_unknown_pane_is_reported() {
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
 
     let ghost = PaneId::new();
@@ -984,9 +1006,9 @@ fn a_client_focus_on_an_unknown_pane_is_reported() {
 #[test]
 fn a_client_focus_in_a_missing_tab_is_reported() {
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
     let phantom_tab = TabId::new();
     let client_id = attach_viewing(&mut session, tab);
@@ -1013,7 +1035,7 @@ fn a_focus_in_a_missing_tab_on_a_ghost_pane_reports_the_missing_record_and_the_m
     // longer holds, trips the registry check and the tab check. The layout check
     // needs a tab to look inside, so it does not also fire.
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let real_tab = get_created_tab_id(&events);
 
     let phantom_tab = TabId::new();
@@ -1044,9 +1066,9 @@ fn a_focus_in_a_missing_tab_on_a_ghost_pane_reports_the_missing_record_and_the_m
 #[test]
 fn a_client_focus_on_a_pane_outside_its_tab_is_reported() {
     let mut session = build_empty_session();
-    let events_a = commit_test_tab(&mut session, "a".to_owned(), SystemTime::UNIX_EPOCH);
-    let pane_a = created_pane_id(&events_a);
-    let events_b = commit_test_tab(&mut session, "b".to_owned(), SystemTime::UNIX_EPOCH);
+    let events_a = commit_test_tab(&mut session, "a".to_owned());
+    let pane_a = find_created_pane_id(&events_a);
+    let events_b = commit_test_tab(&mut session, "b".to_owned());
     let tab_b = get_created_tab_id(&events_b);
 
     let client_id = attach_viewing(&mut session, tab_b);
@@ -1075,11 +1097,11 @@ fn a_client_focus_on_a_pane_outside_its_tab_is_reported() {
 #[test]
 fn a_client_zoom_on_a_pane_outside_its_tab_is_reported() {
     let mut session = build_empty_session();
-    let events_a = commit_test_tab(&mut session, "a".to_owned(), SystemTime::UNIX_EPOCH);
-    let pane_a = created_pane_id(&events_a);
-    let events_b = commit_test_tab(&mut session, "b".to_owned(), SystemTime::UNIX_EPOCH);
+    let events_a = commit_test_tab(&mut session, "a".to_owned());
+    let pane_a = find_created_pane_id(&events_a);
+    let events_b = commit_test_tab(&mut session, "b".to_owned());
     let tab_b = get_created_tab_id(&events_b);
-    let pane_b = created_pane_id(&events_b);
+    let pane_b = find_created_pane_id(&events_b);
 
     let client_id = attach_viewing(&mut session, tab_b);
     let client = session
@@ -1105,9 +1127,9 @@ fn a_client_zoom_on_a_pane_outside_its_tab_is_reported() {
 #[test]
 fn a_zoom_on_the_focused_pane_is_consistent() {
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "a".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "a".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
     let client_id = attach_viewing(&mut session, tab);
     let client = session
@@ -1121,18 +1143,15 @@ fn a_zoom_on_the_focused_pane_is_consistent() {
 }
 
 #[test]
-fn a_closed_tab_left_in_the_map_is_reported() {
-    let mut session = build_empty_session();
-    let pane = register_live_pane(&mut session);
-    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, pane);
-    let tab_id = tab.get_tab_id();
-    let closed = force_tab_lifecycle(&tab, "Closed");
-    session.tabs.insert(tab_id, closed);
+fn a_stored_tab_carrying_a_lifecycle_key_still_reads() {
+    let root_pane_id = PaneId::new();
+    let tab = Tab::from_root_pane(TabId::new(), "code".to_owned(), 0, root_pane_id);
+    let mut tab_value = serde_json::to_value(&tab).expect("a tab serializes");
+    tab_value["lifecycle"] = serde_json::Value::String("Creating".to_owned());
 
-    assert_eq!(
-        session.validate_session_consistency(),
-        Err(vec![SessionConsistencyError::LingeringClosedTab { tab_id }])
-    );
+    let read_back: Tab = serde_json::from_value(tab_value).expect("the older tab reads");
+
+    assert_eq!(read_back, tab);
 }
 
 /// An `Exited` pane record registered in `session`, returned by id. It holds
@@ -1140,7 +1159,7 @@ fn a_closed_tab_left_in_the_map_is_reported() {
 /// check is the one that fires when it is a leaf nowhere.
 fn register_exited_pane(session: &mut Session) -> PaneId {
     let pane_id = PaneId::new();
-    let mut pane_record = PaneRecord::from_terminal_pane(pane_id, SystemTime::UNIX_EPOCH);
+    let mut pane_record = PaneRecord::from_terminal_pane(pane_id);
     pane_record
         .update_lifecycle(PaneLifecycleEvent::ProcessStarted)
         .expect("Spawning -> Running is a legal transition");
@@ -1164,7 +1183,7 @@ fn a_focus_on_a_ghost_pane_in_a_real_tab_reports_both_missing_record_and_missing
     // (`FocusPaneNotInRegistry`), and the tab's layout does not hold it either
     // (`FocusTargetMissing`). Both name the same client, tab, and pane.
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
 
     let ghost = PaneId::new();
@@ -1200,9 +1219,9 @@ fn a_zoom_on_a_pane_with_no_record_is_reported() {
     // so it is reported even though the tab it is keyed under is real. The
     // client's focus sits on the real pane, so no focus check fires alongside.
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
     let ghost = PaneId::new();
     let client_id = attach_viewing(&mut session, tab);
@@ -1229,9 +1248,9 @@ fn a_zoom_in_a_tab_that_is_gone_is_reported() {
     // but through a tab that is no longer in the session, so the pane is not a
     // live leaf of it — reported as `ZoomTargetMissing` naming the gone tab.
     let mut session = build_empty_session();
-    let events = commit_test_tab(&mut session, "code".to_owned(), SystemTime::UNIX_EPOCH);
+    let events = commit_test_tab(&mut session, "code".to_owned());
     let tab = get_created_tab_id(&events);
-    let pane = created_pane_id(&events);
+    let pane = find_created_pane_id(&events);
 
     let phantom_tab = TabId::new();
     let client_id = attach_viewing(&mut session, tab);

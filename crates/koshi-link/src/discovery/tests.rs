@@ -546,7 +546,7 @@ fn one_session_asked_directly_is_a_complete_census_of_itself() {
 fn a_complete_listing_reports_no_gap() {
     assert!(
         build_complete_discovery(vec![build_session_overview("quiet-lake", &[("editor", 1)])])
-            .incomplete_listing()
+            .find_incomplete_listing_error()
             .is_none()
     );
 }
@@ -560,7 +560,7 @@ fn a_listing_missing_a_session_reports_the_gap() {
         2,
     );
     match discovery
-        .incomplete_listing()
+        .find_incomplete_listing_error()
         .expect("the discovery is incomplete")
     {
         CliError::IpcUnavailable { detail } => assert_eq!(

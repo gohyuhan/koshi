@@ -13,12 +13,14 @@ use std::process::ExitCode;
 mod dep_guard;
 
 fn main() -> ExitCode {
-    let raw_command = std::env::args_os().nth(1);
-    let requested_command = raw_command.as_deref().map(|arg| arg.to_string_lossy());
+    let raw_command_argument = std::env::args_os().nth(1);
+    let requested_command = raw_command_argument
+        .as_deref()
+        .map(|command_argument| command_argument.to_string_lossy());
     match requested_command.as_deref() {
         Some("dep-guard") => dep_guard::run_dependency_guard(),
-        Some(other) => {
-            eprintln!("xtask: unknown command `{other}`");
+        Some(unknown_command) => {
+            eprintln!("xtask: unknown command `{unknown_command}`");
             print_usage();
             ExitCode::FAILURE
         }

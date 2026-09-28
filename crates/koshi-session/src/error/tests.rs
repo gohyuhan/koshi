@@ -1,5 +1,5 @@
 //! Tests for the session domain errors: their `Display` wording and their
-//! [`DomainError`] classification.
+//! equality.
 //!
 //! The `Display` of an id-bearing variant embeds a random UUID, so those tests
 //! pin the exact wording against the same ids interpolated the same way — this
@@ -10,7 +10,6 @@
 use std::time::SystemTime;
 
 use super::*;
-use koshi_core::error::{DomainCategory, DomainError, Severity};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 
@@ -18,51 +17,13 @@ use crate::session::lifecycle::{SessionLifecycle, SessionLifecycleEvent};
 
 #[test]
 fn invalid_transition_display_names_the_state_and_event() {
-    let error = InvalidTransition {
+    let transition_error = InvalidTransition {
         previous_lifecycle: SessionLifecycle::Running,
         lifecycle_event: SessionLifecycleEvent::StopCompleted,
     };
     assert_eq!(
-        error.to_string(),
+        transition_error.to_string(),
         "illegal session lifecycle transition from Running on StopCompleted"
-    );
-}
-
-#[test]
-fn an_invalid_transition_is_a_recoverable_session_error() {
-    let error = InvalidTransition {
-        previous_lifecycle: SessionLifecycle::Stopped,
-        lifecycle_event: SessionLifecycleEvent::FirstTabCreated,
-    };
-    assert_eq!(error.category(), DomainCategory::Session);
-    assert_eq!(error.get_severity(), Severity::Recoverable);
-}
-
-#[test]
-fn a_consistency_error_is_a_recoverable_session_error() {
-    // The classification is a flat constant, so two unrelated variants prove it
-    // is variant-independent.
-    assert_eq!(
-        SessionConsistencyError::DuplicateTabIndex { tab_index: 0 }.category(),
-        DomainCategory::Session
-    );
-    assert_eq!(
-        SessionConsistencyError::DuplicateTabIndex { tab_index: 0 }.get_severity(),
-        Severity::Recoverable
-    );
-    assert_eq!(
-        SessionConsistencyError::LingeringRemovedRecord {
-            pane_id: PaneId::new()
-        }
-        .category(),
-        DomainCategory::Session
-    );
-    assert_eq!(
-        SessionConsistencyError::LingeringRemovedRecord {
-            pane_id: PaneId::new()
-        }
-        .get_severity(),
-        Severity::Recoverable
     );
 }
 
@@ -164,12 +125,12 @@ fn pane_in_multiple_layouts_display_of_an_empty_tab_list_shows_empty_brackets() 
 fn invalid_transition_display_names_a_second_state_and_event_pair() {
     // A different pair through the same template: the state comes first, the
     // event second.
-    let error = InvalidTransition {
+    let transition_error = InvalidTransition {
         previous_lifecycle: SessionLifecycle::Starting,
         lifecycle_event: SessionLifecycleEvent::ClientAttached,
     };
     assert_eq!(
-        error.to_string(),
+        transition_error.to_string(),
         "illegal session lifecycle transition from Starting on ClientAttached"
     );
 }
@@ -300,15 +261,15 @@ fn lingering_removed_record_display_names_the_pane() {
 
 #[test]
 fn tab_key_mismatch_display_names_the_key_then_the_tabs_own_id() {
-    let key = TabId::new();
-    let tab_id = TabId::new();
+    let stored_tab_id = TabId::new();
+    let reported_tab_id = TabId::new();
     let consistency_error = SessionConsistencyError::TabKeyMismatch {
-        stored_tab_id: key,
-        reported_tab_id: tab_id,
+        stored_tab_id,
+        reported_tab_id,
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("tab stored under key {key:?} reports its own id as {tab_id:?}")
+        format!("tab stored under key {stored_tab_id:?} reports its own id as {reported_tab_id:?}")
     );
 }
 
@@ -323,16 +284,6 @@ fn client_session_mismatch_display_names_the_client_and_the_session_it_carries()
     assert_eq!(
         consistency_error.to_string(),
         format!("client {client:?} belongs to session {found_session_id:?}, not this one")
-    );
-}
-
-#[test]
-fn lingering_closed_tab_display_names_the_tab() {
-    let tab = TabId::new();
-    let consistency_error = SessionConsistencyError::LingeringClosedTab { tab_id: tab };
-    assert_eq!(
-        consistency_error.to_string(),
-        format!("closed tab {tab:?} still sits in the session's tab map")
     );
 }
 

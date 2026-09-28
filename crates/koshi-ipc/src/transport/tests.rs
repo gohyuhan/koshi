@@ -35,8 +35,8 @@ fn build_hello_request(request_id: u64) -> IpcRequest {
     IpcRequest {
         request_id,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: ConnectionToken::from_secret("test-secret"),
             is_remote: false,
         },
@@ -96,13 +96,13 @@ fn oversized_length_prefix_is_refused_after_only_the_header_is_read() {
     frame_bytes.extend_from_slice(b"payload that must never be read");
     let mut reader = Cursor::new(frame_bytes);
 
-    let error = read_message::<String>(&mut reader).unwrap_err();
+    let read_error = read_message::<String>(&mut reader).unwrap_err();
     let IpcError::FrameTooLarge {
         frame_byte_count,
         maximum_frame_byte_count,
-    } = error
+    } = read_error
     else {
-        panic!("wrong error: {error}");
+        panic!("wrong error: {read_error}");
     };
     assert_eq!(frame_byte_count, u64::from(MAX_FRAME_BYTE_COUNT) + 1);
     assert_eq!(maximum_frame_byte_count, MAX_FRAME_BYTE_COUNT);
@@ -114,13 +114,13 @@ fn oversized_message_is_refused_with_nothing_written() {
     let oversized_message = "x".repeat(MAX_FRAME_BYTE_COUNT as usize);
     let mut frame_bytes: Vec<u8> = Vec::new();
 
-    let error = write_message(&mut frame_bytes, &oversized_message).unwrap_err();
+    let write_error = write_message(&mut frame_bytes, &oversized_message).unwrap_err();
     let IpcError::FrameTooLarge {
         frame_byte_count,
         maximum_frame_byte_count,
-    } = error
+    } = write_error
     else {
-        panic!("wrong error: {error}");
+        panic!("wrong error: {write_error}");
     };
     // Encoding stops at the write that crosses the cap: the opening quote
     // byte was accepted, and the escape-free string body arrives as one
@@ -139,14 +139,14 @@ fn the_refused_write_names_the_size_it_reached_not_the_whole_message() {
     let second_message_text = "y".repeat(100);
     let mut frame_bytes: Vec<u8> = Vec::new();
 
-    let error =
+    let write_error =
         write_message(&mut frame_bytes, &[first_message_text, second_message_text]).unwrap_err();
     let IpcError::FrameTooLarge {
         frame_byte_count,
         maximum_frame_byte_count,
-    } = error
+    } = write_error
     else {
-        panic!("wrong error: {error}");
+        panic!("wrong error: {write_error}");
     };
     // `[`, `"`, the first body, `"`, `,` and `"` are MAX_FRAME_BYTE_COUNT - 5 bytes;
     // the second body adds 100.
@@ -167,9 +167,9 @@ fn a_message_that_fails_to_encode_is_malformed_with_nothing_written() {
 
     let mut frame_bytes: Vec<u8> = Vec::new();
 
-    let error = write_message(&mut frame_bytes, &Unencodable).unwrap_err();
-    let IpcError::MalformedFrame { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let write_error = write_message(&mut frame_bytes, &Unencodable).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = write_error else {
+        panic!("wrong error: {write_error}");
     };
     assert_eq!(error_detail, "cannot encode");
     assert_eq!(frame_bytes, Vec::<u8>::new());
@@ -192,9 +192,9 @@ fn message_encoding_to_exactly_the_limit_is_sent() {
 fn a_length_prefix_of_exactly_the_limit_passes_the_size_check() {
     let mut reader = Cursor::new(MAX_FRAME_BYTE_COUNT.to_be_bytes().to_vec());
 
-    let error = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
     };
     assert_eq!(reader.position(), 4);
 }
@@ -202,9 +202,9 @@ fn a_length_prefix_of_exactly_the_limit_passes_the_size_check() {
 #[test]
 fn empty_frame_is_a_malformed_message() {
     let mut reader = Cursor::new(vec![0, 0, 0, 0]);
-    let error = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = read_error else {
+        panic!("wrong error: {read_error}");
     };
     assert_eq!(error_detail, "EOF while parsing a value at line 1 column 0");
     assert_eq!(reader.position(), 4);
@@ -216,9 +216,9 @@ fn non_json_payload_is_malformed_and_the_whole_frame_is_consumed() {
     frame_bytes.extend_from_slice(b"???");
     let mut reader = Cursor::new(frame_bytes);
 
-    let error = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = read_error else {
+        panic!("wrong error: {read_error}");
     };
     assert_eq!(error_detail, "expected value at line 1 column 1");
     assert_eq!(reader.position(), 7);
@@ -230,9 +230,9 @@ fn a_well_formed_payload_of_the_wrong_type_is_malformed_and_consumed() {
     frame_bytes.extend_from_slice(b"7");
     let mut reader = Cursor::new(frame_bytes);
 
-    let error = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = read_error else {
+        panic!("wrong error: {read_error}");
     };
     assert_eq!(
         error_detail,
@@ -247,9 +247,9 @@ fn bytes_after_the_json_inside_one_frame_are_malformed_and_consumed() {
     frame_bytes.extend_from_slice(b"\"hi\"x");
     let mut reader = Cursor::new(frame_bytes);
 
-    let error = read_message::<String>(&mut reader).unwrap_err();
-    let IpcError::MalformedFrame { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut reader).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = read_error else {
+        panic!("wrong error: {read_error}");
     };
     assert_eq!(error_detail, "trailing characters at line 1 column 5");
     assert_eq!(reader.position(), 9);
@@ -257,17 +257,17 @@ fn bytes_after_the_json_inside_one_frame_are_malformed_and_consumed() {
 
 #[test]
 fn end_of_stream_before_a_header_reads_as_disconnected() {
-    let error = read_message::<String>(&mut Cursor::new(Vec::<u8>::new())).unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut Cursor::new(Vec::<u8>::new())).unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
     };
 }
 
 #[test]
 fn end_of_stream_inside_a_header_reads_as_disconnected() {
-    let error = read_message::<String>(&mut Cursor::new(vec![0, 0])).unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut Cursor::new(vec![0, 0])).unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
     };
 }
 
@@ -275,9 +275,9 @@ fn end_of_stream_inside_a_header_reads_as_disconnected() {
 fn end_of_stream_inside_a_payload_reads_as_disconnected() {
     let mut frame_bytes = 5u32.to_be_bytes().to_vec();
     frame_bytes.extend_from_slice(b"tr");
-    let error = read_message::<String>(&mut Cursor::new(frame_bytes)).unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let read_error = read_message::<String>(&mut Cursor::new(frame_bytes)).unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
     };
 }
 
@@ -293,22 +293,22 @@ fn every_peer_is_gone_io_kind_reads_as_disconnected() {
         io::ErrorKind::ConnectionAborted,
         io::ErrorKind::NotConnected,
     ] {
-        let error = convert_io_error(io::Error::new(error_kind, "the peer is gone"));
-        let IpcError::Disconnected = error else {
-            panic!("{error_kind:?} should read as disconnected, got {error}");
+        let ipc_error = convert_io_error(io::Error::new(error_kind, "the peer is gone"));
+        let IpcError::Disconnected = ipc_error else {
+            panic!("{error_kind:?} should read as disconnected, got {ipc_error}");
         };
     }
 }
 
 #[test]
 fn an_io_kind_that_is_not_the_peer_going_away_keeps_its_own_words() {
-    let error = convert_io_error(io::Error::new(
+    let ipc_error = convert_io_error(io::Error::new(
         io::ErrorKind::PermissionDenied,
         "permission denied",
     ));
 
-    let IpcError::Transport { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let IpcError::Transport { error_detail } = ipc_error else {
+        panic!("wrong error: {ipc_error}");
     };
     assert_eq!(error_detail, "permission denied");
 }
@@ -399,7 +399,7 @@ fn frame_halves_speak_the_frame_shape_and_hand_each_deadline_to_its_half() {
     let read_deadline = Arc::new(Mutex::new(None));
     let write_deadline = Arc::new(Mutex::new(None));
 
-    let (mut reader, mut writer) = frame_halves(
+    let (mut reader, mut writer) = build_frame_halves(
         Box::new(RecordedStream {
             read_cursor: Cursor::new(framed),
             written_bytes: Arc::clone(&written_bytes),
@@ -668,20 +668,22 @@ fn one_listener_serves_two_callers_in_turn() {
 fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
     let socket_address = build_test_socket_address("acceptloop");
     let listener = Listener::bind(&socket_address).expect("bind");
-    let shutting_down = Arc::new(AtomicBool::new(false));
-    let (served_tx, served_rx) = std::sync::mpsc::channel();
+    let is_shutting_down = Arc::new(AtomicBool::new(false));
+    let (served_sender, served_receiver) = std::sync::mpsc::channel();
 
     let server = {
-        let shutting_down = Arc::clone(&shutting_down);
+        let is_shutting_down = Arc::clone(&is_shutting_down);
         thread::spawn(move || {
             let mut served = 0;
             accept_until_shutdown(
                 &listener,
-                &shutting_down,
+                &is_shutting_down,
                 std::time::Duration::from_millis(1),
                 |connection| {
                     served += 1;
-                    served_tx.send(()).expect("report the served connection");
+                    served_sender
+                        .send(())
+                        .expect("report the served connection");
                     drop(connection);
                 },
             );
@@ -691,9 +693,9 @@ fn accept_until_shutdown_serves_each_caller_and_drops_the_wake_up_connection() {
 
     for _ in 0..2 {
         let _caller = Connection::connect(&socket_address).expect("connect");
-        served_rx.recv().expect("the connection was served");
+        served_receiver.recv().expect("the connection was served");
     }
-    shutting_down.store(true, Ordering::SeqCst);
+    is_shutting_down.store(true, Ordering::SeqCst);
     let _wake_up = Connection::connect(&socket_address).expect("connect to wake the loop");
 
     assert_eq!(server.join().expect("server thread"), 2);
@@ -711,9 +713,9 @@ fn a_read_after_the_peer_hangs_up_reports_disconnected() {
     let mut caller = Connection::connect(&socket_address).expect("connect");
     server.join().expect("server thread");
 
-    let error = caller.recv::<IpcResponse>().unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let receive_error = caller.recv::<IpcResponse>().unwrap_err();
+    let IpcError::Disconnected = receive_error else {
+        panic!("wrong error: {receive_error}");
     };
 }
 
@@ -723,9 +725,9 @@ fn binding_an_address_a_listener_already_holds_is_refused() {
     let socket_address = build_test_socket_address("bindtwice");
     let _first = Listener::bind(&socket_address).expect("bind");
 
-    let error = Listener::bind(&socket_address).unwrap_err();
-    let IpcError::Transport { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let bind_error = Listener::bind(&socket_address).unwrap_err();
+    let IpcError::Transport { error_detail } = bind_error else {
+        panic!("wrong error: {bind_error}");
     };
     assert_eq!(
         error_detail,
@@ -744,9 +746,9 @@ fn binding_a_path_too_long_for_a_unix_socket_is_refused() {
         "x".repeat(200)
     );
 
-    let error = Listener::bind(&socket_address).unwrap_err();
-    let IpcError::Transport { error_detail } = error else {
-        panic!("wrong error: {error}");
+    let bind_error = Listener::bind(&socket_address).unwrap_err();
+    let IpcError::Transport { error_detail } = bind_error else {
+        panic!("wrong error: {bind_error}");
     };
     assert_eq!(
         error_detail,
@@ -762,11 +764,13 @@ fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
     let socket_address = build_test_socket_address("readclose-next");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let (sent_sender, sent_receiver) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
-        let closer = connection.read_closer().expect("take the read closer");
-        sent_rx.recv().expect("the caller sent its frame");
+        let closer = connection
+            .create_read_closer()
+            .expect("take the read closer");
+        sent_receiver.recv().expect("the caller sent its frame");
         closer.close();
         // The caller's frame is on the socket by now, and the read still ends.
         connection.recv::<IpcRequest>()
@@ -774,11 +778,11 @@ fn a_closed_read_direction_reports_end_of_stream_on_the_next_read() {
 
     let mut caller = Connection::connect(&socket_address).expect("connect");
     caller.send(&build_hello_request(1)).expect("client send");
-    sent_tx.send(()).expect("the closer is told");
+    sent_sender.send(()).expect("the closer is told");
 
-    let error = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let server_error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = server_error else {
+        panic!("wrong error: {server_error}");
     };
 }
 
@@ -789,17 +793,21 @@ fn a_second_read_closer_closes_the_same_read_direction() {
 
     let server = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
-        let _first_read_closer = connection.read_closer().expect("take the first closer");
-        let second_read_closer = connection.read_closer().expect("take the second closer");
+        let _first_read_closer = connection
+            .create_read_closer()
+            .expect("take the first closer");
+        let second_read_closer = connection
+            .create_read_closer()
+            .expect("take the second closer");
         second_read_closer.close();
         connection.recv::<IpcRequest>()
     });
 
     let _caller = Connection::connect(&socket_address).expect("connect");
 
-    let error = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let server_error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = server_error else {
+        panic!("wrong error: {server_error}");
     };
 }
 
@@ -810,7 +818,9 @@ fn closing_the_read_direction_twice_changes_nothing() {
 
     let server = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
-        let closer = connection.read_closer().expect("take the read closer");
+        let closer = connection
+            .create_read_closer()
+            .expect("take the read closer");
         closer.close();
         closer.close();
         connection.recv::<IpcRequest>()
@@ -818,9 +828,9 @@ fn closing_the_read_direction_twice_changes_nothing() {
 
     let _caller = Connection::connect(&socket_address).expect("connect");
 
-    let error = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let server_error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = server_error else {
+        panic!("wrong error: {server_error}");
     };
 }
 
@@ -829,23 +839,25 @@ fn a_read_closer_taken_before_the_split_closes_the_reading_half() {
     let socket_address = build_test_socket_address("readclose-split");
     let listener = Listener::bind(&socket_address).expect("bind");
 
-    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let (sent_sender, sent_receiver) = std::sync::mpsc::channel();
     let server = thread::spawn(move || {
         let connection = listener.accept().expect("accept");
-        let closer = connection.read_closer().expect("take the read closer");
+        let closer = connection
+            .create_read_closer()
+            .expect("take the read closer");
         let (mut reader, _writer) = connection.split();
-        sent_rx.recv().expect("the caller sent its frame");
+        sent_receiver.recv().expect("the caller sent its frame");
         closer.close();
         reader.recv::<IpcRequest>()
     });
 
     let mut caller = Connection::connect(&socket_address).expect("connect");
     caller.send(&build_hello_request(2)).expect("client send");
-    sent_tx.send(()).expect("the closer is told");
+    sent_sender.send(()).expect("the closer is told");
 
-    let error = server.join().expect("server thread").unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let server_error = server.join().expect("server thread").unwrap_err();
+    let IpcError::Disconnected = server_error else {
+        panic!("wrong error: {server_error}");
     };
 }
 
@@ -865,7 +877,7 @@ fn a_closed_read_direction_leaves_the_writing_direction_open() {
     let server = thread::spawn(move || {
         let mut connection = listener.accept().expect("accept");
         connection
-            .read_closer()
+            .create_read_closer()
             .expect("take the read closer")
             .close();
         connection.send(&response_to_send).expect("server send");
@@ -895,22 +907,24 @@ fn closing_the_read_direction_ends_a_read_the_reader_is_blocked_in() {
     caller.write_all(&[0, 0]).expect("write half a header");
 
     let mut connection = listener.accept().expect("accept");
-    let closer = connection.read_closer().expect("take the read closer");
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let closer = connection
+        .create_read_closer()
+        .expect("take the read closer");
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
     let reading = thread::spawn(move || {
-        started_tx
+        started_sender
             .send(())
             .expect("the reader reports it is starting");
         connection.recv::<IpcRequest>()
     });
 
-    started_rx.recv().expect("the reader started");
+    started_receiver.recv().expect("the reader started");
     thread::sleep(std::time::Duration::from_millis(50));
     closer.close();
 
-    let error = reading.join().expect("reading thread").unwrap_err();
-    let IpcError::Disconnected = error else {
-        panic!("wrong error: {error}");
+    let read_error = reading.join().expect("reading thread").unwrap_err();
+    let IpcError::Disconnected = read_error else {
+        panic!("wrong error: {read_error}");
     };
     drop(caller);
 }
@@ -918,9 +932,9 @@ fn closing_the_read_direction_ends_a_read_the_reader_is_blocked_in() {
 #[test]
 fn connecting_where_nothing_listens_reports_no_listener() {
     let expected_socket_address = build_test_socket_address("nobody");
-    let error = Connection::connect(&expected_socket_address).unwrap_err();
-    let IpcError::NoListener { socket_address } = error else {
-        panic!("wrong error: {error}");
+    let connect_error = Connection::connect(&expected_socket_address).unwrap_err();
+    let IpcError::NoListener { socket_address } = connect_error else {
+        panic!("wrong error: {connect_error}");
     };
     assert_eq!(socket_address, expected_socket_address);
 }
@@ -935,9 +949,9 @@ fn connecting_to_a_stale_socket_file_reports_no_listener() {
         std::os::unix::net::UnixListener::bind(&expected_socket_address).expect("bind stale");
     drop(stale_listener);
 
-    let error = Connection::connect(&expected_socket_address).unwrap_err();
-    let IpcError::NoListener { socket_address } = error else {
-        panic!("wrong error: {error}");
+    let connect_error = Connection::connect(&expected_socket_address).unwrap_err();
+    let IpcError::NoListener { socket_address } = connect_error else {
+        panic!("wrong error: {connect_error}");
     };
     assert_eq!(socket_address, expected_socket_address);
     std::fs::remove_file(&expected_socket_address).expect("cleanup");

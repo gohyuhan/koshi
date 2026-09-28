@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::*;
 use crate::event::SessionEvent;
 use crate::frame::{
-    FrameAttrs, FrameCell, FrameGraphicsProtocol, FrameImageAction, FrameImageChunk,
+    FrameAttributes, FrameCell, FrameGraphicsProtocol, FrameImageAction, FrameImageChunk,
     FrameImageDisplay, FrameImageRecordHeader, FrameImageTransfer, FrameRow, FrameRun, FrameSlot,
     FrameStyle, FrameWindow,
 };
@@ -27,7 +27,7 @@ impl WireVariants for Sample {
 }
 
 impl WireName for Sample {
-    fn wire_name(&self) -> &'static str {
+    fn get_wire_name(&self) -> &'static str {
         match self {
             Sample::Keep { .. } => "Keep",
             Sample::Bare => "Bare",
@@ -86,9 +86,9 @@ fn a_variant_with_no_fields_decodes_from_a_one_key_object_with_null() {
 #[test]
 fn a_known_variant_spelled_without_its_fields_is_an_error() {
     let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(r#""Keep""#);
-    let error = decoded.expect_err("a known name with the wrong shape is an error");
+    let decode_error = decoded.expect_err("a known name with the wrong shape is an error");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         "invalid type: unit variant, expected struct variant"
     );
 }
@@ -126,9 +126,9 @@ fn a_non_ascii_name_is_kept_as_the_peer_spelled_it() {
 fn a_variant_this_build_has_but_cannot_read_is_an_error_not_an_unknown() {
     let decoded: Result<MaybeKnown<Sample>, _> =
         serde_json::from_str(r#"{"Keep":{"payload_number":"x"}}"#);
-    let error = decoded.expect_err("a known variant with an unreadable payload is an error");
+    let decode_error = decoded.expect_err("a known variant with an unreadable payload is an error");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         r#"invalid type: string "x", expected u32 at line 1 column 29"#
     );
 }
@@ -137,9 +137,9 @@ fn a_variant_this_build_has_but_cannot_read_is_an_error_not_an_unknown() {
 fn a_value_that_names_no_variant_is_an_error() {
     for text in [r#"{"Keep":1,"Bare":2}"#, "7", "[]", "null", "{}"] {
         let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(text);
-        let error = decoded.expect_err(text);
+        let decode_error = decoded.expect_err(text);
         assert_eq!(
-            error.to_string(),
+            decode_error.to_string(),
             "a wire value is a variant name, or a one-key object naming one",
             "{text}"
         );
@@ -167,9 +167,9 @@ fn an_object_with_a_second_key_names_no_variant() {
         r#"{"Added":1,"AlsoAdded":2}"#,
     ] {
         let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_str(text);
-        let error = decoded.expect_err(text);
+        let decode_error = decoded.expect_err(text);
         assert_eq!(
-            error.to_string(),
+            decode_error.to_string(),
             "a wire value is a variant name, or a one-key object naming one",
             "{text}"
         );
@@ -231,9 +231,9 @@ fn a_payload_nested_past_the_decoders_depth_limit_still_names_its_variant() {
 
     let known: Result<MaybeKnown<Holder>, _> =
         serde_json::from_str(&format!(r#"{{"Tree":{deep}}}"#));
-    let error = known.expect_err("a known name keeps the decoder's refusal");
+    let decode_error = known.expect_err("a known name keeps the decoder's refusal");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         "recursion limit exceeded at line 1 column 135"
     );
 }
@@ -243,9 +243,9 @@ fn a_payload_nested_past_the_decoders_depth_limit_still_names_its_variant() {
 fn decoding_from_a_reader_that_lends_no_bytes_is_an_error() {
     let reader = std::io::Cursor::new(br#"{"Keep":{"payload_number":7}}"#.to_vec());
     let decoded: Result<MaybeKnown<Sample>, _> = serde_json::from_reader(reader);
-    let error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
+    let decode_error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         r#"invalid type: string "{\"Keep\":{\"payload_number\":7}}", expected raw value"#
     );
 }
@@ -257,9 +257,9 @@ fn decoding_from_a_reader_that_lends_no_bytes_is_an_error() {
 fn a_payload_fault_inside_an_envelope_keeps_the_kind_relative_position() {
     let decoded: Result<Envelope<MaybeKnown<Sample>>, _> =
         serde_json::from_str(r#"{"request_id":1,"request_kind":{"Keep":{"payload_number":"x"}}}"#);
-    let error = decoded.expect_err("a known variant with an unreadable payload is an error");
+    let decode_error = decoded.expect_err("a known variant with an unreadable payload is an error");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         r#"invalid type: string "x", expected u32 at line 1 column 29"#
     );
 }
@@ -282,9 +282,9 @@ fn an_envelope_carrying_a_kind_this_build_lacks_reads_as_unknown() {
 #[test]
 fn an_envelope_without_a_request_id_is_refused() {
     let decoded: Result<Envelope<Sample>, _> = serde_json::from_str(r#"{"request_kind":"Bare"}"#);
-    let error = decoded.expect_err("the request id is not optional");
+    let decode_error = decoded.expect_err("the request id is not optional");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         "missing field `request_id` at line 1 column 23"
     );
 }
@@ -293,9 +293,9 @@ fn an_envelope_without_a_request_id_is_refused() {
 fn an_envelope_with_a_field_it_does_not_know_is_refused() {
     let decoded: Result<Envelope<Sample>, _> =
         serde_json::from_str(r#"{"request_id":1,"request_kind":"Bare","extra":true}"#);
-    let error = decoded.expect_err("an envelope has exactly two fields");
+    let decode_error = decoded.expect_err("an envelope has exactly two fields");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         "unknown field `extra`, expected `request_id` or `request_kind` at line 1 column 45"
     );
 }
@@ -304,9 +304,9 @@ fn an_envelope_with_a_field_it_does_not_know_is_refused() {
 fn an_answer_with_a_field_it_does_not_know_is_refused() {
     let decoded: Result<Answer<Sample>, _> =
         serde_json::from_str(r#"{"request_id":1,"answer_result":"Bare","extra":true}"#);
-    let error = decoded.expect_err("an answer has exactly two fields");
+    let decode_error = decoded.expect_err("an answer has exactly two fields");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         "unknown field `extra`, expected `request_id` or `answer_result` at line 1 column 46"
     );
 }
@@ -520,9 +520,9 @@ fn or_default_from_a_reader_that_lends_no_bytes_is_an_error() {
 
     let reader = std::io::Cursor::new(br#"{"gap":3}"#.to_vec());
     let decoded: Result<Holder, _> = serde_json::from_reader(reader);
-    let error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
+    let decode_error = decoded.expect_err("a reader cannot lend its bytes to the raw text");
     assert_eq!(
-        error.to_string(),
+        decode_error.to_string(),
         r#"invalid type: string "3", expected raw value at line 1 column 9"#
     );
 }
@@ -543,7 +543,7 @@ fn every_wire_enum_lists_the_variants_it_writes() {
             T::VARIANTS
         );
         for wire_variant in wire_variants {
-            let wire_name = wire_variant.wire_name();
+            let wire_name = wire_variant.get_wire_name();
             assert!(
                 T::VARIANTS.contains(&wire_name),
                 "{wire_name} is written but missing from VARIANTS"
@@ -568,7 +568,7 @@ fn every_wire_enum_lists_the_variants_it_writes() {
 }
 
 /// Every wire enum's `VARIANTS` holds exactly the variants its type has. The
-/// real list comes from the type's own decoder through [`variants_of`], and
+/// real list comes from the type's own decoder through [`list_variant_names`], and
 /// follows the enum without being maintained.
 ///
 /// `the_plane_a_remote_client_reaches_names_no_token_verb` in the protocol
@@ -582,7 +582,7 @@ fn every_wire_enum_lists_exactly_the_variants_its_type_has() {
             .map(|wire_variant_name| (*wire_variant_name).to_string())
             .collect();
         listed.sort();
-        let mut real = variants_of::<T>();
+        let mut real = list_variant_names::<T>();
         real.sort();
         assert_eq!(listed, real, "{type_name}");
     }
@@ -603,7 +603,7 @@ fn every_wire_enum_lists_exactly_the_variants_its_type_has() {
 /// Example — for a `SupervisorEvent` the refusal reads ``unknown variant
 /// `koshi-no-such-variant`, expected `Output` or `Exited` at line 1 column 25``,
 /// and the names in backticks after the first are `Output` and `Exited`.
-fn variants_of<T: DeserializeOwned>() -> Vec<String> {
+fn list_variant_names<T: DeserializeOwned>() -> Vec<String> {
     let refusal = serde_json::from_str::<T>("\"koshi-no-such-variant\"")
         .err()
         .expect("a name no variant carries is refused")
@@ -634,8 +634,8 @@ fn sample_supervisor_kinds() -> Vec<SupervisorRequestKind> {
 
     vec![
         SupervisorRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            minimum_protocol_version: 1,
+            maximum_protocol_version: 1,
             connection_token: ConnectionToken::from_secret("t"),
         },
         SupervisorRequestKind::Spawn {
@@ -710,17 +710,16 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
 
     vec![
         IpcRequestKind::Hello {
-            min_protocol_version: 2,
-            max_protocol_version: 2,
+            minimum_protocol_version: 2,
+            maximum_protocol_version: 2,
             connection_token: ConnectionToken::from_secret("t"),
             is_remote: false,
         },
         IpcRequestKind::Attach {
-            viewport: Size {
+            viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
             },
-            event_filter: crate::protocol::EventFilterSpec::All,
             resume_client_id: None,
             resume_token: None,
             pane_area: None,
@@ -738,7 +737,7 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
             },
         },
         IpcRequestKind::Resize {
-            viewport: Size {
+            viewport_size: Size {
                 column_count: 80,
                 row_count: 24,
             },
@@ -759,7 +758,6 @@ fn sample_request_kinds() -> Vec<IpcRequestKind> {
                 session_id: None,
                 target_client_id: None,
             },
-            std::time::UNIX_EPOCH,
             koshi_core::command::Command::ToggleLockMode(
                 koshi_core::command::ToggleLockModeArgs::default(),
             ),
@@ -790,7 +788,6 @@ fn sample_results() -> Vec<IpcResult> {
                 session_id: koshi_core::ids::SessionId::new(),
                 session_name: String::new(),
                 tabs: Vec::new(),
-                panes: Vec::new(),
             },
             resume_token: None,
             pane_area: None,
@@ -876,7 +873,7 @@ fn sample_events() -> Vec<SessionEvent> {
         },
         SessionEvent::PanePlacementRefused {
             request_id: 1,
-            error: crate::protocol::IpcErrorPayload {
+            refusal: crate::protocol::IpcErrorPayload {
                 code: crate::protocol::IpcErrorCode::ResourceLimit,
                 message: String::new(),
             },
@@ -967,7 +964,6 @@ fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
     use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
     use koshi_layout::mode::LayoutMode;
     use koshi_layout::tree::LayoutNode;
-    use koshi_pane::pane::state::PaneKind;
 
     let source_pane_id = PaneId::new();
     let destination_pane_id = PaneId::new();
@@ -986,7 +982,7 @@ fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
             foreground_color: Default::default(),
             background_color: Default::default(),
             underline_color: None,
-            text_attributes: FrameAttrs {
+            text_attributes: FrameAttributes {
                 is_bold: false,
                 is_italic: false,
                 is_reverse: false,
@@ -1022,12 +1018,10 @@ fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
                 pane_id,
                 outer_rect: viewport_rect,
                 content_rect: Some(viewport_rect),
-                pane_kind: PaneKind::Terminal,
                 is_visible: true,
                 is_suppressed: false,
-                is_dead: false,
             }],
-            effective_cell_size: viewport_size,
+            tab_size: viewport_size,
             stack_headers: Vec::new(),
             layout_mode: LayoutMode::Tiled,
             is_every_pane_suppressed: false,
@@ -1074,8 +1068,8 @@ fn build_test_placement_snapshot() -> crate::placement::PanePlacementSnapshot {
 fn sample_router_kinds() -> Vec<RouterRequestKind> {
     vec![
         RouterRequestKind::Hello {
-            min_protocol_version: 1,
-            max_protocol_version: 1,
+            minimum_protocol_version: 1,
+            maximum_protocol_version: 1,
             connection_token: ConnectionToken::from_secret("t"),
         },
         RouterRequestKind::CreateSession {
@@ -1122,7 +1116,7 @@ fn sample_router_results() -> Vec<RouterResult> {
         RouterResult::Restarting,
         RouterResult::Granted {
             connection_token: ConnectionToken::from_secret("t"),
-            did_replace_active_grant: false,
+            has_replaced_active_grant: false,
         },
         RouterResult::Revoked(Vec::new()),
         RouterResult::Tokens(Vec::new()),
@@ -1150,6 +1144,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
     use koshi_core::ids::{ClientId, SessionId, TabId};
 
     crate::frame::PaintedFrame {
+        is_recovery_notice_visible: false,
         session_snapshot: crate::frame::FrameSession {
             session_id: SessionId::new(),
             session_revision: 17,
@@ -1158,7 +1153,7 @@ fn build_test_painted_frame() -> crate::frame::PaintedFrame {
                 tab_id: TabId::new(),
                 tab_name: String::new(),
                 pane_slots: Vec::new(),
-                effective_cell_size: Size {
+                tab_size: Size {
                     column_count: 80,
                     row_count: 24,
                 },

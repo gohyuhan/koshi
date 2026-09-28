@@ -6,28 +6,17 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use image::ImageEncoder;
 use koshi_image::{DecodedImage, GraphicsError, GraphicsProtocol, ImageDimension};
-use std::io;
 
 const EXPECTED_RED_PNG_BASE64: &[u8] =
     b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr/AP8AAP8FAAH/+lyI0QAAAABJRU5ErkJggg==";
 const ITERM_OSC_PREFIX_BYTE_COUNT: usize = b"\x1b]1337;".len();
 const ITERM_OSC_TERMINATOR_BYTE_COUNT: usize = 2;
-const MAX_PACKET_BYTE_COUNT: usize = 64 * 1024;
-
 fn build_red_image() -> DecodedImage {
     DecodedImage {
         pixel_width: 1,
         pixel_height: 1,
         rgba_bytes: vec![255, 0, 0, 255],
     }
-}
-
-fn build_independently_encoded_red_png() -> Vec<u8> {
-    let mut encoded_png_bytes = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut encoded_png_bytes)
-        .write_image(&[255, 0, 0, 255], 1, 1, image::ColorType::Rgba8.into())
-        .expect("one-pixel PNG encodes");
-    encoded_png_bytes
 }
 
 fn extract_packet_body(packet_bytes: &[u8]) -> &[u8] {
@@ -86,7 +75,6 @@ fn small_file_has_exact_wire_fixture_and_round_trip() {
     .concat();
     assert_eq!(packet_bytes, expected_packet_bytes);
     assert!(iterm_encoder.take_next_packet().is_none());
-    assert!(iterm_encoder.is_complete());
 
     let encoded_png_base64 =
         &packet_bytes[expected_header.len()..packet_bytes.len() - ITERM_OSC_TERMINATOR_BYTE_COUNT];
@@ -129,10 +117,9 @@ fn multipart_packets_have_exact_framing_and_independent_png_round_trip() {
     .expect("valid image output");
     let encoded_packets = collect_iterm_packets(&mut iterm_encoder);
     assert!(encoded_packets.len() > 3);
-    assert!(iterm_encoder.is_complete());
     assert!(encoded_packets
         .iter()
-        .all(|encoded_packet_bytes| encoded_packet_bytes.len() <= MAX_PACKET_BYTE_COUNT));
+        .all(|encoded_packet_bytes| { encoded_packet_bytes.len() <= MAX_ITERM_PACKET_BYTE_COUNT }));
 
     let independently_encoded_png_bytes = {
         let mut independently_encoded_png_bytes = Vec::new();
@@ -176,10 +163,9 @@ fn multipart_packets_have_exact_framing_and_independent_png_round_trip() {
             assert_eq!(encoded_part_base64.len() % 4, 0);
             joined_base64.extend_from_slice(encoded_part_base64);
         }
-        let decoded_graphics_option =
-            crate::parse_iterm_command(command_body, &mut multipart_transfer)
-                .expect("each packet parses");
-        if let Some(decoded_graphics) = decoded_graphics_option {
+        let completed_graphics = crate::parse_iterm_command(command_body, &mut multipart_transfer)
+            .expect("each packet parses");
+        if let Some(decoded_graphics) = completed_graphics {
             assert!(parsed_graphics.is_none());
             parsed_graphics = Some(decoded_graphics);
         }
@@ -206,30 +192,6 @@ fn multipart_packets_have_exact_framing_and_independent_png_round_trip() {
     assert_eq!(independently_decoded_image.width(), image.pixel_width);
     assert_eq!(independently_decoded_image.height(), image.pixel_height);
     assert_eq!(independently_decoded_image.into_raw(), image.rgba_bytes);
-}
-
-#[test]
-fn packet_reset_restarts_the_transfer() {
-    let image = build_red_image();
-    let mut iterm_encoder = ItermEncoder::from_image(
-        &image,
-        ItermOutputOptions::from_cell_dimensions(1, 1).expect("dimensions"),
-    )
-    .expect("valid image output");
-    let first_packet_bytes = iterm_encoder
-        .take_next_packet()
-        .expect("file packet")
-        .to_vec();
-    assert!(iterm_encoder.is_complete());
-    iterm_encoder.reset_packet_emission();
-    assert!(!iterm_encoder.is_complete());
-    assert_eq!(
-        iterm_encoder
-            .take_next_packet()
-            .expect("file packet after reset"),
-        first_packet_bytes
-    );
-    assert!(iterm_encoder.is_complete());
 }
 
 #[test]
@@ -316,81 +278,4 @@ fn extract_graphics_error(encode_error: ItermEncodeError) -> GraphicsError {
         ItermEncodeError::Graphics(graphics_error) => graphics_error,
         unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
     }
-}
-
-struct PartialFailingWriter {
-    written_bytes: Vec<u8>,
-    accepted_byte_count: usize,
-}
-
-impl io::Write for PartialFailingWriter {
-    fn write(&mut self, requested_bytes: &[u8]) -> io::Result<usize> {
-        let accepted_byte_count = requested_bytes.len().min(self.accepted_byte_count);
-        self.written_bytes
-            .extend_from_slice(&requested_bytes[..accepted_byte_count]);
-        Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-#[test]
-fn writer_error_is_preserved_without_advancing_packet_state() {
-    let image = build_red_image();
-    let mut iterm_encoder = ItermEncoder::from_image(
-        &image,
-        ItermOutputOptions::from_cell_dimensions(1, 1).expect("dimensions"),
-    )
-    .expect("valid image");
-    let mut writer = PartialFailingWriter {
-        written_bytes: Vec::new(),
-        accepted_byte_count: 5,
-    };
-    let encode_error = iterm_encoder
-        .write_next_packet(&mut writer)
-        .expect_err("writer fails");
-    match encode_error {
-        ItermEncodeError::Io(io_error) => {
-            assert_eq!(io_error.kind(), io::ErrorKind::BrokenPipe)
-        }
-        unexpected_error => panic!("unexpected error: {unexpected_error:?}"),
-    }
-    assert_eq!(writer.written_bytes.len(), 5);
-    assert!(!iterm_encoder.is_complete());
-    let packet_after_error = iterm_encoder
-        .take_next_packet()
-        .expect("same packet remains");
-    assert_eq!(&packet_after_error[..5], writer.written_bytes.as_slice());
-    assert!(iterm_encoder.is_complete());
-}
-
-#[test]
-fn successful_writer_emits_one_packet_and_reports_completion() {
-    let image = build_red_image();
-    let mut iterm_encoder = ItermEncoder::from_image(
-        &image,
-        ItermOutputOptions::from_cell_dimensions(1, 1).expect("dimensions"),
-    )
-    .expect("valid image");
-    let mut output_bytes = Vec::new();
-    assert!(iterm_encoder
-        .write_next_packet(&mut output_bytes)
-        .expect("writer accepts packet"));
-    assert!(!iterm_encoder
-        .write_next_packet(&mut output_bytes)
-        .expect("completed encoder has no packet"));
-    assert!(iterm_encoder.is_complete());
-    assert_eq!(output_bytes, independently_encoded_red_png_wire());
-}
-
-fn independently_encoded_red_png_wire() -> Vec<u8> {
-    let independently_encoded_png_bytes = build_independently_encoded_red_png();
-    let encoded_png_base64 = STANDARD.encode(independently_encoded_png_bytes);
-    format!(
-        "\x1b]1337;File=inline=1;width=1;height=1;preserveAspectRatio=0;size={}:{}\x1b\\",
-        73, encoded_png_base64
-    )
-    .into_bytes()
 }

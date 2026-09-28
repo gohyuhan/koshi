@@ -47,13 +47,13 @@ use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
 use koshi_ipc::protocol::{
-    EventFilterSpec, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
+    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
-use koshi_ipc::transport::{frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
+use koshi_ipc::transport::{build_frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
 use koshi_pty::backend::state::PtyBackend;
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::runtime::event::RuntimeEvent;
+use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_test_runtime_directory;
@@ -115,7 +115,7 @@ struct RunningSession {
     /// pane output.
     pty: Arc<FakePtyBackend>,
     /// The runtime inbox, for the hangup that ends the serving thread.
-    inbox_tx: mpsc::Sender<RuntimeEvent>,
+    inbox_sender: mpsc::Sender<RuntimeEvent>,
     /// The serving thread, joined at drop. `Option` so the drop can take it out
     /// of the otherwise-borrowed struct.
     dispatcher: Option<JoinHandle<()>>,
@@ -127,19 +127,21 @@ impl RunningSession {
     fn start_session() -> RunningSession {
         let runtime_directory = build_test_runtime_directory();
         let session_id = SessionId::new();
-        let pty = Arc::new(FakePtyBackend::new());
-        let (inbox_tx, inbox_rx) = mpsc::channel();
+        let (inbox_sender, inbox_receiver) = mpsc::channel();
+        let pty = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
+            InboxSink::from_event_sender(inbox_sender.clone()),
+        )));
 
         let serving_runtime_directory = runtime_directory.path().to_path_buf();
         let serving_pty = Arc::clone(&pty);
-        let serving_tx = inbox_tx.clone();
+        let serving_sender = inbox_sender.clone();
         let dispatcher = std::thread::spawn(move || {
             serve_session(
                 &serving_runtime_directory,
                 session_id,
                 serving_pty,
-                inbox_rx,
-                serving_tx,
+                inbox_receiver,
+                serving_sender,
             );
         });
 
@@ -147,7 +149,7 @@ impl RunningSession {
             runtime_directory,
             session_id,
             pty,
-            inbox_tx,
+            inbox_sender,
             dispatcher: Some(dispatcher),
         };
         // The endpoint file is written after the socket binds, so a readable one
@@ -183,7 +185,7 @@ impl Drop for RunningSession {
     fn drop(&mut self) {
         // The serving loop stops on a `Quit`; a loop that already stopped on its
         // own leaves a closed inbox, and the send fails harmlessly.
-        let _ = self.inbox_tx.send(RuntimeEvent::Quit);
+        let _ = self.inbox_sender.send(RuntimeEvent::Quit);
         if let Some(handle) = self.dispatcher.take() {
             let _ = handle.join();
         }
@@ -196,11 +198,11 @@ fn serve_session(
     runtime_directory: &Path,
     session_id: SessionId,
     pty: Arc<FakePtyBackend>,
-    inbox_rx: mpsc::Receiver<RuntimeEvent>,
-    inbox_tx: mpsc::Sender<RuntimeEvent>,
+    inbox_receiver: mpsc::Receiver<RuntimeEvent>,
+    inbox_sender: mpsc::Sender<RuntimeEvent>,
 ) {
     let backend: Arc<dyn PtyBackend> = pty;
-    let mut session_server = Server::from_runtime_parts(backend, inbox_rx, inbox_tx.clone());
+    let mut session_server = Server::from_runtime_parts(backend, inbox_receiver);
     session_server.load_startup_config(None);
     session_server
         .bootstrap_session(
@@ -212,7 +214,7 @@ fn serve_session(
         )
         .expect("the session is seeded");
 
-    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_tx, None)
+    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_sender, None)
         .expect("the control socket binds");
     session_server.attach_ipc_server(ipc_server);
 
@@ -229,15 +231,18 @@ fn serve_session(
 fn run_session_event_loop(session_server: &mut Server) {
     loop {
         let current_time = Instant::now();
-        let pending_runtime_event = match session_server.next_render_wakeup(current_time) {
+        let pending_runtime_event = match session_server.compute_next_render_wakeup(current_time) {
             Some(timeout_duration) => {
-                match session_server.inbox_rx().recv_timeout(timeout_duration) {
+                match session_server
+                    .get_inbox_receiver()
+                    .recv_timeout(timeout_duration)
+                {
                     Ok(runtime_event) => Some(runtime_event),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            None => match session_server.inbox_rx().recv() {
+            None => match session_server.get_inbox_receiver().recv() {
                 Ok(runtime_event) => Some(runtime_event),
                 Err(_) => break,
             },
@@ -248,7 +253,7 @@ fn run_session_event_loop(session_server: &mut Server) {
                 .handle_runtime_event(runtime_event)
                 .is_break();
         }
-        while let Ok(runtime_event) = session_server.inbox_rx().try_recv() {
+        while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
             is_quit_requested |= session_server
                 .handle_runtime_event(runtime_event)
                 .is_break();
@@ -283,8 +288,8 @@ fn get_session_endpoint(session: &RunningSession) -> EndpointFile {
 struct LoopbackHalf(TcpStream);
 
 impl Read for LoopbackHalf {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buffer)
+    fn read(&mut self, destination_bytes: &mut [u8]) -> io::Result<usize> {
+        self.0.read(destination_bytes)
     }
 }
 
@@ -324,8 +329,8 @@ fn build_hello_request(endpoint_file: &EndpointFile) -> IpcRequest {
     IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::Hello {
-            min_protocol_version: MIN_PROTOCOL_VERSION,
-            max_protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_PROTOCOL_VERSION,
+            maximum_protocol_version: PROTOCOL_VERSION,
             connection_token: endpoint_file.connection_token.clone(),
             is_remote: false,
         },
@@ -337,8 +342,7 @@ fn build_attach_request() -> IpcRequest {
     IpcRequest {
         request_id: 2,
         request_kind: IpcRequestKind::Attach {
-            viewport: ATTACH_VIEWPORT_SIZE,
-            event_filter: EventFilterSpec::All,
+            viewport_size: ATTACH_VIEWPORT_SIZE,
             resume_client_id: None,
             resume_token: None,
             pane_area: None,
@@ -384,13 +388,13 @@ fn attach_test_client(session: &RunningSession) -> AttachedClient {
     };
     assert_eq!(session_id, session.session_id);
 
-    let (events_tx, events) = mpsc::channel();
+    let (events_sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(session_event) = connection.recv::<SessionEvent>() {
             if matches!(session_event, SessionEvent::Painted { .. }) {
                 continue;
             }
-            if events_tx.send(session_event).is_err() {
+            if events_sender.send(session_event).is_err() {
                 break;
             }
         }
@@ -407,10 +411,10 @@ fn attach_test_client(session: &RunningSession) -> AttachedClient {
 /// connection to `endpoint`, and copies raw bytes between the two at a bounded
 /// rate in each direction.
 ///
-/// The direction carrying the session's events moves
-/// [`FROM_SESSION_BYTE_COUNT_PER_SLICE`] per [`RELAY_SLICE_DURATION`]; the direction carrying the client's own
-/// frames moves [`TO_SESSION_BYTE_COUNT_PER_SLICE`]. Both pumps stop at `deadline`, so no
-/// thread here outlives the test.
+/// The direction carrying the session's events moves [`FROM_SESSION_BYTE_COUNT_PER_SLICE`] per
+/// [`RELAY_SLICE_DURATION`]; the direction carrying the client's own frames moves
+/// [`TO_SESSION_BYTE_COUNT_PER_SLICE`]. Both pumps stop at `deadline`, so no thread here outlives
+/// the test.
 fn start_throttled_relay(endpoint_file: EndpointFile, deadline: Instant) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind the relay's listener");
     let relay_socket_address = listener
@@ -473,7 +477,7 @@ fn attach_client_through_relay(
     let incoming_stream = client_relay_stream
         .try_clone()
         .expect("duplicate the client's relay stream");
-    let (mut incoming, mut outgoing) = frame_halves(
+    let (mut incoming, mut outgoing) = build_frame_halves(
         Box::new(LoopbackHalf(incoming_stream)),
         Box::new(LoopbackHalf(client_relay_stream)),
     );
@@ -517,13 +521,13 @@ fn attach_client_through_relay(
 /// Start reading `incoming` on its own thread, forwarding every frame that is
 /// not the picture to draw into a queue this thread polls with a deadline.
 fn drain_events_into_queue(mut incoming: FrameReader) -> mpsc::Receiver<SessionEvent> {
-    let (events_tx, events) = mpsc::channel();
+    let (events_sender, events) = mpsc::channel();
     std::thread::spawn(move || {
         while let Ok(session_event) = incoming.recv::<SessionEvent>() {
             if matches!(session_event, SessionEvent::Painted { .. }) {
                 continue;
             }
-            if events_tx.send(session_event).is_err() {
+            if events_sender.send(session_event).is_err() {
                 break;
             }
         }
@@ -553,7 +557,6 @@ fn submit_session_command(
             pane_id,
             PathBuf::from(working_directory_path),
         ),
-        SystemTime::now(),
         command,
     );
     let request = IpcRequest {

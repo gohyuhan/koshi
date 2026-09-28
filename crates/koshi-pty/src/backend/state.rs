@@ -1,11 +1,10 @@
-//! The `PtyBackend` trait, the `PtyHandle` struct a spawned pane is driven
-//! through, and the `CarriedPtyPane` record a pane is handed on as.
+//! The `PtyBackend` trait, the `PtySink` a backend delivers each pane's output
+//! and exit to, and the `CarriedPtyPane` record a pane is handed on as.
 //!
 //! A PTY (pseudo-terminal) is the OS-level channel a spawned shell or program
 //! runs inside; it makes the program behave as if attached to a real terminal.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
 
 use koshi_core::{
     ids::PaneId,
@@ -19,17 +18,17 @@ use crate::error::PtyError;
 /// Reported by a `waitpid` that answers `ECHILD`, by a `portable-pty` wait that
 /// fails, and for a pane the supervisor no longer holds when a new link settles
 /// its pane list.
-pub(crate) const UNOBSERVED_EXIT: ExitStatus = ExitStatus::ExitCode(-1);
+pub const UNOBSERVED_EXIT: ExitStatus = ExitStatus::ExitCode(-1);
 
 /// The PTY backend: spawns children in PTYs and drives their I/O and teardown.
 ///
 /// `Send + Sync`: one backend is shared across the reader/writer threads and
-/// the runtime. Implementors own the child processes, keyed by [`PaneId`];
-/// the [`PtyHandle`] returned from [`spawn_pane`](PtyBackend::spawn_pane) is the read side.
+/// the runtime. Implementors own the child processes, keyed by [`PaneId`], and
+/// deliver each pane's child output and exit to the [`PtySink`] they were
+/// built with.
 pub trait PtyBackend: Send + Sync {
-    /// Spawn a child in a new PTY of the given size for `pane_id`, returning a
-    /// handle (addressed by that same id) that streams its output and exit
-    /// status. The caller owns the pane identity; the backend keys its records
+    /// Spawn a child in a new PTY of the given size for `pane_id`. The child's
+    /// output and exit status go to the backend's [`PtySink`]. The caller owns the pane identity; the backend keys its records
     /// by `pane_id`, and `resize_pane`/`write_pane_input`/`kill_pane` calls with that id address
     /// this pane.
     ///
@@ -43,7 +42,7 @@ pub trait PtyBackend: Send + Sync {
         pane_id: PaneId,
         spawn_spec: SpawnSpec,
         pty_size: PtySize,
-    ) -> Result<PtyHandle, PtyError>;
+    ) -> Result<(), PtyError>;
     /// Resize an existing pane's PTY.
     fn resize_pane(&self, pane_id: PaneId, pty_size: PtySize) -> Result<(), PtyError>;
     /// Write bytes to a pane's child stdin.
@@ -61,9 +60,8 @@ pub trait PtyBackend: Send + Sync {
 
 /// Where a backend delivers a pane's child output and exit status.
 ///
-/// The pane's reader thread hands each chunk to the sink itself; no relay
-/// thread runs per pane. `Send + Sync`: the reader and watcher threads of
-/// every pane share one sink.
+/// The pane's reader thread hands each chunk to the sink itself. `Send +
+/// Sync`: the reader and watcher threads of every pane share one sink.
 pub trait PtySink: Send + Sync {
     /// Take one chunk of `pane_id`'s child output. Returning `false` means this
     /// consumer is done with `pane_id`: the reader stops reading it and nothing
@@ -119,85 +117,3 @@ pub struct CarriedPtyPane {
     /// while the child runs, and the next image waits on the process id itself.
     pub exit_status: Option<ExitStatus>,
 }
-
-/// The read side of one spawned pane: its id and the channels the backend
-/// delivers child output and exit status on.
-///
-/// The channels are held as `Option`: [`take_output_and_exit_receivers`](PtyHandle::take_output_and_exit_receivers)
-/// moves them out for a forwarder thread to block on, after which the drained
-/// handle stays live as a per-pane token (`contains_key`/`remove` still
-/// address it) and the `try_*` polls return `None`. While the receivers are
-/// held, the `try_*` methods poll them without blocking. The backend keeps the
-/// sending ends (see [`PtyHandle::from_pane_id`]); dropping the handle closes the receivers.
-#[derive(Debug)]
-pub struct PtyHandle {
-    pane_id: PaneId,
-    output_receiver: Option<Receiver<Vec<u8>>>,
-    exit_receiver: Option<Receiver<ExitStatus>>,
-}
-
-impl PtyHandle {
-    /// Build a handle for `pane_id`, returning it with the output and exit
-    /// senders the backend retains to push child output and the final exit.
-    pub fn from_pane_id(pane_id: PaneId) -> (Self, Sender<Vec<u8>>, Sender<ExitStatus>) {
-        let (output_sender, output_receiver) = channel();
-        let (exit_sender, exit_receiver) = channel();
-        let handle = PtyHandle {
-            pane_id,
-            output_receiver: Some(output_receiver),
-            exit_receiver: Some(exit_receiver),
-        };
-        (handle, output_sender, exit_sender)
-    }
-
-    /// Build a handle for `pane_id` that carries no channels, for a backend
-    /// delivering that pane's output and exit through a [`PtySink`] instead.
-    ///
-    /// The handle stays the pane's live token — `contains_key`/`remove` still
-    /// address it — while [`take_output_and_exit_receivers`](PtyHandle::take_output_and_exit_receivers) and
-    /// both `try_*` polls return `None`.
-    #[must_use]
-    pub fn from_detached_pane_id(pane_id: PaneId) -> Self {
-        PtyHandle {
-            pane_id,
-            output_receiver: None,
-            exit_receiver: None,
-        }
-    }
-
-    /// The pane this handle addresses.
-    #[must_use]
-    pub fn get_pane_id(&self) -> PaneId {
-        self.pane_id
-    }
-
-    /// Move the output and exit receivers out of the handle. Returns `None` if
-    /// they were already taken or the handle is [`from_detached_pane_id`](PtyHandle::from_detached_pane_id).
-    pub fn take_output_and_exit_receivers(
-        &mut self,
-    ) -> Option<(Receiver<Vec<u8>>, Receiver<ExitStatus>)> {
-        let output_receiver = self.output_receiver.take()?;
-        let exit_receiver = self.exit_receiver.take()?;
-        Some((output_receiver, exit_receiver))
-    }
-
-    /// The next chunk of child output, or `None` if none is pending, the
-    /// backend dropped its sender, or the receivers have been taken.
-    pub fn try_receive_output_chunk(&self) -> Option<Vec<u8>> {
-        self.output_receiver
-            .as_ref()
-            .and_then(|output_receiver| output_receiver.try_recv().ok())
-    }
-
-    /// The child's exit status, or `None` if it has not exited yet, the
-    /// backend dropped its sender, or the receivers have been taken. A status
-    /// is returned once; the next call answers `None`.
-    pub fn try_receive_exit_status(&self) -> Option<ExitStatus> {
-        self.exit_receiver
-            .as_ref()
-            .and_then(|exit_receiver| exit_receiver.try_recv().ok())
-    }
-}
-
-#[cfg(test)]
-mod tests;
