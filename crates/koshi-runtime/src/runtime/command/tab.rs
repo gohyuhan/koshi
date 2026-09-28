@@ -164,9 +164,8 @@ impl Server {
         advance_session_placement_revision(session);
         advance_client_placement_revisions(session, &affected_client_ids);
 
-        // Park the handle: the spawn size lands in the size cache later reflows
-        // compare against, and the terminal engine gives the child's output a
-        // grid to land in.
+        // Register the live pane and its spawn size, and create the terminal
+        // engine that receives the child's output.
         self.park_pane_pty(new_pane_id, new_tab_pty_size);
         // Announce the new pane's size — PaneCreated carries none.
         emitted_events.push(Event::PtyResized(PtyResized {
@@ -266,9 +265,9 @@ impl Server {
         advance_session_placement_revision(session);
         advance_client_placement_revisions(session, &affected_client_ids);
 
-        // The panes are gone from state; drop their runtime bookkeeping — PTY
-        // handle, size cache, terminal engine, scroll offsets, and highlights. Keyed
-        // off the layout's own leaf list — the exact set the op removed.
+        // The panes are gone from the session. Remove their live IDs, size
+        // caches, terminal engines, scroll offsets, and selections. The layout's
+        // leaf list names the panes that the command removed.
         for &pane_id in &pane_ids {
             self.release_pane_bookkeeping(session_id, pane_id);
         }

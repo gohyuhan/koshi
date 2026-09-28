@@ -199,9 +199,8 @@ impl Server {
         advance_session_placement_revision(session);
         advance_client_placement_revisions(session, &affected_client_ids);
 
-        // Park the handle and its size, which the reflows below compare a later
-        // resize against. The terminal engine gives the child's output a grid
-        // to land in.
+        // Register the live pane and its size, and create the terminal engine
+        // that receives the child's output.
         self.park_pane_pty(new_pane_id, new_pane_pty_size);
         // Announce the new pane's size — PaneCreated carries none.
         emitted_events.push(Event::PtyResized(PtyResized {
@@ -380,11 +379,9 @@ impl Server {
         })
     }
 
-    /// Drop every per-pane record a removed pane leaves behind: its PTY handle,
-    /// size cache, terminal engine, and — for every attached client — that
-    /// client's scroll offset for the pane and the highlight it holds there,
-    /// so no per-view map keeps a dead entry. The one release point for pane
-    /// bookkeeping — every path that removes a pane funnels through here.
+    /// Remove a pane's live ID, cached size, and terminal engine. Clear each
+    /// attached client's scroll offset and selection for it. Every pane
+    /// removal calls this for runtime bookkeeping.
     pub(super) fn release_pane_bookkeeping(&mut self, session_id: SessionId, pane_id: PaneId) {
         self.live_pane_ids.remove(&pane_id);
         self.pty_size_by_pane_id.remove(&pane_id);
@@ -401,7 +398,7 @@ impl Server {
     /// Drop a removed pane's runtime bookkeeping and reflow the survivors into
     /// the space it freed.
     ///
-    /// Removes the pane's PTY handle, size cache, and terminal engine — output
+    /// Removes the pane's live ID, size cache, and terminal engine — output
     /// bytes still in flight for it now find no engine and are dropped — and
     /// clears each client's scroll offset and any highlight in it, then
     /// re-solves and resizes the tab that reclaims the space: the pane's own tab
@@ -447,11 +444,11 @@ impl Server {
     /// reflow. An exit for a pane already gone — closed while the exit waited in
     /// the inbox — is dropped.
     ///
-    /// Releasing a removed pane's bookkeeping drops its PTY handle, size cache,
-    /// terminal engine, and the backend's own PTY entry. The backend purge goes
-    /// through `kill_pane`, which drops the writer, joins the finished watcher,
-    /// and frees the master fd. `KillPolicy::Force` and `KillPolicy::Graceful`
-    /// send no signal to a leader whose `has_child_exited` flag is set.
+    /// Releasing a removed pane's bookkeeping clears its live ID, size cache,
+    /// and terminal engine. The backend's `kill_pane` call removes its pane
+    /// entry. A local backend drops the writer, joins the finished watcher,
+    /// and closes the terminal master. A supervisor backend sends a kill
+    /// request to the helper. An exited child receives no leader signal.
     pub fn handle_child_exit(&mut self, pane_id: PaneId, exit_status: ExitStatus) -> Vec<Event> {
         // Exactly one of `exit_code` and `signal` is `Some`.
         let pane_exit = match exit_status {
