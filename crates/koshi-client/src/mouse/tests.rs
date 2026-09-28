@@ -2121,6 +2121,80 @@ fn dragging_a_pane_focuses_the_source_and_hides_pointer_chrome() {
 }
 
 #[test]
+fn shifted_handle_press_in_normal_mode_does_not_start_pane_placement() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut viewer = build_test_client();
+    viewer.set_frame_view(active_tab_id, Some(pane_id), vec![active_tab_id]);
+    viewer.placement_handle_pane_id = Some(pane_id);
+    let handle_position = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(viewer.build_frame_layout(&mouse_frame), handle_position),
+        HitRegion::PlacementHandle { pane_id }
+    );
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                handle_position,
+                ModFlags::SHIFT,
+            ),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        None
+    );
+    assert_eq!(
+        viewer.handle_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                handle_position,
+                ModFlags::SHIFT,
+            ),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Vec::new()
+    );
+    assert!(!viewer.is_placement_mode_active());
+}
+
+#[test]
+fn plain_handle_press_in_normal_mode_starts_pane_placement() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
+    let mut viewer = build_test_client();
+    viewer.set_frame_view(active_tab_id, Some(pane_id), vec![active_tab_id]);
+    viewer.placement_handle_pane_id = Some(pane_id);
+    let handle_position = Point { column: 1, row: 1 };
+    assert_eq!(
+        resolve_hit_region(viewer.build_frame_layout(&mouse_frame), handle_position),
+        HitRegion::PlacementHandle { pane_id }
+    );
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                handle_position,
+                ModFlags::NONE,
+            ),
+            &mouse_frame,
+            Instant::now(),
+        ),
+        Some(PlacementInputAction::ReadPlacement {
+            pane_id_to_focus: Some(pane_id),
+            source_pane_id: pane_id,
+            destination_tab_id: active_tab_id,
+        })
+    );
+    assert!(viewer.is_placement_mode_active());
+}
+
+#[test]
 fn submitted_mouse_placement_consumes_mouse_input_until_the_frame_reconciles() {
     let pane_id = PaneId::new();
     let frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));

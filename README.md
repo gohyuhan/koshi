@@ -47,8 +47,8 @@ session at the same time. One switches to tab 2, and the other stays on tab 1.
 Each one types into the pane they focused. Neither moves the other's screen.
 
 **A session outlives the terminals that view it.** The session runs as its own
-program. Close your terminal, and its panes keep running. Attach again later,
-from the same machine or another one, and the panes are where you left them.
+program. Close your terminal, and its panes keep running. Reattach from the
+same machine or another one, and the panes are where you left them.
 
 > [!IMPORTANT]
 > One setting controls this. `auto-close-session` in `koshi.kdl` is `#false` by
@@ -57,7 +57,7 @@ from the same machine or another one, and the panes are where you left them.
 > stop, waits up to three seconds, then kills what has not exited.
 >
 > The session reads this setting once, from the `koshi.kdl` on the machine it
-> starts on. A terminal that attaches later cannot change it from its own file.
+> starts on. Another attached terminal cannot change it from its own file.
 > See [config-docs/koshi.md](config-docs/koshi.md#auto-close-session).
 
 ## Features
@@ -284,20 +284,25 @@ The default leader is Ctrl.
 | `<C-l>` | Lock or unlock input |
 | `<C-q>` | Quit |
 
-In pane placement mode, drag a pane onto another pane to swap them. Hold Shift
-when you start the drag to insert beside the destination instead. Koshi asks
-compatible terminals to send Shift mouse events during this mode. Ghostty
+Drag a pane's handle in normal mode to swap it with another pane. In pane
+placement mode, dragging a pane onto another also swaps them. To insert, press
+`<C-p> m`, wait for `PLACE PANE` in the tabline, then hold Shift when you start
+the drag. Koshi asks compatible terminals to send Shift mouse events during
+this mode. Ghostty
 honors the request when mouse reporting is enabled and `mouse-shift-capture`
 is `false` or `true`. It already sends Shift with `always`; `never` keeps Shift
 for terminal selection. Other terminals can keep Shift for their own text
-selection. Outside pane placement mode, Shift+drag keeps its text selection
-behavior. Shift+Arrow also selects an insertion edge without a mouse.
+selection. Outside pane placement mode, Shift+drag over pane content keeps its
+text selection behavior, and a Shift press on a handle does not start placement.
+Shift+Arrow also selects an insertion edge without a mouse.
 
 The preview dims visible affected panes. The moving pane and destination use
 different tints. Centered messages name the moving pane and explain what
-happens to the affected pane or group. A group shows its message in an uncovered
-area of one destination pane when one is visible. When panes overlap during a
-slide, the moving pane's message and tint take priority.
+happens to the affected pane or group. Messages sit inside visible pane content;
+collapsed stack headers keep their title and position with the role tint. A
+group shows its message in an uncovered area of one destination pane when one
+is visible. Messages stay clear of every visible stack header. When panes
+overlap during a slide, the moving pane's tint takes priority.
 
 `koshi keys list` prints the active keymap. `koshi actions list` prints actions
 that can be bound.

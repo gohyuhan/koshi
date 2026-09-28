@@ -3523,8 +3523,8 @@ fn fire_expired_key_sequence(client: &mut Client, uplink: &mut Uplink, current_t
 /// Answer one mouse event with pane placement, against `mouse_frame`, the frame
 /// this terminal last painted. Returns `true` when placement took the event and
 /// sent what it decided through `uplink`, and `false` when the event takes the
-/// normal mouse path. A left press on a placement handle opens placement; see
-/// [`Client::handle_placement_mouse`] for every other case.
+/// normal mouse path. An unshifted left press on a placement handle opens
+/// placement; see [`Client::handle_placement_mouse`] for every other case.
 fn handle_placement_mouse_event(
     client: &mut Client,
     uplink: &mut Uplink,

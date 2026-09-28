@@ -114,15 +114,16 @@ pub struct PanePlacementPresentation {
     pub source_pane_id: PaneId,
     /// Panes in the selected destination span, excluding the source pane.
     pub target_pane_ids: Vec<PaneId>,
-    /// The message drawn over the moving pane.
+    /// The moving pane's message, shown in uncovered visible content when no
+    /// stack header for this pane is displayed.
     pub source_message: PanePlacementMessage,
-    /// The message drawn in one visible destination pane outside the moving
-    /// pane's area.
+    /// The destination message, shown in one affected pane's uncovered visible
+    /// content when an area is available.
     pub target_message: Option<PanePlacementMessage>,
 }
 
 impl PanePlacementPresentation {
-    /// Whether a pane's content is softened for this placement preview.
+    /// Whether the pane is the moving pane or belongs to the destination span.
     #[must_use]
     pub fn is_pane_affected(&self, pane_id: PaneId) -> bool {
         pane_id == self.source_pane_id || self.target_pane_ids.contains(&pane_id)
@@ -585,7 +586,8 @@ pub struct TabSnapshot {
 /// content area to draw), and an [`is_suppressed`](Self::is_suppressed) pane is not
 /// visible. `content_rect` is `None` for three distinct reasons — no room,
 /// hidden, or a collapsed stack member — and [`is_suppressed`](Self::is_suppressed)
-/// marks the no-room case.
+/// marks the no-room case. A placement slide can keep a pane box visible while
+/// its content rect is absent and a stack header for the same pane is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSlot {
     /// The pane this slot places.

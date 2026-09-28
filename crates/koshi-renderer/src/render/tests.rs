@@ -1516,7 +1516,7 @@ fn partially_overlapping_swap_keeps_both_role_messages_visible() {
     let moving_heading = (24..35)
         .map(|column_index| render_buffer[(column_index, 4)].symbol())
         .collect::<String>();
-    let destination_heading = (55..65)
+    let destination_heading = (54..64)
         .map(|column_index| render_buffer[(column_index, 4)].symbol())
         .collect::<String>();
     assert_eq!(moving_heading, "Moving pane");
@@ -1580,6 +1580,504 @@ fn group_preview_uses_a_pane_wide_enough_for_its_role_message() {
         .map(|column_index| render_buffer[(column_index, 4)].symbol())
         .collect::<String>();
     assert_eq!(destination_heading, "Other panes");
+}
+
+#[test]
+fn placement_preview_preserves_collapsed_source_header_title_and_position() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 14, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(0, 1, 14, 1), false),
+            (target_pane_id, build_cell_rect(0, 2, 14, 4), true),
+        ],
+        Some(target_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 14,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[0].pane_title = Some("logs".to_string());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: source_pane_id,
+        header_rect: build_cell_rect(0, 1, 14, 1),
+        member_index: 1,
+        member_count: 3,
+    }];
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(14, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(
+        format_rendered_row_text(&render_buffer, 1),
+        "▸ logs   [2/3]"
+    );
+    assert_eq!(render_buffer[(3, 1)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(
+        (2..12)
+            .map(|column_index| render_buffer[(column_index, 4)].symbol())
+            .collect::<String>(),
+        "Other pane"
+    );
+}
+
+#[test]
+fn placement_preview_preserves_collapsed_destination_header_title_and_position() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 14, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(0, 2, 14, 4), true),
+            (target_pane_id, build_cell_rect(0, 1, 14, 1), false),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 14,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[1].pane_title = Some("logs".to_string());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: target_pane_id,
+        header_rect: build_cell_rect(0, 1, 14, 1),
+        member_index: 1,
+        member_count: 3,
+    }];
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(14, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(
+        format_rendered_row_text(&render_buffer, 1),
+        "▸ logs   [2/3]"
+    );
+    assert_eq!(render_buffer[(3, 1)].bg, Color::Rgb(22, 12, 33));
+    assert_eq!(
+        (1..12)
+            .map(|column_index| render_buffer[(column_index, 4)].symbol())
+            .collect::<String>(),
+        "Moving pane"
+    );
+}
+
+#[test]
+fn placement_preview_tints_pane_body_and_header_during_source_expansion() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 28, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(0, 1, 14, 5), true),
+            (target_pane_id, build_cell_rect(14, 1, 14, 5), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 28,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[0].pane_title = Some("logs".to_string());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: source_pane_id,
+        header_rect: build_cell_rect(0, 3, 14, 1),
+        member_index: 1,
+        member_count: 3,
+    }];
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(28, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(render_buffer[(2, 2)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(render_buffer[(3, 3)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(
+        (0..14)
+            .map(|column_index| render_buffer[(column_index, 3)].symbol())
+            .collect::<String>(),
+        "▸ logs   [2/3]"
+    );
+}
+
+#[test]
+fn placement_preview_preserves_destination_header_during_expansion() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 28, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(14, 1, 14, 5), true),
+            (target_pane_id, build_cell_rect(0, 1, 14, 5), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 28,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[1].pane_title = Some("logs".to_string());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: target_pane_id,
+        header_rect: build_cell_rect(0, 3, 14, 1),
+        member_index: 1,
+        member_count: 3,
+    }];
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(28, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(render_buffer[(2, 2)].bg, Color::Rgb(22, 12, 33));
+    assert_eq!(render_buffer[(3, 3)].bg, Color::Rgb(22, 12, 33));
+    assert_eq!(
+        (0..14)
+            .map(|column_index| render_buffer[(column_index, 3)].symbol())
+            .collect::<String>(),
+        "▸ logs   [2/3]"
+    );
+}
+
+#[test]
+fn placement_preview_preserves_other_pane_header_under_moving_message() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 28, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(0, 1, 14, 5), true),
+            (target_pane_id, build_cell_rect(14, 1, 14, 1), false),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 28,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[1].pane_title = Some("logs".to_string());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: target_pane_id,
+        header_rect: build_cell_rect(0, 3, 14, 1),
+        member_index: 1,
+        member_count: 3,
+    }];
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(28, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(
+        (0..14)
+            .map(|column_index| render_buffer[(column_index, 3)].symbol())
+            .collect::<String>(),
+        "▸ logs   [2/3]"
+    );
+    assert_eq!(
+        (1..12)
+            .map(|column_index| render_buffer[(column_index, 4)].symbol())
+            .collect::<String>(),
+        "Moving pane"
+    );
+}
+
+#[test]
+fn placement_preview_preserves_other_pane_header_under_destination_message() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 28, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(0, 1, 14, 5), true),
+            (target_pane_id, build_cell_rect(14, 1, 14, 5), true),
+            (collapsed_pane_id, build_cell_rect(14, 3, 14, 1), false),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 28,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[2].pane_title = Some("logs".to_string());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .stack_headers = vec![StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect: build_cell_rect(14, 3, 14, 1),
+        member_index: 1,
+        member_count: 3,
+    }];
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(28, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    assert_eq!(
+        (14..28)
+            .map(|column_index| render_buffer[(column_index, 3)].symbol())
+            .collect::<String>(),
+        "▸ logs   [2/3]"
+    );
+    assert_eq!(
+        (16..26)
+            .map(|column_index| render_buffer[(column_index, 4)].symbol())
+            .collect::<String>(),
+        "Other pane"
+    );
+}
+
+#[test]
+fn placement_preview_preserves_border_of_a_two_row_pane() {
+    let source_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 14, 8);
+    let mut render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[(source_pane_id, build_cell_rect(0, 1, 14, 2), true)],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 14,
+            row_count: 8,
+        },
+    );
+    render_snapshot.pane_snapshots[0].pane_title = Some("shell".to_string());
+    let mut ordinary_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(14, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        None,
+        None,
+        viewport_area,
+        &mut ordinary_buffer,
+    );
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: Vec::new(),
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will land here".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: None,
+    };
+    let mut preview_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(14, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut preview_buffer,
+    );
+
+    assert_eq!(
+        format_rendered_row_text(&preview_buffer, 1),
+        format_rendered_row_text(&ordinary_buffer, 1)
+    );
+    assert_eq!(
+        format_rendered_row_text(&preview_buffer, 2),
+        format_rendered_row_text(&ordinary_buffer, 2)
+    );
+    assert_eq!(preview_buffer[(5, 1)].bg, Color::Rgb(0, 42, 51));
 }
 
 #[test]

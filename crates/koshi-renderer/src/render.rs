@@ -92,10 +92,11 @@ use placement::draw_pane_placement_presentation;
 /// native bytes are ready, and every other image shows the unavailable-image
 /// text; `None` shows that text only over images whose record is missing.
 ///
-/// `placement_presentation` tints visible affected panes and paints the moving
-/// pane's message and one destination message. The moving pane's tint and text
-/// take priority where pane rectangles overlap. `placement_target` selects
-/// destination border styling before the preview colors affected panes.
+/// `placement_presentation` tints visible affected panes and paints messages
+/// inside visible pane content outside stack headers. Collapsed stack headers
+/// keep their text under the tint. The moving pane's tint and text take priority
+/// where pane rectangles overlap outside those headers. `placement_target`
+/// selects destination border styling before the preview colors affected panes.
 ///
 /// # Panics
 ///

@@ -63,14 +63,29 @@ fn placement_background_colors_distinguish_the_moving_and_destination_panes() {
 }
 
 #[test]
-fn uncovered_message_area_prefers_pane_body_over_a_one_row_strip() {
+fn uncovered_message_area_prefers_wide_side_over_short_top_strip() {
     assert_eq!(
-        find_legible_uncovered_pane_area(
+        find_legible_uncovered_content_area(
             RatatuiRect::new(0, 0, 40, 6),
-            RatatuiRect::new(10, 1, 15, 5),
+            &[RatatuiRect::new(10, 1, 15, 5)],
             12,
         ),
         Some(RatatuiRect::new(25, 1, 15, 5))
+    );
+}
+
+#[test]
+fn uncovered_message_area_uses_other_side_when_header_covers_one_side() {
+    assert_eq!(
+        find_legible_uncovered_content_area(
+            RatatuiRect::new(0, 0, 30, 5),
+            &[
+                RatatuiRect::new(10, 0, 10, 5),
+                RatatuiRect::new(20, 0, 10, 5),
+            ],
+            8,
+        ),
+        Some(RatatuiRect::new(0, 0, 10, 5))
     );
 }
 
@@ -124,7 +139,7 @@ fn draw_placement_message_uses_compact_sentence_in_a_narrow_pane() {
 #[test]
 fn draw_placement_message_uses_an_ellipsis_when_only_one_cell_fits() {
     let theme = Theme::default();
-    let mut screen_buffer = Buffer::empty(RatatuiRect::new(0, 0, 3, 3));
+    let mut screen_buffer = Buffer::empty(RatatuiRect::new(0, 0, 1, 3));
     let placement_message = PanePlacementMessage {
         full_text: "Moving pane will insert above".to_string(),
         compact_text: "Moving pane",
@@ -132,7 +147,7 @@ fn draw_placement_message_uses_an_ellipsis_when_only_one_cell_fits() {
     };
 
     draw_placement_message(
-        RatatuiRect::new(0, 0, 3, 3),
+        RatatuiRect::new(0, 0, 1, 3),
         &placement_message,
         theme.accent_color,
         theme.bar_background_color,
@@ -140,5 +155,5 @@ fn draw_placement_message_uses_an_ellipsis_when_only_one_cell_fits() {
         &mut screen_buffer,
     );
 
-    assert_eq!(screen_buffer[(1, 1)].symbol(), "…");
+    assert_eq!(screen_buffer[(0, 1)].symbol(), "…");
 }
