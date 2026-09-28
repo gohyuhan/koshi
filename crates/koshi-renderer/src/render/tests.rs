@@ -15,8 +15,8 @@
 //! replaces the frame when the tab has no room for any pane. A viewport larger
 //! than the tab size centers the layout and letterboxes the margin, with
 //! the cursor shifted to match. Degenerate sizes are safe, including a buffer
-//! shorter than the laid-out frame. Pane placement mode shows pane id suffixes instead
-//! of `/work/koshi` and `nvim`, then restores those titles.
+//! shorter than the laid-out frame. Pane placement keeps pane titles visible
+//! while the source and destination previews soften their pane areas.
 
 use super::*;
 
@@ -1183,7 +1183,7 @@ fn focused_pane_border_is_highlighted() {
 }
 
 #[test]
-fn placement_preview_keeps_pane_ids_content_and_source_focus_visible() {
+fn placement_preview_distinguishes_pane_roles_and_keeps_content_visible() {
     let source_pane_id = PaneId::new();
     let target_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -1226,6 +1226,20 @@ fn placement_preview_keeps_pane_ids_content_and_source_focus_visible() {
     let viewport_area = RatatuiRect::new(0, 0, 80, 8);
     let mut render_buffer = Buffer::empty(viewport_area);
     let theme = Theme::default();
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will insert below".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will make room below".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
 
     render_frame(
         &render_snapshot,
@@ -1236,26 +1250,336 @@ fn placement_preview_keeps_pane_ids_content_and_source_focus_visible() {
         viewer_chrome,
         ImageRenderMode::Placeholder,
         None,
-        None,
+        Some(&placement_presentation),
         Some(&placement_target),
         viewport_area,
         &mut render_buffer,
     );
 
-    let rendered_pane_labels = format_rendered_row_text(&render_buffer, 1);
-    assert!(rendered_pane_labels.contains(&format_pane_id_label(source_pane_id)));
-    assert!(rendered_pane_labels.contains(&format_pane_id_label(target_pane_id)));
     assert_eq!(render_buffer[(0, 1)].fg, theme.focused_border_color);
-    assert_eq!(render_buffer[(40, 1)].fg, theme.accent_color);
-    assert_ne!(render_buffer[(40, 1)].fg, theme.hover_border_color);
+    assert_eq!(render_buffer[(40, 1)].fg, theme.hover_border_color);
     assert_eq!(render_buffer[(1, 2)].symbol(), "S");
     assert_eq!(render_buffer[(41, 2)].symbol(), "T");
+    assert_eq!(render_buffer[(1, 2)].fg, theme.unfocused_border_color);
+    assert_eq!(render_buffer[(41, 2)].fg, theme.unfocused_border_color);
+    assert_eq!(render_buffer[(1, 2)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(render_buffer[(41, 2)].bg, Color::Rgb(22, 12, 33));
+    assert_eq!(render_buffer[(27, 4)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(render_buffer[(54, 4)].bg, Color::Rgb(22, 12, 33));
+    assert_eq!(render_buffer[(8, 4)].fg, theme.focused_border_color);
+    assert_eq!(render_buffer[(54, 4)].fg, theme.hover_border_color);
+    let source_heading = (5..34)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    let destination_heading = (44..75)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    assert_eq!(source_heading, "Moving pane will insert below");
+    assert_eq!(destination_heading, "Other pane will make room below");
 }
 
-fn format_pane_id_label(pane_id: PaneId) -> String {
-    let pane_id_hex = pane_id.get_uuid().simple().to_string();
-    let suffix_start_byte_offset = pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
-    format!("pane-…{}", &pane_id_hex[suffix_start_byte_offset..])
+#[test]
+fn whole_tab_insertion_keeps_destination_message_out_of_moving_pane() {
+    let left_pane_id = PaneId::new();
+    let source_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 60, 8);
+    let render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (left_pane_id, build_cell_rect(0, 1, 20, 6), true),
+            (source_pane_id, build_cell_rect(20, 1, 20, 6), true),
+            (right_pane_id, build_cell_rect(40, 1, 20, 6), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 60,
+            row_count: 8,
+        },
+    );
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id: render_snapshot.client_snapshot.active_tab_id,
+        anchor: PanePlacementAnchor::Tab,
+        direction: koshi_core::geometry::Direction::Right,
+    };
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![left_pane_id, right_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other panes will make room right".to_string(),
+            compact_text: "Other panes",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(60, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        Some(&placement_target),
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    let source_heading = (21..39)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    let target_heading = (4..15)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    assert_eq!(source_heading, "   Moving pane    ");
+    assert_eq!(target_heading, "Other panes");
+}
+
+#[test]
+fn clipped_placement_preview_uses_a_destination_pane_inside_the_buffer() {
+    let left_pane_id = PaneId::new();
+    let source_pane_id = PaneId::new();
+    let right_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 60, 8);
+    let render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (left_pane_id, build_cell_rect(0, 1, 15, 6), true),
+            (source_pane_id, build_cell_rect(15, 1, 20, 6), true),
+            (right_pane_id, build_cell_rect(35, 1, 25, 6), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 60,
+            row_count: 8,
+        },
+    );
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![left_pane_id, right_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other panes will make room right".to_string(),
+            compact_text: "Other panes",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(RatatuiRect::new(0, 0, 35, 8));
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(60, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    let visible_target_heading = (2..13)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    assert_eq!(visible_target_heading, "Other panes");
+}
+
+#[test]
+fn overlapping_swap_preview_keeps_moving_pane_role_and_message_legible() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 80, 8);
+    let render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(20, 1, 40, 6), true),
+            (target_pane_id, build_cell_rect(20, 1, 40, 6), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 80,
+            row_count: 8,
+        },
+    );
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Move".to_string(),
+            compact_text: "Move",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(80, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    let source_heading = (21..59)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    assert_eq!(
+        source_heading,
+        format!("{}Move{}", " ".repeat(17), " ".repeat(17))
+    );
+    assert_eq!(render_buffer[(25, 2)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(
+        render_buffer[(20, 1)].fg,
+        Theme::default().focused_border_color
+    );
+}
+
+#[test]
+fn partially_overlapping_swap_keeps_both_role_messages_visible() {
+    let source_pane_id = PaneId::new();
+    let target_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 80, 8);
+    let render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (source_pane_id, build_cell_rect(10, 1, 40, 6), true),
+            (target_pane_id, build_cell_rect(30, 1, 40, 6), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 80,
+            row_count: 8,
+        },
+    );
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other pane will move here".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(80, 8),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    let moving_heading = (24..35)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    let destination_heading = (55..65)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    assert_eq!(moving_heading, "Moving pane");
+    assert_eq!(destination_heading, "Other pane");
+    assert_eq!(render_buffer[(40, 2)].bg, Color::Rgb(0, 42, 51));
+    assert_eq!(render_buffer[(60, 2)].bg, Color::Rgb(22, 12, 33));
+}
+
+#[test]
+fn group_preview_uses_a_pane_wide_enough_for_its_role_message() {
+    let narrow_target_pane_id = PaneId::new();
+    let wide_target_pane_id = PaneId::new();
+    let source_pane_id = PaneId::new();
+    let viewport_area = RatatuiRect::new(0, 0, 40, 22);
+    let render_snapshot = build_render_snapshot(
+        "session",
+        &[("work", true)],
+        &[
+            (narrow_target_pane_id, build_cell_rect(0, 1, 8, 19), true),
+            (wide_target_pane_id, build_cell_rect(10, 1, 20, 6), true),
+            (source_pane_id, build_cell_rect(30, 1, 10, 19), true),
+        ],
+        Some(source_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 40,
+            row_count: 22,
+        },
+    );
+    let placement_presentation = PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![narrow_target_pane_id, wide_target_pane_id],
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(crate::snapshot::PanePlacementMessage {
+            full_text: "Other panes will make room".to_string(),
+            compact_text: "Other panes",
+            detail_text: None,
+        }),
+    };
+    let mut render_buffer = Buffer::empty(viewport_area);
+    render_frame(
+        &render_snapshot,
+        &build_legacy_regions(40, 22),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut render_buffer,
+    );
+
+    let destination_heading = (14..25)
+        .map(|column_index| render_buffer[(column_index, 4)].symbol())
+        .collect::<String>();
+    assert_eq!(destination_heading, "Other panes");
 }
 
 #[test]
@@ -3319,7 +3643,7 @@ fn pane_title_drawn_when_box_is_five_wide() {
 }
 
 #[test]
-fn pane_placement_mode_shows_pane_id_suffixes_and_restores_titles_after_it_ends() {
+fn pane_placement_mode_keeps_pane_and_stack_titles_visible() {
     let active_pane_id = PaneId::new();
     let collapsed_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -3368,26 +3692,8 @@ fn pane_placement_mode_shows_pane_id_suffixes_and_restores_titles_after_it_ends(
 
     let placement_pane_border_text = format_rendered_row_text(&placement_buffer, 3);
     let placement_stack_header_text = format_rendered_row_text(&placement_buffer, 1);
-    let active_pane_id_hex = active_pane_id.get_uuid().simple().to_string();
-    let active_pane_id_suffix_start_byte_offset =
-        active_pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
-    let active_pane_id_label = format!(
-        "pane-…{}",
-        &active_pane_id_hex[active_pane_id_suffix_start_byte_offset..]
-    );
-    let collapsed_pane_id_hex = collapsed_pane_id.get_uuid().simple().to_string();
-    let collapsed_pane_id_suffix_start_byte_offset =
-        collapsed_pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
-    let collapsed_pane_id_label = format!(
-        "pane-…{}",
-        &collapsed_pane_id_hex[collapsed_pane_id_suffix_start_byte_offset..]
-    );
-    assert!(placement_pane_border_text.contains(&active_pane_id_label));
-    assert!(placement_stack_header_text.contains(&collapsed_pane_id_label));
-    assert!(!placement_pane_border_text.contains("/work/koshi"));
-    assert!(!placement_pane_border_text.contains("nvim"));
-    assert!(!placement_stack_header_text.contains("/work/koshi"));
-    assert!(!placement_stack_header_text.contains("nvim"));
+    assert!(placement_pane_border_text.contains("/work/koshi"));
+    assert!(placement_stack_header_text.contains("nvim"));
 
     assert!(format_rendered_row_text(&restored_buffer, 3).contains("/work/koshi"));
     assert!(format_rendered_row_text(&restored_buffer, 1).contains("nvim"));

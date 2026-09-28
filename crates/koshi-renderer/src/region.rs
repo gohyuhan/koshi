@@ -6,7 +6,7 @@ use koshi_core::key::KeySequence;
 use koshi_core::lock::LockMode;
 use koshi_layout::regions::{solve_region_rects, Edge, RegionGeometry, SolvedRegions};
 
-use crate::snapshot::{KeymapHints, PlacementStatus, Reconnecting, TabMetadata};
+use crate::snapshot::{KeymapHints, Reconnecting, TabMetadata};
 
 /// The compiled-in region geometry, in solve order: a one-row tabline on the
 /// top edge, then a one-row statusline on the bottom edge.
@@ -28,7 +28,7 @@ pub fn solve_core_regions(viewport_size: Size) -> SolvedRegions {
 }
 
 /// The statusline facts needed to paint it: keybinding hints, the open key
-/// sequence, viewer-local placement status, and session recovery notice.
+/// sequence, and session recovery notice.
 ///
 /// This value excludes colors. [`crate::statusline_hints::draw_statusline`]
 /// takes the theme as its own argument.
@@ -40,8 +40,6 @@ pub(crate) struct StatuslineInputs<'a> {
     /// The chords already pressed of an open key sequence. `None` when no
     /// sequence is open.
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
-    /// The viewer-local placement status, shown at the row's right edge.
-    pub(crate) placement_status: Option<&'a PlacementStatus>,
     /// Whether the session recovery notice takes the hint area.
     pub(crate) is_recovery_notice_visible: bool,
 }

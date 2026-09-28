@@ -284,6 +284,21 @@ The default leader is Ctrl.
 | `<C-l>` | Lock or unlock input |
 | `<C-q>` | Quit |
 
+In pane placement mode, drag a pane onto another pane to swap them. Hold Shift
+when you start the drag to insert beside the destination instead. Koshi asks
+compatible terminals to send Shift mouse events during this mode. Ghostty
+honors the request when mouse reporting is enabled and `mouse-shift-capture`
+is `false` or `true`. It already sends Shift with `always`; `never` keeps Shift
+for terminal selection. Other terminals can keep Shift for their own text
+selection. Outside pane placement mode, Shift+drag keeps its text selection
+behavior. Shift+Arrow also selects an insertion edge without a mouse.
+
+The preview dims visible affected panes. The moving pane and destination use
+different tints. Centered messages name the moving pane and explain what
+happens to the affected pane or group. A group shows its message in an uncovered
+area of one destination pane when one is visible. When panes overlap during a
+slide, the moving pane's message and tint take priority.
+
 `koshi keys list` prints the active keymap. `koshi actions list` prints actions
 that can be bound.
 

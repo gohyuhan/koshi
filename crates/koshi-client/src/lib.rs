@@ -136,6 +136,8 @@ pub(crate) struct PendingPlacementCommand {
 pub(crate) struct PlacementDrag {
     /// The screen position where the drag began.
     pub(crate) start_position: Point,
+    /// Whether the pointer has reached a different position during this drag.
+    pub(crate) has_pointer_moved: bool,
     /// Shift+drag selects insertion targets; a plain drag selects swaps.
     pub(crate) is_insertion_drag: bool,
 }
@@ -758,8 +760,8 @@ impl Client {
             })
     }
 
-    /// Return whether pane placement mode draws its placement view: pane labels
-    /// such as `pane-…000000000001`, with no hover tint and no placement handle.
+    /// Return whether pane placement draws its subdued panes and in-pane messages,
+    /// with no hover tint and no placement handle.
     /// It stays `true` while a submitted placement command waits for the
     /// session's answer.
     #[must_use]
@@ -806,6 +808,9 @@ impl Client {
     }
 
     /// Select a placement destination tab without changing session focus.
+    /// Clear the prior target and preview. Keep an active drag and its insertion
+    /// choice. Return the source pane and new tab, or `None` when selection
+    /// cannot change.
     pub(crate) fn select_placement_destination_tab(
         &mut self,
         destination_tab_id: TabId,
@@ -822,7 +827,6 @@ impl Client {
             placement_mode.placement_target = None;
             placement_mode.source_pane_id
         };
-        self.placement_state.placement_drag = None;
         self.placement_state.placement_tab_hover = None;
         self.clear_placement_snapshot();
         Some((source_pane_id, destination_tab_id))
@@ -930,16 +934,25 @@ impl Client {
         if self.is_placement_mode_active() && !self.is_placement_confirmation_pending() {
             self.placement_state.placement_drag = Some(PlacementDrag {
                 start_position,
+                has_pointer_moved: false,
                 is_insertion_drag,
             });
         }
     }
 
-    /// Return whether the current placement drag moved to `position`.
-    pub(crate) fn has_placement_drag_moved(&self, position: Point) -> bool {
-        self.placement_state
-            .placement_drag
-            .is_some_and(|placement_drag| placement_drag.start_position != position)
+    /// Return whether this viewer is dragging a pane for placement.
+    pub(crate) fn is_placement_drag_active(&self) -> bool {
+        self.placement_state.placement_drag.is_some()
+    }
+
+    /// Record movement away from the drag origin and return whether it has moved
+    /// at least once during this drag.
+    pub(crate) fn update_placement_drag_movement(&mut self, position: Point) -> bool {
+        let Some(placement_drag) = self.placement_state.placement_drag.as_mut() else {
+            return false;
+        };
+        placement_drag.has_pointer_moved |= placement_drag.start_position != position;
+        placement_drag.has_pointer_moved
     }
 
     /// Return whether the active placement mode ends when its drag ends.
@@ -1007,8 +1020,8 @@ impl Client {
         self.placement_state.placement_read_request.is_some()
     }
 
-    /// Whether the placement status is `PlacementStatusKind::Loading`: a preview read is in
-    /// flight, or the end of this attachment loop pass sends one.
+    /// Whether the placement preview is loading: a read is in flight, or the
+    /// end of this attachment loop pass sends one.
     #[must_use]
     pub(crate) fn is_placement_preview_loading(&self) -> bool {
         self.is_placement_read_pending() || self.find_placement_preview_refresh().is_some()

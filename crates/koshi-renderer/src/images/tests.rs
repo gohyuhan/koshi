@@ -941,6 +941,37 @@ fn native_mode_keeps_image_cells_and_placeholder_mode_writes_the_label() {
         .collect();
     assert_eq!(placeholder_text, "term");
 
+    let placement_presentation = crate::snapshot::PanePlacementPresentation {
+        source_pane_id: pane_id,
+        target_pane_ids: Vec::new(),
+        source_message: crate::snapshot::PanePlacementMessage {
+            full_text: "Moving pane: choose a destination".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: None,
+    };
+    let mut placement_buffer = Buffer::empty(viewport_area);
+    crate::render::render_frame(
+        &snapshot,
+        &build_regions(),
+        &render_theme,
+        &keymap_hints,
+        None,
+        ViewerChrome::default(),
+        ImageRenderMode::Placeholder,
+        None,
+        Some(&placement_presentation),
+        None,
+        viewport_area,
+        &mut placement_buffer,
+    );
+    assert_eq!(placement_buffer[(1, 1)].symbol(), "X");
+    assert_eq!(
+        placement_buffer[(1, 1)].fg,
+        render_theme.unfocused_border_color
+    );
+
     let mut native_buffer = Buffer::empty(viewport_area);
     crate::render::render_frame(
         &snapshot,

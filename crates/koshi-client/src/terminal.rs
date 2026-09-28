@@ -46,8 +46,8 @@ use koshi_layout::placement::{place_pane_across_tabs, place_pane_within_tab, Pla
 use koshi_layout::solver::solve_layout_with_mode;
 use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_renderer::snapshot::{
-    CommittedRegions, CursorSnapshot, CursorStyle, KeymapHints, PaneSlot, PaneSnapshot,
-    PlacementPaneSnapshot, PlacementSnapshot, PlacementStatus, PlacementTabSnapshot,
+    CommittedRegions, CursorSnapshot, CursorStyle, KeymapHints, PanePlacementPresentation,
+    PaneSlot, PaneSnapshot, PlacementPaneSnapshot, PlacementSnapshot, PlacementTabSnapshot,
     RenderSnapshot, ScrollbackMetadata, TabSnapshot, ViewerChrome,
 };
 use koshi_renderer::theme::Theme;
@@ -90,13 +90,17 @@ const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 const APPLICATION_MODE_SETUP_BYTES: &[u8] =
     b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
 
+const SHIFT_MOUSE_CAPTURE_REQUEST_BYTES: &[u8] = b"\x1b[>1s";
+const SHIFT_MOUSE_CAPTURE_RELEASE_BYTES: &[u8] = b"\x1b[>0s";
+
 /// Ask which Kitty keyboard enhancements the terminal applied. The answer is
 /// `ESC [ ? flags u`.
 const KEYBOARD_ENHANCEMENT_QUERY_BYTES: &[u8] = b"\x1b[?u";
 
-/// Disable paste, mouse, keyboard, and alternate-screen modes; restore cursor state.
+/// Reset Shift mouse capture, disable paste, mouse, keyboard, and alternate-screen
+/// modes, and restore cursor state.
 const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
-    b"\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
+    b"\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q";
 
 /// Paints a render snapshot into ratatui's frame buffer with
 /// [`koshi_renderer::render_frame`]. With a placement
@@ -125,8 +129,8 @@ pub(crate) struct SnapshotWidget<'a> {
     pub(crate) placement_display_snapshot: Option<&'a PlacementSnapshot>,
     /// The target selected by the viewer's placement interaction.
     pub(crate) placement_target: Option<&'a PanePlacementTarget>,
-    /// The statusline entry for the viewer's placement interaction.
-    pub(crate) placement_status: Option<&'a PlacementStatus>,
+    /// The whole-pane visual explanation for the viewer's placement.
+    pub(crate) placement_presentation: Option<&'a PanePlacementPresentation>,
 }
 
 impl Widget for SnapshotWidget<'_> {
@@ -140,7 +144,7 @@ impl Widget for SnapshotWidget<'_> {
             self.chrome,
             self.image_mode,
             self.available_image_placement_keys,
-            self.placement_status,
+            self.placement_presentation,
             self.placement_target,
             render_area,
             render_buffer,
@@ -1644,6 +1648,28 @@ fn enable_terminal_modes<W: Write>(
     writer.flush()
 }
 
+/// Request Shift mouse reports while pane placement owns the mouse gesture.
+/// The outer terminal may ignore this request. A successful write and flush
+/// records the requested mode so unchanged frames send no sequence.
+pub(crate) fn update_shift_mouse_capture<W: Write>(
+    writer: &mut W,
+    should_request_shift_mouse_capture: bool,
+    is_shift_mouse_capture_requested: &mut bool,
+) -> io::Result<()> {
+    if *is_shift_mouse_capture_requested == should_request_shift_mouse_capture {
+        return Ok(());
+    }
+    let shift_mouse_capture_bytes = if should_request_shift_mouse_capture {
+        SHIFT_MOUSE_CAPTURE_REQUEST_BYTES
+    } else {
+        SHIFT_MOUSE_CAPTURE_RELEASE_BYTES
+    };
+    writer.write_all(shift_mouse_capture_bytes)?;
+    writer.flush()?;
+    *is_shift_mouse_capture_requested = should_request_shift_mouse_capture;
+    Ok(())
+}
+
 /// Write every application-level terminal reset in reverse setup order.
 fn write_terminal_cleanup<W: Write>(
     writer: &mut W,
@@ -1940,12 +1966,28 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
     );
     let terminal_size = terminal.size().map_err(PaintError::Backend)?;
     let mut render_area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+    let is_focused_pane_softened = displayed_snapshot
+        .client_snapshot
+        .focused_pane_id
+        .is_some_and(|focused_pane_id| {
+            frame_paint
+                .placement_presentation
+                .as_ref()
+                .is_some_and(|placement_presentation| {
+                    placement_presentation.is_pane_affected(focused_pane_id)
+                })
+        });
     let mut hardware_cursor_position =
-        get_cursor_position(displayed_snapshot, committed_regions, render_area);
+        get_cursor_position(displayed_snapshot, committed_regions, render_area)
+            .filter(|_| !is_focused_pane_softened);
     let is_native_image_output = image_output_state.get_output_kind().is_some();
     image_output_state.set_host_terminal_size(terminal_size.width, terminal_size.height);
-    let image_paint_commands =
+    let mut image_paint_commands =
         build_image_paints(displayed_snapshot, committed_regions, render_area);
+    if let Some(placement_presentation) = &frame_paint.placement_presentation {
+        image_paint_commands
+            .retain(|image_paint| !placement_presentation.is_pane_affected(image_paint.pane_id));
+    }
     let image_cell_composition_snapshot = image_output_state
         .get_output_kind()
         .filter(|output_kind| {
@@ -2024,7 +2066,8 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
                 let frame_area = render_frame.area();
                 render_area = frame_area;
                 hardware_cursor_position =
-                    get_cursor_position(displayed_snapshot, committed_regions, frame_area);
+                    get_cursor_position(displayed_snapshot, committed_regions, frame_area)
+                        .filter(|_| !is_focused_pane_softened);
                 render_frame.render_widget(
                     SnapshotWidget {
                         snapshot: displayed_snapshot,
@@ -2038,7 +2081,7 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
                         placement_snapshot,
                         placement_display_snapshot,
                         placement_target: frame_paint.placement_target.as_ref(),
-                        placement_status: frame_paint.placement_status.as_ref(),
+                        placement_presentation: frame_paint.placement_presentation.as_ref(),
                     },
                     frame_area,
                 );

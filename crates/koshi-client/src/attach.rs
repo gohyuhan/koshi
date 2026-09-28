@@ -105,7 +105,7 @@ use std::time::{Duration, Instant};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use serde_json::value::RawValue;
 
@@ -136,10 +136,9 @@ use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, Session
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
-use koshi_renderer::get_cursor_position;
 use koshi_renderer::snapshot::{
-    CommittedRegions, CursorStyle, MouseFrame, PlacementSnapshot, PlacementStatus,
-    PlacementStatusKind, Reconnecting, RenderSnapshot, TabSnapshot, ViewerChrome,
+    CommittedRegions, CursorStyle, MouseFrame, PanePlacementMessage, PanePlacementPresentation,
+    PlacementSnapshot, Reconnecting, RenderSnapshot, TabSnapshot, ViewerChrome,
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 
@@ -247,7 +246,7 @@ struct SentBorderMove {
 
 /// The viewer state a frame paint uses: its chrome, the input mode and
 /// mouse-select state, the sequence the hint bar displays, and the placement
-/// target and status.
+/// target and its in-pane presentation.
 ///
 /// [`Screen`] holds the value the frame on the screen was drawn with, and
 /// compares it against a fresh read at the end of every loop pass.
@@ -266,8 +265,8 @@ pub(crate) struct ViewerPaint {
     pub(crate) pending_key_sequence: Option<KeySequence>,
     /// The checked placement target outlined in the active pane area.
     pub(crate) placement_target: Option<PanePlacementTarget>,
-    /// The placement status shown in the keybinding statusline.
-    pub(crate) placement_status: Option<PlacementStatus>,
+    /// The whole-pane visual explanation of this viewer's placement.
+    pub(crate) placement_presentation: Option<PanePlacementPresentation>,
 }
 
 const PLACEMENT_ANIMATION_DURATION: Duration = Duration::from_millis(160);
@@ -336,7 +335,7 @@ fn can_slide_between_tab_snapshots(
 impl ViewerPaint {
     /// Read what `client` contributes to a paint of `render_snapshot` that
     /// shows `displayed_active_tab_id`. A tab-strip peek made on any other tab
-    /// does not apply. The placement status names tabs from
+    /// does not apply. The placement message names tabs from
     /// `render_snapshot`'s tab list.
     pub(crate) fn from_client(
         client: &Client,
@@ -349,92 +348,149 @@ impl ViewerPaint {
             is_mouse_selection_enabled: client.is_mouse_selection_enabled(),
             pending_key_sequence: client.get_pending_key_sequence().cloned(),
             placement_target: client.get_placement_target(),
-            placement_status: build_placement_status(client, render_snapshot),
+            placement_presentation: build_pane_placement_presentation(client, render_snapshot),
         }
     }
 }
 
-/// Build placement status from pane ids and the destination tab name. A swap to
-/// `pane-123` displays that id instead of its terminal title.
-fn build_placement_status(
+/// Describe the proposed positions inside the affected panes.
+fn build_pane_placement_presentation(
     client: &Client,
     render_snapshot: &RenderSnapshot,
-) -> Option<PlacementStatus> {
+) -> Option<PanePlacementPresentation> {
     if !client.is_pane_placement_visible() {
         return None;
     }
     let source_pane_id = client.get_placement_source_pane_id()?;
-    let destination_tab_id = client.get_placement_destination_tab_id()?;
-    let source_pane_label = source_pane_id.to_string();
-    let destination_tab_label = render_snapshot
-        .session_snapshot
-        .tabs_metadata
-        .iter()
-        .find(|tab_metadata| tab_metadata.tab_id == destination_tab_id)
-        .map(|tab_metadata| tab_metadata.tab_name.clone())
-        .unwrap_or_else(|| destination_tab_id.to_string());
-    let (placement_status_kind, status_text) = match (
+    let destination_tab_name = client
+        .get_placement_destination_tab_id()
+        .and_then(|destination_tab_id| {
+            render_snapshot
+                .session_snapshot
+                .tabs_metadata
+                .iter()
+                .find(|tab_metadata| tab_metadata.tab_id == destination_tab_id)
+                .map(|tab_metadata| tab_metadata.tab_name.as_str())
+        })
+        .unwrap_or("this tab");
+    let moving_pane_selection_text = if client.is_placement_preview_loading() {
+        format!("Moving pane: loading {destination_tab_name}")
+    } else {
+        "Moving pane: choose a destination".to_string()
+    };
+    let source_selection_message = PanePlacementMessage {
+        full_text: moving_pane_selection_text,
+        compact_text: "Moving pane",
+        detail_text: Some("Esc to cancel".to_string()),
+    };
+    let (Some(placement_snapshot), Some(placement_target)) = (
         client.get_placement_snapshot(),
         client.get_placement_target(),
-    ) {
-        (None, _) if client.is_placement_preview_loading() => (
-            PlacementStatusKind::Loading,
-            format!("PLACE {source_pane_label} | loading {destination_tab_label}"),
-        ),
-        (Some(_), Some(placement_target)) => {
-            let placement_description =
-                format_placement_target_description(&placement_target, &destination_tab_label);
-            let status_text = if client.is_placement_confirmation_pending() {
-                format!(
-                    "PLACE {source_pane_label} | {destination_tab_label}: {placement_description} | confirming placement"
-                )
-            } else {
-                format!(
-                    "PLACE {source_pane_label} | {destination_tab_label}: {placement_description} | Enter: place | Esc: cancel"
-                )
-            };
-            (PlacementStatusKind::Valid, status_text)
-        }
-        _ => (
-            PlacementStatusKind::Invalid,
-            format!("PLACE {source_pane_label} | {destination_tab_label}: choose a destination"),
-        ),
+    ) else {
+        return Some(PanePlacementPresentation {
+            source_pane_id,
+            target_pane_ids: Vec::new(),
+            source_message: source_selection_message,
+            target_message: None,
+        });
     };
-    Some(PlacementStatus {
-        placement_status_kind,
-        status_text,
-    })
-}
-
-/// Describe one checked placement target for the placement statusline.
-fn format_placement_target_description(
-    placement_target: &PanePlacementTarget,
-    destination_tab_label: &str,
-) -> String {
-    match placement_target {
-        PanePlacementTarget::Swap { target_pane_id } => format!("swap with {target_pane_id}"),
-        PanePlacementTarget::Split {
-            anchor, direction, ..
-        } => {
-            let direction_label = format_placement_direction_label(*direction);
-            match anchor {
-                PanePlacementAnchor::Pane(target_pane_id) => {
-                    format!("insert {direction_label} {target_pane_id}")
-                }
-                PanePlacementAnchor::Group(target_pane_ids) => {
-                    let group_pane_labels = target_pane_ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("insert {direction_label} group [{group_pane_labels}]")
-                }
-                PanePlacementAnchor::Tab => {
-                    format!("insert {direction_label} {destination_tab_label}")
-                }
+    let is_cross_tab = placement_snapshot.source_tab_id != placement_snapshot.destination_tab_id;
+    let confirmation_hint = if client.is_placement_confirmation_pending() {
+        "Waiting for session"
+    } else if client.is_placement_drag_active() {
+        "Release to place · Esc to cancel"
+    } else {
+        "Enter to place · Esc to cancel"
+    };
+    let (mut target_pane_ids, moving_pane_text, moving_pane_compact_text, target_message) =
+        match &placement_target {
+            PanePlacementTarget::Swap { target_pane_id } => (
+                vec![*target_pane_id],
+                "Moving pane will land here".to_string(),
+                "Moving pane",
+                PanePlacementMessage {
+                    full_text: "Other pane will move here".to_string(),
+                    compact_text: "Other pane",
+                    detail_text: Some("Into the moving pane's old place".to_string()),
+                },
+            ),
+            PanePlacementTarget::Split {
+                anchor, direction, ..
+            } => {
+                let (target_pane_ids, affected_pane_subject) = match anchor {
+                    PanePlacementAnchor::Pane(target_pane_id) => {
+                        (vec![*target_pane_id], "Other pane")
+                    }
+                    PanePlacementAnchor::Group(target_pane_ids) => {
+                        (target_pane_ids.clone(), "Other panes")
+                    }
+                    PanePlacementAnchor::Tab => {
+                        let destination_tab_snapshot = if is_cross_tab {
+                            placement_snapshot.destination_tab_snapshot.as_ref()
+                        } else {
+                            Some(&placement_snapshot.source_tab_snapshot)
+                        };
+                        (
+                            destination_tab_snapshot
+                                .map(|destination_tab_snapshot| {
+                                    destination_tab_snapshot
+                                        .pane_slots
+                                        .iter()
+                                        .map(|pane_slot| pane_slot.pane_id)
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            "Other panes",
+                        )
+                    }
+                };
+                let direction_label = format_placement_direction_label(*direction);
+                (
+                    target_pane_ids,
+                    format!("Moving pane will insert {direction_label}"),
+                    "Moving pane",
+                    PanePlacementMessage {
+                        full_text: format!(
+                            "{affected_pane_subject} will make room {direction_label}"
+                        ),
+                        compact_text: affected_pane_subject,
+                        detail_text: None,
+                    },
+                )
             }
+        };
+    target_pane_ids.retain(|target_pane_id| *target_pane_id != source_pane_id);
+    let moving_pane_detail_text = if client.is_placement_confirmation_pending() {
+        confirmation_hint.to_string()
+    } else if is_cross_tab {
+        match placement_target {
+            PanePlacementTarget::Swap { .. } => format!(
+                "Other pane takes the old place in {}",
+                placement_snapshot.source_tab_snapshot.tab_name
+            ),
+            PanePlacementTarget::Split { .. } => format!("In {destination_tab_name}"),
         }
-    }
+    } else {
+        confirmation_hint.to_string()
+    };
+    Some(PanePlacementPresentation {
+        source_pane_id,
+        target_message: (!target_pane_ids.is_empty()).then_some(target_message),
+        target_pane_ids,
+        source_message: PanePlacementMessage {
+            full_text: if client.is_placement_confirmation_pending() {
+                "Placing this pane…".to_string()
+            } else {
+                moving_pane_text
+            },
+            compact_text: if client.is_placement_confirmation_pending() {
+                "Placing…"
+            } else {
+                moving_pane_compact_text
+            },
+            detail_text: Some(moving_pane_detail_text),
+        },
+    })
 }
 
 /// Return the text for one placement insertion direction.
@@ -442,8 +498,8 @@ fn format_placement_direction_label(direction: Direction) -> &'static str {
     match direction {
         Direction::Up => "above",
         Direction::Down => "below",
-        Direction::Left => "left of",
-        Direction::Right => "right of",
+        Direction::Left => "to the left",
+        Direction::Right => "to the right",
     }
 }
 
@@ -453,8 +509,8 @@ fn format_placement_direction_label(direction: Direction) -> &'static str {
 /// Every draw goes through here. `draw` paints a session frame and returns its
 /// mouse view. `refresh` commits a pending frame or redraws when viewer paint or
 /// placement snapshots change, or while another viewer's accepted placement
-/// slides. Enter or mouse release changes the status to
-/// `confirming placement` until the session rejects the command, or commits
+/// slides. Enter or mouse release changes the in-pane message to
+/// `Placing this pane…` until the session rejects the command, or commits
 /// it and a painted frame carries the new placement revision.
 struct Screen<B: Backend> {
     /// The ratatui terminal the renderer paints into.
@@ -463,6 +519,8 @@ struct Screen<B: Backend> {
     last_window_title: String,
     /// The cursor style used for the last cursor-style-write comparison.
     last_cursor_style: Option<CursorStyle>,
+    /// Whether this viewer requested Shift mouse reports from the outer terminal.
+    is_shift_mouse_capture_requested: bool,
     /// The snapshot last drawn, kept so a viewer-only change can draw it
     /// again without re-reading the frame. Its grids travel behind `Arc`s, so
     /// retaining it does not copy cell data. `None` until the first draw.
@@ -499,8 +557,6 @@ struct Screen<B: Backend> {
     native_retry_delay: Duration,
     /// The next time a failed native frame commit may run again.
     native_retry_at: Option<Instant>,
-    /// The cursor position from the most recent ordinary frame paint.
-    current_cursor_position: Option<Position>,
     /// The cell dimensions reported by the outer terminal.
     cell_size: Option<PixelCellSize>,
 }
@@ -517,6 +573,7 @@ impl<B: Backend> Screen<B> {
             terminal,
             last_window_title: String::new(),
             last_cursor_style: None,
+            is_shift_mouse_capture_requested: false,
             last_snapshot: None,
             placement_snapshot: None,
             shown_placement_snapshot: None,
@@ -534,7 +591,6 @@ impl<B: Backend> Screen<B> {
             ),
             native_retry_delay: IMAGE_OUTPUT_STEP_DELAY_DURATION,
             native_retry_at: None,
-            current_cursor_position: None,
             cell_size,
         }
     }
@@ -557,6 +613,20 @@ impl<B: Backend> Screen<B> {
     ) -> Option<MouseFrame> {
         self.pending_snapshot = Some(snapshot);
         self.commit_pending_snapshot(client, Instant::now())
+    }
+
+    /// Keep the outer terminal's Shift mouse reporting request aligned with
+    /// this viewer's placement mode, including changes made by session frames.
+    fn update_shift_mouse_capture<W: Write>(
+        &mut self,
+        client: &Client,
+        writer: &mut W,
+    ) -> io::Result<()> {
+        terminal::update_shift_mouse_capture(
+            writer,
+            client.is_placement_mode_active(),
+            &mut self.is_shift_mouse_capture_requested,
+        )
     }
 
     /// Apply the pending frame to `client` and paint it from the result. A
@@ -657,16 +727,6 @@ impl<B: Backend> Screen<B> {
             .take()
             .expect("the committed snapshot is pending");
         let displayed_snapshot = displayed_render_snapshot.as_ref().unwrap_or(&snapshot);
-        self.current_cursor_position = get_cursor_position(
-            displayed_snapshot,
-            &committed_regions,
-            Rect::new(
-                0,
-                0,
-                client.get_viewport_size().column_count,
-                client.get_viewport_size().row_count,
-            ),
-        );
         self.committed_regions = committed_regions.clone();
         self.shown_viewer_paint = Some(frame_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
@@ -689,8 +749,8 @@ impl<B: Backend> Screen<B> {
 
     /// Commit a pending frame or redraw the last frame when viewer paint or a
     /// placement snapshot changes, or while another viewer's accepted placement
-    /// slides. Enter or mouse release changes the status to
-    /// `confirming placement` until the session rejects the command, or commits
+    /// slides. Enter or mouse release changes the in-pane message to
+    /// `Placing this pane…` until the session rejects the command, or commits
     /// it and a painted frame carries the new placement revision.
     ///
     /// `active_tab_id` is `Some` after the first frame has been drawn. A viewer
@@ -777,16 +837,6 @@ impl<B: Backend> Screen<B> {
         )) {
             return None;
         }
-        self.current_cursor_position = get_cursor_position(
-            displayed_snapshot,
-            &self.committed_regions,
-            Rect::new(
-                0,
-                0,
-                client.get_viewport_size().column_count,
-                client.get_viewport_size().row_count,
-            ),
-        );
         self.shown_viewer_paint = Some(viewer_paint);
         self.shown_placement_snapshot = self.placement_snapshot.clone();
         self.shown_placement_render_snapshot = placement_render_snapshot.cloned();
@@ -858,6 +908,11 @@ impl<B: Backend> Screen<B> {
                 .placement_animation
                 .as_ref()
                 .map(|animation| animation.build_placement_snapshot(current_time))
+                .or_else(|| {
+                    (self.shown_placement_snapshot.as_ref() == Some(&base_snapshot))
+                        .then(|| self.shown_placement_render_snapshot.clone())
+                        .flatten()
+                })
                 .unwrap_or_else(|| base_snapshot.clone());
             if from_snapshot == desired_snapshot {
                 self.placement_animation = None;
@@ -1790,6 +1845,7 @@ fn attach_once(
         cell_size_query.get_current_cell_size(),
     );
 
+    let mut terminal_mode_writer = io::stdout();
     let ending = run_attachment(
         home,
         session_id,
@@ -1801,6 +1857,7 @@ fn attach_once(
         &mut uplink,
         graphics_support,
         &mut cell_size_query,
+        &mut terminal_mode_writer,
         incoming_sender,
         incoming_receiver,
     );
@@ -1845,7 +1902,7 @@ fn attach_once(
 /// on the next redial to get that attach's view back. Every reconnection
 /// stamps it with the secret its own attach minted.
 #[allow(clippy::too_many_arguments)]
-fn run_attachment<B: Backend>(
+fn run_attachment<B: Backend, W: Write>(
     home: &Home,
     session_id: SessionId,
     mut client_id: ClientId,
@@ -1856,6 +1913,7 @@ fn run_attachment<B: Backend>(
     uplink: &mut Uplink,
     graphics_support: terminal::GraphicsSupport,
     cell_size_query: &mut terminal::CellSizeQuery,
+    terminal_mode_writer: &mut W,
     incoming_sender: mpsc::SyncSender<Incoming>,
     incoming_receiver: mpsc::Receiver<Incoming>,
 ) -> AttachmentEnding {
@@ -2274,6 +2332,10 @@ fn run_attachment<B: Backend>(
             // next move asks for its whole distance from the drag anchor.
             sent_border_moves.clear();
             screen.reset_connection();
+            if let Err(io_error) = screen.update_shift_mouse_capture(client, terminal_mode_writer) {
+                tracing::warn!(%io_error, "could not update Shift mouse reporting");
+                break AttachmentEnding::TerminalGone;
+            }
             continue;
         }
         let current_time = Instant::now();
@@ -2310,6 +2372,10 @@ fn run_attachment<B: Backend>(
             Instant::now(),
         ) {
             last_mouse_frame = Some(mouse_frame);
+        }
+        if let Err(io_error) = screen.update_shift_mouse_capture(client, terminal_mode_writer) {
+            tracing::warn!(%io_error, "could not update Shift mouse reporting");
+            break AttachmentEnding::TerminalGone;
         }
         flush_mouse_round(uplink, &mut sent_border_moves, &mut pending_mouse_actions);
     }

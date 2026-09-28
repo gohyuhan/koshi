@@ -2847,6 +2847,127 @@ fn cross_tab_mouse_target_uses_the_destination_pane_under_the_pointer() {
 }
 
 #[test]
+fn shifted_drag_across_a_tab_submits_insertion_when_drop_matches_press_position() {
+    let source_pane_id = PaneId::new();
+    let destination_first_pane_id = PaneId::new();
+    let destination_second_pane_id = PaneId::new();
+    let source_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(PaneId::new()),
+            build_plain_mouse_pane(source_pane_id),
+        ],
+        Some(source_pane_id),
+    );
+    let source_tab_id = source_frame.client_snapshot.active_tab_id;
+    let destination_frame = build_mouse_frame(
+        &[
+            build_plain_mouse_pane(destination_first_pane_id),
+            build_plain_mouse_pane(destination_second_pane_id),
+        ],
+        Some(destination_first_pane_id),
+    );
+    let destination_tab_id = destination_frame.client_snapshot.active_tab_id;
+    let placement_snapshot = build_cross_tab_mouse_placement_snapshot(
+        &source_frame,
+        source_pane_id,
+        destination_tab_id,
+        [destination_first_pane_id, destination_second_pane_id],
+    );
+    let source_point = get_content_cell(&source_frame, 1);
+    let destination_point = get_content_cell(&destination_frame, 1);
+    assert_eq!(source_point, destination_point);
+    let hover_started_at = Instant::now();
+    let mut viewer = build_test_client();
+    viewer.visible_tab_ids = vec![source_tab_id, destination_tab_id];
+    viewer.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id: source_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command: None,
+    });
+
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Press(MouseButton::Left),
+                source_point,
+                ModFlags::SHIFT,
+            ),
+            &source_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Drag(MouseButton::Left),
+                Point { column: 2, row: 0 },
+                ModFlags::NONE,
+            ),
+            &source_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    viewer.update_placement_tab_hover(Some(destination_tab_id), hover_started_at);
+    assert_eq!(
+        viewer.expire_placement_tab_hover(
+            hover_started_at + crate::PLACEMENT_TAB_HOVER_DELAY_DURATION,
+        ),
+        Some((source_pane_id, destination_tab_id))
+    );
+    viewer.placement_state.placement_snapshot = Some(Arc::new(placement_snapshot));
+    assert_eq!(
+        viewer.handle_placement_mouse(
+            build_mouse_event(
+                MouseKind::Drag(MouseButton::Left),
+                destination_point,
+                ModFlags::NONE,
+            ),
+            &destination_frame,
+            hover_started_at,
+        ),
+        Some(PlacementInputAction::Consumed)
+    );
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(destination_second_pane_id),
+        direction: Direction::Up,
+    };
+    assert_eq!(
+        viewer.get_placement_target(),
+        Some(placement_target.clone())
+    );
+
+    let release_action = viewer.handle_placement_mouse(
+        build_mouse_event(
+            MouseKind::Release(MouseButton::Left),
+            destination_point,
+            ModFlags::NONE,
+        ),
+        &destination_frame,
+        hover_started_at,
+    );
+    assert_eq!(
+        release_action,
+        Some(crate::tests::build_expected_submit_placement(
+            &viewer,
+            Command::PlacePane(koshi_core::command::PlacePaneArgs {
+                source_pane_id,
+                placement_target,
+                expected_placement_revision: Some(koshi_core::command::PlacementRevision {
+                    session_revision: 0,
+                    client_revision: 0,
+                }),
+            }),
+        ))
+    );
+}
+
+#[test]
 fn stack_header_drag_selects_group_for_insertion_and_pane_for_swap() {
     let source_pane_id = PaneId::new();
     let expanded_stack_pane_id = PaneId::new();
@@ -3022,7 +3143,7 @@ fn a_stack_header_press_in_pane_placement_mode_picks_that_collapsed_member_as_th
         viewer.get_placement_source_pane_id(),
         Some(collapsed_stack_pane_id)
     );
-    assert!(viewer.has_placement_drag_moved(Point { column: 40, row: 3 }));
+    assert!(viewer.update_placement_drag_movement(Point { column: 40, row: 3 }));
 }
 
 /// A viewer on tab `active_tab_id` in placement mode that places

@@ -445,7 +445,7 @@ impl Client {
                     }
                     _ => {}
                 }
-                if self.has_placement_drag_moved(mouse_input.position) {
+                if self.update_placement_drag_movement(mouse_input.position) {
                     if let Some(placement_target) =
                         self.find_placement_target_at(mouse_input.position, frame)
                     {
@@ -468,7 +468,7 @@ impl Client {
             }
             MouseKind::Release(released_button) => {
                 let should_submit = released_button == MouseButton::Left
-                    && self.has_placement_drag_moved(mouse_input.position);
+                    && self.update_placement_drag_movement(mouse_input.position);
                 if should_submit {
                     let placement_target =
                         self.find_placement_target_at(mouse_input.position, frame);
