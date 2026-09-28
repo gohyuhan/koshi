@@ -112,7 +112,9 @@ impl SupervisorPtyBackend {
     ///   answer to that kill is not checked.
     /// - A pane in `pane_ids` the supervisor does not hold is reported to `pty_sink`
     ///   as ended, carrying `ExitCode(-1)` when no exit arrived on this link.
-    ///   Every kill above is sent first.
+    ///   An `ExitCode(-1)` report follows the kills made during reconciliation.
+    /// - A listed pane with a recorded exit is closed in the supervisor and
+    ///   reported to `pty_sink` as ended.
     ///
     /// Every remaining pane is driven by the returned backend, at the process
     /// id and size the supervisor listed.
@@ -120,7 +122,8 @@ impl SupervisorPtyBackend {
     /// # Errors
     /// Returns [`PtyError::Io`] when the link cannot be opened, when the
     /// supervisor does not answer within the answer wait, when it refuses the
-    /// Hello or the pane list, or when it answers either with something else.
+    /// Hello, pane list, or a recorded exit's kill, or when it answers a request
+    /// with the wrong response kind.
     /// Any of those closes the link's read direction, so the reader thread
     /// ends and the supervisor is free to serve the next link.
     ///
@@ -178,11 +181,13 @@ impl SupervisorPtyBackend {
     /// A pane the supervisor holds that `pane_ids` does not name is killed with
     /// [`KillPolicy::Tree`]; a pane `pane_ids` names that the supervisor does not
     /// hold is reported to the `pty_sink` as ended if its exit has not arrived.
+    /// A listed pane with a recorded exit is killed with [`KillPolicy::Force`].
     /// Every remaining pane is written into this backend's pane map.
     ///
     /// # Errors
-    /// Returns [`PtyError::Io`] when the supervisor refuses the Hello or the
-    /// pane list, answers either with something else, or does not answer.
+    /// Returns [`PtyError::Io`] when the supervisor refuses the Hello, pane
+    /// list, or a recorded exit's kill, answers with the wrong response kind,
+    /// or does not answer.
     fn reconcile_panes(
         &self,
         connection_token: ConnectionToken,
@@ -210,7 +215,7 @@ impl SupervisorPtyBackend {
                 }
             };
 
-        // Both differences are settled before any pane is driven.
+        // Reconcile the pane list and recorded exits before any pane is driven.
         let requested_pane_ids: HashSet<PaneId> = pane_ids.iter().copied().collect();
         for supervisor_pane in &supervisor_panes {
             if !requested_pane_ids.contains(&supervisor_pane.pane_id) {
@@ -237,11 +242,19 @@ impl SupervisorPtyBackend {
             .exit_status_by_pane_id_during_connect
             .lock()
             .expect("supervisor exits during connect");
-        // The supervisor sends each exit before removing that pane from its
-        // ListPanes answer. Preserve those statuses across session rebuild.
+        // Keep exits received across the pane-list reply. A pane still listed
+        // with an exit needs a Kill request; an unlisted pane is already closed.
         let exit_status_by_pane_id = exit_status_by_pane_id_during_connect
             .take()
             .expect("pane reconciliation runs once");
+        let exited_listed_pane_ids: Vec<PaneId> = supervisor_panes
+            .iter()
+            .filter(|supervisor_pane| {
+                requested_pane_ids.contains(&supervisor_pane.pane_id)
+                    && exit_status_by_pane_id.contains_key(&supervisor_pane.pane_id)
+            })
+            .map(|supervisor_pane| supervisor_pane.pane_id)
+            .collect();
         let missing_pane_ids: Vec<PaneId> = pane_ids
             .iter()
             .filter(|pane_id| {
@@ -259,6 +272,13 @@ impl SupervisorPtyBackend {
             .lock()
             .expect("supervisor exit statuses") = exit_status_by_pane_id;
         drop(exit_status_by_pane_id_during_connect);
+        // The helper can send an exit after its ListPanes cleanup.
+        for pane_id in exited_listed_pane_ids {
+            self.send_request_and_require_done(SupervisorRequestKind::Kill {
+                pane_id,
+                kill_policy: KillPolicy::Force,
+            })?;
+        }
         for pane_id in missing_pane_ids {
             self.pty_sink.accept_exit_status(pane_id, UNOBSERVED_EXIT);
         }

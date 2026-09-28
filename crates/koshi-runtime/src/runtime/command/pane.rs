@@ -407,9 +407,8 @@ impl Server {
     /// sizes. Each applied resize appends one [`Event::PtyResized`] to `emitted_events`.
     ///
     /// Shared by [`handle_close_pane`](Self::handle_close_pane) and
-    /// [`handle_child_exit`](Self::handle_child_exit). Killing the child and any
-    /// render invalidation stay with the caller: a close kills a live child on a
-    /// detached thread, while a child-exit reaps a dead one inline.
+    /// [`handle_child_exit`](Self::handle_child_exit). Both callers release any
+    /// backend entry after reflow. Child-exit also invalidates rendering.
     fn release_pane_and_reflow(
         &mut self,
         session_id: SessionId,
@@ -434,21 +433,22 @@ impl Server {
         }
     }
 
-    /// Remove the pane whose child process exited and return the resulting
-    /// domain events.
+    /// Remove a pane after a child-exit event or when resume finds it absent
+    /// from the backend, and return the resulting domain events.
     ///
-    /// The child is already dead: the backend's watcher reaped it and set its
-    /// `has_child_exited` flag before this exit became observable.
+    /// A local backend's watcher reaps a child before reporting its exit.
+    /// Resume can also report a carried pane that the backend does not drive.
     /// [`apply_child_exit`] removes the pane — its tab may close and the last
     /// tab quit — and its runtime bookkeeping is released while the survivors
     /// reflow. An exit for a pane already gone — closed while the exit waited in
     /// the inbox — is dropped.
     ///
     /// Releasing a removed pane's bookkeeping clears its live ID, size cache,
-    /// and terminal engine. The backend's `kill_pane` call removes its pane
-    /// entry. A local backend drops the writer, joins the finished watcher,
-    /// and closes the terminal master. A supervisor backend sends a kill
-    /// request to the helper. An exited child receives no leader signal.
+    /// and terminal engine. If the backend still holds the pane, `kill_pane`
+    /// removes its entry. A local backend drops the writer, joins the watcher,
+    /// and closes the terminal master; a supervisor backend sends a kill request
+    /// to the helper. An absent pane returns `UnknownPane` without a kill
+    /// request. A reaped local child receives no leader signal.
     pub fn handle_child_exit(&mut self, pane_id: PaneId, exit_status: ExitStatus) -> Vec<Event> {
         // Exactly one of `exit_code` and `signal` is `Some`.
         let pane_exit = match exit_status {
@@ -513,9 +513,9 @@ impl Server {
             &mut emitted_events,
         );
 
-        // Release the backend's own PTY entry. The child already exited, so the
-        // `has_child_exited` guard skips the signal — this only drops the writer,
-        // joins the finished watcher, and frees the master fd.
+        // Release any backend entry still held for this pane. A local backend
+        // sends no leader signal after its watcher reaps the child. An undriven
+        // carried pane has no backend entry and returns UnknownPane.
         let _ = pty_backend.kill_pane(pane_id, KillPolicy::Force);
 
         self.render_scheduler.invalidate();
