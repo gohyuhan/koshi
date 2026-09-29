@@ -126,6 +126,16 @@ fn build_short_test_directory() -> TempDir {
         .expect("a temporary directory")
 }
 
+#[cfg(all(unix, target_os = "macos"))]
+fn resolve_test_config_directory(test_home_directory: &Path) -> PathBuf {
+    test_home_directory.join("Library/Application Support/koshi")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn resolve_test_config_directory(test_home_directory: &Path) -> PathBuf {
+    test_home_directory.join("config/koshi")
+}
+
 /// A session server the test started. Dropping it ends that server.
 struct RunningSession {
     /// The process the test started.
@@ -1013,6 +1023,15 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
     #[cfg(unix)]
     let children_before_restart = list_child_process_ids(endpoint_before_restart.process_id);
 
+    #[cfg(unix)]
+    let app_config_path = {
+        let config_directory = resolve_test_config_directory(test_home_directory.path());
+        std::fs::create_dir_all(&config_directory).expect("create config directory");
+        let app_config_path = config_directory.join("koshi.kdl");
+        std::fs::write(&app_config_path, "version 1\n").expect("write released config");
+        app_config_path
+    };
+
     assert_eq!(
         send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
         IpcResult::Restarting
@@ -1024,6 +1043,11 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
         runtime_directory.path(),
         session_id,
         &endpoint_before_restart,
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::read_to_string(&app_config_path).expect("read migrated config"),
+        "version 2\n"
     );
     let _restarted_process = RunningProcess {
         process_id: restarted_endpoint.process_id,
@@ -1807,6 +1831,86 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
 
     // Nothing was torn down for the refused restart: the session serves the
     // socket it bound, holds both panes, and its client is still streaming.
+    assert!(!session_server_process.has_session_server_exited());
+    assert_eq!(
+        EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
+            runtime_directory.path(),
+            session_id
+        ))
+        .expect("the session still advertises its socket")
+        .connection_token
+        .expose_secret(),
+        endpoint_before_restart.connection_token.expose_secret()
+    );
+    let mut expected_pane_lifecycles = vec![
+        (seeded_pane_id, PaneLifecycle::Running),
+        (output_pane_id, PaneLifecycle::Running),
+    ];
+    expected_pane_lifecycles.sort_by_key(|(pane_id, _)| *pane_id);
+    assert_eq!(
+        list_pane_lifecycles(runtime_directory.path(), session_id),
+        expected_pane_lifecycles
+    );
+    assert_eq!(
+        attached_client_stream
+            .receive_next_painted_frame()
+            .client_snapshot
+            .client_id,
+        attached_client_stream.client_id
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let binary_path = copy_koshi_binary(test_home_directory.path());
+    let session_id = SessionId::new();
+    let mut session_server_process = start_session_server(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+        session_id,
+    );
+
+    let (attached_client_stream, endpoint_before_restart) =
+        AttachedClientStream::attach_test_client(
+            runtime_directory.path(),
+            session_id,
+            TALL_ATTACH_VIEWPORT_SIZE,
+            None,
+        );
+    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
+    let output_pane_id = build_pane(
+        &mut control_connection,
+        session_id,
+        attached_client_stream.client_id,
+        Some(build_idle_spawn_spec()),
+    );
+
+    let config_directory = resolve_test_config_directory(test_home_directory.path());
+    std::fs::create_dir_all(&config_directory).expect("create config directory");
+    let app_config_path = config_directory.join("koshi.kdl");
+    std::fs::write(&app_config_path, "version 1\n").expect("write released config");
+    std::fs::create_dir(config_directory.join(".migration.lock"))
+        .expect("block the migration lock");
+
+    assert_eq!(
+        send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::MalformedRequest,
+            message: format!(
+                "the binary at {} does not say which resume formats it reads: EOF while parsing a value at line 1 column 0",
+                binary_path.display()
+            ),
+        })
+    );
+    assert_eq!(
+        std::fs::read_to_string(&app_config_path).expect("read unchanged config"),
+        "version 1\n"
+    );
     assert!(!session_server_process.has_session_server_exited());
     assert_eq!(
         EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(

@@ -15,15 +15,31 @@ flag and accepted value.
 
 `koshi update` then restarts each running session that can into the new release,
 and after them the background process that tracks sessions. A session keeps its
-panes, the programs running in them and their scrollback, and an attached
-terminal rejoins the session on its own.
+panes, the programs running in them and their scrollback. A client from the
+installed build can reattach to that session. The replacement session server
+or router migrates valid `version 1` KDL files to `version 2` before reading
+them. If migration fails, a running session refuses the restart and keeps its
+current build. A new session server or router exits with a config error.
+
+Live session handoff is available for sessions started by koshi 0.3.0 or
+0.4.0. A session started by 0.1.0 or 0.2.0 has no restart handoff; the update
+replaces the installed binary while that session keeps running its older
+build. End that session and start a new one to use the installed build.
+
+If the terminal still runs an older client, start the installed build and run
+`koshi attach workspace` for a session named `workspace`.
+
+The router converts the remote listener's certificate, access mark, and grants.
+Koshi converts saved servers on their first read. For example, a saved server
+keeps its secret and certificate pin, and an existing grant keeps its scope and
+expiry.
 
 A session whose saved state is partly damaged still comes back. A pane whose
 screen could not be read comes back blank with a notice, and its program keeps
 running. When the layout could not be read, each program comes back in a tab of
 its own. When nothing could be brought back, the session starts one new shell
-with a notice, and every program it ran is ended. An attached terminal rejoins
-in each of these cases.
+with a notice, and every program it ran is ended. A client from the installed
+build can attach in each of these cases.
 
 `koshi update` names every session that did not move on standard error, and that
 session keeps the old build until you end it and start it again. A session
@@ -56,7 +72,9 @@ An unknown key exits 2 and suggests the nearest known key.
 `check` and `migrate` scan `koshi.kdl`, `keybinding.kdl`, `themes/*.kdl`, and
 `profile/*.kdl`. Migration does not repair bad KDL or bad fields. Current
 schema version is `2`. Valid version `1` files migrate to version `2`.
-Valid version `2` files stay unchanged.
+Valid version `2` files stay unchanged. The replacement session server or
+router runs this migration before reading config; the command also lets
+you run it directly.
 
 Each path must be a regular file or a symlink to one. Both commands report all
 read and schema errors before migration writes anything. Migration keeps the
@@ -643,10 +661,11 @@ The checks run in this order:
 
 The `session directory` and `remote connections` rows report facts and rate
 nothing. The `remote access` row rates one thing: it reads `warn` when the
-grants could not be read. `koshi doctor` starts no koshi and creates no
-directory. The `log directory` row writes one empty file in the log directory
-and removes it again, which is how it reports whether that directory can be
-written.
+grants could not be read. A format `1` grant file is counted without changing
+it; the router converts it when it starts. `koshi doctor` starts no koshi and
+creates no directory. The `log directory` row writes one empty file in the log
+directory and removes it again, which is how it reports whether that directory
+can be written.
 
 The `router` row is the only row that rates the running router. A router whose
 build has no such question is `warn`; a router that is listening and does not

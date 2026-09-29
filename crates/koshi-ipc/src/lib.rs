@@ -42,6 +42,8 @@ pub mod plane;
 /// answer that repeats a request's `request_id`, and the Hello that opens a
 /// connection.
 pub mod protocol;
+/// One-way conversion of remote access files written by version 0.4.0.
+pub mod remote_migration;
 /// The servers a dialling user has connected to: the address, the secret, the
 /// pinned certificate fingerprint, and the name the user chose for each.
 pub mod remote_servers;

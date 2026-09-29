@@ -26,6 +26,9 @@ use std::time::{Duration, Instant};
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::supervisor::migration::{
+    encode_previous_supervisor_request, PreviousSupervisorMessage,
+};
 use koshi_ipc::supervisor::{
     IncomingSupervisorMessage, SupervisorEvent, SupervisorMessage, SupervisorRequest,
     SupervisorRequestKind, SupervisorResponse, SupervisorResult,
@@ -69,6 +72,8 @@ struct Link {
     response_receiver: Receiver<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
     /// The id the next request carries.
     next_request_id: u64,
+    /// Protocol of the supervisor process that stays alive across this session's swap.
+    supervisor_protocol_version: u32,
 }
 
 /// A [`PtyBackend`] whose panes live in a supervisor process.
@@ -135,6 +140,41 @@ impl SupervisorPtyBackend {
         pty_sink: Arc<dyn PtySink>,
         pane_ids: &[PaneId],
     ) -> Result<SupervisorPtyBackend, PtyError> {
+        Self::connect_with_supervisor_protocol(
+            supervisor_address,
+            connection_token,
+            pty_sink,
+            pane_ids,
+            koshi_ipc::supervisor::SUPERVISOR_PROTOCOL_VERSION,
+        )
+    }
+
+    /// Reconnect to a version 1 supervisor that still owns the carried panes.
+    ///
+    /// # Errors
+    /// Returns the connection, handshake, and reconciliation failures of [`connect`](Self::connect).
+    pub fn connect_previous_supervisor(
+        supervisor_address: &str,
+        connection_token: ConnectionToken,
+        pty_sink: Arc<dyn PtySink>,
+        pane_ids: &[PaneId],
+    ) -> Result<SupervisorPtyBackend, PtyError> {
+        Self::connect_with_supervisor_protocol(
+            supervisor_address,
+            connection_token,
+            pty_sink,
+            pane_ids,
+            1,
+        )
+    }
+
+    fn connect_with_supervisor_protocol(
+        supervisor_address: &str,
+        connection_token: ConnectionToken,
+        pty_sink: Arc<dyn PtySink>,
+        pane_ids: &[PaneId],
+        supervisor_protocol_version: u32,
+    ) -> Result<SupervisorPtyBackend, PtyError> {
         let connection =
             Connection::connect(supervisor_address).map_err(|io_error| PtyError::Io {
                 detail: format!(
@@ -150,6 +190,7 @@ impl SupervisorPtyBackend {
             response_sender,
             Arc::clone(&pty_sink),
             Arc::clone(&exit_status_by_pane_id_during_connect),
+            supervisor_protocol_version,
         );
 
         let backend = SupervisorPtyBackend {
@@ -157,6 +198,7 @@ impl SupervisorPtyBackend {
                 frame_writer,
                 response_receiver,
                 next_request_id: 1,
+                supervisor_protocol_version,
             }),
             live_panes_by_id: Mutex::new(HashMap::new()),
             exit_status_by_pane_id_during_connect,
@@ -412,17 +454,22 @@ impl SupervisorPtyBackend {
         let deadline = Instant::now() + wait_duration;
         let request_id = link_state.next_request_id;
         link_state.next_request_id += 1;
-        link_state
-            .frame_writer
-            .send(&SupervisorRequest {
-                request_id,
-                request_kind,
-            })
-            .map_err(|io_error| PtyError::Io {
-                detail: format!(
-                    "{request_kind_name} could not be sent to the supervisor: {io_error}"
-                ),
-            })?;
+        let supervisor_request = SupervisorRequest {
+            request_id,
+            request_kind,
+        };
+        let send_result = if link_state.supervisor_protocol_version == 1 {
+            let previous_request = encode_previous_supervisor_request(&supervisor_request)
+                .map_err(|conversion_error| PtyError::Io {
+                    detail: format!("{request_kind_name} cannot be encoded for the running supervisor: {conversion_error}"),
+                })?;
+            link_state.frame_writer.send(&previous_request)
+        } else {
+            link_state.frame_writer.send(&supervisor_request)
+        };
+        send_result.map_err(|io_error| PtyError::Io {
+            detail: format!("{request_kind_name} could not be sent to the supervisor: {io_error}"),
+        })?;
         let supervisor_response = loop {
             let remaining_wait_duration = deadline.saturating_duration_since(Instant::now());
             match link_state
@@ -713,6 +760,7 @@ fn start_link_reader_thread(
     response_sender: Sender<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
     pty_sink: Arc<dyn PtySink>,
     exit_status_by_pane_id_during_connect: Arc<Mutex<Option<HashMap<PaneId, ExitStatus>>>>,
+    supervisor_protocol_version: u32,
 ) {
     let _ = thread::Builder::new()
         .name("koshi-pty-link".to_string())
@@ -721,9 +769,17 @@ fn start_link_reader_thread(
             // pane is delivered, its exit included; every other pane keeps
             // being delivered.
             let mut output_rejected_pane_ids: HashSet<PaneId> = HashSet::new();
-            while let Ok(incoming_supervisor_message) =
-                frame_reader.recv::<IncomingSupervisorMessage>()
-            {
+            loop {
+                let incoming_supervisor_message = if supervisor_protocol_version == 1 {
+                    frame_reader
+                        .recv::<PreviousSupervisorMessage>()
+                        .map(|previous_message| previous_message.decoded_message)
+                } else {
+                    frame_reader.recv::<IncomingSupervisorMessage>()
+                };
+                let Ok(incoming_supervisor_message) = incoming_supervisor_message else {
+                    break;
+                };
                 match incoming_supervisor_message {
                     SupervisorMessage::Response(supervisor_response) => {
                         if response_sender.send(supervisor_response).is_err() {

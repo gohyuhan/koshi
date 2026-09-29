@@ -43,6 +43,8 @@ use crate::handshake::{GateWords, VersionGate};
 use crate::protocol::{ConnectionToken, IpcErrorPayload};
 use crate::wire::{Answer, Envelope, MaybeKnown, WireName, WireVariants};
 
+pub mod migration;
+
 /// The highest supervisor-link protocol version this build speaks, and the one
 /// it uses when the peer speaks it too.
 ///

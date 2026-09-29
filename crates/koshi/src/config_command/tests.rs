@@ -758,6 +758,143 @@ fn migrate_writes_only_the_files_that_changed() {
 }
 
 #[test]
+fn update_migrates_every_config_kind_without_a_user_command() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let config_paths = [
+        config_directory.path().join("koshi.kdl"),
+        config_directory.path().join("keybinding.kdl"),
+        config_directory.path().join("themes").join("plain.kdl"),
+        config_directory.path().join("profile").join("work.kdl"),
+    ];
+    for config_path in &config_paths {
+        fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        let config_source = if config_path.ends_with("work.kdl") {
+            "version 1\ntab { pane }\n"
+        } else {
+            "version 1\n"
+        };
+        fs::write(config_path, config_source).expect("write old schema");
+    }
+
+    migrate_config_directory_for_update(config_directory.path())
+        .expect("migrate valid config files during update");
+    for config_path in &config_paths {
+        assert_eq!(
+            fs::read_to_string(config_path).expect("read migrated config"),
+            if config_path.ends_with("work.kdl") {
+                "version 2\ntab { pane }\n"
+            } else {
+                "version 2\n"
+            }
+        );
+    }
+    migrate_config_directory_for_update(config_directory.path())
+        .expect("migrating current config leaves it readable");
+    for config_path in &config_paths {
+        assert_eq!(
+            fs::read_to_string(config_path).expect("read current config"),
+            if config_path.ends_with("work.kdl") {
+                "version 2\ntab { pane }\n"
+            } else {
+                "version 2\n"
+            }
+        );
+    }
+}
+
+#[test]
+fn concurrent_update_processes_migrate_one_config_directory_safely() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").expect("write old schema");
+    let start_barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut migration_threads = Vec::new();
+    for _migration_index in 0..2 {
+        let config_directory_path = config_directory.path().to_path_buf();
+        let thread_barrier = std::sync::Arc::clone(&start_barrier);
+        migration_threads.push(std::thread::spawn(move || {
+            thread_barrier.wait();
+            migrate_config_directory_for_update(&config_directory_path)
+        }));
+    }
+    start_barrier.wait();
+    for migration_thread in migration_threads {
+        migration_thread
+            .join()
+            .expect("migration thread completed")
+            .expect("migration completed");
+    }
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read migrated config"),
+        "version 2\n"
+    );
+}
+
+#[test]
+fn update_without_config_directory_creates_no_config_files() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let missing_config_directory = test_directory.path().join("missing-config");
+
+    migrate_config_directory_for_update(&missing_config_directory)
+        .expect("missing config directory is valid");
+
+    assert!(!missing_config_directory.exists());
+}
+
+#[test]
+fn update_refuses_config_migration_when_its_lock_cannot_open() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").expect("write released config");
+    let migration_lock_path = config_directory.path().join(".migration.lock");
+    fs::create_dir(&migration_lock_path).expect("block migration lock");
+    let expected_open_error = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&migration_lock_path)
+        .expect_err("a directory cannot be opened as a migration lock");
+
+    let migration_error = migrate_config_directory_for_update(config_directory.path())
+        .expect_err("migration lock must open before config changes");
+
+    match migration_error {
+        CliError::Config { detail } => {
+            assert_eq!(
+                detail,
+                format!(
+                    "open {}: {expected_open_error}",
+                    migration_lock_path.display()
+                )
+            );
+        }
+        unexpected_cli_error => panic!("expected config error, got {unexpected_cli_error:?}"),
+    }
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read unchanged config"),
+        "version 1\n"
+    );
+}
+
+#[test]
+fn update_reads_current_config_without_opening_the_migration_lock() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 2\n").expect("write current config");
+    fs::create_dir(config_directory.path().join(".migration.lock")).expect("block migration lock");
+
+    migrate_config_directory_for_update(config_directory.path())
+        .expect("current config needs no migration lock");
+
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read current config"),
+        "version 2\n"
+    );
+}
+
+#[test]
 fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_list() {
     let config_directory = TempDir::new().unwrap();
     let keybinding_config_path = config_directory.path().join("keybinding.kdl");

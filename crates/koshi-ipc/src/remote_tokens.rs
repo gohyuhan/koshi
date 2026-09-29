@@ -16,9 +16,10 @@
 //! The whole set lives in one JSON file —
 //! [`resolve_token_store_path`](crate::remote_tokens::resolve_token_store_path) — inside the
 //! private koshi data directory. The file carries the format number
-//! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT), and a file carrying any other
-//! number is refused. Writes go through [`koshi_storage::atomic::write_atomic`]: a reader finds the
-//! old content or the new, never a half-written middle.
+//! [`TOKEN_STORE_FORMAT`](crate::remote_tokens::TOKEN_STORE_FORMAT). The normal reader refuses
+//! another number; [`remote_migration`](crate::remote_migration) converts format 1 grants
+//! when the router starts. Writes go through [`koshi_storage::atomic::write_atomic`]: a reader
+//! finds the old content or the new, never a half-written middle.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

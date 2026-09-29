@@ -180,8 +180,8 @@ fn the_session_protocol_stands_one_step_above_its_release_anchor() {
 }
 
 #[test]
-fn the_resume_format_speaks_four_and_accepts_nothing_older() {
-    assert_eq!(RESUME_FORMAT.minimum_version, 4);
+fn the_resume_format_writes_four_and_migrates_from_one() {
+    assert_eq!(RESUME_FORMAT.minimum_version, 1);
     assert_eq!(RESUME_FORMAT.maximum_version, 4);
     assert_eq!(RESUME_FORMAT.released_version, Some(3));
 }
@@ -238,13 +238,13 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
             ("session protocol", 4, 4, Some(3)),
             ("control plane", 3, 3, Some(2)),
             ("supervisor link", 2, 2, Some(1)),
-            ("token store format", 2, 2, Some(1)),
+            ("token store format", 1, 2, Some(1)),
             ("remote doorway", 2, 2, Some(1)),
-            ("saved server file format", 2, 2, Some(1)),
-            ("remote certificate file format", 2, 2, Some(1)),
-            ("remote access record format", 2, 2, Some(1)),
-            ("resume file format", 4, 4, Some(3)),
-            ("config schema", 2, 2, Some(1)),
+            ("saved server file format", 1, 2, Some(1)),
+            ("remote certificate file format", 1, 2, Some(1)),
+            ("remote access record format", 1, 2, Some(1)),
+            ("resume file format", 1, 4, Some(3)),
+            ("config schema", 1, 2, Some(1)),
         ]
     );
 }

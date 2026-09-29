@@ -17,7 +17,7 @@ use koshi_config::migration::{
 use koshi_config::parser::format_unknown_key;
 use koshi_storage::{atomic::write_atomic, error::StorageError};
 
-use crate::cli::ConfigCommand;
+use crate::cli::{CliCommand, ConfigCommand};
 use koshi_link::error::CliError;
 
 #[cfg(test)]
@@ -382,6 +382,47 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Migrate config before a router, session server, or resume-support probe starts.
+/// Other commands and an unresolved config directory make no changes.
+///
+/// # Errors
+/// Returns validation and migration errors from the config directory.
+pub fn migrate_config_for_service_command(
+    command: Option<&CliCommand>,
+    config_directory: Option<&Path>,
+) -> Result<(), CliError> {
+    if matches!(
+        command,
+        Some(
+            CliCommand::ServeSession { .. }
+                | CliCommand::ServeRouter { .. }
+                | CliCommand::ResumeSupport
+        )
+    ) {
+        if let Some(config_directory) = config_directory {
+            migrate_config_directory_for_update(config_directory)?;
+        }
+    }
+    Ok(())
+}
+
+/// Migrate saved KDL files before a replacement server reads config.
+///
+/// # Errors
+/// Returns validation and migration errors. Current files need no write lock.
+pub fn migrate_config_directory_for_update(config_directory: &Path) -> Result<(), CliError> {
+    let config_report = validate_config_directory(config_directory);
+    if !config_report.config_file_errors.is_empty() {
+        return Err(CliError::Config {
+            detail: config_report.config_file_errors.join("\n"),
+        });
+    }
+    if !config_report.has_older_schema_file {
+        return Ok(());
+    }
+    migrate_config_directory_with_lock(config_directory).map(|_| ())
+}
+
 fn run_config_command_in_directory(
     command: &ConfigCommand,
     config_directory: &Path,
@@ -390,10 +431,54 @@ fn run_config_command_in_directory(
         ConfigCommand::Path => Ok(format!("{}\n", config_directory.display())),
         ConfigCommand::Explain { config_key } => explain_config_key(config_key),
         ConfigCommand::Check => check_config_directory(config_directory),
-        ConfigCommand::Migrate => {
-            migrate_config_directory_with(config_directory, migrate_config, write_atomic)
+        ConfigCommand::Migrate => migrate_config_directory_with_lock(config_directory),
+    }
+}
+
+fn migrate_config_directory_with_lock(config_directory: &Path) -> Result<String, CliError> {
+    match fs::metadata(config_directory) {
+        Ok(directory_metadata) if directory_metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(CliError::Config {
+                detail: format!("{} is not a directory", config_directory.display()),
+            });
+        }
+        Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(format!(
+                "no config files found in {}\n",
+                config_directory.display()
+            ));
+        }
+        Err(read_error) => {
+            return Err(CliError::Config {
+                detail: format!("read {}: {read_error}", config_directory.display()),
+            });
         }
     }
+    let migration_lock_path = config_directory.join(".migration.lock");
+    let mut migration_lock_options = fs::File::options();
+    migration_lock_options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        migration_lock_options.mode(0o600);
+    }
+    let migration_lock_file =
+        migration_lock_options
+            .open(&migration_lock_path)
+            .map_err(|open_error| CliError::Config {
+                detail: format!("open {}: {open_error}", migration_lock_path.display()),
+            })?;
+    migration_lock_file
+        .lock()
+        .map_err(|lock_error| CliError::Config {
+            detail: format!("lock {}: {lock_error}", migration_lock_path.display()),
+        })?;
+    migrate_config_directory_with(config_directory, migrate_config, write_atomic)
 }
 
 fn explain_config_key(config_key: &str) -> Result<String, CliError> {
@@ -428,16 +513,20 @@ pub(crate) struct ConfigReport {
     pub(crate) config_report_lines: Vec<String>,
     /// One message per file that could not be read or did not validate.
     pub(crate) config_file_errors: Vec<String>,
+    /// Whether a valid file needs an ordered schema migration.
+    pub(crate) has_older_schema_file: bool,
 }
 
 /// Read and validate every known config file under `config_directory`.
 ///
 /// Reads the filesystem and writes nothing. A directory with no config file
-/// gives empty `config_report_lines` and empty `config_file_errors`.
+/// gives empty `config_report_lines` and `config_file_errors`, and reports no
+/// older schema file.
 pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport {
     let loaded_config_files = load_config_files(config_directory);
     let mut config_report_lines = Vec::with_capacity(loaded_config_files.config_files.len());
     let mut config_file_errors = loaded_config_files.config_file_read_errors;
+    let mut has_older_schema_file = false;
     for config_file in &loaded_config_files.config_files {
         match validate_config(
             config_file.config_file_kind,
@@ -449,18 +538,22 @@ pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport
                 config_file.config_path.display(),
                 validated.schema_version
             )),
-            Ok(validated) => config_report_lines.push(format!(
-                "{}: valid (version {}; migrate to version {})",
-                config_file.config_path.display(),
-                validated.schema_version,
-                koshi_config::types::SCHEMA_VERSION
-            )),
+            Ok(validated) => {
+                has_older_schema_file = true;
+                config_report_lines.push(format!(
+                    "{}: valid (version {}; migrate to version {})",
+                    config_file.config_path.display(),
+                    validated.schema_version,
+                    koshi_config::types::SCHEMA_VERSION
+                ));
+            }
             Err(config_error) => config_file_errors.push(config_error.to_string()),
         }
     }
     ConfigReport {
         config_report_lines,
         config_file_errors,
+        has_older_schema_file,
     }
 }
 
