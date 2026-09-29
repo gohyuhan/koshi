@@ -20,7 +20,9 @@ use koshi_terminal::state::ImagePlacementId;
 use koshi_terminal::style::Style as CellStyle;
 
 use crate::render::{compute_layout_origin, find_pane_snapshot, place_cell_rect};
-use crate::snapshot::{CommittedRegions, ImagePlacementSnapshot, RenderSnapshot};
+use crate::snapshot::{
+    CommittedRegions, ImagePlacementSnapshot, PanePlacementPresentation, RenderSnapshot,
+};
 
 /// The text a client paints when it cannot display terminal image pixels.
 pub const TERMINAL_IMAGE_UNAVAILABLE: &str = "terminal image unavailable";
@@ -381,12 +383,14 @@ pub fn build_image_paints(
 /// placement shows it while its image record is missing, or while
 /// `available_image_keys` is `Some` and does not name the placement. `None`
 /// counts every placement with a record as ready.
+/// A placement preview hides placeholders in its softened panes.
 pub(crate) fn compute_image_placeholder_rects(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     screen_area: RatatuiRect,
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
+    placement_presentation: Option<&PanePlacementPresentation>,
 ) -> Vec<RatatuiRect> {
     if screen_area.width == 0
         || screen_area.height == 0
@@ -405,7 +409,11 @@ pub(crate) fn compute_image_placeholder_rects(
         .active_tab_snapshot
         .pane_slots
     {
-        if !pane_slot.is_visible {
+        if !pane_slot.is_visible
+            || placement_presentation.is_some_and(|placement_presentation| {
+                placement_presentation.is_pane_affected(pane_slot.pane_id)
+            })
+        {
             continue;
         }
         let Some(content_rect) = pane_slot.content_rect else {

@@ -1040,6 +1040,162 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
     }
 }
 
+#[test]
+fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
+    let (mut server, client_id, pane_id) = build_test_server_with_pane();
+    let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
+    let _ = server.handle_runtime_event(RuntimeEvent::CellSize {
+        client_id,
+        cell_size,
+    });
+    let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
+        pane_id,
+        output_bytes: build_opaque_image_input(koshi_terminal::graphics::GraphicsProtocol::Kitty),
+    });
+    let snapshot = build_render_snapshot(&server, client_id);
+    let client = build_test_client(&mut server, client_id);
+    let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
+
+    for graphics in [
+        GraphicsSupport::Kitty,
+        GraphicsSupport::Iterm,
+        GraphicsSupport::Sixel {
+            palette_color_count: 256,
+            maximum_pixel_width: None,
+            maximum_pixel_height: None,
+        },
+    ] {
+        let mut writer = ImageTraceWriter::default();
+        let backend = ImageTraceBackend(ratatui::backend::CrosstermBackend::new(writer.clone()));
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+            },
+        )
+        .expect("test terminal");
+        let mut image_output_state =
+            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics));
+        let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
+            column_count: 80,
+            row_count: 24,
+        });
+        terminal_engine.set_cell_size(cell_size);
+        let _ = terminal_engine.process_pty_output(b"\x1b[?1049h");
+        let mut frame_paint =
+            ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot);
+
+        for should_show_preview in [false, true, false] {
+            frame_paint.placement_presentation =
+                should_show_preview.then(|| koshi_renderer::snapshot::PanePlacementPresentation {
+                    source_pane_id: pane_id,
+                    target_pane_ids: Vec::new(),
+                    source_message: koshi_renderer::snapshot::PanePlacementMessage {
+                        full_text: "Moving pane: choose a destination".to_string(),
+                        compact_text: "Moving pane",
+                        detail_text: None,
+                    },
+                    target_message: None,
+                });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let committed = paint_frame_with_writer(
+                    &mut writer,
+                    &mut terminal,
+                    &client,
+                    &snapshot,
+                    &committed_regions,
+                    &frame_paint,
+                    graphics.get_image_render_mode(),
+                    &mut image_output_state,
+                    Some(cell_size),
+                    &mut String::new(),
+                    &mut None,
+                    None,
+                    None,
+                )
+                .expect("native image frame paints");
+                let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
+                let _ = terminal_engine.process_pty_output(&output_bytes);
+                if committed && !image_output_state.is_work_pending() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{graphics:?} image frame settles"
+                );
+                std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
+            }
+            assert_eq!(
+                build_terminal_image_pixel_map(&terminal_engine).is_empty(),
+                should_show_preview,
+                "{graphics:?} native images follow the pane preview"
+            );
+        }
+    }
+}
+
+#[test]
+fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
+    let (mut server, client_id, pane_id) = build_test_server_with_pane();
+    let mut snapshot = build_render_snapshot(&server, client_id);
+    snapshot.pane_snapshots[0].cursor_snapshot.is_visible = true;
+    let client = build_test_client(&mut server, client_id);
+    let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+    let mut frame_paint =
+        ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot);
+    assert!(get_cursor_position(&snapshot, &committed_regions, Rect::new(0, 0, 80, 24)).is_some());
+
+    paint_frame(
+        &mut terminal,
+        &client,
+        &snapshot,
+        &committed_regions,
+        &frame_paint,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("normal frame paints");
+    assert!(terminal.backend().cursor_visible());
+
+    frame_paint.placement_presentation =
+        Some(koshi_renderer::snapshot::PanePlacementPresentation {
+            source_pane_id: pane_id,
+            target_pane_ids: Vec::new(),
+            source_message: koshi_renderer::snapshot::PanePlacementMessage {
+                full_text: "Moving pane: choose a destination".to_string(),
+                compact_text: "Moving pane",
+                detail_text: None,
+            },
+            target_message: None,
+        });
+    paint_frame(
+        &mut terminal,
+        &client,
+        &snapshot,
+        &committed_regions,
+        &frame_paint,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("placement preview paints");
+    assert!(!terminal.backend().cursor_visible());
+
+    frame_paint.placement_presentation = None;
+    paint_frame(
+        &mut terminal,
+        &client,
+        &snapshot,
+        &committed_regions,
+        &frame_paint,
+        &mut String::new(),
+        &mut None,
+    )
+    .expect("normal frame paints after placement");
+    assert!(terminal.backend().cursor_visible());
+}
+
 fn assert_two_image_trace_output(
     client: &Client,
     image_protocol: koshi_terminal::graphics::GraphicsProtocol,
@@ -2305,6 +2461,68 @@ fn terminal_modes_are_enabled_after_entering_the_alternate_screen() {
 }
 
 #[test]
+fn shift_mouse_capture_is_requested_only_while_placement_is_active() {
+    let mut terminal_mode_bytes = Vec::new();
+    let mut is_shift_mouse_capture_requested = false;
+
+    update_shift_mouse_capture(
+        &mut terminal_mode_bytes,
+        false,
+        &mut is_shift_mouse_capture_requested,
+    )
+    .expect("normal mouse mode");
+    assert_eq!(terminal_mode_bytes, b"");
+
+    update_shift_mouse_capture(
+        &mut terminal_mode_bytes,
+        true,
+        &mut is_shift_mouse_capture_requested,
+    )
+    .expect("placement mouse mode");
+    assert_eq!(terminal_mode_bytes, b"\x1b[>1s");
+    assert!(is_shift_mouse_capture_requested);
+
+    update_shift_mouse_capture(
+        &mut terminal_mode_bytes,
+        true,
+        &mut is_shift_mouse_capture_requested,
+    )
+    .expect("unchanged placement mouse mode");
+    assert_eq!(terminal_mode_bytes, b"\x1b[>1s");
+
+    update_shift_mouse_capture(
+        &mut terminal_mode_bytes,
+        false,
+        &mut is_shift_mouse_capture_requested,
+    )
+    .expect("normal mouse mode restored");
+    assert_eq!(terminal_mode_bytes, b"\x1b[>1s\x1b[>0s");
+    assert!(!is_shift_mouse_capture_requested);
+}
+
+#[test]
+fn failed_shift_mouse_capture_write_can_be_retried() {
+    let mut writer = FailOnWrite {
+        fail_at: 0,
+        writes: 0,
+        written_bytes: Vec::new(),
+    };
+    let mut is_shift_mouse_capture_requested = false;
+
+    let io_error =
+        update_shift_mouse_capture(&mut writer, true, &mut is_shift_mouse_capture_requested)
+            .expect_err("the terminal write fails");
+    assert_eq!(io_error.kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(writer.written_bytes, b"");
+    assert!(!is_shift_mouse_capture_requested);
+
+    update_shift_mouse_capture(&mut writer, true, &mut is_shift_mouse_capture_requested)
+        .expect("the next write succeeds");
+    assert_eq!(writer.written_bytes, b"\x1b[>1s");
+    assert!(is_shift_mouse_capture_requested);
+}
+
+#[test]
 fn sixel_modes_are_saved_before_application_modes() {
     let mut terminal_mode_bytes = Vec::new();
     let graphics = GraphicsSupport::Sixel {
@@ -2331,7 +2549,7 @@ fn terminal_cleanup_reverses_modes_and_deletes_kitty_images() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
     assert!(claimed.load(Ordering::Acquire));
 }
@@ -2351,7 +2569,7 @@ fn sixel_cleanup_aborts_a_control_string_before_restoring_modes() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b[?80r\x1b[?8452r\x1b[?1070r\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b[?80r\x1b[?8452r\x1b[?1070r\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 }
 
@@ -2370,7 +2588,7 @@ fn terminal_cleanup_attempts_mode_resets_after_image_delete_fails() {
     assert_eq!(cleanup_error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(
         writer.written_bytes,
-        b"\x18\x1b\\\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 }
 
@@ -2384,7 +2602,7 @@ fn terminal_cleanup_cancels_a_partial_kitty_apc_before_deleting_images() {
         .expect("cleanup writes after the partial packet");
     assert_eq!(
         &writer[partial.len()..],
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 
     let mut engine = TerminalEngine::from_pty_size(PtySize {
@@ -2419,7 +2637,7 @@ fn terminal_application_modes_are_restored_once_across_cleanup_paths() {
 
     assert_eq!(
         cleanup_bytes,
-        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
+        b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
     assert!(!active.load(Ordering::Acquire));
     assert!(image_claimed.load(Ordering::Acquire));
@@ -3038,7 +3256,7 @@ fn placement_interpolation_reaches_the_target_without_overshooting() {
 }
 
 #[test]
-fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
+fn pane_insertion_preview_shows_both_messages_and_terminal_contents() {
     let (session_server, client_id, source_pane_id) = build_test_server_with_pane();
     let mut render_snapshot = build_render_snapshot(&session_server, client_id);
     let tab_id = render_snapshot.client_snapshot.active_tab_id;
@@ -3087,6 +3305,20 @@ fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
     );
     let theme = Theme::default();
     let mut render_buffer = Buffer::empty(viewport_area);
+    let placement_presentation = koshi_renderer::snapshot::PanePlacementPresentation {
+        source_pane_id,
+        target_pane_ids: vec![target_pane_id],
+        source_message: koshi_renderer::snapshot::PanePlacementMessage {
+            full_text: "Moving pane will insert below".to_string(),
+            compact_text: "Moving pane",
+            detail_text: None,
+        },
+        target_message: Some(koshi_renderer::snapshot::PanePlacementMessage {
+            full_text: "Other pane will make room below".to_string(),
+            compact_text: "Other pane",
+            detail_text: None,
+        }),
+    };
 
     koshi_renderer::render_frame(
         &displayed_render_snapshot,
@@ -3101,7 +3333,7 @@ fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
         },
         ImageRenderMode::Placeholder,
         None,
-        None,
+        Some(&placement_presentation),
         Some(&placement_target),
         viewport_area,
         &mut render_buffer,
@@ -3117,15 +3349,30 @@ fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
         &mut render_buffer,
     );
 
-    let rendered_text = render_buffer
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered_text.contains(&format_pane_id_label(source_pane_id)));
-    assert!(rendered_text.contains(&format_pane_id_label(target_pane_id)));
     assert_eq!(
-        render_displayed_pane_cell(
+        get_rendered_pane_heading(
+            &render_buffer,
+            &committed_regions,
+            viewport_area,
+            &displayed_render_snapshot,
+            source_pane_id,
+            29,
+        ),
+        "Moving pane will insert below"
+    );
+    assert_eq!(
+        get_rendered_pane_heading(
+            &render_buffer,
+            &committed_regions,
+            viewport_area,
+            &displayed_render_snapshot,
+            target_pane_id,
+            31,
+        ),
+        "Other pane will make room below"
+    );
+    assert_eq!(
+        get_rendered_pane_cell(
             &render_buffer,
             &committed_regions,
             viewport_area,
@@ -3136,7 +3383,7 @@ fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
         "the moving pane keeps its terminal cells in the proposed slot"
     );
     assert_eq!(
-        render_displayed_pane_cell(
+        get_rendered_pane_cell(
             &render_buffer,
             &committed_regions,
             viewport_area,
@@ -3148,13 +3395,39 @@ fn pane_insertion_preview_keeps_both_ids_and_terminal_contents_visible() {
     );
 }
 
-fn format_pane_id_label(pane_id: PaneId) -> String {
-    let pane_id_hex = pane_id.get_uuid().simple().to_string();
-    let pane_id_suffix_start_byte_offset = pane_id_hex.len() - 12;
-    format!("pane-…{}", &pane_id_hex[pane_id_suffix_start_byte_offset..])
+fn get_rendered_pane_heading(
+    render_buffer: &Buffer,
+    committed_regions: &CommittedRegions,
+    viewport_area: Rect,
+    displayed_render_snapshot: &RenderSnapshot,
+    pane_id: PaneId,
+    heading_column_count: u16,
+) -> String {
+    let pane_slot = displayed_render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .pane_slots
+        .iter()
+        .find(|pane_slot| pane_slot.pane_id == pane_id)
+        .expect("the displayed pane has a proposed slot");
+    let layout_rect = koshi_renderer::compute_content_rect(
+        koshi_renderer::compute_pane_area(committed_regions, viewport_area),
+        displayed_render_snapshot
+            .session_snapshot
+            .active_tab_snapshot
+            .tab_size,
+    );
+    let heading_column = layout_rect.x
+        + pane_slot.outer_rect.origin.column
+        + (pane_slot.outer_rect.size.column_count - heading_column_count) / 2;
+    let heading_row =
+        layout_rect.y + pane_slot.outer_rect.origin.row + pane_slot.outer_rect.size.row_count / 2;
+    (heading_column..heading_column + heading_column_count)
+        .map(|column_index| render_buffer[(column_index, heading_row)].symbol())
+        .collect()
 }
 
-fn render_displayed_pane_cell(
+fn get_rendered_pane_cell(
     render_buffer: &Buffer,
     committed_regions: &CommittedRegions,
     viewport_area: Rect,

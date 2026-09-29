@@ -232,13 +232,11 @@ fn assembling_statusline_inputs_twice_shares_every_allocation() {
     let first_statusline_inputs = StatuslineInputs {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
-        placement_status: None,
         is_recovery_notice_visible: false,
     };
     let second_statusline_inputs = StatuslineInputs {
         keymap_hints: &keymap_hints,
         pending_key_sequence: Some(&pending_key_sequence),
-        placement_status: None,
         is_recovery_notice_visible: false,
     };
 

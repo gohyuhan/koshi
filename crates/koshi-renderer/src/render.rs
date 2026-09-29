@@ -5,9 +5,8 @@
 //! koshi version, and the tab list on the left, the right-aligned mode tag),
 //! the **pane area** (a bordered box per visible pane, the focused pane's
 //! border highlighted), and the **statusline** — a koshi-owned row with
-//! per-mode keybinding hints and viewer-local placement status. Pane borders
-//! and collapsed stack headers show pane id suffixes in pane placement mode
-//! and terminal titles in other modes: `pane-…123456789abc` replaces `nvim`.
+//! per-mode keybinding hints. Placement previews tint the moving and destination
+//! panes separately, color their outlines, and explain their proposed positions.
 //! The committed region solve supplies all three zones.
 //!
 //! Collapsed members of a stacked pane group are drawn as one-row title strips
@@ -19,8 +18,6 @@
 //! render for that frame. When the pane area is larger than the size the
 //! layout was solved for, the layout is centered inside that pane area and the
 //! surrounding margin is filled with a dim letterbox.
-
-use std::borrow::Cow;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect as RatatuiRect};
@@ -42,14 +39,17 @@ use crate::images::{
 };
 use crate::region::StatuslineInputs;
 use crate::snapshot::{
-    CommittedRegions, CursorStyle, KeymapHints, PaneSnapshot, PlacementStatus, Reconnecting,
-    RenderSnapshot, SelectionSpans, ViewerChrome,
+    CommittedRegions, CursorStyle, KeymapHints, PanePlacementPresentation, PaneSnapshot,
+    Reconnecting, RenderSnapshot, SelectionSpans, ViewerChrome,
 };
 use crate::statusline_hints::draw_statusline;
 use crate::theme::Theme;
 
 const PLACEMENT_HOVER_TINT_COLOR: Color = Color::Rgb(0x3a, 0x3a, 0x3a);
-const PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT: usize = 12;
+
+mod placement;
+
+use placement::draw_pane_placement_presentation;
 
 /// Paint `render_snapshot` into `screen_buffer` over `viewport_area`.
 ///
@@ -62,16 +62,19 @@ const PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT: usize = 12;
 /// 1. Blanks every cell of `viewport_area`, so a buffer reused across frames shows no
 ///    stale cells.
 /// 2. Draws one bordered box per visible pane: the terminal title in the top
-///    border, or a pane id suffix in pane placement mode, and the scroll
+///    border, and the scroll
 ///    position in the bottom border when the pane is scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect.
 /// 4. Keeps pane cells under native images or writes the unsupported-image
 ///    text over unavailable coverage.
 /// 5. Draws the one-row title strip for every collapsed stack member.
-/// 6. Fills the letterbox margin: every cell of `viewport_area` outside the centered
+/// 6. Tints each visible affected pane with a role color and colors its outline.
+///    The moving pane and the uncovered area of one visible destination pane
+///    show preview text when both areas are visible.
+/// 7. Fills the letterbox margin: every cell of `viewport_area` outside the centered
 ///    layout, the chrome rows included.
-/// 7. Draws the tabline in the first committed region, over that margin.
-/// 8. Draws the statusline in the second committed region, over that margin.
+/// 8. Draws the tabline in the first committed region, over that margin.
+/// 9. Draws the statusline in the second committed region, over that margin.
 ///
 /// `theme`, `hints`, `pending_key_sequence`, and `viewer_chrome` come from the viewer: the colors
 /// it paints koshi's chrome in, the statusline data for the mode it is in, the
@@ -89,10 +92,11 @@ const PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT: usize = 12;
 /// native bytes are ready, and every other image shows the unavailable-image
 /// text; `None` shows that text only over images whose record is missing.
 ///
-/// `placement_status` fills the placement entry of the statusline. Every pane
-/// and collapsed stack header that `placement_target` names in the displayed
-/// tab takes the placement hover color: an insertion above `pane-123` colors
-/// `pane-123`'s border.
+/// `placement_presentation` tints visible affected panes and paints messages
+/// inside visible pane content outside stack headers. Collapsed stack headers
+/// keep their text under the tint. The moving pane's tint and text take priority
+/// where pane rectangles overlap outside those headers. `placement_target`
+/// selects destination border styling before the preview colors affected panes.
 ///
 /// # Panics
 ///
@@ -108,7 +112,7 @@ pub fn render_frame(
     viewer_chrome: ViewerChrome,
     image_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
-    placement_status: Option<&PlacementStatus>,
+    placement_presentation: Option<&PanePlacementPresentation>,
     placement_target: Option<&PanePlacementTarget>,
     viewport_area: RatatuiRect,
     screen_buffer: &mut Buffer,
@@ -173,6 +177,7 @@ pub fn render_frame(
         viewport_area,
         image_mode,
         available_image_keys,
+        placement_presentation,
     );
     draw_image_placeholders(&placeholder_rects, screen_buffer);
     draw_stack_headers(
@@ -183,6 +188,15 @@ pub fn render_frame(
         layout_origin,
         screen_buffer,
     );
+    if let Some(placement_presentation) = placement_presentation {
+        draw_pane_placement_presentation(
+            render_snapshot,
+            placement_presentation,
+            layout_origin,
+            theme,
+            screen_buffer,
+        );
+    }
 
     // The margin fills first; the tabline and statusline paint over it.
     draw_letterbox(viewport_area, effective_layout_rect, theme, screen_buffer);
@@ -201,7 +215,6 @@ pub fn render_frame(
             StatuslineInputs {
                 keymap_hints: hints,
                 pending_key_sequence,
-                placement_status,
                 is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
             },
             theme,
@@ -326,8 +339,7 @@ pub(crate) fn find_pane_snapshot(
 
 /// Draw a bordered box for every visible pane in the active tab, coloring the
 /// focused pane's border (and an unfocused hovered pane's), writing its title
-/// into the top border or its id suffix while pane placement is visible, and
-/// drawing its scroll position when it is scrolled back.
+/// into the top border, and drawing its scroll position when it is scrolled back.
 ///
 /// `viewer_chrome.hovered_pane_id` is the pane the viewer's pointer is over.
 /// `viewer_chrome.placement_handle_pane_id` names the top border that shows the
@@ -386,8 +398,9 @@ fn draw_panes(
 
         // The pane label starts two cells in and stops four cells short of the
         // box width, which leaves the corner glyphs.
-        let pane_label =
-            format_pane_label(pane_slot.pane_id, pane_snapshot, is_pane_placement_visible);
+        let pane_label = pane_snapshot
+            .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
+            .unwrap_or("");
         if !pane_label.is_empty() && pane_rect.width > 4 {
             let pane_label_line = Line::from(Span::styled(format!(" {pane_label} "), border_style));
             set_line_clipped(
@@ -687,10 +700,7 @@ fn get_cell_color(cell_color: CellColor) -> Color {
 
 /// Draw one header strip for each collapsed stack member: a collapse arrow and
 /// the pane title on the left, and a `[position/total]` indicator on the right.
-/// While `viewer_chrome.is_pane_placement_visible` is `true`, the strip shows the
-/// pane id suffix in place of the title: a collapsed pane with id
-/// `pane-0192f0c1-0000-7000-8000-000000000001` shows `pane-…000000000001`. The
-/// strip of `viewer_chrome.placement_source_pane_id` takes the focus color, and
+/// The strip of `viewer_chrome.placement_source_pane_id` takes the focus color, and
 /// a strip that `placement_target` names takes the placement hover color.
 /// `layout_origin` shifts each strip into the centered content rect.
 fn draw_stack_headers(
@@ -727,11 +737,9 @@ fn draw_stack_headers(
         // carries the strip background too.
         screen_buffer.set_style(header_rect, stack_header_style);
 
-        let pane_label = format_pane_label(
-            stack_header.pane_id,
-            find_pane_snapshot(render_snapshot, stack_header.pane_id),
-            viewer_chrome.is_pane_placement_visible,
-        );
+        let pane_label = find_pane_snapshot(render_snapshot, stack_header.pane_id)
+            .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
+            .unwrap_or("");
         let pane_label_line = Line::from(format!("▸ {pane_label}"));
         set_line_clipped(
             screen_buffer,
@@ -761,30 +769,6 @@ fn draw_stack_headers(
             header_rect.right() - indicator_start_column,
         );
     }
-}
-
-/// Return the label drawn for `pane_id`: `pane-…` and the last 12 hex digits of
-/// the id while `is_pane_placement_visible` is `true`, else the terminal title
-/// in `pane_snapshot`, or `""` when it has none. Pane id
-/// `pane-0192f0c1-0000-7000-8000-000000000001` gives `pane-…000000000001`.
-fn format_pane_label<'snapshot>(
-    pane_id: PaneId,
-    pane_snapshot: Option<&'snapshot PaneSnapshot>,
-    is_pane_placement_visible: bool,
-) -> Cow<'snapshot, str> {
-    if is_pane_placement_visible {
-        let pane_id_hex = pane_id.get_uuid().simple().to_string();
-        let pane_id_suffix_start_byte_offset =
-            pane_id_hex.len() - PLACEMENT_PANE_ID_SUFFIX_HEX_DIGIT_COUNT;
-        return Cow::Owned(format!(
-            "pane-…{}",
-            &pane_id_hex[pane_id_suffix_start_byte_offset..]
-        ));
-    }
-    pane_snapshot
-        .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
-        .map(Cow::Borrowed)
-        .unwrap_or(Cow::Borrowed(""))
 }
 
 /// The mode indicator shown in the tabline: every active mode label joined with

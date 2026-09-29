@@ -96,24 +96,38 @@ pub struct PlacementSnapshot {
     pub pane_sizing: PaneSizing,
 }
 
-/// The presentation state of the viewer's placement statusline entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementStatusKind {
-    /// The selected destination snapshot is still being read.
-    Loading,
-    /// The viewer has no confirmed destination to submit.
-    Invalid,
-    /// The viewer has a destination that can be confirmed.
-    Valid,
+/// Text drawn inside one softened pane during placement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanePlacementMessage {
+    /// The sentence shown when the area has room for it.
+    pub full_text: String,
+    /// The short sentence shown in a narrow area.
+    pub compact_text: &'static str,
+    /// The second line shown when the area has room for it.
+    pub detail_text: Option<String>,
 }
 
-/// One viewer-local placement statusline entry.
+/// One viewer's visual explanation of a pane placement proposal or confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlacementStatus {
-    /// The style and validation state shown with `status_text`.
-    pub placement_status_kind: PlacementStatusKind,
-    /// The one-line text shown in the statusline.
-    pub status_text: String,
+pub struct PanePlacementPresentation {
+    /// The pane the viewer is moving.
+    pub source_pane_id: PaneId,
+    /// Panes in the selected destination span, excluding the source pane.
+    pub target_pane_ids: Vec<PaneId>,
+    /// The moving pane's message, shown in uncovered visible content when no
+    /// stack header for this pane is displayed.
+    pub source_message: PanePlacementMessage,
+    /// The destination message, shown in one affected pane's uncovered visible
+    /// content when an area is available.
+    pub target_message: Option<PanePlacementMessage>,
+}
+
+impl PanePlacementPresentation {
+    /// Whether the pane is the moving pane or belongs to the destination span.
+    #[must_use]
+    pub fn is_pane_affected(&self, pane_id: PaneId) -> bool {
+        pane_id == self.source_pane_id || self.target_pane_ids.contains(&pane_id)
+    }
 }
 
 /// One source or destination tab in a placement preview.
@@ -302,10 +316,9 @@ pub struct ViewerChrome {
     /// The effective input mode for the viewer's keymap and mode tag. `None`
     /// lets generic frame consumers use the mode carried by the session frame.
     pub active_input_mode: Option<LockMode>,
-    /// Whether pane borders and stack headers show pane ids and suppress hover
-    /// styling for this painted frame.
+    /// Whether pane placement suppresses hover styling for this painted frame.
     pub is_pane_placement_visible: bool,
-    /// The pane being placed, whose border keeps the focus color.
+    /// The pane being placed, used for border styling before the preview treatment.
     pub placement_source_pane_id: Option<PaneId>,
     /// Where the viewer's tab strip is scrolled: `None` follows the active tab —
     /// the strip always reveals it — while `Some(i)` peeks from tab index `i`
@@ -573,7 +586,8 @@ pub struct TabSnapshot {
 /// content area to draw), and an [`is_suppressed`](Self::is_suppressed) pane is not
 /// visible. `content_rect` is `None` for three distinct reasons — no room,
 /// hidden, or a collapsed stack member — and [`is_suppressed`](Self::is_suppressed)
-/// marks the no-room case.
+/// marks the no-room case. A placement slide can keep a pane box visible while
+/// its content rect is absent and a stack header for the same pane is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSlot {
     /// The pane this slot places.

@@ -337,9 +337,9 @@ impl Client {
     ///
     /// - While a submitted placement waits for the session, every event is
     ///   consumed and the placement drag ends.
-    /// - With placement mode off, a left press on a placement handle opens
-    ///   placement mode for that pane until the drag ends. Every other event
-    ///   returns `None`.
+    /// - With placement mode off, an unshifted left press on a placement handle
+    ///   opens placement mode for that pane until the drag ends. A Shift press
+    ///   and every other event return `None`.
     /// - With placement mode on, a left press on a tab previews that tab. A
     ///   left press on pane content, a placement handle, or a stack header
     ///   starts a drag, and picks that pane as the source unless it already is
@@ -365,6 +365,12 @@ impl Client {
         let frame_layout = self.build_frame_layout(frame);
         let region = resolve_hit_region(frame_layout, mouse_input.position);
         if !self.is_placement_mode_active() {
+            if mouse_input
+                .modifier_flags
+                .has_all_modifiers(ModFlags::SHIFT)
+            {
+                return None;
+            }
             if let (MouseKind::Press(MouseButton::Left), HitRegion::PlacementHandle { pane_id }) =
                 (mouse_input.mouse_kind, region)
             {
@@ -374,12 +380,7 @@ impl Client {
                 else {
                     return Some(PlacementInputAction::Consumed);
                 };
-                self.begin_placement_drag(
-                    mouse_input.position,
-                    mouse_input
-                        .modifier_flags
-                        .has_all_modifiers(ModFlags::SHIFT),
-                );
+                self.begin_placement_drag(mouse_input.position, false);
                 return Some(PlacementInputAction::ReadPlacement {
                     pane_id_to_focus: Some(source_pane_id),
                     source_pane_id,
@@ -445,7 +446,7 @@ impl Client {
                     }
                     _ => {}
                 }
-                if self.has_placement_drag_moved(mouse_input.position) {
+                if self.update_placement_drag_movement(mouse_input.position) {
                     if let Some(placement_target) =
                         self.find_placement_target_at(mouse_input.position, frame)
                     {
@@ -468,7 +469,7 @@ impl Client {
             }
             MouseKind::Release(released_button) => {
                 let should_submit = released_button == MouseButton::Left
-                    && self.has_placement_drag_moved(mouse_input.position);
+                    && self.update_placement_drag_movement(mouse_input.position);
                 if should_submit {
                     let placement_target =
                         self.find_placement_target_at(mouse_input.position, frame);

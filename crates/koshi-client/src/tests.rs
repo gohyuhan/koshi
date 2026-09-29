@@ -1079,6 +1079,7 @@ fn a_revision_change_during_a_placement_drag_keeps_the_drag_and_refreshes_the_pr
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
     let drag_start_position = Point { column: 2, row: 1 };
     client.begin_placement_drag(drag_start_position, true);
+    assert!(client.update_placement_drag_movement(Point { column: 3, row: 1 }));
 
     client.set_placement_revisions(0, 1);
 
@@ -1086,6 +1087,7 @@ fn a_revision_change_during_a_placement_drag_keeps_the_drag_and_refreshes_the_pr
         client.placement_state.placement_drag,
         Some(PlacementDrag {
             start_position: drag_start_position,
+            has_pointer_moved: true,
             is_insertion_drag: true,
         })
     );
@@ -1095,6 +1097,74 @@ fn a_revision_change_during_a_placement_drag_keeps_the_drag_and_refreshes_the_pr
         client.take_placement_preview_refresh(),
         Some((source_pane_id, source_tab_id))
     );
+}
+
+#[test]
+fn hovering_another_tab_during_a_placement_drag_preserves_the_drag_and_insertion_choice() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let destination_tab_id = TabId::new();
+    let drag_start_position = Point { column: 2, row: 3 };
+    let hover_started_at = Instant::now();
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id: source_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command: None,
+    });
+    client.begin_placement_drag(drag_start_position, true);
+    client.update_placement_tab_hover(Some(destination_tab_id), hover_started_at);
+
+    assert_eq!(
+        client.expire_placement_tab_hover(hover_started_at + PLACEMENT_TAB_HOVER_DELAY_DURATION),
+        Some((source_pane_id, destination_tab_id))
+    );
+    assert_eq!(
+        client.placement_state.placement_drag,
+        Some(PlacementDrag {
+            start_position: drag_start_position,
+            has_pointer_moved: false,
+            is_insertion_drag: true,
+        })
+    );
+    assert_eq!(
+        client.get_placement_destination_tab_id(),
+        Some(destination_tab_id)
+    );
+}
+
+#[test]
+fn placement_drag_stays_moved_when_pointer_returns_to_the_press_position() {
+    let (mut client, _) = build_test_client_with_event_sender();
+    let source_pane_id = PaneId::new();
+    let source_tab_id = TabId::new();
+    let drag_start_position = Point { column: 2, row: 3 };
+    client.placement_state.placement_mode = Some(PlacementMode {
+        source_pane_id,
+        source_tab_id,
+        destination_tab_id: source_tab_id,
+        placement_direction: Direction::Right,
+        placement_target: None,
+        pending_placement_command: None,
+    });
+    client.begin_placement_drag(drag_start_position, true);
+
+    assert!(!client.update_placement_drag_movement(drag_start_position));
+    assert!(client.update_placement_drag_movement(Point { column: 4, row: 3 }));
+    assert!(client.update_placement_drag_movement(drag_start_position));
+    assert_eq!(
+        client.placement_state.placement_drag,
+        Some(PlacementDrag {
+            start_position: drag_start_position,
+            has_pointer_moved: true,
+            is_insertion_drag: true,
+        })
+    );
+    client.end_placement_drag();
+    assert!(!client.update_placement_drag_movement(drag_start_position));
 }
 
 #[test]
