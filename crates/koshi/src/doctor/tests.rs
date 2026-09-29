@@ -1121,6 +1121,43 @@ fn remote_access_warns_when_the_grants_could_not_be_read() {
     );
 }
 
+#[test]
+fn doctor_counts_previous_grants_without_changing_the_file() {
+    let test_directory = TempDir::new().expect("create data directory");
+    let token_store_path =
+        koshi_ipc::remote_tokens::resolve_token_store_path(test_directory.path());
+    fs::create_dir_all(token_store_path.parent().expect("token store parent"))
+        .expect("create remote directory");
+    let current_time = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+    let token_store_bytes = serde_json::to_vec(&serde_json::json!({
+        "format": 1,
+        "records": [
+            {"identity": "active", "hash": "aa".repeat(32), "scope": "HostWide",
+             "issued_at": SystemTime::UNIX_EPOCH, "expires_at": null,
+             "last_used_at": null, "revoked_at": null},
+            {"identity": "expired", "hash": "bb".repeat(32), "scope": "HostWide",
+             "issued_at": SystemTime::UNIX_EPOCH,
+             "expires_at": SystemTime::UNIX_EPOCH + Duration::from_secs(400),
+             "last_used_at": null, "revoked_at": null},
+            {"identity": "revoked", "hash": "cc".repeat(32), "scope": "HostWide",
+             "issued_at": SystemTime::UNIX_EPOCH, "expires_at": null,
+             "last_used_at": null,
+             "revoked_at": SystemTime::UNIX_EPOCH + Duration::from_secs(300)}
+        ]
+    }))
+    .expect("encode previous grants");
+    fs::write(&token_store_path, &token_store_bytes).expect("write previous grants");
+
+    assert_eq!(
+        load_standing_grant_count(test_directory.path(), current_time),
+        Ok(1)
+    );
+    assert_eq!(
+        fs::read(&token_store_path).expect("read grants after doctor"),
+        token_store_bytes
+    );
+}
+
 // ---------------------------------------------------- remote connections
 
 #[test]

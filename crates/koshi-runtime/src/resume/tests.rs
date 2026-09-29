@@ -33,6 +33,327 @@ use koshi_test_support::fake_pty::FakePtyBackend;
 use tempfile::TempDir;
 
 use super::*;
+
+fn read_released_resume_fixture(fixture_bytes: &[u8]) -> (ResumeHeader, ResumeBody) {
+    let resume_test_directory = TempDir::new().expect("create resume test directory");
+    let resume_file_path = resume_test_directory.path().join("session.resume");
+    std::fs::write(&resume_file_path, fixture_bytes).expect("write released resume fixture");
+    let (resume_header, raw_body) =
+        read_resume_header(&resume_file_path).expect("read released resume header");
+    let resume_body = read_resume_body(resume_header.resume_format, &raw_body)
+        .expect("migrate released resume body");
+    (resume_header, resume_body)
+}
+
+#[test]
+fn migrate_format_two_restores_tabs_clients_selection_and_screens() {
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(include_bytes!("fixtures/format_two.json"));
+    assert_eq!(resume_header.resume_format, 2);
+    assert_eq!(resume_header.session_name, "carried");
+    assert_eq!(resume_header.carried_panes.len(), 4);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    assert_eq!(session.tabs.len(), 2);
+    assert_eq!(session.panes.count_pane_records(), 4);
+    assert_eq!(session.clients.count_clients(), 2);
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+    let session_json = serde_json::to_value(session).expect("serialize migrated session");
+    let client_records = session_json["clients"]["client_by_id"]
+        .as_object()
+        .expect("client records");
+    let selected_client = client_records
+        .values()
+        .find(|client| {
+            client["selection_by_pane_id"]
+                .as_object()
+                .is_some_and(|selections| !selections.is_empty())
+        })
+        .expect("selected client is restored");
+    let selection = selected_client["selection_by_pane_id"]
+        .as_object()
+        .expect("selection map")
+        .values()
+        .next()
+        .expect("selection");
+    assert_eq!(selection["selection_kind"], "Word");
+    assert_eq!(
+        selection["anchor"],
+        serde_json::json!({"row_index": 3, "column_index": 4})
+    );
+    assert_eq!(
+        selection["cursor"],
+        serde_json::json!({"row_index": 3, "column_index": 9})
+    );
+    let first_pane_id = resume_header.carried_panes[0].pane_id;
+    assert_eq!(
+        get_joined_screen_text(
+            resumed_server.terminal_engine_by_pane_id[&first_pane_id].get_terminal_state()
+        ),
+        "pane 0 output"
+    );
+}
+
+#[test]
+fn migrate_format_three_restores_image_and_open_parser_sequences() {
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(include_bytes!("fixtures/format_three.json"));
+    assert_eq!(resume_header.resume_format, 3);
+    assert_eq!(resume_header.carried_panes.len(), 4);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let first_pane_id = resume_header.carried_panes[0].pane_id;
+    let second_pane_id = resume_header.carried_panes[1].pane_id;
+    let third_pane_id = resume_header.carried_panes[2].pane_id;
+    let first_pane_state = &resume_body.carried_pane_state_by_pane_id[&first_pane_id];
+    let terminal_json = serde_json::to_value(&first_pane_state.terminal_state)
+        .expect("serialize migrated terminal");
+    assert_eq!(
+        terminal_json["image_contents"][0]["decoded_image"]["rgba_bytes"],
+        serde_json::json!([255, 0, 0, 255])
+    );
+    assert_eq!(
+        terminal_json["primary_image_placements"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(first_pane_state.graphics_events.len(), 1);
+    assert_eq!(
+        resume_body.carried_pane_state_by_pane_id[&second_pane_id].undecoded_bytes,
+        b"\x1b]7;file://host/Users/yuhan/Proj"
+    );
+    assert_eq!(
+        resume_body.carried_pane_state_by_pane_id[&third_pane_id]
+            .graphics_transport
+            .as_ref()
+            .expect("graphics parser state")
+            .carry_bytes,
+        b"\x1b_Gf=32,s=1,v=1;"
+    );
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(
+        resumed_server.session_by_id[&resume_header.session_id]
+            .tabs
+            .len(),
+        2
+    );
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+#[test]
+fn migrate_format_three_restores_large_image_bytes_and_running_panes() {
+    let released_fixture = include_str!("fixtures/format_three.json");
+    let previous_image =
+        r#""Ok":{"protocol":"Kitty","image":{"width":1,"height":1,"rgba":[255,0,0,255]}"#;
+    let image_bytes = format!("[{}]", vec!["255"; 512 * 512 * 4].join(","));
+    let saved_image = format!(
+        r#""Ok":{{"protocol":"Kitty","image":{{"width":512,"height":512,"rgba":{image_bytes}}}"#
+    );
+    let upgraded_fixture = released_fixture.replacen(previous_image, &saved_image, 1);
+    assert_ne!(upgraded_fixture, released_fixture);
+
+    let (resume_header, resume_body) = read_released_resume_fixture(upgraded_fixture.as_bytes());
+
+    assert_eq!(resume_header.resume_format, 3);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let first_pane_id = resume_header.carried_panes[0].pane_id;
+    let image_record = resume_body.carried_pane_state_by_pane_id[&first_pane_id].graphics_events[0]
+        .as_ref()
+        .expect("the queued image reads");
+    assert_eq!(image_record.image.rgba_bytes, vec![255; 512 * 512 * 4]);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+#[test]
+fn migrate_format_three_discards_both_screens_with_the_same_pane_id() {
+    let mut released_fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("released fixture is JSON");
+    let terminal_engines = released_fixture["body"]["engines"]
+        .as_object_mut()
+        .expect("released terminal engines");
+    let pane_key = terminal_engines
+        .keys()
+        .next()
+        .expect("one released terminal engine")
+        .clone();
+    let uppercase_pane_key = pane_key.to_ascii_uppercase();
+    assert_ne!(pane_key, uppercase_pane_key);
+    let repeated_terminal_engine = terminal_engines[&pane_key].clone();
+    terminal_engines.get_mut(&pane_key).expect("first engine")["tab_stops"] =
+        serde_json::json!("unreadable");
+    terminal_engines.insert(uppercase_pane_key, repeated_terminal_engine);
+    let repeated_pane_id: PaneId = serde_json::from_value(serde_json::Value::String(pane_key))
+        .expect("released pane id reads");
+    let fixture_bytes = serde_json::to_vec(&released_fixture).expect("encode duplicate pane id");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+
+    assert_eq!(resume_header.carried_panes.len(), 4);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 3);
+    assert!(!resume_body
+        .carried_pane_state_by_pane_id
+        .contains_key(&repeated_pane_id));
+}
+
+#[test]
+fn migrate_format_three_preserves_reported_and_starving_pane_areas() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("format three fixture is JSON");
+    let sessions = fixture_json["body"]["sessions"]
+        .as_object_mut()
+        .expect("saved sessions");
+    let session = sessions.values_mut().next().expect("saved session");
+    let clients = session["clients"]["records"]
+        .as_object_mut()
+        .expect("saved clients");
+    let mut client_ids: Vec<String> = clients.keys().cloned().collect();
+    client_ids.sort();
+    assert_eq!(client_ids.len(), 2);
+    clients[&client_ids[0]]["pane_area"] =
+        serde_json::json!({"Reported": {"cols": 78, "rows": 20}});
+    clients[&client_ids[1]]["pane_area"] = serde_json::json!("Starving");
+
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved clients");
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    let session_json = serde_json::to_value(&resume_body.session_by_id[&resume_header.session_id])
+        .expect("serialize restored session");
+    let restored_clients = &session_json["clients"]["client_by_id"];
+    assert_eq!(
+        restored_clients[&client_ids[0]]["pane_area"],
+        serde_json::json!({"Reported": {"column_count": 78, "row_count": 20}})
+    );
+    assert_eq!(
+        restored_clients[&client_ids[1]]["pane_area"],
+        serde_json::json!("Starving")
+    );
+}
+
+#[test]
+fn migrate_format_three_preserves_sixel_source_and_palette() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("format three fixture is JSON");
+    let engines = fixture_json["body"]["engines"]
+        .as_object_mut()
+        .expect("saved terminal engines");
+    let engine = engines.values_mut().next().expect("saved terminal engine");
+    let mut palette = engine["sixel_palette"].clone();
+    palette[2] = serde_json::json!([255, 0, 0]);
+    engine["sixel_palette"] = palette.clone();
+    engine["image_contents"][0]["sixel"] = serde_json::json!({
+        "indexed": {"width": 1, "height": 1, "indices": [2],
+                    "aspect_vertical": 1, "aspect_horizontal": 1},
+        "palette": palette,
+        "shared_palette": false
+    });
+
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved Sixel image");
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    let image_contents = resume_body
+        .carried_pane_state_by_pane_id
+        .values()
+        .map(|pane_state| {
+            serde_json::to_value(&pane_state.terminal_state).expect("serialize terminal")
+        })
+        .find(|terminal_json| {
+            !terminal_json["image_contents"]
+                .as_array()
+                .expect("contents")
+                .is_empty()
+        })
+        .expect("terminal with Sixel content");
+    let sixel = &image_contents["image_contents"][0]["sixel"];
+    assert_eq!(
+        sixel["indexed_image"]["pixel_register_indices"],
+        serde_json::json!([2])
+    );
+    assert_eq!(sixel["indexed_image"]["width_pixels"], 1);
+    assert_eq!(sixel["indexed_image"]["height_pixels"], 1);
+    assert_eq!(sixel["sixel_palette"][2], serde_json::json!([255, 0, 0]));
+    assert_eq!(resume_header.resume_format, 3);
+}
+
+#[test]
+fn migrate_format_three_preserves_retained_animation_frames() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("format three fixture is JSON");
+    let engines = fixture_json["body"]["engines"]
+        .as_object_mut()
+        .expect("saved terminal engines");
+    let engine = engines.values_mut().next().expect("saved terminal engine");
+    engine["image_contents"][0]["animation"] = serde_json::json!({
+        "frames": [{
+            "image": {"width": 1, "height": 1, "rgba": [255, 0, 0, 255]},
+            "delay": {"numerator_ms": 100, "denominator_ms": 1},
+            "gapless": false
+        }],
+        "loop_policy": "Infinite"
+    });
+
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved animation");
+    let (_resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    let terminal_json = resume_body
+        .carried_pane_state_by_pane_id
+        .values()
+        .map(|pane_state| {
+            serde_json::to_value(&pane_state.terminal_state).expect("serialize terminal")
+        })
+        .find(|terminal_json| {
+            !terminal_json["image_contents"]
+                .as_array()
+                .expect("contents")
+                .is_empty()
+        })
+        .expect("terminal with animation");
+    let animation = &terminal_json["image_contents"][0]["animation"];
+    assert_eq!(
+        animation["frames"][0]["decoded_image"]["rgba_bytes"],
+        serde_json::json!([255, 0, 0, 255])
+    );
+    assert_eq!(
+        animation["frames"][0]["frame_delay"],
+        serde_json::json!({"numerator_ms": 100, "denominator_ms": 1})
+    );
+    assert_eq!(animation["frames"][0]["is_gapless"], false);
+    assert_eq!(animation["loop_policy"], "Infinite");
+}
+
+#[test]
+fn migrate_format_one_applies_every_adjacent_resume_step() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_two.json"))
+            .expect("format two fixture is JSON");
+    fixture_json["header"]["format"] = serde_json::json!(1);
+    let sessions = fixture_json["body"]["sessions"]
+        .as_object_mut()
+        .expect("sessions");
+    for session in sessions.values_mut() {
+        let clients = session["clients"]["records"]
+            .as_object_mut()
+            .expect("clients");
+        for client in clients.values_mut() {
+            client["tier"] = serde_json::json!("Admin");
+        }
+    }
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode format one fixture");
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    assert_eq!(resume_header.resume_format, 1);
+    assert_eq!(resume_body.session_by_id.len(), 1);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(
+        resumed_server.session_by_id[&resume_header.session_id]
+            .clients
+            .count_clients(),
+        2
+    );
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
 use crate::runtime::event::RuntimeEvent;
 use crate::server::Server;
 
@@ -1656,7 +1977,7 @@ fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
             detail.split(" at line ").next(),
             Some(
                 format!(
-                    "resume state at {} is unreadable: missing field `resume_format`",
+                    "resume state at {} is unreadable: unknown field `carried_pane_state_by_pane_id`, expected one of `format`, `session_id`, `session_name`, `panes`",
                     resume_file_path.display()
                 )
                 .as_str()
@@ -1750,7 +2071,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
 
 #[test]
 fn a_resume_format_before_current_baseline_is_rejected() {
-    let retired_resume_format = RESUME_FORMAT - 1;
+    let retired_resume_format = RESUME_FORMAT_MIN - 1;
 
     match read_resume_body(retired_resume_format, serde_json::value::RawValue::NULL) {
         Err(StorageError::Corrupt { detail }) => assert_eq!(

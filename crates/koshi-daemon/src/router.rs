@@ -61,6 +61,7 @@ use koshi_ipc::endpoint::{
 use koshi_ipc::error::{IpcError, RemoteFile};
 use koshi_ipc::plane::{self, RequestDisposition};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
+use koshi_ipc::remote_migration::migrate_remote_listener_files;
 use koshi_ipc::remote_state::{
     is_remote_enabled, CertFile, EnabledFile, CERT_FILE_FORMAT, ENABLED_FILE_FORMAT,
 };
@@ -245,10 +246,10 @@ enum RouterExit {
 /// this call returns `Ok(())` having bound nothing, and the caller connects
 /// to that router instead. `should_wait_for_lock` waits up to `LOCK_HANDOVER_TIMEOUT_DURATION`
 /// for that router to release it, and yields the same way once the wait runs
-/// out. With the lock held, the socket is bound, the endpoint file is written,
-/// the session list is rebuilt from what is already running, and the
-/// dispatcher serves requests until an idle window passes with no session
-/// running.
+/// out. With the lock held, version 0.4.0 remote files are converted, the
+/// socket is bound, the endpoint file is written, the session list is rebuilt
+/// from what is already running, and the dispatcher serves requests until an
+/// idle window passes with no session running.
 ///
 /// A restart request ends the dispatcher and restarts this router into the
 /// binary on disk; a restart that fails resumes the dispatcher with everything
@@ -276,6 +277,12 @@ pub fn run_router(
         .open(resolve_router_lock_path(runtime_directory))?;
     if !take_router_lock(&lock_file, should_wait_for_lock)? {
         return Ok(());
+    }
+
+    if let Some(data_directory) = data_directory.as_deref() {
+        for migration_error in migrate_remote_listener_files(data_directory) {
+            tracing::warn!(%migration_error, "remote access files could not be migrated");
+        }
     }
 
     // Trust order: the address is checked against the private directory
@@ -479,15 +486,26 @@ fn open_remote_listener(
 /// it.
 ///
 /// # Errors
-/// [`IpcError::RemoteFileWrite`] naming [`RemoteFile::Certificate`] and what
-/// failed, for a certificate that could not be generated or could not be
-/// written.
+/// [`IpcError::RemoteFileUnreadable`] for an existing certificate that cannot
+/// be read. [`IpcError::RemoteFileWrite`] names a certificate that could not
+/// be generated or written.
 fn load_or_create_certificate(data_directory: &Path) -> Result<(CertFile, String), IpcError> {
     let certificate_file_path = CertFile::resolve_certificate_file_path(data_directory);
-    if let Ok(certificate_file) = CertFile::load_from_path(&certificate_file_path) {
-        let certificate_fingerprint =
-            tls::compute_certificate_fingerprint(&certificate_file.cert_der);
-        return Ok((certificate_file, certificate_fingerprint));
+    match std::fs::symlink_metadata(&certificate_file_path) {
+        Ok(_) => {
+            let certificate_file = CertFile::load_from_path(&certificate_file_path)?;
+            let certificate_fingerprint =
+                tls::compute_certificate_fingerprint(&certificate_file.cert_der);
+            return Ok((certificate_file, certificate_fingerprint));
+        }
+        Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(read_error) => {
+            return Err(IpcError::RemoteFileUnreadable {
+                remote_file: RemoteFile::Certificate,
+                remote_file_path: certificate_file_path.display().to_string(),
+                error_detail: read_error.to_string(),
+            });
+        }
     }
     let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .map_err(|certificate_generation_error| IpcError::RemoteFileWrite {

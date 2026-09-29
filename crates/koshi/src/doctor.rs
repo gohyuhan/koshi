@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use koshi_core::process::SpawnSpec;
-use koshi_ipc::remote_tokens::{resolve_token_store_path, TokenStore};
+use koshi_ipc::remote_tokens::TokenStore;
 use serde::Serialize;
 
 use crate::cli::OutputFormat;
@@ -219,8 +219,8 @@ pub struct DoctorContext {
 impl DoctorContext {
     /// Read every fact the checks need from this machine: the platform
     /// directories, the rule that produced the runtime directory, `koshi.kdl`,
-    /// the environment, the grant file, and the running router. Creates
-    /// nothing and starts no router.
+    /// the environment, the grant file, and the running router. Format 1
+    /// grants are counted in memory. Creates nothing and starts no router.
     #[must_use]
     pub fn from_current_machine() -> DoctorContext {
         let config_directory = koshi_paths::resolve_config_directory();
@@ -233,14 +233,7 @@ impl DoctorContext {
             .clone()
             .or_else(koshi_paths::resolve_shared_sessions_directory);
         let standing_grant_count = match koshi_paths::resolve_data_directory() {
-            Some(data_directory) => {
-                match TokenStore::load_token_store_from_path(&resolve_token_store_path(
-                    &data_directory,
-                )) {
-                    Ok(token_store) => Ok(count_standing_grants(&token_store, SystemTime::now())),
-                    Err(store_error) => Err(store_error.to_string()),
-                }
-            }
+            Some(data_directory) => load_standing_grant_count(&data_directory, SystemTime::now()),
             None => Err("this machine reports no home directory".to_string()),
         };
         let router_connections = match runtime_directory.as_deref() {
@@ -288,6 +281,15 @@ impl DoctorContext {
             router_connections,
         }
     }
+}
+
+fn load_standing_grant_count(
+    data_directory: &Path,
+    current_time: SystemTime,
+) -> Result<usize, String> {
+    let token_store = koshi_ipc::remote_migration::load_token_store_for_diagnostics(data_directory)
+        .map_err(|store_error| store_error.to_string())?;
+    Ok(count_standing_grants(&token_store, current_time))
 }
 
 /// One row of the answer.

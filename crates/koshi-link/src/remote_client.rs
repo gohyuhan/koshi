@@ -43,6 +43,7 @@ use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, MIN_PROTOCOL_VERSION,
     PROTOCOL_VERSION,
 };
+use koshi_ipc::remote_migration::migrate_saved_server_file;
 use koshi_ipc::remote_servers::{
     resolve_server_store_lock_path, resolve_server_store_path, SavedServer, SavedServerLookup,
     ServerStore,
@@ -203,16 +204,23 @@ pub enum Reach {
 }
 
 /// The saved-server store and the path it came from, under the private data
-/// directory.
+/// directory. A version 0.4.0 store is converted under its lock before it is
+/// read.
 ///
 /// # Errors
-/// [`CliError::IpcUnavailable`] when the machine has no data directory, and
-/// when the store could not be read.
+/// [`CliError::IpcUnavailable`] when the machine has no data directory or
+/// the store lock, migration, or read fails.
 pub fn load_saved_server_store() -> Result<(PathBuf, ServerStore), CliError> {
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
+    let store_lock_file = acquire_store_lock(
+        &resolve_server_store_lock_path(&private_data_directory),
+        STORE_LOCK_TIMEOUT_DURATION,
+    )?;
+    migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
     let saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
+    drop(store_lock_file);
     Ok((saved_server_store_path, saved_server_store))
 }
 
@@ -229,8 +237,9 @@ fn resolve_private_data_directory() -> Result<PathBuf, CliError> {
 /// Change the saved-server store, holding it against every other koshi from
 /// the read to the write.
 ///
-/// Takes the store's lock file, reads the store, hands it to `update_store`,
-/// and writes it back. The lock is released when this returns, either way. An
+/// Takes the store's lock file, converts a version 0.4.0 store, reads it,
+/// hands it to `update_store`, and writes it back. The lock is released when
+/// this returns, either way. An
 /// `update_store` that refuses stops the write, so the store on disk keeps
 /// what it held.
 ///
@@ -253,6 +262,7 @@ pub fn update_saved_server_store<T>(
         &resolve_server_store_lock_path(&private_data_directory),
         STORE_LOCK_TIMEOUT_DURATION,
     )?;
+    migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
     let mut saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
     let store_update_response = update_store(&mut saved_server_store)?;

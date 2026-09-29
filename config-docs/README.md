@@ -56,13 +56,16 @@ version 2
 Missing versions, bad KDL, bad values, unknown keys, and unsupported versions
 fail the check. Errors from all files are reported together.
 
-`koshi config migrate` validates every file before writing. It applies each
-registered version step in order and validates after each step. Invalid input
-or a missing step stops migration before any file is written.
+An updated session server or router runs config migration before it reads the
+files. `koshi config migrate` runs the same migration on request. It validates
+every file before writing. It applies each registered version step in order
+and validates after each step. Invalid input or a missing step stops migration
+before any file is written.
 
 Current schema version is `2`. Valid version `1` files migrate to version `2`.
-Valid version `2` files are reported as current and stay unchanged. Migration
-does not repair invalid config and never runs during startup.
+Valid version `2` files are reported as current and stay unchanged. For
+example, `version 1` in `koshi.kdl` becomes `version 2` when the updated
+server starts. Migration does not repair invalid config.
 
 Changed files use atomic replacement, one file at a time. Config symlinks stay;
 their regular-file targets change. A write error lists earlier completed files

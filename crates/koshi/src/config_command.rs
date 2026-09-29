@@ -382,6 +382,14 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Migrate saved KDL files before a replacement server reads config.
+///
+/// # Errors
+/// Returns the same read, validation, and write errors as `config migrate`.
+pub fn migrate_config_directory_for_update(config_directory: &Path) -> Result<(), CliError> {
+    migrate_config_directory_with_lock(config_directory).map(|_| ())
+}
+
 fn run_config_command_in_directory(
     command: &ConfigCommand,
     config_directory: &Path,
@@ -390,10 +398,54 @@ fn run_config_command_in_directory(
         ConfigCommand::Path => Ok(format!("{}\n", config_directory.display())),
         ConfigCommand::Explain { config_key } => explain_config_key(config_key),
         ConfigCommand::Check => check_config_directory(config_directory),
-        ConfigCommand::Migrate => {
-            migrate_config_directory_with(config_directory, migrate_config, write_atomic)
+        ConfigCommand::Migrate => migrate_config_directory_with_lock(config_directory),
+    }
+}
+
+fn migrate_config_directory_with_lock(config_directory: &Path) -> Result<String, CliError> {
+    match fs::metadata(config_directory) {
+        Ok(directory_metadata) if directory_metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(CliError::Config {
+                detail: format!("{} is not a directory", config_directory.display()),
+            });
+        }
+        Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(format!(
+                "no config files found in {}\n",
+                config_directory.display()
+            ));
+        }
+        Err(read_error) => {
+            return Err(CliError::Config {
+                detail: format!("read {}: {read_error}", config_directory.display()),
+            });
         }
     }
+    let migration_lock_path = config_directory.join(".migration.lock");
+    let mut migration_lock_options = fs::File::options();
+    migration_lock_options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        migration_lock_options.mode(0o600);
+    }
+    let migration_lock_file =
+        migration_lock_options
+            .open(&migration_lock_path)
+            .map_err(|open_error| CliError::Config {
+                detail: format!("open {}: {open_error}", migration_lock_path.display()),
+            })?;
+    migration_lock_file
+        .lock()
+        .map_err(|lock_error| CliError::Config {
+            detail: format!("lock {}: {lock_error}", migration_lock_path.display()),
+        })?;
+    migrate_config_directory_with(config_directory, migrate_config, write_atomic)
 }
 
 fn explain_config_key(config_key: &str) -> Result<String, CliError> {

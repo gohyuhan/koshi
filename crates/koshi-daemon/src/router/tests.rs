@@ -42,6 +42,36 @@ use koshi_ipc::router::RouterRequest;
 use koshi_link::remote_client::{self, DIAL_TIMEOUT_DURATION};
 use koshi_test_support::fixtures::build_test_runtime_directory;
 
+#[test]
+fn unreadable_existing_certificate_is_kept_for_recovery() {
+    let runtime_directory = build_test_runtime_directory();
+    let data_directory = runtime_directory.path().join("data");
+    let certificate_path = CertFile::resolve_certificate_file_path(&data_directory);
+    std::fs::create_dir_all(certificate_path.parent().expect("certificate parent"))
+        .expect("create remote directory");
+    std::fs::write(&certificate_path, b"unreadable certificate")
+        .expect("write unreadable certificate");
+
+    let certificate_error = load_or_create_certificate(&data_directory)
+        .expect_err("the existing certificate must not be replaced");
+    match certificate_error {
+        IpcError::RemoteFileUnreadable {
+            remote_file,
+            remote_file_path,
+            error_detail,
+        } => {
+            assert_eq!(remote_file, RemoteFile::Certificate);
+            assert_eq!(remote_file_path, certificate_path.display().to_string());
+            assert_eq!(error_detail, "expected value at line 1 column 1");
+        }
+        unexpected_error => panic!("expected an unreadable file, got {unexpected_error:?}"),
+    }
+    assert_eq!(
+        std::fs::read(&certificate_path).expect("read certificate after refusal"),
+        b"unreadable certificate"
+    );
+}
+
 /// Build a session registry from `(session_id, session_name)` pairs.
 fn build_session_registry(session_entries: &[(SessionId, &str)]) -> SessionRegistry {
     session_entries

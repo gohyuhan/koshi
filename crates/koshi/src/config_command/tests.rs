@@ -758,6 +758,91 @@ fn migrate_writes_only_the_files_that_changed() {
 }
 
 #[test]
+fn update_migrates_every_config_kind_without_a_user_command() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let config_paths = [
+        config_directory.path().join("koshi.kdl"),
+        config_directory.path().join("keybinding.kdl"),
+        config_directory.path().join("themes").join("plain.kdl"),
+        config_directory.path().join("profile").join("work.kdl"),
+    ];
+    for config_path in &config_paths {
+        fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("create config parent");
+        let config_source = if config_path.ends_with("work.kdl") {
+            "version 1\ntab { pane }\n"
+        } else {
+            "version 1\n"
+        };
+        fs::write(config_path, config_source).expect("write old schema");
+    }
+
+    migrate_config_directory_for_update(config_directory.path())
+        .expect("migrate valid config files during update");
+    for config_path in &config_paths {
+        assert_eq!(
+            fs::read_to_string(config_path).expect("read migrated config"),
+            if config_path.ends_with("work.kdl") {
+                "version 2\ntab { pane }\n"
+            } else {
+                "version 2\n"
+            }
+        );
+    }
+    migrate_config_directory_for_update(config_directory.path())
+        .expect("migrating current config leaves it readable");
+    for config_path in &config_paths {
+        assert_eq!(
+            fs::read_to_string(config_path).expect("read current config"),
+            if config_path.ends_with("work.kdl") {
+                "version 2\ntab { pane }\n"
+            } else {
+                "version 2\n"
+            }
+        );
+    }
+}
+
+#[test]
+fn concurrent_update_processes_migrate_one_config_directory_safely() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").expect("write old schema");
+    let start_barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut migration_threads = Vec::new();
+    for _migration_index in 0..2 {
+        let config_directory_path = config_directory.path().to_path_buf();
+        let thread_barrier = std::sync::Arc::clone(&start_barrier);
+        migration_threads.push(std::thread::spawn(move || {
+            thread_barrier.wait();
+            migrate_config_directory_for_update(&config_directory_path)
+        }));
+    }
+    start_barrier.wait();
+    for migration_thread in migration_threads {
+        migration_thread
+            .join()
+            .expect("migration thread completed")
+            .expect("migration completed");
+    }
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read migrated config"),
+        "version 2\n"
+    );
+}
+
+#[test]
+fn update_without_config_directory_creates_no_config_files() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let missing_config_directory = test_directory.path().join("missing-config");
+
+    migrate_config_directory_for_update(&missing_config_directory)
+        .expect("missing config directory is valid");
+
+    assert!(!missing_config_directory.exists());
+}
+
+#[test]
 fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_list() {
     let config_directory = TempDir::new().unwrap();
     let keybinding_config_path = config_directory.path().join("keybinding.kdl");

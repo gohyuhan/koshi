@@ -114,10 +114,11 @@ pub const SUPERVISOR_PROTOCOL: Surface = Surface {
 
 /// The remote access token store: the file this machine keeps its grants in.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted before the
+/// token store is opened.
 pub const TOKEN_STORE_FORMAT: Surface = Surface {
     surface_name: "token store format",
-    minimum_version: 2,
+    minimum_version: 1,
     maximum_version: 2,
     released_version: Some(1),
 };
@@ -138,11 +139,11 @@ pub const REMOTE_PROTOCOL: Surface = Surface {
 /// The saved server file: the servers a dialling machine has connected to,
 /// with the secret and the pinned certificate fingerprint for each.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. The file sits on
-/// the dialling machine.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted when the
+/// dialling machine opens its saved-server store.
 pub const SAVED_SERVER_FORMAT: Surface = Surface {
     surface_name: "saved server file format",
-    minimum_version: 2,
+    minimum_version: 1,
     maximum_version: 2,
     released_version: Some(1),
 };
@@ -150,11 +151,11 @@ pub const SAVED_SERVER_FORMAT: Surface = Surface {
 /// The remote certificate file: the certificate and private key this machine
 /// generated for its remote listener.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. A file with
-/// format 1 is not read.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted when the
+/// replacement router starts.
 pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
     surface_name: "remote certificate file format",
-    minimum_version: 2,
+    minimum_version: 1,
     maximum_version: 2,
     released_version: Some(1),
 };
@@ -162,11 +163,11 @@ pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
 /// The remote access record: the file saying the operator switched remote
 /// access on for this machine.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2. A file with format 1
-/// is not read.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted when the
+/// replacement router starts.
 pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
     surface_name: "remote access record format",
-    minimum_version: 2,
+    minimum_version: 1,
     maximum_version: 2,
     released_version: Some(1),
 };
@@ -175,23 +176,25 @@ pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
 /// own process image, and the next image reads back.
 ///
 /// `v0.3.0` writes 2, `v0.4.0` writes 3, and `v0.5.0` writes 4. Format 4
-/// uses the declared field names in the saved records. The floor is 4.
+/// uses the declared field names in the saved records. Formats 1 through 3
+/// pass through the ordered migration steps before they are restored.
 ///
 /// The build being installed states which format it writes. The running server
 /// reads that answer before it commits to the swap.
 pub const RESUME_FORMAT: Surface = Surface {
     surface_name: "resume file format",
-    minimum_version: 4,
+    minimum_version: 1,
     maximum_version: 4,
     released_version: Some(3),
 };
 
 /// The config schema: the shape of the files under the config directory.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. The floor is 2.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. Version 1 is migrated when the
+/// replacement router starts.
 pub const CONFIG_SCHEMA: Surface = Surface {
     surface_name: "config schema",
-    minimum_version: 2,
+    minimum_version: 1,
     maximum_version: 2,
     released_version: Some(1),
 };

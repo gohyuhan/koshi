@@ -16,9 +16,9 @@
 //! the owning user, and are replaced through
 //! [`koshi_storage::atomic::write_atomic`]. The token store and the
 //! saved-server store are written the same way, through the
-//! `write_remote_file` this module holds, and each of the four files states a
-//! format number this build does not read through the same
-//! `find_format_mismatch`.
+//! `write_remote_file` this module holds. Each normal reader checks its format
+//! number through `find_format_mismatch`; [`remote_migration`](crate::remote_migration)
+//! converts version 0.4.0 files before those readers load them.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

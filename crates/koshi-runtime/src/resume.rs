@@ -6,20 +6,20 @@
 //! `session-<uuid>.resume`, beside the endpoint file.
 //!
 //! The **header** ([`ResumeHeader`]) names the session and every live pane.
-//! Every field added to it carries `#[serde(default)]`, so a build that cannot
-//! read the body still reads the header and takes every pane back. A header
-//! whose keys are not the field names below does not read.
+//! The reader converts headers written by older builds into this shape before
+//! it reads the body.
 //!
 //! The **body** ([`ResumeBody`]) carries the fields that type names. Its shape
 //! does change, so
 //! [`ResumeHeader::resume_format`] numbers it: [`RESUME_FORMAT`] is what this build
 //! writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and [`read_resume_body`] refuses
-//! anything outside that range. This build reads and writes format 4, which uses
-//! the declared field names in the saved records.
+//! anything outside that range. This build writes format 4 and converts formats
+//! 1 through 3 through adjacent migration steps before it restores the body.
 //!
-//! Each pane's screen is one [`CarriedPaneState`] and is read on its own. A pane
-//! whose state does not read is left out of the body that
-//! [`read_resume_body`] hands back, and every other pane keeps its screen.
+//! Each pane's screen is one [`CarriedPaneState`]. For a format 4 body, an
+//! unreadable pane state is left out while other panes keep their screens.
+//! An unreadable migrated pane makes the whole body unreadable; the session
+//! server then restores the running panes with blank screens and separate tabs.
 //!
 //! Example: a server holding two panes writes
 //! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":51234,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
@@ -43,6 +43,8 @@ use koshi_terminal::state::TerminalState;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
+
+mod migration;
 
 /// The resume-file format this build writes.
 ///
@@ -201,6 +203,36 @@ struct ResumeFile {
     raw_body: Box<RawValue>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviousResumeFile {
+    header: PreviousResumeHeader,
+    body: Box<RawValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviousResumeHeader {
+    format: u32,
+    session_id: SessionId,
+    session_name: String,
+    panes: Vec<PreviousCarriedPane>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviousCarriedPane {
+    pane_id: PaneId,
+    pid: u32,
+    rows: u16,
+    cols: u16,
+    terminal_fd: Option<i32>,
+    #[serde(default)]
+    terminal_name: Option<String>,
+    #[serde(default)]
+    exit: Option<ExitStatus>,
+}
+
 /// The body as it is read: the session-wide fields decoded, and each pane's
 /// state left as the raw JSON text it was written as.
 #[derive(Deserialize)]
@@ -259,9 +291,9 @@ pub fn write_resume_file(
 /// Read the resume file at `resume_file_path`: its header, and its body as raw JSON for
 /// [`read_resume_body`].
 ///
-/// The header's shape never changes, so this call answers for a file any build
-/// wrote. It does not look at [`ResumeHeader::resume_format`], so a caller holding a
-/// body it cannot read still gets every pane's descriptor and process id.
+/// This reads the current header or converts a header written with formats 1
+/// through 3. It leaves the body as raw JSON, so a caller can still take the
+/// panes back when their saved screens cannot be decoded.
 ///
 /// # Errors
 /// Returns [`StorageError::Io`] when the file cannot be read, and
@@ -276,34 +308,66 @@ pub fn read_resume_header(
                 resume_file_path.display()
             ),
         })?;
-    let resume_file: ResumeFile =
-        serde_json::from_slice(&resume_file_bytes).map_err(|parse_error| {
-            StorageError::Corrupt {
-                detail: format!(
-                    "resume state at {} is unreadable: {parse_error}",
-                    resume_file_path.display()
-                ),
-            }
+    if let Ok(resume_file) = serde_json::from_slice::<ResumeFile>(&resume_file_bytes) {
+        return Ok((resume_file.header, resume_file.raw_body));
+    }
+    let previous_resume_file: PreviousResumeFile = serde_json::from_slice(&resume_file_bytes)
+        .map_err(|parse_error| StorageError::Corrupt {
+            detail: format!(
+                "resume state at {} is unreadable: {parse_error}",
+                resume_file_path.display()
+            ),
         })?;
-    Ok((resume_file.header, resume_file.raw_body))
+    if !(RESUME_FORMAT_MIN..RESUME_FORMAT).contains(&previous_resume_file.header.format) {
+        return Err(StorageError::Corrupt {
+            detail: format!(
+                "resume format {} is outside the {} to {} range this build reads",
+                previous_resume_file.header.format, RESUME_FORMAT_MIN, RESUME_FORMAT
+            ),
+        });
+    }
+    Ok((
+        ResumeHeader {
+            resume_format: previous_resume_file.header.format,
+            session_id: previous_resume_file.header.session_id,
+            session_name: previous_resume_file.header.session_name,
+            carried_panes: previous_resume_file
+                .header
+                .panes
+                .into_iter()
+                .map(|carried_pane| CarriedPane {
+                    pane_id: carried_pane.pane_id,
+                    process_id: carried_pane.pid,
+                    row_count: carried_pane.rows,
+                    column_count: carried_pane.cols,
+                    terminal_fd: carried_pane.terminal_fd,
+                    terminal_name: carried_pane.terminal_name,
+                    exit_status: carried_pane.exit,
+                })
+                .collect(),
+        },
+        previous_resume_file.body,
+    ))
 }
 
 /// Decode the raw `resume_body` [`read_resume_header`] handed back, given the `resume_format` the
 /// same header named.
 ///
-/// The sessions and the carried quit are read as one. Each pane's
-/// [`CarriedPaneState`] is read on its own: a pane whose state does not read,
-/// whose key is no pane id, or whose key appears twice is logged and left out
-/// of the body handed back, and every other pane keeps its state.
+/// The sessions and carried quit are read as one. Each pane's
+/// [`CarriedPaneState`] is read on its own. A pane whose key is no pane id or
+/// appears twice is logged and left out. An unreadable format 4 pane is also
+/// left out. An unreadable pane converted from formats 1 through 3 makes the
+/// body unreadable.
 ///
-/// Before → after: a body carrying panes `A` and `B`, where `B`'s screen holds
-/// a Kitty placement no upload holds → a body carrying `A` alone, and one
-/// warning naming `B`.
+/// Example: a format 4 body carries panes `A` and `B`, where `B`'s screen
+/// holds a Kitty placement no upload holds. The returned body carries `A`
+/// alone, and a warning names `B`.
 ///
 /// # Errors
 /// Returns [`StorageError::Corrupt`] when `format` is outside
 /// `RESUME_FORMAT_MIN..=RESUME_FORMAT`, and when the sessions, the carried quit
-/// or the map of pane states is not that format's shape.
+/// or the map of pane states is not that format's shape, or when a pane
+/// converted from formats 1 through 3 cannot be decoded.
 pub fn read_resume_body(
     resume_format: u32,
     resume_body: &RawValue,
@@ -314,6 +378,9 @@ pub fn read_resume_body(
                 "resume body format {resume_format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
             ),
         });
+    }
+    if resume_format < RESUME_FORMAT {
+        return migration::migrate_resume_body(resume_format, resume_body.get());
     }
     let encoded_resume_body: EncodedResumeBody =
         serde_json::from_str(resume_body.get()).map_err(|parse_error| StorageError::Corrupt {

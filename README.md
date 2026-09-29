@@ -311,7 +311,9 @@ that can be bound.
 
 Koshi uses four optional KDL file types. Each present file must declare a
 supported version. New files use `version 2`; valid `version 1` files migrate
-to version 2.
+to version 2 before an updated session server or router reads them. For example, a valid
+`keybinding.kdl` with `version 1` becomes `version 2` without a command from
+the user.
 
 | File | Contents |
 |---|---|
@@ -457,6 +459,11 @@ Every other verb refuses it.
 The `share` commands run on the machine holding the sessions; the rest run on
 the machine connecting to it.
 
+After an update, the router converts the remote listener's certificate,
+access mark, and token grants. The first read of saved servers converts their
+file. For example, a saved server keeps its secret and certificate pin, and a
+grant keeps its scope and expiry; no re-enrollment is needed.
+
 ### Debugging
 
 | Command | Result |
@@ -475,9 +482,17 @@ the machine connecting to it.
 
 Each compatible running session restarts into the new release. The background
 process that tracks sessions then restarts. A session keeps its panes, the
-programs running in them and their scrollback, and an attached terminal rejoins
-on its own. A session that refuses the restart is named on standard error and
-keeps the old build.
+programs running in them and their scrollback. A client from the installed
+build can reattach to that session. A session that refuses the restart is named
+on standard error and keeps the old build.
+
+If the terminal still runs an older client, start the installed build and run
+`koshi attach workspace` to reattach to a session named `workspace`.
+
+Saved state carries a format number. Koshi applies the required conversion
+steps in order as the updated build opens it. This also works when an update
+skips a release. For example, a resume file at format `2` passes through `3`
+before Koshi loads it as format `4`. No migration command is needed.
 
 If a session cannot read its restart record, it opens one new shell and the
 previous panes are unavailable. Koshi shows `Restore failed` in the statusline

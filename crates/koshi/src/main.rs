@@ -88,6 +88,19 @@ fn parse_cli_arguments() -> Cli {
 /// target from that machine's sessions instead, by the same rules. A verb the
 /// socket does not serve yet reports IPC unavailable.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
+    if matches!(
+        cli.command,
+        Some(CliCommand::ServeSession { .. } | CliCommand::ServeRouter { .. })
+    ) {
+        if let Some(config_directory) = koshi_paths::resolve_config_directory() {
+            if let Err(migration_error) =
+                config_command::migrate_config_directory_for_update(&config_directory)
+            {
+                eprintln!("koshi: config files could not be migrated: {migration_error}");
+            }
+        }
+    }
+
     // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
     // entry point reads, before any verb dispatches. One
     // `allow-beta-features` answer covers the CLI verbs and the interactive
@@ -212,10 +225,15 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         // A session server about to replace its own image runs the newly
         // installed binary this way, and reads this line to learn whether that
         // binary can take its carried state back.
+        let resume_support = ResumeSupport::from_current_build();
         println!(
             "{}",
-            serde_json::to_string(&ResumeSupport::from_current_build())
-                .expect("a pair of numbers always encodes")
+            serde_json::json!({
+                "minimum_resume_format": resume_support.minimum_resume_format,
+                "maximum_resume_format": resume_support.maximum_resume_format,
+                "min": resume_support.minimum_resume_format,
+                "max": resume_support.maximum_resume_format,
+            })
         );
         return Ok(());
     }
