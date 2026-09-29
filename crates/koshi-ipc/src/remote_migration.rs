@@ -1,4 +1,4 @@
-//! Convert version 0.4.0 remote files while their owning store is locked.
+//! Convert format 1 remote files while their owning store is locked.
 
 use std::path::Path;
 use std::time::SystemTime;

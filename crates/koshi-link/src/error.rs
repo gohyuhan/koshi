@@ -25,7 +25,7 @@ pub enum CliError {
     /// A keybinding file dry-run found problems.
     #[error("keybinding file {keymap_file_path} failed validation")]
     InvalidKeymapFile { keymap_file_path: String },
-    /// A config command could not read, validate, explain, or migrate config.
+    /// A config command failed, or a service could not migrate config before startup.
     #[error("config failed: {detail}")]
     Config { detail: String },
     /// The `KOSHI` marker is set but the rest of the in-session environment

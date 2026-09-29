@@ -18,7 +18,7 @@
 //! saved-server store are written the same way, through the
 //! `write_remote_file` this module holds. Each normal reader checks its format
 //! number through `find_format_mismatch`; [`remote_migration`](crate::remote_migration)
-//! converts version 0.4.0 files before those readers load them.
+//! converts format 1 files before those readers load them.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;

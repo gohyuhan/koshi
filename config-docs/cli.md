@@ -18,7 +18,14 @@ and after them the background process that tracks sessions. A session keeps its
 panes, the programs running in them and their scrollback. A client from the
 installed build can reattach to that session. The replacement session server
 or router migrates valid `version 1` KDL files to `version 2` before reading
-them.
+them. If migration fails, a running session refuses the restart and keeps its
+current build. A new session server or router exits with a config error.
+
+Live session handoff is available for sessions started by koshi 0.3.0 or
+0.4.0. A session started by 0.1.0 or 0.2.0 has no restart handoff; the update
+replaces the installed binary while that session keeps running its older
+build. End that session and start a new one to use the installed build.
+
 If the terminal still runs an older client, start the installed build and run
 `koshi attach workspace` for a session named `workspace`.
 

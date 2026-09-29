@@ -246,7 +246,7 @@ enum RouterExit {
 /// this call returns `Ok(())` having bound nothing, and the caller connects
 /// to that router instead. `should_wait_for_lock` waits up to `LOCK_HANDOVER_TIMEOUT_DURATION`
 /// for that router to release it, and yields the same way once the wait runs
-/// out. With the lock held, version 0.4.0 remote files are converted, the
+/// out. With the lock held, format 1 remote files are converted, the
 /// socket is bound, the endpoint file is written, the session list is rebuilt
 /// from what is already running, and the dispatcher serves requests until an
 /// idle window passes with no session running.

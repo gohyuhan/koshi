@@ -1,6 +1,6 @@
 //! Ordered conversion of released resume bodies into the current shape.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -16,89 +16,23 @@ use koshi_terminal::state::TerminalState;
 
 use super::{CarriedPaneState, CarriedQuit, ResumeBody, RESUME_FORMAT};
 
-struct BorrowedJsonObject<'a>(BTreeMap<String, &'a RawValue>);
-
-struct UniqueJsonInspector;
-
-impl<'de> Deserialize<'de> for UniqueJsonInspector {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct UniqueJsonInspectorVisitor;
-
-        impl<'de> Visitor<'de> for UniqueJsonInspectorVisitor {
-            type Value = UniqueJsonInspector;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("JSON with unique object fields")
-            }
-
-            fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Self::Value, A::Error> {
-                while sequence.next_element::<UniqueJsonInspector>()?.is_some() {}
-                Ok(UniqueJsonInspector)
-            }
-
-            fn visit_map<A: MapAccess<'de>>(
-                self,
-                mut json_map: A,
-            ) -> Result<Self::Value, A::Error> {
-                let mut field_names = HashSet::new();
-                while let Some(field_name) = json_map.next_key::<String>()? {
-                    json_map.next_value::<UniqueJsonInspector>()?;
-                    if !field_names.insert(field_name.clone()) {
-                        return Err(de::Error::custom(format!(
-                            "duplicate JSON field {field_name}"
-                        )));
-                    }
-                }
-                Ok(UniqueJsonInspector)
-            }
-        }
-
-        deserializer.deserialize_any(UniqueJsonInspectorVisitor)
-    }
+struct ParsedJsonObject<'a> {
+    json_fields: BTreeMap<String, &'a RawValue>,
+    repeated_json_field_names: BTreeSet<String>,
 }
 
-impl<'de> Deserialize<'de> for BorrowedJsonObject<'de> {
+impl<'de> Deserialize<'de> for ParsedJsonObject<'de> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct BorrowedJsonObjectVisitor;
+        struct ParsedJsonObjectVisitor;
 
-        impl<'de> Visitor<'de> for BorrowedJsonObjectVisitor {
-            type Value = BorrowedJsonObject<'de>;
+        impl<'de> Visitor<'de> for ParsedJsonObjectVisitor {
+            type Value = ParsedJsonObject<'de>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("JSON object with unique fields")
+                formatter.write_str("JSON object")
             }
 
             fn visit_map<A: MapAccess<'de>>(
@@ -106,20 +40,22 @@ impl<'de> Deserialize<'de> for BorrowedJsonObject<'de> {
                 mut json_map: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut json_fields = BTreeMap::new();
+                let mut repeated_json_field_names = BTreeSet::new();
                 while let Some((field_name, raw_field)) =
                     json_map.next_entry::<String, &'de RawValue>()?
                 {
                     if json_fields.insert(field_name.clone(), raw_field).is_some() {
-                        return Err(de::Error::custom(format!(
-                            "duplicate JSON field {field_name}"
-                        )));
+                        repeated_json_field_names.insert(field_name);
                     }
                 }
-                Ok(BorrowedJsonObject(json_fields))
+                Ok(ParsedJsonObject {
+                    json_fields,
+                    repeated_json_field_names,
+                })
             }
         }
 
-        deserializer.deserialize_map(BorrowedJsonObjectVisitor)
+        deserializer.deserialize_map(ParsedJsonObjectVisitor)
     }
 }
 
@@ -362,19 +298,17 @@ pub(super) fn migrate_resume_body(
             RESUME_FORMAT - 1
         )));
     }
-    serde_json::from_str::<UniqueJsonInspector>(raw_resume_body).map_err(|parse_error| {
-        build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
-    })?;
-    let root_fields = parse_borrowed_json_object(raw_resume_body, "body")?;
+    let root_fields = parse_unique_json_object(raw_resume_body, "body")?;
     let raw_sessions = root_fields
         .get("sessions")
         .ok_or_else(|| build_invalid_resume_error("body.sessions is missing"))?;
-    let sessions = parse_borrowed_json_object(raw_sessions.get(), "body.sessions")?;
+    let sessions = parse_unique_json_object(raw_sessions.get(), "body.sessions")?;
     let raw_terminal_engines = root_fields
         .get("engines")
         .ok_or_else(|| build_invalid_resume_error("body.engines is missing"))?;
-    let terminal_engines = parse_borrowed_json_object(raw_terminal_engines.get(), "body.engines")?;
+    let terminal_engines = parse_json_object_fields(raw_terminal_engines.get(), "body.engines")?;
     let mut ancillary_pane_fields = BTreeMap::new();
+    let mut repeated_pane_keys = terminal_engines.repeated_json_field_names;
     for field_name in [
         "undecoded",
         "graphics_events",
@@ -382,10 +316,10 @@ pub(super) fn migrate_resume_body(
         "synchronized_output",
     ] {
         if let Some(raw_fields) = root_fields.get(field_name) {
-            ancillary_pane_fields.insert(
-                field_name,
-                parse_borrowed_json_object(raw_fields.get(), field_name)?,
-            );
+            let ancillary_fields_for_panes =
+                parse_json_object_fields(raw_fields.get(), field_name)?;
+            repeated_pane_keys.extend(ancillary_fields_for_panes.repeated_json_field_names);
+            ancillary_pane_fields.insert(field_name, ancillary_fields_for_panes.json_fields);
         }
     }
     let carried_quit = root_fields
@@ -441,61 +375,30 @@ pub(super) fn migrate_resume_body(
                     "migrated session {session_id} is unreadable: {parse_error}"
                 ))
             })?;
-        session_by_id.insert(session_id, migrated_session);
+        if session_by_id.insert(session_id, migrated_session).is_some() {
+            return Err(build_invalid_resume_error(format!(
+                "resume body has duplicate session id {session_id}"
+            )));
+        }
     }
 
     let mut seen_pane_ids = HashSet::new();
     let mut repeated_pane_ids = HashSet::new();
-    for pane_key in terminal_engines.keys() {
+    for pane_key in terminal_engines.json_fields.keys() {
         if let Ok(pane_id) = serde_json::from_value::<PaneId>(Value::String(pane_key.clone())) {
             if !seen_pane_ids.insert(pane_id) {
                 repeated_pane_ids.insert(pane_id);
             }
         }
     }
-    let mut carried_pane_state_by_pane_id = HashMap::with_capacity(terminal_engines.len());
-    for (pane_key, raw_terminal_engine) in terminal_engines {
-        let mut opaque_byte_arrays = Vec::new();
-        let terminal_engine =
-            parse_json_fragment(raw_terminal_engine.get(), &mut opaque_byte_arrays).map_err(
-                |parse_error| {
-                    build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
-                },
-            )?;
-        let mut single_engine_by_pane_id = Map::new();
-        single_engine_by_pane_id.insert(pane_key.clone(), terminal_engine);
-        let mut body_fields = Map::new();
-        body_fields.insert("sessions".to_string(), Value::Object(Map::new()));
-        body_fields.insert(
-            "engines".to_string(),
-            Value::Object(single_engine_by_pane_id),
-        );
-        for (field_name, pane_fields) in &ancillary_pane_fields {
-            if let Some(raw_pane_field) = pane_fields.get(&pane_key) {
-                let pane_field = parse_json_fragment(raw_pane_field.get(), &mut opaque_byte_arrays)
-                    .map_err(|parse_error| {
-                        build_invalid_resume_error(format!(
-                            "resume body is unreadable: {parse_error}"
-                        ))
-                    })?;
-                let mut single_pane_field = Map::new();
-                single_pane_field.insert(pane_key.clone(), pane_field);
-                body_fields.insert((*field_name).to_string(), Value::Object(single_pane_field));
-            }
+    for pane_key in repeated_pane_keys {
+        if let Ok(pane_id) = serde_json::from_value::<PaneId>(Value::String(pane_key)) {
+            repeated_pane_ids.insert(pane_id);
         }
-        let mut single_pane_body = Value::Object(body_fields);
-        apply_resume_migrations(source_resume_format, &mut single_pane_body)?;
-        let migrated_pane = get_required_json_field(
-            get_json_object(&mut single_pane_body, "body")?,
-            "carried_pane_state_by_pane_id",
-            "body",
-        )?
-        .get(&pane_key)
-        .ok_or_else(|| {
-            build_invalid_resume_error(format!(
-                "body.carried_pane_state_by_pane_id.{pane_key} is missing"
-            ))
-        })?;
+    }
+    let mut carried_pane_state_by_pane_id =
+        HashMap::with_capacity(terminal_engines.json_fields.len());
+    for (pane_key, raw_terminal_engine) in terminal_engines.json_fields {
         let pane_id = match serde_json::from_value::<PaneId>(Value::String(pane_key.clone())) {
             Ok(pane_id) => pane_id,
             Err(_) => {
@@ -513,21 +416,21 @@ pub(super) fn migrate_resume_body(
             );
             continue;
         }
-        let mut migrated_pane_bytes = Vec::new();
-        write_migrated_json(
-            &mut migrated_pane_bytes,
-            &JsonWithOpaqueByteArrays {
-                json_value: migrated_pane,
-                opaque_byte_arrays: &opaque_byte_arrays,
-            },
-        )?;
-        let carried_pane_state: CarriedPaneState = serde_json::from_slice(&migrated_pane_bytes)
-            .map_err(|parse_error| {
-                build_invalid_resume_error(format!(
-                    "migrated pane {pane_id} is unreadable: {parse_error}"
-                ))
-            })?;
-        carried_pane_state_by_pane_id.insert(pane_id, carried_pane_state);
+        match migrate_previous_pane_state(
+            source_resume_format,
+            &pane_key,
+            raw_terminal_engine,
+            &ancillary_pane_fields,
+        ) {
+            Ok(carried_pane_state) => {
+                carried_pane_state_by_pane_id.insert(pane_id, carried_pane_state);
+            }
+            Err(migration_error) => tracing::warn!(
+                %pane_id,
+                %migration_error,
+                "a carried pane state could not be read; that pane comes back with a blank screen"
+            ),
+        }
     }
     Ok(ResumeBody {
         session_by_id,
@@ -536,17 +439,88 @@ pub(super) fn migrate_resume_body(
     })
 }
 
-fn parse_borrowed_json_object<'a>(
+fn migrate_previous_pane_state(
+    source_resume_format: u32,
+    pane_key: &str,
+    raw_terminal_engine: &RawValue,
+    ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
+) -> Result<CarriedPaneState, StorageError> {
+    let mut opaque_byte_arrays = Vec::new();
+    let terminal_engine = parse_json_fragment(raw_terminal_engine.get(), &mut opaque_byte_arrays)
+        .map_err(|parse_error| {
+        build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
+    })?;
+    let mut single_engine_by_pane_id = Map::new();
+    single_engine_by_pane_id.insert(pane_key.to_string(), terminal_engine);
+    let mut body_fields = Map::new();
+    body_fields.insert("sessions".to_string(), Value::Object(Map::new()));
+    body_fields.insert(
+        "engines".to_string(),
+        Value::Object(single_engine_by_pane_id),
+    );
+    for (field_name, pane_fields) in ancillary_pane_fields {
+        if let Some(raw_pane_field) = pane_fields.get(pane_key) {
+            let pane_field = parse_json_fragment(raw_pane_field.get(), &mut opaque_byte_arrays)
+                .map_err(|parse_error| {
+                    build_invalid_resume_error(format!(
+                        "pane {pane_key} {field_name} is unreadable: {parse_error}"
+                    ))
+                })?;
+            let mut single_pane_field = Map::new();
+            single_pane_field.insert(pane_key.to_string(), pane_field);
+            body_fields.insert((*field_name).to_string(), Value::Object(single_pane_field));
+        }
+    }
+    let mut single_pane_body = Value::Object(body_fields);
+    apply_resume_migrations(source_resume_format, &mut single_pane_body)?;
+    let migrated_pane = get_required_json_field(
+        get_json_object(&mut single_pane_body, "body")?,
+        "carried_pane_state_by_pane_id",
+        "body",
+    )?
+    .get(pane_key)
+    .ok_or_else(|| {
+        build_invalid_resume_error(format!(
+            "body.carried_pane_state_by_pane_id.{pane_key} is missing"
+        ))
+    })?;
+    let mut migrated_pane_bytes = Vec::new();
+    write_migrated_json(
+        &mut migrated_pane_bytes,
+        &JsonWithOpaqueByteArrays {
+            json_value: migrated_pane,
+            opaque_byte_arrays: &opaque_byte_arrays,
+        },
+    )?;
+    serde_json::from_slice(&migrated_pane_bytes).map_err(|parse_error| {
+        build_invalid_resume_error(format!(
+            "migrated pane {pane_key} is unreadable: {parse_error}"
+        ))
+    })
+}
+
+fn parse_json_object_fields<'a>(
+    json_text: &'a str,
+    json_path: &str,
+) -> Result<ParsedJsonObject<'a>, StorageError> {
+    serde_json::from_str(json_text).map_err(|parse_error| {
+        build_invalid_resume_error(format!(
+            "resume body is unreadable at {json_path}: {parse_error}"
+        ))
+    })
+}
+
+fn parse_unique_json_object<'a>(
     json_text: &'a str,
     json_path: &str,
 ) -> Result<BTreeMap<String, &'a RawValue>, StorageError> {
-    let BorrowedJsonObject(json_fields) =
-        serde_json::from_str(json_text).map_err(|parse_error| {
-            build_invalid_resume_error(format!(
-                "resume body is unreadable at {json_path}: {parse_error}"
-            ))
-        })?;
-    Ok(json_fields)
+    let parsed_json_object = parse_json_object_fields(json_text, json_path)?;
+    if let Some(field_name) = parsed_json_object.repeated_json_field_names.first() {
+        return Err(build_invalid_resume_error(format!(
+            "resume body has duplicate field {json_path}.{field_name}"
+        )));
+    }
+    Ok(parsed_json_object.json_fields)
 }
 
 fn write_migrated_json(
@@ -809,7 +783,7 @@ fn migrate_resume_three_to_four(resume_body: &mut Value) -> Result<(), StorageEr
         "carried_pane_state_by_pane_id".to_string(),
         Value::Object(pane_states),
     );
-    for field in [
+    for previous_field_name in [
         "undecoded",
         "graphics_undecoded",
         "graphics_screen_continuation",
@@ -820,7 +794,7 @@ fn migrate_resume_three_to_four(resume_body: &mut Value) -> Result<(), StorageEr
         "graphics_transport",
         "synchronized_output",
     ] {
-        body_fields.remove(field);
+        body_fields.remove(previous_field_name);
     }
     Ok(())
 }

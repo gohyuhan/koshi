@@ -843,6 +843,58 @@ fn update_without_config_directory_creates_no_config_files() {
 }
 
 #[test]
+fn update_refuses_config_migration_when_its_lock_cannot_open() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\n").expect("write released config");
+    let migration_lock_path = config_directory.path().join(".migration.lock");
+    fs::create_dir(&migration_lock_path).expect("block migration lock");
+    let expected_open_error = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&migration_lock_path)
+        .expect_err("a directory cannot be opened as a migration lock");
+
+    let migration_error = migrate_config_directory_for_update(config_directory.path())
+        .expect_err("migration lock must open before config changes");
+
+    match migration_error {
+        CliError::Config { detail } => {
+            assert_eq!(
+                detail,
+                format!(
+                    "open {}: {expected_open_error}",
+                    migration_lock_path.display()
+                )
+            );
+        }
+        unexpected_cli_error => panic!("expected config error, got {unexpected_cli_error:?}"),
+    }
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read unchanged config"),
+        "version 1\n"
+    );
+}
+
+#[test]
+fn update_reads_current_config_without_opening_the_migration_lock() {
+    let config_directory = TempDir::new().expect("create config directory");
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 2\n").expect("write current config");
+    fs::create_dir(config_directory.path().join(".migration.lock")).expect("block migration lock");
+
+    migrate_config_directory_for_update(config_directory.path())
+        .expect("current config needs no migration lock");
+
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read current config"),
+        "version 2\n"
+    );
+}
+
+#[test]
 fn migrate_write_failure_leaves_an_unchanged_file_out_of_the_already_migrated_list() {
     let config_directory = TempDir::new().unwrap();
     let keybinding_config_path = config_directory.path().join("keybinding.kdl");

@@ -16,10 +16,8 @@
 //! anything outside that range. This build writes format 4 and converts formats
 //! 1 through 3 through adjacent migration steps before it restores the body.
 //!
-//! Each pane's screen is one [`CarriedPaneState`]. For a format 4 body, an
-//! unreadable pane state is left out while other panes keep their screens.
-//! An unreadable migrated pane makes the whole body unreadable; the session
-//! server then restores the running panes with blank screens and separate tabs.
+//! Each pane's screen is one [`CarriedPaneState`]. An unreadable pane state is
+//! left out while other panes keep their screens and the session keeps its layout.
 //!
 //! Example: a server holding two panes writes
 //! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":51234,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
@@ -117,8 +115,7 @@ impl CarriedPane {
     }
 }
 
-/// The half of the resume file whose shape never changes: which session this
-/// is, and every pane it holds.
+/// The resume-file header: which session this is and every pane it holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeHeader {
     /// Which format the body is written in.
@@ -237,9 +234,44 @@ struct PreviousCarriedPane {
 /// state left as the raw JSON text it was written as.
 #[derive(Deserialize)]
 struct EncodedResumeBody {
+    #[serde(deserialize_with = "deserialize_unique_sessions")]
     session_by_id: HashMap<SessionId, Session>,
     carried_pane_state_by_pane_id: EncodedPaneStates,
     carried_quit: Option<CarriedQuit>,
+}
+
+fn deserialize_unique_sessions<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<SessionId, Session>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct UniqueSessionsVisitor;
+
+    impl<'de> Visitor<'de> for UniqueSessionsVisitor {
+        type Value = HashMap<SessionId, Session>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map")
+        }
+
+        fn visit_map<A>(self, mut map_access: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut session_by_id = HashMap::new();
+            while let Some((session_id, session)) = map_access.next_entry::<SessionId, Session>()? {
+                if session_by_id.insert(session_id, session).is_some() {
+                    return Err(de::Error::custom(format!(
+                        "duplicate session id {session_id}"
+                    )));
+                }
+            }
+            Ok(session_by_id)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueSessionsVisitor)
 }
 
 /// Each pane's carried state as raw JSON text, keyed by pane id, and the keys
@@ -353,11 +385,11 @@ pub fn read_resume_header(
 /// Decode the raw `resume_body` [`read_resume_header`] handed back, given the `resume_format` the
 /// same header named.
 ///
-/// The sessions and carried quit are read as one. Each pane's
+/// The sessions and carried quit are read as one. Two session keys that name
+/// the same id make the body unreadable. Each pane's
 /// [`CarriedPaneState`] is read on its own. A pane whose key is no pane id or
-/// appears twice is logged and left out. An unreadable format 4 pane is also
-/// left out. An unreadable pane converted from formats 1 through 3 makes the
-/// body unreadable.
+/// appears twice or cannot be read is logged and left out. Other panes keep
+/// their screens and the session keeps its layout.
 ///
 /// Example: a format 4 body carries panes `A` and `B`, where `B`'s screen
 /// holds a Kitty placement no upload holds. The returned body carries `A`
@@ -366,8 +398,7 @@ pub fn read_resume_header(
 /// # Errors
 /// Returns [`StorageError::Corrupt`] when `format` is outside
 /// `RESUME_FORMAT_MIN..=RESUME_FORMAT`, and when the sessions, the carried quit
-/// or the map of pane states is not that format's shape, or when a pane
-/// converted from formats 1 through 3 cannot be decoded.
+/// or the map of pane states is not that format's shape.
 pub fn read_resume_body(
     resume_format: u32,
     resume_body: &RawValue,

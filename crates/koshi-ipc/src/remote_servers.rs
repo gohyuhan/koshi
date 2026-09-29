@@ -11,7 +11,7 @@
 //! [`resolve_server_store_path`](crate::remote_servers::resolve_server_store_path) — inside the
 //! private koshi data directory. The file carries the format number
 //! [`SERVER_STORE_FORMAT`](crate::remote_servers::SERVER_STORE_FORMAT). The normal reader refuses
-//! another number; [`remote_migration`](crate::remote_migration) converts version 0.4.0 saved
+//! another number; [`remote_migration`](crate::remote_migration) converts format 1 saved
 //! servers before they are loaded. Writes go through [`koshi_storage::atomic::write_atomic`]: a
 //! reader finds the old content or the new, never a half-written middle.
 

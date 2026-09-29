@@ -1,36 +1,80 @@
-//! Tests for complete conversion of saved image placement errors.
+//! Tests for conversion of saved sessions, images, and placement errors.
 
 use super::*;
+use crate::resume::read_resume_body;
 
 #[test]
-fn migrate_resume_body_rejects_duplicate_nested_json_fields() {
-    let previous_body = r#"{"engines":{"pane":{"ch":"a","ch":"b"}}}"#;
+fn resume_readers_reject_session_ids_repeated_with_different_letter_case() {
+    let fixture_json: Value = serde_json::from_str(include_str!("../fixtures/format_three.json"))
+        .expect("parse released resume fixture");
+    let previous_sessions = fixture_json["body"]["sessions"]
+        .as_object()
+        .expect("released sessions");
+    assert_eq!(previous_sessions.len(), 1);
+    let (session_key, previous_session) = previous_sessions.iter().next().expect("one session");
+    let session_id = serde_json::from_value::<SessionId>(Value::String(session_key.clone()))
+        .expect("released session id");
+    let uppercase_session_key = session_key.to_ascii_uppercase();
+    assert_ne!(uppercase_session_key, *session_key);
+    let previous_session_json =
+        serde_json::to_string(previous_session).expect("encode released session");
+    let previous_body_json = format!(
+        r#"{{"sessions":{{"{session_key}":{previous_session_json},"{uppercase_session_key}":{previous_session_json}}},"engines":{{}}}}"#
+    );
 
-    let migration_error =
-        migrate_resume_body(3, previous_body).expect_err("duplicate field must be refused");
-
-    match migration_error {
+    let previous_error = migrate_resume_body(3, &previous_body_json)
+        .expect_err("equivalent released session keys must be refused");
+    match previous_error {
         StorageError::Corrupt { detail } => assert_eq!(
             detail,
-            "resume body is unreadable: duplicate JSON field ch at line 1 column 38"
+            format!("resume body has duplicate session id {session_id}")
         ),
-        other_error => panic!("expected corrupt resume body, got {other_error:?}"),
+        unexpected_storage_error => {
+            panic!("expected corrupt resume body, got {unexpected_storage_error:?}")
+        }
+    }
+
+    let migrated_body = migrate_resume_body(3, &fixture_json["body"].to_string())
+        .expect("migrate released session");
+    let migrated_session = &migrated_body.session_by_id[&session_id];
+    let migrated_session_json =
+        serde_json::to_string(migrated_session).expect("encode current session");
+    let current_body_prefix = format!(
+        r#"{{"session_by_id":{{"{session_key}":{migrated_session_json},"{uppercase_session_key}":"#
+    );
+    let duplicate_session_end_column = current_body_prefix.len() + migrated_session_json.len() + 1;
+    let current_body_json = format!("{current_body_prefix}{migrated_session_json}")
+        + r#"},"carried_pane_state_by_pane_id":{},"carried_quit":null}"#;
+    let current_raw_body = RawValue::from_string(current_body_json).expect("current body JSON");
+    let current_error = read_resume_body(RESUME_FORMAT, &current_raw_body)
+        .expect_err("equivalent current session keys must be refused");
+    match current_error {
+        StorageError::Corrupt { detail } => assert_eq!(
+            detail,
+            format!(
+                "resume body is unreadable: duplicate session id {session_id} at line 1 column {duplicate_session_end_column}"
+            )
+        ),
+        unexpected_storage_error => {
+            panic!("expected corrupt resume body, got {unexpected_storage_error:?}")
+        }
     }
 }
 
 #[test]
-fn migrate_resume_body_rejects_duplicate_fields_inside_image_bytes() {
-    let previous_body = r#"{"sessions":{},"engines":{"pane":{"rgba":[{"x":1,"x":2}]}}}"#;
+fn migrate_resume_body_rejects_duplicate_session_map_fields() {
+    let previous_body = r#"{"sessions":{},"sessions":{},"engines":{}}"#;
 
     let migration_error =
-        migrate_resume_body(3, previous_body).expect_err("duplicate field must be refused");
+        migrate_resume_body(3, previous_body).expect_err("duplicate sessions field is invalid");
 
     match migration_error {
-        StorageError::Corrupt { detail } => assert_eq!(
-            detail,
-            "resume body is unreadable: duplicate JSON field x at line 1 column 55"
-        ),
-        other_error => panic!("expected corrupt resume body, got {other_error:?}"),
+        StorageError::Corrupt { detail } => {
+            assert_eq!(detail, "resume body has duplicate field body.sessions");
+        }
+        unexpected_storage_error => {
+            panic!("expected corrupt resume body, got {unexpected_storage_error:?}")
+        }
     }
 }
 

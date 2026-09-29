@@ -3,7 +3,7 @@
 //! drain leaves behind, a sequence the swap cut in half finishing in the next
 //! image, what the header still yields when the body cannot be read, what a
 //! body format this build does not know is answered with, what a body written
-//! in the older client format reads back as, what a pane carried pane's size, exit
+//! in the older client format reads back as, what a carried pane's size, exit
 //! status and applied quit read back as, and what a write over an existing
 //! file and a write into a directory that is not there each do.
 
@@ -137,6 +137,170 @@ fn migrate_format_three_restores_image_and_open_parser_sequences() {
             .tabs
             .len(),
         2
+    );
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+#[test]
+fn migrate_format_three_keeps_other_screens_and_layout_when_one_pane_is_unreadable() {
+    let fixture_bytes = include_bytes!("fixtures/format_three.json");
+    let (original_header, original_resume_body) = read_released_resume_fixture(fixture_bytes);
+    let damaged_pane_id = original_header.carried_panes[0].pane_id;
+    let preserved_pane_id = original_header.carried_panes[1].pane_id;
+    let preserved_screen = serde_json::to_value(
+        &original_resume_body.carried_pane_state_by_pane_id[&preserved_pane_id].terminal_state,
+    )
+    .expect("serialize the preserved screen");
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(fixture_bytes).expect("format three fixture is JSON");
+    let damaged_pane_key = fixture_json["header"]["panes"][0]["pane_id"]
+        .as_str()
+        .expect("released pane key")
+        .to_string();
+    fixture_json["body"]["engines"]
+        .get_mut(&damaged_pane_key)
+        .expect("released terminal engine")["tab_stops"] = serde_json::json!("unreadable");
+    let damaged_fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode damaged pane");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&damaged_fixture_bytes);
+
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 3);
+    assert!(!resume_body
+        .carried_pane_state_by_pane_id
+        .contains_key(&damaged_pane_id));
+    assert_eq!(
+        serde_json::to_value(
+            &resume_body.carried_pane_state_by_pane_id[&preserved_pane_id].terminal_state
+        )
+        .expect("serialize the restored screen"),
+        preserved_screen
+    );
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    assert_eq!(session.tabs.len(), 2);
+    assert_eq!(session.panes.count_pane_records(), 4);
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+    assert_eq!(
+        serde_json::to_value(
+            resumed_server.terminal_engine_by_pane_id[&preserved_pane_id].get_terminal_state()
+        )
+        .expect("serialize the running screen"),
+        preserved_screen
+    );
+}
+
+#[test]
+fn migrate_format_three_keeps_other_panes_when_one_screen_has_duplicate_fields() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("format three fixture is JSON");
+    let terminal_engines = fixture_json["body"]["engines"]
+        .as_object_mut()
+        .expect("released terminal engines");
+    let damaged_pane_key = terminal_engines
+        .keys()
+        .next()
+        .expect("one released terminal engine")
+        .clone();
+    let damaged_pane_id: PaneId =
+        serde_json::from_value(serde_json::Value::String(damaged_pane_key))
+            .expect("released pane id");
+    let fixture_text = serde_json::to_string(&fixture_json).expect("encode released fixture");
+    let damaged_fixture_text =
+        fixture_text.replacen("\"tab_stops\":", "\"tab_stops\":[],\"tab_stops\":", 1);
+    assert_ne!(damaged_fixture_text, fixture_text);
+
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(damaged_fixture_text.as_bytes());
+
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 3);
+    assert!(!resume_body
+        .carried_pane_state_by_pane_id
+        .contains_key(&damaged_pane_id));
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(
+        resumed_server.session_by_id[&resume_header.session_id]
+            .panes
+            .count_pane_records(),
+        4
+    );
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+#[test]
+fn migrate_format_three_keeps_other_panes_when_one_engine_key_repeats() {
+    let fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("format three fixture is JSON");
+    let terminal_engines = fixture_json["body"]["engines"]
+        .as_object()
+        .expect("released terminal engines");
+    let (damaged_pane_key, terminal_engine) = terminal_engines
+        .iter()
+        .next()
+        .expect("one released terminal engine");
+    let damaged_pane_id: PaneId =
+        serde_json::from_value(serde_json::Value::String(damaged_pane_key.clone()))
+            .expect("released pane id");
+    let repeated_engine_field = format!(
+        "{}:{}",
+        serde_json::to_string(damaged_pane_key).expect("encode pane key"),
+        serde_json::to_string(terminal_engine).expect("encode terminal engine")
+    );
+    let fixture_text = serde_json::to_string(&fixture_json).expect("encode released fixture");
+    let damaged_fixture_text = fixture_text.replacen(
+        &repeated_engine_field,
+        &format!("{repeated_engine_field},{repeated_engine_field}"),
+        1,
+    );
+    assert_ne!(damaged_fixture_text, fixture_text);
+
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(damaged_fixture_text.as_bytes());
+
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 3);
+    assert!(!resume_body
+        .carried_pane_state_by_pane_id
+        .contains_key(&damaged_pane_id));
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(
+        resumed_server.session_by_id[&resume_header.session_id]
+            .panes
+            .count_pane_records(),
+        4
+    );
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+#[test]
+fn migrate_format_three_keeps_other_panes_when_one_graphics_queue_is_unreadable() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("format three fixture is JSON");
+    let damaged_pane_key = fixture_json["header"]["panes"][0]["pane_id"]
+        .as_str()
+        .expect("released pane key")
+        .to_string();
+    let damaged_pane_id: PaneId =
+        serde_json::from_value(serde_json::Value::String(damaged_pane_key.clone()))
+            .expect("released pane id");
+    *fixture_json["body"]["graphics_events"]
+        .get_mut(&damaged_pane_key)
+        .expect("released graphics queue") = serde_json::json!("unreadable");
+    let damaged_fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode damaged queue");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&damaged_fixture_bytes);
+
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 3);
+    assert!(!resume_body
+        .carried_pane_state_by_pane_id
+        .contains_key(&damaged_pane_id));
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(
+        resumed_server.session_by_id[&resume_header.session_id]
+            .panes
+            .count_pane_records(),
+        4
     );
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
 }

@@ -60,7 +60,9 @@ An updated session server or router runs config migration before it reads the
 files. `koshi config migrate` runs the same migration on request. It validates
 every file before writing. It applies each registered version step in order
 and validates after each step. Invalid input or a missing step stops migration
-before any file is written.
+before any file is written. A migration error stops a new session server or
+router before it loads config. A running session checks migration before its
+restart and keeps its current build if the check fails.
 
 Current schema version is `2`. Valid version `1` files migrate to version `2`.
 Valid version `2` files are reported as current and stay unchanged. For

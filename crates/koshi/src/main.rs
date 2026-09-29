@@ -88,18 +88,11 @@ fn parse_cli_arguments() -> Cli {
 /// target from that machine's sessions instead, by the same rules. A verb the
 /// socket does not serve yet reports IPC unavailable.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
-    if matches!(
-        cli.command,
-        Some(CliCommand::ServeSession { .. } | CliCommand::ServeRouter { .. })
-    ) {
-        if let Some(config_directory) = koshi_paths::resolve_config_directory() {
-            if let Err(migration_error) =
-                config_command::migrate_config_directory_for_update(&config_directory)
-            {
-                eprintln!("koshi: config files could not be migrated: {migration_error}");
-            }
-        }
-    }
+    let config_directory = koshi_paths::resolve_config_directory();
+    config_command::migrate_config_for_service_command(
+        cli.command.as_ref(),
+        config_directory.as_deref(),
+    )?;
 
     // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
     // entry point reads, before any verb dispatches. One

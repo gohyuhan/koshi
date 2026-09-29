@@ -1,4 +1,4 @@
-//! Tests for automatic conversion of remote files written by version 0.4.0.
+//! Tests for automatic conversion of format 1 remote files.
 
 use std::time::Duration;
 

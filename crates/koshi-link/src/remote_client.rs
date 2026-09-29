@@ -204,7 +204,7 @@ pub enum Reach {
 }
 
 /// The saved-server store and the path it came from, under the private data
-/// directory. A version 0.4.0 store is converted under its lock before it is
+/// directory. A format 1 store is converted under its lock before it is
 /// read.
 ///
 /// # Errors
@@ -237,7 +237,7 @@ fn resolve_private_data_directory() -> Result<PathBuf, CliError> {
 /// Change the saved-server store, holding it against every other koshi from
 /// the read to the write.
 ///
-/// Takes the store's lock file, converts a version 0.4.0 store, reads it,
+/// Takes the store's lock file, converts a format 1 store, reads it,
 /// hands it to `update_store`, and writes it back. The lock is released when
 /// this returns, either way. An
 /// `update_store` that refuses stops the write, so the store on disk keeps
