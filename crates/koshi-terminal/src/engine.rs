@@ -23,12 +23,16 @@ use std::mem;
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_core::geometry::PixelCellSize;
 use koshi_core::process::PtySize;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::graphics::GraphicsTransportState;
-use crate::graphics::{GraphicsError, GraphicsParser, ImageRecord, MAX_IMAGE_BYTE_COUNT};
+use crate::graphics::{
+    GraphicsError, GraphicsOperation, GraphicsParser, GraphicsProtocol, ImageRecord,
+    MAX_IMAGE_BYTE_COUNT,
+};
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ShellIntegrationFact, TerminalState};
 
@@ -462,8 +466,8 @@ fn compute_terminal_byte_offset_without_inert_ranges(
 ) -> usize {
     let removed_byte_count = terminal_inert_ranges
         .iter()
-        .take_while(|range| range.start < raw_end_byte_index)
-        .map(|range| range.end.min(raw_end_byte_index) - range.start)
+        .take_while(|inert_range| inert_range.start < raw_end_byte_index)
+        .map(|inert_range| inert_range.end.min(raw_end_byte_index) - inert_range.start)
         .sum::<usize>();
     raw_end_byte_index - removed_byte_count
 }
@@ -538,7 +542,8 @@ impl C1InputNormalizer {
         }
     }
 
-    /// Return the leading bytes that cannot change the normalizer state.
+    /// The count of leading bytes in `terminal_input_bytes` that cannot change
+    /// the normalizer state. `0` while a UTF-8 code point is still open.
     fn get_plain_terminal_input_byte_count(&self, terminal_input_bytes: &[u8]) -> usize {
         if self.remaining_utf8_continuation_count != 0 {
             return 0;
@@ -637,7 +642,7 @@ impl C1InputNormalizer {
         &mut self,
         terminal_input_byte: u8,
     ) -> Option<SynchronizedControl> {
-        let mut control = None;
+        let mut synchronized_control = None;
         self.input_state = match self.input_state {
             C1InputState::Ground => match terminal_input_byte {
                 ESCAPE_BYTE => C1InputState::Escape,
@@ -653,7 +658,7 @@ impl C1InputNormalizer {
                 CANCEL_BYTE | SUBSTITUTE_BYTE => C1InputState::Ground,
                 ESCAPE_BYTE => C1InputState::Escape,
                 0x40..=0x7e => {
-                    control = match terminal_input_byte {
+                    synchronized_control = match terminal_input_byte {
                         b'h' => Some(SynchronizedControl::Begin),
                         b'l' => Some(SynchronizedControl::End),
                         _ => None,
@@ -674,7 +679,7 @@ impl C1InputNormalizer {
                 _ => C1InputState::String(string_kind),
             },
         };
-        control
+        synchronized_control
     }
 
     fn advance_escape(terminal_input_byte: u8) -> C1InputState {
@@ -707,11 +712,14 @@ impl C1InputNormalizer {
         }
     }
 
-    fn is_synchronized_control_in_trailing_bytes(&self, control: SynchronizedControl) -> bool {
+    fn is_synchronized_control_in_trailing_bytes(
+        &self,
+        synchronized_control: SynchronizedControl,
+    ) -> bool {
         if self.trailing_byte_count != self.trailing_bytes.len() {
             return false;
         }
-        let expected_control_bytes = match control {
+        let expected_control_bytes = match synchronized_control {
             SynchronizedControl::Begin => BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
             SynchronizedControl::End => END_SYNCHRONIZED_OUTPUT_BYTES,
         };
@@ -740,8 +748,8 @@ pub struct TerminalEngine {
     terminal_state: TerminalState,
     /// The canonical bytes that put another parser where `parser` stands, as
     /// [`get_undecoded_terminal_bytes`](TerminalEngine::get_undecoded_terminal_bytes) describes
-    /// them. Eight-bit string controls use their seven-bit `ESC` forms so the VTE parser can replay
-    /// them.
+    /// them. Eight-bit string controls are stored in their seven-bit `ESC` forms, which the VTE
+    /// parser replays.
     undecoded_terminal_bytes: Vec<u8>,
     /// A second parser fed the same bytes as `parser`, driving no screen. It
     /// reports where each sequence ends. One chunk costs one pass over that
@@ -841,7 +849,7 @@ impl TerminalEngine {
         (reply_bytes, shell_integration_facts)
     }
 
-    /// Feed one chunk at `now` and report whether bytes reached the terminal parsers.
+    /// Feed one chunk at `monotonic_timestamp` and report whether bytes reached the terminal parsers.
     #[must_use = "undelivered replies or shell facts are lost"]
     pub fn process_pty_output_with_shell_integration_at(
         &mut self,
@@ -1064,7 +1072,7 @@ impl TerminalEngine {
     /// [`from_terminal_state`](Self::from_terminal_state). Eight-bit string controls are stored
     /// in their seven-bit `ESC` forms.
     ///
-    /// Example: the chunk ends with `ESC ] 7 ; file://host/Users/yuhan/Proj` →
+    /// Example: the chunk ends with `ESC ] 7 ; file://host/home/user/Proj` →
     /// those bytes, and the pane's reported directory is still whatever the
     /// last finished report set.
     ///
@@ -1155,7 +1163,7 @@ impl TerminalEngine {
     }
 
     /// Set the shared pixel-to-cell measurement for new image placements and queries.
-    pub fn set_cell_size(&mut self, pixel_cell_size: koshi_core::geometry::PixelCellSize) {
+    pub fn set_cell_size(&mut self, pixel_cell_size: PixelCellSize) {
         self.terminal_state.set_cell_size(pixel_cell_size);
     }
 
@@ -1181,11 +1189,11 @@ impl TerminalEngine {
 
     fn process_graphics_operation(
         &mut self,
-        graphics_result: Result<crate::graphics::GraphicsOperation, GraphicsError>,
+        graphics_result: Result<GraphicsOperation, GraphicsError>,
         cursor_position: (u16, u16),
     ) {
         match graphics_result {
-            Ok(crate::graphics::GraphicsOperation::Failure {
+            Ok(GraphicsOperation::Failure {
                 image_display,
                 graphics_error,
             }) => {
@@ -1193,17 +1201,17 @@ impl TerminalEngine {
                     .reply_to_kitty_failure(&image_display, &graphics_error);
                 self.enqueue_graphics_event(Err(graphics_error));
             }
-            Ok(crate::graphics::GraphicsOperation::Command(graphics_command)) => {
+            Ok(GraphicsOperation::Command(graphics_command)) => {
                 if let Err(placement_error) =
                     self.terminal_state.apply_kitty_command(&graphics_command)
                 {
                     self.enqueue_graphics_event(Err(GraphicsError::PlacementRejected {
-                        protocol: crate::graphics::GraphicsProtocol::Kitty,
+                        protocol: GraphicsProtocol::Kitty,
                         placement_error,
                     }));
                 }
             }
-            Ok(crate::graphics::GraphicsOperation::Image(decoded_image)) => {
+            Ok(GraphicsOperation::Image(decoded_image)) => {
                 if decoded_image.is_query {
                     self.terminal_state
                         .reply_to_kitty(&decoded_image.display, None, true);
@@ -1222,16 +1230,16 @@ impl TerminalEngine {
                 let image_rgba_byte_count = image_record.image.rgba_bytes.len();
                 let image_protocol = image_record.protocol;
                 let placement_result = self.terminal_state.apply_image_record(&image_record);
-                let display = if placement_result.is_ok() {
+                let reply_display = if placement_result.is_ok() {
                     self.terminal_state
                         .get_kitty_reply_display(&image_record.display)
                 } else {
                     image_record.display.clone()
                 };
                 self.terminal_state.reply_to_kitty(
-                    &display,
+                    &reply_display,
                     placement_result.as_ref().err().copied(),
-                    image_protocol == crate::graphics::GraphicsProtocol::Kitty,
+                    image_protocol == GraphicsProtocol::Kitty,
                 );
                 let graphics_event =
                     placement_result
@@ -1250,7 +1258,7 @@ impl TerminalEngine {
                     queued_image_rgba_byte_count,
                 );
             }
-            Ok(crate::graphics::GraphicsOperation::Sixel(sixel_graphic)) => {
+            Ok(GraphicsOperation::Sixel(sixel_graphic)) => {
                 match self
                     .terminal_state
                     .apply_sixel_graphic(sixel_graphic, cursor_position)
@@ -1327,12 +1335,13 @@ impl TerminalEngine {
         // Each round runs to the action that ends a sequence or opens the body
         // of a device control string, or to the end of the normalized bytes.
         while normalized_byte_index < normalized_bytes.len() {
-            let mut probe = ActionProbe::default();
-            let consumed_byte_count = self
-                .undecoded_parser
-                .advance_until_terminated(&mut probe, &normalized_bytes[normalized_byte_index..]);
+            let mut action_probe = ActionProbe::default();
+            let consumed_byte_count = self.undecoded_parser.advance_until_terminated(
+                &mut action_probe,
+                &normalized_bytes[normalized_byte_index..],
+            );
             let stop_byte_index = normalized_byte_index + consumed_byte_count;
-            if probe.is_at_sequence_boundary {
+            if action_probe.is_at_sequence_boundary {
                 self.undecoded_terminal_bytes.clear();
                 self.is_at_sequence_boundary = true;
                 self.is_in_string_body = false;
@@ -1349,7 +1358,7 @@ impl TerminalEngine {
                     self.undecoded_terminal_bytes = Vec::new();
                     self.is_in_string_body = true;
                 } else {
-                    self.is_in_string_body = probe.is_string_started;
+                    self.is_in_string_body = action_probe.is_string_started;
                 }
             }
             normalized_byte_index = stop_byte_index;

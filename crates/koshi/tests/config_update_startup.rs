@@ -1,7 +1,6 @@
 //! Config migration before the updated binary starts its service commands.
 
 use std::fs;
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Command, Output, Stdio};
@@ -11,12 +10,13 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use koshi::cli::Cli;
 use koshi::config_command::migrate_config_for_service_command;
-#[cfg(unix)]
-use koshi_core::command::CliExitCode;
 use koshi_core::ids::SessionId;
 #[cfg(unix)]
 use koshi_daemon::session_server::ResumeSupport;
-use koshi_link::error::CliError;
+#[cfg(unix)]
+use koshi_ipc::router::resolve_router_endpoint_path;
+#[cfg(unix)]
+use koshi_test_support::fixtures::build_test_runtime_directory;
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -38,17 +38,49 @@ fn build_service_command_arguments(session_id: SessionId) -> [Vec<String>; 3] {
     ]
 }
 
+/// Writes `app_config_source_text` to `<config_directory>/koshi.kdl`, creating
+/// `config_directory` first. Returns the `koshi.kdl` path.
+fn write_app_config(config_directory: &Path, app_config_source_text: &str) -> PathBuf {
+    fs::create_dir_all(config_directory).expect("create config directory");
+    let app_config_path = config_directory.join("koshi.kdl");
+    fs::write(&app_config_path, app_config_source_text).expect("write app config");
+    app_config_path
+}
+
+/// Creates `<config_directory>/.migration.lock` as a directory, which no
+/// migration can open as its lock file. Returns the lock path and the error
+/// that opening it as the lock file gives.
+fn block_migration_lock(config_directory: &Path) -> (PathBuf, std::io::Error) {
+    let migration_lock_path = config_directory.join(".migration.lock");
+    fs::create_dir(&migration_lock_path).expect("block migration lock");
+    let lock_open_error = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&migration_lock_path)
+        .expect_err("a directory cannot be opened as a migration lock");
+    (migration_lock_path, lock_open_error)
+}
+
+/// Parses `cli_arguments` and runs the config migration step for the command
+/// they name against `config_directory`.
+fn run_config_migration_step(
+    cli_arguments: Vec<String>,
+    config_directory: &Path,
+) -> Result<(), koshi_link::error::CliError> {
+    let parsed_cli = Cli::try_parse_from(cli_arguments).expect("parse command");
+    migrate_config_for_service_command(parsed_cli.command.as_ref(), Some(config_directory))
+}
+
 #[test]
 fn service_commands_migrate_released_config_before_starting_on_every_platform() {
     for cli_arguments in build_service_command_arguments(SessionId::new()) {
         let test_directory = TempDir::new().expect("create test directory");
         let config_directory = test_directory.path().join("config");
-        fs::create_dir(&config_directory).expect("create config directory");
-        let app_config_path = config_directory.join("koshi.kdl");
-        fs::write(&app_config_path, "version 1\n").expect("write released config");
-        let cli = Cli::try_parse_from(cli_arguments).expect("parse service command");
+        let app_config_path = write_app_config(&config_directory, "version 1\n");
 
-        migrate_config_for_service_command(cli.command.as_ref(), Some(&config_directory))
+        run_config_migration_step(cli_arguments, &config_directory)
             .expect("migrate released config");
 
         assert_eq!(
@@ -59,38 +91,79 @@ fn service_commands_migrate_released_config_before_starting_on_every_platform() 
 }
 
 #[test]
-fn service_commands_reject_failed_config_migration_on_every_platform() {
+fn service_commands_migrate_a_released_config_with_an_unknown_key_on_every_platform() {
     for cli_arguments in build_service_command_arguments(SessionId::new()) {
         let test_directory = TempDir::new().expect("create test directory");
         let config_directory = test_directory.path().join("config");
-        fs::create_dir(&config_directory).expect("create config directory");
-        let app_config_path = config_directory.join("koshi.kdl");
-        fs::write(&app_config_path, "version 1\n").expect("write released config");
-        let migration_lock_path = config_directory.join(".migration.lock");
-        fs::create_dir(&migration_lock_path).expect("block migration lock");
-        let expected_open_error = fs::File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&migration_lock_path)
-            .expect_err("a directory cannot be opened as a migration lock");
-        let cli = Cli::try_parse_from(cli_arguments).expect("parse service command");
+        let app_config_path = write_app_config(&config_directory, "version 1\nmade-up-key \"x\"\n");
 
-        let migration_error =
-            migrate_config_for_service_command(cli.command.as_ref(), Some(&config_directory))
-                .expect_err("reject failed migration");
+        run_config_migration_step(cli_arguments, &config_directory)
+            .expect("migrate released config with an unknown key");
 
-        let CliError::Config {
-            detail: migration_error_detail,
-        } = migration_error
-        else {
-            panic!("expected a config error");
-        };
         assert_eq!(
-            migration_error_detail,
+            fs::read_to_string(app_config_path).expect("read migrated config"),
+            "version 2\nmade-up-key \"x\"\n"
+        );
+    }
+}
+
+#[test]
+fn service_commands_accept_a_current_config_with_an_unknown_key_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        let app_config_path = write_app_config(&config_directory, "version 2\nmade-up-key \"x\"\n");
+        block_migration_lock(&config_directory);
+
+        run_config_migration_step(cli_arguments, &config_directory)
+            .expect("current config with an unknown key needs no migration");
+
+        assert_eq!(
+            fs::read_to_string(app_config_path).expect("read unchanged config"),
+            "version 2\nmade-up-key \"x\"\n"
+        );
+    }
+}
+
+#[test]
+fn the_migration_step_reports_config_kdl_that_does_not_parse_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        let app_config_path = write_app_config(&config_directory, "version 1\npane {");
+
+        let migration_error = run_config_migration_step(cli_arguments, &config_directory)
+            .expect_err("reject config that does not parse");
+
+        assert_eq!(
+            migration_error.to_string(),
             format!(
-                "open {}: {expected_open_error}",
+                "config failed: config parse error in {}: No closing '}}' for child block",
+                app_config_path.display()
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(app_config_path).expect("read unchanged config"),
+            "version 1\npane {"
+        );
+    }
+}
+
+#[test]
+fn the_migration_step_reports_a_blocked_migration_lock_on_every_platform() {
+    for cli_arguments in build_service_command_arguments(SessionId::new()) {
+        let test_directory = TempDir::new().expect("create test directory");
+        let config_directory = test_directory.path().join("config");
+        let app_config_path = write_app_config(&config_directory, "version 1\n");
+        let (migration_lock_path, lock_open_error) = block_migration_lock(&config_directory);
+
+        let migration_error = run_config_migration_step(cli_arguments, &config_directory)
+            .expect_err("reject failed migration");
+
+        assert_eq!(
+            migration_error.to_string(),
+            format!(
+                "config failed: open {}: {lock_open_error}",
                 migration_lock_path.display()
             )
         );
@@ -106,13 +179,10 @@ fn service_commands_accept_current_config_without_a_migration_lock_on_every_plat
     for cli_arguments in build_service_command_arguments(SessionId::new()) {
         let test_directory = TempDir::new().expect("create test directory");
         let config_directory = test_directory.path().join("config");
-        fs::create_dir(&config_directory).expect("create config directory");
-        let app_config_path = config_directory.join("koshi.kdl");
-        fs::write(&app_config_path, "version 2\n").expect("write current config");
-        fs::create_dir(config_directory.join(".migration.lock")).expect("block migration lock");
-        let cli = Cli::try_parse_from(cli_arguments).expect("parse service command");
+        let app_config_path = write_app_config(&config_directory, "version 2\n");
+        block_migration_lock(&config_directory);
 
-        migrate_config_for_service_command(cli.command.as_ref(), Some(&config_directory))
+        run_config_migration_step(cli_arguments, &config_directory)
             .expect("current config needs no migration lock");
 
         assert_eq!(
@@ -125,20 +195,21 @@ fn service_commands_accept_current_config_without_a_migration_lock_on_every_plat
 #[test]
 fn non_service_commands_leave_released_config_unchanged_on_every_platform() {
     let command_arguments = [
-        vec!["koshi", "version"],
-        vec!["koshi", "config", "check"],
-        vec!["koshi"],
+        vec!["koshi".to_string(), "version".to_string()],
+        vec![
+            "koshi".to_string(),
+            "config".to_string(),
+            "check".to_string(),
+        ],
+        vec!["koshi".to_string()],
     ];
     for cli_arguments in command_arguments {
         let test_directory = TempDir::new().expect("create test directory");
         let config_directory = test_directory.path().join("config");
-        fs::create_dir(&config_directory).expect("create config directory");
-        let app_config_path = config_directory.join("koshi.kdl");
-        fs::write(&app_config_path, "version 1\n").expect("write released config");
-        fs::create_dir(config_directory.join(".migration.lock")).expect("block migration lock");
-        let cli = Cli::try_parse_from(cli_arguments).expect("parse non-service command");
+        let app_config_path = write_app_config(&config_directory, "version 1\n");
+        block_migration_lock(&config_directory);
 
-        migrate_config_for_service_command(cli.command.as_ref(), Some(&config_directory))
+        run_config_migration_step(cli_arguments, &config_directory)
             .expect("non-service command does not migrate config");
 
         assert_eq!(
@@ -200,18 +271,13 @@ fn run_test_koshi_command(process_command: &mut Command) -> Output {
     }
 }
 
+/// Runs `koshi resume-support` with `home_directory` as the home directory, and
+/// asserts it exits `0`, writes nothing to stderr, and prints this build's
+/// resume-format bounds under both key pairs.
 #[cfg(unix)]
-#[test]
-fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
-    let test_directory = TempDir::new().expect("create test directory");
-    let config_directory = resolve_test_config_directory(test_directory.path());
-    fs::create_dir_all(&config_directory).expect("create config directory");
-    let app_config_path = config_directory.join("koshi.kdl");
-    fs::write(&app_config_path, "version 1\n").expect("write released config");
-
-    let process_output = run_test_koshi_command(
-        build_test_koshi_command(test_directory.path()).arg("resume-support"),
-    );
+fn assert_resume_support_answers(home_directory: &Path) {
+    let process_output =
+        run_test_koshi_command(build_test_koshi_command(home_directory).arg("resume-support"));
 
     assert_eq!(process_output.status.code(), Some(0));
     assert_eq!(process_output.stderr, b"");
@@ -226,6 +292,19 @@ fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
             "max": resume_support.maximum_resume_format,
         })
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let app_config_path = write_app_config(
+        &resolve_test_config_directory(test_directory.path()),
+        "version 1\n",
+    );
+
+    assert_resume_support_answers(test_directory.path());
+
     assert_eq!(
         fs::read_to_string(app_config_path).expect("read migrated config"),
         "version 2\n"
@@ -234,20 +313,58 @@ fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
 
 #[cfg(unix)]
 #[test]
+fn resume_support_answers_for_a_released_config_with_an_unknown_key() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let app_config_path = write_app_config(
+        &resolve_test_config_directory(test_directory.path()),
+        "version 1\nmade-up-key \"x\"\n",
+    );
+
+    assert_resume_support_answers(test_directory.path());
+
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read migrated config"),
+        "version 2\nmade-up-key \"x\"\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn resume_support_accepts_current_config_without_a_migration_lock() {
     let test_directory = TempDir::new().expect("create test directory");
     let config_directory = resolve_test_config_directory(test_directory.path());
-    fs::create_dir_all(&config_directory).expect("create config directory");
-    let app_config_path = config_directory.join("koshi.kdl");
-    fs::write(&app_config_path, "version 2\n").expect("write current config");
-    fs::create_dir(config_directory.join(".migration.lock")).expect("block migration lock");
+    let app_config_path = write_app_config(&config_directory, "version 2\n");
+    block_migration_lock(&config_directory);
+
+    assert_resume_support_answers(test_directory.path());
+
+    assert_eq!(
+        fs::read_to_string(app_config_path).expect("read unchanged config"),
+        "version 2\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resume_support_answers_when_its_config_migration_fails() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let config_directory = resolve_test_config_directory(test_directory.path());
+    let app_config_path = write_app_config(&config_directory, "version 1\n");
+    let (migration_lock_path, lock_open_error) = block_migration_lock(&config_directory);
 
     let process_output = run_test_koshi_command(
         build_test_koshi_command(test_directory.path()).arg("resume-support"),
     );
 
     assert_eq!(process_output.status.code(), Some(0));
-    assert_eq!(process_output.stderr, b"");
+    assert_eq!(
+        String::from_utf8_lossy(&process_output.stderr),
+        format!(
+            "koshi: config failed: open {}: {lock_open_error}; starting with the config files \
+             as they are\n",
+            migration_lock_path.display()
+        )
+    );
     let resume_support = ResumeSupport::from_current_build();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&process_output.stdout)
@@ -260,64 +377,53 @@ fn resume_support_accepts_current_config_without_a_migration_lock() {
         })
     );
     assert_eq!(
-        fs::read_to_string(app_config_path).expect("read unchanged config"),
-        "version 2\n"
+        fs::read_to_string(&app_config_path).expect("read unchanged config"),
+        "version 1\n"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn process_entrypoints_refuse_a_failed_config_migration_before_serving() {
+fn a_router_whose_config_migration_fails_warns_and_serves() {
     let test_directory = TempDir::new().expect("create test directory");
     let config_directory = resolve_test_config_directory(test_directory.path());
-    fs::create_dir_all(&config_directory).expect("create config directory");
-    let app_config_path = config_directory.join("koshi.kdl");
-    fs::write(&app_config_path, "version 1\n").expect("write released config");
-    let migration_lock_path = config_directory.join(".migration.lock");
-    fs::create_dir(&migration_lock_path).expect("block migration lock");
-    let expected_open_error = fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&migration_lock_path)
-        .expect_err("a directory cannot be opened as a migration lock");
-    let expected_standard_error = format!(
-        "koshi: config failed: open {}: {expected_open_error}\n",
-        migration_lock_path.display()
-    );
-    let runtime_directory = test_directory.path().join("runtime");
-    let session_id = SessionId::new();
-    let cli_arguments_by_process = [
-        vec!["resume-support".to_string()],
-        vec![
-            "serve-router".to_string(),
-            "--runtime-dir".to_string(),
-            runtime_directory.display().to_string(),
-        ],
-        vec![
-            "serve-session".to_string(),
-            session_id.to_string(),
-            "workspace".to_string(),
-            "--runtime-dir".to_string(),
-            runtime_directory.display().to_string(),
-        ],
-    ];
+    let app_config_path = write_app_config(&config_directory, "version 1\npane {");
+    let runtime_directory = build_test_runtime_directory();
+    let router_endpoint_path = resolve_router_endpoint_path(runtime_directory.path());
 
-    for cli_arguments in cli_arguments_by_process {
-        let process_output = run_test_koshi_command(
-            build_test_koshi_command(test_directory.path()).args(cli_arguments),
-        );
-        assert_eq!(
-            process_output.status.code(),
-            Some(CliExitCode::UsageOrConfig.get_exit_code())
-        );
-        assert_eq!(process_output.stdout, b"");
-        assert_eq!(process_output.stderr, expected_standard_error.as_bytes());
-        assert_eq!(
-            fs::read_to_string(&app_config_path).expect("read unchanged config"),
-            "version 1\n"
-        );
-        assert!(!runtime_directory.exists());
+    let mut router_process = build_test_koshi_command(test_directory.path())
+        .arg("serve-router")
+        .arg("--runtime-dir")
+        .arg(runtime_directory.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the router");
+    let startup_deadline = Instant::now() + STARTUP_TEST_TIMEOUT_DURATION;
+    while !router_endpoint_path.exists() && Instant::now() < startup_deadline {
+        std::thread::sleep(STARTUP_POLL_INTERVAL_DURATION);
     }
+    let is_router_serving = router_endpoint_path.exists();
+    let _ = router_process.kill();
+    let router_output = router_process
+        .wait_with_output()
+        .expect("read router output");
+
+    assert!(
+        is_router_serving,
+        "the router wrote no endpoint file within {STARTUP_TEST_TIMEOUT_DURATION:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&router_output.stderr),
+        format!(
+            "koshi: config failed: config parse error in {}: No closing '}}' for child block; \
+             starting with the config files as they are\n",
+            app_config_path.display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(&app_config_path).expect("read unchanged config"),
+        "version 1\npane {"
+    );
 }

@@ -91,6 +91,21 @@ fn decoded_image_rejects_a_side_above_the_limit() {
 }
 
 #[test]
+fn compute_decoded_image_byte_count_holds_each_limit_at_its_edge() {
+    assert_eq!(compute_decoded_image_byte_count(2, 3), Some(24));
+    assert_eq!(compute_decoded_image_byte_count(0, 3), None);
+    assert_eq!(compute_decoded_image_byte_count(2, 0), None);
+    assert_eq!(compute_decoded_image_byte_count(16_384, 1), Some(65_536));
+    assert_eq!(compute_decoded_image_byte_count(16_385, 1), None);
+    assert_eq!(compute_decoded_image_byte_count(1, 16_385), None);
+    assert_eq!(
+        compute_decoded_image_byte_count(16_384, 1_024),
+        Some(67_108_864)
+    );
+    assert_eq!(compute_decoded_image_byte_count(16_384, 1_025), None);
+}
+
+#[test]
 fn compute_source_rect_uses_the_complete_image_for_non_kitty_records() {
     let image_record = build_image_record(GraphicsProtocol::Iterm2, ImageDisplay::default());
 

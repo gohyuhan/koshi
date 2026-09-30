@@ -104,20 +104,20 @@ pub struct KeymapLayer {
 /// pane prefix into `<A-p>`.
 #[must_use]
 pub fn build_keymap_layers(
-    user_modes: Option<BTreeMap<ModeName, ModeBindings>>,
+    user_mode_bindings_by_name: Option<BTreeMap<ModeName, ModeBindings>>,
     leader: Leader,
 ) -> Vec<KeymapLayer> {
-    let mut layers = vec![KeymapLayer {
+    let mut keymap_layers = vec![KeymapLayer {
         origin: LayerOrigin::Defaults,
         mode_bindings_by_name: build_default_mode_bindings(leader),
     }];
-    if let Some(user_mode_bindings) = user_modes {
-        layers.push(KeymapLayer {
+    if let Some(user_mode_bindings_by_name) = user_mode_bindings_by_name {
+        keymap_layers.push(KeymapLayer {
             origin: LayerOrigin::User,
-            mode_bindings_by_name: user_mode_bindings,
+            mode_bindings_by_name: user_mode_bindings_by_name,
         });
     }
-    layers
+    keymap_layers
 }
 
 /// Every built-in input mode's name.
@@ -135,7 +135,8 @@ pub enum ConflictSeverity {
     Warning,
     /// A user-vs-user key collision; the user keymap reverts to defaults.
     Collision,
-    /// The locked-mode unlock escape is compromised; the keymap is refused.
+    /// The locked-mode unlock escape or the `pane-placement` cancellation is
+    /// broken; the keymap is refused.
     Fatal,
 }
 
@@ -157,8 +158,7 @@ pub enum KeymapVerdict {
 pub enum ConflictDiagnostic {
     /// Two or more user-authored layers bind `key_sequence` in `mode_name` to
     /// different actions. `binding_claims` holds one entry per distinct bound
-    /// action, in
-    /// layer order.
+    /// action, in layer order.
     KeyCollision {
         /// The mode whose bindings collide.
         mode_name: ModeName,
@@ -167,8 +167,8 @@ pub enum ConflictDiagnostic {
         /// Each distinct claim: the layer that made it and what it binds.
         binding_claims: Vec<(LayerOrigin, BoundAction)>,
     },
-    /// `prefix` is bound, and so is a longer sequence starting with it.
-    /// The prefix binding fires only on the chord timeout.
+    /// `prefix_sequence` is bound, and so is `longer_sequence`, which starts
+    /// with it. The prefix binding fires only on the chord timeout.
     AmbiguousPrefix {
         /// The mode holding both bindings.
         mode_name: ModeName,
@@ -201,7 +201,7 @@ pub enum ConflictDiagnostic {
         unlock_alternative_chord: KeyChord,
     },
     /// The effective `pane-placement` map has no live `core:cancel-pane-placement`
-    /// binding, so an active placement cannot be cancelled from the keyboard.
+    /// binding. An active placement then has no keyboard cancellation.
     PanePlacementCancelBindingMissing,
     /// A locked-mode sequence of two or more chords holds the reserved unlock
     /// chord. The chord resolves the instant it is pressed, ahead of the
@@ -678,10 +678,10 @@ fn is_over_chord_depth_limit(key_sequence: &KeySequence, maximum_chord_depth: u8
 
 /// True when the leader is reachable by plain typing: a chord leader that is
 /// itself typeable, or a modifier-run leader whose modifiers plain typing
-/// produces ([`koshi_core::key::ModFlags::is_typing`] — Shift alone merges into typed keys).
+/// produces ([`koshi_core::key::BindingModifierFlags::is_typing`] — Shift alone merges into typed keys).
 fn is_leader_typeable(leader: Leader) -> bool {
     match leader {
-        Leader::Mods(modifier_flags) => modifier_flags.is_typing(),
+        Leader::Modifiers(modifier_flags) => modifier_flags.is_typing(),
         Leader::Chord(key_chord) => key_chord.is_typeable(),
     }
 }

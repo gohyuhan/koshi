@@ -10,7 +10,7 @@
 //! in, and what a pass must move before the loop draws again on its own. It also
 //! covers coming back after the session replaces its own process image: which
 //! endpoint file the wait takes and which it reads past, that the join names the
-//! client image record this terminal holds, and every way back that fails reporting
+//! client record this terminal holds, and every way back that fails reporting
 //! the death a broken connection already reports. It also covers a remote
 //! viewer whose link broke: the pause each redial waits, that dialing again
 //! moves what the viewer paints, what the drain of the stretch with no link
@@ -37,8 +37,8 @@ use koshi_core::command::{
 use koshi_core::geometry::{Direction, PaneArea, Point, Rect, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, TabId};
 use koshi_core::key::{
-    Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags, NamedKey,
-    TEXT_ONLY_KEY_CODEPOINT,
+    BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
+    NamedKey, TEXT_ONLY_KEY_CODEPOINT,
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseButton, MouseTracking, ScrollDirection};
@@ -88,15 +88,15 @@ impl<B: Backend> Screen<B> {
         )
     }
 
-    /// Build the render snapshot `frame` carries and draw it with
+    /// Build the render snapshot `painted_frame` carries and draw it with
     /// [`Screen::draw_snapshot`].
     fn draw_painted_frame(
         &mut self,
         client: &mut Client,
-        frame: Box<PaintedFrame>,
+        painted_frame: Box<PaintedFrame>,
     ) -> Option<MouseFrame> {
-        let snapshot = build_render_snapshot(&frame);
-        self.draw_snapshot(client, snapshot)
+        let render_snapshot = build_render_snapshot(&painted_frame);
+        self.draw_snapshot(client, render_snapshot)
     }
 
     /// [`Screen::compute_next_image_wakeup_at`] at the current instant.
@@ -173,7 +173,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
     }
 }
 
-/// One listing row for a session displayed as `name`, on this machine.
+/// One listing row for a session displayed as `session_name`, on this machine.
 fn build_test_session_row(session_name: &str) -> SessionRow {
     SessionRow {
         session_id: SessionId::new(),
@@ -312,10 +312,8 @@ fn a_line_that_is_not_a_listed_number_is_refused() {
 /// answers a Hello with the settled protocol version and refuses every other
 /// request with `BadToken`.
 ///
-/// It serves one connection and records each request before it answers it, so
-/// a caller that has its answer is a caller whose request is already in the
-/// returned list. That ordering is what lets a test read the list once its
-/// caller has returned, without joining the thread.
+/// It serves one connection and records each request before it answers it. A
+/// caller that has its answer finds its request already in the returned list.
 fn build_recording_router(runtime_directory: &Path) -> Arc<Mutex<Vec<&'static str>>> {
     let socket_address = compute_router_socket_address(runtime_directory);
     let listener = Listener::bind(&socket_address).expect("bind the stand-in router");
@@ -338,7 +336,7 @@ fn build_recording_router(runtime_directory: &Path) -> Arc<Mutex<Vec<&'static st
                 .lock()
                 .expect("the list outlives every panic")
                 .push(request.request_kind.get_request_kind_name());
-            let router_response = match request.request_kind {
+            let router_result = match request.request_kind {
                 RouterRequestKind::Hello { .. } => RouterResult::Hello {
                     protocol_version: ROUTER_PROTOCOL_VERSION,
                     build_version: String::new(),
@@ -352,7 +350,7 @@ fn build_recording_router(runtime_directory: &Path) -> Arc<Mutex<Vec<&'static st
             };
             let _ = connection.send(&RouterResponse {
                 request_id: Some(request.request_id),
-                answer_result: router_response,
+                answer_result: router_result,
             });
         }
     });
@@ -362,13 +360,13 @@ fn build_recording_router(runtime_directory: &Path) -> Arc<Mutex<Vec<&'static st
 #[test]
 fn attaching_by_id_skips_the_selector_lookup() {
     let runtime_directory = build_test_runtime_directory();
-    let router = build_recording_router(runtime_directory.path());
+    let recorded_request_kind_names = build_recording_router(runtime_directory.path());
     let session_id = SessionId::new();
 
     let attach_error = attach_session(runtime_directory.path(), session_id)
         .expect_err("no endpoint file advertises that session");
 
-    let request_kind_names = router
+    let request_kind_names = recorded_request_kind_names
         .lock()
         .expect("the list outlives every panic")
         .clone();
@@ -392,12 +390,12 @@ fn attaching_by_id_skips_the_selector_lookup() {
 #[test]
 fn looking_up_a_name_asks_the_selector_lookup() {
     let runtime_directory = build_test_runtime_directory();
-    let router = build_recording_router(runtime_directory.path());
+    let recorded_request_kind_names = build_recording_router(runtime_directory.path());
 
     let lookup_error = lookup_session_address(runtime_directory.path(), "quiet-lake")
         .expect_err("the stand-in router refuses the lookup");
 
-    let request_kind_names = router
+    let request_kind_names = recorded_request_kind_names
         .lock()
         .expect("the list outlives every panic")
         .clone();
@@ -569,6 +567,7 @@ fn a_death_reports_the_cause_and_how_to_reattach() {
         &build_local_home(),
         AttachmentEnding::ConnectionDied,
         session_id,
+        None,
     )
     .expect_err("a death is an error");
     assert_eq!(
@@ -584,13 +583,13 @@ fn a_death_reports_the_cause_and_how_to_reattach() {
 
 #[test]
 fn a_death_on_another_machine_reports_the_way_back_to_that_machine() {
-    // The local way back would send the user to their own machine, where the
-    // session never ran, so the message names the saved server instead.
+    // The way back names the saved server `work`, not this machine.
     let session_id = SessionId::new();
     let ending_error = report_attachment_ending(
         &build_remote_home(),
         AttachmentEnding::ConnectionDied,
         session_id,
+        None,
     )
     .expect_err("a death is an error");
     assert_eq!(
@@ -613,9 +612,13 @@ fn a_server_with_no_name_is_named_by_its_address_in_the_way_back() {
             server_address: "laptop.local:7654".to_string(),
         },
     };
-    let ending_error =
-        report_attachment_ending(&remote_home, AttachmentEnding::ConnectionDied, session_id)
-            .expect_err("a death is an error");
+    let ending_error = report_attachment_ending(
+        &remote_home,
+        AttachmentEnding::ConnectionDied,
+        session_id,
+        None,
+    )
+    .expect_err("a death is an error");
     assert_eq!(
         ending_error.to_string(),
         format!(
@@ -637,6 +640,7 @@ fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_b
         &build_remote_home(),
         AttachmentEnding::LinkLost(Box::new(cause)),
         session_id,
+        None,
     )
     .expect_err("a lost link is an error");
     assert_eq!(
@@ -654,26 +658,38 @@ fn a_viewer_that_stopped_dialing_reports_the_cause_that_stopped_it_and_the_way_b
 
 #[test]
 fn two_lost_links_are_equal_only_when_their_causes_print_the_same_text() {
-    let lost = |detail: &str| {
+    let build_lost_link = |detail: &str| {
         AttachmentEnding::LinkLost(Box::new(CliError::Runtime {
             detail: detail.to_string(),
         }))
     };
 
-    assert_eq!(lost("connection refused"), lost("connection refused"));
-    assert_ne!(lost("connection refused"), lost("connection timed out"));
-    assert_ne!(lost("connection refused"), AttachmentEnding::ConnectionDied);
-    assert_ne!(AttachmentEnding::ConnectionDied, lost("connection refused"));
+    assert_eq!(
+        build_lost_link("connection refused"),
+        build_lost_link("connection refused")
+    );
+    assert_ne!(
+        build_lost_link("connection refused"),
+        build_lost_link("connection timed out")
+    );
+    assert_ne!(
+        build_lost_link("connection refused"),
+        AttachmentEnding::ConnectionDied
+    );
+    assert_ne!(
+        AttachmentEnding::ConnectionDied,
+        build_lost_link("connection refused")
+    );
 }
 
 #[test]
 fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let mut dials = 0_u32;
+    let mut dial_count = 0_u32;
     let Err(cause) = redial_remote_session_with(
         || {
-            dials += 1;
+            dial_count += 1;
             Err(DialError::Refused(CliError::Runtime {
                 detail: "the server desk.local:7654 did not admit the connection".to_string(),
             }))
@@ -685,7 +701,7 @@ fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
     ) else {
         panic!("a refused dial never joins");
     };
-    assert_eq!(dials, 1);
+    assert_eq!(dial_count, 1);
     assert_eq!(
         cause.to_string(),
         "the server desk.local:7654 did not admit the connection"
@@ -697,8 +713,13 @@ fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
 fn a_detach_and_a_session_end_both_succeed_and_name_no_session_to_join_next() {
     let session_id = SessionId::new();
     assert_eq!(
-        report_attachment_ending(&build_local_home(), AttachmentEnding::Detached, session_id)
-            .expect("a detach is a success"),
+        report_attachment_ending(
+            &build_local_home(),
+            AttachmentEnding::Detached,
+            session_id,
+            None
+        )
+        .expect("a detach is a success"),
         None
     );
     assert_eq!(
@@ -706,6 +727,7 @@ fn a_detach_and_a_session_end_both_succeed_and_name_no_session_to_join_next() {
             &build_local_home(),
             AttachmentEnding::SessionEnded,
             session_id,
+            None,
         )
         .expect("a session ending is a success"),
         None
@@ -720,6 +742,7 @@ fn a_switch_names_the_session_to_join_next() {
             &build_local_home(),
             AttachmentEnding::SwitchSession(target_session_id),
             SessionId::new(),
+            None,
         )
         .expect("a switch is a success"),
         Some(target_session_id)
@@ -767,7 +790,7 @@ const NEW_CONNECTION_TOKEN: &str = "the token the new image minted";
 fn the_wait_takes_the_endpoint_file_the_moment_it_names_another_token() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let advertised = write_advertised_endpoint(
+    let advertised_endpoint = write_advertised_endpoint(
         runtime_directory.path(),
         session_id,
         NEW_CONNECTION_TOKEN,
@@ -782,7 +805,7 @@ fn the_wait_takes_the_endpoint_file_the_moment_it_names_another_token() {
             &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
             deadline,
         ),
-        Some(advertised)
+        Some(advertised_endpoint)
     );
     assert!(
         Instant::now() < deadline,
@@ -802,7 +825,7 @@ fn the_wait_reads_the_endpoint_file_again_until_the_token_changes() {
     );
 
     let runtime_directory_path = runtime_directory.path().to_path_buf();
-    let writer = thread::spawn(move || {
+    let endpoint_writer_thread = thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
         write_advertised_endpoint(
             &runtime_directory_path,
@@ -819,8 +842,10 @@ fn the_wait_reads_the_endpoint_file_again_until_the_token_changes() {
         &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
         deadline,
     );
-    let advertised = writer.join().expect("the writing thread finished");
-    assert_eq!(new_endpoint, Some(advertised));
+    let advertised_endpoint = endpoint_writer_thread
+        .join()
+        .expect("the writing thread finished");
+    assert_eq!(new_endpoint, Some(advertised_endpoint));
     assert!(
         Instant::now() < deadline,
         "the wait returned before its deadline"
@@ -831,8 +856,8 @@ fn the_wait_reads_the_endpoint_file_again_until_the_token_changes() {
 fn the_wait_ignores_an_endpoint_file_still_naming_the_token_this_client_attached_under() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    // A different process id under the same token. On Unix `execvp` keeps the
-    // process id, so only the token tells the new image from the old one.
+    // A different process id under the same token. The wait compares the token
+    // alone.
     write_advertised_endpoint(
         runtime_directory.path(),
         session_id,
@@ -894,14 +919,17 @@ fn build_attached_response(
 /// image: it binds `session_id`'s socket, advertises it under [`NEW_CONNECTION_TOKEN`],
 /// and serves one connection.
 ///
-/// `attached` is how it answers the Attach: `Ok` is the client id it hands back,
-/// `Err` is the sentence it refuses with. It records the Attach it read before
-/// it answers, so a caller holding that answer is a caller whose request is
-/// already in the returned slot.
+/// `protocol_version_refusal_message` is the sentence it refuses the Hello with as
+/// [`IpcErrorCode::UnsupportedVersion`], and `None` accepts the Hello.
+/// `attach_answer` is how it answers the Attach: `Ok` is the client id it hands
+/// back, `Err` is the sentence it refuses with. It records the Attach it read
+/// before it answers. A caller holding that answer finds its request already in
+/// the returned slot.
 fn spawn_restarted_session(
     runtime_directory: &Path,
     session_id: SessionId,
-    attached: Result<ClientId, &'static str>,
+    protocol_version_refusal_message: Option<&'static str>,
+    attach_answer: Result<ClientId, &'static str>,
 ) -> Arc<Mutex<Option<IpcRequestKind>>> {
     let socket_address = compute_socket_address(runtime_directory, session_id);
     let listener = Listener::bind(&socket_address).expect("bind the stand-in session");
@@ -919,17 +947,23 @@ fn spawn_restarted_session(
             return;
         };
         while let Ok(request) = connection.recv::<IpcRequest>() {
-            let ipc_response = match &request.request_kind {
-                IpcRequestKind::Hello { .. } => IpcResult::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                    build_version: String::from("0.0.0"),
+            let ipc_result = match &request.request_kind {
+                IpcRequestKind::Hello { .. } => match protocol_version_refusal_message {
+                    Some(refusal_message) => IpcResult::Error(IpcErrorPayload {
+                        code: IpcErrorCode::UnsupportedVersion,
+                        message: String::from(refusal_message),
+                    }),
+                    None => IpcResult::Hello {
+                        protocol_version: PROTOCOL_VERSION,
+                        build_version: String::from("0.0.0"),
+                    },
                 },
                 IpcRequestKind::Attach { .. } => {
                     *request_kind_slot
                         .lock()
                         .expect("the slot outlives every panic") =
                         Some(request.request_kind.clone());
-                    match attached {
+                    match attach_answer {
                         Ok(client_id) => IpcResult::Attached {
                             client_id,
                             session_id,
@@ -954,7 +988,7 @@ fn spawn_restarted_session(
             };
             let _ = connection.send(&IpcResponse {
                 request_id: Some(request.request_id),
-                answer_result: ipc_response,
+                answer_result: ipc_result,
             });
         }
     });
@@ -966,7 +1000,7 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
     let client_id = ClientId::new();
     let session_id = SessionId::new();
 
-    let echoed = parse_attached_session(build_attached_response(
+    let echoed_attached_session = parse_attached_session(build_attached_response(
         client_id,
         session_id,
         Some(PaneArea::Reported(Size {
@@ -975,11 +1009,12 @@ fn an_attach_answer_is_taken_whether_or_not_it_echoes_a_pane_area() {
         })),
     ))
     .expect("the answer of a session that echoes the field is accepted");
-    let silent = parse_attached_session(build_attached_response(client_id, session_id, None))
-        .expect("the answer of an older session is accepted too");
+    let silent_attached_session =
+        parse_attached_session(build_attached_response(client_id, session_id, None))
+            .expect("the answer of an older session is accepted too");
 
-    assert_eq!(echoed, (client_id, session_id, None));
-    assert_eq!(silent, (client_id, session_id, None));
+    assert_eq!(echoed_attached_session, (client_id, session_id, None));
+    assert_eq!(silent_attached_session, (client_id, session_id, None));
 }
 
 #[test]
@@ -988,7 +1023,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let recorded_attach_request =
-        spawn_restarted_session(runtime_directory.path(), session_id, Ok(client_id));
+        spawn_restarted_session(runtime_directory.path(), session_id, None, Ok(client_id));
     let advertised_endpoint = EndpointFile::load_from_path(
         &EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
     )
@@ -1002,7 +1037,7 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
         terminal::GraphicsSupport::Kitty,
         None,
     )
-    .expect("the stand-in session handed the client image record back");
+    .expect("the stand-in session handed the client record back");
     drop(client_connection);
 
     assert_eq!(rejoined_client_id, client_id);
@@ -1024,14 +1059,15 @@ fn coming_back_after_a_restart_keeps_the_client_record_and_graphics_capability()
             },
             cell_size: None,
         }),
-        "the restart path claims the client image record and reports this terminal's capability"
+        "the restart path claims the client record and reports this terminal's capability"
     );
 }
 
 #[test]
 fn attach_advertises_the_selected_native_protocol() {
-    let iterm = build_attach_request(None, None, terminal::GraphicsSupport::Iterm, None);
-    let sixel = build_attach_request(
+    let iterm_attach_request =
+        build_attach_request(None, None, terminal::GraphicsSupport::Iterm, None);
+    let sixel_attach_request = build_attach_request(
         None,
         None,
         terminal::GraphicsSupport::Sixel {
@@ -1045,7 +1081,7 @@ fn attach_advertises_the_selected_native_protocol() {
     let IpcRequestKind::Attach {
         graphics_capabilities,
         ..
-    } = iterm.request_kind
+    } = iterm_attach_request.request_kind
     else {
         panic!("expected an attach request");
     };
@@ -1060,7 +1096,7 @@ fn attach_advertises_the_selected_native_protocol() {
     let IpcRequestKind::Attach {
         graphics_capabilities,
         ..
-    } = sixel.request_kind
+    } = sixel_attach_request.request_kind
     else {
         panic!("expected an attach request");
     };
@@ -1082,10 +1118,11 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
     let _recorded_attach_request = spawn_restarted_session(
         runtime_directory.path(),
         session_id,
+        None,
         Err("this session holds no such client"),
     );
 
-    let attached = rejoin_session(
+    let rejoin_result = rejoin_session(
         runtime_directory.path(),
         session_id,
         client_id,
@@ -1094,8 +1131,8 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
         None,
     );
     assert_eq!(
-        attached.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
-        None
+        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        Err(AttachmentEnding::Restarting)
     );
 }
 
@@ -1104,8 +1141,12 @@ fn a_restarted_session_that_mints_a_new_client_is_joined_as_that_client() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let minted_client_id = ClientId::new();
-    let _recorded_attach_request =
-        spawn_restarted_session(runtime_directory.path(), session_id, Ok(minted_client_id));
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        None,
+        Ok(minted_client_id),
+    );
     let advertised_endpoint = EndpointFile::load_from_path(
         &EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
     )
@@ -1132,45 +1173,17 @@ fn a_viewer_whose_restarted_session_mints_a_new_client_goes_on_as_that_client() 
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let minted_client_id = ClientId::new();
-    let recorded_attach_request =
-        spawn_restarted_session(runtime_directory.path(), session_id, Ok(minted_client_id));
-    let mut client = build_test_client();
-    client.set_client_id(client_id);
-    let mut screen = build_test_screen();
-    let (request_sender, _request_receiver) = mpsc::channel();
-    let mut uplink = Uplink {
-        request_sender,
-        registry: ActionRegistry::new(),
-        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
-    };
-    let (incoming_sender, incoming_receiver) = build_incoming_channel();
-    incoming_sender
-        .send(Incoming::Frame {
-            connection_index: INITIAL_CONNECTION_INDEX,
-            session_event_result: Ok(SessionEvent::Restarting),
-        })
-        .expect("the loop's queue takes the restart frame");
-    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        None,
+        Ok(minted_client_id),
+    );
 
     // The stand-in session answers the viewer's resize with a response frame,
     // which the event stream cannot read, so the new connection ends there.
-    let attachment_ending = run_attachment(
-        &Home::Local {
-            runtime_directory: runtime_directory.path().to_path_buf(),
-        },
-        session_id,
-        client_id,
-        ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        None,
-        &mut client,
-        &mut screen,
-        &mut uplink,
-        terminal::GraphicsSupport::Unsupported,
-        &mut cell_size_query,
-        &mut Vec::new(),
-        incoming_sender,
-        incoming_receiver,
-    );
+    let (attachment_ending, client) =
+        run_local_attachment_through_restart(runtime_directory.path(), session_id, client_id);
 
     assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
     assert_eq!(client.get_client_id(), minted_client_id);
@@ -1194,7 +1207,7 @@ fn another_local_users_restarting_session_is_not_waited_for() {
 
     // The empty token is what a session another local user started is reached
     // with: this user reads no endpoint file for it, so there is none to watch.
-    let attached = rejoin_session(
+    let rejoin_result = rejoin_session(
         runtime_directory.path(),
         SessionId::new(),
         ClientId::new(),
@@ -1204,8 +1217,8 @@ fn another_local_users_restarting_session_is_not_waited_for() {
     );
 
     assert_eq!(
-        attached.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
-        None
+        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        Err(AttachmentEnding::Restarting)
     );
     assert!(
         redial_started_at.elapsed() < Duration::from_secs(1),
@@ -1214,23 +1227,380 @@ fn another_local_users_restarting_session_is_not_waited_for() {
 }
 
 #[test]
-fn a_restart_this_client_cannot_come_back_from_reports_the_session_ended_unexpectedly() {
+fn a_restart_this_client_cannot_come_back_from_reports_the_restart_and_the_attach_command() {
     let session_id = SessionId::new();
     let ending_error = report_attachment_ending(
         &build_local_home(),
         AttachmentEnding::Restarting,
         session_id,
+        None,
     )
     .expect_err("a restart with no way back is an error");
     assert_eq!(
         ending_error.to_string(),
         format!(
-            "the session ended unexpectedly\n  \
+            "the session restarted into another koshi build and this client could not \
+             reconnect to it\n  \
              run `koshi list-sessions`; if session {session_id} is still listed, \
              reattach with `koshi attach {session_id}`"
         )
     );
     assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
+}
+
+/// The sentence a session that speaks only protocol version 5 refuses a Hello
+/// for versions 4 to 4 with.
+const PROTOCOL_VERSION_REFUSAL_MESSAGE: &str =
+    "the client speaks protocol version 4 to 4, this session speaks 5 to 5";
+
+/// A session's answer to the Hello, request 1: a refusal carrying `code` and
+/// `message`.
+fn build_hello_refusal_response(code: IpcErrorCode, message: &str) -> IncomingResponse {
+    IpcResponse {
+        request_id: Some(1),
+        answer_result: MaybeKnown::Known(IpcResult::Error(IpcErrorPayload {
+            code,
+            message: String::from(message),
+        })),
+    }
+}
+
+#[test]
+fn a_hello_refused_for_its_protocol_version_is_a_protocol_version_refusal() {
+    let hello_refusal_response = build_hello_refusal_response(
+        IpcErrorCode::UnsupportedVersion,
+        "\u{1b}[2Jthe client speaks protocol version 4 to 4, this session speaks 5 to 5",
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) =
+        validate_session_protocol_version(hello_refusal_response)
+    else {
+        panic!("a version refusal is a protocol version refusal");
+    };
+    assert_eq!(
+        detail,
+        "[2Jthe client speaks protocol version 4 to 4, this session speaks 5 to 5"
+    );
+}
+
+#[test]
+fn a_hello_refused_for_its_token_is_an_unavailable_session() {
+    let hello_refusal_response =
+        build_hello_refusal_response(IpcErrorCode::BadToken, "the token is stale");
+
+    let Err(CliError::IpcUnavailable { detail }) =
+        validate_session_protocol_version(hello_refusal_response)
+    else {
+        panic!("a token refusal is an unavailable session");
+    };
+    assert_eq!(detail, "the token is stale");
+}
+
+#[test]
+fn a_restarted_session_that_refuses_this_protocol_version_is_a_restart_into_an_incompatible_build()
+{
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        Some(PROTOCOL_VERSION_REFUSAL_MESSAGE),
+        Ok(ClientId::new()),
+    );
+
+    let rejoin_result = rejoin_session(
+        runtime_directory.path(),
+        session_id,
+        ClientId::new(),
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        terminal::GraphicsSupport::Unsupported,
+        None,
+    );
+    assert_eq!(
+        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
+    );
+}
+
+#[test]
+fn a_viewer_whose_restarted_session_refuses_its_protocol_version_ends_as_a_restart_into_an_incompatible_build(
+) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        Some(PROTOCOL_VERSION_REFUSAL_MESSAGE),
+        Ok(client_id),
+    );
+
+    let (attachment_ending, _client) =
+        run_local_attachment_through_restart(runtime_directory.path(), session_id, client_id);
+
+    assert_eq!(
+        attachment_ending,
+        AttachmentEnding::RestartedIntoIncompatibleBuild
+    );
+}
+
+/// Run one attachment of `session_id` on this machine as `client_id` whose first
+/// frame is `Restarting`, and hand back how it ended and the viewer it ran.
+///
+/// The viewer comes back on the socket a [`spawn_restarted_session`] stand-in
+/// advertises in `runtime_directory`.
+fn run_local_attachment_through_restart(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    client_id: ClientId,
+) -> (AttachmentEnding, Client) {
+    let mut client = build_test_client();
+    client.set_client_id(client_id);
+    let mut screen = build_test_screen();
+    let (request_sender, _request_receiver) = mpsc::channel();
+    let mut uplink = Uplink {
+        request_sender,
+        registry: ActionRegistry::new(),
+        next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
+    };
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    incoming_sender
+        .send(Incoming::Frame {
+            connection_index: INITIAL_CONNECTION_INDEX,
+            session_event_result: Ok(SessionEvent::Restarting),
+        })
+        .expect("the loop's queue takes the restart frame");
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+
+    let attachment_ending = run_attachment(
+        &Home::Local {
+            runtime_directory: runtime_directory.to_path_buf(),
+        },
+        session_id,
+        client_id,
+        ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        None,
+        &mut client,
+        &mut screen,
+        &mut uplink,
+        terminal::GraphicsSupport::Unsupported,
+        &mut cell_size_query,
+        &mut Vec::new(),
+        incoming_sender,
+        incoming_receiver,
+    );
+    (attachment_ending, client)
+}
+
+/// Advertise a router in `runtime_directory` under `connection_token`, the way a
+/// router does each time it starts.
+fn write_router_endpoint(runtime_directory: &Path, connection_token: &str) {
+    EndpointFile {
+        socket_address: compute_router_socket_address(runtime_directory),
+        connection_token: ConnectionToken::from_secret(connection_token),
+        process_id: 5000,
+    }
+    .write_to_path(&resolve_router_endpoint_path(runtime_directory))
+    .expect("write the router endpoint file");
+}
+
+#[test]
+fn the_router_wait_ends_on_a_router_advertising_another_token() {
+    let runtime_directory = build_test_runtime_directory();
+    write_router_endpoint(runtime_directory.path(), NEW_CONNECTION_TOKEN);
+
+    assert!(wait_for_router_restart(
+        &resolve_router_endpoint_path(runtime_directory.path()),
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now(),
+    ));
+}
+
+#[test]
+fn the_router_wait_ends_on_a_router_file_this_build_cannot_read() {
+    let runtime_directory = build_test_runtime_directory();
+    let router_endpoint_path = resolve_router_endpoint_path(runtime_directory.path());
+    std::fs::write(&router_endpoint_path, b"{\"router_socket\": 7}")
+        .expect("write a router file of another build");
+
+    assert!(wait_for_router_restart(
+        &router_endpoint_path,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now(),
+    ));
+}
+
+#[test]
+fn the_router_wait_gives_up_at_the_deadline_on_the_same_token_or_no_file() {
+    let runtime_directory = build_test_runtime_directory();
+    let router_endpoint_path = resolve_router_endpoint_path(runtime_directory.path());
+
+    assert!(!wait_for_router_restart(
+        &router_endpoint_path,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now(),
+    ));
+    write_router_endpoint(runtime_directory.path(), OLD_CONNECTION_TOKEN);
+    assert!(!wait_for_router_restart(
+        &router_endpoint_path,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now(),
+    ));
+}
+
+#[test]
+fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    write_router_endpoint(runtime_directory.path(), OLD_CONNECTION_TOKEN);
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        Some(PROTOCOL_VERSION_REFUSAL_MESSAGE),
+        Ok(client_id),
+    );
+    let router_runtime_directory = runtime_directory.path().to_path_buf();
+    let router_restart = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        let router_restarted_at = Instant::now();
+        write_router_endpoint(&router_runtime_directory, NEW_CONNECTION_TOKEN);
+        router_restarted_at
+    });
+
+    let reconnect_result = reconnect_after_restart(
+        &Home::Local {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+        },
+        session_id,
+        client_id,
+        &mut ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        &mut None,
+        terminal::GraphicsSupport::Unsupported,
+        None,
+    );
+    let reconnect_returned_at = Instant::now();
+
+    assert_eq!(
+        reconnect_result.map(|(rejoined_client_id, _, _)| rejoined_client_id),
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
+    );
+    let router_restarted_at = router_restart.join().expect("the router restart ran");
+    assert!(
+        reconnect_returned_at >= router_restarted_at,
+        "the reconnect returned before the router advertised its new token"
+    );
+}
+
+#[test]
+fn a_restart_into_an_incompatible_build_with_no_router_running_returns_at_once() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        Some(PROTOCOL_VERSION_REFUSAL_MESSAGE),
+        Ok(client_id),
+    );
+    let reconnect_started_at = Instant::now();
+
+    let reconnect_result = reconnect_after_restart(
+        &Home::Local {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+        },
+        session_id,
+        client_id,
+        &mut ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        &mut None,
+        terminal::GraphicsSupport::Unsupported,
+        None,
+    );
+
+    assert_eq!(
+        reconnect_result.map(|(rejoined_client_id, _, _)| rejoined_client_id),
+        Err(AttachmentEnding::RestartedIntoIncompatibleBuild)
+    );
+    assert!(
+        reconnect_started_at.elapsed() < Duration::from_secs(1),
+        "no router wait runs when no router was advertised"
+    );
+}
+
+#[test]
+fn a_restart_into_an_incompatible_build_with_no_client_path_reports_the_attach_command() {
+    let session_id = SessionId::new();
+    let ending_error = report_attachment_ending(
+        &build_local_home(),
+        AttachmentEnding::RestartedIntoIncompatibleBuild,
+        session_id,
+        None,
+    )
+    .expect_err("with no path to run, the restart is an error");
+    assert_eq!(
+        ending_error.to_string(),
+        format!(
+            "the session restarted into another koshi build and this client could not \
+             reconnect to it: this client could not read the path it was started from\n  \
+             run `koshi list-sessions`; if session {session_id} is still listed, \
+             reattach with `koshi attach {session_id}`"
+        )
+    );
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
+}
+
+#[test]
+fn a_restart_into_an_incompatible_build_whose_client_path_cannot_start_reports_why_and_the_attach_command(
+) {
+    let session_id = SessionId::new();
+    // A fresh directory holds no program at this path.
+    let empty_directory = build_test_runtime_directory();
+    let missing_executable_path = empty_directory.path().join("koshi");
+    let expected_start_error = std::process::Command::new(&missing_executable_path)
+        .status()
+        .expect_err("no program is at that path");
+
+    let ending_error = report_attachment_ending(
+        &build_local_home(),
+        AttachmentEnding::RestartedIntoIncompatibleBuild,
+        session_id,
+        Some(&missing_executable_path),
+    )
+    .expect_err("a command that cannot start is an error");
+    assert_eq!(
+        ending_error.to_string(),
+        format!(
+            "the session restarted into another koshi build and this client could not \
+             reconnect to it: could not start {}: {expected_start_error}\n  \
+             run `koshi list-sessions`; if session {session_id} is still listed, \
+             reattach with `koshi attach {session_id}`",
+            missing_executable_path.display()
+        )
+    );
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
+}
+
+#[test]
+fn the_attach_command_runs_the_client_executable_with_the_session_id_and_no_pane_marker() {
+    let session_id = SessionId::new();
+    let attach_command = build_attach_command(Path::new("/home/user/bin/koshi"), session_id);
+
+    assert_eq!(
+        attach_command.get_program(),
+        std::ffi::OsStr::new("/home/user/bin/koshi")
+    );
+    assert_eq!(
+        attach_command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<String>>(),
+        vec![String::from("attach"), session_id.to_string()]
+    );
+    assert_eq!(
+        attach_command.get_envs().collect::<Vec<_>>(),
+        vec![(std::ffi::OsStr::new("KOSHI"), None)],
+        "the command removes the pane marker and sets no variable"
+    );
 }
 
 /// A test client on the stock settings — `scroll_line_count` 3, wheel scrolls scrollback,
@@ -1260,13 +1630,13 @@ fn build_plain_mouse_pane(pane_id: PaneId) -> MousePane {
 /// panes share.
 fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
     let tab_id = TabId::new();
-    let band =
+    let band_row_count =
         (TEST_VIEWPORT_SIZE.row_count - 2) / u16::try_from(mouse_panes.len()).expect("few panes");
     let pane_slots: Vec<PaneSlot> = mouse_panes
         .iter()
         .enumerate()
         .map(|(pane_index, mouse_pane)| {
-            let top_row = band * u16::try_from(pane_index).expect("few panes");
+            let top_row = band_row_count * u16::try_from(pane_index).expect("few panes");
             PaneSlot {
                 pane_id: mouse_pane.pane_id,
                 outer_rect: Rect::from_origin_and_size(
@@ -1276,7 +1646,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                     },
                     Size {
                         column_count: TEST_VIEWPORT_SIZE.column_count,
-                        row_count: band,
+                        row_count: band_row_count,
                     },
                 ),
                 content_rect: Some(Rect::from_origin_and_size(
@@ -1286,7 +1656,7 @@ fn build_mouse_frame(mouse_panes: &[MousePane]) -> MouseFrame {
                     },
                     Size {
                         column_count: TEST_VIEWPORT_SIZE.column_count - 2,
-                        row_count: band - 2,
+                        row_count: band_row_count - 2,
                     },
                 )),
                 is_visible: true,
@@ -1368,7 +1738,7 @@ fn build_mouse_wheel(scroll_direction: ScrollDirection, screen_point: Point) -> 
     MouseInput {
         mouse_kind: MouseKind::Scroll(scroll_direction),
         position: screen_point,
-        modifier_flags: ModFlags::NONE,
+        modifier_flags: BindingModifierFlags::NONE,
     }
 }
 
@@ -1377,7 +1747,7 @@ fn build_mouse_press(screen_point: Point) -> MouseInput {
     MouseInput {
         mouse_kind: MouseKind::Press(MouseButton::Left),
         position: screen_point,
-        modifier_flags: ModFlags::NONE,
+        modifier_flags: BindingModifierFlags::NONE,
     }
 }
 
@@ -1386,7 +1756,7 @@ fn build_mouse_drag(screen_point: Point) -> MouseInput {
     MouseInput {
         mouse_kind: MouseKind::Drag(MouseButton::Left),
         position: screen_point,
-        modifier_flags: ModFlags::NONE,
+        modifier_flags: BindingModifierFlags::NONE,
     }
 }
 
@@ -1395,7 +1765,7 @@ fn build_mouse_release(screen_point: Point) -> MouseInput {
     MouseInput {
         mouse_kind: MouseKind::Release(MouseButton::Left),
         position: screen_point,
-        modifier_flags: ModFlags::NONE,
+        modifier_flags: BindingModifierFlags::NONE,
     }
 }
 
@@ -1434,24 +1804,22 @@ fn build_forward_mouse_action(pane_id: PaneId, column_index: u16) -> MouseAction
 /// in the shape the loop writes through, and the session end the requests are
 /// read back off.
 ///
-/// The accept runs on its own thread, since the connect and the accept must
-/// both be live for the connection to open.
-struct Wire {
+/// The accept runs on its own thread while this thread connects.
+struct TestControlSocket {
     /// The reading half of the client end. Held, not read: this is what the
     /// frame-reader thread owns in the running loop.
-    _reader: FrameReader,
+    _frame_reader: FrameReader,
     /// The session end: every request the uplink writes is read from here.
-    session: Connection,
+    session_connection: Connection,
     /// The client end, numbered from [`FIRST_POST_ATTACH_REQUEST_ID`] exactly as the
     /// loop numbers it.
     uplink: Uplink,
 }
 
-fn build_test_wire() -> Wire {
-    // The address is a socket-file path on Unix and a bare pipe name on
-    // Windows, so the directory goes unused there. `/tmp` keeps the path short
-    // enough for the platform's socket-path limit; the session id makes it
-    // unique, so tests running side by side never share one.
+fn build_test_control_socket() -> TestControlSocket {
+    // On Unix the address is a socket-file path under `/tmp`. On Windows it is
+    // a pipe name, and the directory is unused. A new session id makes each
+    // address unique.
     #[cfg(unix)]
     let socket_directory = std::path::PathBuf::from("/tmp");
     #[cfg(windows)]
@@ -1463,9 +1831,9 @@ fn build_test_wire() -> Wire {
         Connection::connect(&socket_address).expect("connect to the control socket");
     let session_connection = accept_thread.join().expect("the accepting thread finished");
     let (frame_reader, frame_writer) = client_connection.split();
-    Wire {
-        _reader: frame_reader,
-        session: session_connection,
+    TestControlSocket {
+        _frame_reader: frame_reader,
+        session_connection,
         uplink: Uplink {
             request_sender: spawn_uplink_writer(frame_writer),
             registry: ActionRegistry::new(),
@@ -1683,15 +2051,23 @@ fn a_forward_between_two_scrolls_keeps_all_three() {
 
 #[test]
 fn an_empty_round_takes_no_request_id_and_writes_nothing() {
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
 
-    assert_eq!(send_mouse_round(&mut wire.uplink, Vec::new()), None);
+    assert_eq!(
+        send_mouse_round(&mut control_socket.uplink, Vec::new()),
+        None
+    );
 
     // The next request written is the first thing on the wire, and it carries
     // the id the empty round would have taken.
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
-    assert_eq!(sentinel, FIRST_POST_ATTACH_REQUEST_ID);
-    let request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    assert_eq!(sentinel_request_id, FIRST_POST_ATTACH_REQUEST_ID);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         request,
         IpcRequest {
@@ -1704,8 +2080,8 @@ fn an_empty_round_takes_no_request_id_and_writes_nothing() {
 #[test]
 fn a_round_goes_out_as_one_request_holding_its_actions_in_order() {
     let pane_id = PaneId::new();
-    let mut wire = build_test_wire();
-    let round = vec![
+    let mut control_socket = build_test_control_socket();
+    let mouse_round = vec![
         MouseAction::Scroll {
             pane_id,
             is_scrolling_up: true,
@@ -1721,11 +2097,14 @@ fn a_round_goes_out_as_one_request_holding_its_actions_in_order() {
     ];
 
     assert_eq!(
-        send_mouse_round(&mut wire.uplink, round),
+        send_mouse_round(&mut control_socket.uplink, mouse_round),
         Some(FIRST_POST_ATTACH_REQUEST_ID)
     );
 
-    let request: IpcRequest = wire.session.recv().expect("read the round");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the round");
     assert_eq!(
         request,
         IpcRequest {
@@ -1751,12 +2130,17 @@ fn a_round_goes_out_as_one_request_holding_its_actions_in_order() {
     );
 
     // Nothing follows it: the whole round was one request.
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
-    let sentinel_request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let sentinel_request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         sentinel_request,
         IpcRequest {
-            request_id: sentinel,
+            request_id: sentinel_request_id,
             request_kind: IpcRequestKind::Discovery,
         }
     );
@@ -1765,16 +2149,11 @@ fn a_round_goes_out_as_one_request_holding_its_actions_in_order() {
 /// How many full rounds the writer-behind test queues while the session end
 /// reads nothing.
 ///
-/// Every round holds [`MAX_PENDING_MOUSE_ACTION_COUNT`] forwarded reports, which is about
-/// 31 kB of frame, so 128 rounds come to about 3.9 MB — past every platform's
-/// socket buffer, which is at most a few hundred kilobytes — and the writer
-/// thread is therefore stuck inside a write for all but the first few.
+/// Every round holds [`MAX_PENDING_MOUSE_ACTION_COUNT`] forwarded reports, about
+/// 31 kB of frame. 128 rounds come to about 3.9 MB.
 const WRITER_STALLED_ROUND_COUNT: u64 = 128;
 
-/// How long the test waits for the queueing to finish before it calls the loop
-/// stalled. A watchdog, not a deadline the code observes: the queueing takes
-/// milliseconds, and a write done on the queueing thread would never finish at
-/// all.
+/// How long the test waits for the queueing to finish before it fails.
 const QUEUEING_WATCHDOG_TIMEOUT_DURATION: Duration = Duration::from_secs(60);
 
 /// One round of forwarded reports, each at its own column so the round read
@@ -1806,44 +2185,47 @@ fn build_full_forwarded_wire_round(pane_id: PaneId) -> Vec<WireMouseAction> {
 #[test]
 fn queueing_a_round_returns_while_a_full_socket_holds_the_writer() {
     let pane_id = PaneId::new();
-    let Wire {
-        _reader,
-        mut session,
+    let TestControlSocket {
+        _frame_reader,
+        mut session_connection,
         mut uplink,
-    } = build_test_wire();
-    let (done_tx, done_rx) = mpsc::channel();
+    } = build_test_control_socket();
+    let (queueing_done_sender, queueing_done_receiver) = mpsc::channel();
 
-    // The session end reads nothing until every round is queued, so the socket
-    // fills and the writer thread stops inside a write. The rounds are queued
-    // on their own thread, which stands in for the loop: a write done there
-    // would stop with the socket and this send would never return.
-    let queueing = thread::spawn(move || {
-        for round in 0..WRITER_STALLED_ROUND_COUNT {
+    // The session end reads nothing until every round is queued. The socket
+    // fills, and the writer thread stops inside a write. The rounds are queued
+    // on their own thread, which stands in for the loop.
+    let queueing_thread = thread::spawn(move || {
+        for round_index in 0..WRITER_STALLED_ROUND_COUNT {
             assert_eq!(
                 send_mouse_round(&mut uplink, build_full_forwarded_mouse_round(pane_id)),
-                Some(FIRST_POST_ATTACH_REQUEST_ID + round),
+                Some(FIRST_POST_ATTACH_REQUEST_ID + round_index),
             );
         }
-        done_tx.send(()).expect("the test is still waiting");
+        queueing_done_sender
+            .send(())
+            .expect("the test is still waiting");
     });
-    done_rx
+    queueing_done_receiver
         .recv_timeout(QUEUEING_WATCHDOG_TIMEOUT_DURATION)
         .expect("every round was queued while the writer was stuck on the full socket");
 
     // Reading drains the socket and lets the writer run out. Every round
     // arrives whole and in the order it was queued: the backed-up queue drops
     // no forwarded report, folds none into another, and reorders none.
-    for round in 0..WRITER_STALLED_ROUND_COUNT {
-        let request: IpcRequest = session.recv().expect("read the round");
+    for round_index in 0..WRITER_STALLED_ROUND_COUNT {
+        let request: IpcRequest = session_connection.recv().expect("read the round");
         assert_eq!(
             request,
             IpcRequest {
-                request_id: FIRST_POST_ATTACH_REQUEST_ID + round,
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + round_index,
                 request_kind: IpcRequestKind::Mouse(build_full_forwarded_wire_round(pane_id)),
             }
         );
     }
-    queueing.join().expect("the queueing thread finished");
+    queueing_thread
+        .join()
+        .expect("the queueing thread finished");
 }
 
 /// A viewer holding a border drag three cells past the divider it grabbed, and
@@ -1880,7 +2262,7 @@ fn build_border_drag_fixture() -> (Client, MouseFrame, Point) {
     (client, mouse_frame, pointer_point)
 }
 
-/// The session's answer to a move of the top border [`dragging_a_border`]
+/// The session's answer to a move of the top border [`build_border_drag_fixture`]
 /// grabbed on `pane_id`, `applied_cell_count` cells of it accepted.
 fn build_top_border_resize_answer(pane_id: PaneId, applied_cell_count: u16) -> MouseAnswer {
     MouseAnswer::Resized {
@@ -1891,7 +2273,7 @@ fn build_top_border_resize_answer(pane_id: PaneId, applied_cell_count: u16) -> M
     }
 }
 
-/// The image record of a move of `pane_id`'s top border, `requested_cell_count` cells inward,
+/// The record of a move of `pane_id`'s top border, `requested_cell_count` cells inward,
 /// written in round `request_id` and not yet answered.
 fn build_sent_top_border_move(
     request_id: u64,
@@ -1908,26 +2290,30 @@ fn build_sent_top_border_move(
 
 #[test]
 fn an_answer_moves_the_drag_anchor_whatever_round_it_came_back_in() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let mut sent = Vec::new();
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let mut sent_border_moves = Vec::new();
     let mut pending_mouse_actions = Vec::new();
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         8,
         vec![build_top_border_resize_answer(
-            frame.mouse_panes[1].pane_id,
+            mouse_frame.mouse_panes[1].pane_id,
             3,
         )],
         &mut pending_mouse_actions,
     );
 
-    assert_eq!(sent, Vec::new());
+    assert_eq!(sent_border_moves, Vec::new());
     assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(
-        client.handle_mouse(build_mouse_drag(to), &frame, Instant::now()),
+        client.handle_mouse(
+            build_mouse_drag(pointer_point),
+            &mouse_frame,
+            Instant::now()
+        ),
         Vec::new(),
         "the answer names its own border, so the anchor moved to the pointer"
     );
@@ -1935,9 +2321,9 @@ fn an_answer_moves_the_drag_anchor_whatever_round_it_came_back_in() {
 
 #[test]
 fn a_resized_forgets_only_the_border_move_its_own_round_wrote() {
-    let (mut client, frame, _to) = build_border_drag_fixture();
-    let pane_id = frame.mouse_panes[1].pane_id;
-    let mut sent = vec![
+    let (mut client, mouse_frame, _pointer_point) = build_border_drag_fixture();
+    let pane_id = mouse_frame.mouse_panes[1].pane_id;
+    let mut sent_border_moves = vec![
         build_sent_top_border_move(7, pane_id, 3),
         build_sent_top_border_move(8, pane_id, 1),
     ];
@@ -1945,57 +2331,61 @@ fn a_resized_forgets_only_the_border_move_its_own_round_wrote() {
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![build_top_border_resize_answer(pane_id, 3)],
         &mut pending_mouse_actions,
     );
 
     assert_eq!(
-        sent,
+        sent_border_moves,
         vec![build_sent_top_border_move(8, pane_id, 1)],
         "round 8's move is still on the wire"
     );
     assert_eq!(
-        compute_sent_border_cell_delta(&sent, pane_id, Direction::Up),
+        compute_sent_border_cell_delta(&sent_border_moves, pane_id, Direction::Up),
         -1
     );
 }
 
 #[test]
 fn an_empty_answer_changes_nothing() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let mut sent = vec![build_sent_top_border_move(
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let mut sent_border_moves = vec![build_sent_top_border_move(
         7,
-        frame.mouse_panes[1].pane_id,
+        mouse_frame.mouse_panes[1].pane_id,
         3,
     )];
     let mut pending_mouse_actions = Vec::new();
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         Vec::new(),
         &mut pending_mouse_actions,
     );
 
     assert_eq!(
-        sent,
+        sent_border_moves,
         vec![build_sent_top_border_move(
             7,
-            frame.mouse_panes[1].pane_id,
+            mouse_frame.mouse_panes[1].pane_id,
             3
         )],
         "a round that reported no border move forgets none"
     );
     assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(
-        client.handle_mouse(build_mouse_drag(to), &frame, Instant::now()),
+        client.handle_mouse(
+            build_mouse_drag(pointer_point),
+            &mouse_frame,
+            Instant::now()
+        ),
         vec![MouseAction::Resize {
-            pane_id: frame.mouse_panes[1].pane_id,
+            pane_id: mouse_frame.mouse_panes[1].pane_id,
             border_side: Direction::Up,
             resize_step: -1,
             requested_cell_count: 3,
@@ -2007,33 +2397,40 @@ fn an_empty_answer_changes_nothing() {
 #[test]
 fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
     let pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
-    let screen_point = get_content_cell(&frame, 0);
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let screen_point = get_content_cell(&mouse_frame, 0);
     let mut client = build_test_client();
-    let mut wire = build_test_wire();
-    let mut sent = Vec::new();
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = Vec::new();
     let mut pending_mouse_actions = Vec::new();
 
     // Four ticks, one per pass of the loop, none of them answered. Every pass
     // writes what it decided, so four rounds are on the wire unanswered.
-    for round in 0..4u64 {
+    for round_index in 0..4u64 {
         handle_mouse_event(
             &mut client,
-            &frame,
+            &mouse_frame,
             build_mouse_wheel(ScrollDirection::Up, screen_point),
             &mut pending_mouse_actions,
         );
-        flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+        flush_mouse_round(
+            &mut control_socket.uplink,
+            &mut sent_border_moves,
+            &mut pending_mouse_actions,
+        );
         assert_eq!(
             pending_mouse_actions,
             Vec::new(),
             "the pass that decided it wrote it"
         );
-        let request: IpcRequest = wire.session.recv().expect("read the round");
+        let request: IpcRequest = control_socket
+            .session_connection
+            .recv()
+            .expect("read the round");
         assert_eq!(
             request,
             IpcRequest {
-                request_id: FIRST_POST_ATTACH_REQUEST_ID + round,
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + round_index,
                 request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
                     pane_id,
                     is_scrolling_up: true,
@@ -2047,14 +2444,23 @@ fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
     // sentinel that follows it, so it is the first request read off the wire.
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_wheel(ScrollDirection::Up, screen_point),
         &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
 
-    let request: IpcRequest = wire.session.recv().expect("read the fifth round");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the fifth round");
     assert_eq!(
         request,
         IpcRequest {
@@ -2067,25 +2473,28 @@ fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
         },
         "four unanswered rounds held the fifth tick back by nothing"
     );
-    let sentinel_request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         sentinel_request,
         IpcRequest {
-            request_id: sentinel,
+            request_id: sentinel_request_id,
             request_kind: IpcRequestKind::Discovery,
         }
     );
-    assert_eq!(sent, Vec::new(), "no border move was written");
+    assert_eq!(sent_border_moves, Vec::new(), "no border move was written");
 }
 
 #[test]
 fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
     let pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
-    let screen_point = get_content_cell(&frame, 0);
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let screen_point = get_content_cell(&mouse_frame, 0);
     let mut client = build_test_client();
-    let mut wire = build_test_wire();
-    let mut sent = Vec::new();
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = Vec::new();
     let mut pending_mouse_actions = Vec::new();
 
     // A burst of ten ticks read out of the channel as one batch, so all ten are
@@ -2093,7 +2502,7 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
     for _ in 0..10 {
         handle_mouse_event(
             &mut client,
-            &frame,
+            &mouse_frame,
             build_mouse_wheel(ScrollDirection::Up, screen_point),
             &mut pending_mouse_actions,
         );
@@ -2111,10 +2520,17 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
         "one three-line scroll per tick, none written yet"
     );
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
     assert_eq!(pending_mouse_actions, Vec::new());
-    let request: IpcRequest = wire.session.recv().expect("read the folded burst");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the folded burst");
     assert_eq!(
         request,
         IpcRequest {
@@ -2129,12 +2545,17 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
     );
 
     // Nothing follows it: the whole burst was one request.
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
-    let sentinel_request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let sentinel_request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         sentinel_request,
         IpcRequest {
-            request_id: sentinel,
+            request_id: sentinel_request_id,
             request_kind: IpcRequestKind::Discovery,
         }
     );
@@ -2143,22 +2564,29 @@ fn ten_ticks_in_one_pass_leave_as_one_scroll_of_the_summed_lines() {
 #[test]
 fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
     let pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let mut client = build_test_client();
-    let mut wire = build_test_wire();
-    let mut sent = Vec::new();
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = Vec::new();
     let mut pending_mouse_actions = Vec::new();
 
     // The press arrives in a pass of its own and goes out as its own round, so
     // the drag moves below are the only thing the next pass holds.
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_press(get_content_cell(&frame, 0)),
+        &mouse_frame,
+        build_mouse_press(get_content_cell(&mouse_frame, 0)),
         &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
-    let request: IpcRequest = wire.session.recv().expect("read the press");
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the press");
     assert_eq!(
         request,
         IpcRequest {
@@ -2184,7 +2612,7 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
     ] {
         handle_mouse_event(
             &mut client,
-            &frame,
+            &mouse_frame,
             build_mouse_drag(screen_point),
             &mut pending_mouse_actions,
         );
@@ -2224,10 +2652,17 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
         "one whole highlight per move, none written yet"
     );
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
     assert_eq!(pending_mouse_actions, Vec::new());
-    let request: IpcRequest = wire.session.recv().expect("read the folded run");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the folded run");
     assert_eq!(
         request,
         IpcRequest {
@@ -2247,12 +2682,17 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
     );
 
     // Nothing follows it: the whole run was one request.
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
-    let sentinel_request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let sentinel_request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         sentinel_request,
         IpcRequest {
-            request_id: sentinel,
+            request_id: sentinel_request_id,
             request_kind: IpcRequestKind::Discovery,
         }
     );
@@ -2260,51 +2700,56 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
 
 #[test]
 fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
-    let plain = PaneId::new();
-    let watched = PaneId::new();
-    let frame = build_mouse_frame(&[
-        build_plain_mouse_pane(plain),
+    let plain_pane_id = PaneId::new();
+    let watched_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(&[
+        build_plain_mouse_pane(plain_pane_id),
         MousePane {
             mouse_tracking: MouseTracking::Normal,
-            ..build_plain_mouse_pane(watched)
+            ..build_plain_mouse_pane(watched_pane_id)
         },
     ]);
-    let over_watched = get_content_cell(&frame, 1);
+    let watched_pane_point = get_content_cell(&mouse_frame, 1);
     let mut client = build_test_client();
-    let mut wire = build_test_wire();
-    let mut sent = Vec::new();
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = Vec::new();
     let mut pending_mouse_actions = Vec::new();
 
     // Five ticks on the pane whose program reads the mouse, arriving together in
     // one pass. The first two are the same tick twice: the pair a fold would
     // join.
     let forwarded_mouse_inputs = [
-        build_mouse_wheel(ScrollDirection::Up, over_watched),
-        build_mouse_wheel(ScrollDirection::Up, over_watched),
-        build_mouse_wheel(ScrollDirection::Down, over_watched),
+        build_mouse_wheel(ScrollDirection::Up, watched_pane_point),
+        build_mouse_wheel(ScrollDirection::Up, watched_pane_point),
+        build_mouse_wheel(ScrollDirection::Down, watched_pane_point),
         build_mouse_wheel(
             ScrollDirection::Up,
             Point {
-                column: over_watched.column + 1,
-                ..over_watched
+                column: watched_pane_point.column + 1,
+                ..watched_pane_point
             },
         ),
         build_mouse_wheel(
             ScrollDirection::Up,
             Point {
-                row: over_watched.row + 1,
-                ..over_watched
+                row: watched_pane_point.row + 1,
+                ..watched_pane_point
             },
         ),
     ];
     for mouse_input in forwarded_mouse_inputs {
-        handle_mouse_event(&mut client, &frame, mouse_input, &mut pending_mouse_actions);
+        handle_mouse_event(
+            &mut client,
+            &mouse_frame,
+            mouse_input,
+            &mut pending_mouse_actions,
+        );
     }
 
     let forwarded_actions: Vec<MouseAction> = forwarded_mouse_inputs
         .iter()
         .map(|&mouse_input| MouseAction::Forward {
-            pane_id: watched,
+            pane_id: watched_pane_id,
             mouse_input,
         })
         .collect();
@@ -2313,10 +2758,17 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
         "one report per tick, none written yet"
     );
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
     assert_eq!(pending_mouse_actions, Vec::new());
-    let request: IpcRequest = wire.session.recv().expect("read the round of reports");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the round of reports");
     assert_eq!(
         request,
         IpcRequest {
@@ -2325,7 +2777,7 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
                 forwarded_mouse_inputs
                     .iter()
                     .map(|&mouse_input| WireMouseAction::Forward {
-                        pane_id: watched,
+                        pane_id: watched_pane_id,
                         mouse_input,
                     })
                     .collect(),
@@ -2335,12 +2787,17 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
     );
 
     // Nothing follows it: the five reports were one request.
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
-    let sentinel_request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let sentinel_request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         sentinel_request,
         IpcRequest {
-            request_id: sentinel,
+            request_id: sentinel_request_id,
             request_kind: IpcRequestKind::Discovery,
         }
     );
@@ -2348,17 +2805,17 @@ fn every_report_in_one_pass_leaves_as_its_own_forward_in_order() {
 
 #[test]
 fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
-    let plain = PaneId::new();
-    let watched = PaneId::new();
-    let frame = build_mouse_frame(&[
-        build_plain_mouse_pane(plain),
+    let plain_pane_id = PaneId::new();
+    let watched_pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(&[
+        build_plain_mouse_pane(plain_pane_id),
         MousePane {
             mouse_tracking: MouseTracking::Normal,
-            ..build_plain_mouse_pane(watched)
+            ..build_plain_mouse_pane(watched_pane_id)
         },
     ]);
-    let over_plain = get_content_cell(&frame, 0);
-    let over_watched = get_content_cell(&frame, 1);
+    let plain_pane_point = get_content_cell(&mouse_frame, 0);
+    let watched_pane_point = get_content_cell(&mouse_frame, 1);
     let mut client = build_test_client();
     let mut pending_mouse_actions = Vec::new();
     let mut forwarded_actions = Vec::new();
@@ -2367,29 +2824,34 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
     // never fold, so each one adds an action. Every hundredth lands on the pane
     // whose program reads the mouse, at its own column, and goes up as a report
     // instead of a scroll.
-    for tick in 0..MAX_PENDING_MOUSE_ACTION_COUNT + 300 {
-        let direction = if tick % 2 == 0 {
+    for tick_index in 0..MAX_PENDING_MOUSE_ACTION_COUNT + 300 {
+        let scroll_direction = if tick_index % 2 == 0 {
             ScrollDirection::Up
         } else {
             ScrollDirection::Down
         };
-        if tick % 100 == 0 {
+        if tick_index % 100 == 0 {
             let screen_point = Point {
-                column: over_watched.column
-                    + u16::try_from(tick / 100).expect("a handful of reports"),
-                row: over_watched.row,
+                column: watched_pane_point.column
+                    + u16::try_from(tick_index / 100).expect("a handful of reports"),
+                row: watched_pane_point.row,
             };
-            let mouse = build_mouse_wheel(direction, screen_point);
-            handle_mouse_event(&mut client, &frame, mouse, &mut pending_mouse_actions);
+            let wheel_mouse_input = build_mouse_wheel(scroll_direction, screen_point);
+            handle_mouse_event(
+                &mut client,
+                &mouse_frame,
+                wheel_mouse_input,
+                &mut pending_mouse_actions,
+            );
             forwarded_actions.push(MouseAction::Forward {
-                pane_id: watched,
-                mouse_input: mouse,
+                pane_id: watched_pane_id,
+                mouse_input: wheel_mouse_input,
             });
         } else {
             handle_mouse_event(
                 &mut client,
-                &frame,
-                build_mouse_wheel(direction, over_plain),
+                &mouse_frame,
+                build_mouse_wheel(scroll_direction, plain_pane_point),
                 &mut pending_mouse_actions,
             );
         }
@@ -2418,15 +2880,15 @@ fn the_pile_stops_at_the_cap_and_keeps_every_forwarded_report() {
 
 #[test]
 fn a_border_move_decided_before_the_answer_asks_only_for_what_the_answer_left() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let further = Point {
-        row: to.row + 1,
-        ..to
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let further_pointer_point = Point {
+        row: pointer_point.row + 1,
+        ..pointer_point
     };
-    let mut wire = build_test_wire();
-    let mut sent = vec![build_sent_top_border_move(
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = vec![build_sent_top_border_move(
         7,
-        frame.mouse_panes[1].pane_id,
+        mouse_frame.mouse_panes[1].pane_id,
         3,
     )];
     let mut pending_mouse_actions = Vec::new();
@@ -2435,14 +2897,14 @@ fn a_border_move_decided_before_the_answer_asks_only_for_what_the_answer_left() 
     // anchor round 7 started position, so it names all four cells.
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_drag(further),
+        &mouse_frame,
+        build_mouse_drag(further_pointer_point),
         &mut pending_mouse_actions,
     );
     assert_eq!(
         pending_mouse_actions,
         vec![MouseAction::Resize {
-            pane_id: frame.mouse_panes[1].pane_id,
+            pane_id: mouse_frame.mouse_panes[1].pane_id,
             border_side: Direction::Up,
             resize_step: -1,
             requested_cell_count: 4,
@@ -2451,27 +2913,38 @@ fn a_border_move_decided_before_the_answer_asks_only_for_what_the_answer_left() 
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![build_top_border_resize_answer(
-            frame.mouse_panes[1].pane_id,
+            mouse_frame.mouse_panes[1].pane_id,
             3,
         )],
         &mut pending_mouse_actions,
     );
-    assert_eq!(sent, Vec::new(), "round 7 is answered and forgotten");
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    assert_eq!(
+        sent_border_moves,
+        Vec::new(),
+        "round 7 is answered and forgotten"
+    );
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
     // Three of the four cells are already travelled, so the round that goes out
     // asks for the one the pointer is still ahead by.
-    let request: IpcRequest = wire.session.recv().expect("read the next round");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the next round");
     assert_eq!(
         request,
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Resize {
-                pane_id: frame.mouse_panes[1].pane_id,
+                pane_id: mouse_frame.mouse_panes[1].pane_id,
                 border_side: Direction::Up,
                 resize_step: -1,
                 requested_cell_count: 1,
@@ -2482,15 +2955,15 @@ fn a_border_move_decided_before_the_answer_asks_only_for_what_the_answer_left() 
 
 #[test]
 fn a_border_move_the_answer_covered_whole_leaves_nothing_to_send() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let further = Point {
-        row: to.row + 1,
-        ..to
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let further_pointer_point = Point {
+        row: pointer_point.row + 1,
+        ..pointer_point
     };
-    let mut wire = build_test_wire();
-    let mut sent = vec![build_sent_top_border_move(
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = vec![build_sent_top_border_move(
         7,
-        frame.mouse_panes[1].pane_id,
+        mouse_frame.mouse_panes[1].pane_id,
         3,
     )];
     let mut pending_mouse_actions = Vec::new();
@@ -2499,39 +2972,48 @@ fn a_border_move_the_answer_covered_whole_leaves_nothing_to_send() {
     // buffered move names exactly the three cells round 7 asked for.
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_drag(further),
+        &mouse_frame,
+        build_mouse_drag(further_pointer_point),
         &mut pending_mouse_actions,
     );
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_drag(to),
+        &mouse_frame,
+        build_mouse_drag(pointer_point),
         &mut pending_mouse_actions,
     );
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![build_top_border_resize_answer(
-            frame.mouse_panes[1].pane_id,
+            mouse_frame.mouse_panes[1].pane_id,
             3,
         )],
         &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
-    assert_eq!(sent, Vec::new(), "nothing was left to ask for");
+    assert_eq!(sent_border_moves, Vec::new(), "nothing was left to ask for");
     assert_eq!(pending_mouse_actions, Vec::new());
     // Nothing reached the wire: the sentinel is the first request read.
-    let sentinel = wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the sentinel");
+    let sentinel_request_id = control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the sentinel");
     assert_eq!(
         request,
         IpcRequest {
-            request_id: sentinel,
+            request_id: sentinel_request_id,
             request_kind: IpcRequestKind::Discovery,
         }
     );
@@ -2539,10 +3021,10 @@ fn a_border_move_the_answer_covered_whole_leaves_nothing_to_send() {
 
 #[test]
 fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let pane_id = frame.mouse_panes[1].pane_id;
-    let mut wire = build_test_wire();
-    let mut sent = vec![build_sent_top_border_move(7, pane_id, 3)];
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let pane_id = mouse_frame.mouse_panes[1].pane_id;
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = vec![build_sent_top_border_move(7, pane_id, 3)];
     let mut pending_mouse_actions = Vec::new();
 
     // A fourth cell of travel while round 7 is out, then round 7's answer: the
@@ -2550,27 +3032,34 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
     // goes out as the next round.
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point {
-            row: to.row + 1,
-            ..to
+            row: pointer_point.row + 1,
+            ..pointer_point
         }),
         &mut pending_mouse_actions,
     );
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![build_top_border_resize_answer(
-            frame.mouse_panes[1].pane_id,
+            mouse_frame.mouse_panes[1].pane_id,
             3,
         )],
         &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
-    let request: IpcRequest = wire.session.recv().expect("read the second round");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the second round");
     assert_eq!(
         request,
         IpcRequest {
@@ -2588,26 +3077,26 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
     // the flush and the answer, so nothing but the answer can move the anchor.
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         FIRST_POST_ATTACH_REQUEST_ID,
         vec![build_top_border_resize_answer(
-            frame.mouse_panes[1].pane_id,
+            mouse_frame.mouse_panes[1].pane_id,
             1,
         )],
         &mut pending_mouse_actions,
     );
-    assert_eq!(sent, Vec::new());
+    assert_eq!(sent_border_moves, Vec::new());
     assert_eq!(pending_mouse_actions, Vec::new());
 
     // One more cell of travel past the border it moved: the anchor sits on the
     // border's real row, so one cell of pointer travel asks for one cell.
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point {
-            row: to.row + 2,
-            ..to
+            row: pointer_point.row + 2,
+            ..pointer_point
         }),
         &mut pending_mouse_actions,
     );
@@ -2624,14 +3113,14 @@ fn an_answer_that_lands_while_the_pointer_is_still_moves_the_drag_anchor() {
 
 #[test]
 fn two_border_moves_in_one_round_each_land_on_their_own_border() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let grabbed_pane_id = frame.mouse_panes[1].pane_id;
-    let other_pane_id = frame.mouse_panes[0].pane_id;
-    let further = Point {
-        row: to.row + 1,
-        ..to
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let grabbed_pane_id = mouse_frame.mouse_panes[1].pane_id;
+    let other_pane_id = mouse_frame.mouse_panes[0].pane_id;
+    let further_pointer_point = Point {
+        row: pointer_point.row + 1,
+        ..pointer_point
     };
-    let mut sent = vec![
+    let mut sent_border_moves = vec![
         build_sent_top_border_move(7, grabbed_pane_id, 3),
         SentBorderMove {
             request_id: 7,
@@ -2652,15 +3141,15 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
     // per border.
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_drag(further),
+        &mouse_frame,
+        build_mouse_drag(further_pointer_point),
         &mut pending_mouse_actions,
     );
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![
             build_top_border_resize_answer(grabbed_pane_id, 3),
@@ -2674,7 +3163,11 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
         &mut pending_mouse_actions,
     );
 
-    assert_eq!(sent, Vec::new(), "both of round 7's moves are answered");
+    assert_eq!(
+        sent_border_moves,
+        Vec::new(),
+        "both of round 7's moves are answered"
+    );
     assert_eq!(
         pending_mouse_actions,
         vec![
@@ -2694,7 +3187,11 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
         "each buffered move lost only the cells its own border's answer took"
     );
     assert_eq!(
-        client.handle_mouse(build_mouse_drag(further), &frame, Instant::now()),
+        client.handle_mouse(
+            build_mouse_drag(further_pointer_point),
+            &mouse_frame,
+            Instant::now()
+        ),
         vec![MouseAction::Resize {
             pane_id: grabbed_pane_id,
             border_side: Direction::Up,
@@ -2708,8 +3205,8 @@ fn two_border_moves_in_one_round_each_land_on_their_own_border() {
 #[test]
 fn two_moves_of_one_border_in_one_round_travel_the_newest_distance() {
     let pane_id = PaneId::new();
-    let mut wire = build_test_wire();
-    let mut sent = Vec::new();
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = Vec::new();
     // A wheel tick between two moves of one border keeps them apart through the
     // fold. Both measure the whole travel from the same drag anchor: three cells
     // out, then five.
@@ -2733,10 +3230,17 @@ fn two_moves_of_one_border_in_one_round_travel_the_newest_distance() {
         },
     ];
 
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
     assert_eq!(pending_mouse_actions, Vec::new());
-    let request: IpcRequest = wire.session.recv().expect("read the round");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the round");
     assert_eq!(
         request,
         IpcRequest {
@@ -2764,7 +3268,7 @@ fn two_moves_of_one_border_in_one_round_travel_the_newest_distance() {
         "the session travels each move in turn, so the second asks for the two cells the first left"
     );
     assert_eq!(
-        sent,
+        sent_border_moves,
         vec![
             build_sent_top_border_move(FIRST_POST_ATTACH_REQUEST_ID, pane_id, 3),
             build_sent_top_border_move(FIRST_POST_ATTACH_REQUEST_ID, pane_id, 2),
@@ -2775,48 +3279,52 @@ fn two_moves_of_one_border_in_one_round_travel_the_newest_distance() {
 
 #[test]
 fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
-    let frame = build_mouse_frame(&[
+    let mouse_frame = build_mouse_frame(&[
         build_plain_mouse_pane(PaneId::new()),
         build_plain_mouse_pane(PaneId::new()),
         build_plain_mouse_pane(PaneId::new()),
     ]);
-    let first_pane_id = frame.mouse_panes[1].pane_id;
-    let second_pane_id = frame.mouse_panes[2].pane_id;
-    let upper = Point {
+    let first_pane_id = mouse_frame.mouse_panes[1].pane_id;
+    let second_pane_id = mouse_frame.mouse_panes[2].pane_id;
+    let upper_divider_point = Point {
         column: 10,
-        row: frame.session_snapshot.active_tab_snapshot.pane_slots[1]
+        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[1]
             .outer_rect
             .origin
             .row
             + 1,
     };
-    let lower = Point {
+    let lower_divider_point = Point {
         column: 10,
-        row: frame.session_snapshot.active_tab_snapshot.pane_slots[2]
+        row: mouse_frame.session_snapshot.active_tab_snapshot.pane_slots[2]
             .outer_rect
             .origin
             .row
             + 1,
     };
-    let held = Point {
-        row: lower.row + 1,
-        ..lower
+    let held_pointer_point = Point {
+        row: lower_divider_point.row + 1,
+        ..lower_divider_point
     };
     let mut client = build_test_client();
-    let now = Instant::now();
-    let mut sent = vec![build_sent_top_border_move(7, first_pane_id, 3)];
+    let current_time = Instant::now();
+    let mut sent_border_moves = vec![build_sent_top_border_move(7, first_pane_id, 3)];
     let mut pending_mouse_actions = Vec::new();
 
     // Round 7 asks for three cells of the upper divider.
-    client.handle_mouse(build_mouse_press(upper), &frame, now);
+    client.handle_mouse(
+        build_mouse_press(upper_divider_point),
+        &mouse_frame,
+        current_time,
+    );
     assert_eq!(
         client.handle_mouse(
             build_mouse_drag(Point {
-                row: upper.row + 3,
-                ..upper
+                row: upper_divider_point.row + 3,
+                ..upper_divider_point
             }),
-            &frame,
-            now
+            &mouse_frame,
+            current_time
         ),
         vec![MouseAction::Resize {
             pane_id: first_pane_id,
@@ -2831,19 +3339,23 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
     assert_eq!(
         client.handle_mouse(
             build_mouse_release(Point {
-                row: upper.row + 3,
-                ..upper
+                row: upper_divider_point.row + 3,
+                ..upper_divider_point
             }),
-            &frame,
-            now
+            &mouse_frame,
+            current_time
         ),
         Vec::new()
     );
-    client.handle_mouse(build_mouse_press(lower), &frame, now);
+    client.handle_mouse(
+        build_mouse_press(lower_divider_point),
+        &mouse_frame,
+        current_time,
+    );
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_drag(held),
+        &mouse_frame,
+        build_mouse_drag(held_pointer_point),
         &mut pending_mouse_actions,
     );
     assert_eq!(
@@ -2858,14 +3370,18 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
 
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![build_top_border_resize_answer(first_pane_id, 3)],
         &mut pending_mouse_actions,
     );
 
-    assert_eq!(sent, Vec::new(), "round 7's move is answered and forgotten");
+    assert_eq!(
+        sent_border_moves,
+        Vec::new(),
+        "round 7's move is answered and forgotten"
+    );
     assert_eq!(
         pending_mouse_actions,
         vec![MouseAction::Resize {
@@ -2877,7 +3393,11 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
         "the buffered move is for the other border, so the answer left it alone"
     );
     assert_eq!(
-        client.handle_mouse(build_mouse_drag(held), &frame, Instant::now()),
+        client.handle_mouse(
+            build_mouse_drag(held_pointer_point),
+            &mouse_frame,
+            Instant::now()
+        ),
         vec![MouseAction::Resize {
             pane_id: second_pane_id,
             border_side: Direction::Up,
@@ -2890,30 +3410,34 @@ fn an_answer_for_a_border_drag_that_already_ended_changes_nothing() {
 
 #[test]
 fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet() {
-    let frame = build_mouse_frame(&[
+    let mouse_frame = build_mouse_frame(&[
         build_plain_mouse_pane(PaneId::new()),
         build_plain_mouse_pane(PaneId::new()),
     ]);
-    let pane_id = frame.mouse_panes[1].pane_id;
-    let grabbed = get_border_divider_point(&frame);
+    let pane_id = mouse_frame.mouse_panes[1].pane_id;
+    let grabbed_divider_point = get_border_divider_point(&mouse_frame);
     let mut client = build_test_client();
-    let mut wire = build_test_wire();
-    let mut sent = Vec::new();
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = Vec::new();
     let mut pending_mouse_actions = Vec::new();
 
-    client.handle_mouse(build_mouse_press(grabbed), &frame, Instant::now());
+    client.handle_mouse(
+        build_mouse_press(grabbed_divider_point),
+        &mouse_frame,
+        Instant::now(),
+    );
 
     // The pointer walks three cells down, one cell per pass, with none of the
     // rounds answered. Each move names its whole distance from the drag anchor —
     // 1, then 2, then 3 — and each round asks for the one cell the rounds
     // already on the wire did not.
-    for cell in 1..=3u16 {
+    for travelled_cell_count in 1..=3u16 {
         handle_mouse_event(
             &mut client,
-            &frame,
+            &mouse_frame,
             build_mouse_drag(Point {
-                row: grabbed.row + cell,
-                ..grabbed
+                row: grabbed_divider_point.row + travelled_cell_count,
+                ..grabbed_divider_point
             }),
             &mut pending_mouse_actions,
         );
@@ -2923,16 +3447,23 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
                 pane_id,
                 border_side: Direction::Up,
                 resize_step: -1,
-                requested_cell_count: cell,
+                requested_cell_count: travelled_cell_count,
             }],
             "the anchor has not moved, so the whole distance is named again"
         );
-        flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
-        let request: IpcRequest = wire.session.recv().expect("read the round");
+        flush_mouse_round(
+            &mut control_socket.uplink,
+            &mut sent_border_moves,
+            &mut pending_mouse_actions,
+        );
+        let request: IpcRequest = control_socket
+            .session_connection
+            .recv()
+            .expect("read the round");
         assert_eq!(
             request,
             IpcRequest {
-                request_id: FIRST_POST_ATTACH_REQUEST_ID + u64::from(cell) - 1,
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + u64::from(travelled_cell_count) - 1,
                 request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Resize {
                     pane_id,
                     border_side: Direction::Up,
@@ -2943,31 +3474,31 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
         );
     }
     assert_eq!(
-        compute_sent_border_cell_delta(&sent, pane_id, Direction::Up),
+        compute_sent_border_cell_delta(&sent_border_moves, pane_id, Direction::Up),
         -3,
         "three cells asked for over three rounds, one each"
     );
 
     // The three answers come back, each taking its own round's cell off.
-    for round in 0..3u64 {
+    for round_index in 0..3u64 {
         apply_mouse_answers(
             &mut client,
-            &frame,
-            &mut sent,
-            FIRST_POST_ATTACH_REQUEST_ID + round,
+            &mouse_frame,
+            &mut sent_border_moves,
+            FIRST_POST_ATTACH_REQUEST_ID + round_index,
             vec![build_top_border_resize_answer(pane_id, 1)],
             &mut pending_mouse_actions,
         );
     }
 
-    assert_eq!(sent, Vec::new());
+    assert_eq!(sent_border_moves, Vec::new());
     assert_eq!(
         client.handle_mouse(
             build_mouse_drag(Point {
-                row: grabbed.row + 3,
-                ..grabbed
+                row: grabbed_divider_point.row + 3,
+                ..grabbed_divider_point
             }),
-            &frame,
+            &mouse_frame,
             Instant::now()
         ),
         Vec::new(),
@@ -2977,34 +3508,41 @@ fn border_moves_written_back_to_back_ask_only_for_the_cells_no_round_asked_yet()
 
 #[test]
 fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
-    let (mut client, frame, to) = build_border_drag_fixture();
-    let pane_id = frame.mouse_panes[1].pane_id;
-    let mut wire = build_test_wire();
-    let mut sent = vec![build_sent_top_border_move(7, pane_id, 3)];
+    let (mut client, mouse_frame, pointer_point) = build_border_drag_fixture();
+    let pane_id = mouse_frame.mouse_panes[1].pane_id;
+    let mut control_socket = build_test_control_socket();
+    let mut sent_border_moves = vec![build_sent_top_border_move(7, pane_id, 3)];
     let mut pending_mouse_actions = Vec::new();
 
     // Round 7 asked for three cells and the session took none: the border is
-    // against a wall. The anchor stays put and the image record goes, so the pointer's
-    // next move asks for its whole distance again.
+    // against a wall. The anchor stays put and the sent move is forgotten, so the
+    // pointer's next move asks for its whole distance again.
     apply_mouse_answers(
         &mut client,
-        &frame,
-        &mut sent,
+        &mouse_frame,
+        &mut sent_border_moves,
         7,
         vec![build_top_border_resize_answer(pane_id, 0)],
         &mut pending_mouse_actions,
     );
-    assert_eq!(sent, Vec::new());
+    assert_eq!(sent_border_moves, Vec::new());
 
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_drag(to),
+        &mouse_frame,
+        build_mouse_drag(pointer_point),
         &mut pending_mouse_actions,
     );
-    flush_mouse_round(&mut wire.uplink, &mut sent, &mut pending_mouse_actions);
+    flush_mouse_round(
+        &mut control_socket.uplink,
+        &mut sent_border_moves,
+        &mut pending_mouse_actions,
+    );
 
-    let request: IpcRequest = wire.session.recv().expect("read the next round");
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the next round");
     assert_eq!(
         request,
         IpcRequest {
@@ -3024,15 +3562,15 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
 fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 Key::Char('a'),
             )),
         },
@@ -3040,15 +3578,20 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
 
     // The sentinel goes out behind the key, so a key that was never sent reads
     // back as the sentinel instead of leaving this test waiting.
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the key");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the key");
     assert_eq!(
         request,
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Keyboard {
                 key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
-                    ModFlags::NONE,
+                    BindingModifierFlags::NONE,
                     Key::Char('a'),
                 )),
             },
@@ -3057,10 +3600,10 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
 }
 
 /// The release the outer terminal reports for one chord.
-fn build_key_release_for_chord(chord: KeyChord) -> KeyInput {
+fn build_key_release_for_chord(key_chord: KeyChord) -> KeyInput {
     KeyInput {
         key_event_kind: KeyEventKind::Release,
-        ..crate::tests::build_key_input_for_chord(chord)
+        ..crate::tests::build_key_input_for_chord(key_chord)
     }
 }
 
@@ -3068,14 +3611,14 @@ fn build_key_release_for_chord(chord: KeyChord) -> KeyInput {
 fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     // `<C-p>` is the default pane prefix: it binds nothing on its own, so it
     // opens a sequence and holds the keyboard.
-    let sequence_opener_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('p'));
+    let sequence_opener_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: crate::tests::build_key_input_for_chord(sequence_opener_chord),
@@ -3090,7 +3633,7 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
     let released_key_input = build_key_release_for_chord(sequence_opener_chord);
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: released_key_input.clone(),
@@ -3108,8 +3651,13 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
 
     // The opener was held, so the release is the first thing this connection
     // carries. The sentinel behind it keeps a missing release from waiting.
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the release");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the release");
     assert_eq!(
         request,
         IpcRequest {
@@ -3125,7 +3673,7 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
 fn a_key_no_binding_can_name_goes_up_the_connection_whole() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     // Left Shift reports as codepoint 57441 and has no chord form at all.
     let left_shift_key_input = KeyInput {
         key: KeyIdentity::Codepoint(57441),
@@ -3138,15 +3686,20 @@ fn a_key_no_binding_can_name_goes_up_the_connection_whole() {
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: left_shift_key_input.clone(),
         },
     );
 
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the key");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the key");
     assert_eq!(
         request,
         IpcRequest {
@@ -3162,7 +3715,7 @@ fn a_key_no_binding_can_name_goes_up_the_connection_whole() {
 fn a_text_only_event_goes_up_the_connection_whole() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     // A terminal that reports text with no key sends codepoint 0, and no
     // keybinding can name it.
     let text_only_key_input = KeyInput {
@@ -3176,15 +3729,20 @@ fn a_text_only_event_goes_up_the_connection_whole() {
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: text_only_key_input.clone(),
         },
     );
 
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the text-only event");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the text-only event");
     assert_eq!(
         request,
         IpcRequest {
@@ -3201,26 +3759,26 @@ fn a_key_release_leaves_this_viewers_selection_gesture_running() {
     // The press that typed into the pane already ended the gesture. A release
     // arriving after a fresh press must not end the next one.
     let pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     let mut pending_mouse_actions = Vec::new();
 
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_press(get_content_cell(&frame, 0)),
+        &mouse_frame,
+        build_mouse_press(get_content_cell(&mouse_frame, 0)),
         &mut pending_mouse_actions,
     );
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: build_key_release_for_chord(KeyChord::from_parts(
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 Key::Char('a'),
             )),
         },
@@ -3229,7 +3787,7 @@ fn a_key_release_leaves_this_viewers_selection_gesture_running() {
     pending_mouse_actions.clear();
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point { column: 9, row: 8 }),
         &mut pending_mouse_actions,
     );
@@ -3262,21 +3820,21 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
     // The key is the program's, so the highlight gesture over it is over. The
     // highlight it already made stands; only the drag ends.
     let pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     let mut pending_mouse_actions = Vec::new();
 
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_press(get_content_cell(&frame, 0)),
+        &mouse_frame,
+        build_mouse_press(get_content_cell(&mouse_frame, 0)),
         &mut pending_mouse_actions,
     );
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point { column: 9, row: 8 }),
         &mut pending_mouse_actions,
     );
@@ -3304,11 +3862,11 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 Key::Char('a'),
             )),
         },
@@ -3318,7 +3876,7 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
     pending_mouse_actions.clear();
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point {
             column: 20,
             row: 12,
@@ -3330,46 +3888,51 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
 
 #[test]
 fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
-    // The viewer hit-tests its own frames against this size, and the session
-    // reconciles the tab size from every viewer's report, so both copies move.
+    // The resize moves the viewer's own size and reports the new size to the
+    // session.
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
-    let bigger = Size {
+    let mut control_socket = build_test_control_socket();
+    let resized_viewport_size = Size {
         column_count: 132,
         row_count: 43,
     };
     assert_eq!(client.get_viewport_size(), TEST_VIEWPORT_SIZE);
-    let measurement = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+    let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::Resize {
             client_id,
-            viewport_size: bigger,
+            viewport_size: resized_viewport_size,
             pane_area: None,
-            cell_size: Some(measurement),
+            cell_size: Some(measured_cell_size),
         },
     );
 
     assert_eq!(
         client.get_viewport_size(),
-        bigger,
+        resized_viewport_size,
         "the viewer's own copy moved"
     );
     // The sentinel goes out behind the report, so a report that was never sent
     // reads back as the sentinel instead of leaving this test waiting.
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the resize");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the resize");
     assert_eq!(
         request,
         IpcRequest {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::Resize {
-                viewport_size: bigger,
-                pane_area: Some(compute_core_pane_area(bigger)),
+                viewport_size: resized_viewport_size,
+                pane_area: Some(compute_core_pane_area(resized_viewport_size)),
                 cell_size: None,
             },
         }
@@ -3380,14 +3943,14 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
 fn a_terminal_resize_reports_its_measured_cell_size() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, true, false);
-    let measurement = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+    let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
 
     process_runtime_input_with_cell_size(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         &mut cell_size_query,
         RuntimeEvent::Resize {
             client_id,
@@ -3396,27 +3959,32 @@ fn a_terminal_resize_reports_its_measured_cell_size() {
                 row_count: 40,
             },
             pane_area: None,
-            cell_size: Some(measurement),
+            cell_size: Some(measured_cell_size),
         },
     );
 
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the resize");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the resize");
     let IpcRequestKind::Resize { cell_size, .. } = request.request_kind else {
         panic!("expected a Resize, got {:?}", request.request_kind);
     };
-    assert_eq!(cell_size, Some(measurement));
+    assert_eq!(cell_size, Some(measured_cell_size));
 }
 
 #[test]
 fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::HostPaste {
             client_id,
             pasted_text: String::from("hello\nworld"),
@@ -3425,8 +3993,13 @@ fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
 
     // The sentinel goes out behind the paste, so a paste that was never sent
     // reads back as the sentinel instead of leaving this test waiting.
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let request: IpcRequest = wire.session.recv().expect("read the paste");
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the paste");
     assert_eq!(
         request,
         IpcRequest {
@@ -3443,27 +4016,29 @@ fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
 fn a_paste_too_big_for_one_frame_is_the_only_thing_lost() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::HostPaste {
             client_id,
             pasted_text: "a".repeat(MAX_FRAME_BYTE_COUNT as usize + 1),
         },
     );
-    wire.uplink.send_request(IpcRequestKind::Discovery);
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
 
     // The read runs on its own thread: a writer that ended on the paste writes
     // nothing more, and this reports that as a failure instead of waiting for a
     // frame that never comes.
-    let (read_tx, read_rx) = mpsc::channel();
-    let mut session = wire.session;
+    let (read_result_sender, read_result_receiver) = mpsc::channel();
+    let mut session_connection = control_socket.session_connection;
     thread::spawn(move || {
-        let _ = read_tx.send(session.recv::<IpcRequest>());
+        let _ = read_result_sender.send(session_connection.recv::<IpcRequest>());
     });
-    let request = read_rx
+    let request = read_result_receiver
         .recv_timeout(Duration::from_secs(10))
         .expect("the uplink still writes after the refused paste")
         .expect("read the request behind the paste");
@@ -3481,22 +4056,22 @@ fn a_paste_too_big_for_one_frame_is_the_only_thing_lost() {
 #[test]
 fn a_paste_ends_this_viewers_selection_gesture() {
     let pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let mut client = build_test_client();
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     let mut pending_mouse_actions = Vec::new();
 
     // Press and drag: the gesture is under way, so the move names a highlight.
     handle_mouse_event(
         &mut client,
-        &frame,
-        build_mouse_press(get_content_cell(&frame, 0)),
+        &mouse_frame,
+        build_mouse_press(get_content_cell(&mouse_frame, 0)),
         &mut pending_mouse_actions,
     );
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point { column: 9, row: 8 }),
         &mut pending_mouse_actions,
     );
@@ -3524,7 +4099,7 @@ fn a_paste_ends_this_viewers_selection_gesture() {
 
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::HostPaste {
             client_id,
             pasted_text: String::from("hello"),
@@ -3535,7 +4110,7 @@ fn a_paste_ends_this_viewers_selection_gesture() {
     pending_mouse_actions.clear();
     handle_mouse_event(
         &mut client,
-        &frame,
+        &mouse_frame,
         build_mouse_drag(Point {
             column: 20,
             row: 12,
@@ -3547,29 +4122,38 @@ fn a_paste_ends_this_viewers_selection_gesture() {
 
 #[test]
 fn earliest_of_two_present_durations_is_the_smaller_either_order() {
-    let short = Duration::from_millis(5);
-    let long = Duration::from_millis(50);
+    let shorter_duration = Duration::from_millis(5);
+    let longer_duration = Duration::from_millis(50);
     assert_eq!(
-        select_earliest_duration(Some(short), Some(long)),
-        Some(short)
+        select_earliest_duration(Some(shorter_duration), Some(longer_duration)),
+        Some(shorter_duration)
     );
     assert_eq!(
-        select_earliest_duration(Some(long), Some(short)),
-        Some(short)
+        select_earliest_duration(Some(longer_duration), Some(shorter_duration)),
+        Some(shorter_duration)
     );
 }
 
 #[test]
 fn earliest_of_two_equal_durations_returns_that_duration() {
-    let same = Duration::from_millis(10);
-    assert_eq!(select_earliest_duration(Some(same), Some(same)), Some(same));
+    let equal_duration = Duration::from_millis(10);
+    assert_eq!(
+        select_earliest_duration(Some(equal_duration), Some(equal_duration)),
+        Some(equal_duration)
+    );
 }
 
 #[test]
 fn earliest_falls_back_to_whichever_single_side_is_present() {
-    let only = Duration::from_millis(7);
-    assert_eq!(select_earliest_duration(Some(only), None), Some(only));
-    assert_eq!(select_earliest_duration(None, Some(only)), Some(only));
+    let present_duration = Duration::from_millis(7);
+    assert_eq!(
+        select_earliest_duration(Some(present_duration), None),
+        Some(present_duration)
+    );
+    assert_eq!(
+        select_earliest_duration(None, Some(present_duration)),
+        Some(present_duration)
+    );
 }
 
 #[test]
@@ -3630,8 +4214,8 @@ impl Backend for FailingBackend {
             return Err(io::Error::other("the test backend rejected the draw"));
         }
         let mut drawn_buffer = self.drawn_buffer.lock().expect("the drawn buffer lock");
-        for (column_index, row_index, cell) in cell_updates {
-            drawn_buffer[(column_index, row_index)] = cell.clone();
+        for (column_index, row_index, drawn_cell) in cell_updates {
+            drawn_buffer[(column_index, row_index)] = drawn_cell.clone();
         }
         Ok(())
     }
@@ -3747,8 +4331,9 @@ fn build_native_image_snapshot() -> RenderSnapshot {
         display: ImageDisplay::default(),
         anchor: (0, 0),
     });
-    let placement = ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
-        .expect("the test image placement is valid");
+    let image_placement_snapshot =
+        ImagePlacementSnapshot::from_image_record(1, image_record, (0, 0), 1, 1)
+            .expect("the test image placement is valid");
 
     RenderSnapshot {
         is_recovery_notice_visible: false,
@@ -3806,7 +4391,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                 )),
                 view_row_offset: 0,
             }),
-            image_placement_snapshots: vec![placement],
+            image_placement_snapshots: vec![image_placement_snapshot],
             is_reverse_video: false,
             mouse_tracking: MouseTracking::Off,
             is_alternate_scroll_enabled: false,
@@ -3858,7 +4443,7 @@ fn a_screen_starts_with_the_compiled_in_region_solve() {
 }
 
 #[test]
-fn a_new_viewport_commits_a_new_region_revision_with_the_build_test_painted_frame() {
+fn a_new_viewport_commits_a_new_region_revision_with_the_painted_frame() {
     let mut screen = Screen::from_terminal_and_viewport_size(
         Terminal::new(TestBackend::new(100, 30)).expect("build an in-memory terminal"),
         TEST_VIEWPORT_SIZE,
@@ -3869,7 +4454,7 @@ fn a_new_viewport_commits_a_new_region_revision_with_the_build_test_painted_fram
         row_count: 30,
     });
 
-    let frame = screen
+    let mouse_frame = screen
         .draw_painted_frame(
             &mut client,
             Box::new(build_test_painted_frame_with_viewport_size(Size {
@@ -3887,7 +4472,7 @@ fn a_new_viewport_commits_a_new_region_revision_with_the_build_test_painted_fram
         }
     );
     assert_eq!(screen.committed_regions.region_input_revision, 1);
-    assert_eq!(frame.committed_regions, screen.committed_regions);
+    assert_eq!(mouse_frame.committed_regions, screen.committed_regions);
 }
 
 #[test]
@@ -3897,18 +4482,18 @@ fn an_in_flight_frame_uses_its_own_viewport_for_region_geometry() {
         TEST_VIEWPORT_SIZE,
     );
     let mut client = build_test_client();
-    let resized = Size {
+    let resized_viewport_size = Size {
         column_count: 120,
         row_count: 40,
     };
-    client.set_viewport_size(resized);
+    client.set_viewport_size(resized_viewport_size);
 
-    let frame = screen
+    let mouse_frame = screen
         .draw_painted_frame(&mut client, Box::new(build_test_painted_frame()))
         .expect("paint");
     let expected_committed_regions = CommittedRegions::build_core(TEST_VIEWPORT_SIZE, 0);
 
-    assert_eq!(frame.committed_regions, expected_committed_regions);
+    assert_eq!(mouse_frame.committed_regions, expected_committed_regions);
     assert_eq!(screen.committed_regions, expected_committed_regions);
 }
 
@@ -3925,11 +4510,11 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
         .expect("the first frame paints");
     let shown_viewer_paint_before = screen.shown_viewer_paint.clone();
     let snapshot_before = screen.last_snapshot.clone();
-    let regions_before = screen.committed_regions.clone();
+    let committed_regions_before = screen.committed_regions.clone();
 
-    let opener = get_sequence_opener(&client);
+    let sequence_opener_chord = get_sequence_opener(&client);
     assert_eq!(
-        client.resolve_key(opener, Instant::now()),
+        client.resolve_key(sequence_opener_chord, Instant::now()),
         KeyOutcome::Pending
     );
 
@@ -3947,11 +4532,11 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
     assert!(!client.is_mouse_selection_enabled());
     assert_eq!(
         client.get_pending_key_sequence().cloned(),
-        Some(KeySequence::from(opener))
+        Some(KeySequence::from(sequence_opener_chord))
     );
     assert_eq!(screen.shown_viewer_paint, shown_viewer_paint_before);
     assert_eq!(screen.last_snapshot, snapshot_before);
-    assert_eq!(screen.committed_regions, regions_before);
+    assert_eq!(screen.committed_regions, committed_regions_before);
     assert_eq!(screen.last_window_title, "session");
 
     screen.terminal.backend_mut().should_fail_draw = false;
@@ -4208,11 +4793,14 @@ fn a_repeated_native_frame_failure_uses_capped_retry_delay() {
         None,
     );
     let mut client = build_test_client();
-    let snapshot = build_native_image_snapshot();
-    let active_tab_id = snapshot.client_snapshot.active_tab_id;
+    let native_image_snapshot = build_native_image_snapshot();
+    let active_tab_id = native_image_snapshot.client_snapshot.active_tab_id;
     screen.terminal.backend_mut().should_fail_draw = true;
 
-    assert_eq!(screen.draw_snapshot(&mut client, snapshot), None);
+    assert_eq!(
+        screen.draw_snapshot(&mut client, native_image_snapshot),
+        None
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while screen.image_output_state.is_work_pending() {
@@ -4340,11 +4928,11 @@ fn a_completed_native_image_is_committed_by_refresh() {
         None,
     );
     let mut client = build_test_client();
-    let snapshot = build_native_image_snapshot();
-    let active_tab_id = snapshot.client_snapshot.active_tab_id;
+    let native_image_snapshot = build_native_image_snapshot();
+    let active_tab_id = native_image_snapshot.client_snapshot.active_tab_id;
 
     assert_eq!(
-        screen.draw_snapshot(&mut client, snapshot),
+        screen.draw_snapshot(&mut client, native_image_snapshot),
         None,
         "the first paint waits for native image preparation"
     );
@@ -4378,7 +4966,7 @@ fn native_images_return_after_scrolling_away_for_each_output_protocol() {
         },
     ];
 
-    for graphics in output_protocols {
+    for graphics_support in output_protocols {
         let mut screen = Screen::with_graphics_support(
             Terminal::new(TestBackend::new(
                 TEST_VIEWPORT_SIZE.column_count,
@@ -4386,21 +4974,21 @@ fn native_images_return_after_scrolling_away_for_each_output_protocol() {
             ))
             .expect("build terminal"),
             TEST_VIEWPORT_SIZE,
-            graphics,
+            graphics_support,
             Some(cell_size),
         );
         let mut client = build_test_client();
-        let image = build_native_image_snapshot();
-        let active_tab_id = image.client_snapshot.active_tab_id;
-        let mut scrolled_away = image.clone();
-        for pane_snapshot in &mut scrolled_away.pane_snapshots {
+        let image_render_snapshot = build_native_image_snapshot();
+        let active_tab_id = image_render_snapshot.client_snapshot.active_tab_id;
+        let mut scrolled_away_render_snapshot = image_render_snapshot.clone();
+        for pane_snapshot in &mut scrolled_away_render_snapshot.pane_snapshots {
             pane_snapshot.image_placement_snapshots.clear();
         }
 
         assert_eq!(
-            screen.draw_snapshot(&mut client, image.clone()),
+            screen.draw_snapshot(&mut client, image_render_snapshot.clone()),
             None,
-            "{graphics:?} must wait for its first native output"
+            "{graphics_support:?} must wait for its first native output"
         );
         wait_for_pending_native_frame(&mut screen, &mut client, active_tab_id);
         assert_eq!(
@@ -4409,25 +4997,27 @@ fn native_images_return_after_scrolling_away_for_each_output_protocol() {
                 .list_prepared_placement_keys()
                 .len(),
             1,
-            "{graphics:?}"
+            "{graphics_support:?}"
         );
 
         assert!(
-            screen.draw_snapshot(&mut client, scrolled_away).is_some(),
-            "{graphics:?} must commit the frame with no visible image"
+            screen
+                .draw_snapshot(&mut client, scrolled_away_render_snapshot)
+                .is_some(),
+            "{graphics_support:?} must commit the frame with no visible image"
         );
         assert!(
             screen
                 .image_output_state
                 .list_prepared_placement_keys()
                 .is_empty(),
-            "{graphics:?}"
+            "{graphics_support:?}"
         );
 
         assert_eq!(
-            screen.draw_snapshot(&mut client, image),
+            screen.draw_snapshot(&mut client, image_render_snapshot),
             None,
-            "{graphics:?} must prepare the image again after it returns"
+            "{graphics_support:?} must prepare the image again after it returns"
         );
         wait_for_pending_native_frame(&mut screen, &mut client, active_tab_id);
         assert_eq!(
@@ -4436,7 +5026,7 @@ fn native_images_return_after_scrolling_away_for_each_output_protocol() {
                 .list_prepared_placement_keys()
                 .len(),
             1,
-            "{graphics:?}"
+            "{graphics_support:?}"
         );
     }
 }
@@ -4682,27 +5272,32 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
     screen.refresh(&mut client, Some(active_tab_id));
 
     let client_id = client.get_client_id();
-    let mut wire = build_test_wire();
+    let mut control_socket = build_test_control_socket();
     process_runtime_input(
         &mut client,
-        &mut wire.uplink,
+        &mut control_socket.uplink,
         RuntimeEvent::KeyInput {
             client_id,
             key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 Key::Named(NamedKey::Enter),
             )),
         },
     );
     screen.refresh(&mut client, Some(active_tab_id));
 
-    wire.uplink.send_request(IpcRequestKind::Discovery);
-    let placement_request: IpcRequest = wire.session.recv().expect("read the placement command");
-    let IpcRequestKind::SubmitCommand(envelope) = placement_request.request_kind else {
+    control_socket
+        .uplink
+        .send_request(IpcRequestKind::Discovery);
+    let placement_request: IpcRequest = control_socket
+        .session_connection
+        .recv()
+        .expect("read the placement command");
+    let IpcRequestKind::SubmitCommand(command_envelope) = placement_request.request_kind else {
         panic!("Enter must submit a placement command");
     };
     assert_eq!(
-        envelope.command,
+        command_envelope.command,
         Command::PlacePane(PlacePaneArgs {
             source_pane_id,
             placement_target: PanePlacementTarget::Swap { target_pane_id },
@@ -4727,13 +5322,13 @@ fn enter_submits_keyboard_placement_and_repaints_without_resize() {
 fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
     let initial_focused_pane_id = PaneId::new();
     let dragged_pane_id = PaneId::new();
-    let frame = build_mouse_frame(&[
+    let mouse_frame = build_mouse_frame(&[
         build_plain_mouse_pane(initial_focused_pane_id),
         build_plain_mouse_pane(dragged_pane_id),
     ]);
-    let active_tab_id = frame.client_snapshot.active_tab_id;
+    let active_tab_id = mouse_frame.client_snapshot.active_tab_id;
     let screen_pane_content_rect = koshi_renderer::find_pane_content_rect(
-        frame.build_frame_layout(koshi_renderer::snapshot::ViewerChrome::default()),
+        mouse_frame.build_frame_layout(koshi_renderer::snapshot::ViewerChrome::default()),
         dragged_pane_id,
     )
     .expect("the dragged pane has visible content");
@@ -4750,7 +5345,7 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
     );
     client.handle_mouse(
         build_mouse_motion(placement_handle_position),
-        &frame,
+        &mouse_frame,
         Instant::now(),
     );
     let (request_sender, request_receiver) = mpsc::channel();
@@ -4763,7 +5358,7 @@ fn mouse_pickup_reads_placement_and_focuses_dragged_pane() {
     assert!(handle_placement_mouse_event(
         &mut client,
         &mut uplink,
-        &frame,
+        &mouse_frame,
         build_mouse_press(placement_handle_position),
     ));
     assert_eq!(client.get_placement_source_pane_id(), Some(dragged_pane_id));
@@ -4976,7 +5571,7 @@ fn assert_attachment_commits_pane_swap_without_waiting_for_resize(
         PlacementModeLifetime::UntilCancelled => vec![RuntimeEvent::KeyInput {
             client_id,
             key_input: crate::tests::build_key_input_for_chord(KeyChord::from_parts(
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 Key::Named(NamedKey::Enter),
             )),
         }],
@@ -5484,7 +6079,7 @@ fn get_hint_row(screen: &Screen<TestBackend>) -> String {
         .last()
         .expect("a drawn frame has at least one row")
         .iter()
-        .map(|cell| cell.symbol())
+        .map(|buffer_cell| buffer_cell.symbol())
         .collect::<String>()
         .trim_end()
         .to_string()
@@ -5503,12 +6098,12 @@ fn get_sequence_opener(client: &Client) -> KeyChord {
         .list_chords()[0]
 }
 
-/// The pointer moved to `at` with no button held.
+/// The pointer moved to `screen_point` with no button held.
 fn build_mouse_motion(screen_point: Point) -> MouseInput {
     MouseInput {
         mouse_kind: MouseKind::Motion,
         position: screen_point,
-        modifier_flags: ModFlags::NONE,
+        modifier_flags: BindingModifierFlags::NONE,
     }
 }
 
@@ -5525,7 +6120,7 @@ fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
             Box::new(build_test_painted_frame_with_lock_mode(LockMode::Normal)),
         )
         .expect("paint");
-    let normal = get_hint_row(&screen);
+    let normal_hint_row = get_hint_row(&screen);
 
     screen
         .draw_painted_frame(
@@ -5533,13 +6128,13 @@ fn the_frame_that_locks_the_client_draws_the_locked_hint_bar() {
             Box::new(build_test_painted_frame_with_lock_mode(LockMode::Locked)),
         )
         .expect("paint");
-    let locked = get_hint_row(&screen);
+    let locked_hint_row = get_hint_row(&screen);
 
     assert_eq!(
-        locked,
+        locked_hint_row,
         " Ctrl +  l  Unlock  g  Mouse Select  p  PANE  q  Quit"
     );
-    assert_ne!(normal, locked);
+    assert_ne!(normal_hint_row, locked_hint_row);
 }
 
 #[test]
@@ -5567,22 +6162,22 @@ fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
     screen
         .draw_painted_frame(&mut client, Box::new(painted_frame))
         .expect("paint");
-    let drawn = get_hint_row(&screen);
+    let drawn_hint_row = get_hint_row(&screen);
 
-    let opener = get_sequence_opener(&client);
+    let sequence_opener_chord = get_sequence_opener(&client);
     assert_eq!(
-        client.resolve_key(opener, Instant::now()),
+        client.resolve_key(sequence_opener_chord, Instant::now()),
         KeyOutcome::Pending
     );
     screen.refresh(&mut client, Some(active_tab_id));
 
     // The breadcrumb view opens with the chord that was pressed and ends with
     // the arrow that separates it from the chords continuing it.
-    let breadcrumb = get_hint_row(&screen);
-    assert_ne!(breadcrumb, drawn);
+    let breadcrumb_hint_row = get_hint_row(&screen);
+    assert_ne!(breadcrumb_hint_row, drawn_hint_row);
     assert!(
-        breadcrumb.contains(" ▶ "),
-        "the bar draws the open sequence: {breadcrumb}"
+        breadcrumb_hint_row.contains(" ▶ "),
+        "the bar draws the open sequence: {breadcrumb_hint_row}"
     );
 }
 
@@ -5592,18 +6187,18 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
     // viewer's own, and the frame drawn before the move does not carry it.
     let mut client = build_test_client();
     let mut screen = build_test_screen();
-    let painted = build_test_painted_frame_with_lock_mode(LockMode::Normal);
-    let active_tab_id = painted.client_snapshot.active_tab_id;
+    let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
-    let mouse = build_mouse_frame(&[
+    let mouse_frame = build_mouse_frame(&[
         build_plain_mouse_pane(first_pane_id),
         build_plain_mouse_pane(second_pane_id),
     ]);
     let mut pending_mouse_actions = Vec::new();
 
     screen
-        .draw_painted_frame(&mut client, Box::new(painted))
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
         .expect("paint");
     let painted_render_snapshot = screen.last_snapshot.clone().expect("the frame painted");
     let hovered_before = ViewerPaint::from_client(&client, active_tab_id, &painted_render_snapshot)
@@ -5612,8 +6207,8 @@ fn a_pointer_moved_after_a_frame_in_one_pass_still_draws_the_new_hover() {
 
     handle_mouse_event(
         &mut client,
-        &mouse,
-        build_mouse_motion(get_content_cell(&mouse, 1)),
+        &mouse_frame,
+        build_mouse_motion(get_content_cell(&mouse_frame, 1)),
         &mut pending_mouse_actions,
     );
     let hovered_after = ViewerPaint::from_client(&client, active_tab_id, &painted_render_snapshot)
@@ -5819,18 +6414,19 @@ fn locking_the_client_moves_what_the_viewer_paints() {
 
 #[test]
 fn opening_a_key_sequence_moves_what_the_viewer_paints() {
-    // An opened sequence reaches no session, so no frame comes back. The hint
-    // bar draws it as a breadcrumb, so `ViewerPaint` carries it.
+    // An opened sequence reaches no session, and no frame comes back.
+    // `ViewerPaint` carries the sequence, and the hint bar draws it as a
+    // breadcrumb.
     let mut client = build_test_client();
     let render_snapshot =
         build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Normal));
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
-    let opener = get_sequence_opener(&client);
+    let sequence_opener_chord = get_sequence_opener(&client);
     let paint_before_key_sequence =
         ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
 
     assert_eq!(
-        client.resolve_key(opener, Instant::now()),
+        client.resolve_key(sequence_opener_chord, Instant::now()),
         KeyOutcome::Pending
     );
 
@@ -5839,30 +6435,33 @@ fn opening_a_key_sequence_moves_what_the_viewer_paints() {
     assert_eq!(paint_before_key_sequence.pending_key_sequence, None);
     assert_eq!(
         paint_after_key_sequence.pending_key_sequence,
-        Some(KeySequence::from(opener))
+        Some(KeySequence::from(sequence_opener_chord))
     );
     assert_ne!(paint_after_key_sequence, paint_before_key_sequence);
 }
 
 #[test]
 fn dialing_again_moves_what_the_viewer_paints() {
-    // No frame arrives while the link is down, so the `RECONNECTING` tag is
-    // drawn by the repaint a moved `ViewerPaint` fires.
+    // No frame arrives while the link is down. A moved `ViewerPaint` fires the
+    // repaint that draws the `RECONNECTING` tag.
     let mut client = build_test_client();
     let render_snapshot =
         build_render_snapshot(&build_test_painted_frame_with_lock_mode(LockMode::Normal));
     let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     let paint_before_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
 
-    let dialing = Reconnecting {
+    let reconnecting = Reconnecting {
         attempt: 1,
         retry_in_seconds: 5,
     };
-    client.set_reconnecting(Some(dialing));
+    client.set_reconnecting(Some(reconnecting));
 
     let paint_after_reconnect = ViewerPaint::from_client(&client, active_tab_id, &render_snapshot);
     assert_eq!(paint_before_reconnect.chrome.reconnecting, None);
-    assert_eq!(paint_after_reconnect.chrome.reconnecting, Some(dialing));
+    assert_eq!(
+        paint_after_reconnect.chrome.reconnecting,
+        Some(reconnecting)
+    );
     assert_ne!(paint_after_reconnect, paint_before_reconnect);
 }
 
@@ -5870,30 +6469,30 @@ fn dialing_again_moves_what_the_viewer_paints() {
 fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
     let client = build_test_client();
     let sequence_opener_chord = get_sequence_opener(&client);
-    let resized = Size {
+    let resized_viewport_size = Size {
         column_count: 100,
         row_count: 40,
     };
-    let (incoming_tx, incoming_rx) = build_incoming_channel();
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
-    incoming_tx
+    incoming_sender
         .send(Incoming::Input(Box::new(RuntimeEvent::KeyInput {
             client_id: client.get_client_id(),
             key_input: crate::tests::build_key_input_for_chord(sequence_opener_chord),
         })))
         .expect("the loop's channel takes it");
-    incoming_tx
+    incoming_sender
         .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
         .expect("the loop's channel takes it");
-    incoming_tx
+    incoming_sender
         .send(Incoming::Input(Box::new(RuntimeEvent::Resize {
             client_id: client.get_client_id(),
-            viewport_size: resized,
+            viewport_size: resized_viewport_size,
             pane_area: None,
             cell_size: None,
         })))
         .expect("the loop's channel takes it");
-    incoming_tx
+    incoming_sender
         .send(Incoming::Frame {
             connection_index: 0,
             session_event_result: Ok(SessionEvent::Painted {
@@ -5905,7 +6504,7 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
     let viewport_size_before_blackout = client.get_viewport_size();
 
     assert!(
-        drop_input_from_the_blackout(&incoming_rx, &mut cell_size_query),
+        drop_input_from_the_blackout(&incoming_receiver, &mut cell_size_query),
         "the terminal hung up while the link was down"
     );
 
@@ -5915,11 +6514,11 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
         "the resize was dropped with the rest; the new link reads the size itself"
     );
     assert_ne!(
-        viewport_size_before_blackout, resized,
+        viewport_size_before_blackout, resized_viewport_size,
         "the dropped resize named another size"
     );
     assert_eq!(
-        incoming_rx.try_recv().err(),
+        incoming_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),
         "the key, the resize and the stale frame were all taken off the channel"
     );
@@ -5927,24 +6526,24 @@ fn every_event_from_the_blackout_is_dropped_and_the_hangup_still_reported() {
 
 #[test]
 fn a_cell_size_reply_in_the_blackout_is_consumed_by_the_outer_query() {
-    let measurement = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+    let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
     let client_id = ClientId::new();
-    let (incoming_tx, incoming_rx) = build_incoming_channel();
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, true, true);
-    incoming_tx
+    incoming_sender
         .send(Incoming::Input(Box::new(RuntimeEvent::CellSize {
             client_id,
-            cell_size: measurement,
+            cell_size: measured_cell_size,
         })))
         .expect("the cell-size reply is queued");
 
     assert!(!drop_input_from_the_blackout(
-        &incoming_rx,
+        &incoming_receiver,
         &mut cell_size_query,
     ));
     assert_eq!(
-        cell_size_query.accept_cell_size_reply(measurement),
+        cell_size_query.accept_cell_size_reply(measured_cell_size),
         (None, false),
         "the blackout consumed the reply instead of leaving it pending"
     );
@@ -5952,14 +6551,14 @@ fn a_cell_size_reply_in_the_blackout_is_consumed_by_the_outer_query() {
 
 #[test]
 fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
-    let (incoming_tx, incoming_rx) = mpsc::channel();
+    let (incoming_sender, incoming_receiver) = mpsc::channel();
     for _ in 0..MAX_INCOMING_EVENT_COUNT_PER_PASS {
-        incoming_tx
+        incoming_sender
             .send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
             .expect("the test receiver is open");
     }
     let client_id = ClientId::new();
-    incoming_tx
+    incoming_sender
         .send(Incoming::Input(Box::new(RuntimeEvent::Resize {
             client_id,
             viewport_size: Size {
@@ -5971,10 +6570,10 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
         })))
         .expect("the test receiver is open");
 
-    let (incoming_events, deferred) = build_incoming_batch(None, &incoming_rx);
+    let (incoming_events, deferred_incoming_event) = build_incoming_batch(None, &incoming_receiver);
 
     assert_eq!(incoming_events.len(), MAX_INCOMING_EVENT_COUNT_PER_PASS);
-    let None = deferred else {
+    let None = deferred_incoming_event else {
         panic!("a full event-count batch must leave the next event in the channel");
     };
     for incoming_event in incoming_events {
@@ -5986,10 +6585,10 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
             unexpected_runtime_event => panic!("the batch contained {unexpected_runtime_event:?}"),
         }
     }
-    let remaining = incoming_rx
+    let remaining_incoming_event = incoming_receiver
         .try_recv()
         .expect("the event past the count limit remains queued");
-    let Incoming::Input(runtime_event) = remaining else {
+    let Incoming::Input(runtime_event) = remaining_incoming_event else {
         panic!("the remaining event came from the session");
     };
     match *runtime_event {
@@ -6013,7 +6612,7 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
         unexpected_runtime_event => panic!("the remaining event was {unexpected_runtime_event:?}"),
     }
     assert_eq!(
-        incoming_rx.try_recv().err(),
+        incoming_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty)
     );
 }
@@ -6021,24 +6620,25 @@ fn incoming_batch_leaves_events_past_the_per_pass_limit_queued() {
 #[test]
 fn incoming_queue_stops_producers_at_its_fixed_capacity() {
     assert_eq!(INCOMING_QUEUE_CAPACITY, 16);
-    let (incoming_tx, incoming_rx) = build_incoming_channel();
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
     for _ in 0..INCOMING_QUEUE_CAPACITY {
-        incoming_tx
+        incoming_sender
             .try_send(Incoming::Input(Box::new(RuntimeEvent::Quit)))
             .expect("an event inside the queue limit fits");
     }
     let client_id = ClientId::new();
-    let rejected = incoming_tx.try_send(Incoming::Input(Box::new(RuntimeEvent::Resize {
-        client_id,
-        viewport_size: Size {
-            column_count: 90,
-            row_count: 30,
-        },
-        pane_area: None,
-        cell_size: None,
-    })));
+    let rejected_send_result =
+        incoming_sender.try_send(Incoming::Input(Box::new(RuntimeEvent::Resize {
+            client_id,
+            viewport_size: Size {
+                column_count: 90,
+                row_count: 30,
+            },
+            pane_area: None,
+            cell_size: None,
+        })));
 
-    let Err(mpsc::TrySendError::Full(Incoming::Input(runtime_event))) = rejected else {
+    let Err(mpsc::TrySendError::Full(Incoming::Input(runtime_event))) = rejected_send_result else {
         panic!("the event past the queue limit was not returned as full");
     };
     let RuntimeEvent::Resize {
@@ -6061,7 +6661,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
     assert_eq!(pane_area, None);
     assert_eq!(cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
-        let Incoming::Input(runtime_event) = incoming_rx
+        let Incoming::Input(runtime_event) = incoming_receiver
             .try_recv()
             .expect("each accepted event remains queued")
         else {
@@ -6072,7 +6672,7 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
         };
     }
     assert_eq!(
-        incoming_rx.try_recv().err(),
+        incoming_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty)
     );
 }
@@ -6080,20 +6680,20 @@ fn incoming_queue_stops_producers_at_its_fixed_capacity() {
 #[test]
 fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
     assert_eq!(INCOMING_QUEUE_CAPACITY, 16);
-    let (input_tx, input_rx) = build_input_channel();
+    let (input_sender, input_receiver) = build_input_channel();
     for _ in 0..INCOMING_QUEUE_CAPACITY {
-        input_tx
+        input_sender
             .try_send(RuntimeEvent::Quit)
             .expect("an input event inside the queue limit fits");
     }
     let client_id = ClientId::new();
-    let resized = Size {
+    let resized_viewport_size = Size {
         column_count: 90,
         row_count: 30,
     };
-    let rejected = input_tx.try_send(RuntimeEvent::Resize {
+    let rejected_send_result = input_sender.try_send(RuntimeEvent::Resize {
         client_id,
-        viewport_size: resized,
+        viewport_size: resized_viewport_size,
         pane_area: None,
         cell_size: None,
     });
@@ -6103,28 +6703,31 @@ fn terminal_input_queue_stops_the_reader_at_its_fixed_capacity() {
         viewport_size,
         pane_area,
         cell_size,
-    })) = rejected
+    })) = rejected_send_result
     else {
         panic!("the input event past the queue limit was not returned as full");
     };
     assert_eq!(actual_client_id, client_id);
-    assert_eq!(viewport_size, resized);
+    assert_eq!(viewport_size, resized_viewport_size);
     assert_eq!(pane_area, None);
     assert_eq!(cell_size, None);
     for _ in 0..INCOMING_QUEUE_CAPACITY {
-        let runtime_event = input_rx
+        let runtime_event = input_receiver
             .try_recv()
             .expect("each accepted input remains queued");
         let RuntimeEvent::Quit = runtime_event else {
             panic!("the input queue contained another event");
         };
     }
-    assert_eq!(input_rx.try_recv().err(), Some(mpsc::TryRecvError::Empty));
+    assert_eq!(
+        input_receiver.try_recv().err(),
+        Some(mpsc::TryRecvError::Empty)
+    );
 }
 
 #[test]
 fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
-    let (incoming_tx, incoming_rx) = mpsc::channel();
+    let (incoming_sender, incoming_receiver) = mpsc::channel();
     let chunk_byte_count = MAX_INCOMING_IMAGE_BYTE_COUNT_PER_BATCH / 2 + 1;
     let first_chunk = koshi_ipc::frame::FrameImageChunk {
         image_transfer_id: 7,
@@ -6138,7 +6741,7 @@ fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
         is_last: true,
         chunk_bytes: vec![2; chunk_byte_count],
     };
-    incoming_tx
+    incoming_sender
         .send(Incoming::Frame {
             connection_index: 0,
             session_event_result: Ok(SessionEvent::ImageContentChunk {
@@ -6146,7 +6749,7 @@ fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
             }),
         })
         .expect("the first image chunk is queued");
-    incoming_tx
+    incoming_sender
         .send(Incoming::Frame {
             connection_index: 0,
             session_event_result: Ok(SessionEvent::ImageContentChunk {
@@ -6154,12 +6757,12 @@ fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
             }),
         })
         .expect("the second image chunk is queued");
-    let first_incoming_frame = incoming_rx
+    let first_incoming_frame = incoming_receiver
         .try_recv()
         .expect("the first image chunk is available");
 
-    let (incoming_events, deferred) =
-        build_incoming_batch(Some(first_incoming_frame), &incoming_rx);
+    let (incoming_events, deferred_incoming_event) =
+        build_incoming_batch(Some(first_incoming_frame), &incoming_receiver);
 
     assert_eq!(incoming_events.len(), 1);
     let mut incoming_event_iterator = incoming_events.into_iter();
@@ -6176,14 +6779,14 @@ fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
     let Some(Incoming::Frame {
         connection_index,
         session_event_result: Ok(SessionEvent::ImageContentChunk { image_chunk }),
-    }) = deferred
+    }) = deferred_incoming_event
     else {
         panic!("the second image chunk was not deferred");
     };
     assert_eq!(connection_index, 0);
     assert_eq!(image_chunk, second_chunk);
     assert_eq!(
-        incoming_rx.try_recv().err(),
+        incoming_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty)
     );
 }
@@ -6191,16 +6794,16 @@ fn incoming_batch_defers_an_image_chunk_past_the_byte_limit() {
 #[test]
 fn a_new_connection_is_told_the_size_the_terminal_is_now() {
     let mut client = build_test_client();
-    let (requests, sent) = mpsc::channel();
+    let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = Uplink {
-        request_sender: requests,
+        request_sender,
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
     };
 
     report_terminal_size(&mut client, &mut uplink);
 
-    let request = sent.try_recv().expect("the size was reported");
+    let request = request_receiver.try_recv().expect("the size was reported");
     assert_eq!(request.request_id, FIRST_POST_ATTACH_REQUEST_ID);
     let IpcRequestKind::Resize {
         viewport_size,
@@ -6222,7 +6825,7 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
     );
     assert_eq!(cell_size, None);
     assert_eq!(
-        sent.try_recv().err(),
+        request_receiver.try_recv().err(),
         Some(mpsc::TryRecvError::Empty),
         "the size is reported once"
     );
@@ -6231,13 +6834,13 @@ fn a_new_connection_is_told_the_size_the_terminal_is_now() {
 #[test]
 fn a_new_connection_reports_a_measured_cell_size() {
     let mut client = build_test_client();
-    let (requests, sent) = mpsc::channel();
+    let (request_sender, request_receiver) = mpsc::channel();
     let mut uplink = Uplink {
-        request_sender: requests,
+        request_sender,
         registry: ActionRegistry::new(),
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
     };
-    let measurement = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
+    let measured_cell_size = koshi_core::geometry::PixelCellSize::from_pixel_dimensions(10, 20)
         .expect("positive cell dimensions");
     let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, true, false);
 
@@ -6245,14 +6848,14 @@ fn a_new_connection_reports_a_measured_cell_size() {
         &mut client,
         &mut uplink,
         &mut cell_size_query,
-        Some(measurement),
+        Some(measured_cell_size),
     );
 
-    let request = sent.try_recv().expect("the size was reported");
+    let request = request_receiver.try_recv().expect("the size was reported");
     let IpcRequestKind::Resize { cell_size, .. } = request.request_kind else {
         panic!("expected a Resize, got {:?}", request.request_kind);
     };
-    assert_eq!(cell_size, Some(measurement));
+    assert_eq!(cell_size, Some(measured_cell_size));
 }
 
 #[test]
@@ -6299,18 +6902,18 @@ fn a_pause_ending_on_or_past_the_window_is_not_taken() {
 fn every_pause_the_ladder_hands_out_stays_inside_the_window() {
     // Walking the real ladder from the first pause, the loop stops before any
     // pause crosses 120 seconds, and it stops after taking at least one.
-    let mut elapsed = Duration::ZERO;
-    let mut wait = FIRST_REDIAL_WAIT_DURATION;
-    let mut pauses = 0;
-    while can_redial_pause_fit(elapsed, wait) {
-        elapsed += wait;
-        wait = compute_next_redial_wait(wait);
-        pauses += 1;
+    let mut elapsed_duration = Duration::ZERO;
+    let mut redial_wait = FIRST_REDIAL_WAIT_DURATION;
+    let mut pause_count = 0;
+    while can_redial_pause_fit(elapsed_duration, redial_wait) {
+        elapsed_duration += redial_wait;
+        redial_wait = compute_next_redial_wait(redial_wait);
+        pause_count += 1;
     }
 
-    assert_eq!(pauses, 17);
-    assert_eq!(elapsed, Duration::from_secs(119));
-    assert!(elapsed < REDIAL_WINDOW_DURATION);
+    assert_eq!(pause_count, 17);
+    assert_eq!(elapsed_duration, Duration::from_secs(119));
+    assert!(elapsed_duration < REDIAL_WINDOW_DURATION);
 }
 
 #[test]
@@ -6330,13 +6933,11 @@ fn a_pass_that_moves_nothing_leaves_what_the_viewer_paints_alone() {
 
 #[test]
 fn a_deadline_already_past_still_takes_a_session_that_is_already_back() {
-    // The client sits out its own wait for the frame that told it, so the
-    // window can be spent by the time the wait runs. The file is read once
-    // before the deadline is weighed, so a session that came back inside the
-    // window is still joined.
+    // The wait reads the endpoint file once before it checks the deadline. A
+    // session that came back before a deadline already past is still joined.
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let advertised = write_advertised_endpoint(
+    let advertised_endpoint = write_advertised_endpoint(
         runtime_directory.path(),
         session_id,
         NEW_CONNECTION_TOKEN,
@@ -6350,15 +6951,14 @@ fn a_deadline_already_past_still_takes_a_session_that_is_already_back() {
             &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
             Instant::now() - Duration::from_secs(1),
         ),
-        Some(advertised)
+        Some(advertised_endpoint)
     );
 }
 
 #[test]
 fn the_wait_reads_past_an_endpoint_file_that_is_not_a_file_this_build_reads() {
-    // The swap rewrites the endpoint file, and a client can read it while it
-    // holds bytes no build reads. That read is passed over and the wait keeps
-    // reading, rather than reporting the session gone.
+    // An endpoint file holding bytes no build reads is passed over, and the
+    // wait keeps reading until its deadline.
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     std::fs::write(
@@ -6384,21 +6984,18 @@ fn the_wait_reads_past_an_endpoint_file_that_is_not_a_file_this_build_reads() {
 }
 
 /// How long a test waits for the reader thread to forward a frame before it
-/// fails instead of hanging the suite.
+/// fails.
 const FRAME_READ_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
 /// A live event stream: the session end that writes frames, and both halves of
-/// the client end. The reading half is what the frame-reader thread owns; the
-/// writing half is held so the connection stands exactly as it does in the
-/// running loop.
+/// the client end. The frame-reader thread owns the reading half, and the
+/// caller holds the writing half.
 ///
-/// The accept runs on its own thread, since the connect and the accept must
-/// both be live for the connection to open.
+/// The accept runs on its own thread while this thread connects.
 fn build_test_event_stream() -> (Connection, FrameReader, FrameWriter) {
-    // The address is a socket-file path on Unix and a bare pipe name on
-    // Windows, so the directory goes unused there. `/tmp` keeps the path short
-    // enough for the platform's socket-path limit; the session id makes it
-    // unique, so tests running side by side never share one.
+    // On Unix the address is a socket-file path under `/tmp`. On Windows it is
+    // a pipe name, and the directory is unused. A new session id makes each
+    // address unique.
     #[cfg(unix)]
     let socket_directory = std::path::PathBuf::from("/tmp");
     #[cfg(windows)]
@@ -6415,27 +7012,26 @@ fn build_test_event_stream() -> (Connection, FrameReader, FrameWriter) {
 
 #[test]
 fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives() {
-    // A newer session writes frames this build was compiled without. Ending the
-    // read at the first one would drop the connection and report the session
-    // dead, so the reader steps over it and forwards the frame after it.
-    let (mut session, reader, _uplink) = build_test_event_stream();
-    let (incoming_tx, incoming_rx) = build_incoming_channel();
-    spawn_frame_reader(reader, 4, incoming_tx);
+    // The reader steps over a frame this build has no name for and forwards the
+    // frame after it.
+    let (mut session_connection, frame_reader, _frame_writer) = build_test_event_stream();
+    let (incoming_sender, incoming_receiver) = build_incoming_channel();
+    spawn_frame_reader(frame_reader, 4, incoming_sender);
 
-    let closed = SessionEvent::TabClosed {
+    let tab_closed_event = SessionEvent::TabClosed {
         tab_id: TabId::new(),
     };
-    session
+    session_connection
         .send(&serde_json::json!({ "Floating": { "pane_id": 1 } }))
         .expect("write a frame this build has no name for");
-    session
-        .send(&closed)
+    session_connection
+        .send(&tab_closed_event)
         .expect("write the frame after it, which this build has");
 
     let Incoming::Frame {
         connection_index,
         session_event_result,
-    } = incoming_rx
+    } = incoming_receiver
         .recv_timeout(FRAME_READ_TIMEOUT_DURATION)
         .expect("the reader forwarded a frame")
     else {
@@ -6447,7 +7043,7 @@ fn a_frame_this_build_has_no_name_for_is_stepped_over_and_the_next_one_arrives()
     );
     assert_eq!(
         session_event_result.expect("the frame after the unknown one decoded"),
-        closed,
+        tab_closed_event,
         "the frame after the one this build cannot name is the first the loop is handed",
     );
 }
@@ -6579,14 +7175,14 @@ fn paint_initial_swapped_pane_frame(
     started_at: Instant,
 ) -> (TabId, TabSnapshot, RenderSnapshot) {
     let (initial_frame, committed_frame) = build_swapped_pane_frames(PaneId::new(), PaneId::new());
-    let initial_snapshot = build_render_snapshot(&initial_frame);
-    screen.pending_snapshot = Some(initial_snapshot.clone());
+    let initial_render_snapshot = build_render_snapshot(&initial_frame);
+    screen.pending_snapshot = Some(initial_render_snapshot.clone());
     screen
         .commit_pending_snapshot(client, started_at)
         .expect("the first frame paints");
     (
         initial_frame.client_snapshot.active_tab_id,
-        initial_snapshot.session_snapshot.active_tab_snapshot,
+        initial_render_snapshot.session_snapshot.active_tab_snapshot,
         build_render_snapshot(&committed_frame),
     )
 }
@@ -6799,14 +7395,14 @@ fn a_frame_for_another_tab_during_a_committed_placement_slide_draws_that_tab_at_
     screen
         .commit_pending_snapshot(&mut client, started_at)
         .expect("the committed frame paints");
-    let other_tab_snapshot = build_render_snapshot(&build_test_painted_frame());
-    let other_active_tab_snapshot = other_tab_snapshot
+    let other_tab_render_snapshot = build_render_snapshot(&build_test_painted_frame());
+    let other_active_tab_snapshot = other_tab_render_snapshot
         .session_snapshot
         .active_tab_snapshot
         .clone();
 
     let halfway_time = started_at + Duration::from_millis(80);
-    screen.pending_snapshot = Some(other_tab_snapshot);
+    screen.pending_snapshot = Some(other_tab_render_snapshot);
     screen
         .commit_pending_snapshot(&mut client, halfway_time)
         .expect("the other tab's frame paints");
@@ -7136,14 +7732,14 @@ fn a_new_preview_animation_starts_from_the_last_visible_layout() {
         screen
             .placement_animation
             .as_ref()
-            .map(|animation| &animation.from_snapshot),
+            .map(|placement_animation| &placement_animation.from_snapshot),
         Some(&shown_snapshot)
     );
     assert_eq!(
         screen
             .placement_animation
             .as_ref()
-            .map(|animation| &animation.to_snapshot),
+            .map(|placement_animation| &placement_animation.to_snapshot),
         Some(&base_snapshot)
     );
 }

@@ -39,8 +39,9 @@ pub const CERT_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_CERTIFICATE_FORMAT.
 /// one it reads back.
 ///
 /// The value and the rule it follows live in
-/// [`koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT`].
-pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT.maximum_version;
+/// [`koshi_core::compat::REMOTE_ACCESS_RECORD_FORMAT`].
+pub const ENABLED_FILE_FORMAT: u32 =
+    koshi_core::compat::REMOTE_ACCESS_RECORD_FORMAT.maximum_version;
 
 /// The certificate this machine presents to remote clients, and its private
 /// key.
@@ -125,12 +126,12 @@ impl EnabledFile {
     /// [`ENABLED_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
     pub fn load_from_path(enabled_file_path: &Path) -> Result<EnabledFile, IpcError> {
         let enabled_file: EnabledFile =
-            load_remote_file(RemoteFile::RemoteAccessMark, enabled_file_path)?;
+            load_remote_file(RemoteFile::RemoteAccessRecord, enabled_file_path)?;
         if let Some(format_error) =
             find_format_mismatch(enabled_file.file_format, ENABLED_FILE_FORMAT)
         {
             return Err(build_unreadable_remote_file_error(
-                RemoteFile::RemoteAccessMark,
+                RemoteFile::RemoteAccessRecord,
                 enabled_file_path,
                 format_error,
             ));
@@ -143,7 +144,7 @@ impl EnabledFile {
     /// # Errors
     /// [`IpcError::RemoteFileWrite`] naming what failed.
     pub fn write_to_path(&self, enabled_file_path: &Path) -> Result<(), IpcError> {
-        write_remote_file(RemoteFile::RemoteAccessMark, enabled_file_path, self)
+        write_remote_file(RemoteFile::RemoteAccessRecord, enabled_file_path, self)
     }
 }
 

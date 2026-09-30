@@ -164,7 +164,7 @@ pub enum RemoteFile {
     /// This machine's own certificate for the remote listener.
     Certificate,
     /// The record that remote access was switched on for this machine.
-    RemoteAccessMark,
+    RemoteAccessRecord,
     /// The remote access grants this machine has handed out.
     TokenStore,
 }
@@ -174,7 +174,7 @@ impl std::fmt::Display for RemoteFile {
         let remote_file_name = match self {
             Self::SavedServers => "saved servers file",
             Self::Certificate => "remote access certificate",
-            Self::RemoteAccessMark => "remote access record",
+            Self::RemoteAccessRecord => "remote access record",
             Self::TokenStore => "remote access token store",
         };
         formatter.write_str(remote_file_name)

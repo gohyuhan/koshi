@@ -125,14 +125,18 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
+use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, WireMouseAction,
+    ConnectionToken, IncomingResponse, IpcErrorCode, IpcRequest, IpcRequestKind, IpcResult,
+    WireMouseAction,
 };
 use koshi_ipc::remote_wire::{RemoteServerFrame, RemoteSessionRow};
-use koshi_ipc::router::{RouterRequestKind, RouterResult, SessionAddress, SessionSelector};
+use koshi_ipc::router::{
+    resolve_router_endpoint_path, RouterRequestKind, RouterResult, SessionAddress, SessionSelector,
+};
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
 use koshi_observability::cleanup::{install_panic_hook, TerminalCleanupGuard};
@@ -1205,8 +1209,12 @@ enum AttachmentEnding {
     SwitchSession(SessionId),
     /// The session is replacing its own process image. The loop waits for the
     /// session's new socket and attaches again on it. A loop that cannot ends
-    /// here and reports the same death a broken connection reports.
+    /// here, and the report names the restart and the attach command.
     Restarting,
+    /// The session replaced its own process image with a build that refused
+    /// this client's protocol version. The koshi at the path this client was
+    /// started from runs `koshi attach <session id>` in this terminal next.
+    RestartedIntoIncompatibleBuild,
     /// A remote viewer's link broke and [`redial_remote_session`] gave up, carrying the cause it
     /// gave up on. The session keeps running without this viewer.
     LinkLost(Box<CliError>),
@@ -1223,7 +1231,11 @@ impl PartialEq for AttachmentEnding {
             | (AttachmentEnding::SessionEnded, AttachmentEnding::SessionEnded)
             | (AttachmentEnding::ConnectionDied, AttachmentEnding::ConnectionDied)
             | (AttachmentEnding::TerminalGone, AttachmentEnding::TerminalGone)
-            | (AttachmentEnding::Restarting, AttachmentEnding::Restarting) => true,
+            | (AttachmentEnding::Restarting, AttachmentEnding::Restarting)
+            | (
+                AttachmentEnding::RestartedIntoIncompatibleBuild,
+                AttachmentEnding::RestartedIntoIncompatibleBuild,
+            ) => true,
             (
                 AttachmentEnding::SwitchSession(first_session_id),
                 AttachmentEnding::SwitchSession(second_session_id),
@@ -1711,9 +1723,17 @@ pub(crate) fn attach_session(
 /// same home: a client on a server dials that server again for it, so the
 /// certificate, the secret and the scope are all checked again before the next
 /// session paints anything.
+///
+/// The path this program was started from is read once, here, before the first
+/// attachment. `None` when the platform cannot report it.
 fn attach_home(home: &Home, session_selector: SessionSelector) -> Result<(), CliError> {
+    let client_executable_path = std::env::current_exe().ok();
     let mut next_session_selector = session_selector;
-    while let Some(next_session_id) = attach_once(home, &next_session_selector)? {
+    while let Some(next_session_id) = attach_once(
+        home,
+        &next_session_selector,
+        client_executable_path.as_deref(),
+    )? {
         next_session_selector = SessionSelector::SessionId(next_session_id);
     }
     Ok(())
@@ -1733,9 +1753,14 @@ fn attach_home(home: &Home, session_selector: SessionSelector) -> Result<(), Cli
 /// socket on this machine, and through a fresh dial of the server otherwise —
 /// and the terminal keeps every mode it is in, so nothing on the screen
 /// flickers.
+///
+/// `client_executable_path` is the path this program was started from, which
+/// [`report_attachment_ending`] runs `koshi attach` from when the session
+/// restarted into a build that refused this client's protocol version.
 fn attach_once(
     home: &Home,
     session_selector: &SessionSelector,
+    client_executable_path: Option<&Path>,
 ) -> Result<Option<SessionId>, CliError> {
     let (loaded_config, config_warnings) = koshi_link::config::load_config_files();
     let supports_native_images =
@@ -1758,20 +1783,25 @@ fn attach_once(
         cell_size_query.get_current_cell_size(),
     )?;
 
-    // The session accepted the client, so the terminal may change mode now.
-    // The hooks undo every mode this function sets, and the panic hook shares
-    // them, so an unwinding panic restores the terminal too and then writes a
+    // After the session accepts the client, the terminal changes mode. The
+    // cleanup hooks undo every mode this function sets. The panic hook runs the
+    // same hooks: an unwinding panic restores the terminal and then writes a
     // crash report into the data directory.
-    let cleanup = TerminalCleanupGuard::new();
-    terminal_owner.register_restore(&cleanup);
-    let _panic_guard = install_panic_hook(&cleanup, koshi_paths::resolve_data_directory());
+    let terminal_cleanup_guard = TerminalCleanupGuard::new();
+    terminal_owner.register_terminal_restore(&terminal_cleanup_guard);
+    let _panic_guard = install_panic_hook(
+        &terminal_cleanup_guard,
+        koshi_paths::resolve_data_directory(),
+    );
 
     let (incoming_sender, incoming_receiver) = build_incoming_channel();
     let (input_sender, input_receiver) = build_input_channel();
     let should_read_input = io::stdin().is_tty();
     terminal_owner
-        .activate(input_sender, client_id, should_read_input)
-        .map_err(|detail| CliError::Runtime { detail })?;
+        .activate_terminal(input_sender, client_id, should_read_input)
+        .map_err(|activation_detail| CliError::Runtime {
+            detail: activation_detail,
+        })?;
     if should_read_input {
         spawn_input_relay(input_receiver, incoming_sender.clone());
     } else {
@@ -1808,10 +1838,9 @@ fn attach_once(
     spawn_frame_reader(reader, INITIAL_CONNECTION_INDEX, incoming_sender.clone());
 
     // The viewer half: this terminal's own keymap, colors and hint bar, read
-    // from this user's config files. Its frames arrive over the connection
-    // rather than over a session subscription, so the receiver it holds has no
-    // sender. It also holds the cleanup guard, since the outer terminal that
-    // guard restores is this viewer's.
+    // from this user's config files. Its frames arrive over the connection,
+    // and the delivery receiver it holds has no sender. It holds the cleanup
+    // guard that restores this outer terminal.
     // The subscriber this client writes its own log through. `koshi attach`
     // installs none before this point; a bare `koshi` already has one, and
     // this call answers `AlreadyInitialized` for it.
@@ -1829,7 +1858,7 @@ fn attach_once(
         client_id,
         get_terminal_viewport_size(),
         delivery_receiver,
-        cleanup,
+        terminal_cleanup_guard,
         loaded_config,
     );
     client.set_session_id(session_id);
@@ -1862,16 +1891,15 @@ fn attach_once(
         incoming_receiver,
     );
 
-    // Restore the terminal before anything is printed, so the message lands on
-    // the shell's own screen rather than the alternate one, and nothing follows
-    // it. Dropping the screen drops the ratatui terminal it holds, which shows
-    // the cursor a painted frame hid, and that cursor belongs on the alternate
-    // screen; dropping the client then runs the cleanup guard it holds, which
-    // leaves that screen.
+    // The terminal is restored before the ending message is printed, and the
+    // message lands on the shell's own screen. Dropping the screen drops the
+    // ratatui terminal it holds, which shows the cursor on the alternate
+    // screen. Dropping the client then runs its cleanup guard, which leaves
+    // the alternate screen.
     drop(screen);
-    terminal_owner.shutdown();
+    terminal_owner.shutdown_terminal();
     drop(client);
-    report_attachment_ending(home, ending, session_id)
+    report_attachment_ending(home, ending, session_id, client_executable_path)
 }
 
 /// Run one attachment: paint every frame the session sends, send this
@@ -2237,7 +2265,7 @@ fn run_attachment<B: Backend, W: Write>(
                     uplink.send_request(IpcRequestKind::Leaving);
                     client.prepare_placement_reconciliation();
                     screen.set_placement_snapshot(None);
-                    reconnect_after_restart(
+                    match reconnect_after_restart(
                         home,
                         session_id,
                         client_id,
@@ -2245,15 +2273,18 @@ fn run_attachment<B: Backend, W: Write>(
                         &mut resume_token,
                         graphics_support,
                         cell_size_query.get_current_cell_size(),
-                    )
-                    .inspect(|(rejoined_client_id, _, _)| {
-                        if *rejoined_client_id != client_id {
-                            tracing::warn!(
-                                %session_id,
-                                "the restarted session did not hand this client back; this viewer goes on as the new client it minted"
-                            );
+                    ) {
+                        Ok((rejoined_client_id, reader, writer)) => {
+                            if rejoined_client_id != client_id {
+                                tracing::warn!(
+                                    %session_id,
+                                    "the restarted session did not hand this client back; this viewer goes on as the new client it minted"
+                                );
+                            }
+                            Some((rejoined_client_id, reader, writer))
                         }
-                    })
+                        Err(restart_ending) => break restart_ending,
+                    }
                 }
                 // The link broke. A viewer of a session on a server, with
                 // `remote-reconnect` on, dials that server again while the
@@ -2301,6 +2332,7 @@ fn run_attachment<B: Backend, W: Write>(
                 | AttachmentEnding::SessionEnded
                 | AttachmentEnding::TerminalGone
                 | AttachmentEnding::SwitchSession(_)
+                | AttachmentEnding::RestartedIntoIncompatibleBuild
                 | AttachmentEnding::LinkLost(_) => None,
             };
             let Some((rejoined_client_id, reader, writer)) = reconnection else {
@@ -2616,8 +2648,15 @@ fn format_session_selector_name(session_selector: &SessionSelector) -> String {
 /// carried layout back holds no record, and a record whose tab closed is not
 /// handed back.
 ///
-/// `None` for every way the client cannot come back. The caller reports each
-/// of them as the session ending unexpectedly.
+/// `Err` carries the ending the attachment reports: what [`rejoin_session`]
+/// answers on this machine, and [`AttachmentEnding::Restarting`] when a server
+/// has not let this client back in by the deadline.
+///
+/// On this machine the router's token is read from its endpoint file before the
+/// rejoin starts. A rejoin that ends as
+/// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] returns only after
+/// [`wait_for_router_restart`] sees another token, or after
+/// [`RESTART_WINDOW_DURATION`] passes. No router endpoint file means no wait.
 fn reconnect_after_restart(
     home: &Home,
     session_id: SessionId,
@@ -2626,21 +2665,47 @@ fn reconnect_after_restart(
     resume_token: &mut Option<ConnectionToken>,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-) -> Option<(ClientId, FrameReader, FrameWriter)> {
+) -> Result<(ClientId, FrameReader, FrameWriter), AttachmentEnding> {
     match home {
         Home::Local { runtime_directory } => {
-            let (rejoined_client_id, endpoint, connection) = rejoin_session(
+            let router_endpoint_path = resolve_router_endpoint_path(runtime_directory);
+            let router_connection_token_before_restart =
+                EndpointFile::load_from_path(&router_endpoint_path)
+                    .ok()
+                    .map(|router_endpoint| router_endpoint.connection_token);
+            let (rejoined_client_id, endpoint, connection) = match rejoin_session(
                 runtime_directory,
                 session_id,
                 client_id,
                 connection_token,
                 graphics_support,
                 cell_size,
-            )?;
+            ) {
+                Ok(rejoined_session) => rejoined_session,
+                Err(AttachmentEnding::RestartedIntoIncompatibleBuild) => {
+                    if let Some(router_connection_token_before_restart) =
+                        &router_connection_token_before_restart
+                    {
+                        let has_router_restarted = wait_for_router_restart(
+                            &router_endpoint_path,
+                            router_connection_token_before_restart,
+                            Instant::now() + RESTART_WINDOW_DURATION,
+                        );
+                        if !has_router_restarted {
+                            tracing::warn!(
+                                "the router did not restart inside the restart window; \
+                                 attaching again through the router as it is"
+                            );
+                        }
+                    }
+                    return Err(AttachmentEnding::RestartedIntoIncompatibleBuild);
+                }
+                Err(restart_ending) => return Err(restart_ending),
+            };
             *connection_token = endpoint.connection_token;
             *resume_token = None;
             let (reader, writer) = connection.split();
-            Some((rejoined_client_id, reader, writer))
+            Ok((rejoined_client_id, reader, writer))
         }
         Home::Remote { server } => {
             let deadline = Instant::now() + RESTART_WINDOW_DURATION;
@@ -2659,12 +2724,12 @@ fn reconnect_after_restart(
                     Ok(joined) => {
                         *connection_token = joined.connection_token;
                         *resume_token = joined.resume_token;
-                        return Some((joined.client_id, joined.reader, joined.writer));
+                        return Ok((joined.client_id, joined.reader, joined.writer));
                     }
                     Err(redial_error) => {
                         if Instant::now() >= deadline {
                             tracing::warn!(%redial_error, "could not reach the restarted session");
-                            return None;
+                            return Err(AttachmentEnding::Restarting);
                         }
                     }
                 }
@@ -3145,11 +3210,21 @@ fn build_attach_request(
 
 /// Check the protocol version a Hello answer settled on against the range this
 /// build asked for.
+///
+/// A refusal carrying [`IpcErrorCode::UnsupportedVersion`] is
+/// [`CliError::ProtocolVersionRefused`]. Every other refusal is
+/// [`CliError::IpcUnavailable`]. Both carry the session's sentence filtered by
+/// [`sanitize_reported_text`].
 fn validate_session_protocol_version(incoming_response: IncomingResponse) -> Result<(), CliError> {
     match talk::SESSION_PEER_WORDS.take_response_result(incoming_response)? {
         IpcResult::Hello {
             protocol_version, ..
         } => talk::SESSION_PEER_WORDS.validate_settled_protocol_version(protocol_version),
+        IpcResult::Error(refusal) if refusal.code == IpcErrorCode::UnsupportedVersion => {
+            Err(CliError::ProtocolVersionRefused {
+                detail: sanitize_reported_text(&refusal.message),
+            })
+        }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),
         other => Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&other)),
     }
@@ -3191,11 +3266,13 @@ fn parse_attached_session(
 /// `connection_token` is the token this client attached under; the wait watches it for a
 /// change.
 ///
-/// `None` for every way the client cannot come back: another local user's
-/// session, which advertises no endpoint file this user can read; a session
-/// that has not come back inside [`RESTART_WINDOW_DURATION`]; and a new socket
-/// that refuses the connection or the join. The caller reports every one of
-/// them as the session ending unexpectedly.
+/// `Err` carries the ending the attachment reports.
+/// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] when the new socket
+/// refuses this build's protocol version. [`AttachmentEnding::Restarting`] for
+/// every other way the client cannot come back: another local user's session,
+/// which advertises no endpoint file this user can read; a session that has
+/// not come back inside [`RESTART_WINDOW_DURATION`]; and a new socket that
+/// refuses the connection, or refuses the join for another reason.
 fn rejoin_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -3203,26 +3280,26 @@ fn rejoin_session(
     connection_token: &ConnectionToken,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-) -> Option<(ClientId, EndpointFile, Connection)> {
+) -> Result<(ClientId, EndpointFile, Connection), AttachmentEnding> {
     if connection_token.expose_secret().is_empty() {
         tracing::warn!(
             %session_id,
             "another local user's session is restarting, and this user cannot read its endpoint file"
         );
-        return None;
+        return Err(AttachmentEnding::Restarting);
     }
     let deadline = Instant::now() + RESTART_WINDOW_DURATION;
     let Some(endpoint) =
         wait_for_new_endpoint(runtime_directory, session_id, connection_token, deadline)
     else {
         tracing::warn!(%session_id, "the session advertised no new socket after its restart");
-        return None;
+        return Err(AttachmentEnding::Restarting);
     };
-    let mut connection = ipc_client::connect_to_session(&endpoint, session_id)
-        .inspect_err(|connection_error| {
-            tracing::warn!(%connection_error, "could not reach the restarted session")
-        })
-        .ok()?;
+    let mut connection =
+        ipc_client::connect_to_session(&endpoint, session_id).map_err(|connection_error| {
+            tracing::warn!(%connection_error, "could not reach the restarted session");
+            AttachmentEnding::Restarting
+        })?;
     let (rejoined_client_id, _, _) = join_session(
         &mut connection,
         &endpoint.connection_token,
@@ -3230,11 +3307,16 @@ fn rejoin_session(
         graphics_support,
         cell_size,
     )
-    .inspect_err(
-        |join_error| tracing::warn!(%join_error, "the restarted session refused this client"),
-    )
-    .ok()?;
-    Some((rejoined_client_id, endpoint, connection))
+    .map_err(|join_error| {
+        tracing::warn!(%join_error, "the restarted session refused this client");
+        match join_error {
+            CliError::ProtocolVersionRefused { .. } => {
+                AttachmentEnding::RestartedIntoIncompatibleBuild
+            }
+            _ => AttachmentEnding::Restarting,
+        }
+    })?;
+    Ok((rejoined_client_id, endpoint, connection))
 }
 
 /// Wait for `session_id` to advertise a socket under a token other than
@@ -3264,6 +3346,37 @@ fn wait_for_new_endpoint(
         }
         if Instant::now() >= restart_deadline {
             return None;
+        }
+        thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    }
+}
+
+/// Wait until the router's endpoint file at `router_endpoint_path` no longer
+/// carries `router_connection_token_before_restart`, and return `true`. Return
+/// `false` when `restart_deadline` passes first.
+///
+/// A file with another token ends the wait, and so does a file this build
+/// cannot read. A missing file and a file with the same token are read again
+/// every [`RESTART_POLL_INTERVAL_DURATION`]. The first read happens before the
+/// deadline is checked, so a deadline already passed still sees a router that
+/// already restarted.
+fn wait_for_router_restart(
+    router_endpoint_path: &Path,
+    router_connection_token_before_restart: &ConnectionToken,
+    restart_deadline: Instant,
+) -> bool {
+    loop {
+        match EndpointFile::load_from_path(router_endpoint_path) {
+            Ok(router_endpoint)
+                if router_endpoint.connection_token != *router_connection_token_before_restart =>
+            {
+                return true;
+            }
+            Err(IpcError::EndpointFileUnreadable { .. }) => return true,
+            Ok(_) | Err(_) => {}
+        }
+        if Instant::now() >= restart_deadline {
+            return false;
         }
         thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
@@ -4020,7 +4133,10 @@ fn classify_session_event(
 /// machine names that server rather than this one.
 ///
 /// A restart reaches here only when the client could not come back on the
-/// session's new socket, so it names the same cause and the same way back.
+/// session's new socket. It says the session restarted, then names the same
+/// way back. A restart into a build that refused this client's protocol
+/// version runs `koshi attach <session id>` from `client_executable_path`
+/// instead, through [`attach_again_from_client_executable`].
 ///
 /// A remote viewer that gave up dialing again names the cause it gave up on,
 /// then `the session continues without you`, then that same way back.
@@ -4028,6 +4144,7 @@ fn report_attachment_ending(
     home: &Home,
     ending: AttachmentEnding,
     session_id: SessionId,
+    client_executable_path: Option<&Path>,
 ) -> Result<Option<SessionId>, CliError> {
     match ending {
         AttachmentEnding::Detached => {
@@ -4039,12 +4156,22 @@ fn report_attachment_ending(
             Ok(None)
         }
         AttachmentEnding::SwitchSession(next_session_id) => Ok(Some(next_session_id)),
-        AttachmentEnding::ConnectionDied | AttachmentEnding::Restarting => Err(CliError::Runtime {
+        AttachmentEnding::ConnectionDied => Err(CliError::Runtime {
             detail: format!(
                 "the session ended unexpectedly\n  {}",
                 build_reattach_instructions(home, session_id)
             ),
         }),
+        AttachmentEnding::Restarting => Err(CliError::Runtime {
+            detail: format!(
+                "the session restarted into another koshi build and this client could not \
+                 reconnect to it\n  {}",
+                build_reattach_instructions(home, session_id)
+            ),
+        }),
+        AttachmentEnding::RestartedIntoIncompatibleBuild => {
+            attach_again_from_client_executable(home, session_id, client_executable_path)
+        }
         AttachmentEnding::LinkLost(cause) => Err(CliError::Runtime {
             detail: format!(
                 "{cause}\n  the session continues without you\n  {}",
@@ -4058,6 +4185,96 @@ fn report_attachment_ending(
             tracing::info!(%session_id, "this terminal went away; leaving the session running");
             Ok(None)
         }
+    }
+}
+
+/// Run `koshi attach <session id>` from `client_executable_path` in this
+/// terminal, after the session restarted into a build that refused this
+/// client's protocol version.
+///
+/// Prints `koshi: the session restarted into another koshi build; attaching to
+/// session <session id> again with <path>` on stderr first. On Unix the command
+/// replaces this process's image and keeps its process id. On Windows the
+/// command runs as a child in this console, and this process exits with the
+/// child's exit code once the child ends, or with 1 when the child reports no
+/// code.
+///
+/// # Errors
+/// [`CliError::Runtime`] naming the restart, why the command did not start, and
+/// the way back from [`build_reattach_instructions`]: when
+/// `client_executable_path` is `None`, and when the command could not start.
+fn attach_again_from_client_executable(
+    home: &Home,
+    session_id: SessionId,
+    client_executable_path: Option<&Path>,
+) -> Result<Option<SessionId>, CliError> {
+    let start_failure_reason = match client_executable_path {
+        None => String::from("this client could not read the path it was started from"),
+        Some(client_executable_path) => {
+            eprintln!(
+                "koshi: the session restarted into another koshi build; \
+                 attaching to session {session_id} again with {}",
+                client_executable_path.display()
+            );
+            let start_error = run_attach_command(client_executable_path, session_id);
+            format!(
+                "could not start {}: {start_error}",
+                client_executable_path.display()
+            )
+        }
+    };
+    Err(CliError::Runtime {
+        detail: format!(
+            "the session restarted into another koshi build and this client could not \
+             reconnect to it: {start_failure_reason}\n  {}",
+            build_reattach_instructions(home, session_id)
+        ),
+    })
+}
+
+/// The command `koshi attach <session id>`, run from `client_executable_path`
+/// with this process's environment minus the
+/// [`IN_SESSION_MARKER_VARIABLE_NAME`](koshi_link::in_session::IN_SESSION_MARKER_VARIABLE_NAME)
+/// variable. A client that runs inside a pane of another session attaches to
+/// `session_id` as a client, and does not move that pane's own client.
+fn build_attach_command(
+    client_executable_path: &Path,
+    session_id: SessionId,
+) -> std::process::Command {
+    let mut attach_command = std::process::Command::new(client_executable_path);
+    attach_command
+        .arg("attach")
+        .arg(session_id.to_string())
+        .env_remove(koshi_link::in_session::IN_SESSION_MARKER_VARIABLE_NAME);
+    attach_command
+}
+
+/// Replace this process's image with [`build_attach_command`]'s command, after
+/// standard output is flushed. The command keeps this terminal, working
+/// directory and process id, and this environment minus the variable
+/// [`build_attach_command`] removes. Returns only the error that kept the
+/// command from starting, on the terms
+/// [`exec_and_keep_ignoring_sigpipe`](koshi_link::process::exec_and_keep_ignoring_sigpipe)
+/// states.
+#[cfg(unix)]
+fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> io::Error {
+    let _ = io::stdout().flush();
+    koshi_link::process::exec_and_keep_ignoring_sigpipe(&mut build_attach_command(
+        client_executable_path,
+        session_id,
+    ))
+}
+
+/// Run [`build_attach_command`]'s command as a child that shares this console,
+/// after standard output is flushed, and exit this process with the child's
+/// exit code once the child ends, or with 1 when the child reports no code.
+/// Returns only the error that kept the child from starting.
+#[cfg(windows)]
+fn run_attach_command(client_executable_path: &Path, session_id: SessionId) -> io::Error {
+    let _ = io::stdout().flush();
+    match build_attach_command(client_executable_path, session_id).status() {
+        Ok(child_exit_status) => std::process::exit(child_exit_status.code().unwrap_or(1)),
+        Err(spawn_error) => spawn_error,
     }
 }
 

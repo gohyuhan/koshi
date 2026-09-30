@@ -68,7 +68,7 @@ pub fn commit_new_tab(
     focus_client_id: Option<ClientId>,
     new_pane_spec: NewPaneSpec,
 ) -> (Option<TabId>, Vec<Event>) {
-    let mut events = vec![];
+    let mut emitted_events = vec![];
 
     register_running_pane(session, new_pane_id, new_pane_spec);
 
@@ -79,8 +79,8 @@ pub fn commit_new_tab(
     }
     session.tabs.insert(new_tab_id, new_tab);
 
-    events.push(Event::TabCreated(TabCreated { tab_id: new_tab_id }));
-    events.push(Event::PaneCreated(PaneCreated {
+    emitted_events.push(Event::TabCreated(TabCreated { tab_id: new_tab_id }));
+    emitted_events.push(Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,
         tab_id: new_tab_id,
     }));
@@ -94,13 +94,13 @@ pub fn commit_new_tab(
             let previous_tab_id = client.get_active_tab_id();
             previous_active_tab_id = Some(previous_tab_id);
             client.update_active_tab_id(new_tab_id);
-            events.push(Event::TabFocused(TabFocused {
+            emitted_events.push(Event::TabFocused(TabFocused {
                 client_id,
                 tab_id: new_tab_id,
                 previous_tab_id,
             }));
             let previous_pane_id = client.update_focused_pane(new_tab_id, new_pane_id);
-            events.push(Event::PaneFocused(PaneFocused {
+            emitted_events.push(Event::PaneFocused(PaneFocused {
                 client_id,
                 tab_id: new_tab_id,
                 pane_id: new_pane_id,
@@ -109,7 +109,7 @@ pub fn commit_new_tab(
         }
     }
 
-    (previous_active_tab_id, events)
+    (previous_active_tab_id, emitted_events)
 }
 
 /// The pane ids, layout tree, pane record specs, and starting focus of one profile tab.
@@ -165,7 +165,7 @@ pub fn commit_profile_tab(
         new_pane_specs,
         focused_leaf_index,
     } = profile_tab;
-    let mut events = Vec::new();
+    let mut emitted_events = Vec::new();
 
     for (pane_id, new_pane_spec) in pane_ids.iter().zip(new_pane_specs) {
         register_running_pane(session, *pane_id, new_pane_spec);
@@ -188,9 +188,9 @@ pub fn commit_profile_tab(
     }
     session.tabs.insert(tab_id, new_tab);
 
-    events.push(Event::TabCreated(TabCreated { tab_id }));
+    emitted_events.push(Event::TabCreated(TabCreated { tab_id }));
     for pane_id in &pane_ids {
-        events.push(Event::PaneCreated(PaneCreated {
+        emitted_events.push(Event::PaneCreated(PaneCreated {
             pane_id: *pane_id,
             tab_id,
         }));
@@ -204,12 +204,12 @@ pub fn commit_profile_tab(
             if is_active {
                 let previous_tab_id = client.get_active_tab_id();
                 client.update_active_tab_id(tab_id);
-                events.push(Event::TabFocused(TabFocused {
+                emitted_events.push(Event::TabFocused(TabFocused {
                     client_id,
                     tab_id,
                     previous_tab_id,
                 }));
-                events.push(Event::PaneFocused(PaneFocused {
+                emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
                     tab_id,
                     pane_id: focused_pane_id,
@@ -219,7 +219,7 @@ pub fn commit_profile_tab(
         }
     }
 
-    events
+    emitted_events
 }
 
 /// Close `tab_id` and everything in it.
@@ -237,16 +237,16 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
     };
     let tab_pane_ids = tab.get_layout_tree().list_leaf_pane_ids();
 
-    let mut events = vec![];
+    let mut emitted_events = vec![];
     for pane_id in tab_pane_ids {
         let _ = session.panes.remove_pane_record(pane_id);
-        events.push(Event::PaneClosing(PaneClosing { pane_id }));
-        events.push(Event::PaneRemoved(PaneRemoved { pane_id, tab_id }));
+        emitted_events.push(Event::PaneClosing(PaneClosing { pane_id }));
+        emitted_events.push(Event::PaneRemoved(PaneRemoved { pane_id, tab_id }));
     }
 
-    events.extend(close_and_refocus_tab(session, tab_id, None));
+    emitted_events.extend(close_and_refocus_tab(session, tab_id, None));
 
-    events
+    emitted_events
 }
 
 /// Point the client `client_id` at the tab named by `tab_target`, resolved
@@ -283,13 +283,13 @@ pub fn focus_tab(session: &mut Session, client_id: ClientId, tab_target: TabTarg
     };
     client.update_active_tab_id(target_tab_id);
 
-    let mut events = vec![Event::TabFocused(TabFocused {
+    let mut emitted_events = vec![Event::TabFocused(TabFocused {
         client_id,
         tab_id: target_tab_id,
         previous_tab_id,
     })];
-    land_focus(session, client_id, target_tab_id, &mut events);
-    events
+    land_focus(session, client_id, target_tab_id, &mut emitted_events);
+    emitted_events
 }
 
 /// The pane a client landing on `tab_id` focuses: the tab's focus history
@@ -317,7 +317,12 @@ fn find_landing_pane(session: &Session, tab_id: TabId) -> Option<PaneId> {
 ///
 /// Changes nothing and appends nothing when the client already focuses a pane
 /// in `tab_id`, when it is not attached, or when the tab has no landing pane.
-fn land_focus(session: &mut Session, client_id: ClientId, tab_id: TabId, events: &mut Vec<Event>) {
+fn land_focus(
+    session: &mut Session,
+    client_id: ClientId,
+    tab_id: TabId,
+    emitted_events: &mut Vec<Event>,
+) {
     let has_focused_pane = session
         .clients
         .get_client_by_id(client_id)
@@ -336,7 +341,7 @@ fn land_focus(session: &mut Session, client_id: ClientId, tab_id: TabId, events:
     if let Some(tab) = session.tabs.get_mut(&tab_id) {
         tab.record_focus_mru(pane_id);
     }
-    events.push(Event::PaneFocused(PaneFocused {
+    emitted_events.push(Event::PaneFocused(PaneFocused {
         client_id,
         tab_id,
         pane_id,
@@ -453,10 +458,10 @@ pub(crate) fn close_and_refocus_tab(
     tab_id: TabId,
     pane_exit: Option<PaneProcessExited>,
 ) -> Vec<Event> {
-    let mut events = vec![];
+    let mut emitted_events = vec![];
 
     let closed_tab_index = session.tabs.remove(&tab_id).map(|tab| tab.get_tab_index());
-    events.push(Event::TabClosed(TabClosed { tab_id }));
+    emitted_events.push(Event::TabClosed(TabClosed { tab_id }));
 
     // Move every client off the closed tab: drop its focus and zoom for the
     // gone tab, and send whoever was viewing it to the nearest surviving tab.
@@ -477,12 +482,12 @@ pub(crate) fn close_and_refocus_tab(
             if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
                 client.update_active_tab_id(next_tab_id);
             }
-            events.push(Event::TabFocused(TabFocused {
+            emitted_events.push(Event::TabFocused(TabFocused {
                 client_id,
                 tab_id: next_tab_id,
                 previous_tab_id: tab_id,
             }));
-            land_focus(session, client_id, next_tab_id, &mut events);
+            land_focus(session, client_id, next_tab_id, &mut emitted_events);
         }
     }
 
@@ -492,10 +497,10 @@ pub(crate) fn close_and_refocus_tab(
         // An already `Stopping` or `Stopped` session keeps the state it has;
         // `Quit` is emitted either way.
         let _ = session.update_lifecycle(SessionLifecycleEvent::StopRequested);
-        events.push(Event::Quit(QuitCause::LastTabClosed { tab_id, pane_exit }));
+        emitted_events.push(Event::Quit(QuitCause::LastTabClosed { tab_id, pane_exit }));
     }
 
-    events
+    emitted_events
 }
 
 /// Find the tab that receives viewers when `closed_tab_id` is removed.

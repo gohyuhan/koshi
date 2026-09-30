@@ -21,7 +21,7 @@
 //! release reports button `3` in place of the button that came up; `Sgr`
 //! keeps the button and marks the release with a trailing `m` instead of `M`.
 
-use koshi_core::key::ModFlags;
+use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{is_mouse_kind_reported, MouseButton, MouseKind, ScrollDirection};
 
 use crate::state::{MouseEncoding, MouseTracking};
@@ -29,18 +29,18 @@ use crate::state::{MouseEncoding, MouseTracking};
 #[cfg(test)]
 mod tests;
 
-/// The bytes a program expects for one mouse event at a 1-based pane-local
-/// cell (`column_index`, `row_index`), or [`None`] when `mouse_tracking` does not
-/// report this event kind.
+/// The bytes a program expects for one mouse event at the 1-based pane-local
+/// cell (`column_number`, `row_number`), or [`None`] when `mouse_tracking` does
+/// not report this event kind.
 ///
 /// A left press at the top-left cell under SGR encoding is `CSI < 0 ; 1 ; 1 M`
 /// (`\x1b[<0;1;1M`); the same release is `\x1b[<0;1;1m`.
 #[must_use]
 pub fn encode_mouse(
     mouse_kind: MouseKind,
-    modifier_flags: ModFlags,
-    column_index: u16,
-    row_index: u16,
+    modifier_flags: BindingModifierFlags,
+    column_number: u16,
+    row_number: u16,
     mouse_tracking: MouseTracking,
     mouse_encoding: MouseEncoding,
 ) -> Option<Vec<u8>> {
@@ -61,18 +61,18 @@ pub fn encode_mouse(
     Some(match mouse_encoding {
         MouseEncoding::Sgr => encode_sgr_mouse_report(
             mouse_button_code_with_modifiers,
-            column_index,
-            row_index,
+            column_number,
+            row_number,
             is_mouse_release,
         ),
         MouseEncoding::Default => {
-            encode_legacy_mouse_report(mouse_button_code_with_modifiers, column_index, row_index)
+            encode_legacy_mouse_report(mouse_button_code_with_modifiers, column_number, row_number)
         }
         MouseEncoding::Utf8 => {
-            encode_utf8_mouse_report(mouse_button_code_with_modifiers, column_index, row_index)
+            encode_utf8_mouse_report(mouse_button_code_with_modifiers, column_number, row_number)
         }
         MouseEncoding::Urxvt => {
-            encode_urxvt_mouse_report(mouse_button_code_with_modifiers, column_index, row_index)
+            encode_urxvt_mouse_report(mouse_button_code_with_modifiers, column_number, row_number)
         }
     })
 }
@@ -120,54 +120,60 @@ fn compute_mouse_wheel_number(scroll_direction: ScrollDirection) -> u16 {
 }
 
 /// Shift `4`, alt `8`, ctrl `16`, summed. Super adds nothing.
-fn compute_mouse_modifier_bits(modifier_flags: ModFlags) -> u16 {
+fn compute_mouse_modifier_bits(modifier_flags: BindingModifierFlags) -> u16 {
     let mut mouse_modifier_bits = 0;
-    if modifier_flags.has_all_modifiers(ModFlags::SHIFT) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT) {
         mouse_modifier_bits += 4;
     }
-    if modifier_flags.has_all_modifiers(ModFlags::ALT) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::ALT) {
         mouse_modifier_bits += 8;
     }
-    if modifier_flags.has_all_modifiers(ModFlags::CTRL) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::CTRL) {
         mouse_modifier_bits += 16;
     }
     mouse_modifier_bits
 }
 
-/// `CSI < mouse_button_code ; column_index ; row_index M` (or a trailing `m` for a release).
+/// `CSI < mouse_button_code ; column_number ; row_number M`, or a trailing `m`
+/// for a release.
 fn encode_sgr_mouse_report(
     mouse_button_code: u16,
-    column_index: u16,
-    row_index: u16,
+    column_number: u16,
+    row_number: u16,
     is_mouse_release: bool,
 ) -> Vec<u8> {
-    let mouse_release_terminator = if is_mouse_release { 'm' } else { 'M' };
-    format!("\x1b[<{mouse_button_code};{column_index};{row_index}{mouse_release_terminator}")
+    let sgr_final_character = if is_mouse_release { 'm' } else { 'M' };
+    format!("\x1b[<{mouse_button_code};{column_number};{row_number}{sgr_final_character}")
         .into_bytes()
 }
 
-/// `CSI M` then `mouse_button_code+32`, `column_index+32`, `row_index+32` as one byte each, saturating at
-/// `255`.
+/// `CSI M` then `mouse_button_code+32`, `column_number+32`, `row_number+32` as
+/// one byte each, saturating at `255`.
 fn encode_legacy_mouse_report(
     mouse_button_code: u16,
-    column_index: u16,
-    row_index: u16,
+    column_number: u16,
+    row_number: u16,
 ) -> Vec<u8> {
     vec![
         0x1b,
         b'[',
         b'M',
         compute_legacy_mouse_report_byte(mouse_button_code),
-        compute_legacy_mouse_report_byte(column_index),
-        compute_legacy_mouse_report_byte(row_index),
+        compute_legacy_mouse_report_byte(column_number),
+        compute_legacy_mouse_report_byte(row_number),
     ]
 }
 
-/// `CSI M` then `mouse_button_code+32`, `column_index+32`, `row_index+32`, each written as UTF-8: one byte
-/// below `128`, two bytes up to `2047`, three up to `65535`, four above.
-fn encode_utf8_mouse_report(mouse_button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
+/// `CSI M` then `mouse_button_code+32`, `column_number+32`, `row_number+32`,
+/// each written as UTF-8: one byte below `128`, two bytes up to `2047`, three
+/// up to `65535`, four above.
+fn encode_utf8_mouse_report(
+    mouse_button_code: u16,
+    column_number: u16,
+    row_number: u16,
+) -> Vec<u8> {
     let mut encoded_mouse_bytes = vec![0x1b, b'[', b'M'];
-    for mouse_report_number in [mouse_button_code, column_index, row_index] {
+    for mouse_report_number in [mouse_button_code, column_number, row_number] {
         append_utf8_character_encoding(
             &mut encoded_mouse_bytes,
             u32::from(mouse_report_number) + 32,
@@ -176,13 +182,15 @@ fn encode_utf8_mouse_report(mouse_button_code: u16, column_index: u16, row_index
     encoded_mouse_bytes
 }
 
-/// `CSI (mouse_button_code+32) ; column_index ; row_index M`, every value in decimal.
-fn encode_urxvt_mouse_report(mouse_button_code: u16, column_index: u16, row_index: u16) -> Vec<u8> {
-    format!(
-        "\x1b[{};{column_index};{row_index}M",
-        mouse_button_code + 32
-    )
-    .into_bytes()
+/// `CSI (mouse_button_code+32) ; column_number ; row_number M`, every value in
+/// decimal.
+fn encode_urxvt_mouse_report(
+    mouse_button_code: u16,
+    column_number: u16,
+    row_number: u16,
+) -> Vec<u8> {
+    let offset_mouse_button_code = u32::from(mouse_button_code) + 32;
+    format!("\x1b[{offset_mouse_button_code};{column_number};{row_number}M").into_bytes()
 }
 
 /// `mouse_report_number + 32`, summed in `u32`, capped at `255`, then narrowed to

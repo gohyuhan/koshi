@@ -168,7 +168,7 @@ fn each_remote_file_displays_as_its_own_name() {
         "remote access certificate"
     );
     assert_eq!(
-        RemoteFile::RemoteAccessMark.to_string(),
+        RemoteFile::RemoteAccessRecord.to_string(),
         "remote access record"
     );
     assert_eq!(
@@ -204,7 +204,7 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     );
     assert_eq!(
         IpcError::RemoteFileWrite {
-            remote_file: RemoteFile::RemoteAccessMark,
+            remote_file: RemoteFile::RemoteAccessRecord,
             remote_file_path: "/var/lib/koshi/remote/enabled".to_string(),
             error_detail: "permission denied".to_string(),
         }

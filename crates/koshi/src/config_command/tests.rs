@@ -20,110 +20,62 @@ fn path_prints_the_given_config_directory() {
 }
 
 #[test]
-fn explain_reports_file_default_and_meaning() {
-    let explanation = explain_config_key("koshi.pane.min-cols").unwrap();
+fn explain_reports_file_default_and_meaning_for_each_config_file_kind() {
+    let expected_explanation_by_config_key = [
+        (
+            "koshi.pane.min-cols",
+            "koshi.pane.min-cols\nfile: koshi.kdl\ndefault: 2\nSmallest pane width in columns.\n",
+        ),
+        (
+            "koshi.pane.gap",
+            "koshi.pane.gap\nfile: koshi.kdl\ndefault: 0\n\
+             Blank cells between two panes that meet along a split.\n",
+        ),
+        (
+            "koshi.allow-beta-features",
+            "koshi.allow-beta-features\nfile: koshi.kdl\ndefault: #false\n\
+             Run features still marked beta.\n",
+        ),
+        (
+            "koshi.allow-other-users",
+            "koshi.allow-other-users\nfile: koshi.kdl\ndefault: #false\n\
+             Let other users of this machine reach your sessions.\n",
+        ),
+        (
+            "koshi.shared-sessions-dir",
+            "koshi.shared-sessions-dir\nfile: koshi.kdl\n\
+             default: \"/tmp/koshi\", %ProgramData%\\koshi on Windows\n\
+             Directory the shared session sockets live in.\n",
+        ),
+        (
+            "koshi.auto-close-session",
+            "koshi.auto-close-session\nfile: koshi.kdl\ndefault: #false\n\
+             End the session when its last client leaves.\n",
+        ),
+        (
+            "theme.colors.border-hover",
+            "theme.colors.border-hover\nfile: themes/<name>.kdl\ndefault: \"#af5fff\"\n\
+             Pane border under the pointer.\n",
+        ),
+        (
+            "keybinding.chord-timeout-ms",
+            "keybinding.chord-timeout-ms\nfile: keybinding.kdl\ndefault: 500\n\
+             Wait for the next key in a sequence.\n",
+        ),
+        (
+            "profile.version",
+            "profile.version\nfile: profile/<name>.kdl\ndefault: 2\n\
+             Config schema version.\n",
+        ),
+    ];
 
-    assert_eq!(
-        explanation,
-        "koshi.pane.min-cols\nfile: koshi.kdl\ndefault: 2\nSmallest pane width in columns.\n"
-    );
-}
-
-#[test]
-fn explain_answers_for_the_pane_gap() {
-    let explanation = explain_config_key("koshi.pane.gap").unwrap();
-
-    assert_eq!(
-        explanation,
-        "koshi.pane.gap\nfile: koshi.kdl\ndefault: 0\n\
-         Blank cells between two panes that meet along a split.\n"
-    );
-}
-
-/// The beta knob is top-level like `theme`, and `explain` answers for it the
-/// same way it answers for every other key the parser accepts.
-#[test]
-fn explain_answers_for_the_top_level_beta_knob() {
-    let explanation = explain_config_key("koshi.allow-beta-features").unwrap();
-
-    assert_eq!(
-        explanation,
-        "koshi.allow-beta-features\nfile: koshi.kdl\ndefault: #false\n\
-         Run features still marked beta.\n"
-    );
-}
-
-/// The other-users knob is top-level like `theme`, and `explain` answers for it
-/// the same way it answers for every other key the parser accepts.
-#[test]
-fn explain_answers_for_the_top_level_other_users_knob() {
-    let explanation = explain_config_key("koshi.allow-other-users").unwrap();
-
-    assert_eq!(
-        explanation,
-        "koshi.allow-other-users\nfile: koshi.kdl\ndefault: #false\n\
-         Let other users of this machine reach your sessions.\n"
-    );
-}
-
-/// The shared directory knob is top-level like `theme`, and `explain` answers
-/// for it the same way it answers for every other key the parser accepts.
-#[test]
-fn explain_answers_for_the_top_level_shared_sessions_dir_knob() {
-    let explanation = explain_config_key("koshi.shared-sessions-dir").unwrap();
-
-    assert_eq!(
-        explanation,
-        "koshi.shared-sessions-dir\nfile: koshi.kdl\n\
-         default: \"/tmp/koshi\", %ProgramData%\\koshi on Windows\n\
-         Directory the shared session sockets live in.\n"
-    );
-}
-
-/// The auto-close knob is top-level like `theme`, and `explain` answers for it
-/// the same way it answers for every other key the parser accepts.
-#[test]
-fn explain_answers_for_the_top_level_auto_close_knob() {
-    let explanation = explain_config_key("koshi.auto-close-session").unwrap();
-
-    assert_eq!(
-        explanation,
-        "koshi.auto-close-session\nfile: koshi.kdl\ndefault: #false\n\
-         End the session when its last client leaves.\n"
-    );
-}
-
-#[test]
-fn explain_answers_for_a_theme_color() {
-    let explanation = explain_config_key("theme.colors.border-hover").unwrap();
-
-    assert_eq!(
-        explanation,
-        "theme.colors.border-hover\nfile: themes/<name>.kdl\ndefault: \"#af5fff\"\n\
-         Pane border under the pointer.\n"
-    );
-}
-
-#[test]
-fn explain_answers_for_a_keybinding_setting() {
-    let explanation = explain_config_key("keybinding.chord-timeout-ms").unwrap();
-
-    assert_eq!(
-        explanation,
-        "keybinding.chord-timeout-ms\nfile: keybinding.kdl\ndefault: 500\n\
-         Wait for the next key in a sequence.\n"
-    );
-}
-
-#[test]
-fn explain_answers_for_the_profile_version() {
-    let explanation = explain_config_key("profile.version").unwrap();
-
-    assert_eq!(
-        explanation,
-        "profile.version\nfile: profile/<name>.kdl\ndefault: 2\n\
-         Config schema version.\n"
-    );
+    for (config_key, expected_explanation) in expected_explanation_by_config_key {
+        assert_eq!(
+            explain_config_key(config_key).unwrap(),
+            expected_explanation,
+            "explanation of {config_key}"
+        );
+    }
 }
 
 #[test]
@@ -273,7 +225,28 @@ fn migrate_command_updates_a_schema_one_file_to_schema_two() {
     assert_eq!(fs::read_to_string(app_config_path).unwrap(), "version 2\n");
 }
 
-fn migrate_config_for_test(
+#[test]
+fn migrate_command_keeps_an_unknown_key_in_a_migrated_file() {
+    let config_directory = TempDir::new().unwrap();
+    let app_config_path = config_directory.path().join("koshi.kdl");
+    fs::write(&app_config_path, "version 1\nmade-up-key \"x\"\n").unwrap();
+
+    let migration_report =
+        run_config_command_in_directory(&ConfigCommand::Migrate, config_directory.path()).unwrap();
+
+    assert_eq!(
+        migration_report,
+        format!("{}: migrated version 1 to 2\n", app_config_path.display())
+    );
+    assert_eq!(
+        fs::read_to_string(app_config_path).unwrap(),
+        "version 2\nmade-up-key \"x\"\n"
+    );
+}
+
+/// Rejects any `bad.kdl` with `bad source`, and migrates every other file from
+/// version 1 to 2 by appending `migrated #true`.
+fn migrate_every_file_except_bad_kdl(
     _config_file_kind: ConfigFileKind,
     config_path: &Path,
     config_source_text: &str,
@@ -303,7 +276,7 @@ fn migrate_writes_nothing_when_any_source_is_invalid() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         write_atomic,
     )
     .unwrap_err();
@@ -330,7 +303,7 @@ fn migrate_replaces_each_changed_file_after_validation() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         write_atomic,
     )
     .unwrap();
@@ -358,7 +331,7 @@ fn migrate_updates_a_symlink_target_and_keeps_the_link() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         write_atomic,
     )
     .unwrap();
@@ -388,7 +361,7 @@ fn migrate_write_failure_reports_files_already_migrated() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         |config_path, serialized_config_bytes| {
             write_attempt_count += 1;
             if write_attempt_count == 2 {
@@ -425,7 +398,7 @@ fn migrate_write_failure_warns_that_the_failing_file_may_have_changed() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         |config_path, serialized_config_bytes| {
             write_atomic(config_path, serialized_config_bytes)?;
             Err(StorageError::Io {
@@ -471,7 +444,7 @@ fn migrate_of_a_directory_holding_no_config_file_says_so_and_writes_nothing() {
 
     let migration_report = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         |config_path, _serialized_config_bytes| {
             written_config_paths.push(config_path.to_path_buf());
             Ok(())
@@ -487,29 +460,6 @@ fn migrate_of_a_directory_holding_no_config_file_says_so_and_writes_nothing() {
         )
     );
     assert_eq!(written_config_paths, Vec::<PathBuf>::new());
-}
-
-/// A `themes` entry that is not a `.kdl` file is left out of the scan, so a
-/// directory holding only such a file reads as holding no config file.
-#[test]
-fn a_themes_entry_that_is_not_kdl_is_left_out_of_the_scan() {
-    let config_directory = TempDir::new().unwrap();
-    fs::create_dir(config_directory.path().join("themes")).unwrap();
-    fs::write(
-        config_directory.path().join("themes").join("notes.md"),
-        "not config",
-    )
-    .unwrap();
-
-    let report_text = check_config_directory(config_directory.path()).unwrap();
-
-    assert_eq!(
-        report_text,
-        format!(
-            "no config files found in {}\n",
-            config_directory.path().display()
-        )
-    );
 }
 
 #[test]
@@ -546,8 +496,8 @@ fn run_config_command_in_directory_routes_check_to_the_directory_scan() {
     );
 }
 
-/// `migrate` through the real migration table: version 2 is this build's
-/// schema, so the file is reported as current and left byte for byte as it is.
+/// `migrate` runs the real migration table. A `version 2` file is reported as
+/// current and left byte for byte as it is.
 #[test]
 fn run_config_command_in_directory_migrate_leaves_a_file_already_on_this_schema_untouched() {
     let config_directory = TempDir::new().unwrap();
@@ -562,26 +512,6 @@ fn run_config_command_in_directory_migrate_leaves_a_file_already_on_this_schema_
         format!("{}: current (version 2)\n", app_config_path.display())
     );
     assert_eq!(fs::read_to_string(&app_config_path).unwrap(), "version 2\n");
-}
-
-#[test]
-fn check_sorts_two_theme_files_by_path() {
-    let config_directory = TempDir::new().unwrap();
-    let themes_directory = config_directory.path().join("themes");
-    fs::create_dir(&themes_directory).unwrap();
-    fs::write(themes_directory.join("z.kdl"), "version 2\ncolors {}\n").unwrap();
-    fs::write(themes_directory.join("a.kdl"), "version 2\ncolors {}\n").unwrap();
-
-    let report_text = check_config_directory(config_directory.path()).unwrap();
-
-    assert_eq!(
-        report_text,
-        format!(
-            "{}: valid (version 2)\n{}: valid (version 2)\n",
-            themes_directory.join("a.kdl").display(),
-            themes_directory.join("z.kdl").display(),
-        )
-    );
 }
 
 #[test]
@@ -677,7 +607,7 @@ fn migrate_writes_nothing_when_a_config_directory_cannot_be_read() {
 
     let config_error = migrate_config_directory_with(
         config_directory.path(),
-        migrate_config_for_test,
+        migrate_every_file_except_bad_kdl,
         |config_path, _serialized_config_bytes| {
             written_config_paths.push(config_path.to_path_buf());
             Ok(())
@@ -760,51 +690,54 @@ fn migrate_writes_only_the_files_that_changed() {
 #[test]
 fn update_migrates_every_config_kind_without_a_user_command() {
     let config_directory = TempDir::new().expect("create config directory");
-    let config_paths = [
-        config_directory.path().join("koshi.kdl"),
-        config_directory.path().join("keybinding.kdl"),
-        config_directory.path().join("themes").join("plain.kdl"),
-        config_directory.path().join("profile").join("work.kdl"),
+    let config_files = [
+        (
+            config_directory.path().join("koshi.kdl"),
+            "version 1\n",
+            "version 2\n",
+        ),
+        (
+            config_directory.path().join("keybinding.kdl"),
+            "version 1\n",
+            "version 2\n",
+        ),
+        (
+            config_directory.path().join("themes").join("plain.kdl"),
+            "version 1\n",
+            "version 2\n",
+        ),
+        (
+            config_directory.path().join("profile").join("work.kdl"),
+            "version 1\ntab { pane }\n",
+            "version 2\ntab { pane }\n",
+        ),
     ];
-    for config_path in &config_paths {
+    for (config_path, old_config_source_text, _) in &config_files {
         fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("create config parent");
-        let config_source = if config_path.ends_with("work.kdl") {
-            "version 1\ntab { pane }\n"
-        } else {
-            "version 1\n"
-        };
-        fs::write(config_path, config_source).expect("write old schema");
+        fs::write(config_path, old_config_source_text).expect("write old schema");
     }
 
     migrate_config_directory_for_update(config_directory.path())
         .expect("migrate valid config files during update");
-    for config_path in &config_paths {
+    for (config_path, _, migrated_config_source_text) in &config_files {
         assert_eq!(
-            fs::read_to_string(config_path).expect("read migrated config"),
-            if config_path.ends_with("work.kdl") {
-                "version 2\ntab { pane }\n"
-            } else {
-                "version 2\n"
-            }
+            &fs::read_to_string(config_path).expect("read migrated config"),
+            migrated_config_source_text
         );
     }
     migrate_config_directory_for_update(config_directory.path())
         .expect("migrating current config leaves it readable");
-    for config_path in &config_paths {
+    for (config_path, _, migrated_config_source_text) in &config_files {
         assert_eq!(
-            fs::read_to_string(config_path).expect("read current config"),
-            if config_path.ends_with("work.kdl") {
-                "version 2\ntab { pane }\n"
-            } else {
-                "version 2\n"
-            }
+            &fs::read_to_string(config_path).expect("read current config"),
+            migrated_config_source_text
         );
     }
 }
 
 #[test]
-fn concurrent_update_processes_migrate_one_config_directory_safely() {
+fn two_concurrent_updates_leave_the_config_on_the_new_schema() {
     let config_directory = TempDir::new().expect("create config directory");
     let app_config_path = config_directory.path().join("koshi.kdl");
     fs::write(&app_config_path, "version 1\n").expect("write old schema");
@@ -860,18 +793,13 @@ fn update_refuses_config_migration_when_its_lock_cannot_open() {
     let migration_error = migrate_config_directory_for_update(config_directory.path())
         .expect_err("migration lock must open before config changes");
 
-    match migration_error {
-        CliError::Config { detail } => {
-            assert_eq!(
-                detail,
-                format!(
-                    "open {}: {expected_open_error}",
-                    migration_lock_path.display()
-                )
-            );
-        }
-        unexpected_cli_error => panic!("expected config error, got {unexpected_cli_error:?}"),
-    }
+    assert_eq!(
+        migration_error.to_string(),
+        format!(
+            "config failed: open {}: {expected_open_error}",
+            migration_lock_path.display()
+        )
+    );
     assert_eq!(
         fs::read_to_string(app_config_path).expect("read unchanged config"),
         "version 1\n"

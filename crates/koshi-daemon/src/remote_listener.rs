@@ -11,18 +11,18 @@
 //! reaches, which sessions a scope reaches, and where one named session
 //! listens. Carrying a connection's traffic never reaches the dispatcher.
 //!
-//! An admitted secret registers the connection with the router, and it stays registered until this
-//! listener reports it ended. A revoke shuts a registered connection's socket, attached or not. The
-//! router holds at most
+//! An admitted secret registers the connection with the router, and it stays
+//! registered until this listener reports it ended. A revoke shuts a
+//! registered connection's socket, attached or not. The router holds at most
 //! [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT)
 //! registrations and refuses the connections that arrive over that count.
 //!
 //! The TLS handshake, the frame the caller opens with, and the refusal naming
-//! both version ranges finish inside `ADMISSION_WINDOW_DURATION`, counted from the
-//! moment the connection's thread starts. Each single read and write inside
+//! both version ranges finish inside `ADMISSION_WINDOW_DURATION`, counted from
+//! the moment the connection's thread starts. Each single read and write inside
 //! them is given the time left on that deadline when it starts. Every other
-//! refusal replaces that deadline with `REFUSAL_WINDOW_DURATION`. After the Welcome both
-//! halves lose their deadline.
+//! refusal replaces that deadline with `REFUSAL_WINDOW_DURATION`. After the
+//! Welcome both halves lose their deadline.
 //!
 //! Every refusal is
 //! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) and closes the
@@ -74,9 +74,9 @@ use crate::router::RouterEvent;
 
 /// How long the connection's thread spends on the TLS handshake, on reading
 /// the frame the caller opens with, and on writing every refusal it answers
-/// before admission, counted from the moment that thread starts. A caller that
-/// is not admitted holds its thread and its admission place for no longer than
-/// this.
+/// before admission, counted from the moment that thread starts: 10 s. A
+/// caller that is not admitted holds its thread and its admission place for no
+/// longer than this.
 const ADMISSION_WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// How long one address's connection attempts are counted over.
@@ -127,8 +127,8 @@ pub(crate) enum AdmissionAsk {
         /// Where the answer goes. `None` refuses the connection.
         response_sender: Sender<Option<RemoteConnectionAdmission>>,
     },
-    /// The sessions an admitted scope reaches.
-    Rows {
+    /// List the sessions an admitted scope reaches.
+    ListRows {
         /// How far the admitting grant reaches.
         scope: TokenScope,
         /// Where the answer goes.
@@ -146,14 +146,15 @@ pub(crate) enum AdmissionAsk {
         /// Where the answer goes. `None` refuses the attach.
         response_sender: Sender<Option<PathBuf>>,
     },
-    /// One admitted connection has ended. It leaves the router's list.
-    Ended {
+    /// Remove one admitted connection that has ended from the router's list.
+    RemoveConnection {
         /// The number that connection was registered under.
         remote_connection_id: u64,
     },
 }
 
 /// What a presented secret reached.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RemoteConnectionAdmission {
     /// How far the grant behind that secret reaches.
     pub scope: TokenScope,
@@ -171,13 +172,14 @@ pub(crate) struct BoundRemoteListener {
     dispatcher_sender: Sender<Sender<RouterEvent>>,
 }
 
-/// Take the TLS port at `remote_listen_address`, presenting `certificate_file`, without serving on
-/// it yet.
+/// Take the TLS port at `remote_listen_address`, presenting
+/// `certificate_file`, without serving on it yet.
 ///
-/// Builds the TLS configuration, binds `remote_listen_address`, and starts the accept thread.
-/// That thread holds the port and accepts nobody until [`BoundRemoteListener::start_serving`] sends it
-/// somewhere to put its questions, or until the sender is dropped, which ends it
-/// and releases the port.
+/// Builds the TLS configuration, binds `remote_listen_address`, and starts the
+/// accept thread. That thread holds the port and accepts nobody until
+/// [`BoundRemoteListener::start_serving`] sends it the dispatcher's events
+/// sender. Dropping the [`BoundRemoteListener`] first ends the thread and
+/// releases the port.
 ///
 /// # Errors
 /// The certificate that could not be turned into a TLS configuration, or the
@@ -201,9 +203,10 @@ pub(crate) fn bind_remote_listener(
 }
 
 impl BoundRemoteListener {
-    /// Start serving on this port. The thread [`bind_remote_listener`] started begins accepting
-    /// connections and gives each its own thread; `dispatcher_events_sender` carries those
-    /// threads' questions to the router's dispatcher.
+    /// Start serving on this port. The thread [`bind_remote_listener`] started
+    /// begins accepting connections and gives each its own thread;
+    /// `dispatcher_events_sender` carries those threads' questions to the
+    /// router's dispatcher.
     ///
     /// Cannot fail.
     pub(crate) fn start_serving(self, dispatcher_events_sender: Sender<RouterEvent>) {
@@ -239,9 +242,9 @@ impl WarningRateLimiter {
         }
     }
 
-    /// Whether to write the line at `current_time`. True when no line has been written,
-    /// and when the last one was written [`LOG_WINDOW_DURATION`] or longer ago. Writing
-    /// is the caller's; this only answers.
+    /// Whether to write the line at `current_time`. True when no line has been
+    /// written, and when the last one was written [`LOG_WINDOW_DURATION`] or
+    /// longer ago. The caller writes the line; this only answers.
     ///
     /// Example — with [`LOG_WINDOW_DURATION`] at 60 seconds, ten thousand calls spread
     /// over five minutes answer true five times.
@@ -257,9 +260,10 @@ impl WarningRateLimiter {
 }
 
 /// Accept connections and give each its own thread, dropping the ones from an
-/// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside [`RATE_WINDOW_DURATION`]
-/// and the ones that arrive while [`MAX_ADMISSION_COUNT`] connections are already
-/// waiting to present a secret. A failed accept is reported at most once inside
+/// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside
+/// [`RATE_WINDOW_DURATION`] and the ones that arrive while
+/// [`MAX_ADMISSION_COUNT`] connections are already waiting to present a
+/// secret. A failed accept is reported at most once inside
 /// [`LOG_WINDOW_DURATION`], waits [`ACCEPT_RETRY_DELAY_DURATION`], and retries.
 fn run_remote_accept_loop(
     listener: &TcpListener,
@@ -362,6 +366,7 @@ impl Drop for AdmissionSlot {
 }
 
 /// What the rate table says to do with one connection attempt.
+#[derive(Debug, PartialEq, Eq)]
 enum PeerAddressAttemptDecision {
     /// Serve it: this address is inside its limit.
     Serve,
@@ -383,9 +388,9 @@ struct PeerAddressRateWindow {
 
 /// How many connections each address has opened lately.
 ///
-/// Bounded at [`MAX_RATE_TABLE_ENTRY_COUNT`]. Every check first drops the addresses whose
-/// window has passed; a check that still finds the table full drops the address
-/// whose window opened first.
+/// Bounded at [`MAX_RATE_TABLE_ENTRY_COUNT`]. Every check first drops the
+/// addresses whose window has passed; a check that still finds the table full
+/// drops the address whose window opened first.
 struct PeerAddressRateTable {
     /// One window per address.
     window_by_peer_ip_address: HashMap<IpAddr, PeerAddressRateWindow>,
@@ -399,10 +404,11 @@ impl PeerAddressRateTable {
         }
     }
 
-    /// Count one connection from `peer_ip_address` at `current_time` and say what to do with it.
+    /// Count one connection from `peer_ip_address` at `current_time` and say
+    /// what to do with it.
     ///
     /// An address is logged once per window, on the attempt that crosses
-    /// [`MAX_ATTEMPT_COUNT`]. Every subsequent attempt in that window is dropped in
+    /// [`MAX_ATTEMPT_COUNT`]. Every later attempt in that window is dropped in
     /// silence.
     ///
     /// Example — with [`MAX_ATTEMPT_COUNT`] at 10, attempts 1 to 10 from one
@@ -458,6 +464,7 @@ impl PeerAddressRateTable {
 }
 
 /// What the frame a caller sends turned out to be.
+#[derive(Debug, PartialEq, Eq)]
 enum RemoteClientFrameRead {
     /// A readable frame.
     Frame(RemoteClientFrame),
@@ -472,17 +479,17 @@ enum RemoteClientFrameRead {
 /// the sessions that secret reaches or a bridge to one of them.
 ///
 /// The TLS handshake and the frame the caller opens with finish inside
-/// [`ADMISSION_WINDOW_DURATION`], counted from the moment this thread starts. A refusal
-/// written by [`send_refusal`] gets [`REFUSAL_WINDOW_DURATION`] instead. Once the caller is
-/// admitted both halves and the socket lose their deadlines and block for as
-/// long as it takes.
+/// [`ADMISSION_WINDOW_DURATION`], counted from the moment this thread starts. A
+/// refusal written by [`send_refusal`] gets [`REFUSAL_WINDOW_DURATION`]
+/// instead. Once the caller is admitted both halves and the socket lose their
+/// deadlines and block for as long as it takes.
 ///
 /// Admission registers the connection with the router, attached or not. The
 /// registration is dropped when the connection finishes, whichever step it
 /// finished at.
 ///
-/// `admission_slot` holds this connection's place in the admission window and is
-/// dropped the moment the secret is admitted.
+/// `admission_slot` holds this connection's place in the admission window and
+/// is dropped the moment the secret is admitted.
 ///
 /// On Unix the thread blocks SIGPIPE on its own signal mask; a write to a peer
 /// that hung up returns an error whatever the process-wide disposition is.
@@ -535,8 +542,8 @@ fn serve_remote_connection(
         RemoteClientFrameRead::Closed => return,
     };
 
-    // The version is settled before the secret is looked at. This refusal names
-    // both ranges instead of carrying REMOTE_REFUSED.
+    // The version is checked before the secret. The version refusal names both
+    // version ranges.
     let Some(agreed_remote_protocol_version) = compute_agreed_protocol_version(
         minimum_remote_version,
         maximum_remote_version,
@@ -604,11 +611,9 @@ fn serve_remote_connection(
 /// often as it asks, attach to one when it asks for that, and report the
 /// connection ended when no bridge took it over.
 ///
-/// `session_protocol_versions` is the session protocol range the client named in its opening
-/// frame. Nothing here reads it: it is carried to
-/// [`bridge_remote_connection_to_session`], which puts it in the session-plane Hello it sends
-/// for this client, so the client and the session server settle a version
-/// between themselves.
+/// `session_protocol_versions` is the session protocol range the client named
+/// in its opening frame. [`bridge_remote_connection_to_session`] puts it in the
+/// session-plane Hello it sends for this client.
 fn serve_admitted_remote_connection(
     mut reader: TlsReader,
     mut writer: TlsWriter,
@@ -667,7 +672,7 @@ fn process_admitted_remote_frames(
                 let admitted_token_scope = admitted_connection.scope.clone();
                 let remote_session_rows =
                     ask_router_dispatcher(dispatcher_events_sender, |response_sender| {
-                        AdmissionAsk::Rows {
+                        AdmissionAsk::ListRows {
                             scope: admitted_token_scope,
                             response_sender,
                         }
@@ -710,10 +715,11 @@ fn process_admitted_remote_frames(
 }
 
 /// The Hello the router sends a session server for a caller this listener
-/// accepted: `connection_token` from that session's endpoint file, the caller's own
-/// version range in `session_protocol_versions` as `(minimum, maximum)`, and `remote` set.
+/// accepted: `connection_token` from that session's endpoint file, the
+/// caller's own version range in `session_protocol_versions` as
+/// `(minimum, maximum)`, and `is_remote` set to `true`.
 ///
-/// This is the only place `remote` is set.
+/// This is the only place `is_remote` is set.
 fn build_bridged_hello(
     connection_token: ConnectionToken,
     session_protocol_versions: (u32, u32),
@@ -730,8 +736,9 @@ fn build_bridged_hello(
     }
 }
 
-/// Open the local connection to the session advertised at `session_endpoint_path` and
-/// send it the Hello carrying that session's endpoint token and `session_protocol_versions`.
+/// Open the local connection to the session advertised at
+/// `session_endpoint_path` and send it the Hello carrying that session's
+/// endpoint token and `session_protocol_versions`.
 ///
 /// Hands back the connection's two raw halves and the handle that closes its
 /// read direction.
@@ -767,8 +774,8 @@ fn open_local_session_bridge(
 /// Two threads carry the two directions. Whichever ends first shuts the TCP
 /// socket in both directions, ending the thread reading the TLS stream at once,
 /// and closes the local connection's read direction. On Unix that ends the
-/// thread reading the session at once. A Windows named pipe carries no read
-/// direction to shut, so there that thread ends at the session server's next
+/// thread reading the session at once. A Windows named pipe has no read
+/// direction to shut: on Windows that thread ends at the session server's next
 /// message or when it hangs up.
 ///
 /// The connection is reported ended once, by whichever direction finishes
@@ -847,19 +854,20 @@ fn report_remote_connection_ended(
     dispatcher_events_sender: &Sender<RouterEvent>,
     remote_connection_id: u64,
 ) {
-    let _ = dispatcher_events_sender.send(RouterEvent::Admission(AdmissionAsk::Ended {
+    let _ = dispatcher_events_sender.send(RouterEvent::Admission(AdmissionAsk::RemoveConnection {
         remote_connection_id,
     }));
 }
 
-/// Reports one bridged connection ended. The first [`RemoteConnectionEndReport::report_once`] sends;
-/// every subsequent one does nothing.
+/// Reports one bridged connection ended. The first
+/// [`RemoteConnectionEndReport::report_once`] sends; every later call does
+/// nothing.
 struct RemoteConnectionEndReport {
     /// Where the report goes.
     dispatcher_events_sender: Sender<RouterEvent>,
     /// The number the connection is registered under.
     remote_connection_id: u64,
-    /// Set by the first report. Every subsequent one does nothing.
+    /// Set by the first report. Every later report does nothing.
     has_reported: std::sync::atomic::AtomicBool,
 }
 
@@ -903,8 +911,8 @@ fn ask_router_dispatcher<Response>(
 
 /// Write one [`REMOTE_REFUSED`] frame, giving the write until `refusal_deadline`.
 ///
-/// A write that fails is dropped, and so is one whose `refusal_deadline` has already
-/// passed.
+/// A write that fails is dropped, and so is one whose `refusal_deadline` has
+/// already passed.
 fn send_refusal_with_deadline(writer: &mut (impl Write + Deadlined), refusal_deadline: Instant) {
     writer.set_deadline(Some(refusal_deadline));
     let _ = send_remote_frame(
@@ -920,19 +928,20 @@ fn send_refusal_with_deadline(writer: &mut (impl Write + Deadlined), refusal_dea
 ///
 /// For a caller that is already admitted, whose halves carry no deadline. A
 /// caller still inside the admission window is refused with
-/// [`send_refusal_with_deadline`],
-/// which cannot hold a thread past that window.
+/// [`send_refusal_with_deadline`], which ends the write at that window's end.
 fn send_refusal(writer: &mut (impl Write + Deadlined)) {
     send_refusal_with_deadline(writer, Instant::now() + REFUSAL_WINDOW_DURATION);
 }
 
 /// Read one frame: a 4-byte big-endian length, then that many bytes of JSON.
 ///
-/// The length is checked against `maximum_frame_byte_count` before the payload buffer is allocated.
-/// Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before admission and [`MAX_FRAME_BYTE_COUNT`] after
-/// it. A length over `maximum_frame_byte_count` is [`RemoteClientFrameRead::Closed`] and reads no payload.
-fn read_client_frame<R: Read>(
-    reader: &mut R,
+/// The length is checked against `maximum_frame_byte_count` before the payload
+/// buffer is allocated. Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before
+/// admission and [`MAX_FRAME_BYTE_COUNT`] after it. A length over
+/// `maximum_frame_byte_count` is [`RemoteClientFrameRead::Closed`] and reads no
+/// payload.
+fn read_client_frame<Reader: Read>(
+    reader: &mut Reader,
     maximum_frame_byte_count: u32,
 ) -> RemoteClientFrameRead {
     let mut length_bytes = [0u8; 4];
@@ -960,8 +969,8 @@ fn read_client_frame<R: Read>(
 /// # Errors
 /// The JSON encoder's own failure, `the answer is larger than a frame can
 /// carry` for a payload past `u32::MAX` bytes, and whatever the writer reports.
-fn send_remote_frame<W: Write>(
-    writer: &mut W,
+fn send_remote_frame<Writer: Write>(
+    writer: &mut Writer,
     remote_server_frame: &RemoteServerFrame,
 ) -> io::Result<()> {
     let payload_bytes = serde_json::to_vec(remote_server_frame)?;

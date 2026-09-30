@@ -480,23 +480,23 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
 #[test]
 fn remote_access_that_could_not_be_read_says_so_rather_than_saying_it_is_off() {
     // `Unknown` renders its own block, not the `Off` one.
-    let rendered = output::render_remote_ready("alice", &RemoteReady::Unknown);
+    let rendered_text = output::render_remote_ready("alice", &RemoteReady::Unknown);
 
     assert_eq!(
-        rendered,
+        rendered_text,
         "this machine's remote access could not be read, so whether this token can \
          connect is unknown; run `koshi share grant` again, or check the reason \
          printed above.\n"
     );
     assert!(
-        !rendered.contains("stays off"),
-        "an unread state is not the same as switched off: {rendered}"
+        !rendered_text.contains("stays off"),
+        "an unread state is not the same as switched off: {rendered_text}"
     );
 }
 
 #[test]
 fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
-    let rendered = output::render_remote_ready(
+    let rendered_text = output::render_remote_ready(
         "alice",
         &RemoteReady::Blocked {
             remote_listen_address: "laptop.local:7654".to_string(),
@@ -504,7 +504,7 @@ fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
     );
 
     assert_eq!(
-        rendered,
+        rendered_text,
         "remote access is on, and nothing is listening on laptop.local:7654: another program \
          holds it. Free that address, then run `koshi share grant` again to open the port. This \
          token cannot be used to connect until then.\n"
@@ -898,10 +898,11 @@ fn build_token_entry(
 
 #[test]
 fn the_host_wide_warning_names_the_grant_and_what_stopping_both_costs() {
-    let rendered = crate::output::render_revoke_host_wide_warning("alice", &TokenScope::HostWide);
+    let rendered_text =
+        crate::output::render_revoke_host_wide_warning("alice", &TokenScope::HostWide);
 
     assert_eq!(
-        rendered,
+        rendered_text,
         "alice also holds a host-wide grant, which reaches host.\n\
          stopping the grant on host alone leaves alice reaching it through the host-wide one.\n\
          stopping both leaves alice reaching no session on this machine, not just host.\n"

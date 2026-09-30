@@ -8,11 +8,11 @@
 //! chord grammar enforces: a modified key is written bracketed, `<C-g>`.
 //!
 //! `<leader>` may stand as the first token only. A [`Leader::Chord`] becomes
-//! the opening chord; a [`Leader::Mods`] run merges its modifiers into the
+//! the opening chord; a [`Leader::Modifiers`] run merges its modifiers into the
 //! chord that follows, so with the default `C-` leader, `<leader>wq` is
 //! Ctrl+w then `q`.
 
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 
 use crate::key::{create_key_parse_error, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
 
@@ -93,12 +93,13 @@ fn is_leader_token(key_token: &str) -> bool {
 /// key takes `SHIFT` unchanged.
 fn merge_leader_modifier_flags(
     key_token: &str,
-    leader_modifier_flags: ModFlags,
+    leader_modifier_flags: BindingModifierFlags,
     key_chord: KeyChord,
 ) -> Result<KeyChord, KeyParseError> {
     let merged_modifier_flags = key_chord.modifier_flags.union(leader_modifier_flags);
     if let Key::Char(key_character) = key_chord.key {
-        if merged_modifier_flags.has_all_modifiers(ModFlags::SHIFT) && !key_character.is_lowercase()
+        if merged_modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT)
+            && !key_character.is_lowercase()
         {
             return Err(create_key_parse_error(
                 key_token,
@@ -139,7 +140,7 @@ pub fn parse_sequence(
 
     let mut chords: Vec<KeyChord> = Vec::new();
     // Modifiers from a modifier-run leader, waiting to merge into the next chord.
-    let mut pending_leader_modifier_flags = ModFlags::NONE;
+    let mut pending_leader_modifier_flags = BindingModifierFlags::NONE;
     let mut is_first_token = true;
     let mut remaining_sequence_text = sequence_text.trim_start();
 
@@ -155,7 +156,7 @@ pub fn parse_sequence(
             }
             match leader {
                 Leader::Chord(leader_chord) => chords.push(leader_chord),
-                Leader::Mods(leader_modifier_flags) => {
+                Leader::Modifiers(leader_modifier_flags) => {
                     pending_leader_modifier_flags = leader_modifier_flags;
                 }
             }
@@ -182,7 +183,7 @@ pub fn parse_sequence(
                     pending_leader_modifier_flags,
                     key_chord,
                 )?;
-                pending_leader_modifier_flags = ModFlags::NONE;
+                pending_leader_modifier_flags = BindingModifierFlags::NONE;
             }
             chords.push(key_chord);
         }
@@ -195,7 +196,7 @@ pub fn parse_sequence(
         // The whole sequence was `<leader>` with a modifier-run leader.
         return Err(create_key_parse_error(
             sequence_text,
-            KeyParseErrorKind::DanglingLeaderMods,
+            KeyParseErrorKind::DanglingLeaderModifiers,
         ));
     }
     if chords.is_empty() {

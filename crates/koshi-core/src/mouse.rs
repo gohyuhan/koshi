@@ -22,7 +22,7 @@
 
 use crate::geometry::{Direction, Point};
 use crate::ids::PaneId;
-use crate::key::ModFlags;
+use crate::key::BindingModifierFlags;
 use serde::{Deserialize, Serialize};
 
 /// A mouse button.
@@ -82,7 +82,7 @@ pub struct MouseInput {
     /// The client cell the event landed on — raw, not yet hit-tested.
     pub position: Point,
     /// The modifier keys held during the event.
-    pub modifier_flags: ModFlags,
+    pub modifier_flags: BindingModifierFlags,
 }
 
 /// What the session reports back about a mouse action it carried out.

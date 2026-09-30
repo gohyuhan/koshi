@@ -1,6 +1,6 @@
-//! Tests for config file loading — name validation for the name-selected
-//! files (profiles, themes) and the per-file readers that take an explicit
-//! path.
+//! Tests for `config`: file-name validation, the per-file readers, the beta
+//! gate, the logging parameters, the new-pane direction, the other-users
+//! policy, and native image output.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -10,14 +10,13 @@ use koshi_beta::beta_feature;
 use koshi_config::layer::PartialLoggingConfig;
 use koshi_config::types::{BoundAction, ModeBindings, ModeName, RgbColor};
 use koshi_core::action::ActionReference;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::log::{LogFormat, LogLevel};
-use tempfile::TempDir;
 
 use super::*;
 
-/// Stands in for a real beta-gated entry point: the gate decides whether the
-/// body runs, and the two answers differ, so a closed gate is visible.
+/// A beta-gated entry point: returns `1` when the gate is open and `0` when it
+/// is closed.
 #[beta_feature(otherwise = 0)]
 fn mock_beta_entry_point() -> u32 {
     1
@@ -33,7 +32,7 @@ fn a_plain_name_is_accepted() {
 
 #[test]
 fn a_path_traversing_or_absolute_name_is_rejected() {
-    // Each of these would join to a `.kdl` outside `profile/` or `themes/`.
+    // Each of these joins to a `.kdl` outside `profile/` or `themes/`.
     assert!(!is_plain_file_name("../secret"));
     assert!(!is_plain_file_name("a/b"));
     assert!(!is_plain_file_name("/etc/passwd"));
@@ -44,15 +43,15 @@ fn a_path_traversing_or_absolute_name_is_rejected() {
 
 #[test]
 fn a_nested_or_trailing_separator_name_is_rejected() {
-    // `foo/` would read `profile/foo/.kdl` — a nested file, not the flat
-    // `profile/<name>.kdl` the rule requires; `foo/..` walks back out.
+    // `foo/` joins to the nested file `profile/foo/.kdl`, and `foo/..` ends in
+    // a `..` component.
     assert!(!is_plain_file_name("foo/"));
     assert!(!is_plain_file_name("foo/.."));
 }
 
 #[test]
 fn a_leading_or_embedded_dot_name_stays_plain() {
-    // Only the exact `.` and `..` components are rejected; a leading dot or a
+    // Only the exact `.` and `..` components are rejected. A leading dot or a
     // double dot inside a longer name is an ordinary flat file name.
     assert!(is_plain_file_name(".hidden"));
     assert!(is_plain_file_name("a..b"));
@@ -62,8 +61,8 @@ fn a_leading_or_embedded_dot_name_stays_plain() {
 
 #[test]
 fn a_space_or_non_ascii_name_stays_plain() {
-    // Neither is a path separator on any platform, so each is one flat file
-    // name that joins to a `.kdl` directly under `profile/` or `themes/`.
+    // A space and a non-ASCII character are path separators on no platform:
+    // each name joins to a `.kdl` directly under `profile/` or `themes/`.
     assert!(is_plain_file_name(" "));
     assert!(is_plain_file_name("my profile"));
     assert!(is_plain_file_name("日本語"));
@@ -72,9 +71,8 @@ fn a_space_or_non_ascii_name_stays_plain() {
 
 #[test]
 fn a_backslash_in_a_name_follows_the_platform_separator() {
-    // A backslash is a path separator on Windows (so `a\b` names a nested
-    // file and is rejected) but an ordinary character on Unix (so `a\b` is a
-    // single flat file name and stays plain).
+    // A backslash is a path separator on Windows, where `a\b` is rejected. On
+    // Unix it is an ordinary character, and `a\b` stays plain.
     #[cfg(windows)]
     assert!(!is_plain_file_name("a\\b"));
     #[cfg(not(windows))]
@@ -86,42 +84,72 @@ fn a_backslash_in_a_name_follows_the_platform_separator() {
 #[test]
 fn reading_an_absent_file_is_none_without_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&test_directory.path().join("missing.kdl"), &mut warnings),
+        load_config_file(
+            &test_directory.path().join("missing.kdl"),
+            &mut config_warnings
+        ),
         None
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn reading_a_present_file_returns_its_exact_text() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("present.kdl");
-    std::fs::write(&config_file_path, "version 1\n").expect("write");
-    let mut warnings = Vec::new();
+    fs::write(&config_file_path, "version 1\n").expect("write");
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut warnings),
+        load_config_file(&config_file_path, &mut config_warnings),
         Some("version 1\n".to_string())
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn reading_a_directory_as_a_file_warns_and_is_none() {
-    // A path that exists but is a directory is readable-as-a-string nowhere,
-    // so `load_config_file` takes its error arm on every platform.
+    // Reading a directory as a string fails on every platform.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
-    assert_eq!(load_config_file(test_directory.path(), &mut warnings), None);
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "could not read config file {}: ",
+    let read_error =
+        fs::read_to_string(test_directory.path()).expect_err("a directory reads as no string");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_config_file(test_directory.path(), &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "could not read config file {}: {read_error}",
             test_directory.path().display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
+        )]
+    );
+}
+
+/// `present.kdl/keybinding.kdl` has a regular file as its parent. On Unix the
+/// read fails with "not a directory", which is not an absent file.
+#[cfg(unix)]
+#[test]
+fn reading_a_path_below_a_regular_file_warns_and_is_none() {
+    let test_directory = tempfile::tempdir().expect("temp dir");
+    let parent_file_path = test_directory.path().join("present.kdl");
+    fs::write(&parent_file_path, "version 1\n").expect("write");
+    let config_file_path = parent_file_path.join("keybinding.kdl");
+    let read_error =
+        fs::read_to_string(&config_file_path).expect_err("a regular file holds no entries");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_config_file(&config_file_path, &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "could not read config file {}: {read_error}",
+            config_file_path.display()
+        )]
     );
 }
 
@@ -129,81 +157,84 @@ fn reading_a_directory_as_a_file_warns_and_is_none() {
 fn reading_an_empty_file_returns_an_empty_string_without_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("empty.kdl");
-    std::fs::write(&config_file_path, "").expect("write");
-    let mut warnings = Vec::new();
+    fs::write(&config_file_path, "").expect("write");
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_config_file(&config_file_path, &mut warnings),
+        load_config_file(&config_file_path, &mut config_warnings),
         Some(String::new())
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn reading_a_file_that_is_not_utf8_warns_and_is_none() {
-    // `0x80` starts no UTF-8 sequence, so the read fails on every platform.
+    // `0x80` starts no UTF-8 sequence: the read fails on every platform.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("invalid.kdl");
-    std::fs::write(&config_file_path, [0x76, 0x65, 0x80, 0x72]).expect("write");
-    let mut warnings = Vec::new();
-    assert_eq!(load_config_file(&config_file_path, &mut warnings), None);
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "could not read config file {}: ",
+    fs::write(&config_file_path, [0x76, 0x65, 0x80, 0x72]).expect("write");
+    let read_error = fs::read_to_string(&config_file_path).expect_err("the bytes are not UTF-8");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_config_file(&config_file_path, &mut config_warnings),
+        None
+    );
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "could not read config file {}: {read_error}",
             config_file_path.display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
+        )]
     );
 }
 
-// --- load_app_config: clean, field-warning-free, and hard-error files ---
+// --- load_app_config: clean, absent, hard-error, and unknown-field files ---
 
 #[test]
 fn loading_a_clean_app_file_returns_a_layer_without_warnings() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
-    std::fs::write(&config_file_path, "version 1\n").expect("write");
-    let mut warnings = Vec::new();
+    fs::write(&config_file_path, "version 1\n").expect("write");
+    let mut config_warnings = Vec::new();
     let app_config_file =
-        load_app_config(&config_file_path, &mut warnings).expect("the file loads");
+        load_app_config(&config_file_path, &mut config_warnings).expect("the file loads");
     assert_eq!(app_config_file.layer, PartialKoshiConfig::default());
     assert_eq!(app_config_file.theme_name, None);
     assert_eq!(app_config_file.parse_warnings, Vec::<String>::new());
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn loading_an_absent_app_file_is_none_without_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_app_config(&test_directory.path().join("koshi.kdl"), &mut warnings),
+        load_app_config(
+            &test_directory.path().join("koshi.kdl"),
+            &mut config_warnings
+        ),
         None
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn an_app_file_with_an_unsupported_version_drops_to_defaults_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
-    std::fs::write(&config_file_path, "version 999\n").expect("write");
-    let mut warnings = Vec::new();
-    assert_eq!(load_app_config(&config_file_path, &mut warnings), None);
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "koshi.kdl not applied ({}): ",
-            config_file_path.display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
+    fs::write(&config_file_path, "version 999\n").expect("write");
+    let parse_error =
+        parse_app_config(&config_file_path, "version 999\n").expect_err("version 999 is refused");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_app_config(&config_file_path, &mut config_warnings),
+        None
     );
-    assert!(
-        warnings[0].ends_with("; using defaults"),
-        "unexpected warning: {}",
-        warnings[0]
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "koshi.kdl not applied ({}): {parse_error}; using defaults",
+            config_file_path.display()
+        )]
     );
 }
 
@@ -212,22 +243,20 @@ fn an_empty_app_file_drops_to_defaults_with_a_warning() {
     // An empty file names no `version`, which `parse_app_config` refuses.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
-    std::fs::write(&config_file_path, "").expect("write");
-    let mut warnings = Vec::new();
-    assert_eq!(load_app_config(&config_file_path, &mut warnings), None);
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "koshi.kdl not applied ({}): ",
-            config_file_path.display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
+    fs::write(&config_file_path, "").expect("write");
+    let parse_error =
+        parse_app_config(&config_file_path, "").expect_err("a missing version is refused");
+    let mut config_warnings = Vec::new();
+    assert_eq!(
+        load_app_config(&config_file_path, &mut config_warnings),
+        None
     );
-    assert!(
-        warnings[0].ends_with("; using defaults"),
-        "unexpected warning: {}",
-        warnings[0]
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "koshi.kdl not applied ({}): {parse_error}; using defaults",
+            config_file_path.display()
+        )]
     );
 }
 
@@ -237,17 +266,17 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
     // fields and records the skip, prefixed with the file it came from.
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
-    std::fs::write(
+    fs::write(
         &config_file_path,
         "version 1\nfrobnicate 1\ntheme \"midnight\"\n",
     )
     .expect("write");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     let app_config_file =
-        load_app_config(&config_file_path, &mut warnings).expect("the file loads");
+        load_app_config(&config_file_path, &mut config_warnings).expect("the file loads");
     assert_eq!(app_config_file.theme_name, Some("midnight".to_string()));
     assert_eq!(
-        warnings,
+        config_warnings,
         vec![format!(
             "{}: ignored unknown key `frobnicate`; did you mean `update`?",
             config_file_path.display()
@@ -255,52 +284,57 @@ fn an_unknown_app_field_is_kept_as_a_path_prefixed_skip_warning() {
     );
 }
 
-// --- load_theme: selecting a `themes/<name>.kdl` by name ---
+// --- load_theme_config: selecting a `themes/<name>.kdl` by name ---
 
 /// Writes `theme_source` to `themes/<theme_name>.kdl` under `config_directory`,
 /// creates the theme directory, and returns the theme file path.
-fn write_theme(config_directory: &Path, theme_name: &str, theme_source: &str) -> PathBuf {
+fn write_theme_file(config_directory: &Path, theme_name: &str, theme_source: &str) -> PathBuf {
     let themes_directory = config_directory.join("themes");
-    std::fs::create_dir_all(&themes_directory).expect("create themes dir");
+    fs::create_dir_all(&themes_directory).expect("create themes dir");
     let theme_file_path = themes_directory.join(format!("{theme_name}.kdl"));
-    std::fs::write(&theme_file_path, theme_source).expect("write");
+    fs::write(&theme_file_path, theme_source).expect("write");
     theme_file_path
 }
 
 #[test]
 fn a_selected_theme_is_read_from_the_themes_directory_and_named_after_its_file() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    write_theme(
+    write_theme_file(
         test_directory.path(),
         "midnight",
         "version 1\ncolors {\n    accent \"#f5c2ff\"\n}\n",
     );
-    let mut warnings = Vec::new();
-    let layer =
-        load_theme_config(test_directory.path(), "midnight", &mut warnings).expect("theme loads");
-    assert_eq!(layer.theme_name, Some("midnight".to_string()));
+    let mut config_warnings = Vec::new();
+    let theme_config_layer =
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings)
+            .expect("theme loads");
+    assert_eq!(theme_config_layer.theme_name, Some("midnight".to_string()));
     assert_eq!(
-        layer.colors.expect("colors set").accent,
+        theme_config_layer.colors.expect("colors set").accent,
         Some(RgbColor {
             red: 0xf5,
             green: 0xc2,
             blue: 0xff
         })
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn selecting_the_default_theme_by_name_keeps_the_built_in_colors_silently() {
-    // `default` is the built-in theme, so it is never looked up on disk — and
-    // asking for it is a normal choice, not a problem to warn about.
+    // `default` names the built-in theme: no file is read and no warning is
+    // recorded.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), DEFAULT_THEME, &mut warnings),
+        load_theme_config(
+            test_directory.path(),
+            DEFAULT_THEME_NAME,
+            &mut config_warnings
+        ),
         None
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
@@ -308,29 +342,33 @@ fn a_default_named_theme_file_is_ignored_in_favor_of_the_built_in_theme() {
     // Even with a `themes/default.kdl` on disk, the reserved name means the
     // built-in colors: the file is never read.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    write_theme(
+    write_theme_file(
         test_directory.path(),
-        DEFAULT_THEME,
+        DEFAULT_THEME_NAME,
         "colors {\n    accent \"#ff0000\"\n}\n",
     );
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), DEFAULT_THEME, &mut warnings),
+        load_theme_config(
+            test_directory.path(),
+            DEFAULT_THEME_NAME,
+            &mut config_warnings
+        ),
         None
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn a_theme_with_no_file_falls_back_to_the_default_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), "missing", &mut warnings),
+        load_theme_config(test_directory.path(), "missing", &mut config_warnings),
         None
     );
     assert_eq!(
-        warnings,
+        config_warnings,
         vec![format!(
             "theme `missing` not found at {}; using the default theme",
             test_directory
@@ -344,31 +382,30 @@ fn a_theme_with_no_file_falls_back_to_the_default_with_a_warning() {
 
 #[test]
 fn a_path_traversing_theme_name_is_rejected_before_any_file_is_read() {
-    // `theme "../../secret"` must not reach a `.kdl` outside `themes/`.
+    // `theme "../../secret"` reads no file.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), "../../secret", &mut warnings),
+        load_theme_config(test_directory.path(), "../../secret", &mut config_warnings),
         None
     );
     assert_eq!(
-        warnings,
+        config_warnings,
         vec!["theme name `../../secret` must be a plain name; using the default theme".to_string()]
     );
 }
 
 #[test]
 fn an_empty_theme_name_is_rejected_before_any_file_is_read() {
-    // `""` has no file name at all, so it never joins to a path under
-    // `themes/`.
+    // `""` is not a plain name: no file under `themes/` is read.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), "", &mut warnings),
+        load_theme_config(test_directory.path(), "", &mut config_warnings),
         None
     );
     assert_eq!(
-        warnings,
+        config_warnings,
         vec!["theme name `` must be a plain name; using the default theme".to_string()]
     );
 }
@@ -378,20 +415,21 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
     // A theme file that parses but names an unknown color role applies its other
     // fields and records the skip, prefixed with the file it came from.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let config_file_path = write_theme(
+    let theme_file_path = write_theme_file(
         test_directory.path(),
         "midnight",
         "version 1\ncolors {\n    foreground \"#ffffff\"\n}\n",
     );
-    let mut warnings = Vec::new();
-    let layer = load_theme_config(test_directory.path(), "midnight", &mut warnings)
-        .expect("the theme loads");
-    assert_eq!(layer.theme_name, Some("midnight".to_string()));
+    let mut config_warnings = Vec::new();
+    let theme_config_layer =
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings)
+            .expect("the theme loads");
+    assert_eq!(theme_config_layer.theme_name, Some("midnight".to_string()));
     assert_eq!(
-        warnings,
+        config_warnings,
         vec![format!(
             "{}: ignored unknown key `colors.foreground`; did you mean `colors.ramp-end`?",
-            config_file_path.display()
+            theme_file_path.display()
         )]
     );
 }
@@ -399,72 +437,60 @@ fn an_unknown_theme_field_is_kept_as_a_path_prefixed_skip_warning() {
 #[test]
 fn a_theme_file_with_an_unsupported_version_falls_back_to_the_default_with_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let config_file_path = write_theme(test_directory.path(), "midnight", "version 999\n");
-    let mut warnings = Vec::new();
+    let theme_file_path = write_theme_file(test_directory.path(), "midnight", "version 999\n");
+    let parse_error =
+        parse_theme(&theme_file_path, "version 999\n").expect_err("version 999 is refused");
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), "midnight", &mut warnings),
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings),
         None
     );
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "theme `midnight` not applied ({}): ",
-            config_file_path.display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
-    );
-    assert!(
-        warnings[0].ends_with("; using the default theme"),
-        "unexpected warning: {}",
-        warnings[0]
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "theme `midnight` not applied ({}): {parse_error}; using the default theme",
+            theme_file_path.display()
+        )]
     );
 }
 
 #[test]
 fn an_unreadable_theme_file_reports_the_cause_and_the_fallback_in_one_line() {
-    // A directory named `midnight.kdl` exists but reads as no string on any
-    // platform, so the read fails with something other than `NotFound` and the
-    // built-in theme stands. One warning carries the path, the OS reason, and
-    // what koshi used instead.
+    // A directory named `midnight.kdl` fails to read with an error other than
+    // `NotFound` on every platform. One warning carries the path, the OS
+    // reason, and the fallback theme.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let config_file_path = test_directory.path().join("themes").join("midnight.kdl");
-    std::fs::create_dir_all(&config_file_path).expect("create dir in place of the file");
-    let mut warnings = Vec::new();
+    let theme_file_path = test_directory.path().join("themes").join("midnight.kdl");
+    fs::create_dir_all(&theme_file_path).expect("create dir in place of the file");
+    let read_error =
+        fs::read_to_string(&theme_file_path).expect_err("a directory reads as no string");
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), "midnight", &mut warnings),
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings),
         None
     );
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "theme `midnight` could not be read ({}): ",
-            config_file_path.display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
-    );
-    assert!(
-        warnings[0].ends_with("; using the default theme"),
-        "unexpected warning: {}",
-        warnings[0]
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "theme `midnight` could not be read ({}): {read_error}; using the default theme",
+            theme_file_path.display()
+        )]
     );
 }
 
 #[test]
-fn a_missing_theme_is_reported_as_missing_not_as_unreadable() {
-    // The absent case and the unreadable case are told apart by the error kind
-    // off a single read, so each warning names the real cause: a theme that was
-    // never there says "not found", never "could not be read".
+fn a_theme_missing_from_an_existing_themes_directory_is_reported_as_not_found() {
+    // An absent theme file gives the "not found" warning, never the "could not
+    // be read" one.
     let test_directory = tempfile::tempdir().expect("temp dir");
-    std::fs::create_dir_all(test_directory.path().join("themes")).expect("create themes dir");
-    let mut warnings = Vec::new();
+    fs::create_dir_all(test_directory.path().join("themes")).expect("create themes dir");
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_theme_config(test_directory.path(), "midnight", &mut warnings),
+        load_theme_config(test_directory.path(), "midnight", &mut config_warnings),
         None
     );
     assert_eq!(
-        warnings,
+        config_warnings,
         vec![format!(
             "theme `midnight` not found at {}; using the default theme",
             test_directory
@@ -476,54 +502,35 @@ fn a_missing_theme_is_reported_as_missing_not_as_unreadable() {
     );
 }
 
-#[test]
-fn every_theme_failure_says_which_theme_stands_instead() {
-    // One assertion over all four failure paths: whatever went wrong, the last
-    // thing the user reads is what koshi actually drew with.
-    let test_directory = tempfile::tempdir().expect("temp dir");
-    write_theme(test_directory.path(), "broken", "version 999\n");
-    let unreadable = test_directory.path().join("themes").join("unreadable.kdl");
-    std::fs::create_dir_all(&unreadable).expect("create dir in place of the file");
-
-    for theme_name in ["../../secret", "missing", "unreadable", "broken"] {
-        let mut warnings = Vec::new();
-        assert_eq!(
-            load_theme_config(test_directory.path(), theme_name, &mut warnings),
-            None
-        );
-        let last_warning = warnings.last().expect("a warning per failure");
-        assert!(
-            last_warning.ends_with("; using the default theme"),
-            "`{theme_name}` failed without naming the fallback: {last_warning}"
-        );
-    }
-}
-
 // --- load_keybindings_config: valid and unparseable files ---
 
 #[test]
 fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("keybinding.kdl");
-    std::fs::write(
+    fs::write(
         &config_file_path,
         "version 1\nmode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
     )
     .expect("write");
-    let mut warnings = Vec::new();
-    let layer = load_keybindings_config(&config_file_path, &mut warnings).expect("the file loads");
-    assert_eq!(layer.chord_timeout_ms, None);
-    assert_eq!(layer.which_key_delay_ms, None);
-    assert_eq!(layer.maximum_chord_depth, None);
-    assert_eq!(layer.leader, None);
-    assert_eq!(layer.unlock_alternative, None);
+    let mut config_warnings = Vec::new();
+    let keybindings_config_layer =
+        load_keybindings_config(&config_file_path, &mut config_warnings).expect("the file loads");
+    assert_eq!(keybindings_config_layer.chord_timeout_ms, None);
+    assert_eq!(keybindings_config_layer.which_key_delay_ms, None);
+    assert_eq!(keybindings_config_layer.maximum_chord_depth, None);
+    assert_eq!(keybindings_config_layer.leader, None);
+    assert_eq!(keybindings_config_layer.unlock_alternative, None);
     assert_eq!(
-        layer.mode_bindings_by_name,
+        keybindings_config_layer.mode_bindings_by_name,
         Some(BTreeMap::from([(
             ModeName::from_text("normal"),
             ModeBindings {
                 bound_action_by_key_sequence: BTreeMap::from([(
-                    KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y'))),
+                    KeySequence::from(KeyChord::from_parts(
+                        BindingModifierFlags::CTRL,
+                        Key::Char('y')
+                    )),
                     BoundAction {
                         action_reference: ActionReference::from_core_action_name("new-tab")
                             .expect("a core action name"),
@@ -533,48 +540,43 @@ fn loading_a_valid_keybinding_file_returns_a_layer_without_warnings() {
             },
         )]))
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn loading_an_absent_keybinding_file_is_none_without_a_warning() {
     let test_directory = tempfile::tempdir().expect("temp dir");
-    let mut warnings = Vec::new();
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_keybindings_config(&test_directory.path().join("keybinding.kdl"), &mut warnings),
+        load_keybindings_config(
+            &test_directory.path().join("keybinding.kdl"),
+            &mut config_warnings
+        ),
         None
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
 #[test]
 fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
     // `keybinding.kdl` is all-or-nothing: any parse error drops the file.
+    let keybinding_source = "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n";
     let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("keybinding.kdl");
-    std::fs::write(
-        &config_file_path,
-        "mode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n",
-    )
-    .expect("write");
-    let mut warnings = Vec::new();
+    fs::write(&config_file_path, keybinding_source).expect("write");
+    let parse_error = parse_keybindings(&config_file_path, keybinding_source)
+        .expect_err("the file does not parse");
+    let mut config_warnings = Vec::new();
     assert_eq!(
-        load_keybindings_config(&config_file_path, &mut warnings),
+        load_keybindings_config(&config_file_path, &mut config_warnings),
         None
     );
-    assert_eq!(warnings.len(), 1);
-    assert!(
-        warnings[0].starts_with(&format!(
-            "keybinding.kdl not applied ({}): ",
+    assert_eq!(
+        config_warnings,
+        vec![format!(
+            "keybinding.kdl not applied ({}): {parse_error}; using defaults",
             config_file_path.display()
-        )),
-        "unexpected warning: {}",
-        warnings[0]
-    );
-    assert!(
-        warnings[0].ends_with("; using defaults"),
-        "unexpected warning: {}",
-        warnings[0]
+        )]
     );
 }
 
@@ -583,14 +585,14 @@ fn an_unparseable_keybinding_file_drops_the_whole_file_with_a_warning() {
 #[test]
 fn append_config_field_warnings_prefixes_each_skip_with_the_file_path() {
     let config_file_path = Path::new("some/koshi.kdl");
-    let mut warnings = vec!["earlier".to_string()];
+    let mut config_warnings = vec!["earlier".to_string()];
     append_config_field_warnings(
         config_file_path,
         &["first skip".to_string(), "second skip".to_string()],
-        &mut warnings,
+        &mut config_warnings,
     );
     assert_eq!(
-        warnings,
+        config_warnings,
         vec![
             "earlier".to_string(),
             format!("{}: first skip", config_file_path.display()),
@@ -602,14 +604,13 @@ fn append_config_field_warnings_prefixes_each_skip_with_the_file_path() {
 #[test]
 fn append_config_field_warnings_adds_nothing_for_an_empty_skip_list() {
     let config_file_path = Path::new("themes/midnight.kdl");
-    let mut warnings = Vec::new();
-    append_config_field_warnings(config_file_path, &[], &mut warnings);
-    assert_eq!(warnings, Vec::<String>::new());
+    let mut config_warnings = Vec::new();
+    append_config_field_warnings(config_file_path, &[], &mut config_warnings);
+    assert_eq!(config_warnings, Vec::<String>::new());
 }
 
-/// The startup wiring: the `koshi.kdl` knob reaches the process-wide gate.
-/// One test walks both answers, because the gate is one flag and separate
-/// tests would race each other over it.
+/// `apply_beta_gate` opens the process-wide gate for `allow-beta-features
+/// #true` and closes it for `#false` and for no `koshi.kdl` at all.
 #[test]
 fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     let enabled_config = PartialKoshiConfig {
@@ -633,28 +634,27 @@ fn apply_beta_gate_opens_the_gate_only_when_the_file_asks_for_it() {
     apply_beta_gate(None);
     assert!(!koshi_beta::should_allow_beta_features());
 
-    // The whole chain from text on disk: the reader `load_app_layer` uses, onto
-    // the gate, into a function carrying the attribute. `load_app_layer` takes
-    // its directory from the platform, so the file goes to `load_app_config` here.
-    let test_directory = TempDir::new().unwrap();
+    // Text on disk → `load_app_config` → `apply_beta_gate` → a
+    // `#[beta_feature]` function.
+    let test_directory = tempfile::tempdir().expect("temp dir");
     let config_file_path = test_directory.path().join("koshi.kdl");
 
-    fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").unwrap();
-    let mut warnings = Vec::new();
+    fs::write(&config_file_path, "version 2\nallow-beta-features #true\n").expect("write");
+    let mut config_warnings = Vec::new();
     apply_beta_gate(
-        load_app_config(&config_file_path, &mut warnings)
+        load_app_config(&config_file_path, &mut config_warnings)
             .map(|app_config_file| app_config_file.layer),
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
     assert_eq!(mock_beta_entry_point(), 1);
 
-    fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").unwrap();
-    let mut warnings = Vec::new();
+    fs::write(&config_file_path, "version 2\nallow-beta-features #false\n").expect("write");
+    let mut config_warnings = Vec::new();
     apply_beta_gate(
-        load_app_config(&config_file_path, &mut warnings)
+        load_app_config(&config_file_path, &mut config_warnings)
             .map(|app_config_file| app_config_file.layer),
     );
-    assert_eq!(warnings, Vec::<String>::new());
+    assert_eq!(config_warnings, Vec::<String>::new());
     assert_eq!(mock_beta_entry_point(), 0);
 }
 
@@ -769,9 +769,8 @@ fn build_other_user_access_config_layer_with_shared_sessions_directory(
     }
 }
 
-/// The directory a policy shares through, or `None` when the session serves
-/// only the user who started it. `OtherUsers` carries a closure, so the
-/// directory is what a test compares.
+/// The directory `other_users_policy` shares through, or `None` when the
+/// session serves only the user who started it.
 fn get_shared_sessions_directory(other_users_policy: Option<OtherUsers>) -> Option<PathBuf> {
     other_users_policy.map(|other_users_access_policy| other_users_access_policy.shared_directory)
 }
@@ -779,7 +778,7 @@ fn get_shared_sessions_directory(other_users_policy: Option<OtherUsers>) -> Opti
 #[test]
 fn a_fresh_install_serves_only_the_user_who_started_the_session() {
     assert_eq!(
-        get_shared_sessions_directory(resolve_other_users_policy(None, None)),
+        get_shared_sessions_directory(resolve_other_users_policy(None, false)),
         None
     );
 }
@@ -789,7 +788,7 @@ fn a_config_turning_the_switch_off_serves_only_that_user() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
             Some(&build_other_user_access_config_layer(false)),
-            None,
+            false,
         )),
         None
     );
@@ -800,7 +799,7 @@ fn a_config_turning_the_switch_on_shares_through_the_machine_wide_directory() {
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
             Some(&build_other_user_access_config_layer(true)),
-            None,
+            false,
         )),
         koshi_paths::resolve_shared_sessions_directory()
     );
@@ -816,7 +815,7 @@ fn a_config_naming_a_shared_directory_shares_through_that_one() {
                     "/var/run/koshi"
                 )
             ),
-            None
+            false
         )),
         Some(PathBuf::from("/var/run/koshi"))
     );
@@ -824,7 +823,7 @@ fn a_config_naming_a_shared_directory_shares_through_that_one() {
 
 #[test]
 fn naming_a_shared_directory_alone_serves_only_this_user() {
-    // The directory says where the sockets would go, never who may reach them.
+    // `shared-sessions-dir` without `allow-other-users #true` shares nothing.
     assert_eq!(
         get_shared_sessions_directory(resolve_other_users_policy(
             Some(
@@ -833,7 +832,7 @@ fn naming_a_shared_directory_alone_serves_only_this_user() {
                     "/var/run/koshi"
                 )
             ),
-            None
+            false
         )),
         None
     );
@@ -848,7 +847,7 @@ fn the_flag_shares_a_session_whose_config_says_no() {
                 "/var/run/koshi",
             ),
         ),
-        Some(true),
+        true,
     )
     .expect("the flag turns the switch on");
 
@@ -856,8 +855,8 @@ fn the_flag_shares_a_session_whose_config_says_no() {
         other_users_policy.shared_directory,
         PathBuf::from("/var/run/koshi")
     );
-    // A service unit started under the flag keeps serving whatever the app file
-    // says afterwards, so the live read answers the same every time.
+    // Under the flag, `is_enabled` returns `true` on every call, whatever the
+    // app file says.
     assert!((other_users_policy.is_enabled)());
     assert!((other_users_policy.is_enabled)());
 }
@@ -865,26 +864,8 @@ fn the_flag_shares_a_session_whose_config_says_no() {
 #[test]
 fn the_flag_shares_a_session_that_has_no_config_file_at_all() {
     assert_eq!(
-        get_shared_sessions_directory(resolve_other_users_policy(None, Some(true))),
+        get_shared_sessions_directory(resolve_other_users_policy(None, true)),
         koshi_paths::resolve_shared_sessions_directory()
-    );
-}
-
-#[test]
-fn a_flag_naming_no_other_users_serves_only_this_user() {
-    // `--allow-other-users` sends `Some(true)` or nothing, so no command line
-    // spells this today. An explicit answer beats the app file either way.
-    assert_eq!(
-        get_shared_sessions_directory(resolve_other_users_policy(
-            Some(
-                &build_other_user_access_config_layer_with_shared_sessions_directory(
-                    true,
-                    "/var/run/koshi"
-                )
-            ),
-            Some(false)
-        )),
-        None
     );
 }
 

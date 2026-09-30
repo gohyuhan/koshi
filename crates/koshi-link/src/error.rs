@@ -20,11 +20,11 @@ pub enum CliError {
     #[error("invalid arguments: {detail}")]
     InvalidArgs { detail: String },
     /// The described key sequence is not bound in any mode.
-    #[error("nothing is bound on `{sequence}` in any mode")]
-    UnboundKey { sequence: String },
+    #[error("nothing is bound on `{key_sequence_text}` in any mode")]
+    UnboundKey { key_sequence_text: String },
     /// A keybinding file dry-run found problems.
-    #[error("keybinding file {keymap_file_path} failed validation")]
-    InvalidKeymapFile { keymap_file_path: String },
+    #[error("keybinding file {keybinding_file_path} failed validation")]
+    InvalidKeybindingFile { keybinding_file_path: String },
     /// A config command failed, or a service could not migrate config before startup.
     #[error("config failed: {detail}")]
     Config { detail: String },
@@ -35,6 +35,10 @@ pub enum CliError {
     /// The runtime IPC endpoint could not be reached.
     #[error("IPC unavailable: {detail}")]
     IpcUnavailable { detail: String },
+    /// The peer refused the Hello: none of the protocol versions it speaks is
+    /// one this build speaks. `detail` is the peer's own sentence.
+    #[error("IPC unavailable: {detail}")]
+    ProtocolVersionRefused { detail: String },
     /// The named (or in-session) session is not running: nothing advertises
     /// its endpoint, or nothing listens behind the advertised socket.
     #[error("session {session_name} is not running")]
@@ -74,18 +78,20 @@ fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String 
 /// The single error-to-exit-code table: every [`CliError`] class maps to the
 /// [`CliExitCode`] the binary reports to the OS. A usage or config problem
 /// exits 2, a session that is not running exits 3, an unreachable IPC endpoint
-/// exits 4, and a runtime error, a rejected command, or a failed update exits
-/// 1.
+/// or a refused protocol version exits 4, and a runtime error, a rejected
+/// command, or a failed update exits 1.
 impl From<&CliError> for CliExitCode {
     fn from(cli_error: &CliError) -> Self {
         match cli_error {
             CliError::UnknownAction { .. }
             | CliError::InvalidArgs { .. }
             | CliError::UnboundKey { .. }
-            | CliError::InvalidKeymapFile { .. }
+            | CliError::InvalidKeybindingFile { .. }
             | CliError::Config { .. }
             | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
-            CliError::IpcUnavailable { .. } => CliExitCode::IpcUnavailable,
+            CliError::IpcUnavailable { .. } | CliError::ProtocolVersionRefused { .. } => {
+                CliExitCode::IpcUnavailable
+            }
             CliError::SessionNotFound { .. } | CliError::NoSessions => CliExitCode::SessionNotFound,
             CliError::Runtime { .. }
             | CliError::CommandRejected { .. }

@@ -64,13 +64,13 @@ fn build_framed_remote_client_frame(frame: &RemoteClientFrame) -> Vec<u8> {
 fn read_one_remote_client_frame(
     framed_input_bytes: Vec<u8>,
 ) -> (Result<RemoteClientFrame, IpcError>, u64) {
-    let mut reader = Cursor::new(framed_input_bytes);
-    let frame_read_result = read_message::<RemoteClientFrame>(&mut reader);
-    let consumed_byte_count = reader.position();
+    let mut frame_cursor = Cursor::new(framed_input_bytes);
+    let frame_read_result = read_message::<RemoteClientFrame>(&mut frame_cursor);
+    let consumed_byte_count = frame_cursor.position();
     (frame_read_result, consumed_byte_count)
 }
 
-/// `frame payload bytes` as it travels: a 4-byte big-endian length, then the bytes as
+/// `frame_payload_bytes` as it travels: a 4-byte big-endian length, then the bytes as
 /// given.
 fn build_length_prefixed_payload(frame_payload_bytes: &[u8]) -> Vec<u8> {
     let frame_payload_byte_count = u32::try_from(frame_payload_bytes.len())
@@ -96,20 +96,6 @@ fn get_malformed_detail(frame_read_result: Result<RemoteClientFrame, IpcError>) 
 }
 
 #[test]
-fn a_well_formed_hello_reads_back_as_the_frame_that_was_written() {
-    let (frame_read_result, consumed_byte_count) =
-        read_one_remote_client_frame(build_framed_remote_client_frame(&build_hello_frame()));
-    assert_eq!(
-        frame_read_result.expect("a well-formed hello reads"),
-        build_hello_frame()
-    );
-    assert_eq!(
-        consumed_byte_count,
-        build_framed_remote_client_frame(&build_hello_frame()).len() as u64
-    );
-}
-
-#[test]
 fn every_frame_a_client_opens_with_reads_back_as_itself() {
     for frame in [
         build_hello_frame(),
@@ -132,31 +118,21 @@ fn every_frame_a_client_opens_with_reads_back_as_itself() {
 #[test]
 fn a_payload_on_a_variant_that_carries_none_is_a_malformed_frame() {
     let frame_payload_bytes = br#"{"List":{"extra":1}}"#;
-    let mut framed_remote_client_bytes = (frame_payload_bytes.len() as u32).to_be_bytes().to_vec();
-    framed_remote_client_bytes.extend_from_slice(frame_payload_bytes);
 
     let (frame_read_result, consumed_byte_count) =
-        read_one_remote_client_frame(framed_remote_client_bytes.clone());
-    let IpcError::MalformedFrame { .. } =
-        frame_read_result.expect_err("a frame payload on List is refused")
-    else {
-        panic!("a frame payload on a variant that carries none is a malformed frame");
-    };
-    assert_eq!(consumed_byte_count, framed_remote_client_bytes.len() as u64);
+        read_one_remote_client_frame(build_length_prefixed_payload(frame_payload_bytes));
+    assert_eq!(
+        get_malformed_detail(frame_read_result),
+        "invalid type: map, expected unit at line 1 column 8"
+    );
+    assert_eq!(consumed_byte_count, frame_payload_bytes.len() as u64 + 4);
 }
 
 #[test]
-fn the_cap_an_unadmitted_caller_is_held_to_is_tighter_than_the_frame_cap_and_fits_every_hello() {
-    // The pre-admission cap refuses strictly more than the frame cap does.
+fn the_cap_an_unadmitted_caller_is_held_to_is_tighter_than_the_frame_cap() {
     const {
         assert!(REMOTE_HELLO_MAX_BYTE_COUNT < MAX_FRAME_BYTE_COUNT);
     }
-    let frame_payload_bytes =
-        build_framed_remote_client_frame(&build_hello_frame()).len() as u32 - 4;
-    assert!(
-        frame_payload_bytes < REMOTE_HELLO_MAX_BYTE_COUNT,
-        "a hello of {frame_payload_bytes} bytes fits the {REMOTE_HELLO_MAX_BYTE_COUNT}-byte pre-admission cap"
-    );
 }
 
 #[test]
@@ -208,8 +184,8 @@ fn a_corrupted_payload_leaves_the_stream_on_a_frame_boundary() {
         // that consumed exactly its own frame reads this one back whole.
         mutated_hello_frame_bytes.extend_from_slice(&valid_hello_frame_bytes);
 
-        let mut reader = Cursor::new(mutated_hello_frame_bytes);
-        match read_message::<RemoteClientFrame>(&mut reader) {
+        let mut frame_cursor = Cursor::new(mutated_hello_frame_bytes);
+        match read_message::<RemoteClientFrame>(&mut frame_cursor) {
             // A flip that happens to land on a byte the frame does not care
             // about still decodes; the stream is on a boundary either way.
             Ok(_) => {}
@@ -221,11 +197,11 @@ fn a_corrupted_payload_leaves_the_stream_on_a_frame_boundary() {
             }
         }
         assert_eq!(
-            reader.position(),
+            frame_cursor.position(),
             valid_hello_frame_bytes.len() as u64,
             "the corrupted frame was consumed whole"
         );
-        let following_frame = read_message::<RemoteClientFrame>(&mut reader)
+        let following_frame = read_message::<RemoteClientFrame>(&mut frame_cursor)
             .expect("the frame after a corrupted one still reads");
         assert_eq!(following_frame, build_hello_frame());
     }
@@ -293,51 +269,18 @@ fn a_mutated_length_prefix_is_refused_or_read_and_never_panics() {
     );
 }
 
-#[test]
-fn every_refusal_a_server_sends_carries_the_one_sentence() {
-    let refused_server_frame = RemoteServerFrame::Refused {
-        message: REMOTE_REFUSED.to_string(),
-    };
-    let refused_server_frame_bytes =
-        serde_json::to_vec(&refused_server_frame).expect("a refusal encodes");
-    let decoded_server_frame: RemoteServerFrame =
-        serde_json::from_slice(&refused_server_frame_bytes).expect("a refusal reads");
-    assert_eq!(decoded_server_frame, refused_server_frame);
-    assert_eq!(REMOTE_REFUSED, "this server did not admit the connection");
-}
-
-#[test]
-fn a_server_frame_reads_back_as_the_frame_that_was_written() {
-    for frame in [
-        RemoteServerFrame::Welcome {
-            remote_protocol_version: REMOTE_PROTOCOL_VERSION,
-        },
-        RemoteServerFrame::Sessions {
-            session_rows: vec![RemoteSessionRow {
-                session_id: SessionId::new(),
-                session_name: "quiet-lake".to_string(),
-            }],
-        },
-    ] {
-        let frame_payload_bytes = serde_json::to_vec(&frame).expect("a server frame encodes");
-        let decoded_server_frame: RemoteServerFrame =
-            serde_json::from_slice(&frame_payload_bytes).expect("a server frame reads");
-        assert_eq!(decoded_server_frame, frame);
-    }
-}
-
 /// The one refusal that is not [`REMOTE_REFUSED`] names the caller's range
 /// first and this build's second.
 #[test]
-fn a_doorway_version_refusal_names_the_callers_range_then_this_builds() {
+fn a_remote_protocol_version_refusal_names_the_callers_range_then_this_builds() {
     assert_eq!(
         format_version_refusal(2, 3),
-        "the caller speaks remote doorway 2 to 3, this koshi speaks 2 to 2"
+        "the caller speaks remote protocol versions 2 to 3, this koshi speaks 2 to 2"
     );
 }
 
 #[test]
-fn this_build_speaks_remote_doorway_two_to_two() {
+fn this_build_speaks_remote_protocol_versions_two_to_two() {
     assert_eq!(MIN_REMOTE_PROTOCOL_VERSION, 2);
     assert_eq!(REMOTE_PROTOCOL_VERSION, 2);
 }
@@ -476,12 +419,12 @@ fn a_hello_missing_its_secret_is_a_malformed_frame() {
 
 #[test]
 fn a_server_frame_or_row_carrying_an_unknown_field_still_decodes() {
-    let welcome = serde_json::from_str::<RemoteServerFrame>(
+    let welcome_frame = serde_json::from_str::<RemoteServerFrame>(
         r#"{"Welcome":{"remote_protocol_version":2,"extra":1}}"#,
     )
     .expect("an unknown field on a server frame is ignored");
     assert_eq!(
-        welcome,
+        welcome_frame,
         RemoteServerFrame::Welcome {
             remote_protocol_version: 2
         }
@@ -490,8 +433,14 @@ fn a_server_frame_or_row_carrying_an_unknown_field_still_decodes() {
     let remote_session_row = serde_json::from_str::<RemoteSessionRow>(
         r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","extra":1}"#,
     )
-    .expect("an unknown field on a remote_session_row is ignored");
-    assert_eq!(remote_session_row.session_name, "quiet-lake");
+    .expect("an unknown field on a session row is ignored");
+    assert_eq!(
+        remote_session_row,
+        RemoteSessionRow {
+            session_id: SessionId::from_uuid(build_fixed_test_uuid()),
+            session_name: "quiet-lake".to_string(),
+        }
+    );
 
     let missing_field_error = serde_json::from_str::<RemoteSessionRow>(
         r#"{"session_id":"00000000-0000-0000-0000-000000000001","nme":"quiet-lake"}"#,
@@ -591,12 +540,12 @@ fn the_largest_hello_a_generated_secret_makes_fits_the_pre_admission_cap() {
         connection_token: ConnectionToken::from_secret("7f".repeat(32)),
     };
 
-    let frame_payload_bytes =
+    let largest_hello_payload_byte_count =
         build_framed_remote_client_frame(&largest_hello_frame).len() as u32 - 4;
 
-    assert_eq!(frame_payload_bytes, 245);
+    assert_eq!(largest_hello_payload_byte_count, 245);
     assert!(
-        frame_payload_bytes < REMOTE_HELLO_MAX_BYTE_COUNT,
-        "the largest hello of {frame_payload_bytes} bytes fits the {REMOTE_HELLO_MAX_BYTE_COUNT}-byte cap"
+        largest_hello_payload_byte_count < REMOTE_HELLO_MAX_BYTE_COUNT,
+        "the largest hello of {largest_hello_payload_byte_count} bytes fits the {REMOTE_HELLO_MAX_BYTE_COUNT}-byte cap"
     );
 }

@@ -558,9 +558,8 @@ fn parse_terminal_config(
                 field_name,
                 parse_warnings,
             ),
-            // `extended-keys` decides what a pane that pushed no Kitty
-            // keyboard flag receives for a key whose legacy bytes another key
-            // also owns.
+            // `extended-keys` selects how a pane receives keys whose legacy
+            // bytes another key also owns.
             "extended-keys" => set_parsed_field(
                 &mut partial_terminal_config.extended_keys_mode,
                 parse_extended_keys_mode(field_node),

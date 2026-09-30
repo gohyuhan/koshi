@@ -2,12 +2,13 @@
 //! bar and keyboard resolution.
 //!
 //! [`KeymapHintCatalog::from_keymap_layers_config_and_registry`] builds the
-//! catalog at startup from the keybinding layers and the action table: it folds the layers with
-//! [`merge_keymaps`], joins every surviving binding to its action's display
-//! name from the [`ActionRegistry`], and files the result per mode behind
-//! [`Arc`]s. [`KeymapHintCatalog::build_hints_for_mode`] then hands one mode's data out
-//! as `Arc` clones, and [`KeymapHintCatalog::match_sequence`] answers one
-//! pending key sequence from the same folded map.
+//! catalog at startup from the keybinding layers and the action table: it
+//! folds the layers with [`merge_keymaps`], joins every surviving binding to
+//! its action's display name from the [`ActionRegistry`], and files the
+//! result per mode behind [`Arc`]s. [`KeymapHintCatalog::build_hints_for_mode`]
+//! then hands one mode's data out as `Arc` clones, and
+//! [`KeymapHintCatalog::match_sequence`] answers one pending key sequence from
+//! the same folded map.
 //!
 //! [`HintBinding`] and [`KeymapHints`] describe the keymap; the renderer
 //! re-exports both.
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use crate::conflict::{build_keymap_layers, KeymapLayer};
 use crate::key::Leader;
-use crate::keymap_merge::{merge_keymaps, MergedKeyMap, MergedModeMap};
+use crate::keymap_merge::{merge_keymaps, MergedKeymap, MergedModeMap};
 use crate::types::{build_default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
 use koshi_core::action::ActionReference;
 use koshi_core::key::{KeyChord, KeySequence};
@@ -74,7 +75,7 @@ pub struct HintBinding {
 #[derive(Clone)]
 pub struct KeymapHintCatalog {
     /// Liveness-filtered lookup table shared by hints and keyboard resolution.
-    merged_keymap: Arc<MergedKeyMap>,
+    merged_keymap: Arc<MergedKeymap>,
     /// Multi-chord wait before an incomplete prefix falls through.
     chord_timeout_duration: Duration,
     /// The chord that unlocks a locked client, ahead of every other lookup.
@@ -88,8 +89,9 @@ pub struct KeymapHintCatalog {
     prefix_labels: Arc<BTreeMap<KeyChord, String>>,
     /// True when the user keymap was reverted to defaults over a key
     /// collision.
-    /// [`from_keymap_layers_config_and_registry`](Self::from_keymap_layers_config_and_registry) builds it `false`;
-    /// [`mark_reverted_to_defaults`](Self::mark_reverted_to_defaults) sets it.
+    /// [`from_keymap_layers_config_and_registry`](Self::from_keymap_layers_config_and_registry)
+    /// builds it `false`; [`mark_reverted_to_defaults`](Self::mark_reverted_to_defaults)
+    /// sets it.
     is_reverted_to_defaults: bool,
 }
 
@@ -104,20 +106,19 @@ impl KeymapHintCatalog {
         )
     }
 
-    /// Resolve the hint catalog from `layers` and the effective keybinding
-    /// configuration. Reads `chord_timeout_ms`, `unlock_alternative`,
-    /// `maximum_chord_depth` and `leader`; `modes` is not read, `layers` carries
-    /// the bindings.
+    /// Resolve the hint catalog from `keymap_layers` and the effective
+    /// keybinding configuration. Reads `chord_timeout_ms`,
+    /// `unlock_alternative`, `maximum_chord_depth` and `leader`; `modes` is not
+    /// read, `keymap_layers` carries the bindings.
     ///
     /// Folds the layers with [`merge_keymaps`]: a binding that does not fire
-    /// yields no hint — its action unregistered, its arguments unresolvable,
-    /// a locked-mode sequence of two or more chords holding the unlock
-    /// chord, or a sequence longer than
-    /// `maximum_chord_depth`. In locked mode every entry firing `core:unlock` is
-    /// flagged pinned; the hint bar sorts pinned hints before unpinned ones
-    /// in the same modifier group.
+    /// yields no hint — its action unregistered, its arguments unresolvable, a
+    /// locked-mode sequence of two or more chords holding the unlock chord, or
+    /// a sequence longer than `maximum_chord_depth`. In locked mode every entry
+    /// firing `core:unlock` is flagged pinned; the hint bar sorts pinned hints
+    /// before unpinned ones in the same modifier group.
     pub fn from_keymap_layers_config_and_registry(
-        layers: &[KeymapLayer],
+        keymap_layers: &[KeymapLayer],
         keybindings_config: &KeybindingsConfig,
         registry: &ActionRegistry,
     ) -> Self {
@@ -127,7 +128,7 @@ impl KeymapHintCatalog {
             .unlock_alternative
             .unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
         let merged_keymap = merge_keymaps(
-            layers,
+            keymap_layers,
             keybindings_config.unlock_alternative,
             keybindings_config.maximum_chord_depth,
             registry,
@@ -182,12 +183,12 @@ impl KeymapHintCatalog {
 
     /// Resolve one pending sequence in a built-in mode.
     ///
-    /// [`KeyMatch::exact_bound_action`] holds the binding `key_sequence` fires, the
-    /// user-authored entry ahead of the surviving default.
-    /// [`KeyMatch::has_longer_key_sequence`] is true when some binding in the mode
-    /// is longer than `key_sequence` and opens with it. A mode with no bindings
-    /// answers `KeyMatch::default()`: `exact_bound_action` is `None` and
-    /// `has_longer_key_sequence` is false.
+    /// [`KeyMatch::exact_bound_action`] holds the binding `key_sequence` fires,
+    /// the user-authored entry ahead of the surviving default.
+    /// [`KeyMatch::has_longer_key_sequence`] is true when some binding in the
+    /// mode is longer than `key_sequence` and opens with it. A mode with no
+    /// bindings answers `KeyMatch::default()`: `exact_bound_action` is `None`
+    /// and `has_longer_key_sequence` is false.
     pub fn match_sequence(&self, lock_mode: LockMode, key_sequence: &KeySequence) -> KeyMatch {
         let Some(merged_mode_map) = self
             .merged_keymap
@@ -199,7 +200,7 @@ impl KeymapHintCatalog {
         let exact_bound_action = merged_mode_map
             .user_bindings_by_key_sequence
             .get(key_sequence)
-            .map(|binding| binding.bound_action.clone())
+            .map(|merged_binding| merged_binding.bound_action.clone())
             .or_else(|| {
                 merged_mode_map
                     .default_bindings_by_key_sequence
@@ -263,11 +264,12 @@ pub struct KeyMatch {
     pub has_longer_key_sequence: bool,
 }
 
-/// True when `bindings_by_key_sequence` holds a key longer than `key_sequence` that opens with it.
+/// True when `bindings_by_key_sequence` holds a key longer than `key_sequence`
+/// that opens with it.
 ///
 /// Reads only the first key after `key_sequence` in sort order: keys sort
-/// lexicographically by chord, and every longer key opening with `key_sequence`
-/// sorts directly after it.
+/// lexicographically by chord, and every longer key opening with
+/// `key_sequence` sorts directly after it.
 fn has_longer_key_sequence_starting_with<Binding>(
     bindings_by_key_sequence: &BTreeMap<KeySequence, Binding>,
     key_sequence: &KeySequence,

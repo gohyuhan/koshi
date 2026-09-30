@@ -34,16 +34,16 @@ mod unix {
 
     #[test]
     fn control_reports_the_child_process_id_it_was_built_with() {
-        let control = PtyChildKillControl::from_process_id(4321);
-        assert_eq!(control.get_child_process_id(), 4321);
+        let kill_control = PtyChildKillControl::from_process_id(4321);
+        assert_eq!(kill_control.get_child_process_id(), 4321);
     }
 
     #[test]
     fn request_child_stop_terminates_the_child_with_sigterm() {
         let mut child_process = spawn_sleeper();
-        let control = PtyChildKillControl::from_process_id(child_process.id());
+        let kill_control = PtyChildKillControl::from_process_id(child_process.id());
 
-        assert_eq!(control.request_child_stop(), StopRequest::Delivered);
+        assert_eq!(kill_control.request_child_stop(), StopRequest::Delivered);
 
         let child_exit_status = child_process.wait().expect("reap child");
         // SIGTERM = 15; sleep does not catch it, so it dies by that signal and
@@ -60,8 +60,8 @@ mod unix {
         child_process.wait().expect("reap child");
 
         // The pid is gone, so `kill` answers ESRCH and nothing was signalled.
-        let control = PtyChildKillControl::from_process_id(process_id);
-        assert_eq!(control.request_child_stop(), StopRequest::NotDelivered);
+        let kill_control = PtyChildKillControl::from_process_id(process_id);
+        assert_eq!(kill_control.request_child_stop(), StopRequest::NotDelivered);
     }
 
     #[test]
@@ -72,9 +72,9 @@ mod unix {
         child_process.wait().expect("reap child");
 
         // The pid is gone and never led a group, so `killpg` answers ESRCH.
-        let control = PtyChildKillControl::from_process_id(process_id);
+        let kill_control = PtyChildKillControl::from_process_id(process_id);
         assert_eq!(
-            control.request_process_tree_stop(),
+            kill_control.request_process_tree_stop(),
             StopRequest::NotDelivered
         );
     }
@@ -86,9 +86,9 @@ mod unix {
         child_process.kill().expect("kill the child");
         child_process.wait().expect("reap child");
 
-        let control = PtyChildKillControl::from_process_id(process_id);
+        let kill_control = PtyChildKillControl::from_process_id(process_id);
         assert_eq!(
-            control.force_kill_child(),
+            kill_control.force_kill_child(),
             Err(build_no_such_process_error())
         );
     }
@@ -100,9 +100,9 @@ mod unix {
         child_process.kill().expect("kill the child");
         child_process.wait().expect("reap child");
 
-        let control = PtyChildKillControl::from_process_id(process_id);
+        let kill_control = PtyChildKillControl::from_process_id(process_id);
         assert_eq!(
-            control.force_kill_process_tree(),
+            kill_control.force_kill_process_tree(),
             Err(build_no_such_process_error())
         );
     }
@@ -110,17 +110,17 @@ mod unix {
     #[test]
     fn a_group_stop_request_that_finds_no_group_reports_nothing_received_it() {
         let mut child_process = spawn_sleeper();
-        let control = PtyChildKillControl::from_process_id(child_process.id());
+        let kill_control = PtyChildKillControl::from_process_id(child_process.id());
 
         // The child is not a process-group leader, so no group carries its pid
         // and `killpg` answers ESRCH. It signals nothing, so the child is still
         // alive to clean up below.
         assert_eq!(
-            control.request_process_tree_stop(),
+            kill_control.request_process_tree_stop(),
             StopRequest::NotDelivered
         );
 
-        control
+        kill_control
             .force_kill_child()
             .expect("clean up the still-live child");
         let child_exit_status = child_process.wait().expect("reap child");
@@ -130,9 +130,9 @@ mod unix {
     #[test]
     fn force_kills_the_child_with_sigkill() {
         let mut child_process = spawn_sleeper();
-        let control = PtyChildKillControl::from_process_id(child_process.id());
+        let kill_control = PtyChildKillControl::from_process_id(child_process.id());
 
-        control.force_kill_child().expect("SIGKILL delivered");
+        kill_control.force_kill_child().expect("SIGKILL delivered");
 
         let child_exit_status = child_process.wait().expect("reap child");
         // SIGKILL = 9.
@@ -143,17 +143,17 @@ mod unix {
     #[test]
     fn a_group_kill_that_finds_no_group_reports_a_signal_error() {
         let mut child_process = spawn_sleeper();
-        let control = PtyChildKillControl::from_process_id(child_process.id());
+        let kill_control = PtyChildKillControl::from_process_id(child_process.id());
 
         // The child is not a process-group leader, so no group has its pid;
         // `killpg` finds nothing (ESRCH) and the failure maps to `Signal`. It
         // kills nothing, so the child is still alive to clean up below.
         assert_eq!(
-            control.force_kill_process_tree(),
+            kill_control.force_kill_process_tree(),
             Err(build_no_such_process_error())
         );
 
-        control
+        kill_control
             .force_kill_child()
             .expect("clean up the still-live child");
         let child_exit_status = child_process.wait().expect("reap child");
@@ -166,27 +166,27 @@ mod unix {
         // `i32::MAX` wraps to a negative id naming an arbitrary group. Both
         // would signal the test runner, so both are refused before any call.
         for process_id in [0, 2_147_483_648, u32::MAX] {
-            let control = PtyChildKillControl::from_process_id(process_id);
+            let kill_control = PtyChildKillControl::from_process_id(process_id);
 
             assert_eq!(
-                control.request_child_stop(),
+                kill_control.request_child_stop(),
                 StopRequest::NotDelivered,
                 "{process_id}"
             );
             assert_eq!(
-                control.request_process_tree_stop(),
+                kill_control.request_process_tree_stop(),
                 StopRequest::NotDelivered,
                 "{process_id}"
             );
             assert_eq!(
-                control
+                kill_control
                     .force_kill_child()
                     .expect_err("nothing is signalled")
                     .to_string(),
                 format!("pty signal error: pid {process_id} names no child process")
             );
             assert_eq!(
-                control
+                kill_control
                     .force_kill_process_tree()
                     .expect_err("nothing is signalled")
                     .to_string(),
@@ -215,14 +215,16 @@ mod windows {
         let mut child_process = spawn_pinger();
         let process_id = child_process.id();
 
-        let control = PtyChildKillControl::from_process_id_and_handle(
+        let kill_control = PtyChildKillControl::from_process_id_and_handle(
             process_id,
             child_process.as_raw_handle(),
         )
         .expect("construct kill control");
-        assert_eq!(control.get_child_process_id(), process_id);
+        assert_eq!(kill_control.get_child_process_id(), process_id);
 
-        control.force_kill_child().expect("terminate the child");
+        kill_control
+            .force_kill_child()
+            .expect("terminate the child");
 
         let child_exit_status = child_process.wait().expect("reap child");
         // `force` passes exit code 137 to `TerminateProcess`.
@@ -232,20 +234,20 @@ mod windows {
     #[test]
     fn stop_requests_send_nothing_and_answer_not_delivered() {
         let mut child_process = spawn_pinger();
-        let control = PtyChildKillControl::from_process_id_and_handle(
+        let kill_control = PtyChildKillControl::from_process_id_and_handle(
             child_process.id(),
             child_process.as_raw_handle(),
         )
         .expect("construct kill control");
 
-        assert_eq!(control.request_child_stop(), StopRequest::NotDelivered);
+        assert_eq!(kill_control.request_child_stop(), StopRequest::NotDelivered);
         assert_eq!(
-            control.request_process_tree_stop(),
+            kill_control.request_process_tree_stop(),
             StopRequest::NotDelivered
         );
 
         // Neither request touched the child: it is still alive to terminate.
-        control
+        kill_control
             .force_kill_process_tree()
             .expect("terminate the job");
         let child_exit_status = child_process.wait().expect("reap child");

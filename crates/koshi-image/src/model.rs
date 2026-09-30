@@ -67,16 +67,12 @@ pub struct ImageDisplay {
     /// The kitty image z-index.
     pub z_index: i32,
     /// The parent Kitty image id for a relative placement.
-    #[serde(default)]
     pub relative_image_id: Option<u32>,
     /// The parent Kitty placement id for a relative placement.
-    #[serde(default)]
     pub relative_placement_id: Option<u32>,
     /// The horizontal cell offset from a relative parent placement.
-    #[serde(default)]
     pub relative_column_offset: i32,
     /// The vertical cell offset from a relative parent placement.
-    #[serde(default)]
     pub relative_row_offset: i32,
     /// The number of terminal columns requested by kitty.
     pub requested_column_count: Option<u32>,
@@ -93,7 +89,6 @@ pub struct ImageDisplay {
     /// Whether kitty asks the placement to move the cursor after display.
     pub should_move_cursor: bool,
     /// Kitty response suppression: 0 sends all replies, 1 sends errors, 2 sends none.
-    #[serde(default)]
     pub response_suppression_level: u8,
 }
 
@@ -171,42 +166,50 @@ where
 }
 
 fn validate_decoded_image<E>(
-    decoded_pixel_width: u32,
-    decoded_pixel_height: u32,
+    pixel_width: u32,
+    pixel_height: u32,
     rgba_bytes: Vec<u8>,
 ) -> Result<DecodedImage, E>
 where
     E: de::Error,
 {
-    let pixel_width = usize::try_from(decoded_pixel_width)
-        .map_err(|_| E::custom("decoded image width cannot be represented by this platform"))?;
-    let pixel_height = usize::try_from(decoded_pixel_height)
-        .map_err(|_| E::custom("decoded image height cannot be represented by this platform"))?;
-    let pixel_count = pixel_width
-        .checked_mul(pixel_height)
-        .ok_or_else(|| E::custom("decoded image dimensions overflow"))?;
-    let expected_rgba_byte_count = pixel_count
-        .checked_mul(4)
-        .ok_or_else(|| E::custom("decoded image byte count overflows"))?;
-    if pixel_width == 0
-        || pixel_height == 0
-        || pixel_width > MAX_IMAGE_SIDE_PIXEL_COUNT
-        || pixel_height > MAX_IMAGE_SIDE_PIXEL_COUNT
-        || pixel_count > MAX_IMAGE_PIXEL_COUNT
-        || expected_rgba_byte_count > MAX_IMAGE_BYTE_COUNT
-    {
-        return Err(E::custom("decoded image dimensions exceed graphics limits"));
-    }
+    let expected_rgba_byte_count = compute_decoded_image_byte_count(pixel_width, pixel_height)
+        .ok_or_else(|| E::custom("decoded image dimensions exceed graphics limits"))?;
     if rgba_bytes.len() != expected_rgba_byte_count {
         return Err(E::custom(
             "decoded image RGBA length does not match its dimensions",
         ));
     }
     Ok(DecodedImage {
-        pixel_width: decoded_pixel_width,
-        pixel_height: decoded_pixel_height,
+        pixel_width,
+        pixel_height,
         rgba_bytes,
     })
+}
+
+/// The RGBA byte count of a `pixel_width` by `pixel_height` image: four bytes
+/// per pixel. `None` when a side is `0` or above `MAX_IMAGE_SIDE_PIXEL_COUNT`,
+/// or the image holds more than `MAX_IMAGE_PIXEL_COUNT` pixels.
+///
+/// Example: `2` by `3` returns `Some(24)`.
+pub(crate) fn compute_decoded_image_byte_count(
+    pixel_width: u32,
+    pixel_height: u32,
+) -> Option<usize> {
+    let pixel_width = usize::try_from(pixel_width).ok()?;
+    let pixel_height = usize::try_from(pixel_height).ok()?;
+    if pixel_width == 0
+        || pixel_height == 0
+        || pixel_width > MAX_IMAGE_SIDE_PIXEL_COUNT
+        || pixel_height > MAX_IMAGE_SIDE_PIXEL_COUNT
+    {
+        return None;
+    }
+    let pixel_count = pixel_width * pixel_height;
+    if pixel_count > MAX_IMAGE_PIXEL_COUNT {
+        return None;
+    }
+    Some(pixel_count * 4)
 }
 
 /// The transfer action recorded with an image record.

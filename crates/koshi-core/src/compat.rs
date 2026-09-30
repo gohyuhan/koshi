@@ -123,14 +123,14 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
     released_version: Some(1),
 };
 
-/// The remote doorway: what a client on another machine and this machine's TLS
-/// listener speak before any session is reached.
+/// The remote protocol: what a client on another machine and this machine's
+/// TLS listener speak before any session is reached.
 ///
 /// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2. Its two ends are
-/// different machines. The session protocol the two ends settle after the door
-/// opens is a separate surface, [`SESSION_PROTOCOL`].
+/// different machines. The session protocol the two ends settle after the
+/// Welcome is a separate surface, [`SESSION_PROTOCOL`].
 pub const REMOTE_PROTOCOL: Surface = Surface {
-    surface_name: "remote doorway",
+    surface_name: "remote protocol",
     minimum_version: 2,
     maximum_version: 2,
     released_version: Some(1),
@@ -165,7 +165,7 @@ pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
 ///
 /// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted when the
 /// replacement router starts.
-pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
+pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
     surface_name: "remote access record format",
     minimum_version: 1,
     maximum_version: 2,
@@ -190,8 +190,9 @@ pub const RESUME_FORMAT: Surface = Surface {
 
 /// The config schema: the shape of the files under the config directory.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. Version 1 is migrated when the
-/// replacement router starts.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. `koshi resume-support`,
+/// `koshi serve-session`, and `koshi serve-router` migrate version 1 files to
+/// version 2 before they read config.
 pub const CONFIG_SCHEMA: Surface = Surface {
     surface_name: "config schema",
     minimum_version: 1,
@@ -209,7 +210,7 @@ pub const SURFACES: &[Surface] = &[
     REMOTE_PROTOCOL,
     SAVED_SERVER_FORMAT,
     REMOTE_CERTIFICATE_FORMAT,
-    REMOTE_ACCESS_MARK_FORMAT,
+    REMOTE_ACCESS_RECORD_FORMAT,
     RESUME_FORMAT,
     CONFIG_SCHEMA,
 ];

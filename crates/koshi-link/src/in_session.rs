@@ -19,6 +19,10 @@ use uuid::Uuid;
 
 use crate::error::CliError;
 
+/// The environment variable whose presence marks a process as running inside a
+/// koshi pane: `KOSHI`. Its value is not read.
+pub const IN_SESSION_MARKER_VARIABLE_NAME: &str = "KOSHI";
+
 /// The in-session identity a `koshi` CLI inherits from its pane's
 /// environment.
 ///
@@ -55,7 +59,7 @@ impl InSessionContext {
     fn from_environment_lookup(
         lookup_environment_variable: impl Fn(&str) -> Option<String>,
     ) -> Result<Option<InSessionContext>, CliError> {
-        if lookup_environment_variable("KOSHI").is_none() {
+        if lookup_environment_variable(IN_SESSION_MARKER_VARIABLE_NAME).is_none() {
             return Ok(None);
         }
         let session_id = parse_required_environment_variable_id(

@@ -241,7 +241,7 @@ fn a_missing_enabled_file_is_an_error_naming_the_record() {
     else {
         panic!("a missing enabled file names the record: {missing_enabled_file_error}");
     };
-    assert_eq!(remote_file, RemoteFile::RemoteAccessMark);
+    assert_eq!(remote_file, RemoteFile::RemoteAccessRecord);
     assert_eq!(reported_file_path, remote_file_path.display().to_string());
 }
 
@@ -380,7 +380,7 @@ fn writing_where_the_directory_cannot_exist_names_the_file_that_failed() {
     else {
         panic!("a failed write names the record: {enabled_file_write_error}");
     };
-    assert_eq!(remote_file, RemoteFile::RemoteAccessMark);
+    assert_eq!(remote_file, RemoteFile::RemoteAccessRecord);
     assert_eq!(reported_file_path, enabled_path.display().to_string());
     assert!(!is_remote_enabled(test_directory.path()));
 }

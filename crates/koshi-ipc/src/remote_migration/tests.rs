@@ -58,7 +58,7 @@ fn listener_migration_preserves_certificate_access_mark_and_grant() {
         }
     );
     assert_eq!(
-        EnabledFile::load_from_path(&enabled_path).expect("read access mark"),
+        EnabledFile::load_from_path(&enabled_path).expect("read remote access record"),
         EnabledFile {
             file_format: ENABLED_FILE_FORMAT,
             enabled_at,

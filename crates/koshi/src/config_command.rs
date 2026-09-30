@@ -382,8 +382,8 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Migrate config before a router, session server, or resume-support probe starts.
-/// Other commands and an unresolved config directory make no changes.
+/// Migrate config before `serve-session`, `serve-router`, or `resume-support`
+/// runs. Other commands and an unresolved config directory make no changes.
 ///
 /// # Errors
 /// Returns validation and migration errors from the config directory.
@@ -408,16 +408,36 @@ pub fn migrate_config_for_service_command(
 
 /// Migrate saved KDL files before a replacement server reads config.
 ///
+/// A file with schema problems, such as an unknown key, is migrated with those
+/// problems left in its text. A directory whose files all use the current
+/// schema takes no lock and writes nothing.
+///
 /// # Errors
-/// Returns validation and migration errors. Current files need no write lock.
+/// Returns read, KDL, version, lock, and write errors.
 pub fn migrate_config_directory_for_update(config_directory: &Path) -> Result<(), CliError> {
-    let config_report = validate_config_directory(config_directory);
-    if !config_report.config_file_errors.is_empty() {
+    let loaded_config_files = load_config_files(config_directory);
+    let mut migration_errors = loaded_config_files.config_file_read_errors;
+    let mut has_older_schema_file = false;
+    for config_file in &loaded_config_files.config_files {
+        match migrate_config(
+            config_file.config_file_kind,
+            &config_file.config_path,
+            &config_file.config_source_text,
+        ) {
+            Ok(migrated_config) => {
+                if migrated_config.is_changed {
+                    has_older_schema_file = true;
+                }
+            }
+            Err(migration_error) => migration_errors.push(migration_error.to_string()),
+        }
+    }
+    if !migration_errors.is_empty() {
         return Err(CliError::Config {
-            detail: config_report.config_file_errors.join("\n"),
+            detail: migration_errors.join("\n"),
         });
     }
-    if !config_report.has_older_schema_file {
+    if !has_older_schema_file {
         return Ok(());
     }
     migrate_config_directory_with_lock(config_directory).map(|_| ())
@@ -506,54 +526,48 @@ fn explain_config_key(config_key: &str) -> Result<String, CliError> {
 /// What validating every config file in one directory produced.
 pub(crate) struct ConfigReport {
     /// One line per file that validated, in path order:
-    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 2)"` for a file on
+    /// `"/home/user/.config/koshi/koshi.kdl: valid (version 2)"` for a file on
     /// this build's schema, and
-    /// `"/home/u/.config/koshi/koshi.kdl: valid (version 1; migrate to version 2)"`
+    /// `"/home/user/.config/koshi/koshi.kdl: valid (version 1; migrate to version 2)"`
     /// for one on an older schema.
     pub(crate) config_report_lines: Vec<String>,
     /// One message per file that could not be read or did not validate.
     pub(crate) config_file_errors: Vec<String>,
-    /// Whether a valid file needs an ordered schema migration.
-    pub(crate) has_older_schema_file: bool,
 }
 
 /// Read and validate every known config file under `config_directory`.
 ///
 /// Reads the filesystem and writes nothing. A directory with no config file
-/// gives empty `config_report_lines` and `config_file_errors`, and reports no
-/// older schema file.
+/// gives empty `config_report_lines` and `config_file_errors`.
 pub(crate) fn validate_config_directory(config_directory: &Path) -> ConfigReport {
     let loaded_config_files = load_config_files(config_directory);
     let mut config_report_lines = Vec::with_capacity(loaded_config_files.config_files.len());
     let mut config_file_errors = loaded_config_files.config_file_read_errors;
-    let mut has_older_schema_file = false;
     for config_file in &loaded_config_files.config_files {
         match validate_config(
             config_file.config_file_kind,
             &config_file.config_path,
             &config_file.config_source_text,
         ) {
-            Ok(validated) if validated.is_current => config_report_lines.push(format!(
-                "{}: valid (version {})",
-                config_file.config_path.display(),
-                validated.schema_version
-            )),
-            Ok(validated) => {
-                has_older_schema_file = true;
+            Ok(validated_config) if validated_config.is_current => {
                 config_report_lines.push(format!(
-                    "{}: valid (version {}; migrate to version {})",
+                    "{}: valid (version {})",
                     config_file.config_path.display(),
-                    validated.schema_version,
-                    koshi_config::types::SCHEMA_VERSION
+                    validated_config.schema_version
                 ));
             }
+            Ok(validated_config) => config_report_lines.push(format!(
+                "{}: valid (version {}; migrate to version {})",
+                config_file.config_path.display(),
+                validated_config.schema_version,
+                koshi_config::types::SCHEMA_VERSION
+            )),
             Err(config_error) => config_file_errors.push(config_error.to_string()),
         }
     }
     ConfigReport {
         config_report_lines,
         config_file_errors,
-        has_older_schema_file,
     }
 }
 

@@ -3,13 +3,12 @@
 //! The tree is split by who reads it: [`ServerConfig`] holds what one session
 //! shares across every viewer (the layout floor, scrollback caps, the child
 //! environment), and [`ClientConfig`] holds what one viewer decides for itself
-//! (keybindings, theme, mouse, copy). Both come from the same `koshi.kdl`;
-//! each side folds only the sections it owns, so a viewer cannot set the shell
-//! a session spawns and a session cannot set a viewer's colors.
+//! (keybindings, theme, mouse, copy). Both come from the same `koshi.kdl`.
+//! Each side folds only the sections it owns: a viewer cannot set the shell a
+//! session spawns, and a session cannot set a viewer's colors.
 //!
-//! Every field has a default via [`Default`], so Koshi runs with zero user
-//! config, and each side's `default()` is the baseline user overrides layer
-//! onto. This module owns the schema and defaults only. The sibling
+//! Every field has a default via [`Default`]: koshi runs with no user config,
+//! and each side's `default()` is the baseline that user layers fold onto. This module owns the schema and defaults only. The sibling
 //! [`layer`](crate::layer) module folds override layers onto these defaults,
 //! [`keybinding`](crate::keybinding) parses keybinding-file KDL, and
 //! [`migration`](crate::migration) validates versioned files and moves them
@@ -22,7 +21,7 @@ use std::str::FromStr;
 
 use koshi_core::action::ActionReference;
 use koshi_core::geometry::Direction;
-use koshi_core::key::{ExtendedKeysMode, Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord, KeySequence};
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::resolve::DEFAULT_SCROLL_LINE_COUNT;
 
@@ -30,9 +29,9 @@ use crate::error::ColorParseError;
 use crate::key::Leader;
 use crate::key_sequence::parse_sequence;
 
-/// The config schema version written to and read from disk, bumped when the
-/// on-disk shape changes. A file declaring an older version is migrated
-/// forward to this shape; a file declaring a newer one is refused.
+/// The config schema version written to and read from disk. A file declaring
+/// an older version is migrated forward to this shape; a file declaring a
+/// newer one is refused.
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::CONFIG_SCHEMA`].
@@ -41,7 +40,7 @@ pub const SCHEMA_VERSION: u32 = koshi_core::compat::CONFIG_SCHEMA.maximum_versio
 /// The name of the built-in theme, whose colors are compiled into koshi. It is
 /// the theme in effect when `koshi.kdl` names no theme, names this one, or
 /// names one whose `themes/<name>.kdl` cannot be loaded.
-pub const DEFAULT_THEME: &str = "default";
+pub const DEFAULT_THEME_NAME: &str = "default";
 
 /// The settings the session host reads: the shared layout floor, the
 /// scrollback buffers it owns, the environment it spawns children into, its
@@ -99,7 +98,7 @@ impl Default for ServerConfig {
 /// what it paints with, and what it does with copied text.
 ///
 /// Each attached viewer holds its own, read from the `koshi.kdl` on the
-/// machine it runs on, so two viewers of one session can bind different keys
+/// machine it runs on: two viewers of one session can bind different keys
 /// and paint different colors. The settings the session itself needs are
 /// [`ServerConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,8 +211,8 @@ impl Default for PaneConfig {
 }
 
 /// Per-pane scrollback history caps. The buffer these bound lives in the
-/// pane's terminal engine, so one pane has one set of caps however many
-/// viewers it has.
+/// pane's terminal engine: one pane has one set of caps however many viewers
+/// it has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrollbackLimits {
     /// Maximum retained lines per pane.
@@ -231,8 +230,8 @@ impl Default for ScrollbackLimits {
     }
 }
 
-/// How one viewer's scrollback view behaves. Held per viewer, so two viewers
-/// of the same pane can follow live output differently.
+/// How one viewer's scrollback view behaves. Each viewer holds its own: two
+/// viewers of the same pane can follow live output differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbackView {
     /// Whether input you send to a pane snaps its view back to the newest line
@@ -263,9 +262,9 @@ pub struct KeybindingsConfig {
     /// The prefix that `<leader>` in a binding resolves to. A modifier run
     /// merges into the chord that follows it; a chord stands on its own.
     pub leader: Leader,
-    /// Bindings grouped by input mode name. `Default` ships the built-in binding
-    /// set (`normal` plus the reserved unlock in `locked`); user layers
-    /// override it at merge.
+    /// Bindings grouped by input mode name. `Default` holds the built-in
+    /// binding set of [`build_default_mode_bindings`]; user layers override it
+    /// at merge.
     pub mode_bindings_by_name: BTreeMap<ModeName, ModeBindings>,
     /// Replacement chord for the reserved unlock. When set, this chord (not
     /// [`RESERVED_UNLOCK`](Self::RESERVED_UNLOCK)) is the guaranteed
@@ -276,12 +275,13 @@ pub struct KeybindingsConfig {
 }
 
 impl KeybindingsConfig {
-    /// The reserved unlock chord — the same chord that locks in normal mode,
-    /// so one key flips the client both ways. In `locked` mode this chord
+    /// The reserved unlock chord, `<C-l>`. The same chord locks in normal
+    /// mode: one key flips the client both ways. In `locked` mode this chord
     /// fires `core:unlock` and is intercepted ahead of pane pass-through;
     /// validation refuses a config that removes it without naming an
     /// explicit alternative.
-    pub const RESERVED_UNLOCK: KeyChord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('l'));
+    pub const RESERVED_UNLOCK: KeyChord =
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('l'));
 }
 
 impl Default for KeybindingsConfig {
@@ -335,8 +335,7 @@ pub struct BoundAction {
 
 /// The bindings for one input mode, keyed by the key sequence pressed.
 ///
-/// The map key is the sequence, so one sequence resolves to exactly one
-/// action. The reverse is open: several sequences in one mode may name the
+/// The map key is the sequence: one sequence resolves to exactly one action. The reverse is open: several sequences in one mode may name the
 /// same action, though no shipped default does — within a mode every default
 /// action has exactly one key (`core:focus-pane-left` is reachable only as
 /// `<C-p> <Left>`). An action bound in two modes is two entries in two maps:
@@ -356,8 +355,8 @@ pub struct ModeBindings {
 /// unlock, quit, and mouse-select in `locked` mode, and the placement actions
 /// in the `pane-placement` mode.
 ///
-/// Sequences written with `<leader>` resolve against `leader`, so rebinding
-/// the leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
+/// Sequences written with `<leader>` resolve against `leader`: rebinding the
+/// leader moves them. Explicit chords — `<A-f>`, the reserved unlock, and
 /// the `Tab`/`Shift+Tab` pair — are written literally and never move.
 ///
 /// Under the default `C-` leader every sequence OPENS with a non-typeable
@@ -371,7 +370,7 @@ pub struct ModeBindings {
 /// splits, and directional focus — live under the `<C-p>` prefix, resize under
 /// `<C-s>`, and tab lifecycle under `<C-t>`. Placement actions live in the
 /// `pane-placement` mode. An action choice with a fixed set of values is part
-/// of the action name (`new-pane-left`, `select-pane-target-left`), so any key
+/// of the action name (`new-pane-left`, `select-pane-target-left`). Any key
 /// here can be rebound from `keybinding.kdl`.
 pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBindings> {
     let parse_default_key_sequence = |key_sequence_text: &str| {
@@ -436,13 +435,13 @@ pub fn build_default_mode_bindings(leader: Leader) -> BTreeMap<ModeName, ModeBin
             parse_default_key_sequence("<leader>p x"),
             build_bound_action("close-pane-tree"),
         ),
-        // Fullscreen — an explicit chord, so it stays put under any leader.
+        // Fullscreen: an explicit chord that does not move with the leader.
         (
             parse_default_key_sequence("<A-f>"),
             build_bound_action("toggle-pane-fullscreen"),
         ),
         // Directional focus: arrows under the pane prefix. These fire
-        // continuous actions, so the prefix stays armed after each press.
+        // continuous actions: the prefix stays armed after each press.
         (
             parse_default_key_sequence("<leader>p <Left>"),
             build_bound_action("focus-pane-left"),
@@ -637,7 +636,7 @@ pub fn build_default_prefix_labels(leader: Leader) -> BTreeMap<KeyChord, String>
     ];
     // `C-` gives each group its own opening chord: `<C-p> PANE`,
     // `<C-s> RESIZE`, `<C-t> TAB`. A chord leader opens every group at the
-    // leader itself, so `<Space>` collapses all three onto one entry.
+    // leader itself: under `<Space>` all three collapse onto one entry.
     let prefix_labels: BTreeMap<KeyChord, String> = prefix_groups
         .iter()
         .map(|(prefix_text, label_text)| {
@@ -747,7 +746,7 @@ impl Default for TerminalConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeConfig {
     /// The theme's name: the file stem of the `themes/<name>.kdl` its colors
-    /// were read from, or [`DEFAULT_THEME`] when the built-in colors are in
+    /// were read from, or [`DEFAULT_THEME_NAME`] when the built-in colors are in
     /// effect.
     pub theme_name: String,
     /// The theme's colors.
@@ -757,7 +756,7 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            theme_name: DEFAULT_THEME.to_string(),
+            theme_name: DEFAULT_THEME_NAME.to_string(),
             colors: ColorPalette::default(),
         }
     }
@@ -795,8 +794,7 @@ pub struct ColorPalette {
     pub border_focused: RgbColor,
     /// Border of unfocused panes.
     pub border_unfocused: RgbColor,
-    /// Border of the pane the pointer is hovering over — the pane the wheel
-    /// scrolls, marked so the target is visible before the wheel is turned.
+    /// Border of the pane the pointer is over: the pane the wheel scrolls.
     pub border_hover: RgbColor,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: RgbColor,
@@ -872,8 +870,8 @@ impl RgbColor {
                 invalid_hex_text: bare_hex_text.to_string(),
             });
         }
-        // Six ASCII hex digits: one byte per character, so each two-byte
-        // slice is valid ASCII and parses.
+        // Six ASCII hex digits: one byte per character. Each two-byte slice
+        // is one hex pair.
         let parse_color_component = |component_start_index: usize| {
             u8::from_str_radix(
                 &bare_hex_text[component_start_index..component_start_index + 2],

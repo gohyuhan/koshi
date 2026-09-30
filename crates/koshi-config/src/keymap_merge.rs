@@ -60,16 +60,16 @@ pub struct MergedModeMap {
     /// Every key any layer removes in this mode, whether or not a lower
     /// layer held it.
     pub removed_key_sequences: BTreeSet<KeySequence>,
-    /// Built-in bindings displaced by the user — their key stolen by a
-    /// `user_bindings_by_key_sequence` entry or cleared by a remove. `koshi keys list` shows each
-    /// one with its default action, marked unbound.
+    /// Built-in bindings the user displaced: their key is taken by a
+    /// `user_bindings_by_key_sequence` entry or cleared by a remove. `koshi
+    /// keys list` shows each one with its default action, marked unbound.
     pub unbound_default_bindings_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
 }
 
 /// The merged keymap: one [`MergedModeMap`] per registered mode any layer
 /// names, whether or not that mode's block holds an entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MergedKeyMap {
+pub struct MergedKeymap {
     /// Per-mode merged tables.
     pub mode_map_by_name: BTreeMap<ModeName, MergedModeMap>,
 }
@@ -77,29 +77,30 @@ pub struct MergedKeyMap {
 /// Folds keybinding layers (ordered lowest precedence first) into the
 /// per-mode lookup tables.
 ///
-/// `registry` is the live action table each binding is resolved against
-/// for the firing judgment; `maximum_chord_depth` is the cap a firing sequence
-/// must fit. A layer's binding whose mode is not one of the
-/// [`LockMode`](koshi_core::lock::LockMode) names is skipped, matching
-/// detection. The reserved unlock chord is `unlock_alternative` when set,
-/// otherwise [`KeybindingsConfig::RESERVED_UNLOCK`].
+/// `registry` is the action table each binding resolves against: a binding
+/// the registry refuses does not fire. `maximum_chord_depth` is the longest
+/// sequence, in chords, that fires. A binding whose mode is not a
+/// [`LockMode`](koshi_core::lock::LockMode) name is skipped. The reserved
+/// unlock chord is `unlock_alternative` when set, otherwise
+/// [`KeybindingsConfig::RESERVED_UNLOCK`].
 ///
-/// Per key, the highest firing entry wins. A firing user-authored entry on a defaulted key takes it
-/// and the displaced default moves to
+/// Per key, the highest firing entry wins. A firing user-authored entry on a
+/// defaulted key takes it, and the displaced default moves to
 /// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence);
-/// a remove above the defaults layer does the same. A dead binding (resolver-refused, swallowed by
-/// the locked-mode reserved-chord bypass, or longer than the chord-depth cap) enters no map: a dead
-/// user entry leaves the default beneath it live, and a dead default is absent from
-/// `default_bindings_by_key_sequence` and from
-/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence)
-/// both.
+/// a remove above the defaults layer does the same. A dead binding enters no
+/// map. A binding is dead when the registry refuses it, when it is a
+/// locked-mode sequence that holds the reserved unlock chord, or when it is
+/// longer than `maximum_chord_depth`. A dead user entry leaves the default
+/// beneath it in `default_bindings_by_key_sequence`. A dead default is in
+/// neither `default_bindings_by_key_sequence` nor
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence).
 #[must_use]
 pub fn merge_keymaps(
     layers: &[KeymapLayer],
     unlock_alternative: Option<KeyChord>,
     maximum_chord_depth: u8,
     registry: &ActionRegistry,
-) -> MergedKeyMap {
+) -> MergedKeymap {
     let known_mode_names = &list_builtin_mode_names();
     let reserved_unlock_chord = unlock_alternative.unwrap_or(KeybindingsConfig::RESERVED_UNLOCK);
     let locked_mode_name = ModeName::from_text("locked");
@@ -176,7 +177,7 @@ pub fn merge_keymaps(
         }
     }
 
-    MergedKeyMap {
+    MergedKeymap {
         mode_map_by_name: merged_mode_map_by_name,
     }
 }

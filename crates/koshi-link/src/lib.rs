@@ -7,7 +7,7 @@
 //! server process reads the same config at startup and asks the router where
 //! its neighbours are.
 //!
-//! Two halves, and nothing else:
+//! Two halves:
 //!
 //! - **The files.** [`config`] reads `koshi.kdl`, the theme, the keybindings
 //!   and the profiles off disk into the override layers and the admission
@@ -23,13 +23,16 @@
 //!   pane, from the `KOSHI_*` variables the pane's shell was given.
 //!
 //! [`error`] is the failure both halves report, and the one a koshi program
-//! turns into an exit code.
+//! turns into an exit code. On Unix, `process` replaces the running koshi
+//! program with another koshi command.
 
 pub mod config;
 pub mod discovery;
 pub mod error;
 pub mod in_session;
 pub mod ipc_client;
+#[cfg(unix)]
+pub mod process;
 pub mod remote_client;
 pub mod router_client;
 pub mod talk;

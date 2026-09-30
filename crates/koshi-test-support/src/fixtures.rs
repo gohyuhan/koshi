@@ -1,16 +1,18 @@
 //! Shared test fixtures.
 
-use koshi_core::key::{KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, ModFlags};
+use koshi_core::key::{
+    BindingModifierFlags, KeyChord, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags,
+};
 use tempfile::TempDir;
 
 /// Each keybinding modifier beside the reported modifier that stands for it.
 /// The two sets number their bits differently, so a chord's bit pattern is
 /// never a reported bit pattern.
-const REPORTED_MODIFIER_BY_BINDING_MODIFIER: [(ModFlags, KeyModifierFlags); 4] = [
-    (ModFlags::CTRL, KeyModifierFlags::CTRL),
-    (ModFlags::ALT, KeyModifierFlags::ALT),
-    (ModFlags::SHIFT, KeyModifierFlags::SHIFT),
-    (ModFlags::SUPER, KeyModifierFlags::SUPER),
+const REPORTED_MODIFIER_BY_BINDING_MODIFIER: [(BindingModifierFlags, KeyModifierFlags); 4] = [
+    (BindingModifierFlags::CTRL, KeyModifierFlags::CTRL),
+    (BindingModifierFlags::ALT, KeyModifierFlags::ALT),
+    (BindingModifierFlags::SHIFT, KeyModifierFlags::SHIFT),
+    (BindingModifierFlags::SUPER, KeyModifierFlags::SUPER),
 ];
 
 /// The complete key event a terminal reports for one chord: a press, with no

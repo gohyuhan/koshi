@@ -1862,12 +1862,12 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
 
 #[cfg(unix)]
 #[test]
-fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving() {
+fn a_restart_whose_config_migration_fails_still_swaps_and_keeps_every_pane() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
     let session_id = SessionId::new();
-    let mut session_server_process = start_session_server(
+    let _session_server_process = start_session_server(
         &binary_path,
         test_home_directory.path(),
         runtime_directory.path(),
@@ -1899,28 +1899,28 @@ fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving()
 
     assert_eq!(
         send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
-        IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
-            message: format!(
-                "the binary at {} does not say which resume formats it reads: EOF while parsing a value at line 1 column 0",
-                binary_path.display()
-            ),
-        })
+        IpcResult::Restarting
     );
+    attached_client_stream.receive_events_until_restarting();
+    drop(control_connection);
+
+    let restarted_endpoint = wait_for_restarted_session_endpoint(
+        runtime_directory.path(),
+        session_id,
+        &endpoint_before_restart,
+    );
+    let _restarted_process = RunningProcess {
+        process_id: restarted_endpoint.process_id,
+    };
     assert_eq!(
         std::fs::read_to_string(&app_config_path).expect("read unchanged config"),
         "version 1\n"
     );
-    assert!(!session_server_process.has_session_server_exited());
-    assert_eq!(
-        EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            session_id
-        ))
-        .expect("the session still advertises its socket")
-        .connection_token
-        .expose_secret(),
-        endpoint_before_restart.connection_token.expose_secret()
+    let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
+        runtime_directory.path(),
+        session_id,
+        TALL_ATTACH_VIEWPORT_SIZE,
+        None,
     );
     let mut expected_pane_lifecycles = vec![
         (seeded_pane_id, PaneLifecycle::Running),

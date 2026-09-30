@@ -1,9 +1,9 @@
-//! Tests for the outer terminal an attached client owns: the viewer built for
-//! it, painting a frame, the cursor-style mapping, and the window title. A fake PTY
-//! backend stands in for real children and ratatui's `TestBackend` renders into
-//! an in-memory buffer, so painting runs without a terminal. Platform terminal
-//! setup and the input reader are TTY-bound; event conversion is tested here,
-//! and key decoding is covered in `koshi-input`.
+//! Tests for the outer terminal an attached client owns: the client built for
+//! it, painting a frame, the cursor-style mapping, and the window title. A fake
+//! PTY backend stands in for real children, and ratatui's `TestBackend` renders
+//! into an in-memory buffer. Event conversion is tested here. Platform terminal
+//! setup and the input reader need a TTY and are not tested here. Key decoding
+//! is tested in `koshi-input`.
 
 use super::*;
 
@@ -97,7 +97,9 @@ use koshi_core::geometry::{
     Direction, PaneArea, Point as CorePoint, Rect as CoreRect, Size, SplitDirection,
 };
 use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
-use koshi_core::key::{Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags, ModFlags};
+use koshi_core::key::{
+    BindingModifierFlags, Key, KeyChord, KeyEventKind, KeyIdentity, KeyModifierFlags,
+};
 use koshi_core::lock::LockMode;
 use koshi_core::process::PtySize;
 use koshi_input::host::{GraphicAttributeError, GraphicAttributeReply, KeyCode};
@@ -135,18 +137,18 @@ fn build_terminal_probe(graphics_support: GraphicsSupport) -> TerminalProbe {
 }
 
 struct ProbeSource {
-    events: VecDeque<Event>,
+    pending_events: VecDeque<Event>,
 }
 
 impl reader::EventSource for ProbeSource {
     fn try_read_event(&mut self, _timeout: Option<Duration>) -> io::Result<Option<Event>> {
-        Ok(self.events.pop_front())
+        Ok(self.pending_events.pop_front())
     }
 }
 
-fn probe_reader(events: impl IntoIterator<Item = Event>) -> InputReader<ProbeSource> {
+fn build_probe_reader(probe_events: impl IntoIterator<Item = Event>) -> InputReader<ProbeSource> {
     InputReader::from_event_source_for_tests(ProbeSource {
-        events: events.into_iter().collect(),
+        pending_events: probe_events.into_iter().collect(),
     })
 }
 
@@ -171,17 +173,18 @@ fn build_test_client(server: &mut Server, client_id: ClientId) -> Client {
     build_test_client_with_config(server, client_id, LoadedConfig::default())
 }
 
-/// The same, on the config files `loaded` stands for.
+/// A client half for `client_id`, subscribed to `server`'s events, built from
+/// `loaded_config`.
 fn build_test_client_with_config(
     server: &mut Server,
     client_id: ClientId,
     loaded_config: LoadedConfig,
 ) -> Client {
-    let events = server.subscribe(client_id);
+    let frame_delivery_receiver = server.subscribe(client_id);
     build_client_with_loaded_config(
         client_id,
         TEST_VIEWPORT_SIZE,
-        events,
+        frame_delivery_receiver,
         TerminalCleanupGuard::new(),
         loaded_config,
     )
@@ -194,21 +197,21 @@ fn serialize_terminal_screen_text(terminal: &Terminal<TestBackend>) -> String {
         .buffer()
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(|buffer_cell| buffer_cell.symbol())
         .collect()
 }
 
 struct FailOnWrite {
-    fail_at: usize,
-    writes: usize,
+    failing_write_index: usize,
+    write_count: usize,
     written_bytes: Vec<u8>,
 }
 
 impl Write for FailOnWrite {
     fn write(&mut self, write_bytes: &[u8]) -> io::Result<usize> {
-        let write_index = self.writes;
-        self.writes += 1;
-        if write_index == self.fail_at {
+        let write_index = self.write_count;
+        self.write_count += 1;
+        if write_index == self.failing_write_index {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "test writer failed",
@@ -224,7 +227,7 @@ impl Write for FailOnWrite {
 }
 
 struct FailInsideSequence {
-    sequence: &'static [u8],
+    sequence_bytes: &'static [u8],
     split_byte_count: usize,
     should_fail_next_write: bool,
     has_failed: bool,
@@ -243,8 +246,8 @@ impl Write for FailInsideSequence {
         }
         if !self.has_failed {
             if let Some(sequence_start_byte_index) = write_bytes
-                .windows(self.sequence.len())
-                .position(|window| window == self.sequence)
+                .windows(self.sequence_bytes.len())
+                .position(|byte_window| byte_window == self.sequence_bytes)
             {
                 let written_byte_count = sequence_start_byte_index + self.split_byte_count;
                 self.written_bytes
@@ -296,8 +299,8 @@ impl Backend for ImageTraceBackend {
     fn clear(&mut self) -> io::Result<()> {
         panic!("painting must not clear through the backend");
     }
-    fn clear_region(&mut self, region: ratatui::backend::ClearType) -> io::Result<()> {
-        self.0.clear_region(region)
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> io::Result<()> {
+        self.0.clear_region(clear_type)
     }
     fn size(&self) -> io::Result<ratatui::layout::Size> {
         Ok(ratatui::layout::Size::new(80, 24))
@@ -335,7 +338,7 @@ fn build_opaque_image_pixels() -> Vec<u8> {
         [255, 255, 255, 255],
     ]
     .into_iter()
-    .flat_map(|pixel| pixel.repeat(4))
+    .flat_map(|rgba_pixel| rgba_pixel.repeat(4))
     .collect()
 }
 
@@ -347,67 +350,68 @@ fn build_second_opaque_image_pixels() -> Vec<u8> {
         [0, 0, 0, 255],
     ]
     .into_iter()
-    .flat_map(|pixel| pixel.repeat(4))
+    .flat_map(|rgba_pixel| rgba_pixel.repeat(4))
     .collect()
 }
 
 fn build_protocol_image_input(
-    protocol: koshi_terminal::graphics::GraphicsProtocol,
+    graphics_protocol: koshi_terminal::graphics::GraphicsProtocol,
     rgba_pixel_bytes: Vec<u8>,
     image_content_id: u32,
 ) -> Vec<u8> {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
 
-    let image = koshi_image::DecodedImage {
+    let decoded_image = koshi_image::DecodedImage {
         pixel_width: 4,
         pixel_height: 4,
         rgba_bytes: rgba_pixel_bytes,
     };
-    match protocol {
+    match graphics_protocol {
         koshi_terminal::graphics::GraphicsProtocol::Kitty => format!(
             "\x1b_Ga=T,f=32,s=4,v=4,i={image_content_id},c=4,r=4,C=1,q=2;{}\x1b\\",
-            STANDARD.encode(image.rgba_bytes)
+            STANDARD.encode(decoded_image.rgba_bytes)
         )
         .into_bytes(),
         koshi_terminal::graphics::GraphicsProtocol::Iterm2 => {
-            let mut encoder = koshi_iterm::ItermEncoder::from_image(
-                &image,
+            let mut iterm_encoder = koshi_iterm::ItermEncoder::from_image(
+                &decoded_image,
                 koshi_iterm::ItermOutputOptions::from_cell_dimensions(4, 4)
                     .expect("image dimensions"),
             )
             .expect("iTerm image encoding");
             let mut iterm_output_bytes = Vec::new();
-            while let Some(packet) = encoder.take_next_packet() {
-                iterm_output_bytes.extend_from_slice(packet);
+            while let Some(iterm_packet) = iterm_encoder.take_next_packet() {
+                iterm_output_bytes.extend_from_slice(iterm_packet);
             }
             iterm_output_bytes
         }
         koshi_terminal::graphics::GraphicsProtocol::Sixel => {
-            let mut encoder = koshi_sixel::SixelEncoder::from_image(Arc::new(image), [0, 0, 0])
-                .expect("Sixel image encoding");
+            let mut sixel_encoder =
+                koshi_sixel::SixelEncoder::from_image(Arc::new(decoded_image), [0, 0, 0])
+                    .expect("Sixel image encoding");
             let mut sixel_output_bytes = b"\x1b[?80l".to_vec();
-            while let Some(output_chunk) = encoder
+            while let Some(sixel_chunk) = sixel_encoder
                 .take_next_chunk(koshi_sixel::MAX_SIXEL_CHUNK_BYTE_COUNT)
                 .expect("Sixel image output")
             {
-                sixel_output_bytes.extend_from_slice(output_chunk);
+                sixel_output_bytes.extend_from_slice(sixel_chunk);
             }
             sixel_output_bytes
         }
     }
 }
 
-fn build_two_image_input(protocol: koshi_terminal::graphics::GraphicsProtocol) -> Vec<u8> {
+fn build_two_image_input(graphics_protocol: koshi_terminal::graphics::GraphicsProtocol) -> Vec<u8> {
     let mut terminal_input_bytes = b"\x1b[22;1Hscroll-test\x1b[2;2H".to_vec();
     terminal_input_bytes.extend_from_slice(&build_protocol_image_input(
-        protocol,
+        graphics_protocol,
         build_opaque_image_pixels(),
         42,
     ));
     terminal_input_bytes.extend_from_slice(b"\x1b[4;4H");
     terminal_input_bytes.extend_from_slice(&build_protocol_image_input(
-        protocol,
+        graphics_protocol,
         build_second_opaque_image_pixels(),
         43,
     ));
@@ -433,7 +437,7 @@ fn build_source_image_pixel_map(render_snapshot: &RenderSnapshot) -> BTreeMap<(u
                     * image_paint.image_record.image.pixel_width
                     + source_pixel_column)
                     * 4) as usize;
-                let pixel = image_paint.image_record.image.rgba_bytes
+                let rgba_pixel = image_paint.image_record.image.rgba_bytes
                     [pixel_start_byte_index..pixel_start_byte_index + 4]
                     .try_into()
                     .expect("source pixel");
@@ -442,7 +446,7 @@ fn build_source_image_pixel_map(render_snapshot: &RenderSnapshot) -> BTreeMap<(u
                         image_paint.target_area.y + target_row_offset,
                         image_paint.target_area.x + target_column_offset,
                     ),
-                    pixel,
+                    rgba_pixel,
                 );
             }
         }
@@ -463,19 +467,20 @@ fn build_terminal_image_pixel_map(
             image_record
                 .compute_source_rect()
                 .expect("outer source rectangle");
-        let geometry = image_placement.get_image_geometry();
+        let image_geometry = image_placement.get_image_geometry();
         for image_row_index in 0..image_placement.get_image_cell_dimensions().0 {
             for image_column_index in 0..image_placement.get_image_cell_dimensions().1 {
                 let image_pixel_y = source_pixel_y
-                    + u32::from(geometry.cell_offset.row + image_row_index) * source_pixel_height
-                        / u32::from(geometry.full_size.row_count);
+                    + u32::from(image_geometry.cell_offset.row + image_row_index)
+                        * source_pixel_height
+                        / u32::from(image_geometry.full_size.row_count);
                 let image_pixel_x = source_pixel_x
-                    + u32::from(geometry.cell_offset.column + image_column_index)
+                    + u32::from(image_geometry.cell_offset.column + image_column_index)
                         * source_pixel_width
-                        / u32::from(geometry.full_size.column_count);
+                        / u32::from(image_geometry.full_size.column_count);
                 let pixel_start_byte_index =
                     ((image_pixel_y * image_record.image.pixel_width + image_pixel_x) * 4) as usize;
-                let pixel = image_record.image.rgba_bytes
+                let rgba_pixel = image_record.image.rgba_bytes
                     [pixel_start_byte_index..pixel_start_byte_index + 4]
                     .try_into()
                     .expect("outer pixel");
@@ -484,7 +489,7 @@ fn build_terminal_image_pixel_map(
                         image_placement.get_image_anchor().0 + image_row_index,
                         image_placement.get_image_anchor().1 + image_column_index,
                     ),
-                    pixel,
+                    rgba_pixel,
                 );
             }
         }
@@ -492,21 +497,23 @@ fn build_terminal_image_pixel_map(
     image_pixel_by_position
 }
 
-fn build_opaque_image_input(protocol: koshi_terminal::graphics::GraphicsProtocol) -> Vec<u8> {
+fn build_opaque_image_input(
+    graphics_protocol: koshi_terminal::graphics::GraphicsProtocol,
+) -> Vec<u8> {
     use koshi_terminal::graphics::GraphicsProtocol;
-    match protocol {
+    match graphics_protocol {
         GraphicsProtocol::Kitty => b"\x1b_Ga=T,f=32,s=4,v=4,i=42,c=4,r=4,C=1,q=2;/wAA//8AAP//AAD//wAA/wD/AP8A/wD/AP8A/wD/AP8AAP//AAD//wAA//8AAP///////////////////////w==\x1b\\".to_vec(),
         GraphicsProtocol::Sixel => b"\x1b[?80l\x1bP0;1q\"1;1;4;4#1;2;100;0;0#1@@@@$#2;2;0;100;0#2AAAA$#3;2;0;0;100#3CCCC$#4;2;100;100;100#4GGGG\x1b\\".to_vec(),
         GraphicsProtocol::Iterm2 => {
-            let image = koshi_image::DecodedImage { pixel_width: 4, pixel_height: 4, rgba_bytes: build_opaque_image_pixels() };
-            let mut encoder = koshi_iterm::ItermEncoder::from_image(
-                &image,
+            let decoded_image = koshi_image::DecodedImage { pixel_width: 4, pixel_height: 4, rgba_bytes: build_opaque_image_pixels() };
+            let mut iterm_encoder = koshi_iterm::ItermEncoder::from_image(
+                &decoded_image,
                 koshi_iterm::ItermOutputOptions::from_cell_dimensions(4, 4).unwrap(),
             )
             .unwrap();
             let mut iterm_output_bytes = Vec::new();
-            while let Some(packet) = encoder.take_next_packet() {
-                iterm_output_bytes.extend_from_slice(packet);
+            while let Some(iterm_packet) = iterm_encoder.take_next_packet() {
+                iterm_output_bytes.extend_from_slice(iterm_packet);
             }
             iterm_output_bytes
         }
@@ -525,10 +532,10 @@ impl ImageWireContentIds {
             .pane_snapshots
             .iter()
             .flat_map(|pane_snapshot| &pane_snapshot.image_placement_snapshots)
-            .filter_map(|placement| {
-                placement.clone_image_record().map(|image_record| {
+            .filter_map(|image_placement| {
+                image_placement.clone_image_record().map(|image_record| {
                     (
-                        placement.get_image_content_id(),
+                        image_placement.get_image_content_id(),
                         Arc::as_ptr(&image_record) as usize,
                     )
                 })
@@ -566,44 +573,47 @@ impl ImageWireContentIds {
 
 fn round_trip_image_frame_through_wire(
     render_snapshot: &RenderSnapshot,
-    cache: &mut crate::attach::paint::ImageCache,
-    content_ids: &mut ImageWireContentIds,
+    image_cache: &mut crate::attach::paint::ImageCache,
+    image_wire_content_ids: &mut ImageWireContentIds,
 ) -> RenderSnapshot {
     use koshi_ipc::frame::{FrameImageChunk, FrameImageTransfer, PaintedFrame};
-    content_ids.retain_visible_image_content_ids(render_snapshot);
-    let mut wire = koshi_runtime::runtime::frame::build_wire_frame(render_snapshot);
-    for (source_pane_snapshot, wire_pane) in render_snapshot
+    image_wire_content_ids.retain_visible_image_content_ids(render_snapshot);
+    let mut wire_frame = koshi_runtime::runtime::frame::build_wire_frame(render_snapshot);
+    for (source_pane_snapshot, wire_pane_snapshot) in render_snapshot
         .pane_snapshots
         .iter()
-        .zip(&mut wire.pane_snapshots)
+        .zip(&mut wire_frame.pane_snapshots)
     {
         for (source_image_placement, wire_image_placement) in source_pane_snapshot
             .image_placement_snapshots
             .iter()
-            .zip(&mut wire_pane.image_placement_snapshots)
+            .zip(&mut wire_pane_snapshot.image_placement_snapshots)
         {
             let image_record_address = source_image_placement
                 .clone_image_record()
                 .map_or(0, |image_record| Arc::as_ptr(&image_record) as usize);
-            wire_image_placement.image_content_id = content_ids
+            wire_image_placement.image_content_id = image_wire_content_ids
                 .get_or_create_wire_image_content_id(
                     source_image_placement.get_image_content_id(),
                     image_record_address,
                 );
         }
     }
-    let wire: PaintedFrame = serde_json::from_slice(&serde_json::to_vec(&wire).unwrap()).unwrap();
-    let mut resolved_render_snapshot = cache.adopt_painted_frame(Box::new(wire.clone())).unwrap();
+    let wire_frame: PaintedFrame =
+        serde_json::from_slice(&serde_json::to_vec(&wire_frame).unwrap()).unwrap();
+    let mut resolved_render_snapshot = image_cache
+        .adopt_painted_frame(Box::new(wire_frame.clone()))
+        .unwrap();
     let mut transferred_image_content_ids = HashSet::new();
-    for (source_pane_snapshot, wire_pane) in render_snapshot
+    for (source_pane_snapshot, wire_pane_snapshot) in render_snapshot
         .pane_snapshots
         .iter()
-        .zip(&wire.pane_snapshots)
+        .zip(&wire_frame.pane_snapshots)
     {
         for (source_image_placement, wire_image_placement) in source_pane_snapshot
             .image_placement_snapshots
             .iter()
-            .zip(&wire_pane.image_placement_snapshots)
+            .zip(&wire_pane_snapshot.image_placement_snapshots)
         {
             if !transferred_image_content_ids.insert(wire_image_placement.image_content_id) {
                 continue;
@@ -611,7 +621,7 @@ fn round_trip_image_frame_through_wire(
             let image_record = source_image_placement
                 .get_image_record()
                 .expect("source pixels");
-            let transfer = FrameImageTransfer {
+            let image_transfer = FrameImageTransfer {
                 image_content_id: wire_image_placement.image_content_id,
                 image_record: wire_image_placement
                     .image_record
@@ -619,8 +629,8 @@ fn round_trip_image_frame_through_wire(
                     .expect("wire metadata"),
                 image_byte_count: image_record.image.rgba_bytes.len() as u64,
             };
-            match cache.start_image_transfer(
-                serde_json::from_slice(&serde_json::to_vec(&transfer).unwrap()).unwrap(),
+            match image_cache.start_image_transfer(
+                serde_json::from_slice(&serde_json::to_vec(&image_transfer).unwrap()).unwrap(),
             ) {
                 Ok(()) => {}
                 Err(crate::attach::paint::ImageAssemblyError::TransferAlreadyComplete {
@@ -631,15 +641,15 @@ fn round_trip_image_frame_through_wire(
                 }
                 Err(transfer_error) => panic!("image transfer failed to start: {transfer_error}"),
             }
-            let chunk = FrameImageChunk {
+            let image_chunk = FrameImageChunk {
                 image_transfer_id: wire_image_placement.image_content_id,
                 byte_offset: 0,
                 is_last: true,
                 chunk_bytes: image_record.image.rgba_bytes.clone(),
             };
-            if let Some(completed_render_snapshot) = cache
+            if let Some(completed_render_snapshot) = image_cache
                 .accept_image_chunk(
-                    serde_json::from_slice(&serde_json::to_vec(&chunk).unwrap()).unwrap(),
+                    serde_json::from_slice(&serde_json::to_vec(&image_chunk).unwrap()).unwrap(),
                 )
                 .unwrap()
             {
@@ -674,22 +684,25 @@ fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
             pane_id,
             output_bytes,
         });
-        let initial = build_render_snapshot(&server, client_id);
+        let initial_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
             pane_id,
             output_bytes: b"\x1b[1;1HB".to_vec(),
         });
-        let changed = build_render_snapshot(&server, client_id);
-        let mut pixels = build_opaque_image_pixels();
+        let changed_render_snapshot = build_render_snapshot(&server, client_id);
+        let mut overwritten_image_pixels = build_opaque_image_pixels();
         if image_protocol != GraphicsProtocol::Kitty {
-            pixels[..4].fill(0);
+            overwritten_image_pixels[..4].fill(0);
         }
         let client = build_test_client(&mut server, client_id);
         assert_image_trace_output(
             &client,
             image_protocol,
-            &[initial, changed],
-            &[(0, 4, build_opaque_image_pixels()), (0, 4, pixels)],
+            &[initial_render_snapshot, changed_render_snapshot],
+            &[
+                (0, 4, build_opaque_image_pixels()),
+                (0, 4, overwritten_image_pixels),
+            ],
             true,
         );
     }
@@ -709,21 +722,21 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
             client_id,
             cell_size: PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size"),
         });
-        let mut image = b"\x1b[1;1H".to_vec();
-        image.extend_from_slice(&build_opaque_image_input(image_protocol));
+        let mut image_input_bytes = b"\x1b[1;1H".to_vec();
+        image_input_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
         let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
             pane_id,
-            output_bytes: image,
+            output_bytes: image_input_bytes,
         });
-        let initial = build_render_snapshot(&server, client_id);
+        let initial_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
             pane_id,
             output_bytes: b"\x1b[1;1HB".to_vec(),
         });
-        let repainted = build_render_snapshot(&server, client_id);
+        let repainted_render_snapshot = build_render_snapshot(&server, client_id);
         let client = build_test_client(&mut server, client_id);
 
-        for graphics in [
+        for graphics_support in [
             GraphicsSupport::Kitty,
             GraphicsSupport::Iterm,
             GraphicsSupport::Sixel {
@@ -744,31 +757,35 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
             )
             .expect("test terminal");
             let mut image_output_state =
-                ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics));
-            let mut cache = crate::attach::paint::ImageCache::new();
-            let mut content_ids = ImageWireContentIds::default();
+                ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+            let mut image_cache = crate::attach::paint::ImageCache::new();
+            let mut image_wire_content_ids = ImageWireContentIds::default();
 
-            for (stage_index, painted_frame) in [&initial, &repainted].into_iter().enumerate() {
-                let snapshot = round_trip_image_frame_through_wire(
+            for (stage_index, painted_frame) in
+                [&initial_render_snapshot, &repainted_render_snapshot]
+                    .into_iter()
+                    .enumerate()
+            {
+                let render_snapshot = round_trip_image_frame_through_wire(
                     painted_frame,
-                    &mut cache,
-                    &mut content_ids,
+                    &mut image_cache,
+                    &mut image_wire_content_ids,
                 );
-                let deadline = Instant::now() + Duration::from_secs(5);
+                let settle_deadline = Instant::now() + Duration::from_secs(5);
                 let mut stage_output_bytes = Vec::new();
                 loop {
-                    let committed = paint_frame_with_writer(
+                    let is_frame_committed = paint_frame_with_writer(
                         &mut writer,
                         &mut terminal,
                         &client,
-                        &snapshot,
+                        &render_snapshot,
                         &build_committed_regions(TEST_VIEWPORT_SIZE),
                         &ViewerPaint::from_client(
                             &client,
-                            snapshot.client_snapshot.active_tab_id,
-                            &snapshot,
+                            render_snapshot.client_snapshot.active_tab_id,
+                            &render_snapshot,
                         ),
-                        graphics.get_image_render_mode(),
+                        graphics_support.get_image_render_mode(),
                         &mut image_output_state,
                         Some(PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size")),
                         &mut String::new(),
@@ -780,47 +797,47 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
                     stage_output_bytes.extend_from_slice(&std::mem::take(
                         &mut *writer.0.lock().expect("trace lock"),
                     ));
-                    if committed && !image_output_state.is_work_pending() {
+                    if is_frame_committed && !image_output_state.is_work_pending() {
                         break;
                     }
                     assert!(
-                        Instant::now() < deadline,
-                        "{image_protocol:?} -> {graphics:?}, stage {stage_index} did not settle"
+                        Instant::now() < settle_deadline,
+                        "{image_protocol:?} -> {graphics_support:?}, stage {stage_index} did not settle"
                     );
                     std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
                 }
 
-                let contains_marker = |marker: &[u8]| {
+                let has_output_marker = |marker: &[u8]| {
                     stage_output_bytes
                         .windows(marker.len())
                         .any(|window_bytes| window_bytes == marker)
                 };
                 let encoded_output_text = String::from_utf8_lossy(&stage_output_bytes);
-                match graphics {
+                match graphics_support {
                     // Kitty pixels transmit once. A Kitty-source image keeps
-                    // its cells under the text, so nothing is placed again. An
-                    // iTerm2 or Sixel source loses the overwritten cell, so its
-                    // placement geometry changes and is placed again.
+                    // its cells under the text and is not placed again. An
+                    // iTerm2 or Sixel source loses the overwritten cell; its
+                    // placement geometry changes and it is placed again.
                     GraphicsSupport::Kitty => {
                         assert_eq!(
-                            contains_marker(b"\x1b_Ga=t"),
+                            has_output_marker(b"\x1b_Ga=t"),
                             stage_index == 0,
                             "{image_protocol:?} -> Kitty, stage {stage_index} pixel transmit, bytes: {encoded_output_text:?}"
                         );
                         assert_eq!(
-                            contains_marker(b"\x1b_Ga=p"),
+                            has_output_marker(b"\x1b_Ga=p"),
                             stage_index == 0 || image_protocol != GraphicsProtocol::Kitty,
                             "{image_protocol:?} -> Kitty, stage {stage_index} placement, bytes: {encoded_output_text:?}"
                         );
                     }
-                    // iTerm2 and Sixel pixels live in the cells, so the text
-                    // repaint under the image writes the image again.
+                    // A text repaint under an iTerm2 or Sixel image writes the
+                    // image again.
                     GraphicsSupport::Iterm => assert!(
-                        contains_marker(b"\x1b]1337;File="),
+                        has_output_marker(b"\x1b]1337;File="),
                         "{image_protocol:?} -> Iterm, stage {stage_index} did not emit the image: {encoded_output_text:?}"
                     ),
                     GraphicsSupport::Sixel { .. } => assert!(
-                        contains_marker(b"\x1bP"),
+                        has_output_marker(b"\x1bP"),
                         "{image_protocol:?} -> Sixel, stage {stage_index} did not emit the image: {encoded_output_text:?}"
                     ),
                     GraphicsSupport::Unsupported => unreachable!(),
@@ -851,14 +868,15 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
         pane_id,
         output_bytes: b"\x1b[?1049h".to_vec(),
     });
-    let upload = String::from_utf8(build_opaque_image_input(GraphicsProtocol::Kitty))
+    let kitty_upload_text = String::from_utf8(build_opaque_image_input(GraphicsProtocol::Kitty))
         .unwrap()
         .replace("c=4,r=4,C=1", "c=4,C=1,y=3,h=1,r=1");
-    let mut frames = Vec::new();
-    let stages: [(u16, u16, u16); 5] = [(1, 1, 3), (1, 3, 1), (2, 4, 0), (1, 3, 1), (1, 1, 3)];
+    let mut render_snapshots = Vec::new();
+    let image_row_stages: [(u16, u16, u16); 5] =
+        [(1, 1, 3), (1, 3, 1), (2, 4, 0), (1, 3, 1), (1, 1, 3)];
     let mut expected_frame_pixel_rows = Vec::new();
     for (stage_index, (image_row_index, image_row_count, source_pixel_row_index)) in
-        stages.into_iter().enumerate()
+        image_row_stages.into_iter().enumerate()
     {
         let mut terminal_input_text = String::from("\x1b[?2026h");
         if stage_index != 0 {
@@ -868,7 +886,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
             terminal_input_text.push_str(&format!("\x1b[{terminal_row_index};1H\x1b[2K"));
             if terminal_row_index == image_row_index {
                 if stage_index == 0 {
-                    terminal_input_text.push_str(&upload);
+                    terminal_input_text.push_str(&kitty_upload_text);
                 } else if image_row_count == 4 {
                     terminal_input_text.push_str("\x1b_Ga=p,q=2,i=42,c=4,r=4,C=1\x1b\\");
                 } else {
@@ -888,13 +906,14 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
                     )
                 };
                 if has_scrollbar && image_row_count != 1 {
-                    let bar = if terminal_row_index == 3 {
+                    let scrollbar_character = if terminal_row_index == 3 {
                         '┃'
                     } else {
                         '│'
                     };
-                    terminal_input_text
-                        .push_str(&format!("{terminal_row_text:19}\x1b[90m{bar}\x1b[39m"));
+                    terminal_input_text.push_str(&format!(
+                        "{terminal_row_text:19}\x1b[90m{scrollbar_character}\x1b[39m"
+                    ));
                 } else {
                     terminal_input_text.push_str(&terminal_row_text);
                 }
@@ -906,7 +925,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
             pane_id,
             output_bytes: terminal_input_text.into_bytes(),
         });
-        frames.push(build_render_snapshot(&server, client_id));
+        render_snapshots.push(build_render_snapshot(&server, client_id));
         expected_frame_pixel_rows.push((
             image_row_index - 1,
             image_row_count,
@@ -917,7 +936,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
     assert_image_trace_output(
         &client,
         GraphicsProtocol::Kitty,
-        &frames,
+        &render_snapshots,
         &expected_frame_pixel_rows,
         true,
     );
@@ -925,28 +944,28 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
 
 #[test]
 fn utf8_border_before_kitty_upload_preserves_pixels() {
-    for prefix in ["", "┐"] {
+    for border_prefix in ["", "┐"] {
         let mut terminal = TerminalEngine::from_pty_size(PtySize {
             column_count: 20,
             row_count: 10,
         });
         terminal.set_cell_size(PixelCellSize::from_pixel_dimensions(1, 1).unwrap());
-        let mut terminal_input_bytes = prefix.as_bytes().to_vec();
+        let mut terminal_input_bytes = border_prefix.as_bytes().to_vec();
         terminal_input_bytes.extend_from_slice(b"\x1b[1;1H");
         terminal_input_bytes.extend_from_slice(&build_opaque_image_input(
             koshi_terminal::graphics::GraphicsProtocol::Kitty,
         ));
         let _ = terminal.process_pty_output(&terminal_input_bytes);
-        let pixels = terminal
+        let placement_pixels = terminal
             .get_terminal_state()
             .list_image_placements_for_view(0)
             .into_iter()
-            .map(|placement| placement.get_image_record().image.rgba_bytes.clone())
+            .map(|image_placement| image_placement.get_image_record().image.rgba_bytes.clone())
             .collect::<Vec<_>>();
         assert_eq!(
-            pixels,
+            placement_pixels,
             [build_opaque_image_pixels()],
-            "prefix {prefix:?}, events {:?}",
+            "prefix {border_prefix:?}, events {:?}",
             terminal.take_graphics_events()
         );
     }
@@ -975,19 +994,19 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             pane_id,
             output_bytes: build_two_image_input(image_protocol),
         });
-        let mut frames = vec![build_render_snapshot(&server, client_id)];
+        let mut render_snapshots = vec![build_render_snapshot(&server, client_id)];
 
         let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
             pane_id,
             output_bytes: b"\x1b[3S".to_vec(),
         });
-        frames.push(build_render_snapshot(&server, client_id));
+        render_snapshots.push(build_render_snapshot(&server, client_id));
 
         let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
             pane_id,
             output_bytes: b"\x1b[5S".to_vec(),
         });
-        frames.push(build_render_snapshot(&server, client_id));
+        render_snapshots.push(build_render_snapshot(&server, client_id));
 
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
             client_id,
@@ -998,7 +1017,7 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
                 scroll_line_count: 8,
             }],
         });
-        frames.push(build_render_snapshot(&server, client_id));
+        render_snapshots.push(build_render_snapshot(&server, client_id));
 
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
             client_id,
@@ -1009,15 +1028,15 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
                 scroll_line_count: 8,
             }],
         });
-        frames.push(build_render_snapshot(&server, client_id));
+        render_snapshots.push(build_render_snapshot(&server, client_id));
 
-        let expected_frame_pixel_maps = frames
+        let expected_frame_pixel_maps = render_snapshots
             .iter()
             .map(build_source_image_pixel_map)
             .collect::<Vec<_>>();
         assert!(
             build_image_paints(
-                &frames[0],
+                &render_snapshots[0],
                 &build_committed_regions(TEST_VIEWPORT_SIZE),
                 Rect::new(0, 0, 80, 24)
             )
@@ -1028,15 +1047,20 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
         assert!(
             expected_frame_pixel_maps[0]
                 .values()
-                .any(|pixel| *pixel == [255, 0, 0, 255])
+                .any(|rgba_pixel| *rgba_pixel == [255, 0, 0, 255])
                 && expected_frame_pixel_maps[0]
                     .values()
-                    .any(|pixel| *pixel == [255, 255, 0, 255]),
+                    .any(|rgba_pixel| *rgba_pixel == [255, 255, 0, 255]),
             "source {image_protocol:?} must expose distinct pixels from both images"
         );
 
         let client = build_test_client(&mut server, client_id);
-        assert_two_image_trace_output(&client, image_protocol, &frames, &expected_frame_pixel_maps);
+        assert_two_image_trace_output(
+            &client,
+            image_protocol,
+            &render_snapshots,
+            &expected_frame_pixel_maps,
+        );
     }
 }
 
@@ -1052,11 +1076,11 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
         pane_id,
         output_bytes: build_opaque_image_input(koshi_terminal::graphics::GraphicsProtocol::Kitty),
     });
-    let snapshot = build_render_snapshot(&server, client_id);
+    let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_test_client(&mut server, client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
 
-    for graphics in [
+    for graphics_support in [
         GraphicsSupport::Kitty,
         GraphicsSupport::Iterm,
         GraphicsSupport::Sixel {
@@ -1075,15 +1099,18 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
         )
         .expect("test terminal");
         let mut image_output_state =
-            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics));
+            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
         let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
             column_count: 80,
             row_count: 24,
         });
         terminal_engine.set_cell_size(cell_size);
         let _ = terminal_engine.process_pty_output(b"\x1b[?1049h");
-        let mut frame_paint =
-            ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot);
+        let mut frame_paint = ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        );
 
         for should_show_preview in [false, true, false] {
             frame_paint.placement_presentation =
@@ -1097,16 +1124,16 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
                     },
                     target_message: None,
                 });
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let committed = paint_frame_with_writer(
+                let is_frame_committed = paint_frame_with_writer(
                     &mut writer,
                     &mut terminal,
                     &client,
-                    &snapshot,
+                    &render_snapshot,
                     &committed_regions,
                     &frame_paint,
-                    graphics.get_image_render_mode(),
+                    graphics_support.get_image_render_mode(),
                     &mut image_output_state,
                     Some(cell_size),
                     &mut String::new(),
@@ -1117,19 +1144,19 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
                 .expect("native image frame paints");
                 let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
                 let _ = terminal_engine.process_pty_output(&output_bytes);
-                if committed && !image_output_state.is_work_pending() {
+                if is_frame_committed && !image_output_state.is_work_pending() {
                     break;
                 }
                 assert!(
-                    Instant::now() < deadline,
-                    "{graphics:?} image frame settles"
+                    Instant::now() < settle_deadline,
+                    "{graphics_support:?} image frame settles"
                 );
                 std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
             assert_eq!(
                 build_terminal_image_pixel_map(&terminal_engine).is_empty(),
                 should_show_preview,
-                "{graphics:?} native images follow the pane preview"
+                "{graphics_support:?} native images follow the pane preview"
             );
         }
     }
@@ -1138,19 +1165,27 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
 #[test]
 fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.pane_snapshots[0].cursor_snapshot.is_visible = true;
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.pane_snapshots[0].cursor_snapshot.is_visible = true;
     let client = build_test_client(&mut server, client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
-    let mut frame_paint =
-        ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot);
-    assert!(get_cursor_position(&snapshot, &committed_regions, Rect::new(0, 0, 80, 24)).is_some());
+    let mut frame_paint = ViewerPaint::from_client(
+        &client,
+        render_snapshot.client_snapshot.active_tab_id,
+        &render_snapshot,
+    );
+    assert!(get_cursor_position(
+        &render_snapshot,
+        &committed_regions,
+        Rect::new(0, 0, 80, 24)
+    )
+    .is_some());
 
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &committed_regions,
         &frame_paint,
         &mut String::new(),
@@ -1173,7 +1208,7 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &committed_regions,
         &frame_paint,
         &mut String::new(),
@@ -1186,7 +1221,7 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &committed_regions,
         &frame_paint,
         &mut String::new(),
@@ -1199,10 +1234,10 @@ fn pane_placement_preview_hides_the_focused_panes_hardware_cursor() {
 fn assert_two_image_trace_output(
     client: &Client,
     image_protocol: koshi_terminal::graphics::GraphicsProtocol,
-    frames: &[RenderSnapshot],
+    render_snapshots: &[RenderSnapshot],
     expected_frame_pixel_maps: &[BTreeMap<(u16, u16), [u8; 4]>],
 ) {
-    for graphics in [
+    for graphics_support in [
         GraphicsSupport::Kitty,
         GraphicsSupport::Iterm,
         GraphicsSupport::Sixel {
@@ -1221,9 +1256,9 @@ fn assert_two_image_trace_output(
         )
         .unwrap();
         let mut image_output_state =
-            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics));
-        let mut cache = crate::attach::paint::ImageCache::new();
-        let mut content_ids = ImageWireContentIds::default();
+            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+        let mut image_cache = crate::attach::paint::ImageCache::new();
+        let mut image_wire_content_ids = ImageWireContentIds::default();
         let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
             column_count: 80,
             row_count: 24,
@@ -1231,26 +1266,31 @@ fn assert_two_image_trace_output(
         terminal_engine.set_cell_size(PixelCellSize::from_pixel_dimensions(1, 1).unwrap());
         let _ = terminal_engine.process_pty_output(b"\x1b[?1049h");
 
-        for (frame_stage_index, (snapshot, expected_pixel_by_position)) in
-            frames.iter().zip(expected_frame_pixel_maps).enumerate()
+        for (frame_stage_index, (render_snapshot, expected_pixel_by_position)) in render_snapshots
+            .iter()
+            .zip(expected_frame_pixel_maps)
+            .enumerate()
         {
             let mut stage_bytes = Vec::new();
-            let snapshot =
-                round_trip_image_frame_through_wire(snapshot, &mut cache, &mut content_ids);
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let render_snapshot = round_trip_image_frame_through_wire(
+                render_snapshot,
+                &mut image_cache,
+                &mut image_wire_content_ids,
+            );
+            let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let committed = paint_frame_with_writer(
+                let is_frame_committed = paint_frame_with_writer(
                     &mut writer,
                     &mut terminal,
                     client,
-                    &snapshot,
+                    &render_snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
                     &ViewerPaint::from_client(
                         client,
-                        snapshot.client_snapshot.active_tab_id,
-                        &snapshot,
+                        render_snapshot.client_snapshot.active_tab_id,
+                        &render_snapshot,
                     ),
-                    graphics.get_image_render_mode(),
+                    graphics_support.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
                     &mut String::new(),
@@ -1262,12 +1302,12 @@ fn assert_two_image_trace_output(
                 let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
                 stage_bytes.extend_from_slice(&output_bytes);
                 let _ = terminal_engine.process_pty_output(&output_bytes);
-                if committed && !image_output_state.is_work_pending() {
+                if is_frame_committed && !image_output_state.is_work_pending() {
                     break;
                 }
                 assert!(
-                    Instant::now() < deadline,
-                    "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} did not settle"
+                    Instant::now() < settle_deadline,
+                    "{image_protocol:?} -> {graphics_support:?}, stage {frame_stage_index} did not settle"
                 );
                 std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
@@ -1277,18 +1317,18 @@ fn assert_two_image_trace_output(
                 .get_active_grid()
                 .list_rows()
                 .iter()
-                .flat_map(|row| row.iter())
-                .map(|cell| cell.get_character())
+                .flat_map(|grid_row| grid_row.iter())
+                .map(|grid_cell| grid_cell.get_character())
                 .collect::<String>();
             assert!(
                 terminal_text.contains("scroll-test"),
-                "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} lost the base-cell frame: {terminal_text:?}"
+                "{image_protocol:?} -> {graphics_support:?}, stage {frame_stage_index} lost the base-cell frame: {terminal_text:?}"
             );
             let actual_pixel_by_position = build_terminal_image_pixel_map(&terminal_engine);
             assert_eq!(
                 &actual_pixel_by_position,
                 expected_pixel_by_position,
-                "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index}, stream {:?}, events {:?}",
+                "{image_protocol:?} -> {graphics_support:?}, stage {frame_stage_index}, stream {:?}, events {:?}",
                 String::from_utf8_lossy(&stage_bytes),
                 terminal_engine.take_graphics_events()
             );
@@ -1298,8 +1338,8 @@ fn assert_two_image_trace_output(
 
 fn assert_partial_native_frame_write_recovers(
     graphics_support: GraphicsSupport,
-    sequence: &'static [u8],
-    split: usize,
+    sequence_bytes: &'static [u8],
+    split_byte_count: usize,
 ) {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
     let cell_size = PixelCellSize::from_pixel_dimensions(1, 1).expect("test cell size");
@@ -1311,18 +1351,24 @@ fn assert_partial_native_frame_write_recovers(
         pane_id,
         output_bytes: build_opaque_image_input(koshi_terminal::graphics::GraphicsProtocol::Kitty),
     });
-    let snapshot = build_render_snapshot(&server, client_id);
+    let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_test_client(&mut server, client_id);
-    let committed = build_committed_regions(TEST_VIEWPORT_SIZE);
-    let area = Rect::new(0, 0, 80, 24);
-    let paints = build_image_paints(&snapshot, &committed, area);
-    let cells = build_image_cell_snapshot(&snapshot, &committed, area).map(Arc::new);
+    let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
+    let render_area = Rect::new(0, 0, 80, 24);
+    let image_paint_commands =
+        build_image_paints(&render_snapshot, &committed_regions, render_area);
+    let image_cell_snapshot =
+        build_image_cell_snapshot(&render_snapshot, &committed_regions, render_area).map(Arc::new);
     let mut image_output_state =
         ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !image_output_state.prepare_frame(&paints, cells.clone(), Some(cell_size)) {
+    let settle_deadline = Instant::now() + Duration::from_secs(5);
+    while !image_output_state.prepare_frame(
+        &image_paint_commands,
+        image_cell_snapshot.clone(),
+        Some(cell_size),
+    ) {
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < settle_deadline,
             "{graphics_support:?} output did not prepare"
         );
         std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
@@ -1330,8 +1376,8 @@ fn assert_partial_native_frame_write_recovers(
     assert!(image_output_state.is_native_commit_pending());
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     let mut writer = FailInsideSequence {
-        sequence,
-        split_byte_count: split,
+        sequence_bytes,
+        split_byte_count,
         should_fail_next_write: false,
         has_failed: false,
         written_bytes: Vec::new(),
@@ -1341,14 +1387,18 @@ fn assert_partial_native_frame_write_recovers(
         &mut writer,
         &mut terminal,
         &client,
-        &snapshot,
-        &committed,
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &render_snapshot,
+        &committed_regions,
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         graphics_support.get_image_render_mode(),
         &mut image_output_state,
         Some(cell_size),
-        &mut build_window_title(&snapshot),
-        &mut get_cursor_style(&snapshot),
+        &mut build_window_title(&render_snapshot),
+        &mut get_cursor_style(&render_snapshot),
         None,
         None,
     )
@@ -1377,7 +1427,7 @@ fn partial_synchronized_begin_is_aborted_before_the_end_sequence() {
 
 #[test]
 fn partial_native_packets_are_aborted_before_synchronized_output_ends() {
-    for (graphics, sequence, split) in [
+    for (graphics_support, sequence_bytes, split_byte_count) in [
         (GraphicsSupport::Kitty, &b"\x1b_G"[..], 3),
         (GraphicsSupport::Iterm, &b"\x1b]1337;"[..], 8),
         (
@@ -1390,7 +1440,11 @@ fn partial_native_packets_are_aborted_before_synchronized_output_ends() {
             2,
         ),
     ] {
-        assert_partial_native_frame_write_recovers(graphics, sequence, split);
+        assert_partial_native_frame_write_recovers(
+            graphics_support,
+            sequence_bytes,
+            split_byte_count,
+        );
     }
 }
 
@@ -1411,12 +1465,12 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
             pane_id,
             output_bytes: build_opaque_image_input(image_protocol),
         });
-        let initial = build_render_snapshot(&server, client_id);
+        let initial_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::PtyOutput {
             pane_id,
             output_bytes: b"\x1b[3S".to_vec(),
         });
-        let cropped = build_render_snapshot(&server, client_id);
+        let cropped_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
             client_id,
             request_id: 1,
@@ -1426,12 +1480,16 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
                 scroll_line_count: 3,
             }],
         });
-        let restored = build_render_snapshot(&server, client_id);
+        let restored_render_snapshot = build_render_snapshot(&server, client_id);
         let client = build_test_client(&mut server, client_id);
         assert_image_trace_output(
             &client,
             image_protocol,
-            &[initial, cropped, restored],
+            &[
+                initial_render_snapshot,
+                cropped_render_snapshot,
+                restored_render_snapshot,
+            ],
             &[
                 (0, 4, build_opaque_image_pixels()),
                 (0, 1, vec![255; 16]),
@@ -1445,11 +1503,11 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
 fn assert_image_trace_output(
     client: &Client,
     image_protocol: koshi_terminal::graphics::GraphicsProtocol,
-    frames: &[RenderSnapshot],
+    render_snapshots: &[RenderSnapshot],
     expected_frame_pixel_rows: &[(u16, u16, Vec<u8>)],
     should_include_text: bool,
 ) {
-    for graphics in [
+    for graphics_support in [
         GraphicsSupport::Kitty,
         GraphicsSupport::Iterm,
         GraphicsSupport::Sixel {
@@ -1474,9 +1532,9 @@ fn assert_image_trace_output(
         )
         .unwrap();
         let mut image_output_state =
-            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics));
-        let mut cache = crate::attach::paint::ImageCache::new();
-        let mut content_ids = ImageWireContentIds::default();
+            ImageOutputState::from_output_kind(ImageOutputKind::from_support(graphics_support));
+        let mut image_cache = crate::attach::paint::ImageCache::new();
+        let mut image_wire_content_ids = ImageWireContentIds::default();
         let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
             column_count: 80,
             row_count: 24,
@@ -1485,26 +1543,32 @@ fn assert_image_trace_output(
         let _ = terminal_engine.process_pty_output(b"\x1b[?1049h");
         for (
             frame_stage_index,
-            (snapshot, (pixel_row_origin, pixel_row_count, image_pixel_bytes)),
-        ) in frames.iter().zip(expected_frame_pixel_rows).enumerate()
+            (render_snapshot, (pixel_row_origin, pixel_row_count, image_pixel_bytes)),
+        ) in render_snapshots
+            .iter()
+            .zip(expected_frame_pixel_rows)
+            .enumerate()
         {
             let mut stage_bytes = Vec::new();
-            let snapshot =
-                round_trip_image_frame_through_wire(snapshot, &mut cache, &mut content_ids);
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let render_snapshot = round_trip_image_frame_through_wire(
+                render_snapshot,
+                &mut image_cache,
+                &mut image_wire_content_ids,
+            );
+            let settle_deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let committed = paint_frame_with_writer(
+                let is_frame_committed = paint_frame_with_writer(
                     &mut writer,
                     &mut terminal,
                     client,
-                    &snapshot,
+                    &render_snapshot,
                     &build_committed_regions(TEST_VIEWPORT_SIZE),
                     &ViewerPaint::from_client(
                         client,
-                        snapshot.client_snapshot.active_tab_id,
-                        &snapshot,
+                        render_snapshot.client_snapshot.active_tab_id,
+                        &render_snapshot,
                     ),
-                    graphics.get_image_render_mode(),
+                    graphics_support.get_image_render_mode(),
                     &mut image_output_state,
                     Some(PixelCellSize::from_pixel_dimensions(1, 1).unwrap()),
                     &mut String::new(),
@@ -1516,12 +1580,12 @@ fn assert_image_trace_output(
                 let output_bytes = std::mem::take(&mut *writer.0.lock().unwrap());
                 stage_bytes.extend_from_slice(&output_bytes);
                 let _ = terminal_engine.process_pty_output(&output_bytes);
-                if committed && !image_output_state.is_work_pending() {
+                if is_frame_committed && !image_output_state.is_work_pending() {
                     break;
                 }
                 assert!(
-                    Instant::now() < deadline,
-                    "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index} did not settle"
+                    Instant::now() < settle_deadline,
+                    "{image_protocol:?} -> {graphics_support:?}, stage {frame_stage_index} did not settle"
                 );
                 std::thread::sleep(crate::tests::TEST_POLL_INTERVAL_DURATION);
             }
@@ -1547,7 +1611,7 @@ fn assert_image_trace_output(
                         let pixel_start_byte_index =
                             ((source_y * render_image_record.image.pixel_width + source_x) * 4)
                                 as usize;
-                        let pixel: [u8; 4] = render_image_record.image.rgba_bytes
+                        let rgba_pixel: [u8; 4] = render_image_record.image.rgba_bytes
                             [pixel_start_byte_index..pixel_start_byte_index + 4]
                             .try_into()
                             .unwrap();
@@ -1556,7 +1620,7 @@ fn assert_image_trace_output(
                                 image_placement.get_image_anchor().0 + placement_row_index,
                                 image_placement.get_image_anchor().1 + placement_column_index,
                             ),
-                            pixel,
+                            rgba_pixel,
                         );
                     }
                 }
@@ -1584,7 +1648,7 @@ fn assert_image_trace_output(
             assert_eq!(
                 actual_pixels,
                 expected_pixel_by_position,
-                "{image_protocol:?} -> {graphics:?}, stage {frame_stage_index}, stream {:?}, events {:?}",
+                "{image_protocol:?} -> {graphics_support:?}, stage {frame_stage_index}, stream {:?}, events {:?}",
                 String::from_utf8_lossy(&stage_bytes),
                 terminal_engine.take_graphics_events()
             );
@@ -1594,10 +1658,9 @@ fn assert_image_trace_output(
 
 #[test]
 fn the_launch_hands_the_viewer_the_config_files_it_read() {
-    // The viewer's settings, colors, and keymap all come from the files the
-    // launch read. A launch that built the viewer without them would paint the
-    // stock palette over the user's theme and answer the stock keys.
-    let (mut server, client_id, _pane) = build_test_server_with_pane();
+    // The client's settings and colors come from the theme file the launch
+    // read: theme `ocean` with a red focused border.
+    let (mut server, client_id, _pane_id) = build_test_server_with_pane();
 
     let client = build_test_client_with_config(
         &mut server,
@@ -1611,7 +1674,7 @@ fn the_launch_hands_the_viewer_the_config_files_it_read() {
                     ..PartialColorPalette::default()
                 }),
             }),
-            keybindings: None,
+            keybindings_config_layer: None,
         },
     );
 
@@ -1624,10 +1687,9 @@ fn the_launch_hands_the_viewer_the_config_files_it_read() {
 
 #[test]
 fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
-    // A keymap layer that validates replaces the built-in keybinding settings.
-    // A launch that dropped `loaded.keybindings` would leave the stock 500 ms
-    // chord timeout in place.
-    let (mut server, client_id, _pane) = build_test_server_with_pane();
+    // A keymap layer that validates replaces the built-in keybinding settings:
+    // `chord_timeout_ms` becomes `1234`.
+    let (mut server, client_id, _pane_id) = build_test_server_with_pane();
 
     let client = build_test_client_with_config(
         &mut server,
@@ -1635,7 +1697,7 @@ fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
         LoadedConfig {
             app_config_layer: None,
             theme_config_layer: None,
-            keybindings: Some(PartialKeybindingsConfig {
+            keybindings_config_layer: Some(PartialKeybindingsConfig {
                 chord_timeout_ms: Some(1234),
                 ..PartialKeybindingsConfig::default()
             }),
@@ -1650,25 +1712,28 @@ fn the_launch_hands_the_viewer_the_keymap_file_it_read() {
 
 #[test]
 fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
-    // The hint bar is painted from the viewer's own keymap, but which label the
-    // mouse-select entry wears depends on session state the frame carries. A
-    // frame that dropped that link would keep offering "Mouse Select" while
-    // selection was already on.
+    // The hint bar is painted from the client's own keymap. The mouse-select
+    // entry reads `Mouse Select` while the session's mouse-select mode is off
+    // and `Mouse Unselect` while it is on.
     let (mut server, client_id, _pane_id) = build_test_server_with_pane();
     let mut client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).expect("terminal");
-    let snapshot = build_render_snapshot(&server, client_id);
-    client.apply_render_snapshot(&snapshot);
+    let render_snapshot = build_render_snapshot(&server, client_id);
+    client.apply_render_snapshot(&render_snapshot);
 
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(Size {
             column_count: 120,
             row_count: 24,
         }),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         &mut String::new(),
         &mut None,
     )
@@ -1680,24 +1745,31 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
         CommandSource::KeyBinding { client_id },
         Command::ToggleMouseSelect,
     ));
-    let snapshot = build_render_snapshot(&server, client_id);
-    client.apply_render_snapshot(&snapshot);
+    let render_snapshot = build_render_snapshot(&server, client_id);
+    client.apply_render_snapshot(&render_snapshot);
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(Size {
             column_count: 120,
             row_count: 24,
         }),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         &mut String::new(),
         &mut None,
     )
     .expect("paint");
 
-    let painted = serialize_terminal_screen_text(&terminal);
-    assert!(painted.contains("Mouse Unselect"), "{painted}");
+    let painted_screen_text = serialize_terminal_screen_text(&terminal);
+    assert!(
+        painted_screen_text.contains("Mouse Unselect"),
+        "{painted_screen_text}"
+    );
 }
 
 #[test]
@@ -1713,13 +1785,17 @@ fn pty_output_is_painted_to_the_screen() {
 
     let client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let snapshot = build_render_snapshot(&server, client_id);
+    let render_snapshot = build_render_snapshot(&server, client_id);
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         &mut String::new(),
         &mut None,
     )
@@ -1745,21 +1821,25 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
         },)
         .is_continue());
     let client = build_test_client(&mut server, client_id);
-    let mut last_cursor = None;
-    let snapshot = build_render_snapshot(&server, client_id);
+    let mut last_cursor_style = None;
+    let render_snapshot = build_render_snapshot(&server, client_id);
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         &mut String::new(),
-        &mut last_cursor,
+        &mut last_cursor_style,
     )
     .expect("paint");
 
     assert_eq!(
-        last_cursor,
+        last_cursor_style,
         Some(CursorStyle::Shaped {
             shape: CursorShape::Bar,
             is_blinking: false,
@@ -1775,9 +1855,9 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
     let (mut server, client_id, _pane_id) = build_test_server_with_pane();
     let client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.client_snapshot.focused_pane_id = None;
-    let mut last_cursor = Some(CursorStyle::Shaped {
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.client_snapshot.focused_pane_id = None;
+    let mut last_cursor_style = Some(CursorStyle::Shaped {
         shape: CursorShape::Block,
         is_blinking: true,
     });
@@ -1785,15 +1865,19 @@ fn painting_a_frame_that_names_no_cursor_style_records_none() {
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         &mut String::new(),
-        &mut last_cursor,
+        &mut last_cursor_style,
     )
     .expect("paint");
 
-    assert_eq!(last_cursor, None);
+    assert_eq!(last_cursor_style, None);
 }
 
 #[test]
@@ -1801,25 +1885,29 @@ fn painting_records_the_window_title_it_sent() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
     let client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = Some(pane_id);
-    snapshot.pane_snapshots[0].pane_id = pane_id;
-    snapshot.pane_snapshots[0].pane_title = Some("htop".to_string());
-    let mut last_title = String::new();
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = Some("htop".to_string());
+    let mut last_window_title = String::new();
 
     paint_frame(
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
-        &mut last_title,
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
+        &mut last_window_title,
         &mut None,
     )
     .expect("paint");
 
-    assert_eq!(last_title, "quiet-lake | htop");
+    assert_eq!(last_window_title, "quiet-lake | htop");
 }
 
 #[test]
@@ -1829,43 +1917,43 @@ fn a_paint_after_a_title_change_records_the_new_title() {
     let (mut server, client_id, _pane_id) = build_test_server_with_pane();
     let client = build_test_client(&mut server, client_id);
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = None;
-    let mut last_title = String::new();
-    let paint_frame_with_snapshot = |terminal: &mut Terminal<TestBackend>,
-                                     snapshot: &RenderSnapshot,
-                                     last_title: &mut String| {
-        paint_frame(
-            terminal,
-            &client,
-            snapshot,
-            &build_committed_regions(TEST_VIEWPORT_SIZE),
-            &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, snapshot),
-            last_title,
-            &mut None,
-        )
-        .expect("paint");
-    };
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = None;
+    let mut last_window_title = String::new();
+    let paint_frame_with_snapshot =
+        |terminal: &mut Terminal<TestBackend>,
+         render_snapshot: &RenderSnapshot,
+         last_window_title: &mut String| {
+            paint_frame(
+                terminal,
+                &client,
+                render_snapshot,
+                &build_committed_regions(TEST_VIEWPORT_SIZE),
+                &ViewerPaint::from_client(
+                    &client,
+                    render_snapshot.client_snapshot.active_tab_id,
+                    render_snapshot,
+                ),
+                last_window_title,
+                &mut None,
+            )
+            .expect("paint");
+        };
 
-    paint_frame_with_snapshot(&mut terminal, &snapshot, &mut last_title);
-    assert_eq!(last_title, "quiet-lake");
+    paint_frame_with_snapshot(&mut terminal, &render_snapshot, &mut last_window_title);
+    assert_eq!(last_window_title, "quiet-lake");
 
-    snapshot.session_snapshot.session_name = "loud-hill".to_string();
-    paint_frame_with_snapshot(&mut terminal, &snapshot, &mut last_title);
+    render_snapshot.session_snapshot.session_name = "loud-hill".to_string();
+    paint_frame_with_snapshot(&mut terminal, &render_snapshot, &mut last_window_title);
 
-    assert_eq!(last_title, "loud-hill");
+    assert_eq!(last_window_title, "loud-hill");
 }
 
 #[test]
 fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
-    // koshi copies the focused pane's DECSCUSR style out to the terminal it is
-    // itself running in, and crossterm writes these commands as the very same
-    // DECSCUSR sequences. So each pair must map to the command whose bytes are
-    // the sequence that produced it — `CSI 5 SP q` in, `CSI 5 SP q` out.
-    // Nothing else in the suite would catch a swapped arm: a `Bar` sent as
-    // `BlinkingUnderScore` renders vim's insert cursor as an underline while
-    // every test still passes.
+    // Each DECSCUSR shape-and-blink pair maps to the crossterm command that
+    // writes the same DECSCUSR sequence: `CSI 5 SP q` in, `CSI 5 SP q` out.
     let create_shaped_cursor_style = |cursor_shape, is_blinking| CursorStyle::Shaped {
         shape: cursor_shape,
         is_blinking,
@@ -1907,136 +1995,137 @@ fn each_pane_cursor_style_maps_to_the_crossterm_command_that_re_emits_it() {
     }
 }
 
-// --- window_title: the outer-terminal title string ---
+// --- build_window_title: the outer-terminal title string ---
 
 #[test]
 fn window_title_with_no_focused_pane_is_just_the_session_name() {
     let (server, client_id, _pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = None;
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = None;
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake");
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake");
 }
 
 #[test]
 fn window_title_with_a_titled_focused_pane_joins_session_and_title() {
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = Some(pane_id);
-    snapshot.pane_snapshots[0].pane_id = pane_id;
-    snapshot.pane_snapshots[0].pane_title = Some("htop".to_string());
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = Some("htop".to_string());
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake | htop");
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake | htop");
 }
 
 #[test]
 fn window_title_reads_the_focused_pane_not_the_first_one_listed() {
-    // The lookup matches on the pane id. Every other title test lists a single
-    // pane; a lookup that took the first entry would pass all of them.
+    // The lookup matches on the pane id: the focused pane is listed second.
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
     let focused_pane_id = PaneId::new();
-    let mut second_pane_snapshot = snapshot.pane_snapshots[0].clone();
+    let mut second_pane_snapshot = render_snapshot.pane_snapshots[0].clone();
     second_pane_snapshot.pane_id = focused_pane_id;
     second_pane_snapshot.pane_title = Some("htop".to_string());
-    snapshot.pane_snapshots[0].pane_id = pane_id;
-    snapshot.pane_snapshots[0].pane_title = Some("bash".to_string());
-    snapshot.pane_snapshots.push(second_pane_snapshot);
-    snapshot.client_snapshot.focused_pane_id = Some(focused_pane_id);
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = Some("bash".to_string());
+    render_snapshot.pane_snapshots.push(second_pane_snapshot);
+    render_snapshot.client_snapshot.focused_pane_id = Some(focused_pane_id);
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake | htop");
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake | htop");
 }
 
 #[test]
 fn window_title_with_an_untitled_focused_pane_falls_back_to_the_session_name() {
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = Some(pane_id);
-    snapshot.pane_snapshots[0].pane_id = pane_id;
-    snapshot.pane_snapshots[0].pane_title = None;
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = None;
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake");
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake");
 }
 
 #[test]
 fn window_title_keeps_a_non_ascii_pane_title_whole() {
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = Some(pane_id);
-    snapshot.pane_snapshots[0].pane_id = pane_id;
-    snapshot.pane_snapshots[0].pane_title = Some("日本語 🙂".to_string());
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = Some("日本語 🙂".to_string());
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake | 日本語 🙂");
+    assert_eq!(
+        build_window_title(&render_snapshot),
+        "quiet-lake | 日本語 🙂"
+    );
 }
 
 #[test]
 fn window_title_with_an_empty_pane_title_falls_back_to_the_session_name() {
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = Some(pane_id);
-    snapshot.pane_snapshots[0].pane_id = pane_id;
-    snapshot.pane_snapshots[0].pane_title = Some(String::new());
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    render_snapshot.pane_snapshots[0].pane_id = pane_id;
+    render_snapshot.pane_snapshots[0].pane_title = Some(String::new());
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake");
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake");
 }
 
 #[test]
 fn window_title_with_a_focused_pane_absent_from_the_pane_list_falls_back() {
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut snapshot = build_render_snapshot(&server, client_id);
-    snapshot.session_snapshot.session_name = "quiet-lake".to_string();
-    snapshot.client_snapshot.focused_pane_id = Some(pane_id);
-    // No `PaneSnapshot` carries `pane_id`, so the lookup in `window_title`
-    // cannot find a title for it.
-    snapshot.pane_snapshots.clear();
+    let mut render_snapshot = build_render_snapshot(&server, client_id);
+    render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
+    render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    // No `PaneSnapshot` carries `pane_id`.
+    render_snapshot.pane_snapshots.clear();
 
-    assert_eq!(build_window_title(&snapshot), "quiet-lake");
+    assert_eq!(build_window_title(&render_snapshot), "quiet-lake");
 }
 
-/// The title `window_title` builds for a session named `session_name` holding
-/// one focused pane titled `pane_title`, after that frame has travelled the
-/// session-to-client wire and been read back by
-/// [`to_snapshot`](crate::attach::paint::to_snapshot).
+/// The title [`build_window_title`] builds for a session named `session_name`
+/// holding one focused pane titled `pane_title`, after that frame has travelled
+/// the session-to-client wire and been read back by
+/// [`build_render_snapshot`](crate::attach::paint::build_render_snapshot).
 fn round_trip_title_through_wire(session_name: &str, pane_title: &str) -> String {
     let (server, client_id, pane_id) = build_test_server_with_pane();
-    let mut sent = build_render_snapshot(&server, client_id);
-    sent.session_snapshot.session_name = session_name.to_string();
-    sent.client_snapshot.focused_pane_id = Some(pane_id);
-    for pane_snapshot in &mut sent.pane_snapshots {
+    let mut sent_render_snapshot = build_render_snapshot(&server, client_id);
+    sent_render_snapshot.session_snapshot.session_name = session_name.to_string();
+    sent_render_snapshot.client_snapshot.focused_pane_id = Some(pane_id);
+    for pane_snapshot in &mut sent_render_snapshot.pane_snapshots {
         if pane_snapshot.pane_id == pane_id {
             pane_snapshot.pane_title = Some(pane_title.to_string());
         }
     }
 
-    let read_back = crate::attach::paint::build_render_snapshot(
-        &koshi_runtime::runtime::frame::build_wire_frame(&sent),
+    let read_back_render_snapshot = crate::attach::paint::build_render_snapshot(
+        &koshi_runtime::runtime::frame::build_wire_frame(&sent_render_snapshot),
     );
-    build_window_title(&read_back)
+    build_window_title(&read_back_render_snapshot)
 }
 
 #[test]
 fn a_window_title_can_carry_no_osc_terminator() {
-    // `window_title` is written into the viewer's own terminal verbatim,
-    // inside `OSC 0; ... BEL` (crossterm `SetTitle`). A session server this
-    // client did not build chooses both halves of that title.
-    for hostile in [
+    // The window title is written into the client's own terminal inside
+    // `OSC 0; ... BEL` (crossterm `SetTitle`). The session server chooses both
+    // halves of that title.
+    for hostile_title_text in [
         "x\u{7}pwned",          // BEL
         "x\u{1b}]0;pwned\u{7}", // ESC
         "x\u{9c}pwned",         // C1 ST
         "x\u{9b}2J",            // C1 CSI
     ] {
-        let from_session_name = round_trip_title_through_wire(hostile, "bash");
+        let from_session_name = round_trip_title_through_wire(hostile_title_text, "bash");
         assert!(
             !from_session_name.contains(['\u{7}', '\u{1b}', '\u{9c}', '\u{9b}']),
             "an OSC terminator survived into the window title: {from_session_name:?}"
         );
-        let from_pane_title = round_trip_title_through_wire("dev", hostile);
+        let from_pane_title = round_trip_title_through_wire("dev", hostile_title_text);
         assert!(
             !from_pane_title.contains(['\u{7}', '\u{1b}', '\u{9c}', '\u{9b}']),
             "an OSC terminator survived into the window title: {from_pane_title:?}"
@@ -2055,10 +2144,13 @@ fn a_window_title_names_the_session_and_the_pane_the_wire_carried() {
 
 #[test]
 fn a_window_title_is_bounded_by_the_pane_title_cap() {
-    let cap = koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
-    let title = round_trip_title_through_wire("dev", &"a".repeat(100_000));
+    let pane_title_byte_cap = koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
+    let window_title = round_trip_title_through_wire("dev", &"a".repeat(100_000));
 
-    assert_eq!(title, format!("dev | {}", "a".repeat(cap)));
+    assert_eq!(
+        window_title,
+        format!("dev | {}", "a".repeat(pane_title_byte_cap))
+    );
 }
 
 #[test]
@@ -2085,21 +2177,24 @@ fn either_terminal_stream_opens_the_terminal_device() {
 #[test]
 fn redirected_standard_output_skips_the_controlling_terminal_probe() {
     let mut has_been_called = false;
-    let support = resolve_graphics_support_for_output(false, || {
+    let terminal_probe = resolve_graphics_support_for_output(false, || {
         has_been_called = true;
         Ok(build_terminal_probe(GraphicsSupport::Kitty))
     })
     .expect("redirected output selects a supported fallback");
 
-    assert_eq!(support, build_terminal_probe(GraphicsSupport::Unsupported));
+    assert_eq!(
+        terminal_probe,
+        build_terminal_probe(GraphicsSupport::Unsupported)
+    );
     assert!(!has_been_called);
 
-    let support = resolve_graphics_support_for_output(true, || {
+    let terminal_probe = resolve_graphics_support_for_output(true, || {
         has_been_called = true;
         Ok(build_terminal_probe(GraphicsSupport::Kitty))
     })
     .expect("terminal output accepts the probe result");
-    assert_eq!(support, build_terminal_probe(GraphicsSupport::Kitty));
+    assert_eq!(terminal_probe, build_terminal_probe(GraphicsSupport::Kitty));
     assert!(has_been_called);
 
     let probe_error = resolve_graphics_support_for_output(true, || {
@@ -2114,20 +2209,20 @@ fn redirected_standard_output_skips_the_controlling_terminal_probe() {
 
 #[test]
 fn raw_mode_operation_restores_cooked_mode_after_success() {
-    let mut calls = Vec::new();
+    let mut mode_step_names = Vec::new();
 
     let mode_operation_result = run_with_raw_mode(
-        &mut calls,
-        |calls| {
-            calls.push("raw");
+        &mut mode_step_names,
+        |mode_step_names| {
+            mode_step_names.push("raw");
             Ok(())
         },
-        |calls| {
-            calls.push("probe");
+        |mode_step_names| {
+            mode_step_names.push("probe");
             Ok(build_terminal_probe(GraphicsSupport::Kitty))
         },
-        |calls| {
-            calls.push("cooked");
+        |mode_step_names| {
+            mode_step_names.push("cooked");
             Ok(())
         },
     )
@@ -2137,75 +2232,75 @@ fn raw_mode_operation_restores_cooked_mode_after_success() {
         mode_operation_result,
         build_terminal_probe(GraphicsSupport::Kitty)
     );
-    assert_eq!(calls, ["raw", "probe", "cooked"]);
+    assert_eq!(mode_step_names, ["raw", "probe", "cooked"]);
 }
 
 #[test]
 fn raw_mode_operation_stops_when_raw_mode_entry_fails() {
-    let mut calls = Vec::new();
+    let mut mode_step_names = Vec::new();
 
     let raw_mode_error = run_with_raw_mode(
-        &mut calls,
-        |calls| {
-            calls.push("raw");
+        &mut mode_step_names,
+        |mode_step_names| {
+            mode_step_names.push("raw");
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "raw error"))
         },
-        |calls| {
-            calls.push("probe");
+        |mode_step_names| {
+            mode_step_names.push("probe");
             Ok(build_terminal_probe(GraphicsSupport::Kitty))
         },
-        |calls| {
-            calls.push("cooked");
+        |mode_step_names| {
+            mode_step_names.push("cooked");
             Ok(())
         },
     )
     .expect_err("the raw-mode error is returned");
 
     assert_eq!(raw_mode_error.kind(), io::ErrorKind::PermissionDenied);
-    assert_eq!(calls, ["raw"]);
+    assert_eq!(mode_step_names, ["raw"]);
 }
 
 #[test]
 fn raw_mode_operation_restores_cooked_mode_after_an_operation_error() {
-    let mut calls = Vec::new();
+    let mut mode_step_names = Vec::new();
 
     let raw_mode_error = run_with_raw_mode(
-        &mut calls,
-        |calls| {
-            calls.push("raw");
+        &mut mode_step_names,
+        |mode_step_names| {
+            mode_step_names.push("raw");
             Ok(())
         },
-        |calls| {
-            calls.push("probe");
+        |mode_step_names| {
+            mode_step_names.push("probe");
             Err::<TerminalProbe, _>(io::Error::new(io::ErrorKind::InvalidData, "probe error"))
         },
-        |calls| {
-            calls.push("cooked");
+        |mode_step_names| {
+            mode_step_names.push("cooked");
             Ok(())
         },
     )
     .expect_err("the probe error is returned");
 
     assert_eq!(raw_mode_error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(calls, ["raw", "probe", "cooked"]);
+    assert_eq!(mode_step_names, ["raw", "probe", "cooked"]);
 }
 
 #[test]
 fn raw_mode_operation_returns_a_cooked_mode_error() {
-    let mut calls = Vec::new();
+    let mut mode_step_names = Vec::new();
 
     let raw_mode_error = run_with_raw_mode(
-        &mut calls,
-        |calls| {
-            calls.push("raw");
+        &mut mode_step_names,
+        |mode_step_names| {
+            mode_step_names.push("raw");
             Ok(())
         },
-        |calls| {
-            calls.push("probe");
+        |mode_step_names| {
+            mode_step_names.push("probe");
             Ok(build_terminal_probe(GraphicsSupport::Kitty))
         },
-        |calls| {
-            calls.push("cooked");
+        |mode_step_names| {
+            mode_step_names.push("cooked");
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "cooked error",
@@ -2215,25 +2310,25 @@ fn raw_mode_operation_returns_a_cooked_mode_error() {
     .expect_err("the cooked-mode error is returned");
 
     assert_eq!(raw_mode_error.kind(), io::ErrorKind::PermissionDenied);
-    assert_eq!(calls, ["raw", "probe", "cooked"]);
+    assert_eq!(mode_step_names, ["raw", "probe", "cooked"]);
 }
 
 #[test]
 fn raw_mode_operation_keeps_the_operation_error_when_restore_also_fails() {
-    let mut calls = Vec::new();
+    let mut mode_step_names = Vec::new();
 
     let raw_mode_error = run_with_raw_mode(
-        &mut calls,
-        |calls| {
-            calls.push("raw");
+        &mut mode_step_names,
+        |mode_step_names| {
+            mode_step_names.push("raw");
             Ok(())
         },
-        |calls| {
-            calls.push("probe");
+        |mode_step_names| {
+            mode_step_names.push("probe");
             Err::<TerminalProbe, _>(io::Error::new(io::ErrorKind::InvalidData, "probe error"))
         },
-        |calls| {
-            calls.push("cooked");
+        |mode_step_names| {
+            mode_step_names.push("cooked");
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "cooked error",
@@ -2244,7 +2339,7 @@ fn raw_mode_operation_keeps_the_operation_error_when_restore_also_fails() {
 
     assert_eq!(raw_mode_error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(raw_mode_error.to_string(), "probe error");
-    assert_eq!(calls, ["raw", "probe", "cooked"]);
+    assert_eq!(mode_step_names, ["raw", "probe", "cooked"]);
 }
 
 #[test]
@@ -2271,7 +2366,7 @@ fn terminal_probe_filter_leaves_keys_and_other_replies_buffered() {
 fn terminal_probe_collects_reordered_replies_before_selecting_kitty() {
     use koshi_input::host::KittyGraphicsReply;
 
-    let mut reader = probe_reader([
+    let mut reader = build_probe_reader([
         Event::Key(KeyCode::Char('k').into()),
         Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
         Event::TerminalFeatures(b"FSx".to_vec()),
@@ -2297,13 +2392,13 @@ fn terminal_probe_collects_reordered_replies_before_selecting_kitty() {
     );
     assert_eq!(
         reader
-            .read_matching_event(|event| matches!(event, Event::Key(_)))
+            .read_matching_event(|host_event| matches!(host_event, Event::Key(_)))
             .expect("the unrelated key remains buffered"),
         Event::Key(KeyCode::Char('k').into())
     );
     assert_eq!(
         reader
-            .read_matching_event(|event| matches!(event, Event::Paste(_)))
+            .read_matching_event(|host_event| matches!(host_event, Event::Paste(_)))
             .expect("the unrelated paste remains buffered"),
         Event::Paste("pasted".to_string())
     );
@@ -2311,7 +2406,7 @@ fn terminal_probe_collects_reordered_replies_before_selecting_kitty() {
 
 #[test]
 fn terminal_probe_prefers_iterm_file_over_sixel() {
-    let mut reader = probe_reader([
+    let mut reader = build_probe_reader([
         Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
         Event::TerminalFeatures(b"SxF".to_vec()),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Err(
@@ -2327,7 +2422,7 @@ fn terminal_probe_prefers_iterm_file_over_sixel() {
 
 #[test]
 fn terminal_probe_uses_two_sixel_colors_without_a_palette_reply() {
-    let mut reader = probe_reader([Event::PrimaryDeviceAttributes(vec![1, 4])]);
+    let mut reader = build_probe_reader([Event::PrimaryDeviceAttributes(vec![1, 4])]);
 
     let probe_result = probe_terminal(&mut Vec::new(), &mut reader).expect("probe reads replies");
 
@@ -2343,7 +2438,7 @@ fn terminal_probe_uses_two_sixel_colors_without_a_palette_reply() {
 
 #[test]
 fn terminal_probe_caps_sixel_palette_and_maps_zero_geometry_to_unlimited_axes() {
-    let mut reader = probe_reader([
+    let mut reader = build_probe_reader([
         Event::TerminalFeatures(b"Sx".to_vec()),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(512))),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Geometry(Ok((0, 480)))),
@@ -2363,7 +2458,7 @@ fn terminal_probe_caps_sixel_palette_and_maps_zero_geometry_to_unlimited_axes() 
 
 #[test]
 fn terminal_probe_does_not_treat_a_regis_palette_reply_as_sixel_support() {
-    let mut reader = probe_reader([
+    let mut reader = build_probe_reader([
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(256))),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Geometry(Err(
             GraphicAttributeError::Failure,
@@ -2377,7 +2472,7 @@ fn terminal_probe_does_not_treat_a_regis_palette_reply_as_sixel_support() {
 
 #[test]
 fn terminal_probe_accepts_successful_sixel_geometry_without_other_sixel_evidence() {
-    let mut reader = probe_reader([Event::SixelGraphicsAttributeReply(
+    let mut reader = build_probe_reader([Event::SixelGraphicsAttributeReply(
         GraphicAttributeReply::Geometry(Ok((640, 480))),
     )]);
 
@@ -2395,7 +2490,7 @@ fn terminal_probe_accepts_successful_sixel_geometry_without_other_sixel_evidence
 
 #[test]
 fn terminal_probe_rejects_a_reported_one_color_sixel_palette() {
-    let mut reader = probe_reader([
+    let mut reader = build_probe_reader([
         Event::PrimaryDeviceAttributes(vec![1, 2, 4]),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(1))),
     ]);
@@ -2407,7 +2502,7 @@ fn terminal_probe_rejects_a_reported_one_color_sixel_palette() {
 
 #[test]
 fn terminal_probe_without_replies_preserves_unrelated_input_and_reports_unsupported() {
-    let mut reader = probe_reader([
+    let mut reader = build_probe_reader([
         Event::Key(KeyCode::Char('x').into()),
         Event::Paste("input".to_string()),
     ]);
@@ -2418,13 +2513,13 @@ fn terminal_probe_without_replies_preserves_unrelated_input_and_reports_unsuppor
     assert_eq!(probe_result.cell_size, None);
     assert_eq!(
         reader
-            .read_matching_event(|event| matches!(event, Event::Key(_)))
+            .read_matching_event(|host_event| matches!(host_event, Event::Key(_)))
             .expect("the key is not consumed by the probe"),
         Event::Key(KeyCode::Char('x').into())
     );
     assert_eq!(
         reader
-            .read_matching_event(|event| matches!(event, Event::Paste(_)))
+            .read_matching_event(|host_event| matches!(host_event, Event::Paste(_)))
             .expect("the paste is not consumed by the probe"),
         Event::Paste("input".to_string())
     );
@@ -2503,8 +2598,8 @@ fn shift_mouse_capture_is_requested_only_while_placement_is_active() {
 #[test]
 fn failed_shift_mouse_capture_write_can_be_retried() {
     let mut writer = FailOnWrite {
-        fail_at: 0,
-        writes: 0,
+        failing_write_index: 0,
+        write_count: 0,
         written_bytes: Vec::new(),
     };
     let mut is_shift_mouse_capture_requested = false;
@@ -2525,13 +2620,14 @@ fn failed_shift_mouse_capture_write_can_be_retried() {
 #[test]
 fn sixel_modes_are_saved_before_application_modes() {
     let mut terminal_mode_bytes = Vec::new();
-    let graphics = GraphicsSupport::Sixel {
+    let graphics_support = GraphicsSupport::Sixel {
         palette_color_count: 2,
         maximum_pixel_width: None,
         maximum_pixel_height: None,
     };
 
-    enable_terminal_modes(&mut terminal_mode_bytes, graphics).expect("terminal modes write");
+    enable_terminal_modes(&mut terminal_mode_bytes, graphics_support)
+        .expect("terminal modes write");
 
     assert_eq!(
         terminal_mode_bytes,
@@ -2542,30 +2638,38 @@ fn sixel_modes_are_saved_before_application_modes() {
 #[test]
 fn terminal_cleanup_reverses_modes_and_deletes_kitty_images() {
     let mut cleanup_bytes = Vec::new();
-    let claimed = AtomicBool::new(false);
+    let is_image_cleanup_claimed = AtomicBool::new(false);
 
-    write_terminal_cleanup(&mut cleanup_bytes, GraphicsSupport::Kitty, &claimed)
-        .expect("terminal cleanup writes");
+    write_terminal_cleanup(
+        &mut cleanup_bytes,
+        GraphicsSupport::Kitty,
+        &is_image_cleanup_claimed,
+    )
+    .expect("terminal cleanup writes");
 
     assert_eq!(
         cleanup_bytes,
         b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
-    assert!(claimed.load(Ordering::Acquire));
+    assert!(is_image_cleanup_claimed.load(Ordering::Acquire));
 }
 
 #[test]
 fn sixel_cleanup_aborts_a_control_string_before_restoring_modes() {
     let mut cleanup_bytes = Vec::new();
-    let claimed = AtomicBool::new(false);
-    let graphics = GraphicsSupport::Sixel {
+    let is_image_cleanup_claimed = AtomicBool::new(false);
+    let graphics_support = GraphicsSupport::Sixel {
         palette_color_count: 2,
         maximum_pixel_width: None,
         maximum_pixel_height: None,
     };
 
-    write_terminal_cleanup(&mut cleanup_bytes, graphics, &claimed)
-        .expect("terminal cleanup writes");
+    write_terminal_cleanup(
+        &mut cleanup_bytes,
+        graphics_support,
+        &is_image_cleanup_claimed,
+    )
+    .expect("terminal cleanup writes");
 
     assert_eq!(
         cleanup_bytes,
@@ -2576,14 +2680,18 @@ fn sixel_cleanup_aborts_a_control_string_before_restoring_modes() {
 #[test]
 fn terminal_cleanup_attempts_mode_resets_after_image_delete_fails() {
     let mut writer = FailOnWrite {
-        fail_at: 1,
-        writes: 0,
+        failing_write_index: 1,
+        write_count: 0,
         written_bytes: Vec::new(),
     };
-    let claimed = AtomicBool::new(false);
+    let is_image_cleanup_claimed = AtomicBool::new(false);
 
-    let cleanup_error = write_terminal_cleanup(&mut writer, GraphicsSupport::Kitty, &claimed)
-        .expect_err("the failed delete is returned");
+    let cleanup_error = write_terminal_cleanup(
+        &mut writer,
+        GraphicsSupport::Kitty,
+        &is_image_cleanup_claimed,
+    )
+    .expect_err("the failed delete is returned");
 
     assert_eq!(cleanup_error.kind(), io::ErrorKind::BrokenPipe);
     assert_eq!(
@@ -2594,44 +2702,48 @@ fn terminal_cleanup_attempts_mode_resets_after_image_delete_fails() {
 
 #[test]
 fn terminal_cleanup_cancels_a_partial_kitty_apc_before_deleting_images() {
-    let partial = b"\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=1;AAAA";
-    let mut writer = partial.to_vec();
+    let partial_kitty_packet = b"\x1b_Ga=t,f=32,s=1,v=1,I=1,q=2,o=z,m=1;AAAA";
+    let mut writer = partial_kitty_packet.to_vec();
 
-    let claimed = AtomicBool::new(false);
-    write_terminal_cleanup(&mut writer, GraphicsSupport::Kitty, &claimed)
-        .expect("cleanup writes after the partial packet");
+    let is_image_cleanup_claimed = AtomicBool::new(false);
+    write_terminal_cleanup(
+        &mut writer,
+        GraphicsSupport::Kitty,
+        &is_image_cleanup_claimed,
+    )
+    .expect("cleanup writes after the partial packet");
     assert_eq!(
-        &writer[partial.len()..],
+        &writer[partial_kitty_packet.len()..],
         b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
 
-    let mut engine = TerminalEngine::from_pty_size(PtySize {
+    let mut terminal_engine = TerminalEngine::from_pty_size(PtySize {
         column_count: 80,
         row_count: 24,
     });
-    assert!(engine.process_pty_output(&writer).is_empty());
-    assert!(engine.take_graphics_events().is_empty());
-    assert!(engine.finish_graphics_stream().is_empty());
+    assert!(terminal_engine.process_pty_output(&writer).is_empty());
+    assert!(terminal_engine.take_graphics_events().is_empty());
+    assert!(terminal_engine.finish_graphics_stream().is_empty());
 }
 
 #[test]
 fn terminal_application_modes_are_restored_once_across_cleanup_paths() {
     let mut cleanup_bytes = Vec::new();
-    let active = AtomicBool::new(true);
-    let image_claimed = AtomicBool::new(false);
+    let has_active_application_modes = AtomicBool::new(true);
+    let is_image_cleanup_claimed = AtomicBool::new(false);
 
     restore_application_modes(
         &mut cleanup_bytes,
         GraphicsSupport::Kitty,
-        &active,
-        &image_claimed,
+        &has_active_application_modes,
+        &is_image_cleanup_claimed,
     )
     .expect("the panic cleanup writes");
     restore_application_modes(
         &mut cleanup_bytes,
         GraphicsSupport::Kitty,
-        &active,
-        &image_claimed,
+        &has_active_application_modes,
+        &is_image_cleanup_claimed,
     )
     .expect("the unwind cleanup is already complete");
 
@@ -2639,32 +2751,32 @@ fn terminal_application_modes_are_restored_once_across_cleanup_paths() {
         cleanup_bytes,
         b"\x18\x1b\\\x1b_Ga=d,d=A,q=2;\x1b\\\x1b[>0s\x1b[?2004l\x1b[?1006l\x1b[?1003l\x1b[<1u\x1b[?1049l\x1b[?25h\x1b[0 q"
     );
-    assert!(!active.load(Ordering::Acquire));
-    assert!(image_claimed.load(Ordering::Acquire));
+    assert!(!has_active_application_modes.load(Ordering::Acquire));
+    assert!(is_image_cleanup_claimed.load(Ordering::Acquire));
 }
 
 #[test]
 fn terminal_cleanup_skips_image_commands_before_application_modes_are_active() {
     let mut cleanup_bytes = Vec::new();
-    let active = AtomicBool::new(false);
-    let image_claimed = AtomicBool::new(false);
+    let has_active_application_modes = AtomicBool::new(false);
+    let is_image_cleanup_claimed = AtomicBool::new(false);
 
     restore_application_modes(
         &mut cleanup_bytes,
         GraphicsSupport::Kitty,
-        &active,
-        &image_claimed,
+        &has_active_application_modes,
+        &is_image_cleanup_claimed,
     )
     .expect("inactive application modes need no cleanup");
 
     assert!(cleanup_bytes.is_empty());
-    assert!(!image_claimed.load(Ordering::Acquire));
+    assert!(!is_image_cleanup_claimed.load(Ordering::Acquire));
 }
 
 #[test]
 fn host_resize_and_paste_events_keep_their_exact_values() {
     let client_id = ClientId::new();
-    let resize = build_terminal_runtime_event(
+    let resize_runtime_event = build_terminal_runtime_event(
         client_id,
         Event::WindowResized(WindowSize {
             column_count: 101,
@@ -2678,9 +2790,9 @@ fn host_resize_and_paste_events_keep_their_exact_values() {
         viewport_size,
         pane_area,
         cell_size,
-    }) = resize
+    }) = resize_runtime_event
     else {
-        panic!("expected the exact resize event, got {resize:?}");
+        panic!("expected the exact resize event, got {resize_runtime_event:?}");
     };
     assert_eq!(actual_client_id, client_id);
     assert_eq!(
@@ -2699,13 +2811,14 @@ fn host_resize_and_paste_events_keep_their_exact_values() {
         Some(PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions"))
     );
 
-    let paste = build_terminal_runtime_event(client_id, Event::Paste("hello 🐈".to_string()));
+    let paste_runtime_event =
+        build_terminal_runtime_event(client_id, Event::Paste("hello 🐈".to_string()));
     let Some(RuntimeEvent::HostPaste {
         client_id: actual_client_id,
         pasted_text,
-    }) = paste
+    }) = paste_runtime_event
     else {
-        panic!("expected the exact paste event, got {paste:?}");
+        panic!("expected the exact paste event, got {paste_runtime_event:?}");
     };
     assert_eq!(actual_client_id, client_id);
     assert_eq!(pasted_text, "hello 🐈");
@@ -2724,7 +2837,7 @@ fn local_pixel_cell_size_requires_complete_evenly_divisible_metrics() {
         Some(PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions"))
     );
 
-    for invalid in [
+    for invalid_window_size in [
         WindowSize {
             column_count: 10,
             row_count: 20,
@@ -2768,7 +2881,7 @@ fn local_pixel_cell_size_requires_complete_evenly_divisible_metrics() {
             pixel_height: Some(0),
         },
     ] {
-        assert_eq!(compute_pixel_cell_size(invalid), None);
+        assert_eq!(compute_pixel_cell_size(invalid_window_size), None);
     }
 }
 
@@ -2807,83 +2920,95 @@ fn an_outstanding_cell_size_query_cannot_accept_a_reply_from_an_old_resize() {
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
     let current_cell_size =
         PixelCellSize::from_pixel_dimensions(12, 24).expect("positive cell dimensions");
-    let mut query = CellSizeQuery::from_current_measurement(None, true, false);
-    let mut wire = Vec::new();
+    let mut cell_size_query = CellSizeQuery::from_current_measurement(None, true, false);
+    let mut written_query_bytes = Vec::new();
 
-    assert!(query.update_cell_size_for_resize(None));
-    query
-        .write_cell_size_request(&mut wire)
+    assert!(cell_size_query.update_cell_size_for_resize(None));
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("the first cell-size query writes");
-    assert_eq!(wire, b"\x1b[16t");
+    assert_eq!(written_query_bytes, b"\x1b[16t");
 
-    assert!(!query.update_cell_size_for_resize(Some(current_cell_size)));
-    assert_eq!(query.accept_cell_size_reply(old_cell_size), (None, false));
-    assert_eq!(query.get_current_cell_size(), Some(current_cell_size));
+    assert!(!cell_size_query.update_cell_size_for_resize(Some(current_cell_size)));
+    assert_eq!(
+        cell_size_query.accept_cell_size_reply(old_cell_size),
+        (None, false)
+    );
+    assert_eq!(
+        cell_size_query.get_current_cell_size(),
+        Some(current_cell_size)
+    );
 
     assert_eq!(
-        query.accept_cell_size_reply(old_cell_size),
+        cell_size_query.accept_cell_size_reply(old_cell_size),
         (None, false),
         "an unsolicited reply cannot overwrite the current resize"
     );
-    query
-        .write_cell_size_request(&mut wire)
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("an already measured resize needs no replacement query");
-    assert_eq!(wire, b"\x1b[16t");
+    assert_eq!(written_query_bytes, b"\x1b[16t");
 }
 
 #[test]
 fn an_old_reply_is_discarded_then_an_unknown_resize_gets_one_new_query() {
     let old_cell_size =
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
-    let mut query = CellSizeQuery::from_current_measurement(None, true, false);
-    let mut wire = Vec::new();
+    let mut cell_size_query = CellSizeQuery::from_current_measurement(None, true, false);
+    let mut written_query_bytes = Vec::new();
 
-    query
-        .write_cell_size_request(&mut wire)
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("the initial cell-size query writes");
-    assert!(!query.update_cell_size_for_resize(None));
-    assert_eq!(query.accept_cell_size_reply(old_cell_size), (None, true));
-    query
-        .write_cell_size_request(&mut wire)
+    assert!(!cell_size_query.update_cell_size_for_resize(None));
+    assert_eq!(
+        cell_size_query.accept_cell_size_reply(old_cell_size),
+        (None, true)
+    );
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("the replacement query writes after the old reply");
-    assert_eq!(wire, b"\x1b[16t\x1b[16t");
+    assert_eq!(written_query_bytes, b"\x1b[16t\x1b[16t");
 }
 
 #[test]
 fn a_timed_out_probe_does_not_block_a_resize_query() {
     let measured_cell_size =
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
-    let mut query = CellSizeQuery::from_current_measurement(None, true, false);
-    let mut wire = Vec::new();
+    let mut cell_size_query = CellSizeQuery::from_current_measurement(None, true, false);
+    let mut written_query_bytes = Vec::new();
 
-    assert!(query.update_cell_size_for_resize(None));
-    query
-        .write_cell_size_request(&mut wire)
+    assert!(cell_size_query.update_cell_size_for_resize(None));
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("the resize query writes after the timed-out probe");
     assert_eq!(
-        query.accept_cell_size_reply(measured_cell_size),
+        cell_size_query.accept_cell_size_reply(measured_cell_size),
         (Some(measured_cell_size), false)
     );
-    assert_eq!(wire, b"\x1b[16t");
+    assert_eq!(written_query_bytes, b"\x1b[16t");
 }
 
 #[test]
 fn an_ipc_reconnect_keeps_an_outer_terminal_query_pending() {
     let old_cell_size =
         PixelCellSize::from_pixel_dimensions(10, 20).expect("positive cell dimensions");
-    let mut query = CellSizeQuery::from_current_measurement(None, true, false);
-    let mut wire = Vec::new();
+    let mut cell_size_query = CellSizeQuery::from_current_measurement(None, true, false);
+    let mut written_query_bytes = Vec::new();
 
-    query
-        .write_cell_size_request(&mut wire)
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("the closed connection's query writes");
-    assert!(!query.update_cell_size_for_resize(Some(old_cell_size)));
-    assert!(!query.update_cell_size_for_resize(None));
-    assert_eq!(query.accept_cell_size_reply(old_cell_size), (None, true));
-    query
-        .write_cell_size_request(&mut wire)
+    assert!(!cell_size_query.update_cell_size_for_resize(Some(old_cell_size)));
+    assert!(!cell_size_query.update_cell_size_for_resize(None));
+    assert_eq!(
+        cell_size_query.accept_cell_size_reply(old_cell_size),
+        (None, true)
+    );
+    cell_size_query
+        .write_cell_size_request(&mut written_query_bytes)
         .expect("the replacement connection's query writes");
-    assert_eq!(wire, b"\x1b[16t\x1b[16t");
+    assert_eq!(written_query_bytes, b"\x1b[16t\x1b[16t");
 }
 
 #[test]
@@ -2891,12 +3016,12 @@ fn terminal_runtime_discards_capability_reply_events() {
     use koshi_input::host::GraphicAttributeReply;
 
     let client_id = ClientId::new();
-    for event in [
+    for host_event in [
         Event::PrimaryDeviceAttributes(vec![1, 2]),
         Event::TerminalFeatures(b"F".to_vec()),
         Event::SixelGraphicsAttributeReply(GraphicAttributeReply::Palette(Ok(256))),
     ] {
-        match build_terminal_runtime_event(client_id, event) {
+        match build_terminal_runtime_event(client_id, host_event) {
             None => {}
             Some(runtime_event) => panic!("unexpected runtime event: {runtime_event:?}"),
         }
@@ -2924,29 +3049,35 @@ fn unsupported_paint_writes_no_terminal_image_output() {
         output_bytes: b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\".to_vec(),
     });
     let client = build_test_client(&mut server, client_id);
-    let snapshot = build_render_snapshot(&server, client_id);
+    let render_snapshot = build_render_snapshot(&server, client_id);
     assert_eq!(
-        snapshot.pane_snapshots[0].image_placement_snapshots.len(),
+        render_snapshot.pane_snapshots[0]
+            .image_placement_snapshots
+            .len(),
         1
     );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     let mut terminal_output_bytes = Vec::new();
-    let mut last_title = build_window_title(&snapshot);
-    let mut last_cursor = get_cursor_style(&snapshot);
-    let mut image_output = ImageOutputState::from_output_kind(None);
+    let mut last_window_title = build_window_title(&render_snapshot);
+    let mut last_cursor_style = get_cursor_style(&render_snapshot);
+    let mut image_output_state = ImageOutputState::from_output_kind(None);
 
     paint_frame_with_writer(
         &mut terminal_output_bytes,
         &mut terminal,
         &client,
-        &snapshot,
+        &render_snapshot,
         &build_committed_regions(TEST_VIEWPORT_SIZE),
-        &ViewerPaint::from_client(&client, snapshot.client_snapshot.active_tab_id, &snapshot),
+        &ViewerPaint::from_client(
+            &client,
+            render_snapshot.client_snapshot.active_tab_id,
+            &render_snapshot,
+        ),
         ImageRenderMode::Placeholder,
-        &mut image_output,
+        &mut image_output_state,
         None,
-        &mut last_title,
-        &mut last_cursor,
+        &mut last_window_title,
+        &mut last_cursor_style,
         None,
         None,
     )
@@ -2957,10 +3088,10 @@ fn unsupported_paint_writes_no_terminal_image_output() {
 
 #[test]
 fn image_cleanup_has_one_owner() {
-    let claimed = AtomicBool::new(false);
+    let is_image_cleanup_claimed = AtomicBool::new(false);
 
-    assert!(claim_image_cleanup(&claimed));
-    assert!(!claim_image_cleanup(&claimed));
+    assert!(claim_image_cleanup(&is_image_cleanup_claimed));
+    assert!(!claim_image_cleanup(&is_image_cleanup_claimed));
 }
 
 // ------------------------------------ the keyboard enhancement flag query ----
@@ -2973,7 +3104,7 @@ fn the_mode_setup_pushes_the_keyboard_flags_and_asks_what_landed() {
         .expect("terminal modes write");
 
     // The push asks for flags 1|2|4|8|16, and the query follows it in the same
-    // batch so the answer describes the push.
+    // batch.
     let mode_setup_text = String::from_utf8(terminal_mode_bytes).expect("mode bytes are text");
     let push_position = mode_setup_text
         .find("\x1b[>31u")
@@ -2988,10 +3119,9 @@ fn the_mode_setup_pushes_the_keyboard_flags_and_asks_what_landed() {
 }
 
 #[test]
-fn ordinary_typing_still_reaches_a_pane_as_the_character_typed() {
-    // Flag 8 would move typing off the plain-byte path into `CSI u` reports
-    // whose text no pane encoding reads yet. Without it, a typed character
-    // still arrives as itself.
+fn ordinary_typing_reaches_the_runtime_as_the_character_typed() {
+    // The plain bytes of `å` reach the runtime as the chord `å` with no
+    // modifiers.
     let mut parser = koshi_input::host::Parser::default();
     parser.process_input_bytes("å".as_bytes());
     let host_event = parser.remove_next_pending_event().expect("one key event");
@@ -3003,7 +3133,10 @@ fn ordinary_typing_still_reaches_a_pane_as_the_character_typed() {
         RuntimeEvent::KeyInput { key_input, .. } => {
             assert_eq!(
                 key_input.to_binding_chord(),
-                Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('å')))
+                Some(KeyChord::from_parts(
+                    BindingModifierFlags::NONE,
+                    Key::Char('å')
+                ))
             );
         }
         other_runtime_event => panic!("expected a key, got {other_runtime_event:?}"),
@@ -3012,8 +3145,8 @@ fn ordinary_typing_still_reaches_a_pane_as_the_character_typed() {
 
 #[test]
 fn a_release_reaches_the_runtime_and_resolves_no_binding() {
-    // The boundary no longer drops what a chord cannot hold. The release
-    // travels, and the viewer is what declines to resolve it.
+    // A key release reaches the runtime as a `KeyInput`. The release has no
+    // binding chord.
     let mut parser = koshi_input::host::Parser::default();
     parser.process_input_bytes(b"\x1b[97;1:3u");
     let host_event = parser.remove_next_pending_event().expect("one key event");
@@ -3032,8 +3165,8 @@ fn a_release_reaches_the_runtime_and_resolves_no_binding() {
 
 #[test]
 fn every_captured_field_survives_the_runtime_boundary() {
-    // The whole point of the capture: alternate keys, associated text and the
-    // lock modifiers reach the runtime instead of dying at the decode.
+    // Alternate keys, associated text and the lock modifiers reach the
+    // runtime.
     let mut parser = koshi_input::host::Parser::default();
     parser.process_input_bytes(b"\x1b[39:34:113;130:2;34u");
     let host_event = parser.remove_next_pending_event().expect("one key event");
@@ -3058,8 +3191,7 @@ fn every_captured_field_survives_the_runtime_boundary() {
 
 #[test]
 fn the_enhancement_answer_reaches_no_runtime_event() {
-    // The answer is a terminal reply, not input. It records what the terminal
-    // applied and produces nothing for the viewer to act on.
+    // The answer is a terminal reply, not input. It produces no runtime event.
     assert!(
         build_terminal_runtime_event(ClientId::new(), Event::KeyboardEnhancementFlags(31))
             .is_none()
@@ -3067,12 +3199,28 @@ fn the_enhancement_answer_reaches_no_runtime_event() {
 }
 
 #[test]
-fn a_typed_key_still_becomes_a_runtime_event() {
-    // The added reply arm must not swallow ordinary keys.
+fn a_typed_key_becomes_a_key_input_for_its_client() {
+    let client_id = ClientId::new();
     let runtime_event =
-        build_terminal_runtime_event(ClientId::new(), Event::Key(KeyCode::Char('x').into()))
+        build_terminal_runtime_event(client_id, Event::Key(KeyCode::Char('x').into()))
             .expect("a typed key is input");
-    assert!(matches!(runtime_event, RuntimeEvent::KeyInput { .. }));
+
+    match runtime_event {
+        RuntimeEvent::KeyInput {
+            client_id: key_client_id,
+            key_input,
+        } => {
+            assert_eq!(key_client_id, client_id);
+            assert_eq!(
+                key_input.to_binding_chord(),
+                Some(KeyChord::from_parts(
+                    BindingModifierFlags::NONE,
+                    Key::Char('x')
+                ))
+            );
+        }
+        other_runtime_event => panic!("expected a key, got {other_runtime_event:?}"),
+    }
 }
 
 #[test]
@@ -3727,8 +3875,8 @@ fn target_outline_leaves_cells_on_the_source_border_unstyled() {
     );
 
     let is_styled_outline_cell = |column_index: u16, row_index: u16| {
-        let cell = &render_buffer[(column_index, row_index)];
-        cell.fg == theme.accent_color && cell.modifier.contains(Modifier::BOLD)
+        let buffer_cell = &render_buffer[(column_index, row_index)];
+        buffer_cell.fg == theme.accent_color && buffer_cell.modifier.contains(Modifier::BOLD)
     };
     for column_index in 0..5 {
         assert!(
@@ -3798,8 +3946,8 @@ fn build_test_placement_tab_snapshot(
         .iter()
         .enumerate()
         .map(|(pane_index, pane_id)| {
-            let mut grid = Grid::build_blank(4, 8, TerminalStyle::default());
-            *grid
+            let mut test_grid = Grid::build_blank(4, 8, TerminalStyle::default());
+            *test_grid
                 .get_cell_mut(0, 0)
                 .expect("the test grid has a first cell") = Cell::from_character(
                 char::from(b'A' + u8::try_from(pane_index).expect("two panes fit in a byte")),
@@ -3809,7 +3957,7 @@ fn build_test_placement_tab_snapshot(
             PlacementPaneSnapshot {
                 pane_id: *pane_id,
                 terminal_grid_view: Some(GridView {
-                    grid: Arc::new(grid),
+                    grid: Arc::new(test_grid),
                     view_row_offset: 0,
                 }),
                 image_placement_snapshots: if pane_index == 0 {
@@ -3871,8 +4019,8 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
         column_count: 40,
         row_count: 12,
     };
-    let build_rect = |column: u16, row: u16, size: Size| {
-        CoreRect::from_origin_and_size(Point { column, row }, size)
+    let build_rect = |column: u16, row: u16, rect_size: Size| {
+        CoreRect::from_origin_and_size(Point { column, row }, rect_size)
     };
     let tab_id = TabId::new();
     let from_tab_snapshot = TabSnapshot {
@@ -3944,7 +4092,7 @@ fn committed_placement_slide_moves_shown_panes_and_keeps_every_other_slot_at_its
     assert_eq!(
         halfway_tab_snapshot, expected_halfway_tab_snapshot,
         "the moved pane is halfway, the arriving and collapsing panes sit at their \
-         committed slots, the leaving pane is gone, and the committed headers show"
+         is_frame_committed slots, the leaving pane is gone, and the is_frame_committed headers show"
     );
 
     let early_tab_snapshot =

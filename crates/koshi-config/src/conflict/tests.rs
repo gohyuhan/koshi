@@ -5,16 +5,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use koshi_core::action::ActionReference;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use koshi_core::registry::ActionRegistry;
 
 use super::*;
 
-fn build_character_chord(modifier_flags: ModFlags, key_character: char) -> KeyChord {
+fn build_character_chord(modifier_flags: BindingModifierFlags, key_character: char) -> KeyChord {
     KeyChord::from_parts(modifier_flags, Key::Char(key_character))
 }
 
-fn build_single_chord_sequence(modifier_flags: ModFlags, key_character: char) -> KeySequence {
+fn build_single_chord_sequence(
+    modifier_flags: BindingModifierFlags,
+    key_character: char,
+) -> KeySequence {
     KeySequence::from(build_character_chord(modifier_flags, key_character))
 }
 
@@ -38,17 +41,17 @@ fn parse_mode_name(mode_name: &str) -> ModeName {
 }
 
 /// A one-mode layer built from `(sequence, bound action)` binding entries.
-fn build_key_map_layer(
+fn build_keymap_layer(
     origin: LayerOrigin,
     mode_name: &str,
     binding_entries: Vec<(KeySequence, BoundAction)>,
 ) -> KeymapLayer {
-    build_key_map_layer_with_removed(origin, mode_name, binding_entries, Vec::new())
+    build_keymap_layer_with_removed(origin, mode_name, binding_entries, Vec::new())
 }
 
 /// A one-mode layer built from `(sequence, bound action)` binding entries plus the
 /// keys it removes.
-fn build_key_map_layer_with_removed(
+fn build_keymap_layer_with_removed(
     origin: LayerOrigin,
     mode_name: &str,
     binding_entries: Vec<(KeySequence, BoundAction)>,
@@ -67,7 +70,7 @@ fn build_key_map_layer_with_removed(
 }
 
 /// The built-in default bindings as the lowest layer.
-fn build_default_key_map_layer() -> KeymapLayer {
+fn build_default_keymap_layer() -> KeymapLayer {
     KeymapLayer {
         origin: LayerOrigin::Defaults,
         mode_bindings_by_name: KeybindingsConfig::default().mode_bindings_by_name,
@@ -75,7 +78,7 @@ fn build_default_key_map_layer() -> KeymapLayer {
 }
 
 /// The chord-depth cap the tests run under, matching the shipped default.
-const TEST_CHORD_DEPTH: u8 = 4;
+const TEST_MAXIMUM_CHORD_DEPTH: u8 = 4;
 
 /// Runs detection with the default leader, no unlock alternative, and the
 /// seeded core registry.
@@ -84,16 +87,16 @@ fn detect_test_conflicts(layers: &[KeymapLayer]) -> ConflictReport {
         layers,
         Leader::default(),
         None,
-        TEST_CHORD_DEPTH,
+        TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     )
 }
 
 #[test]
 fn build_keymap_layers_appends_the_user_layer_verbatim() {
-    let key_sequence = build_single_chord_sequence(ModFlags::ALT, 'n');
-    let mut modes = BTreeMap::new();
-    modes.insert(
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 'n');
+    let mut user_mode_bindings_by_name = BTreeMap::new();
+    user_mode_bindings_by_name.insert(
         parse_mode_name("normal"),
         ModeBindings {
             bound_action_by_key_sequence: [(key_sequence.clone(), build_bound_action("run"))]
@@ -103,11 +106,11 @@ fn build_keymap_layers_appends_the_user_layer_verbatim() {
         },
     );
 
-    let layers = build_keymap_layers(Some(modes.clone()), Leader::default());
+    let layers = build_keymap_layers(Some(user_mode_bindings_by_name.clone()), Leader::default());
 
     assert_eq!(layers.len(), 2);
     assert_eq!(layers[1].origin, LayerOrigin::User);
-    assert_eq!(layers[1].mode_bindings_by_name, modes);
+    assert_eq!(layers[1].mode_bindings_by_name, user_mode_bindings_by_name);
 }
 
 #[test]
@@ -157,7 +160,7 @@ fn list_builtin_mode_names_returns_every_lock_mode() {
 
 #[test]
 fn defaults_alone_report_nothing() {
-    let report = detect_test_conflicts(&[build_default_key_map_layer()]);
+    let report = detect_test_conflicts(&[build_default_keymap_layer()]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
 }
@@ -172,15 +175,15 @@ fn empty_report_applies() {
 
 #[test]
 fn user_vs_session_same_key_different_action_collides() {
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let layers = [
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -205,20 +208,20 @@ fn user_vs_session_same_key_different_action_collides() {
 fn three_layers_with_three_distinct_actions_all_appear_in_the_collision() {
     // A collision lists every distinct claimant: three layers binding three
     // distinct actions give three claims.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Layout,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("quit"))],
@@ -244,20 +247,20 @@ fn a_repeated_claim_across_nonadjacent_layers_dedups_against_a_third_distinct_on
     // User and Layout bind the identical action; Session's differing claim
     // sits between them. Dedup compares against every earlier distinct
     // claim: the result is exactly two distinct claims.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Layout,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
@@ -281,12 +284,12 @@ fn a_repeated_claim_across_nonadjacent_layers_dedups_against_a_third_distinct_on
 fn steal_of_a_defaulted_key_is_not_a_collision() {
     // `<A-t>` is the default new-tab key; one user layer takes it.
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(
-                build_single_chord_sequence(ModFlags::ALT, 't'),
+                build_single_chord_sequence(BindingModifierFlags::ALT, 't'),
                 build_bound_action("lock"),
             )],
         ),
@@ -297,15 +300,15 @@ fn steal_of_a_defaulted_key_is_not_a_collision() {
 
 #[test]
 fn identical_bound_action_in_two_user_layers_passes() {
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence, build_bound_action("new-tab"))],
@@ -319,15 +322,15 @@ fn identical_bound_action_in_two_user_layers_passes() {
 fn orphan_actions_on_a_shared_key_do_not_collide() {
     // Both claims name unregistered actions: inactive bindings, warned as
     // orphans.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("ghost-a"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("ghost-b"))],
@@ -355,16 +358,16 @@ fn orphan_actions_on_a_shared_key_do_not_collide() {
 
 #[test]
 fn one_orphan_claim_does_not_collide_with_a_live_one() {
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
-    let ghost = build_bound_action("ghost");
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
+    let orphan_bound_action = build_bound_action("ghost");
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
-            vec![(key_sequence.clone(), ghost.clone())],
+            vec![(key_sequence.clone(), orphan_bound_action.clone())],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -376,7 +379,7 @@ fn one_orphan_claim_does_not_collide_with_a_live_one() {
             layer_origin: LayerOrigin::User,
             mode_name: parse_mode_name("normal"),
             key_sequence,
-            action_reference: ghost.action_reference,
+            action_reference: orphan_bound_action.action_reference,
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -384,15 +387,15 @@ fn one_orphan_claim_does_not_collide_with_a_live_one() {
 
 #[test]
 fn bindings_in_an_orphan_mode_do_not_collide() {
-    let key_sequence = build_single_chord_sequence(ModFlags::ALT, 's');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::ALT, 's');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "git",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "git",
             vec![(key_sequence, build_bound_action("new-tab"))],
@@ -416,18 +419,18 @@ fn bindings_in_an_orphan_mode_do_not_collide() {
 
 #[test]
 fn an_action_needing_cli_arguments_warns_and_does_not_collide() {
-    // `core:run` needs a program only `koshi run` supplies, so the user
-    // layer's binding never fires; the session layer's working binding
-    // applies with no revert.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    // `core:run` needs a program only `koshi run` supplies. The user layer's
+    // binding never fires, and the session layer's binding applies with no
+    // revert.
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("run"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
@@ -448,8 +451,8 @@ fn an_action_needing_cli_arguments_warns_and_does_not_collide() {
 #[test]
 fn rebinding_the_reserved_unlock_is_fatal() {
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![(
@@ -474,8 +477,8 @@ fn a_cli_only_action_on_the_reserved_chord_is_dead_not_a_shadow() {
     // default unlock beneath it wins the reserved chord.
     let key_sequence = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![(key_sequence.clone(), build_bound_action("run"))],
@@ -500,16 +503,16 @@ fn reserved_unlock_claims_do_not_collide() {
     // revert.
     let key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        build_character_chord(ModFlags::NONE, 'x'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "locked",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
@@ -540,12 +543,12 @@ fn a_locked_sequence_holding_the_reserved_chord_anywhere_is_dead() {
     // the `<C-l>` unlocks and `core:new-tab` never runs. A locked sequence
     // holding the chord at any position is warned dead.
     let key_sequence = build_two_chord_sequence(
-        build_character_chord(ModFlags::CTRL, 'x'),
+        build_character_chord(BindingModifierFlags::CTRL, 'x'),
         KeybindingsConfig::RESERVED_UNLOCK,
     );
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
@@ -567,7 +570,7 @@ fn the_one_chord_unlock_binding_itself_stays_live() {
     // The dead judgment covers only sequences of two or more chords that
     // hold the reserved chord. Locked mode's own one-chord `<C-l>` →
     // `core:unlock` fires and draws no warning.
-    let report = detect_test_conflicts(&[build_default_key_map_layer()]);
+    let report = detect_test_conflicts(&[build_default_keymap_layer()]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
 }
@@ -576,25 +579,25 @@ fn the_one_chord_unlock_binding_itself_stays_live() {
 fn reserved_unlock_sequences_do_not_pair_as_prefixes() {
     // `<C-l> x` is a strict prefix of `<C-l> x y`, but both hold the
     // reserved chord: two dead warnings, no ambiguous-prefix pair.
-    let short = build_two_chord_sequence(
+    let short_key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        build_character_chord(ModFlags::NONE, 'x'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
-    let long = KeySequence::from_first_and_rest(
+    let long_key_sequence = KeySequence::from_first_and_rest(
         KeybindingsConfig::RESERVED_UNLOCK,
         vec![
-            build_character_chord(ModFlags::NONE, 'x'),
-            build_character_chord(ModFlags::NONE, 'y'),
+            build_character_chord(BindingModifierFlags::NONE, 'x'),
+            build_character_chord(BindingModifierFlags::NONE, 'y'),
         ],
     );
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![
-                (short.clone(), build_bound_action("lock")),
-                (long.clone(), build_bound_action("new-tab")),
+                (short_key_sequence.clone(), build_bound_action("lock")),
+                (long_key_sequence.clone(), build_bound_action("new-tab")),
             ],
         ),
     ]);
@@ -603,12 +606,12 @@ fn reserved_unlock_sequences_do_not_pair_as_prefixes() {
         vec![
             ConflictDiagnostic::DeadUnderReservedUnlock {
                 layer_origin: LayerOrigin::User,
-                key_sequence: short,
+                key_sequence: short_key_sequence,
                 action_reference: build_core_action("lock"),
             },
             ConflictDiagnostic::DeadUnderReservedUnlock {
                 layer_origin: LayerOrigin::User,
-                key_sequence: long,
+                key_sequence: long_key_sequence,
                 action_reference: build_core_action("new-tab"),
             },
         ]
@@ -620,14 +623,14 @@ fn reserved_unlock_sequences_do_not_pair_as_prefixes() {
 fn dead_binding_does_not_warn_typeable() {
     // `g` opens typeable, but the binding is orphaned and steals nothing;
     // it gets exactly the orphan warning, not a stealing warning on top.
-    let key_sequence = build_single_chord_sequence(ModFlags::NONE, 'g');
-    let ghost = build_bound_action("ghost");
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::NONE, 'g');
+    let orphan_bound_action = build_bound_action("ghost");
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
-            vec![(key_sequence.clone(), ghost.clone())],
+            vec![(key_sequence.clone(), orphan_bound_action.clone())],
         ),
     ]);
     assert_eq!(
@@ -636,7 +639,7 @@ fn dead_binding_does_not_warn_typeable() {
             layer_origin: LayerOrigin::User,
             mode_name: parse_mode_name("normal"),
             key_sequence,
-            action_reference: ghost.action_reference,
+            action_reference: orphan_bound_action.action_reference,
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -646,13 +649,16 @@ fn dead_binding_does_not_warn_typeable() {
 fn orphan_mode_bindings_skip_per_binding_warns() {
     // The whole overlay is inactive: one mode warning, no orphan-action or
     // typeable warnings for the bindings inside it.
-    let ghost = build_bound_action("ghost");
+    let orphan_bound_action = build_bound_action("ghost");
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "git",
-            vec![(build_single_chord_sequence(ModFlags::NONE, 'g'), ghost)],
+            vec![(
+                build_single_chord_sequence(BindingModifierFlags::NONE, 'g'),
+                orphan_bound_action,
+            )],
         ),
     ]);
     assert_eq!(
@@ -671,13 +677,13 @@ fn orphan_on_the_reserved_chord_does_not_shadow() {
     // transparent, and the default unlock beneath it still fires. Only the
     // orphan warning is reported; the keymap is not rejected.
     let key_sequence = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
-    let ghost = build_bound_action("ghost");
+    let orphan_bound_action = build_bound_action("ghost");
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
-            vec![(key_sequence.clone(), ghost.clone())],
+            vec![(key_sequence.clone(), orphan_bound_action.clone())],
         ),
     ]);
     assert_eq!(
@@ -686,7 +692,7 @@ fn orphan_on_the_reserved_chord_does_not_shadow() {
             layer_origin: LayerOrigin::User,
             mode_name: parse_mode_name("locked"),
             key_sequence,
-            action_reference: ghost.action_reference,
+            action_reference: orphan_bound_action.action_reference,
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -694,10 +700,10 @@ fn orphan_on_the_reserved_chord_does_not_shadow() {
 
 #[test]
 fn shadow_with_a_bound_alternative_passes() {
-    let alternative = build_character_chord(ModFlags::CTRL, 'u');
+    let unlock_alternative_chord = build_character_chord(BindingModifierFlags::CTRL, 'u');
     let layers = [
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![
@@ -705,15 +711,18 @@ fn shadow_with_a_bound_alternative_passes() {
                     KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK),
                     build_bound_action("lock"),
                 ),
-                (KeySequence::from(alternative), build_bound_action("unlock")),
+                (
+                    KeySequence::from(unlock_alternative_chord),
+                    build_bound_action("unlock"),
+                ),
             ],
         ),
     ];
     let report = detect_conflicts(
         &layers,
         Leader::default(),
-        Some(alternative),
-        TEST_CHORD_DEPTH,
+        Some(unlock_alternative_chord),
+        TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     );
     assert_eq!(report.diagnostics, Vec::new());
@@ -722,18 +731,18 @@ fn shadow_with_a_bound_alternative_passes() {
 
 #[test]
 fn declared_but_unbound_alternative_is_fatal() {
-    let alternative = build_character_chord(ModFlags::CTRL, 'u');
+    let unlock_alternative_chord = build_character_chord(BindingModifierFlags::CTRL, 'u');
     let report = detect_conflicts(
-        &[build_default_key_map_layer()],
+        &[build_default_keymap_layer()],
         Leader::default(),
-        Some(alternative),
-        TEST_CHORD_DEPTH,
+        Some(unlock_alternative_chord),
+        TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     );
     assert_eq!(
         report.diagnostics,
         vec![ConflictDiagnostic::ReservedUnlockMissing {
-            reserved_unlock_chord: alternative,
+            reserved_unlock_chord: unlock_alternative_chord,
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Reject);
@@ -741,22 +750,22 @@ fn declared_but_unbound_alternative_is_fatal() {
 
 #[test]
 fn typeable_alternative_is_fatal() {
-    let alternative = build_character_chord(ModFlags::NONE, 'u');
+    let unlock_alternative_chord = build_character_chord(BindingModifierFlags::NONE, 'u');
     let report = detect_conflicts(
-        &[build_default_key_map_layer()],
+        &[build_default_keymap_layer()],
         Leader::default(),
-        Some(alternative),
-        TEST_CHORD_DEPTH,
+        Some(unlock_alternative_chord),
+        TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     );
     assert_eq!(
         report.diagnostics,
         vec![
             ConflictDiagnostic::UnlockAlternativeTypeable {
-                unlock_alternative_chord: alternative,
+                unlock_alternative_chord,
             },
             ConflictDiagnostic::ReservedUnlockMissing {
-                reserved_unlock_chord: alternative,
+                reserved_unlock_chord: unlock_alternative_chord,
             },
         ]
     );
@@ -783,40 +792,41 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
     // The defaults bind `<C-p> n`, the four `<C-p>` vim-letter splits,
     // `<C-p> x`, and the four `<C-p>` arrow focus sequences; the user binds
     // bare `<C-p>`.
-    let prefix = build_single_chord_sequence(ModFlags::CTRL, 'p');
+    let prefix_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'p');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
-            vec![(prefix.clone(), build_bound_action("lock"))],
+            vec![(prefix_key_sequence.clone(), build_bound_action("lock"))],
         ),
     ]);
-    let ambiguous = |longer_key: Key, longer_action: &str| ConflictDiagnostic::AmbiguousPrefix {
-        mode_name: parse_mode_name("normal"),
-        prefix_sequence: prefix.clone(),
-        prefix_action_reference: build_core_action("lock"),
-        longer_sequence: build_two_chord_sequence(
-            build_character_chord(ModFlags::CTRL, 'p'),
-            KeyChord::from_parts(ModFlags::NONE, longer_key),
-        ),
-        longer_action_reference: build_core_action(longer_action),
-    };
+    let build_ambiguous_prefix =
+        |longer_key: Key, longer_action_name: &str| ConflictDiagnostic::AmbiguousPrefix {
+            mode_name: parse_mode_name("normal"),
+            prefix_sequence: prefix_key_sequence.clone(),
+            prefix_action_reference: build_core_action("lock"),
+            longer_sequence: build_two_chord_sequence(
+                build_character_chord(BindingModifierFlags::CTRL, 'p'),
+                KeyChord::from_parts(BindingModifierFlags::NONE, longer_key),
+            ),
+            longer_action_reference: build_core_action(longer_action_name),
+        };
     assert_eq!(
         report.diagnostics,
         vec![
-            ambiguous(Key::Char('h'), "new-pane-left"),
-            ambiguous(Key::Char('j'), "new-pane-down"),
-            ambiguous(Key::Char('k'), "new-pane-up"),
-            ambiguous(Key::Char('l'), "new-pane-right"),
-            ambiguous(Key::Char('m'), "begin-pane-placement"),
-            ambiguous(Key::Char('n'), "new-pane"),
-            ambiguous(Key::Char('s'), "new-pane-stacked"),
-            ambiguous(Key::Char('x'), "close-pane-tree"),
-            ambiguous(Key::Named(NamedKey::Left), "focus-pane-left"),
-            ambiguous(Key::Named(NamedKey::Right), "focus-pane-right"),
-            ambiguous(Key::Named(NamedKey::Up), "focus-pane-up"),
-            ambiguous(Key::Named(NamedKey::Down), "focus-pane-down"),
+            build_ambiguous_prefix(Key::Char('h'), "new-pane-left"),
+            build_ambiguous_prefix(Key::Char('j'), "new-pane-down"),
+            build_ambiguous_prefix(Key::Char('k'), "new-pane-up"),
+            build_ambiguous_prefix(Key::Char('l'), "new-pane-right"),
+            build_ambiguous_prefix(Key::Char('m'), "begin-pane-placement"),
+            build_ambiguous_prefix(Key::Char('n'), "new-pane"),
+            build_ambiguous_prefix(Key::Char('s'), "new-pane-stacked"),
+            build_ambiguous_prefix(Key::Char('x'), "close-pane-tree"),
+            build_ambiguous_prefix(Key::Named(NamedKey::Left), "focus-pane-left"),
+            build_ambiguous_prefix(Key::Named(NamedKey::Right), "focus-pane-right"),
+            build_ambiguous_prefix(Key::Named(NamedKey::Up), "focus-pane-up"),
+            build_ambiguous_prefix(Key::Named(NamedKey::Down), "focus-pane-down"),
         ]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -826,27 +836,27 @@ fn user_prefix_of_default_sequences_warns_without_revert() {
 fn a_three_deep_prefix_chain_reports_every_pair() {
     // `<C-y>`, `<C-y> n`, and `<C-y> n o` are each a prefix of the ones
     // longer than it: three pairs total.
-    let short = build_single_chord_sequence(ModFlags::CTRL, 'y');
-    let mid = build_two_chord_sequence(
-        build_character_chord(ModFlags::CTRL, 'y'),
-        build_character_chord(ModFlags::NONE, 'n'),
+    let short_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
+    let middle_key_sequence = build_two_chord_sequence(
+        build_character_chord(BindingModifierFlags::CTRL, 'y'),
+        build_character_chord(BindingModifierFlags::NONE, 'n'),
     );
-    let long = KeySequence::from_first_and_rest(
-        build_character_chord(ModFlags::CTRL, 'y'),
+    let long_key_sequence = KeySequence::from_first_and_rest(
+        build_character_chord(BindingModifierFlags::CTRL, 'y'),
         vec![
-            build_character_chord(ModFlags::NONE, 'n'),
-            build_character_chord(ModFlags::NONE, 'o'),
+            build_character_chord(BindingModifierFlags::NONE, 'n'),
+            build_character_chord(BindingModifierFlags::NONE, 'o'),
         ],
     );
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![
-                (short.clone(), build_bound_action("lock")),
-                (mid.clone(), build_bound_action("new-tab")),
-                (long.clone(), build_bound_action("quit")),
+                (short_key_sequence.clone(), build_bound_action("lock")),
+                (middle_key_sequence.clone(), build_bound_action("new-tab")),
+                (long_key_sequence.clone(), build_bound_action("quit")),
             ],
         ),
     ]);
@@ -855,23 +865,23 @@ fn a_three_deep_prefix_chain_reports_every_pair() {
         vec![
             ConflictDiagnostic::AmbiguousPrefix {
                 mode_name: parse_mode_name("normal"),
-                prefix_sequence: short.clone(),
+                prefix_sequence: short_key_sequence.clone(),
                 prefix_action_reference: build_core_action("lock"),
-                longer_sequence: mid.clone(),
+                longer_sequence: middle_key_sequence.clone(),
                 longer_action_reference: build_core_action("new-tab"),
             },
             ConflictDiagnostic::AmbiguousPrefix {
                 mode_name: parse_mode_name("normal"),
-                prefix_sequence: short,
+                prefix_sequence: short_key_sequence,
                 prefix_action_reference: build_core_action("lock"),
-                longer_sequence: long.clone(),
+                longer_sequence: long_key_sequence.clone(),
                 longer_action_reference: build_core_action("quit"),
             },
             ConflictDiagnostic::AmbiguousPrefix {
                 mode_name: parse_mode_name("normal"),
-                prefix_sequence: mid,
+                prefix_sequence: middle_key_sequence,
                 prefix_action_reference: build_core_action("new-tab"),
-                longer_sequence: long,
+                longer_sequence: long_key_sequence,
                 longer_action_reference: build_core_action("quit"),
             },
         ]
@@ -883,35 +893,41 @@ fn a_three_deep_prefix_chain_reports_every_pair() {
 fn prefix_pairs_do_not_cross_modes() {
     // `<C-y>` bound in normal and `<C-y> x` bound in locked do not pair:
     // prefixes are judged within one mode.
-    let short = build_single_chord_sequence(ModFlags::CTRL, 'y');
-    let long = build_two_chord_sequence(
-        build_character_chord(ModFlags::CTRL, 'y'),
-        build_character_chord(ModFlags::NONE, 'x'),
+    let short_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
+    let long_key_sequence = build_two_chord_sequence(
+        build_character_chord(BindingModifierFlags::CTRL, 'y'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
-    let user = KeymapLayer {
+    let user_keymap_layer = KeymapLayer {
         origin: LayerOrigin::User,
         mode_bindings_by_name: BTreeMap::from([
             (
                 parse_mode_name("normal"),
                 ModeBindings {
-                    bound_action_by_key_sequence: [(short, build_bound_action("lock"))]
-                        .into_iter()
-                        .collect(),
+                    bound_action_by_key_sequence: [(
+                        short_key_sequence,
+                        build_bound_action("lock"),
+                    )]
+                    .into_iter()
+                    .collect(),
                     removed_key_sequences: BTreeSet::new(),
                 },
             ),
             (
                 parse_mode_name("locked"),
                 ModeBindings {
-                    bound_action_by_key_sequence: [(long, build_bound_action("new-tab"))]
-                        .into_iter()
-                        .collect(),
+                    bound_action_by_key_sequence: [(
+                        long_key_sequence,
+                        build_bound_action("new-tab"),
+                    )]
+                    .into_iter()
+                    .collect(),
                     removed_key_sequences: BTreeSet::new(),
                 },
             ),
         ]),
     };
-    let report = detect_test_conflicts(&[build_default_key_map_layer(), user]);
+    let report = detect_test_conflicts(&[build_default_keymap_layer(), user_keymap_layer]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
 }
@@ -921,26 +937,26 @@ fn the_reserved_chord_opening_a_normal_mode_sequence_is_an_ordinary_prefix_pair(
     // The reserved chord is only swallowed in LOCKED mode; the identical
     // chord opening a longer sequence in NORMAL mode is an ordinary
     // ambiguous-prefix warning, not a dead binding.
-    let short = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
-    let long = build_two_chord_sequence(
+    let short_key_sequence = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    let long_key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        build_character_chord(ModFlags::NONE, 'x'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
-            vec![(long.clone(), build_bound_action("new-tab"))],
+            vec![(long_key_sequence.clone(), build_bound_action("new-tab"))],
         ),
     ]);
     assert_eq!(
         report.diagnostics,
         vec![ConflictDiagnostic::AmbiguousPrefix {
             mode_name: parse_mode_name("normal"),
-            prefix_sequence: short,
+            prefix_sequence: short_key_sequence,
             prefix_action_reference: build_core_action("lock"),
-            longer_sequence: long,
+            longer_sequence: long_key_sequence,
             longer_action_reference: build_core_action("new-tab"),
         }]
     );
@@ -957,27 +973,27 @@ fn a_redundant_remove_at_higher_precedence_voids_a_rebind_below_it() {
     // layout layer rebinds with a different action (index 4). The remove at
     // index 3 voids Session's rebind at index 2, leaving the top claim
     // alone and nothing to collide with.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "normal",
             Vec::new(),
             vec![key_sequence.clone()],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Layout,
             "normal",
             Vec::new(),
             vec![key_sequence.clone()],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Layout,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -991,11 +1007,11 @@ fn a_redundant_remove_at_higher_precedence_voids_a_rebind_below_it() {
 fn locked_sequence_opening_with_the_reserved_chord_is_dead_not_ambiguous() {
     let key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        build_character_chord(ModFlags::NONE, 'x'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -1014,14 +1030,14 @@ fn locked_sequence_opening_with_the_reserved_chord_is_dead_not_ambiguous() {
 
 #[test]
 fn orphan_action_warns_without_revert() {
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'o');
-    let orphan = build_bound_action("my-macro");
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'o');
+    let orphan_bound_action = build_bound_action("my-macro");
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
-            vec![(key_sequence.clone(), orphan.clone())],
+            vec![(key_sequence.clone(), orphan_bound_action.clone())],
         ),
     ]);
     assert_eq!(
@@ -1030,7 +1046,7 @@ fn orphan_action_warns_without_revert() {
             layer_origin: LayerOrigin::User,
             mode_name: parse_mode_name("normal"),
             key_sequence,
-            action_reference: orphan.action_reference,
+            action_reference: orphan_bound_action.action_reference,
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -1039,12 +1055,12 @@ fn orphan_action_warns_without_revert() {
 #[test]
 fn orphan_mode_warns_without_revert() {
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "git",
             vec![(
-                build_single_chord_sequence(ModFlags::ALT, 's'),
+                build_single_chord_sequence(BindingModifierFlags::ALT, 's'),
                 build_bound_action("lock"),
             )],
         ),
@@ -1061,10 +1077,10 @@ fn orphan_mode_warns_without_revert() {
 
 #[test]
 fn typeable_opening_chord_warns() {
-    let key_sequence = build_single_chord_sequence(ModFlags::NONE, 'g');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::NONE, 'g');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -1087,14 +1103,14 @@ fn typeable_subsequent_chord_does_not_warn() {
     // Only the opening chord matters: a plain second chord is read while
     // the pending sequence is live.
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(
                 build_two_chord_sequence(
-                    build_character_chord(ModFlags::CTRL, 'p'),
-                    build_character_chord(ModFlags::NONE, 'g'),
+                    build_character_chord(BindingModifierFlags::CTRL, 'p'),
+                    build_character_chord(BindingModifierFlags::NONE, 'g'),
                 ),
                 build_bound_action("lock"),
             )],
@@ -1105,18 +1121,18 @@ fn typeable_subsequent_chord_does_not_warn() {
 }
 
 #[test]
-fn shift_only_mods_leader_warns() {
+fn shift_only_modifier_leader_warns() {
     let report = detect_conflicts(
-        &[build_default_key_map_layer()],
-        Leader::Mods(ModFlags::SHIFT),
+        &[build_default_keymap_layer()],
+        Leader::Modifiers(BindingModifierFlags::SHIFT),
         None,
-        TEST_CHORD_DEPTH,
+        TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     );
     assert_eq!(
         report.diagnostics,
         vec![ConflictDiagnostic::TypeableLeader {
-            leader: Leader::Mods(ModFlags::SHIFT),
+            leader: Leader::Modifiers(BindingModifierFlags::SHIFT),
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -1124,12 +1140,12 @@ fn shift_only_mods_leader_warns() {
 
 #[test]
 fn typeable_chord_leader_warns() {
-    let leader = Leader::Chord(build_character_chord(ModFlags::NONE, ','));
+    let leader = Leader::Chord(build_character_chord(BindingModifierFlags::NONE, ','));
     let report = detect_conflicts(
-        &[build_default_key_map_layer()],
+        &[build_default_keymap_layer()],
         leader,
         None,
-        TEST_CHORD_DEPTH,
+        TEST_MAXIMUM_CHORD_DEPTH,
         &ActionRegistry::new(),
     );
     assert_eq!(
@@ -1142,15 +1158,15 @@ fn typeable_chord_leader_warns() {
 #[test]
 fn non_typeable_leaders_do_not_warn() {
     for leader in [
-        Leader::Mods(ModFlags::CTRL),
-        Leader::Mods(ModFlags::ALT.union(ModFlags::SHIFT)),
-        Leader::Chord(build_character_chord(ModFlags::CTRL, 'b')),
+        Leader::Modifiers(BindingModifierFlags::CTRL),
+        Leader::Modifiers(BindingModifierFlags::ALT.union(BindingModifierFlags::SHIFT)),
+        Leader::Chord(build_character_chord(BindingModifierFlags::CTRL, 'b')),
     ] {
         let report = detect_conflicts(
-            &[build_default_key_map_layer()],
+            &[build_default_keymap_layer()],
             leader,
             None,
-            TEST_CHORD_DEPTH,
+            TEST_MAXIMUM_CHORD_DEPTH,
             &ActionRegistry::new(),
         );
         assert_eq!(report.diagnostics, Vec::new());
@@ -1159,20 +1175,20 @@ fn non_typeable_leaders_do_not_warn() {
 
 #[test]
 fn a_fatal_finding_outranks_a_collision() {
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Layout,
             "locked",
             vec![(
@@ -1202,17 +1218,17 @@ fn a_fatal_finding_outranks_a_collision() {
 }
 
 #[test]
-fn severity_table() {
-    let claims = vec![
+fn every_diagnostic_maps_to_its_exact_severity() {
+    let binding_claims = vec![
         (LayerOrigin::User, build_bound_action("new-tab")),
         (LayerOrigin::Session, build_bound_action("lock")),
     ];
-    let cases = [
+    let severity_cases = [
         (
             ConflictDiagnostic::KeyCollision {
                 mode_name: parse_mode_name("normal"),
-                key_sequence: build_single_chord_sequence(ModFlags::CTRL, 'y'),
-                binding_claims: claims,
+                key_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'y'),
+                binding_claims,
             },
             ConflictSeverity::Collision,
         ),
@@ -1231,7 +1247,7 @@ fn severity_table() {
         ),
         (
             ConflictDiagnostic::UnlockAlternativeTypeable {
-                unlock_alternative_chord: build_character_chord(ModFlags::NONE, 'u'),
+                unlock_alternative_chord: build_character_chord(BindingModifierFlags::NONE, 'u'),
             },
             ConflictSeverity::Fatal,
         ),
@@ -1242,11 +1258,11 @@ fn severity_table() {
         (
             ConflictDiagnostic::AmbiguousPrefix {
                 mode_name: parse_mode_name("normal"),
-                prefix_sequence: build_single_chord_sequence(ModFlags::CTRL, 'p'),
+                prefix_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'p'),
                 prefix_action_reference: build_core_action("lock"),
                 longer_sequence: build_two_chord_sequence(
-                    build_character_chord(ModFlags::CTRL, 'p'),
-                    build_character_chord(ModFlags::NONE, 'n'),
+                    build_character_chord(BindingModifierFlags::CTRL, 'p'),
+                    build_character_chord(BindingModifierFlags::NONE, 'n'),
                 ),
                 longer_action_reference: build_core_action("new-pane"),
             },
@@ -1257,7 +1273,7 @@ fn severity_table() {
                 layer_origin: LayerOrigin::User,
                 key_sequence: build_two_chord_sequence(
                     KeybindingsConfig::RESERVED_UNLOCK,
-                    build_character_chord(ModFlags::NONE, 'x'),
+                    build_character_chord(BindingModifierFlags::NONE, 'x'),
                 ),
                 action_reference: build_core_action("lock"),
             },
@@ -1267,7 +1283,7 @@ fn severity_table() {
             ConflictDiagnostic::ArgumentsRequired {
                 layer_origin: LayerOrigin::User,
                 mode_name: parse_mode_name("normal"),
-                key_sequence: build_single_chord_sequence(ModFlags::CTRL, 'y'),
+                key_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'y'),
                 action_reference: build_core_action("run"),
             },
             ConflictSeverity::Warning,
@@ -1276,7 +1292,7 @@ fn severity_table() {
             ConflictDiagnostic::OrphanAction {
                 layer_origin: LayerOrigin::User,
                 mode_name: parse_mode_name("normal"),
-                key_sequence: build_single_chord_sequence(ModFlags::CTRL, 'o'),
+                key_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'o'),
                 action_reference: build_core_action("lock"),
             },
             ConflictSeverity::Warning,
@@ -1292,79 +1308,83 @@ fn severity_table() {
             ConflictDiagnostic::TypeableBinding {
                 layer_origin: LayerOrigin::User,
                 mode_name: parse_mode_name("normal"),
-                key_sequence: build_single_chord_sequence(ModFlags::NONE, 'g'),
+                key_sequence: build_single_chord_sequence(BindingModifierFlags::NONE, 'g'),
                 action_reference: build_core_action("lock"),
             },
             ConflictSeverity::Warning,
         ),
         (
             ConflictDiagnostic::TypeableLeader {
-                leader: Leader::Mods(ModFlags::SHIFT),
+                leader: Leader::Modifiers(BindingModifierFlags::SHIFT),
             },
             ConflictSeverity::Warning,
         ),
     ];
-    for (diagnostic, severity) in cases {
-        assert_eq!(diagnostic.get_severity(), severity, "{diagnostic:?}");
+    for (conflict_diagnostic, expected_severity) in severity_cases {
+        assert_eq!(
+            conflict_diagnostic.get_severity(),
+            expected_severity,
+            "{conflict_diagnostic:?}"
+        );
     }
 }
 
 #[test]
 fn display_messages_are_exact() {
-    let collision = ConflictDiagnostic::KeyCollision {
+    let key_collision = ConflictDiagnostic::KeyCollision {
         mode_name: parse_mode_name("normal"),
-        key_sequence: build_single_chord_sequence(ModFlags::CTRL, 'y'),
+        key_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'y'),
         binding_claims: vec![
             (LayerOrigin::User, build_bound_action("new-tab")),
             (LayerOrigin::Session, build_bound_action("lock")),
         ],
     };
     assert_eq!(
-        collision.to_string(),
+        key_collision.to_string(),
         "key `<C-y>` in mode `normal` is bound by user to `core:new-tab` and by session \
          to `core:lock`; all user keybindings revert to defaults"
     );
 
-    let prefix = ConflictDiagnostic::AmbiguousPrefix {
+    let ambiguous_prefix = ConflictDiagnostic::AmbiguousPrefix {
         mode_name: parse_mode_name("normal"),
-        prefix_sequence: build_single_chord_sequence(ModFlags::CTRL, 'p'),
+        prefix_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'p'),
         prefix_action_reference: build_core_action("lock"),
         longer_sequence: build_two_chord_sequence(
-            build_character_chord(ModFlags::CTRL, 'p'),
-            build_character_chord(ModFlags::NONE, 'n'),
+            build_character_chord(BindingModifierFlags::CTRL, 'p'),
+            build_character_chord(BindingModifierFlags::NONE, 'n'),
         ),
         longer_action_reference: build_core_action("new-pane"),
     };
     assert_eq!(
-        prefix.to_string(),
+        ambiguous_prefix.to_string(),
         "`<C-p>` (`core:lock`) is a prefix of `<C-p> n` (`core:new-pane`) in mode \
          `normal`; the shorter binding fires only on the chord timeout"
     );
 
-    let shadowed = ConflictDiagnostic::ReservedUnlockShadowed {
+    let reserved_unlock_shadowed = ConflictDiagnostic::ReservedUnlockShadowed {
         layer_origin: LayerOrigin::User,
         action_reference: build_core_action("lock"),
     };
     assert_eq!(
-        shadowed.to_string(),
+        reserved_unlock_shadowed.to_string(),
         "the reserved unlock key is bound by user to `core:lock` in locked mode; \
          declare `unlock_alternative` before rebinding it"
     );
 
-    let missing = ConflictDiagnostic::ReservedUnlockMissing {
+    let reserved_unlock_missing = ConflictDiagnostic::ReservedUnlockMissing {
         reserved_unlock_chord: KeybindingsConfig::RESERVED_UNLOCK,
     };
     assert_eq!(
-        missing.to_string(),
+        reserved_unlock_missing.to_string(),
         "locked mode has no binding from `<C-l>` to `core:unlock`; the unlock escape \
          would be unreachable"
     );
 
-    let typeable_alt = ConflictDiagnostic::UnlockAlternativeTypeable {
-        unlock_alternative_chord: build_character_chord(ModFlags::NONE, 'u'),
+    let typeable_unlock_alternative = ConflictDiagnostic::UnlockAlternativeTypeable {
+        unlock_alternative_chord: build_character_chord(BindingModifierFlags::NONE, 'u'),
     };
     assert_eq!(
-        typeable_alt.to_string(),
+        typeable_unlock_alternative.to_string(),
         "`unlock_alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
     );
 
@@ -1376,16 +1396,16 @@ fn display_messages_are_exact() {
          before removing its last cancellation key"
     );
 
-    let dead = ConflictDiagnostic::DeadUnderReservedUnlock {
+    let dead_under_reserved_unlock = ConflictDiagnostic::DeadUnderReservedUnlock {
         layer_origin: LayerOrigin::User,
         key_sequence: build_two_chord_sequence(
             KeybindingsConfig::RESERVED_UNLOCK,
-            build_character_chord(ModFlags::NONE, 'x'),
+            build_character_chord(BindingModifierFlags::NONE, 'x'),
         ),
         action_reference: build_core_action("lock"),
     };
     assert_eq!(
-        dead.to_string(),
+        dead_under_reserved_unlock.to_string(),
         "`<C-l> x` (user, `core:lock`) in locked mode can never fire: it holds the \
          reserved unlock chord, which resolves instantly wherever it is pressed"
     );
@@ -1393,7 +1413,7 @@ fn display_messages_are_exact() {
     let arguments_required = ConflictDiagnostic::ArgumentsRequired {
         layer_origin: LayerOrigin::User,
         mode_name: parse_mode_name("normal"),
-        key_sequence: build_single_chord_sequence(ModFlags::CTRL, 'y'),
+        key_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'y'),
         action_reference: build_core_action("run"),
     };
     assert_eq!(
@@ -1405,7 +1425,7 @@ fn display_messages_are_exact() {
     let orphan_action = ConflictDiagnostic::OrphanAction {
         layer_origin: LayerOrigin::User,
         mode_name: parse_mode_name("normal"),
-        key_sequence: build_single_chord_sequence(ModFlags::CTRL, 'o'),
+        key_sequence: build_single_chord_sequence(BindingModifierFlags::CTRL, 'o'),
         action_reference: build_core_action("my-macro"),
     };
     assert_eq!(
@@ -1427,7 +1447,7 @@ fn display_messages_are_exact() {
     let typeable_binding = ConflictDiagnostic::TypeableBinding {
         layer_origin: LayerOrigin::User,
         mode_name: parse_mode_name("normal"),
-        key_sequence: build_single_chord_sequence(ModFlags::NONE, 'g'),
+        key_sequence: build_single_chord_sequence(BindingModifierFlags::NONE, 'g'),
         action_reference: build_core_action("lock"),
     };
     assert_eq!(
@@ -1437,7 +1457,7 @@ fn display_messages_are_exact() {
     );
 
     let typeable_leader = ConflictDiagnostic::TypeableLeader {
-        leader: Leader::Mods(ModFlags::SHIFT),
+        leader: Leader::Modifiers(BindingModifierFlags::SHIFT),
     };
     assert_eq!(
         typeable_leader.to_string(),
@@ -1450,15 +1470,15 @@ fn display_messages_are_exact() {
 fn remove_then_rebind_across_user_layers_is_not_a_collision() {
     // The supported way to re-key: the session layer removes the user
     // layer's key, voiding its claim, and rebinds the key itself.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -1473,15 +1493,15 @@ fn remove_then_rebind_across_user_layers_is_not_a_collision() {
 fn remove_without_rebind_voids_the_lower_claim() {
     // The user layer binds the key, session only removes it: one claim,
     // voided — no collision, and the key reaches nothing.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Session,
             "normal",
             Vec::new(),
@@ -1496,21 +1516,21 @@ fn remove_without_rebind_voids_the_lower_claim() {
 fn remove_below_both_claims_does_not_stop_their_collision() {
     // A remove voids only LOWER layers' claims: with the remove at the
     // bottom user layer, the two claims above it still collide.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "normal",
             Vec::new(),
             vec![key_sequence.clone()],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Layout,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
@@ -1534,20 +1554,20 @@ fn remove_below_both_claims_does_not_stop_their_collision() {
 fn remove_above_both_claims_voids_the_collision() {
     // A remove above both claims voids both: no collision, and no warning
     // fires.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Layout,
             "normal",
             Vec::new(),
@@ -1563,8 +1583,8 @@ fn removing_the_locked_unlock_binding_is_fatal() {
     // Clearing the reserved chord's binding in locked mode leaves no unlock
     // escape: the effective map misses it, and the keymap is refused.
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "locked",
             Vec::new(),
@@ -1583,12 +1603,12 @@ fn removing_the_locked_unlock_binding_is_fatal() {
 #[test]
 fn removing_the_pane_placement_cancel_binding_is_fatal() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
-        ModFlags::NONE,
+        BindingModifierFlags::NONE,
         Key::Named(NamedKey::Esc),
     ));
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "pane-placement",
             Vec::new(),
@@ -1606,14 +1626,16 @@ fn removing_the_pane_placement_cancel_binding_is_fatal() {
 #[test]
 fn rebinding_pane_placement_cancel_action_keeps_the_effective_map_valid() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
-        ModFlags::NONE,
+        BindingModifierFlags::NONE,
         Key::Named(NamedKey::Esc),
     ));
-    let custom_cancel_sequence =
-        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')));
+    let custom_cancel_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('c'),
+    ));
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "pane-placement",
             vec![(
@@ -1631,20 +1653,22 @@ fn rebinding_pane_placement_cancel_action_keeps_the_effective_map_valid() {
 #[test]
 fn higher_layer_removing_the_last_pane_placement_cancel_binding_is_fatal() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
-        ModFlags::NONE,
+        BindingModifierFlags::NONE,
         Key::Named(NamedKey::Esc),
     ));
-    let custom_cancel_sequence =
-        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')));
+    let custom_cancel_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('c'),
+    ));
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "pane-placement",
             Vec::new(),
             vec![escape_sequence],
         ),
-        build_key_map_layer(
+        build_keymap_layer(
             LayerOrigin::Session,
             "pane-placement",
             vec![(
@@ -1652,7 +1676,7 @@ fn higher_layer_removing_the_last_pane_placement_cancel_binding_is_fatal() {
                 build_bound_action("cancel-pane-placement"),
             )],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Layout,
             "pane-placement",
             Vec::new(),
@@ -1670,14 +1694,16 @@ fn higher_layer_removing_the_last_pane_placement_cancel_binding_is_fatal() {
 #[test]
 fn replacing_pane_placement_cancel_action_without_another_cancel_binding_is_fatal() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
-        ModFlags::NONE,
+        BindingModifierFlags::NONE,
         Key::Named(NamedKey::Esc),
     ));
-    let replacement_sequence =
-        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('c')));
+    let replacement_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('c'),
+    ));
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer_with_removed(
+        build_default_keymap_layer(),
+        build_keymap_layer_with_removed(
             LayerOrigin::User,
             "pane-placement",
             vec![(replacement_sequence, build_bound_action("lock"))],
@@ -1697,15 +1723,15 @@ fn removed_binding_draws_no_per_binding_warns() {
     // The user layer binds an orphan action on a typeable key; session
     // removes the key. The removed binding draws neither the orphan warning
     // nor the typeable warning.
-    let key_sequence = build_single_chord_sequence(ModFlags::NONE, 'g');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::NONE, 'g');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("does-not-exist"))],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Session,
             "normal",
             Vec::new(),
@@ -1718,17 +1744,22 @@ fn removed_binding_draws_no_per_binding_warns() {
 
 #[test]
 fn removed_prefix_binding_does_not_pair_as_a_prefix() {
-    // A single-chord `<C-p>` binding would pair with the defaults' `<C-p> n`
-    // and `<C-p> x` sequences; removing it above voids the pairing.
-    let prefix = build_single_chord_sequence(ModFlags::CTRL, 'p');
+    // A single-chord `<C-p>` binding pairs with the defaults' `<C-p> n` and
+    // `<C-p> x` sequences. A higher layer that removes it voids the pairing.
+    let prefix_key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'p');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
-            vec![(prefix.clone(), build_bound_action("lock"))],
+            vec![(prefix_key_sequence.clone(), build_bound_action("lock"))],
         ),
-        build_key_map_layer_with_removed(LayerOrigin::Session, "normal", Vec::new(), vec![prefix]),
+        build_keymap_layer_with_removed(
+            LayerOrigin::Session,
+            "normal",
+            Vec::new(),
+            vec![prefix_key_sequence],
+        ),
     ]);
     assert_eq!(report.diagnostics, Vec::new());
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -1739,17 +1770,17 @@ fn binding_past_the_chord_depth_cap_warns_and_applies() {
     // At a cap of 1, a two-chord user binding is never reached: the input
     // path flushes the pending sequence before lookup. It warns, stays
     // transparent, and the keymap applies.
-    let long = build_two_chord_sequence(
-        build_character_chord(ModFlags::CTRL, 'y'),
-        build_character_chord(ModFlags::NONE, 'x'),
+    let long_key_sequence = build_two_chord_sequence(
+        build_character_chord(BindingModifierFlags::CTRL, 'y'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
     let report = detect_conflicts(
         &[
-            build_default_key_map_layer(),
-            build_key_map_layer(
+            build_default_keymap_layer(),
+            build_keymap_layer(
                 LayerOrigin::User,
                 "normal",
-                vec![(long.clone(), build_bound_action("new-tab"))],
+                vec![(long_key_sequence.clone(), build_bound_action("new-tab"))],
             ),
         ],
         Leader::default(),
@@ -1762,7 +1793,7 @@ fn binding_past_the_chord_depth_cap_warns_and_applies() {
         vec![ConflictDiagnostic::ExceedsChordDepth {
             layer_origin: LayerOrigin::User,
             mode_name: parse_mode_name("normal"),
-            key_sequence: long,
+            key_sequence: long_key_sequence,
             action_reference: build_core_action("new-tab"),
             maximum_chord_depth: 1,
         }]
@@ -1776,17 +1807,17 @@ fn binding_past_the_chord_depth_cap_warns_and_applies() {
 }
 
 #[test]
-fn binding_with_exactly_max_chord_depth_chords_fires() {
+fn binding_with_exactly_maximum_chord_depth_chords_fires() {
     // At a cap of 1, a one-chord user binding sits exactly at the cap,
     // fires, and draws no warning.
     let report = detect_conflicts(
         &[
-            build_default_key_map_layer(),
-            build_key_map_layer(
+            build_default_keymap_layer(),
+            build_keymap_layer(
                 LayerOrigin::User,
                 "normal",
                 vec![(
-                    build_single_chord_sequence(ModFlags::CTRL, 'y'),
+                    build_single_chord_sequence(BindingModifierFlags::CTRL, 'y'),
                     build_bound_action("new-tab"),
                 )],
             ),
@@ -1805,13 +1836,13 @@ fn a_reserved_unlock_sequence_past_the_cap_warns_dead_not_depth() {
     // A locked two-chord sequence holding the reserved chord while over a
     // cap of 1 draws one warning, the reserved-chord one.
     let key_sequence = build_two_chord_sequence(
-        build_character_chord(ModFlags::CTRL, 'x'),
+        build_character_chord(BindingModifierFlags::CTRL, 'x'),
         KeybindingsConfig::RESERVED_UNLOCK,
     );
     let report = detect_conflicts(
         &[
-            build_default_key_map_layer(),
-            build_key_map_layer(
+            build_default_keymap_layer(),
+            build_keymap_layer(
                 LayerOrigin::User,
                 "locked",
                 vec![(key_sequence.clone(), build_bound_action("new-tab"))],
@@ -1839,15 +1870,15 @@ fn an_orphan_action_on_a_reserved_led_sequence_warns_orphan_not_dead() {
     // unregistered action draws one warning, the resolver's refusal.
     let key_sequence = build_two_chord_sequence(
         KeybindingsConfig::RESERVED_UNLOCK,
-        build_character_chord(ModFlags::NONE, 'x'),
+        build_character_chord(BindingModifierFlags::NONE, 'x'),
     );
-    let ghost = build_bound_action("ghost");
+    let orphan_bound_action = build_bound_action("ghost");
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "locked",
-            vec![(key_sequence.clone(), ghost.clone())],
+            vec![(key_sequence.clone(), orphan_bound_action.clone())],
         ),
     ]);
     assert_eq!(
@@ -1856,7 +1887,7 @@ fn an_orphan_action_on_a_reserved_led_sequence_warns_orphan_not_dead() {
             layer_origin: LayerOrigin::User,
             mode_name: parse_mode_name("locked"),
             key_sequence,
-            action_reference: ghost.action_reference,
+            action_reference: orphan_bound_action.action_reference,
         }]
     );
     assert_eq!(report.get_verdict(), KeymapVerdict::Apply);
@@ -1868,7 +1899,7 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
     // keymap unreachable — including the locked-mode unlock and pane placement
     // cancellation bindings, which the guarantee checks report as missing.
     let report = detect_conflicts(
-        &[build_default_key_map_layer()],
+        &[build_default_keymap_layer()],
         Leader::default(),
         None,
         0,
@@ -1890,15 +1921,15 @@ fn a_chord_depth_of_zero_fails_the_unlock_guarantee() {
 fn remove_in_an_unregistered_mode_is_inert() {
     // Removals in an unknown mode are skipped like its bindings; only the
     // orphan-mode warning surfaces.
-    let key_sequence = build_single_chord_sequence(ModFlags::CTRL, 'y');
+    let key_sequence = build_single_chord_sequence(BindingModifierFlags::CTRL, 'y');
     let report = detect_test_conflicts(&[
-        build_default_key_map_layer(),
-        build_key_map_layer(
+        build_default_keymap_layer(),
+        build_keymap_layer(
             LayerOrigin::User,
             "normal",
             vec![(key_sequence.clone(), build_bound_action("new-tab"))],
         ),
-        build_key_map_layer_with_removed(
+        build_keymap_layer_with_removed(
             LayerOrigin::Session,
             "git",
             Vec::new(),
@@ -1921,7 +1952,10 @@ fn a_collision_naming_one_claim_does_not_say_the_arguments_differ() {
     // public: one claim names no second action to differ from.
     let one_claim = ConflictDiagnostic::KeyCollision {
         mode_name: ModeName::from_text("normal"),
-        key_sequence: KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y'))),
+        key_sequence: KeySequence::from(KeyChord::from_parts(
+            BindingModifierFlags::CTRL,
+            Key::Char('y'),
+        )),
         binding_claims: vec![(
             LayerOrigin::User,
             BoundAction {

@@ -12,14 +12,14 @@
 //!
 //! A file that is absent, unreadable, or fails to parse is skipped and leaves
 //! the built-in defaults in place. `koshi.kdl` and the theme file are
-//! field-partial, so a single bad field is skipped and the rest of the file
-//! still applies; `keybinding.kdl` is all-or-nothing, so any parse error drops
-//! the whole file to defaults. A conflict in a `keybinding.kdl` that *parses*
-//! is caught where the runtime applies it, not here.
+//! field-partial: a single bad field is skipped and the rest of the file still
+//! applies. `keybinding.kdl` is all-or-nothing: any parse error drops the whole
+//! file to defaults. A conflict in a `keybinding.kdl` that *parses* is caught
+//! where the runtime applies it, not here.
 //!
-//! `load_config_files` writes no log line of its own. It runs before the tracing
-//! subscriber is installed, and returns each skip reason as a string the
-//! caller replays once tracing is up.
+//! `load_config_files` writes no log line of its own. It runs before the
+//! tracing subscriber is installed, and returns each skip reason as a string
+//! the caller replays once tracing is up.
 
 use std::fs;
 use std::io;
@@ -33,7 +33,7 @@ use koshi_config::layer::{
 };
 use koshi_config::profile::parse_profile;
 use koshi_config::theme::parse_theme;
-use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME};
+use koshi_config::types::{ClientConfig, ServerConfig, DEFAULT_THEME_NAME};
 use koshi_core::geometry::Direction;
 use koshi_core::ids::SessionId;
 use koshi_layout::template::ProfileTemplate;
@@ -52,7 +52,7 @@ pub struct LoadedConfig {
     /// The layer of the `themes/<name>.kdl` `koshi.kdl` selected.
     pub theme_config_layer: Option<PartialThemeConfig>,
     /// The `keybinding.kdl` layer.
-    pub keybindings: Option<PartialKeybindingsConfig>,
+    pub keybindings_config_layer: Option<PartialKeybindingsConfig>,
 }
 
 /// Read and parse the config files from the config directory. Missing,
@@ -84,7 +84,7 @@ pub fn load_config_files() -> (LoadedConfig, Vec<String>) {
         theme_config_layer: selected_theme_name.and_then(|theme_name| {
             load_theme_config(&config_directory, &theme_name, &mut config_warnings)
         }),
-        keybindings: load_keybindings_config(
+        keybindings_config_layer: load_keybindings_config(
             &config_directory.join("keybinding.kdl"),
             &mut config_warnings,
         ),
@@ -95,7 +95,7 @@ pub fn load_config_files() -> (LoadedConfig, Vec<String>) {
 /// Read and parse `koshi.kdl` alone, skipping the theme and the keymap.
 ///
 /// `koshi.kdl` is the only file carrying the top-level `allow-beta-features`
-/// and `layout.new-pane-direction`, so a `koshi new-pane` reads that file and
+/// and `layout.new-pane-direction`: a `koshi new-pane` reads that file and
 /// nothing else. Absent, unreadable, or unparseable yields `None`, which folds
 /// to the built-in defaults. Warnings are dropped.
 #[must_use]
@@ -106,10 +106,10 @@ pub fn load_app_layer() -> Option<PartialKoshiConfig> {
         .map(|app_config_file| app_config_file.layer)
 }
 
-/// The tracing subscriber's settings for `session_id`: `app_config_layer`'s `logging`
-/// section over the built-in defaults. The session server and every client
-/// attached to it build their params here; one session's lines all land in one
-/// file.
+/// The tracing subscriber's settings for `session_id`: `app_config_layer`'s
+/// `logging` section over the built-in defaults. The session server and every
+/// client attached to it build their parameters here; one session's lines all
+/// land in one file.
 #[must_use]
 pub fn build_logging_parameters(
     app_config_layer: Option<&PartialKoshiConfig>,
@@ -129,13 +129,12 @@ pub fn build_logging_parameters(
 /// What the session's control socket needs to serve the other users of this
 /// machine, or `None` when only the user who started the session may reach it.
 ///
-/// `forced_allow_other_users` is the `--allow-other-users` flag: `Some(true)` serves them
-/// whatever `koshi.kdl` says, `Some(false)` serves only this user whatever
-/// that file says, and `None` leaves the answer to that file's
-/// `allow-other-users`.
+/// `is_other_user_access_forced` is the `--allow-other-users` flag: `true`
+/// serves them whatever `koshi.kdl` says, and `false` leaves the answer to
+/// that file's `allow-other-users`.
 ///
 /// A forced switch stays on for the session's whole life. A switch left to the
-/// file is read again on every request from another user, so an
+/// file is read again on every request from another user: an
 /// `allow-other-users` turned off after the session started closes the
 /// connections it had admitted.
 ///
@@ -145,43 +144,43 @@ pub fn build_logging_parameters(
 #[must_use]
 pub fn resolve_other_users_policy(
     app_config_layer: Option<&PartialKoshiConfig>,
-    forced_allow_other_users: Option<bool>,
+    is_other_user_access_forced: bool,
 ) -> Option<OtherUsers> {
     let server_config = merge_server(
         ServerConfig::default(),
         app_config_layer.cloned().into_iter().collect(),
     );
-    if !forced_allow_other_users.unwrap_or(server_config.should_allow_other_users) {
+    if !is_other_user_access_forced && !server_config.should_allow_other_users {
         return None;
     }
     let shared_sessions_directory = resolve_shared_sessions_directory(&server_config)?;
-    let is_still_enabled: OtherUsersSetting = if forced_allow_other_users == Some(true) {
+    let other_user_access_check: OtherUsersSetting = if is_other_user_access_forced {
         Arc::new(|| true)
     } else {
         Arc::new(is_other_user_access_allowed)
     };
     Some(OtherUsers {
         shared_directory: shared_sessions_directory,
-        is_enabled: is_still_enabled,
+        is_enabled: other_user_access_check,
     })
 }
 
 /// The machine-wide directory the sessions of one user are advertised in:
-/// `server`'s `shared-sessions-dir` when it names one, and the platform's own
-/// machine-wide location otherwise. `None` when neither names one — Windows
-/// reporting no `ProgramData`.
+/// `server_config`'s `shared-sessions-dir` when it names one, and the
+/// platform's own machine-wide location otherwise. `None` when neither names
+/// one — Windows reporting no `ProgramData`.
 ///
 /// The session server creates its socket here, and a `koshi` command looks
 /// here for the sessions the other local users started.
-pub(crate) fn resolve_shared_sessions_directory(server: &ServerConfig) -> Option<PathBuf> {
-    server
+pub(crate) fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> Option<PathBuf> {
+    server_config
         .shared_sessions_directory
         .clone()
         .or_else(koshi_paths::resolve_shared_sessions_directory)
 }
 
 /// The `server` settings `koshi.kdl` carries right now. Reads and parses the
-/// file again on each call, so the answer is the one the file holds at this
+/// file again on each call: the answer is the one the file holds at this
 /// moment.
 #[must_use]
 pub fn load_current_server_config() -> ServerConfig {
@@ -207,10 +206,10 @@ pub fn apply_beta_gate(app_config_layer: Option<PartialKoshiConfig>) {
 }
 
 /// The split direction a pane-opening verb uses when `--direction` is absent:
-/// `app_config_layer`'s `layout.new-pane-direction` folded onto the built-in defaults. The
-/// CLI is a client, so it folds the viewer-owned sections exactly as a viewer
-/// does. `None` — no config directory, no `koshi.kdl`, or a file that did not
-/// parse — gives the built-in [`Direction::Right`].
+/// `app_config_layer`'s `layout.new-pane-direction` folded onto the built-in
+/// defaults. The CLI folds the viewer-owned sections exactly as a viewer does.
+/// `None` — no config directory, no `koshi.kdl`, or a file that did not parse —
+/// gives the built-in [`Direction::Right`].
 #[must_use]
 pub fn resolve_new_pane_direction(app_config_layer: Option<PartialKoshiConfig>) -> Direction {
     merge_client(
@@ -221,8 +220,9 @@ pub fn resolve_new_pane_direction(app_config_layer: Option<PartialKoshiConfig>) 
     .new_pane_direction
 }
 
-/// Whether this viewer sends native image output to its terminal: `app_config_layer`'s
-/// `image-support` folded onto the built-in default. `None` gives `true`.
+/// Whether this viewer sends native image output to its terminal:
+/// `app_config_layer`'s `image-support` folded onto the built-in default.
+/// `None` gives `true`.
 #[must_use]
 pub fn supports_image_output(app_config_layer: Option<PartialKoshiConfig>) -> bool {
     merge_client(
@@ -232,14 +232,13 @@ pub fn supports_image_output(app_config_layer: Option<PartialKoshiConfig>) -> bo
     .supports_image_protocols
 }
 
-/// The file's text, or `None` when it is absent (not an error) or unreadable.
-/// A read failure is recorded in `config_warnings`.
+/// The file's text, or `None` when it is absent or unreadable. A read failure
+/// other than an absent file, such as a permission error, is recorded in
+/// `config_warnings`.
 fn load_config_file(config_path: &Path, config_warnings: &mut Vec<String>) -> Option<String> {
-    if !config_path.exists() {
-        return None;
-    }
     match fs::read_to_string(config_path) {
         Ok(config_source_text) => Some(config_source_text),
+        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => None,
         Err(read_error) => {
             config_warnings.push(format!(
                 "could not read config file {}: {read_error}",
@@ -274,20 +273,20 @@ fn load_app_config(config_path: &Path, config_warnings: &mut Vec<String>) -> Opt
     }
 }
 
-/// Parses the theme `theme_name` selects — `themes/<theme_name>.kdl` under `config_directory` —
-/// into its color layer, naming the layer after the file it came from and recording every
-/// field-partial skip.
+/// Parses the theme `theme_name` selects — `themes/<theme_name>.kdl` under
+/// `config_directory` — into its color layer, naming the layer after the file
+/// it came from and recording every field-partial skip.
 ///
-/// Returns `None`, which leaves koshi's built-in colors in place, when `theme_name`
-/// is [`DEFAULT_THEME`], is not a plain file name, or names a file that is
-/// absent, unreadable, or fails to parse. Every one of those but the first is
-/// recorded in `config_warnings`.
+/// Returns `None`, which leaves koshi's built-in colors in place, when
+/// `theme_name` is [`DEFAULT_THEME_NAME`], is not a plain file name, or names a
+/// file that is absent, unreadable, or fails to parse. Every one of those but
+/// the first is recorded in `config_warnings`.
 fn load_theme_config(
     config_directory: &Path,
     theme_name: &str,
     config_warnings: &mut Vec<String>,
 ) -> Option<PartialThemeConfig> {
-    if theme_name == DEFAULT_THEME {
+    if theme_name == DEFAULT_THEME_NAME {
         return None;
     }
     // A theme name is a single file stem under `themes/`, held to the same
@@ -339,9 +338,9 @@ fn load_theme_config(
     }
 }
 
-/// Records `fallback_reason` as the warning for a theme that could not be used, saying
-/// which theme stands instead, and yields the `None` that leaves the built-in
-/// colors in place.
+/// Records `fallback_reason` as the warning for a theme that could not be
+/// used, saying which theme stands instead, and yields the `None` that leaves
+/// the built-in colors in place.
 ///
 /// Example — `theme "../../x"` gives "theme name `../../x` must be a plain
 /// name; using the default theme".
@@ -350,12 +349,13 @@ fn resolve_default_theme_fallback(
     fallback_reason: String,
 ) -> Option<PartialThemeConfig> {
     config_warnings.push(format!(
-        "{fallback_reason}; using the {DEFAULT_THEME} theme"
+        "{fallback_reason}; using the {DEFAULT_THEME_NAME} theme"
     ));
     None
 }
 
-/// Parses `keybinding.kdl` all-or-nothing: any parse error drops the whole file.
+/// Parses `keybinding.kdl` all-or-nothing: any parse error drops the whole
+/// file.
 fn load_keybindings_config(
     config_path: &Path,
     config_warnings: &mut Vec<String>,
@@ -373,8 +373,8 @@ fn load_keybindings_config(
     }
 }
 
-/// Appends each field-partial skip from a parsed file to `config_warnings`, prefixed
-/// with the file it came from.
+/// Appends each field-partial skip from a parsed file to `config_warnings`,
+/// prefixed with the file it came from.
 fn append_config_field_warnings(
     config_path: &Path,
     field_warnings: &[String],
@@ -385,10 +385,10 @@ fn append_config_field_warnings(
     }
 }
 
-/// Read and parse `profile/<name>.kdl` from the config directory. A missing,
-/// unreadable, or invalid profile is logged and returns `None`; the caller then
-/// starts a single shell. Profiles are all-or-nothing: any schema violation
-/// drops the whole file, so no pane of a broken profile is started.
+/// Read and parse `profile/<profile_name>.kdl` from the config directory. A
+/// missing, unreadable, or invalid profile is logged and returns `None`; the
+/// caller then starts a single shell. Profiles are all-or-nothing: any schema
+/// violation drops the whole file, and no pane of a broken profile starts.
 #[must_use]
 pub fn load_profile_template(profile_name: &str) -> Option<ProfileTemplate> {
     let config_directory = koshi_paths::resolve_config_directory()?;
@@ -404,17 +404,17 @@ pub fn load_profile_template(profile_name: &str) -> Option<ProfileTemplate> {
     let profile_path = config_directory
         .join("profile")
         .join(format!("{profile_name}.kdl"));
-    if !profile_path.exists() {
-        tracing::warn!(path = %profile_path.display(), "profile `{profile_name}` not found; starting a single shell");
-        return None;
-    }
-    // Each read failure goes straight to the log, not to a returned warning.
-    let mut config_warnings = Vec::new();
-    let config_source_text = load_config_file(&profile_path, &mut config_warnings);
-    for config_warning in &config_warnings {
-        tracing::warn!("{config_warning}");
-    }
-    let config_source_text = config_source_text?;
+    let config_source_text = match fs::read_to_string(&profile_path) {
+        Ok(config_source_text) => config_source_text,
+        Err(read_error) if read_error.kind() == io::ErrorKind::NotFound => {
+            tracing::warn!(path = %profile_path.display(), "profile `{profile_name}` not found; starting a single shell");
+            return None;
+        }
+        Err(read_error) => {
+            tracing::warn!(path = %profile_path.display(), %read_error, "profile `{profile_name}` could not be read; starting a single shell");
+            return None;
+        }
+    };
     match parse_profile(&profile_path, &config_source_text) {
         Ok(profile_template) => Some(profile_template),
         Err(profile_error) => {
@@ -424,11 +424,12 @@ pub fn load_profile_template(profile_name: &str) -> Option<ProfileTemplate> {
     }
 }
 
-/// Whether `file_name` is exactly its own file name — no separators, no root or
-/// prefix, no `.`/`..`, not empty. A plain name joins to a `<directory>/<file_name>.kdl`
-/// directly under `<directory>`, never a nested path and never one that escapes
-/// `<directory>`. A file name whose final component differs from the whole string
-/// (`../x`, `a/b`, `/etc/x`, `foo/`) is not a plain name.
+/// Whether `file_name` is exactly its own file name — no separators, no root
+/// or prefix, no `.`/`..`, not empty. A plain name joins to a
+/// `<directory>/<file_name>.kdl` directly under `<directory>`, never a nested
+/// path and never one that escapes `<directory>`. A file name whose final
+/// component differs from the whole string (`../x`, `a/b`, `/etc/x`, `foo/`)
+/// is not a plain name.
 ///
 /// Both name-selected config files are held to this: the `--profile <name>`
 /// under `profile/` and the `theme "<name>"` under `themes/`.

@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use koshi_core::key::{fold_uppercase_character, Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{fold_uppercase_character, BindingModifierFlags, Key, KeyChord, NamedKey};
 use thiserror::Error;
 
 /// A key token that does not name a chord, with the failed token and reason.
@@ -94,7 +94,7 @@ pub enum KeyParseErrorKind {
     /// A modifier-run leader standing alone, with no chord after it to merge
     /// into.
     #[error("the leader's modifiers need a key after them")]
-    DanglingLeaderMods,
+    DanglingLeaderModifiers,
     /// A sequence with more chords than the configured cap.
     #[error("the sequence has {chord_count} chords; the cap is {maximum_chord_depth}")]
     SequenceTooLong {
@@ -117,12 +117,12 @@ pub(crate) fn create_key_parse_error(
 }
 
 /// Maps a modifier letter to its bit, accepting either case.
-fn resolve_modifier_flag(modifier_character: char) -> Option<ModFlags> {
+fn resolve_modifier_flag(modifier_character: char) -> Option<BindingModifierFlags> {
     match modifier_character {
-        'C' | 'c' => Some(ModFlags::CTRL),
-        'A' | 'a' => Some(ModFlags::ALT),
-        'S' | 's' => Some(ModFlags::SHIFT),
-        'D' | 'd' => Some(ModFlags::SUPER),
+        'C' | 'c' => Some(BindingModifierFlags::CTRL),
+        'A' | 'a' => Some(BindingModifierFlags::ALT),
+        'S' | 's' => Some(BindingModifierFlags::SHIFT),
+        'D' | 'd' => Some(BindingModifierFlags::SUPER),
         _ => None,
     }
 }
@@ -132,12 +132,12 @@ fn resolve_modifier_flag(modifier_character: char) -> Option<ModFlags> {
 /// error. A leading pair whose first character is not a modifier letter is an
 /// error. Anything that is not an `X-` pair ends the run: `Space` leaves the
 /// whole word (`S` is not followed by `-`), and `C--` yields
-/// [`ModFlags::CTRL`] with `-` left.
+/// [`BindingModifierFlags::CTRL`] with `-` left.
 fn split_modifier_flags<'a>(
     key_token: &str,
     key_text: &'a str,
-) -> Result<(ModFlags, &'a str), KeyParseError> {
-    let mut modifier_flags = ModFlags::NONE;
+) -> Result<(BindingModifierFlags, &'a str), KeyParseError> {
+    let mut modifier_flags = BindingModifierFlags::NONE;
     let mut remaining_key_text = key_text;
     loop {
         let mut key_text_characters = remaining_key_text.chars();
@@ -171,11 +171,11 @@ fn split_modifier_flags<'a>(
 }
 
 /// Folds a single-character key into canonical form: an uppercase letter becomes
-/// its lowercase plus [`ModFlags::SHIFT`]. Rejects `SHIFT` on a character that
+/// its lowercase plus [`BindingModifierFlags::SHIFT`]. Rejects `SHIFT` on a character that
 /// is not lowercase (`<S-1>`), and rejects any whitespace or control character.
 fn finish_key_character(
     key_token: &str,
-    mut modifier_flags: ModFlags,
+    mut modifier_flags: BindingModifierFlags,
     key_character: char,
 ) -> Result<KeyChord, KeyParseError> {
     if key_character.is_whitespace() || key_character.is_control() {
@@ -186,9 +186,10 @@ fn finish_key_character(
     }
     let (canonical_key_character, needs_shift_modifier) = fold_uppercase_character(key_character);
     if needs_shift_modifier {
-        modifier_flags = modifier_flags.union(ModFlags::SHIFT);
+        modifier_flags = modifier_flags.union(BindingModifierFlags::SHIFT);
     }
-    if modifier_flags.has_all_modifiers(ModFlags::SHIFT) && !canonical_key_character.is_lowercase()
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT)
+        && !canonical_key_character.is_lowercase()
     {
         return Err(create_key_parse_error(
             key_token,
@@ -260,7 +261,7 @@ fn resolve_named_key(key_token: &str, key_name: &str) -> Result<NamedKey, KeyPar
 ///
 /// Accepts a bare printable character (`n`) or an angle-bracketed token with an
 /// optional modifier run (`<C-p>`, `<A-S-n>`, `<F5>`, `<Space>`). An uppercase
-/// letter folds to lowercase plus [`ModFlags::SHIFT`]. `<leader>` is refused: it
+/// letter folds to lowercase plus [`BindingModifierFlags::SHIFT`]. `<leader>` is refused: it
 /// stands for a prefix, which only the sequence parser can substitute.
 ///
 /// # Errors
@@ -293,7 +294,7 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
                 KeyParseErrorKind::UnbracketedMultiChar,
             ));
         }
-        return finish_key_character(chord_text, ModFlags::NONE, key_character);
+        return finish_key_character(chord_text, BindingModifierFlags::NONE, key_character);
     };
 
     // Bracketed form: must close with `>`.
@@ -344,34 +345,34 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
 
 /// What `<leader>` in a binding stands for.
 ///
-/// A modifier run merges into the chord that follows it: with [`Leader::Mods`]
+/// A modifier run merges into the chord that follows it: with [`Leader::Modifiers`]
 /// holding Control, `<leader>l` is one chord, `<C-l>`. A chord leader stands
 /// alone: with [`Leader::Chord`] holding Space, `<leader>l` is two chords,
 /// Space then `l`.
 ///
 /// A leader that [`KeyChord::is_typeable`] reports as typeable, or a modifier
-/// run that [`ModFlags::is_typing`] reports as typing, puts every
+/// run that [`BindingModifierFlags::is_typing`] reports as typing, puts every
 /// leader-relative binding on a key plain typing produces, and those keys
 /// stop reaching the pane while the client is unlocked. The default is `C-`,
 /// which plain typing never produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Leader {
     /// Modifiers that merge into the following chord, written `C-`.
-    Mods(ModFlags),
+    Modifiers(BindingModifierFlags),
     /// A chord of its own, written like any other chord.
     Chord(KeyChord),
 }
 
 impl Default for Leader {
     fn default() -> Self {
-        Self::Mods(ModFlags::CTRL)
+        Self::Modifiers(BindingModifierFlags::CTRL)
     }
 }
 
 impl fmt::Display for Leader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Mods(modifier_flags) => write!(formatter, "{modifier_flags}"),
+            Self::Modifiers(modifier_flags) => write!(formatter, "{modifier_flags}"),
             Self::Chord(key_chord) => write!(formatter, "{key_chord}"),
         }
     }
@@ -395,7 +396,7 @@ pub fn parse_leader(leader_text: &str) -> Result<Leader, KeyParseError> {
     if !leader_text.starts_with('<') && leader_text.ends_with('-') {
         let (modifier_flags, remaining_key_text) = split_modifier_flags(leader_text, leader_text)?;
         if remaining_key_text.is_empty() && !modifier_flags.is_empty() {
-            return Ok(Leader::Mods(modifier_flags));
+            return Ok(Leader::Modifiers(modifier_flags));
         }
     }
     parse_chord(leader_text).map(Leader::Chord)

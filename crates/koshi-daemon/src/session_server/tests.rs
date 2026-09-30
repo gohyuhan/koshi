@@ -93,7 +93,7 @@ fn queue_command(
 ) {
     runtime_event_sender
         .send(RuntimeEvent::Ipc {
-            envelope: Box::new(CommandEnvelope::from_parts(
+            command_envelope: Box::new(CommandEnvelope::from_parts(
                 CommandId::new(),
                 CommandSource::from_key_binding(client_id),
                 command,
@@ -211,7 +211,7 @@ fn a_quit_command_arriving_on_the_socket_ends_the_loop() {
     let (command_response_sender, command_response_receiver) = mpsc::channel();
     runtime_event_sender
         .send(RuntimeEvent::Ipc {
-            envelope: Box::new(CommandEnvelope::from_parts(
+            command_envelope: Box::new(CommandEnvelope::from_parts(
                 command_id,
                 CommandSource::ExternalCli {
                     session_id: Some(session_id),
@@ -518,7 +518,7 @@ fn a_quit_applied_while_the_swap_runs_ends_the_session_instead_of_serving_it_aga
 
     runtime_event_sender
         .send(RuntimeEvent::Ipc {
-            envelope: Box::new(CommandEnvelope::from_parts(
+            command_envelope: Box::new(CommandEnvelope::from_parts(
                 CommandId::new(),
                 CommandSource::ExternalCli {
                     session_id: Some(session_id),
@@ -2779,7 +2779,7 @@ fn a_quit_arriving_with_a_restart_in_one_pass_ends_the_session_instead_of_swappi
     let restart_response_receiver = request_session_restart(&runtime_event_sender);
     runtime_event_sender
         .send(RuntimeEvent::Ipc {
-            envelope: Box::new(CommandEnvelope::from_parts(
+            command_envelope: Box::new(CommandEnvelope::from_parts(
                 CommandId::new(),
                 CommandSource::ExternalCli {
                     session_id: Some(session_id),

@@ -10,9 +10,8 @@
 //! between the caller and that session server directly, never through here.
 //!
 //! One thread accepts connections, serves only this user's own, and gives each
-//! its own serving thread; a serving thread only holds a channel sender, so
-//! the session list has a single owner — the dispatcher loop on the main
-//! thread. A session that dies leaves the list three ways: its reaper thread
+//! its own serving thread. A serving thread holds only a channel sender: the
+//! session list has one owner, the dispatcher loop on the main thread. A session that dies leaves the list three ways: its reaper thread
 //! reports the child's exit, on Unix a watcher thread reports the exit of a
 //! session the rebuild picked up, or a lookup finds nothing listening at its
 //! address. All remove the entry and, for a session this user started, the
@@ -34,9 +33,9 @@
 //! The router also opens the machine's TLS port for remote clients, when
 //! `koshi.kdl` names an address and the operator has switched remote access
 //! on. The remote listener holds those connections and asks the dispatcher
-//! what each caller's secret reaches; the dispatcher keeps the socket of every
-//! connection it admitted, so a revoked or replaced secret ends its
-//! connections at once.
+//! what each caller's secret reaches. The dispatcher keeps the socket of every
+//! connection it admitted: a revoked or replaced secret ends its connections
+//! at once.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -102,7 +101,7 @@ const ROUTER_IDLE_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 const SESSION_SERVER_READY_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
 /// How long the accept loop pauses after a failed accept before trying
-/// again, so a persistent accept error cannot spin a core.
+/// again.
 const ACCEPT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(100);
 
 /// How long a replacement router waits for the previous router to release the
@@ -113,12 +112,12 @@ const LOCK_HANDOVER_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 /// How long the lock wait pauses between attempts on the router lock.
 const LOCK_HANDOVER_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
 
-/// How long shutdown pauses after withdrawing the socket, giving a serving
-/// thread time to finish the reply it is writing.
+/// How long shutdown pauses after withdrawing the socket. A serving thread
+/// that is writing a reply has this long to finish it.
 const DRAIN_GRACE_DURATION: Duration = Duration::from_millis(100);
 
 /// The flag carrying a `--profile` name to the session server the router
-/// starts, so the session opens that profile's tabs and panes.
+/// starts. The session opens that profile's tabs and panes.
 const PROFILE_FLAG: &str = "--profile";
 
 /// The flag this router passes to the router it starts, telling that one to
@@ -160,8 +159,8 @@ pub(crate) enum RouterEvent {
     },
     /// A session server the router started has exited.
     ChildExited(SessionId),
-    /// The `Restarting` reply has been written to its connection, so the
-    /// router may now restart.
+    /// The `Restarting` reply has been written to its connection. The router
+    /// restarts next.
     RestartDelivered,
     /// A question from a remote connection the listener is holding.
     Admission(AdmissionAsk),
@@ -235,8 +234,8 @@ enum RouterExit {
     /// No session is running and the idle window passed, or the events
     /// channel closed.
     Idle,
-    /// A `Restarting` reply reached its caller, so the router restarts into
-    /// the binary on disk.
+    /// A `Restarting` reply reached its caller. The router restarts into the
+    /// binary on disk.
     Restart,
 }
 
@@ -265,10 +264,10 @@ pub fn run_router(
     let executable_path = std::env::current_exe()?;
 
     // Where this machine's remote access tokens live, resolved once here. A
-    // machine with no resolvable data directory has no store, so it holds no
+    // machine with no resolvable data directory has no store and holds no
     // remote access token.
     let data_directory = koshi_paths::resolve_data_directory();
-    let token_store = data_directory.as_deref().map(resolve_token_store_path);
+    let token_store_path = data_directory.as_deref().map(resolve_token_store_path);
 
     let lock_file = OpenOptions::new()
         .create(true)
@@ -305,7 +304,7 @@ pub fn run_router(
         return Err(endpoint_write_error.into());
     }
 
-    let mut registry = rebuild_session_registry(
+    let mut session_registry = rebuild_session_registry(
         runtime_directory,
         ipc_client::resolve_shared_sessions_base_directory().as_deref(),
     );
@@ -318,7 +317,7 @@ pub fn run_router(
         router_events_sender.clone(),
         &is_shutting_down,
     ) {
-        Ok(handle) => handle,
+        Ok(accept_thread_handle) => accept_thread_handle,
         Err(accept_thread_error) => {
             let _ = std::fs::remove_file(&endpoint_path);
             remove_socket_file(&router_socket_address);
@@ -341,10 +340,10 @@ pub fn run_router(
     open_remote_listener(&mut remote_state, &router_events_sender);
 
     #[cfg(unix)]
-    for (session_id, session_entry) in &registry {
-        if session_entry.process_id != 0 {
+    for (session_id, session_record) in &session_registry {
+        if session_record.process_id != 0 {
             watch_session_process_exit(
-                session_entry.process_id,
+                session_record.process_id,
                 *session_id,
                 router_events_sender.clone(),
             );
@@ -355,11 +354,11 @@ pub fn run_router(
         match run_dispatch_loop(
             runtime_directory,
             &executable_path,
-            token_store.as_deref(),
+            token_store_path.as_deref(),
             &router_events_sender,
             &router_events_receiver,
             ROUTER_IDLE_TIMEOUT_DURATION,
-            &mut registry,
+            &mut session_registry,
             &mut remote_state,
         ) {
             RouterExit::Idle => break,
@@ -381,19 +380,18 @@ pub fn run_router(
     }
 
     is_shutting_down.store(true, Ordering::SeqCst);
-    // The accept loop sits blocked in `accept`; a bare connection wakes it so
-    // it observes the flag. The connection is held open across the join,
-    // since on Windows a caller that drops before `accept` runs can leave
-    // nothing for `accept` to return.
+    // The accept loop sits blocked in `accept`. A bare connection wakes it,
+    // and it reads the flag. The connection stays open until the join
+    // returns.
     if let Ok(wake_connection) = Connection::connect(&router_socket_address) {
         let _ = accept_thread.join();
         drop(wake_connection);
     }
     let _ = std::fs::remove_file(&endpoint_path);
     remove_socket_file(&router_socket_address);
-    // A serving thread can stay blocked on its peer, so shutdown waits a fixed
-    // moment instead. A caller that loses its last reply retries through the
-    // same path as a router that has already exited.
+    // Shutdown waits `DRAIN_GRACE_DURATION` and does not join the serving
+    // threads. A caller that loses its last reply retries as it does against
+    // a router that has exited.
     std::thread::sleep(DRAIN_GRACE_DURATION);
 
     drop(lock_file);
@@ -408,12 +406,12 @@ pub fn run_router(
 /// [`LOCK_HANDOVER_TIMEOUT_DURATION`], and a wait that runs out reads as another router
 /// holding it.
 fn take_router_lock(lock_file: &File, should_wait_for_lock: bool) -> std::io::Result<bool> {
-    let deadline = Instant::now() + LOCK_HANDOVER_TIMEOUT_DURATION;
+    let lock_wait_deadline = Instant::now() + LOCK_HANDOVER_TIMEOUT_DURATION;
     loop {
         match FileExt::try_lock(lock_file) {
             Ok(()) => return Ok(true),
             Err(TryLockError::WouldBlock) => {
-                if !should_wait_for_lock || Instant::now() >= deadline {
+                if !should_wait_for_lock || Instant::now() >= lock_wait_deadline {
                     return Ok(false);
                 }
                 std::thread::sleep(LOCK_HANDOVER_POLL_INTERVAL_DURATION);
@@ -468,9 +466,9 @@ fn open_remote_listener(
         Ok(bound_listener) => bound_listener,
         Err(bind_error) => {
             tracing::warn!(
-                    "the remote listener could not open {remote_listen_address}: {bind_error}; local clients are \
+                "the remote listener could not open {remote_listen_address}: {bind_error}; local clients are \
                  unaffected"
-                );
+            );
             return;
         }
     };
@@ -528,7 +526,7 @@ fn load_or_create_certificate(data_directory: &Path) -> Result<(CertFile, String
 /// Replace this process's running image with the binary at `executable_path`, serving the
 /// same runtime directory. The call returns only when the exec failed, and
 /// hands back that error, on the terms
-/// [`exec_and_keep_ignoring_sigpipe`](crate::process::exec_and_keep_ignoring_sigpipe)
+/// [`exec_and_keep_ignoring_sigpipe`](koshi_link::process::exec_and_keep_ignoring_sigpipe)
 /// states.
 ///
 /// A successful exec closes the router lock file with every other descriptor
@@ -537,7 +535,7 @@ fn load_or_create_certificate(data_directory: &Path) -> Result<(CertFile, String
 /// endpoint file, and rebuilds the session list — under the same process id.
 #[cfg(unix)]
 fn restart_by_exec(executable_path: &Path, runtime_directory: &Path) -> std::io::Error {
-    process::exec_and_keep_ignoring_sigpipe(
+    koshi_link::process::exec_and_keep_ignoring_sigpipe(
         std::process::Command::new(executable_path)
             .arg(ROUTER_SUBCOMMAND)
             .arg(RUNTIME_DIRECTORY_FLAG)
@@ -600,8 +598,7 @@ fn run_router_accept_loop(
         is_shutting_down,
         ACCEPT_RETRY_DELAY_DURATION,
         |connection| {
-            // The OS reports which user opened the connection, so a peer cannot
-            // claim to be another one.
+            // The OS reports which user opened the connection.
             if !matches!(connection.is_peer_same_user(), Ok(true)) {
                 return;
             }
@@ -634,11 +631,11 @@ fn serve_router_connection(
 ) {
     #[cfg(unix)]
     process::block_sigpipe_on_this_thread();
-    let mut gate = RouterHandshake::from_connection_token(router_connection_token);
+    let mut router_handshake = RouterHandshake::from_connection_token(router_connection_token);
     loop {
         let (request_id, request_kind) = match plane::read_next_request::<ControlPlane>(
             &mut connection,
-            &mut gate,
+            &mut router_handshake,
             BUILD_VERSION,
             &|| true,
         ) {
@@ -669,7 +666,7 @@ fn serve_router_connection(
 }
 
 /// Hand one request to the dispatcher and wait for its answer. `None` means
-/// the dispatcher is gone — the router is exiting — so the caller closes its
+/// the dispatcher is gone and the router is exiting: the caller closes its
 /// connection without an answer.
 fn ask_dispatcher(
     router_events_sender: &Sender<RouterEvent>,
@@ -691,37 +688,37 @@ fn ask_dispatcher(
 /// Serve events until the router ends, leaving the session list as it stood.
 ///
 /// While a session is running the loop blocks for the next event. While none
-/// is, it waits `idle_exit` for one: an event inside that window is served
+/// is, it waits `idle_timeout` for one: an event inside that window is served
 /// and the loop goes on, and a window that passes ends the loop with
 /// [`RouterExit::Idle`]. A delivered `Restarting` reply ends it with
-/// [`RouterExit::Restart`] instead, so the caller restarts this router into
-/// the binary at `executable_path`.
+/// [`RouterExit::Restart`] instead: the caller restarts this router into the
+/// binary at `executable_path`.
 ///
-/// `router_events_sender` is the loop's own sender, handed to each session's reaper
-/// thread so a child's exit reaches here. `token_store` is the remote access
-/// token store every token request is answered against, and `remote_state` is what
-/// the router holds for remote clients.
+/// `router_events_sender` is the loop's own sender, handed to each session's
+/// reaper thread for its child's exit report. `token_store_path` is the file
+/// of the remote access token store every token request is answered against,
+/// and `remote_state` is what the router holds for remote clients.
 #[allow(clippy::too_many_arguments)]
 fn run_dispatch_loop(
     runtime_directory: &Path,
     executable_path: &Path,
-    token_store: Option<&Path>,
+    token_store_path: Option<&Path>,
     router_events_sender: &Sender<RouterEvent>,
     router_events_receiver: &Receiver<RouterEvent>,
-    idle_exit: Duration,
-    registry: &mut SessionRegistry,
+    idle_timeout: Duration,
+    session_registry: &mut SessionRegistry,
     remote_state: &mut RemoteState,
 ) -> RouterExit {
     loop {
-        let received_event = if registry.is_empty() {
-            router_events_receiver.recv_timeout(idle_exit).ok()
+        let received_event = if session_registry.is_empty() {
+            router_events_receiver.recv_timeout(idle_timeout).ok()
         } else {
             router_events_receiver.recv().ok()
         };
-        let Some(event) = received_event else {
+        let Some(router_event) = received_event else {
             return RouterExit::Idle;
         };
-        match event {
+        match router_event {
             RouterEvent::Request {
                 request_kind,
                 response_sender,
@@ -729,22 +726,22 @@ fn run_dispatch_loop(
                 let _ = response_sender.send(serve_router_request(
                     runtime_directory,
                     executable_path,
-                    token_store,
-                    registry,
+                    token_store_path,
+                    session_registry,
                     remote_state,
                     router_events_sender,
                     request_kind,
                 ));
             }
             RouterEvent::ChildExited(session_id) => {
-                remove_session_from_registry(runtime_directory, registry, session_id)
+                remove_session_from_registry(runtime_directory, session_registry, session_id)
             }
             RouterEvent::RestartDelivered => return RouterExit::Restart,
             RouterEvent::Admission(admission_question) => {
                 serve_remote_admission(
                     runtime_directory,
-                    token_store,
-                    registry,
+                    token_store_path,
+                    session_registry,
                     remote_state,
                     admission_question,
                 );
@@ -755,13 +752,13 @@ fn run_dispatch_loop(
 
 /// Answer one request against the session list.
 ///
-/// The dispatcher answers one request at a time, so the remote access token
-/// store at `token_store` has one writer.
+/// The dispatcher answers one request at a time: the remote access token
+/// store at `token_store_path` has one writer.
 fn serve_router_request(
     runtime_directory: &Path,
     executable_path: &Path,
-    token_store: Option<&Path>,
-    registry: &mut SessionRegistry,
+    token_store_path: Option<&Path>,
+    session_registry: &mut SessionRegistry,
     remote_state: &mut RemoteState,
     router_events_sender: &Sender<RouterEvent>,
     request_kind: RouterRequestKind,
@@ -776,26 +773,30 @@ fn serve_router_request(
             is_other_user_access_allowed,
         } => create_session(
             runtime_directory,
-            registry,
+            session_registry,
             router_events_sender,
             profile.as_deref(),
             working_directory.as_deref(),
             is_other_user_access_allowed,
         ),
         RouterRequestKind::AttachLookup { session_selector } => {
-            lookup_session_attachment(runtime_directory, registry, &session_selector)
+            lookup_session_attachment(runtime_directory, session_registry, &session_selector)
         }
-        RouterRequestKind::ListSessions => list_session_overviews(runtime_directory, registry),
+        RouterRequestKind::ListSessions => {
+            list_session_overviews(runtime_directory, session_registry)
+        }
         RouterRequestKind::Restart => check_restart_binary(executable_path),
         RouterRequestKind::GrantToken {
             identity,
             scope,
             expires_in,
-        } => grant_token(token_store, remote_state, identity, scope, expires_in),
+        } => grant_token(token_store_path, remote_state, identity, scope, expires_in),
         RouterRequestKind::RevokeToken { identity, scope } => {
-            revoke_token(token_store, remote_state, &identity, scope.as_ref())
+            revoke_token(token_store_path, remote_state, &identity, scope.as_ref())
         }
-        RouterRequestKind::ListTokens { scope } => list_token_entries(token_store, scope.as_ref()),
+        RouterRequestKind::ListTokens { scope } => {
+            list_token_entries(token_store_path, scope.as_ref())
+        }
         RouterRequestKind::RemoteStatus => build_remote_status_result(remote_state),
         RouterRequestKind::EnableRemote => enable_remote_access(remote_state, router_events_sender),
     }
@@ -803,12 +804,14 @@ fn serve_router_request(
 
 /// Answer one question from a remote connection the listener is holding.
 ///
-/// The dispatcher answers one at a time, so the token store keeps its one
-/// writer and the list of carried connections has a single owner.
+/// A question for the session rows or for one session's address runs
+/// [`register_unlisted_sessions`] first. The dispatcher answers one at a
+/// time: the token store has one writer, and the list of admitted
+/// connections has one owner.
 fn serve_remote_admission(
     runtime_directory: &Path,
-    token_store: Option<&Path>,
-    registry: &SessionRegistry,
+    token_store_path: Option<&Path>,
+    session_registry: &mut SessionRegistry,
     remote_state: &mut RemoteState,
     admission_question: AdmissionAsk,
 ) {
@@ -819,17 +822,18 @@ fn serve_remote_admission(
             response_sender,
         } => {
             let _ = response_sender.send(admit_remote_token(
-                token_store,
+                token_store_path,
                 remote_state,
                 &connection_token,
                 remote_connection_stream,
             ));
         }
-        AdmissionAsk::Rows {
+        AdmissionAsk::ListRows {
             scope,
             response_sender,
         } => {
-            let _ = response_sender.send(list_remote_session_rows(registry, &scope));
+            register_unlisted_sessions(runtime_directory, session_registry);
+            let _ = response_sender.send(list_remote_session_rows(session_registry, &scope));
         }
         AdmissionAsk::Locate {
             scope,
@@ -837,16 +841,17 @@ fn serve_remote_admission(
             session_selector,
             response_sender,
         } => {
+            register_unlisted_sessions(runtime_directory, session_registry);
             let _ = response_sender.send(locate_remote_session(
                 runtime_directory,
-                registry,
+                session_registry,
                 remote_state,
                 &scope,
                 remote_connection_id,
                 &session_selector,
             ));
         }
-        AdmissionAsk::Ended {
+        AdmissionAsk::RemoveConnection {
             remote_connection_id,
         } => remote_state
             .admitted_remote_connections
@@ -863,14 +868,13 @@ fn serve_remote_admission(
 /// secret's hash, whether or not it goes on to attach. The registration is
 /// dropped when the listener reports the connection ended.
 ///
-/// A list already holding [`MAX_LIVE_REMOTE_CONNECTION_COUNT`] admits nothing more. That count
-/// is read before the secret is, so a caller arriving at a full list does the
-/// same work as one presenting a wrong secret.
+/// A list already holding [`MAX_LIVE_REMOTE_CONNECTION_COUNT`] admits nothing
+/// more. That count is read before the secret.
 ///
 /// The store is written back, stamping that record's last-used time. A store
 /// that cannot be read or written admits nothing.
 fn admit_remote_token(
-    token_store: Option<&Path>,
+    token_store_path: Option<&Path>,
     remote_state: &mut RemoteState,
     connection_token: &ConnectionToken,
     remote_connection_stream: TcpStream,
@@ -884,7 +888,7 @@ fn admit_remote_token(
         }
         return None;
     }
-    let Ok((token_store_path, mut token_store)) = open_token_store(token_store) else {
+    let Ok((token_store_path, mut token_store)) = open_token_store(token_store_path) else {
         return None;
     };
     let scope = token_store.admit_token_scope(connection_token, SystemTime::now())?;
@@ -906,16 +910,16 @@ fn admit_remote_token(
     })
 }
 
-/// Whether this router started the session `session_entry` describes.
+/// Whether this router started the session `session_record` describes.
 ///
 /// A session another local user started carries `process_id` `0`; a session this
 /// router started carries the process id of its session server, which is never
 /// `0`.
 ///
-/// [`list_remote_session_rows`] and [`locate_remote_session`] both read this, so a remote caller is
-/// shown exactly the sessions it can be carried to.
-fn is_session_started_by_this_router(session_entry: &SessionRecord) -> bool {
-    session_entry.process_id != 0
+/// [`list_remote_session_rows`] and [`locate_remote_session`] both read this:
+/// a remote caller is shown exactly the sessions it can be carried to.
+fn is_session_started_by_this_router(session_record: &SessionRecord) -> bool {
+    session_record.process_id != 0
 }
 
 /// The sessions an admitted scope reaches, in name then id order.
@@ -923,21 +927,20 @@ fn is_session_started_by_this_router(session_entry: &SessionRecord) -> bool {
 /// A host-wide scope reaches every session this router started; a session scope
 /// reaches that one session. A session another local user started is left out,
 /// on the rule [`is_session_started_by_this_router`] states. Nothing outside
-/// the router's
-/// own list is read.
+/// the router's own list is read.
 fn list_remote_session_rows(
-    registry: &SessionRegistry,
+    session_registry: &SessionRegistry,
     scope: &TokenScope,
 ) -> Vec<RemoteSessionRow> {
-    let mut remote_session_rows: Vec<RemoteSessionRow> = registry
+    let mut remote_session_rows: Vec<RemoteSessionRow> = session_registry
         .iter()
-        .filter(|(session_id, session_entry)| {
+        .filter(|(session_id, session_record)| {
             scope.is_allowed_for_session(**session_id)
-                && is_session_started_by_this_router(session_entry)
+                && is_session_started_by_this_router(session_record)
         })
-        .map(|(session_id, session_entry)| RemoteSessionRow {
+        .map(|(session_id, session_record)| RemoteSessionRow {
             session_id: *session_id,
-            session_name: session_entry.session_name.clone(),
+            session_name: session_record.session_name.clone(),
         })
         .collect();
     remote_session_rows.sort_by(|left_row, right_row| {
@@ -964,7 +967,7 @@ fn list_remote_session_rows(
 /// local user started.
 fn locate_remote_session(
     runtime_directory: &Path,
-    registry: &SessionRegistry,
+    session_registry: &SessionRegistry,
     remote_state: &RemoteState,
     scope: &TokenScope,
     remote_connection_id: u64,
@@ -977,11 +980,11 @@ fn locate_remote_session(
     {
         return None;
     }
-    let session_id = resolve_session_selector(registry, session_selector)?;
+    let session_id = resolve_session_selector(session_registry, session_selector)?;
     if !scope.is_allowed_for_session(session_id) {
         return None;
     }
-    if !is_session_started_by_this_router(&registry[&session_id]) {
+    if !is_session_started_by_this_router(&session_registry[&session_id]) {
         return None;
     }
     Some(EndpointFile::resolve_endpoint_file_path(
@@ -1044,7 +1047,7 @@ fn enable_remote_access(
     };
     let (certificate_file, certificate_fingerprint) =
         match load_or_create_certificate(&data_directory) {
-            Ok(certificate) => certificate,
+            Ok(loaded_certificate) => loaded_certificate,
             Err(certificate_error) => return build_refused_result(certificate_error.to_string()),
         };
 
@@ -1086,14 +1089,14 @@ fn enable_remote_access(
     }
 }
 
-/// The remote access token store at `token_store`, with the path to write it
-/// back to.
+/// The remote access token store at `token_store_path`, with the path to write
+/// it back to.
 ///
 /// `None` means this machine has no data directory to hold a store. A store
-/// whose bytes cannot be read is refused, so a malformed file refuses every
-/// token request and changes nothing.
-fn open_token_store(token_store: Option<&Path>) -> Result<(&Path, TokenStore), RouterResult> {
-    let Some(token_store_path) = token_store else {
+/// whose bytes cannot be read is refused: every token request is refused, and
+/// nothing changes.
+fn open_token_store(token_store_path: Option<&Path>) -> Result<(&Path, TokenStore), RouterResult> {
+    let Some(token_store_path) = token_store_path else {
         return Err(build_refused_result(
             "this machine has no data directory, so no remote access token can be stored"
                 .to_string(),
@@ -1111,23 +1114,22 @@ fn open_token_store(token_store: Option<&Path>) -> Result<(&Path, TokenStore), R
 ///
 /// The clock is read once, and both the issue time and the expiry are stamped
 /// from that one reading. `expires_in` is added to the issue time with a
-/// checked add: a span the clock cannot represent is refused before anything
-/// is written, so the store file is left as it stood.
+/// checked add. A span the clock cannot represent is refused before anything
+/// is written: the store file is left as it stood.
 ///
-/// A grant takes the place of whatever `identity` held on `scope`, so every
-/// connection the replaced secret admitted is ended once the new record is
-/// written. The hashes are taken before the replace, since the records holding
-/// them are gone after it.
+/// A grant takes the place of whatever `identity` held on `scope`. Every
+/// connection the replaced secret admitted ends once the new record is
+/// written. The replaced hashes are read before the replace.
 fn grant_token(
-    token_store: Option<&Path>,
+    token_store_path: Option<&Path>,
     remote_state: &mut RemoteState,
     identity: String,
     scope: TokenScope,
     expires_in: Option<Duration>,
 ) -> RouterResult {
-    let (token_store_path, mut token_store) = match open_token_store(token_store) {
-        Ok(opened) => opened,
-        Err(refusal) => return refusal,
+    let (token_store_path, mut token_store) = match open_token_store(token_store_path) {
+        Ok(opened_token_store) => opened_token_store,
+        Err(refusal_result) => return refusal_result,
     };
     let issued_at = SystemTime::now();
     let expires_at = match expires_in {
@@ -1151,7 +1153,7 @@ fn grant_token(
                 && token_record.revoked_at.is_none()
                 && token_record
                     .expires_at
-                    .is_none_or(|expiry| expiry > issued_at)
+                    .is_none_or(|expiry_time| expiry_time > issued_at)
         })
         .map(|token_record| token_record.token_hash.clone())
         .collect();
@@ -1170,19 +1172,18 @@ fn grant_token(
 /// Stop the grants `identity` holds, narrowed to one scope when `scope` is
 /// given, and write the store back when this call stopped anything.
 ///
-/// Every connection those grants admitted ends once the store is written, so a
-/// revoke ends the connection rather than refusing its next command. A
-/// connection that never attached ends with the rest. The hashes are taken
-/// before the revoke, since the records carry their stopped time afterwards.
+/// Every connection those grants admitted ends once the store is written. A
+/// connection that never attached ends with the rest. The revoked hashes are
+/// read before the revoke.
 fn revoke_token(
-    token_store: Option<&Path>,
+    token_store_path: Option<&Path>,
     remote_state: &mut RemoteState,
     identity: &str,
     scope: Option<&TokenScope>,
 ) -> RouterResult {
-    let (token_store_path, mut token_store) = match open_token_store(token_store) {
-        Ok(opened) => opened,
-        Err(refusal) => return refusal,
+    let (token_store_path, mut token_store) = match open_token_store(token_store_path) {
+        Ok(opened_token_store) => opened_token_store,
+        Err(refusal_result) => return refusal_result,
     };
     let revoked_token_hashes: Vec<String> = token_store
         .token_records
@@ -1207,10 +1208,10 @@ fn revoke_token(
 
 /// Every grant this machine has made, narrowed to the grants that reach
 /// `scope` when one is given. The store is not written.
-fn list_token_entries(token_store: Option<&Path>, scope: Option<&TokenScope>) -> RouterResult {
-    match open_token_store(token_store) {
+fn list_token_entries(token_store_path: Option<&Path>, scope: Option<&TokenScope>) -> RouterResult {
+    match open_token_store(token_store_path) {
         Ok((_, token_store)) => RouterResult::Tokens(token_store.list_token_entries(scope)),
-        Err(refusal) => refusal,
+        Err(refusal_result) => refusal_result,
     }
 }
 
@@ -1220,7 +1221,7 @@ fn list_token_entries(token_store: Option<&Path>, scope: Option<&TokenScope>) ->
 fn check_restart_binary(executable_path: &Path) -> RouterResult {
     match is_binary_runnable(executable_path) {
         Ok(()) => RouterResult::Restarting,
-        Err(message) => build_refused_result(message),
+        Err(binary_check_error) => build_refused_result(binary_check_error),
     }
 }
 
@@ -1234,11 +1235,11 @@ fn check_restart_binary(executable_path: &Path) -> RouterResult {
 /// advertised removed. A `working_directory` the child cannot enter fails the start.
 ///
 /// `is_other_user_access_allowed` `Some(true)` starts the session server under
-/// [`ALLOW_OTHER_USERS_FLAG`], so the session serves the other users of this
+/// [`ALLOW_OTHER_USERS_FLAG`]: the session serves the other users of this
 /// machine whatever its `koshi.kdl` says.
 fn create_session(
     runtime_directory: &Path,
-    registry: &mut SessionRegistry,
+    session_registry: &mut SessionRegistry,
     router_events_sender: &Sender<RouterEvent>,
     profile: Option<&str>,
     working_directory: Option<&Path>,
@@ -1246,7 +1247,7 @@ fn create_session(
 ) -> RouterResult {
     let session_id = SessionId::new();
     let session_name = generate_name(NameKind::Session, |candidate_session_name| {
-        is_session_name_taken(registry, candidate_session_name)
+        is_session_name_taken(session_registry, candidate_session_name)
     });
 
     let session_server_process = build_session_server_command(
@@ -1268,7 +1269,7 @@ fn create_session(
     };
     let process_id = child_process.id();
 
-    let Some(stdout) = child_process.stdout.take() else {
+    let Some(session_server_stdout) = child_process.stdout.take() else {
         terminate_child_process(&mut child_process);
         return build_refused_result(
             "the session server started without a readable output".to_string(),
@@ -1278,7 +1279,7 @@ fn create_session(
     let ready_report_reader_thread = std::thread::Builder::new()
         .name("koshi-router-ready".to_string())
         .spawn(move || {
-            let _ = ready_report_sender.send(read_session_server_ready_line(stdout));
+            let _ = ready_report_sender.send(read_session_server_ready_line(session_server_stdout));
         });
     if let Err(ready_report_reader_error) = ready_report_reader_thread {
         terminate_child_process(&mut child_process);
@@ -1296,16 +1297,16 @@ fn create_session(
             .flatten(),
     ) {
         Ok(ready_report) => ready_report,
-        Err(reason) => {
+        Err(ready_report_error) => {
             terminate_child_process(&mut child_process);
             // A child that bound its socket before it was killed left an
-            // endpoint file behind; this takes it back off the disk.
-            remove_session_from_registry(runtime_directory, registry, session_id);
-            return build_refused_result(reason);
+            // endpoint file behind; this removes it from the disk.
+            remove_session_from_registry(runtime_directory, session_registry, session_id);
+            return build_refused_result(ready_report_error);
         }
     };
 
-    registry.insert(
+    session_registry.insert(
         session_id,
         SessionRecord {
             session_name: session_name.clone(),
@@ -1325,34 +1326,37 @@ fn create_session(
 
 /// Look one session up and hand back where it listens.
 ///
-/// The address is probed before it is handed out. A probe that finds nothing
+/// Sessions the list does not hold yet go through
+/// [`register_unlisted_sessions`] first. The address is probed before it is
+/// handed out. A probe that finds nothing
 /// listening means the session server is gone: its entry and the files it left
 /// behind are removed, and the answer is the [`build_session_not_found_result`] refusal a selector
 /// naming no session gets.
 fn lookup_session_attachment(
     runtime_directory: &Path,
-    registry: &mut SessionRegistry,
+    session_registry: &mut SessionRegistry,
     session_selector: &SessionSelector,
 ) -> RouterResult {
-    let Some(session_id) = resolve_session_selector(registry, session_selector) else {
+    register_unlisted_sessions(runtime_directory, session_registry);
+    let Some(session_id) = resolve_session_selector(session_registry, session_selector) else {
         return build_session_not_found_result(session_selector);
     };
-    let socket_address = registry[&session_id].socket_address.clone();
+    let socket_address = session_registry[&session_id].socket_address.clone();
     match Connection::connect(&socket_address) {
         // The probe sends nothing; the session server's serving thread reads
         // end of stream and returns.
-        Ok(probe) => {
-            drop(probe);
-            let session_entry = &registry[&session_id];
+        Ok(probe_connection) => {
+            drop(probe_connection);
+            let session_record = &session_registry[&session_id];
             RouterResult::Found(SessionAddress {
                 session_id,
-                session_name: session_entry.session_name.clone(),
+                session_name: session_record.session_name.clone(),
                 socket_address,
-                process_id: session_entry.process_id,
+                process_id: session_record.process_id,
             })
         }
         Err(IpcError::NoListener { .. }) => {
-            remove_session_from_registry(runtime_directory, registry, session_id);
+            remove_session_from_registry(runtime_directory, session_registry, session_id);
             build_session_not_found_result(session_selector)
         }
         Err(ipc_error) => {
@@ -1374,19 +1378,21 @@ fn is_session_gone_error(cli_error: &CliError) -> bool {
 
 /// Describe every running session, in name then id order.
 ///
-/// Each entry is asked to describe itself. An entry that nothing listens for is
+/// Sessions the list does not hold yet go through
+/// [`register_unlisted_sessions`] first. Each entry is asked to describe itself. An entry that nothing listens for is
 /// removed by [`remove_session_from_registry`] and left out of the answer. An entry that is
 /// listening but could not answer keeps its files and its place in the list,
 /// and is left out of this answer only.
 fn list_session_overviews(
     runtime_directory: &Path,
-    registry: &mut SessionRegistry,
+    session_registry: &mut SessionRegistry,
 ) -> RouterResult {
+    register_unlisted_sessions(runtime_directory, session_registry);
     let mut session_discoveries = Vec::new();
     let mut gone_session_ids = Vec::new();
-    for session_id in registry.keys().copied() {
+    for session_id in session_registry.keys().copied() {
         match ipc_client::fetch_session_overview(runtime_directory, session_id) {
-            Ok(overview) => session_discoveries.push(overview.session),
+            Ok(session_overview) => session_discoveries.push(session_overview.session),
             Err(cli_error) if is_session_gone_error(&cli_error) => {
                 gone_session_ids.push(session_id)
             }
@@ -1394,7 +1400,7 @@ fn list_session_overviews(
         }
     }
     for session_id in gone_session_ids {
-        remove_session_from_registry(runtime_directory, registry, session_id);
+        remove_session_from_registry(runtime_directory, session_registry, session_id);
     }
     session_discoveries.sort_by(|left_session, right_session| {
         left_session
@@ -1407,16 +1413,8 @@ fn list_session_overviews(
 
 /// Rebuild the session list from what is already running.
 ///
-/// Every advertised session is read for its address and process id and asked
-/// to describe itself. One that answers both is registered — a session server
-/// that outlived an earlier router is picked up here. One whose endpoint file
-/// cannot be read, and one that nothing listens for, is removed by
-/// [`remove_session_from_registry`]: its endpoint file, its resume file, and on Unix its socket
-/// file go. One that is listening but could not answer keeps its files and is
-/// left out of the list.
-///
-/// The walk is over endpoint files, which exist on every platform, so a
-/// Windows pipe with no directory entry of its own is still found.
+/// Every advertised session goes through [`register_unlisted_sessions`]: a
+/// session server that outlived an earlier router is registered here.
 ///
 /// `shared_sessions_base_directory` is the machine-wide shared directory while
 /// `allow-other-users` is on, and `None` while it is off. Each session it
@@ -1431,28 +1429,8 @@ fn rebuild_session_registry(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
 ) -> SessionRegistry {
-    let mut registry = SessionRegistry::new();
-    for session_id in ipc_client::list_advertised_sessions(runtime_directory) {
-        let endpoint_file = EndpointFile::load_from_path(
-            &EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
-        );
-        let overview = ipc_client::fetch_session_overview(runtime_directory, session_id);
-        match (endpoint_file, overview) {
-            (Ok(endpoint_file), Ok(overview)) => {
-                registry.insert(
-                    session_id,
-                    SessionRecord {
-                        session_name: overview.session.session_name,
-                        socket_address: endpoint_file.socket_address,
-                        process_id: endpoint_file.process_id,
-                    },
-                );
-            }
-            (Ok(_), Err(session_overview_error))
-                if !is_session_gone_error(&session_overview_error) => {}
-            _ => remove_session_from_registry(runtime_directory, &mut registry, session_id),
-        }
-    }
+    let mut session_registry = SessionRegistry::new();
+    register_unlisted_sessions(runtime_directory, &mut session_registry);
     for (session_id, foreign_socket_address) in
         shared_sessions_base_directory
             .into_iter()
@@ -1460,52 +1438,119 @@ fn rebuild_session_registry(
                 ipc_client::list_foreign_sessions(shared_base_directory, runtime_directory)
             })
     {
-        if let Ok(overview) =
+        if let Ok(session_overview) =
             ipc_client::fetch_foreign_session_overview(session_id, &foreign_socket_address)
         {
-            registry.insert(
+            session_registry.insert(
                 session_id,
                 SessionRecord {
-                    session_name: overview.session.session_name,
+                    session_name: session_overview.session.session_name,
                     socket_address: foreign_socket_address,
                     process_id: 0,
                 },
             );
         }
     }
-    remove_orphan_resume_files(runtime_directory, &registry);
-    registry
+    remove_orphan_resume_files(runtime_directory, &session_registry);
+    session_registry
+}
+
+/// Register each session `runtime_directory` advertises that `session_registry` does
+/// not hold yet.
+///
+/// Each one's endpoint file is read, and the session is asked to describe
+/// itself:
+///
+/// - It answers: it is registered with the address and process id its endpoint
+///   file names.
+/// - Nothing listens at the address its endpoint file names: it is removed by
+///   [`remove_session_from_registry`], so its endpoint file, its resume file,
+///   and on Unix its socket file go.
+/// - It is listening but could not answer, such as a refused Hello or a
+///   protocol version outside this build's range: its files stay, and it stays
+///   out of `session_registry`.
+/// - Its endpoint file cannot be read, such as one written with fields this
+///   build does not know: it is removed only when nothing listens at
+///   [`compute_socket_address`]. Otherwise its files stay, and it stays out of
+///   `session_registry`.
+///
+/// A session left out is asked again on the next call.
+///
+/// The walk is over endpoint files, which exist on every platform: a Windows
+/// pipe with no directory entry of its own is found.
+fn register_unlisted_sessions(runtime_directory: &Path, session_registry: &mut SessionRegistry) {
+    for session_id in ipc_client::list_advertised_sessions(runtime_directory) {
+        if session_registry.contains_key(&session_id) {
+            continue;
+        }
+        let endpoint_file_path =
+            EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+        let Ok(endpoint_file) = EndpointFile::load_from_path(&endpoint_file_path) else {
+            if !is_session_listening(runtime_directory, session_id) {
+                remove_session_from_registry(runtime_directory, session_registry, session_id);
+            }
+            continue;
+        };
+        match ipc_client::fetch_session_overview(runtime_directory, session_id) {
+            Ok(session_overview) => {
+                session_registry.insert(
+                    session_id,
+                    SessionRecord {
+                        session_name: session_overview.session.session_name,
+                        socket_address: endpoint_file.socket_address,
+                        process_id: endpoint_file.process_id,
+                    },
+                );
+            }
+            Err(session_overview_error) if is_session_gone_error(&session_overview_error) => {
+                remove_session_from_registry(runtime_directory, session_registry, session_id);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Whether something accepts a connection at the socket address
+/// [`compute_socket_address`] gives `session_id` in `runtime_directory`.
+///
+/// Only [`IpcError::NoListener`] reads as `false`; every other connect failure
+/// reads as `true`. The probe sends nothing.
+fn is_session_listening(runtime_directory: &Path, session_id: SessionId) -> bool {
+    !matches!(
+        Connection::connect(&compute_socket_address(runtime_directory, session_id)),
+        Err(IpcError::NoListener { .. })
+    )
 }
 
 /// True when a session in the list already carries `candidate_session_name` as its name.
-fn is_session_name_taken(registry: &SessionRegistry, candidate_session_name: &str) -> bool {
-    registry
+fn is_session_name_taken(session_registry: &SessionRegistry, candidate_session_name: &str) -> bool {
+    session_registry
         .values()
-        .any(|session_entry| session_entry.session_name == candidate_session_name)
+        .any(|session_record| session_record.session_name == candidate_session_name)
 }
 
 /// The id a selector names, or `None` when the list holds no such session.
 /// A name matches only in full.
 fn resolve_session_selector(
-    registry: &SessionRegistry,
+    session_registry: &SessionRegistry,
     session_selector: &SessionSelector,
 ) -> Option<SessionId> {
     match session_selector {
-        SessionSelector::SessionId(session_id) => {
-            registry.contains_key(session_id).then_some(*session_id)
-        }
-        SessionSelector::SessionName(session_name) => registry
+        SessionSelector::SessionId(session_id) => session_registry
+            .contains_key(session_id)
+            .then_some(*session_id),
+        SessionSelector::SessionName(session_name) => session_registry
             .iter()
-            .find(|(_, session_entry)| session_entry.session_name == *session_name)
+            .find(|(_, session_record)| session_record.session_name == *session_name)
             .map(|(session_id, _)| *session_id),
     }
 }
 
 /// Drop one session from the list and remove every file it left in
 /// `runtime_directory`: its endpoint file, its resume file, and on Unix its socket
-/// file. All three are derived from the id, so this works for an entry that was
-/// never in the list. A session another local user started left none of them
-/// here, so nothing of that user's is removed.
+/// file. All three paths come from the id: an entry that was never in the list
+/// is cleaned the same way. A session another local user started left none of
+/// them here: nothing of that user's is removed.
 ///
 /// A session that is replacing its own process image is left alone. Its socket
 /// is unbound for that moment, which every way the router notices a dead
@@ -1514,13 +1559,13 @@ fn resolve_session_selector(
 /// with the rest.
 fn remove_session_from_registry(
     runtime_directory: &Path,
-    registry: &mut SessionRegistry,
+    session_registry: &mut SessionRegistry,
     session_id: SessionId,
 ) {
     if crate::session_server::is_replacing_its_image(runtime_directory, session_id) {
         return;
     }
-    registry.remove(&session_id);
+    session_registry.remove(&session_id);
     let _ = std::fs::remove_file(EndpointFile::resolve_endpoint_file_path(
         runtime_directory,
         session_id,
@@ -1529,22 +1574,22 @@ fn remove_session_from_registry(
     remove_socket_file(&compute_socket_address(runtime_directory, session_id));
 }
 
-/// Remove every resume file in `runtime_directory` that no session in `registry`
+/// Remove every resume file in `runtime_directory` that no session in `session_registry`
 /// claims and that is older than
 /// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION).
 ///
 /// A swap that never reached its new image leaves the file behind with no
-/// endpoint file beside it, so the walk over endpoint files never sees it. That
+/// endpoint file beside it: the walk over endpoint files does not see it. That
 /// happens when the new image is killed before it reads the file, and when the
-/// machine loses power mid-swap. A new image that starts at all removes the
-/// file on every way out, so a swap that got that far leaves no orphan.
+/// machine loses power mid-swap. A new image that starts removes the file on
+/// every way out.
 ///
-/// A file younger than the window belongs to a swap that is still in flight, and
-/// a file whose session is in the list belongs to a session that is running, so
-/// neither is touched.
-fn remove_orphan_resume_files(runtime_directory: &Path, registry: &SessionRegistry) {
+/// A file younger than the window belongs to a swap that is still in flight,
+/// and a file whose session is in the list belongs to a running session.
+/// Neither is touched.
+fn remove_orphan_resume_files(runtime_directory: &Path, session_registry: &SessionRegistry) {
     for session_id in ipc_client::list_sessions_with_resume_files(runtime_directory) {
-        if registry.contains_key(&session_id)
+        if session_registry.contains_key(&session_id)
             || crate::session_server::is_replacing_its_image(runtime_directory, session_id)
         {
             continue;
@@ -1560,8 +1605,8 @@ fn remove_orphan_resume_files(runtime_directory: &Path, registry: &SessionRegist
 /// `is_other_user_access_allowed` `Some(true)` adds [`ALLOW_OTHER_USERS_FLAG`]; any other
 /// value leaves the session to its own `koshi.kdl`.
 ///
-/// On Windows the server runs with the `CREATE_NO_WINDOW` creation flag, so
-/// its console carries no window on screen.
+/// On Windows the server runs with the `CREATE_NO_WINDOW` creation flag: its
+/// console has no window on screen.
 fn build_session_server_command(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -1570,32 +1615,32 @@ fn build_session_server_command(
     working_directory: Option<&Path>,
     is_other_user_access_allowed: Option<bool>,
 ) -> std::io::Result<std::process::Command> {
-    let mut command = std::process::Command::new(std::env::current_exe()?);
-    command
+    let mut session_server_command = std::process::Command::new(std::env::current_exe()?);
+    session_server_command
         .arg(SESSION_SERVER_SUBCOMMAND)
         .arg(session_id.to_string())
         .arg(session_name)
         .arg(RUNTIME_DIRECTORY_FLAG)
         .arg(runtime_directory);
     if let Some(profile) = profile {
-        command.arg(PROFILE_FLAG).arg(profile);
+        session_server_command.arg(PROFILE_FLAG).arg(profile);
     }
     if is_other_user_access_allowed == Some(true) {
-        command.arg(ALLOW_OTHER_USERS_FLAG);
+        session_server_command.arg(ALLOW_OTHER_USERS_FLAG);
     }
     if let Some(working_directory) = working_directory {
-        command.current_dir(working_directory);
+        session_server_command.current_dir(working_directory);
     }
-    command
+    session_server_command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
+        session_server_command.creation_flags(CREATE_NO_WINDOW);
     }
-    Ok(command)
+    Ok(session_server_command)
 }
 
 /// The line a freshly spawned session server printed, or the refusal to answer
@@ -1624,8 +1669,8 @@ fn validate_session_server_ready(
     Ok(ready_report)
 }
 
-/// Watch one session server until it exits, then report the exit so its
-/// session leaves the list.
+/// Watch one session server until it exits, then report the exit. The
+/// dispatcher removes the session from the list.
 ///
 /// A thread that cannot be started leaves the session in the list unwatched;
 /// the next lookup or listing probes its socket and removes it there.
@@ -1643,7 +1688,7 @@ fn start_session_reaper_thread(
 }
 
 /// Watch one session the rebuild picked up until it exits, then report the
-/// exit so its session leaves the list.
+/// exit. The dispatcher removes the session from the list.
 ///
 /// After a restart in place, the sessions the previous image started are still
 /// children of this process, and this thread reports their exits. A session
@@ -1679,21 +1724,21 @@ fn read_session_server_ready_line(
     serde_json::from_str(&ready_line).ok()
 }
 
-/// End a child that never became a session, and collect it so no process is
-/// left behind.
+/// Kill a child that never became a session, and wait for it to exit.
 fn terminate_child_process(child_process: &mut Child) {
     let _ = child_process.kill();
     let _ = child_process.wait();
 }
 
-/// A refusal carrying `message`, under [`IpcErrorCode::MalformedRequest`].
+/// A refusal carrying `refusal_message`, under
+/// [`IpcErrorCode::MalformedRequest`].
 ///
 /// Every refusal the router answers takes this code except a session it does
 /// not have, which goes through [`build_session_not_found_result`].
-fn build_refused_result(message: String) -> RouterResult {
+fn build_refused_result(refusal_message: String) -> RouterResult {
     RouterResult::Error(IpcErrorPayload {
         code: IpcErrorCode::MalformedRequest,
-        message,
+        message: refusal_message,
     })
 }
 

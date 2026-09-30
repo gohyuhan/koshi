@@ -46,8 +46,8 @@ impl Server {
             }
             // An attached client's viewer already read this event: its keymap
             // bound nothing to it, or no chord could name it. The pane write
-            // reads the whole event, so the receiving pane's keyboard flags
-            // decide which of its fields reach that pane.
+            // reads the whole event: the receiving pane's keyboard flags decide
+            // which of its fields reach that pane.
             RuntimeEvent::ClientKeyboard {
                 client_id,
                 key_input,
@@ -55,8 +55,8 @@ impl Server {
                 self.handle_key_input(client_id, &key_input);
             }
             // An attached client's viewer already read this mouse event against
-            // the frame it painted, so the round names every pane it touches.
-            // The round is answered on that client's own queue.
+            // the frame it painted: the round names every pane it touches. The
+            // round is answered on that client's own queue.
             RuntimeEvent::ClientMouse {
                 client_id,
                 request_id,
@@ -64,9 +64,9 @@ impl Server {
             } => {
                 self.run_client_mouse(client_id, request_id, mouse_actions);
             }
-            // A mouse event is the viewer's for the same reason: only the frame
-            // it painted says which pane the pointer is over and which gesture
-            // is under way. One arriving here belongs to no attached viewer, and
+            // A raw mouse event is the viewer's to read: only the frame it
+            // painted says which pane the pointer is over and which gesture is
+            // under way. One arriving here belongs to no attached viewer, and
             // is dropped.
             RuntimeEvent::MouseInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
@@ -110,23 +110,24 @@ impl Server {
                 cell_size,
             } => self.handle_client_cell_size(client_id, cell_size),
             RuntimeEvent::Ipc {
-                envelope,
+                command_envelope,
                 response_sender,
             } => {
-                let placement_client_id = match (&envelope.command_source, &envelope.command) {
-                    (CommandSource::KeyBinding { client_id }, Command::PlacePane(_)) => {
-                        Some(*client_id)
-                    }
-                    _ => None,
-                };
-                let command_result = self.submit_command(*envelope);
+                let placement_client_id =
+                    match (&command_envelope.command_source, &command_envelope.command) {
+                        (CommandSource::KeyBinding { client_id }, Command::PlacePane(_)) => {
+                            Some(*client_id)
+                        }
+                        _ => None,
+                    };
+                let command_result = self.submit_command(*command_envelope);
                 if let (Some(client_id), CommandResult::Rejected { command_id, .. }) =
                     (placement_client_id, &command_result)
                 {
                     let _ = self.send_placement_command_rejection(client_id, *command_id);
                 }
-                // A closed reply channel means the connection thread is gone;
-                // the command has already applied, so there is nothing to undo.
+                // A closed reply channel means the connection thread is gone.
+                // The command has already applied and stays applied.
                 let _ = response_sender.send(command_result);
             }
             RuntimeEvent::IpcAttach {
@@ -139,8 +140,8 @@ impl Server {
                 is_remote,
                 response_sender,
             } => {
-                // The client and its subscription are registered together here,
-                // so the structure in the answer and the queue's first event
+                // The client and its subscription are registered together here:
+                // the structure in the answer and the queue's first event
                 // describe one continuous state.
                 let _ = response_sender.send(self.handle_ipc_attach(
                     resume_client_id,
@@ -174,8 +175,8 @@ impl Server {
                     destination_tab_id,
                 );
             }
-            // The verdict is answered here and the swap runs after the loop
-            // ends, so the caller reads the reply on a socket that is still up.
+            // The verdict is answered here, and the swap runs after the loop
+            // ends. The caller reads the reply on a socket that is still up.
             RuntimeEvent::IpcRestart { response_sender } => {
                 let _ = response_sender.send(self.handle_ipc_restart());
             }
@@ -198,8 +199,9 @@ impl Server {
             .terminal_engine_by_pane_id
             .values()
             .filter_map(TerminalEngine::get_next_image_animation_delay)
-            .map(|delay| {
-                delay.saturating_sub(current_time.saturating_duration_since(self.animation_clock))
+            .map(|animation_delay| {
+                animation_delay
+                    .saturating_sub(current_time.saturating_duration_since(self.animation_clock))
             })
             .min();
         let synchronized_output_wakeup = self
@@ -252,9 +254,9 @@ impl Server {
     }
 
     /// Immediately group-kill every live pane's child (`KillPolicy::Tree`),
-    /// reaping any descendants so none is orphaned. The abrupt teardown for the
-    /// panic path — no grace window while unwinding; the normal quit path takes
-    /// the staged [`Server::shutdown`].
+    /// reaping every descendant. The abrupt teardown for the panic path — no
+    /// grace window while unwinding; the normal quit path takes the staged
+    /// [`Server::shutdown`].
     pub fn kill_all_panes(&mut self) {
         let pty_backend = Arc::clone(self.get_pty_backend());
         for pane_id in self.live_pane_ids.iter().copied() {

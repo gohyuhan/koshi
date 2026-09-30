@@ -18,7 +18,7 @@ const BUSY_WAIT_DURATION: Duration = Duration::from_secs(20);
 /// How long [`start_koshi_process`] pauses between attempts.
 const BUSY_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
 
-/// End the process with id `pid`, whatever it is doing.
+/// End the process with id `process_id`, whatever it is doing.
 #[cfg(unix)]
 pub fn terminate_process(process_id: u32) {
     let _ = Command::new("kill")
@@ -29,7 +29,7 @@ pub fn terminate_process(process_id: u32) {
         .status();
 }
 
-/// End the process with id `pid`, whatever it is doing.
+/// End the process with id `process_id`, whatever it is doing.
 #[cfg(windows)]
 pub fn terminate_process(process_id: u32) {
     let _ = Command::new("taskkill")

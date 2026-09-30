@@ -88,11 +88,16 @@ fn parse_cli_arguments() -> Cli {
 /// target from that machine's sessions instead, by the same rules. A verb the
 /// socket does not serve yet reports IPC unavailable.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
+    // A service command whose config migration fails prints the failure on
+    // stderr and starts anyway. The config files stay as they are, and the
+    // next service start migrates them again.
     let config_directory = koshi_paths::resolve_config_directory();
-    config_command::migrate_config_for_service_command(
+    if let Err(config_migration_error) = config_command::migrate_config_for_service_command(
         cli.command.as_ref(),
         config_directory.as_deref(),
-    )?;
+    ) {
+        eprintln!("koshi: {config_migration_error}; starting with the config files as they are");
+    }
 
     // `apply_beta_gate` sets the process-wide flag every `#[beta_feature]`
     // entry point reads, before any verb dispatches. One
@@ -217,7 +222,9 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     if let Some(CliCommand::ResumeSupport) = &cli.command {
         // A session server about to replace its own image runs the newly
         // installed binary this way, and reads this line to learn whether that
-        // binary can take its carried state back.
+        // binary can take its carried state back. The line carries each bound
+        // under two keys: `minimum_resume_format` and `min`,
+        // `maximum_resume_format` and `max`.
         let resume_support = ResumeSupport::from_current_build();
         println!(
             "{}",
@@ -332,12 +339,12 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         return koshi_client::app::run_default_client(cli.profile_name.as_deref());
     }
 
-    // The in-session identity is read before any session verb dispatches, so a
-    // broken pane environment reports itself rather than a missing daemon.
+    // The in-session identity is read before any session verb dispatches: a
+    // broken pane environment reports itself before any session is looked up.
     let in_session_context = InSessionContext::from_env()?;
 
-    // Attach is not an action verb, so it dispatches here rather than through
-    // the routing layer. Typed inside a pane it moves that pane's client to
+    // Attach is not an action verb: it dispatches here, outside the routing
+    // layer. Typed inside a pane it moves that pane's client to
     // the named session; typed outside one it joins that session in this
     // terminal.
     if let Some(CliCommand::Attach {
@@ -363,8 +370,8 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         };
     }
 
-    // Detach is not an action verb, so it dispatches here rather than through
-    // the routing layer. Success prints nothing; a detach the session refuses
+    // Detach is not an action verb: it dispatches here, outside the routing
+    // layer. Success prints nothing; a detach the session refuses
     // comes back as a rejected command.
     if let Some(CliCommand::Detach {
         detach_target,
@@ -469,13 +476,12 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// A query scoped by session id asks that one session and reports it as not
 /// running when nothing answers; one scoped by session name asks every
 /// session and keeps the one that matches, refusing when two share the name.
-/// An unscoped query spans every session, so nothing running is an empty
-/// answer — the header row alone — not an error.
+/// An unscoped query spans every session: nothing running is an empty answer —
+/// the header row alone — not an error.
 ///
-/// A listing claims to be the whole picture, so it prints its rows and then
-/// reports a session that could not answer as a failure. An `inspect` claims
-/// one entity: finding it proves it exists whatever the other sessions would
-/// have said, so a successful one is a success.
+/// A listing prints its rows and then reports a session that could not answer
+/// as a failure. An `inspect` that finds its entity succeeds whatever the other
+/// sessions answered.
 ///
 /// `list-sessions` also lists the sessions on the saved servers: a bare one
 /// sweeps every saved server and appends each session that answered, named
@@ -484,11 +490,14 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// answer, or pins no certificate yet is named on stderr and its sessions are
 /// left out; only a session on this machine that could not answer fails the
 /// listing.
-fn run_discovery(command: &CliCommand, remote_server: Option<&str>) -> Result<(), CliError> {
-    if let (CliCommand::ListSessions { output_format }, Some(remote_server)) =
-        (command, remote_server)
+fn run_discovery(
+    command: &CliCommand,
+    remote_server_reference: Option<&str>,
+) -> Result<(), CliError> {
+    if let (CliCommand::ListSessions { output_format }, Some(remote_server_reference)) =
+        (command, remote_server_reference)
     {
-        let saved_server_argument = remote_client::resolve_server(remote_server)?;
+        let saved_server_argument = remote_client::resolve_server(remote_server_reference)?;
         let (mut remote_link, _) = remote_client::connect_saved_server(
             &saved_server_argument,
             None,
@@ -711,10 +720,11 @@ fn run_dump_layout(
 /// Serve a `koshi debug events` from live state: find the sessions in scope,
 /// ask each for its recent events, narrow them, and print them.
 ///
-/// `since` keeps the events recorded within that much of now, and keeps every
-/// event when it reaches back further than the clock can represent. `filter`
-/// keeps the events whose name contains that text, matched ignoring case. Both
-/// absent keeps every event the session remembers.
+/// `since_duration` keeps the events recorded within that much of now, and
+/// keeps every event when it reaches back further than the clock can
+/// represent. `event_name_filter` keeps the events whose name contains that
+/// text, matched ignoring case. Both absent keeps every event the session
+/// remembers.
 ///
 /// A session that refuses the request fails the command before anything
 /// prints; a session that was listening but could not be probed fails it after
@@ -816,7 +826,7 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
                     Ok(())
                 }
                 Ok(None) => Err(CliError::UnboundKey {
-                    sequence: key_sequence_text.clone(),
+                    key_sequence_text: key_sequence_text.clone(),
                 }),
                 Err(parse_error_detail) => Err(CliError::InvalidArgs {
                     detail: parse_error_detail,
@@ -824,8 +834,8 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
             }
         }
         KeysCommand::Conflicts { output_format } => {
-            // An ignored file is part of the rendered answer itself, so no
-            // stderr note is needed here.
+            // The rendered answer names an ignored keybinding file itself;
+            // nothing is written to stderr.
             let keymap_view = keymap::load_keymap_view();
             print!(
                 "{}",
@@ -837,14 +847,12 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
             keybinding_file_path,
             output_format,
         } => {
-            let validation_outcome =
-                keymap::validate_keymap_file(keybinding_file_path).map_err(|read_error| {
-                    CliError::InvalidArgs {
-                        detail: format!(
-                            "cannot read {}: {read_error}",
-                            keybinding_file_path.display()
-                        ),
-                    }
+            let validation_outcome = keymap::validate_keybinding_file(keybinding_file_path)
+                .map_err(|read_error| CliError::InvalidArgs {
+                    detail: format!(
+                        "cannot read {}: {read_error}",
+                        keybinding_file_path.display()
+                    ),
                 })?;
             print!(
                 "{}",
@@ -853,20 +861,21 @@ fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
             if output::is_validation_applicable(&validation_outcome) {
                 Ok(())
             } else {
-                Err(CliError::InvalidKeymapFile {
-                    keymap_file_path: keybinding_file_path.display().to_string(),
+                Err(CliError::InvalidKeybindingFile {
+                    keybinding_file_path: keybinding_file_path.display().to_string(),
                 })
             }
         }
     }
 }
 
-/// Warn on stderr when the user's keybinding file exists but was not
-/// admitted, so the defaults-only answer on stdout is not mistaken for the
-/// file's contents.
+/// Warn on stderr when the user's keybinding file exists but was not admitted:
+/// `koshi: keybinding file ignored: <error>` for a file that could not be
+/// loaded, or a note that the file conflicts and the built-in defaults are
+/// shown.
 fn warn_keymap_reverted(keymap_view: &KeymapView) {
-    if let Some(keymap_error) = &keymap_view.keybinding_file_error_message {
-        eprintln!("koshi: keybinding file ignored: {keymap_error}");
+    if let Some(keybinding_file_error_message) = &keymap_view.keybinding_file_error_message {
+        eprintln!("koshi: keybinding file ignored: {keybinding_file_error_message}");
     } else if keymap_view.is_reverted_to_defaults {
         eprintln!(
             "koshi: keybinding file not applied (conflicts); showing built-in defaults — \

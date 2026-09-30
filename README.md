@@ -310,8 +310,8 @@ that can be bound.
 ## Configuration
 
 Koshi uses four optional KDL file types. Each present file must declare a
-supported version. New files use `version 2`; valid `version 1` files migrate
-to version 2 before an updated session server or router reads them. For example, a valid
+supported version. New files use `version 2`; `version 1` files migrate
+to version 2 before an updated session server or router reads them. For example, a
 `keybinding.kdl` with `version 1` becomes `version 2` without a command from
 the user.
 
@@ -339,8 +339,9 @@ Available config commands:
 | `koshi config check` | Validate every known config file |
 | `koshi config migrate` | Validate files and apply registered schema updates |
 
-Current schema version is `2`. Migration upgrades valid version `1` files to
-version `2` and leaves valid version `2` files unchanged.
+Current schema version is `2`. Migration upgrades version `1` files to version
+`2`, keeps an unknown key or a bad value as written, and leaves version `2`
+files unchanged. `koshi config check` still reports those keys and values.
 
 Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 [themes-example/](themes-example/).
@@ -491,8 +492,14 @@ handoff. An update from 0.1.0 or 0.2.0 replaces the installed binary while
 existing sessions keep running their older build. End those sessions and start
 new ones to use the installed build.
 
-If the terminal still runs an older client, start the installed build and run
-`koshi attach workspace` to reattach to a session named `workspace`.
+A client attached while the update runs comes back to its session by itself. If
+the restarted session does not speak that client's protocol version, the client
+waits up to 30 seconds for the router to restart too, then runs
+`koshi attach <session id>` in the same terminal, with the koshi at the path the
+client was started from. A client from koshi 0.5.0-pr.1 or earlier, and a client
+of a session on another machine, prints the attach command instead: start the
+installed build and run `koshi attach workspace` to reattach to a session named
+`workspace`.
 
 Saved state carries a format number. Koshi applies the required conversion
 steps in order as the updated build opens it. This also works when an update
@@ -506,6 +513,11 @@ startup, the statusline still reports the failed restore.
 
 `koshi server-version` is how you see that: one row per running server, so a
 session still on the old build shows beside the ones that moved.
+
+An update that koshi 0.4.0 runs cannot read the files the installed build
+writes. It reports each session and the router as not confirmed, or as still
+on 0.4.0. Those sessions and the router did restart into the installed build,
+and `koshi server-version` shows the build each one runs.
 
 Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 

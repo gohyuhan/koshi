@@ -2123,9 +2123,9 @@ fn closing_the_grace_window_with_nobody_awaited_detaches_nobody() {
     let (mut server, client_id) = boot_server();
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
 
-    let events = server.handle_drop_unclaimed_clients(Instant::now());
+    let emitted_events = server.handle_drop_unclaimed_clients(Instant::now());
 
-    assert_eq!(events, Vec::new());
+    assert_eq!(emitted_events, Vec::new());
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 1);
 }
 
@@ -2245,9 +2245,9 @@ fn a_detach_that_lands_while_a_client_is_awaited_leaves_its_record_alone() {
     let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
     server.client_ids_awaiting_reconnect.insert(client_id);
 
-    let events = server.handle_client_detach(client_id);
+    let emitted_events = server.handle_client_detach(client_id);
 
-    assert_eq!(events, Vec::new());
+    assert_eq!(emitted_events, Vec::new());
     assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 1);
     assert_eq!(
         server.session_by_id[&session_id]
@@ -2887,18 +2887,18 @@ fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
         )]),
         HashMap::new(),
     );
-    let events = resumed
+    let graphics_events = resumed
         .terminal_engine_by_pane_id
         .get_mut(&root)
         .expect("the resumed engine")
         .take_graphics_events();
 
     assert_eq!(
-        events.len(),
+        graphics_events.len(),
         koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH_COUNT
     );
     assert_eq!(
-        events.last(),
+        graphics_events.last(),
         Some(&Err(koshi_terminal::graphics::GraphicsError::QueueFull {
             dropped_event_count: 2
         }))
@@ -2951,13 +2951,13 @@ fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
         &screen_wrap(&image_graphics_bytes[split_byte_index..]),
     );
 
-    let events = resumed
+    let graphics_events = resumed
         .terminal_engine_by_pane_id
         .get_mut(&root)
         .expect("the resumed engine")
         .take_graphics_events();
-    assert_eq!(events.len(), 1);
-    let event = events
+    assert_eq!(graphics_events.len(), 1);
+    let event = graphics_events
         .into_iter()
         .next()
         .expect("the resumed image event")

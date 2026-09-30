@@ -89,7 +89,7 @@ pub fn commit_new_pane(
     let focused_client_id =
         focus_client_id.filter(|client_id| session.clients.get_client_by_id(*client_id).is_some());
 
-    let mut events = Vec::new();
+    let mut emitted_events = Vec::new();
 
     // Switch the focused client onto the tab when it is not already viewing it,
     // and record the tab it left.
@@ -100,7 +100,7 @@ pub fn commit_new_pane(
                 let client_previous_tab_id = client.get_active_tab_id();
                 previous_tab_id = Some(client_previous_tab_id);
                 client.update_active_tab_id(tab_id);
-                events.push(Event::TabFocused(TabFocused {
+                emitted_events.push(Event::TabFocused(TabFocused {
                     client_id,
                     tab_id,
                     previous_tab_id: client_previous_tab_id,
@@ -141,20 +141,20 @@ pub fn commit_new_pane(
         }
     }
 
-    events.push(Event::PaneCreated(PaneCreated {
+    emitted_events.push(Event::PaneCreated(PaneCreated {
         pane_id: new_pane_id,
         tab_id,
     }));
-    events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
+    emitted_events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
     if let Some(client_id) = focused_client_id {
-        events.push(Event::PaneFocused(PaneFocused {
+        emitted_events.push(Event::PaneFocused(PaneFocused {
             client_id,
             tab_id,
             pane_id: new_pane_id,
             previous_pane_id,
         }));
     }
-    (previous_tab_id, events)
+    (previous_tab_id, emitted_events)
 }
 
 #[cfg(test)]

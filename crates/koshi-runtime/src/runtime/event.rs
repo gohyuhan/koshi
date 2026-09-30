@@ -3,7 +3,7 @@
 //! [`RuntimeEvent`] is the single typed channel the dispatcher thread drains.
 //! Every asynchronous trigger the runtime must react to — child output, child
 //! exit, a client resize, terminal input, an IPC command — arrives as one
-//! variant, so the dispatcher consumes every trigger from one shared
+//! variant. The dispatcher consumes every trigger from one shared
 //! `std::sync::mpsc` inbox.
 //!
 //! These are *input* triggers, distinct from the *output* facts the dispatcher
@@ -11,9 +11,8 @@
 //! notification that a child died, while the emitted `PaneProcessExited` is the
 //! resulting domain fact.
 //!
-//! The inbox stays in-process — producers send into it directly — so
-//! `RuntimeEvent` is not `Serialize`, unlike the command and event vocabulary
-//! that crosses the IPC socket.
+//! The inbox stays in-process: producers send into it directly, and
+//! `RuntimeEvent` is not `Serialize`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -80,8 +79,8 @@ pub enum RuntimeEvent {
     ClientDetached {
         /// The departing client.
         client_id: ClientId,
-        /// When the producer saw the connection end, carried on the event so
-        /// the handler never reads the clock itself.
+        /// When the producer saw the connection end. The handler reads this
+        /// value, not the clock.
         detached_at: SystemTime,
         /// Whether the connection carrying this client reached its event
         /// stream. `false` from the attach reply failing to write, which hands
@@ -133,9 +132,9 @@ pub enum RuntimeEvent {
     /// continues, and what it means are all read from the frame the viewer
     /// painted.
     ///
-    /// It travels the same inbox as [`KeyInput`](Self::KeyInput) so the two stay
-    /// in the order the user produced them: toggling mouse-select and then
-    /// pressing must be answered in that order.
+    /// It travels the same inbox as [`KeyInput`](Self::KeyInput): the two arrive
+    /// in the order the user produced them. Toggling mouse-select and then
+    /// pressing is answered in that order.
     MouseInput {
         /// Client whose terminal produced the mouse event.
         client_id: ClientId,
@@ -148,8 +147,8 @@ pub enum RuntimeEvent {
         client_id: ClientId,
     },
     /// Text the client's outer terminal pasted — the OS paste key pressed in
-    /// the terminal koshi runs in, delivered whole so no character of it can
-    /// fire a keybinding.
+    /// the terminal koshi runs in, delivered whole. No character of it fires a
+    /// keybinding.
     HostPaste {
         /// Client whose terminal pasted.
         client_id: ClientId,
@@ -162,7 +161,7 @@ pub enum RuntimeEvent {
     /// thread writes that result back over the socket.
     Ipc {
         /// The command as it arrived over the socket.
-        envelope: Box<CommandEnvelope>,
+        command_envelope: Box<CommandEnvelope>,
         /// Where the dispatcher sends the command's result.
         response_sender: Sender<CommandResult>,
     },
@@ -191,8 +190,8 @@ pub enum RuntimeEvent {
         pane_area: Option<PaneArea>,
         /// The cell dimensions measured before this attach, if available.
         cell_size: Option<koshi_core::geometry::PixelCellSize>,
-        /// When the producer received the request, carried on the event so the
-        /// handler never reads the clock itself.
+        /// When the producer received the request. The handler reads this
+        /// value, not the clock.
         attached_at: SystemTime,
         /// Whether the connection carrying this attach reached the session
         /// from another machine. The client is minted with it as its origin.
@@ -245,8 +244,8 @@ pub enum RuntimeEvent {
     /// swap has closed. The dispatcher detaches every one of those clients
     /// that has not attached again, and does nothing when they all have.
     DropUnclaimedClients {
-        /// When the window closed, supplied by the producer so the handler
-        /// never reads the clock itself.
+        /// When the window closed, supplied by the producer. The handler reads
+        /// this value, not the clock.
         unclaimed_client_deadline: Instant,
     },
 }
@@ -256,8 +255,8 @@ pub enum RuntimeEvent {
 /// receiving end of the client's own event queue, and the session's shared
 /// ending notice.
 ///
-/// The whole of it comes out of one dispatcher turn, so the structure names
-/// the same state the queue's first event follows.
+/// The whole of it comes out of one dispatcher turn: the structure names the
+/// same state the queue's first event follows.
 #[derive(Debug)]
 pub struct AttachAccepted {
     /// The id the dispatcher minted for this client.
@@ -268,9 +267,9 @@ pub struct AttachAccepted {
     pub session_structure: AttachedSessionStructureSnapshot,
     /// The client's event queue. Dropping it ends the subscription.
     pub deliveries: Receiver<Delivery>,
-    /// Shared with the session, so this client's writing thread learns that the
-    /// session is ending even when the queue above is full, and so the session
-    /// learns when that thread has written the last frame.
+    /// Shared with the session. This client's writing thread reads the session
+    /// ending from it even when the queue above is full, and the session reads
+    /// from it when that thread has written the last frame.
     pub ending_notice: Arc<EndingNotice>,
     /// The fresh secret this attach minted. Presenting it on the next attach
     /// takes back the view this client leaves behind when it detaches.
@@ -297,13 +296,13 @@ pub enum SessionEnding {
 /// Publishing that frame raises the notice. A writing thread reads it at the
 /// top of each turn: raised, it drops whatever is still queued for that client,
 /// writes the frame the notice names, and ends. The queue each client reads is
-/// bounded, so a published last frame does not reach a client whose queue is
-/// full; this is what reaches that client instead. A client whose queue the
-/// server closed already left the session, so its writing thread keeps to its
+/// bounded: a published last frame does not reach a client whose queue is
+/// full, and the notice reaches that client instead. A client whose queue the
+/// server closed already left the session, and its writing thread writes its
 /// own goodbye.
 ///
 /// [`count_running_writers`](Self::count_running_writers) counts the writing threads that
-/// have not ended. Each one ends right after it writes the last frame, so the
+/// have not ended. Each one ends right after it writes the last frame. The
 /// session waits for the count to reach zero before it replaces its own process
 /// image or tears the process down.
 ///

@@ -1370,8 +1370,9 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 /// Bind this session's control socket and write the endpoint file advertising
 /// it, under the reach `--allow-other-users` and `koshi.kdl` give it.
 ///
-/// Every binding goes through here — the first one, and the one a rebuilt
-/// session takes — so the token a client waits for changes once per bind.
+/// Every bind of this session's socket goes through here: the first one, and
+/// the one a rebuilt session takes. The token a client waits for changes once
+/// per bind.
 ///
 /// # Errors
 /// Returns the failure of an address that could not be bound or an endpoint
@@ -1382,7 +1383,7 @@ fn bind_session_socket(
 ) -> Result<IpcServer, IpcError> {
     let other_users_policy = koshi_link::config::resolve_other_users_policy(
         koshi_link::config::load_app_layer().as_ref(),
-        session_start.is_other_user_access_allowed.then_some(true),
+        session_start.is_other_user_access_allowed,
     );
     IpcServer::start(
         &session_start.runtime_directory,
@@ -1394,10 +1395,10 @@ fn bind_session_socket(
 
 /// Print the one JSON line saying where this session's control socket is.
 ///
-/// `is_resumed` marks a run that came up from carried state. The router read this
-/// line when it first started the session and has closed its end of the pipe,
-/// so a failed write on a resume run is logged and passed over. On a first run
-/// it is a failed start.
+/// `is_resumed` marks a run that came up from carried state. On a resume run a
+/// failed write is logged at debug level and passed over: the router read this
+/// line when it first started the session and has closed its end of the pipe.
+/// On a first run a failed write is a failed start.
 ///
 /// # Errors
 /// Returns the failure of a first run whose ready line could not be written.
@@ -1428,8 +1429,9 @@ fn report_ready(
 /// this build writes, every pane can cross the swap, and no pane is still being
 /// written to.
 ///
-/// Installed again on every server this process serves with, so a session that
-/// came back from a swap that failed still answers the next restart.
+/// Installed again on every server this process serves with. A session that
+/// came back from a failed swap answers the next restart request with the same
+/// checks.
 fn install_restart_check(
     session_server: &mut Server,
     pty_owner: &Arc<PtyOwner>,
@@ -1455,12 +1457,14 @@ fn install_restart_check(
 /// Which resume-file formats the binary at `executable_path` takes back, as
 /// `<executable_path> resume-support` prints them.
 ///
-/// Running the binary also proves it runs at all on this machine, so a download
-/// that arrived broken or built for another architecture is caught before the
-/// swap.
+/// A binary that cannot run on this machine, such as a broken download or one
+/// built for another architecture, fails here, before the swap.
 ///
-/// The wait is bounded and the binary is ended either way. This runs on the
-/// thread serving the session, which every pane's output also passes through.
+/// A thread of its own reads the first line of the binary's standard output; a
+/// stream that ends before a newline gives whatever it held. The wait lasts at
+/// most [`RESUME_SUPPORT_WAIT_DURATION`], and the binary is ended either way.
+/// This runs on the thread serving the session, which every pane's output also
+/// passes through.
 ///
 /// # Errors
 /// Returns the sentence naming the binary and what is wrong with it.
@@ -1481,10 +1485,18 @@ fn read_resume_support(executable_path: &Path) -> Result<ResumeSupport, String> 
         .stdout
         .take()
         .expect("the binary was spawned with its standard output piped");
+    let (resume_support_line_sender, resume_support_line_receiver) = mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("koshi-resume-support".to_string())
+        .spawn(move || {
+            let mut resume_support_line = String::new();
+            let _ = BufReader::new(child_standard_output).read_line(&mut resume_support_line);
+            let _ = resume_support_line_sender.send(resume_support_line);
+        });
     let resume_support_line_result =
-        read_session_server_line(child_standard_output).recv_timeout(RESUME_SUPPORT_WAIT_DURATION);
-    // Ending it closes the pipe, which ends the thread reading it, so a binary
-    // that never answered leaves behind neither a process nor a thread.
+        resume_support_line_receiver.recv_timeout(RESUME_SUPPORT_WAIT_DURATION);
+    // Ending the binary closes the pipe and ends the thread reading it. A
+    // binary that never answered leaves neither a process nor a thread behind.
     let _ = child_process.kill();
     let _ = child_process.wait();
 
@@ -1503,21 +1515,6 @@ fn read_resume_support(executable_path: &Path) -> Result<ResumeSupport, String> 
             RESUME_SUPPORT_WAIT_DURATION.as_secs()
         )),
     }
-}
-
-/// Read the first line `child_standard_output` carries on a thread of its own, and hand back
-/// the channel it arrives on. A stream that ends before a newline sends
-/// whatever it held.
-fn read_session_server_line(child_standard_output: std::process::ChildStdout) -> Receiver<String> {
-    let (resume_support_line_sender, resume_support_line_receiver) = mpsc::channel();
-    let _ = std::thread::Builder::new()
-        .name("koshi-resume-support".to_string())
-        .spawn(move || {
-            let mut resume_support_line = String::new();
-            let _ = BufReader::new(child_standard_output).read_line(&mut resume_support_line);
-            let _ = resume_support_line_sender.send(resume_support_line);
-        });
-    resume_support_line_receiver
 }
 
 /// The resume-file formats one line of `koshi resume-support` names.
@@ -1558,7 +1555,7 @@ fn reads_the_format_this_build_writes(
 ///
 /// The router asks this before it drops a session that stopped answering, and
 /// again before it removes a resume file no session claims. A resume file older
-/// than the window means the swap died, so the session is dropped as usual and
+/// than the window reads as a dead swap: the session is dropped as usual, and
 /// the file goes with it. A file stamped ahead of this machine's clock reads as
 /// fresh.
 #[must_use]
@@ -2104,7 +2101,7 @@ fn put_close_on_exec_back(resume_header: &ResumeHeader) {
 /// Replace this process's running image with the binary the session was started
 /// from. The call returns only when the exec failed, and hands back that error,
 /// on the terms
-/// [`exec_and_keep_ignoring_sigpipe`](crate::process::exec_and_keep_ignoring_sigpipe)
+/// [`exec_and_keep_ignoring_sigpipe`](koshi_link::process::exec_and_keep_ignoring_sigpipe)
 /// states.
 ///
 /// A successful exec keeps every pane's terminal, whose close-on-exec flag was
@@ -2115,7 +2112,7 @@ fn restart_session_by_exec(
     session_start: &SessionStart,
     resume_file_path: &Path,
 ) -> std::io::Error {
-    crate::process::exec_and_keep_ignoring_sigpipe(&mut build_resume_command(
+    koshi_link::process::exec_and_keep_ignoring_sigpipe(&mut build_resume_command(
         session_start,
         resume_file_path,
     ))

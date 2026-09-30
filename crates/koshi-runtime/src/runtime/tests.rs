@@ -2,14 +2,20 @@
 //! the runtime submodules. A spawned pane's output reaches the inbox, the pane
 //! reports active, and the graceful quit teardown group-kills it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::runtime::pty_inbox::InboxSink;
+use koshi_client::mouse::MouseAction;
+use koshi_client::Client as ViewerClient;
+use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::constant::GRACEFUL_TIMEOUT_DURATION;
-use koshi_core::ids::PaneId;
+use koshi_core::geometry::Size;
+use koshi_core::ids::{ClientId, CommandId, PaneId};
+use koshi_core::mouse::{MouseInput, MouseKind};
 use koshi_core::process::{KillPolicy, PtySize, SpawnSpec};
+use koshi_observability::cleanup::TerminalCleanupGuard;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
@@ -24,6 +30,110 @@ pub(crate) fn build_mouse_frame(render_snapshot: RenderSnapshot) -> MouseFrame {
     let committed_regions =
         CommittedRegions::build_core(render_snapshot.client_snapshot.viewport_size, 0);
     MouseFrame::from_snapshot(&render_snapshot, committed_regions)
+}
+
+/// The viewer half for `client_id` on an 80x24 viewport, on the stock
+/// settings, subscribed to `server`.
+pub(crate) fn build_viewer(server: &mut Server, client_id: ClientId) -> ViewerClient {
+    ViewerClient::from_client_id_and_viewport_size(
+        client_id,
+        Size {
+            column_count: 80,
+            row_count: 24,
+        },
+        server.subscribe(client_id),
+        TerminalCleanupGuard::new(),
+    )
+}
+
+/// One mouse event at `event_time`, the way the running binary delivers it:
+/// the viewer takes its queued events, decides what the event means against
+/// the frame it is looking at, and only what it decided reaches the session.
+pub(crate) fn dispatch_mouse_input_at_time(
+    server: &mut Server,
+    viewer: &mut ViewerClient,
+    mouse_input: MouseInput,
+    event_time: Instant,
+) {
+    viewer.apply_events();
+    let mouse_frame = build_mouse_frame(
+        server
+            .build_snapshot(viewer.get_client_id())
+            .expect("render snapshot"),
+    );
+    let mouse_actions = viewer.handle_mouse(mouse_input, &mouse_frame, event_time);
+    apply_mouse_actions(server, viewer, &mouse_frame, mouse_actions);
+}
+
+/// Runs every action the viewer decided, in order, the way the binary's loop
+/// does. A scroll's follow-up actions join the end of the queue.
+pub(crate) fn apply_mouse_actions(
+    server: &mut Server,
+    viewer: &mut ViewerClient,
+    mouse_frame: &MouseFrame,
+    mouse_actions: Vec<MouseAction>,
+) {
+    let client_id = viewer.get_client_id();
+    let mut mouse_action_queue: VecDeque<MouseAction> = mouse_actions.into();
+    while let Some(mouse_action) = mouse_action_queue.pop_front() {
+        match mouse_action {
+            MouseAction::Scroll {
+                pane_id,
+                is_scrolling_up,
+                scroll_line_count,
+            } => {
+                let view_top_row_index =
+                    server.scroll_pane_view(client_id, pane_id, is_scrolling_up, scroll_line_count);
+                mouse_action_queue.extend(viewer.note_scroll_applied(
+                    pane_id,
+                    view_top_row_index,
+                    mouse_frame,
+                ));
+            }
+            MouseAction::Forward {
+                pane_id,
+                mouse_input,
+            } => {
+                let is_report_written =
+                    server.forward_mouse_to_pane(client_id, pane_id, mouse_input);
+                if let (true, MouseKind::Press(mouse_button)) =
+                    (is_report_written, mouse_input.mouse_kind)
+                {
+                    viewer.note_press_forwarded(pane_id, mouse_button);
+                }
+            }
+            MouseAction::AlternateScrollArrows {
+                pane_id,
+                is_scrolling_up,
+                arrow_count,
+            } => {
+                server.write_alternate_scroll_arrows(pane_id, is_scrolling_up, arrow_count);
+            }
+            MouseAction::Resize {
+                pane_id,
+                border_side,
+                resize_step,
+                requested_cell_count,
+            } => {
+                let applied_cell_count = server.drag_resize(
+                    client_id,
+                    pane_id,
+                    border_side,
+                    resize_step,
+                    requested_cell_count,
+                );
+                viewer.note_resize_applied(pane_id, border_side, resize_step, applied_cell_count);
+            }
+            MouseAction::Command(command) => {
+                let command_envelope = CommandEnvelope::from_parts(
+                    CommandId::new(),
+                    CommandSource::from_mouse(client_id),
+                    command,
+                );
+                let _ = server.submit_command(command_envelope);
+            }
+        }
+    }
 }
 
 const TEST_PANE_SIZE: PtySize = PtySize {

@@ -7,15 +7,16 @@ use koshi_core::client::ClientOrigin;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{BoundAction, ModeName};
 use koshi_core::action::{build_core_action_seeds, ActionReference, ActionScope, TargetKind};
 use koshi_core::discovery::{
     ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
 };
-use koshi_core::event::{Event, PaneCreated, PaneFocused};
+use koshi_core::event::{Event, InputModeChanged, PaneCreated, PaneFocused, QuitCause, TabCreated};
 use koshi_core::geometry::{PaneArea, Point, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::lock::LockMode;
 use koshi_core::recent_event::{self, RecentEvent};
 use koshi_ipc::layout::{ClientFocus, SessionLayout, SolvedPane, SolvedTab, TabLayout};
@@ -23,12 +24,15 @@ use koshi_layout::mode::LayoutMode;
 use koshi_layout::size::SizeWeight;
 use koshi_layout::solver::StackHeader;
 use koshi_layout::tree::{LayoutNode, SplitNode};
+use koshi_observability::logging::recent_events::MAX_RECENT_EVENT_COUNT;
 use uuid::Uuid;
 
 use super::*;
 use crate::cli::OutputFormat;
+use crate::keymap::tests::build_partial_keybindings_config_with_binding;
+use crate::keymap::{build_keymap_view_from_partial, KeymapValidationOutcome, KeymapView};
 
-/// The fixed UUID every fake id uses, so snapshots are byte-stable.
+/// The fixed UUID every fake id uses: `00000000-0000-0000-0000-000000000001`.
 fn build_fixed_test_uuid() -> Uuid {
     Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("literal UUID parses")
 }
@@ -220,11 +224,11 @@ fn pane_list_json_carries_the_whole_id_chain() {
 
 #[test]
 fn an_untitled_pane_lists_a_null_name_in_json() {
-    let pane = PaneRow {
+    let untitled_pane_row = PaneRow {
         pane_name: None,
         ..build_test_pane_row()
     };
-    let rendered_text = render_panes(&[pane], OutputFormat::Json);
+    let rendered_text = render_panes(&[untitled_pane_row], OutputFormat::Json);
     assert!(
         rendered_text.contains("\"pane_name\": null,"),
         "unexpected name form: {rendered_text}"
@@ -289,9 +293,9 @@ fn pane_json_schema_is_stable() {
 }
 
 #[test]
-fn non_utf8_cwd_renders_lossily_in_json() {
-    let mut pane = build_test_pane_discovery();
-    pane.working_directory = Some(build_non_utf8_path());
+fn a_non_utf8_working_directory_renders_lossily_in_json() {
+    let mut pane_discovery = build_test_pane_discovery();
+    pane_discovery.working_directory = Some(build_non_utf8_path());
     let expected_text = r#"{
   "pane_id": "00000000-0000-0000-0000-000000000001",
   "tab_id": "00000000-0000-0000-0000-000000000001",
@@ -308,7 +312,10 @@ fn non_utf8_cwd_renders_lossily_in_json() {
   ]
 }
 "#;
-    assert_eq!(render_pane(&pane, OutputFormat::Json), expected_text);
+    assert_eq!(
+        render_pane(&pane_discovery, OutputFormat::Json),
+        expected_text
+    );
 }
 
 /// A path containing bytes that are not valid UTF-8; its lossy form is
@@ -330,10 +337,10 @@ fn build_non_utf8_path() -> PathBuf {
 }
 
 #[test]
-fn exited_pane_state_json_carries_the_code() {
-    let mut pane = build_test_pane_discovery();
-    pane.lifecycle = PaneLifecycle::Exited { exit_code: Some(0) };
-    let rendered_text = render_pane(&pane, OutputFormat::Json);
+fn an_exited_pane_lifecycle_json_carries_the_exit_code() {
+    let mut pane_discovery = build_test_pane_discovery();
+    pane_discovery.lifecycle = PaneLifecycle::Exited { exit_code: Some(0) };
+    let rendered_text = render_pane(&pane_discovery, OutputFormat::Json);
     assert!(
         rendered_text
             .contains("\"lifecycle\": {\n    \"Exited\": {\n      \"exit_code\": 0\n    }\n  }"),
@@ -369,7 +376,7 @@ fn client_json_schema_is_stable() {
 
 #[test]
 fn a_reported_pane_area_json_is_a_tagged_size() {
-    let reported_client = ClientDiscovery {
+    let reported_client_discovery = ClientDiscovery {
         pane_area: Some(PaneArea::Reported(Size {
             column_count: 100,
             row_count: 30,
@@ -377,7 +384,7 @@ fn a_reported_pane_area_json_is_a_tagged_size() {
         ..build_test_client_discovery()
     };
 
-    let rendered_text = render_client(&reported_client, OutputFormat::Json);
+    let rendered_text = render_client(&reported_client_discovery, OutputFormat::Json);
 
     assert!(
         rendered_text.contains(
@@ -441,11 +448,11 @@ pane-00000000-0000-0000-0000-000000000001  htop  tab-00000000-0000-0000-0000-000
 
 #[test]
 fn an_untitled_pane_lists_a_dash_for_its_name() {
-    let pane = PaneRow {
+    let untitled_pane_row = PaneRow {
         pane_name: None,
         ..build_test_pane_row()
     };
-    let rendered_text = render_panes(&[pane], OutputFormat::Table);
+    let rendered_text = render_panes(&[untitled_pane_row], OutputFormat::Table);
     let rendered_row = rendered_text.lines().nth(1).expect("one data row");
     let rendered_cells: Vec<&str> = rendered_row.split_whitespace().collect();
     assert_eq!(
@@ -462,13 +469,13 @@ fn an_untitled_pane_lists_a_dash_for_its_name() {
 }
 
 #[test]
-fn absent_values_render_as_dashes() {
-    let mut pane = build_test_pane_discovery();
-    pane.pane_title = None;
-    pane.working_directory = None;
-    pane.command_argv = None;
-    pane.lifecycle = PaneLifecycle::Exited { exit_code: None };
-    let rendered_text = render_pane(&pane, OutputFormat::Table);
+fn absent_pane_fields_render_as_dashes() {
+    let mut pane_discovery = build_test_pane_discovery();
+    pane_discovery.pane_title = None;
+    pane_discovery.working_directory = None;
+    pane_discovery.command_argv = None;
+    pane_discovery.lifecycle = PaneLifecycle::Exited { exit_code: None };
+    let rendered_text = render_pane(&pane_discovery, OutputFormat::Table);
     assert_eq!(
         rendered_text,
         "\
@@ -504,12 +511,12 @@ lock: Normal
 
 #[test]
 fn a_starving_client_prints_starving_in_the_pane_area_column() {
-    let starving_client = ClientDiscovery {
+    let starving_client_discovery = ClientDiscovery {
         pane_area: Some(PaneArea::Starving),
         ..build_test_client_discovery()
     };
 
-    let rendered_text = render_client(&starving_client, OutputFormat::Table);
+    let rendered_text = render_client(&starving_client_discovery, OutputFormat::Table);
 
     assert!(
         rendered_text.contains("\npane_area: starving\n"),
@@ -518,8 +525,8 @@ fn a_starving_client_prints_starving_in_the_pane_area_column() {
 }
 
 #[test]
-fn a_reported_pane_area_prints_as_cols_by_rows() {
-    let reported_client = ClientDiscovery {
+fn a_reported_pane_area_prints_as_columns_by_rows() {
+    let reported_client_discovery = ClientDiscovery {
         pane_area: Some(PaneArea::Reported(Size {
             column_count: 100,
             row_count: 30,
@@ -527,7 +534,7 @@ fn a_reported_pane_area_prints_as_cols_by_rows() {
         ..build_test_client_discovery()
     };
 
-    let rendered_text = render_client(&reported_client, OutputFormat::Table);
+    let rendered_text = render_client(&reported_client_discovery, OutputFormat::Table);
 
     assert!(
         rendered_text.contains("\npane_area: 100x30\n"),
@@ -610,7 +617,7 @@ fn explain_new_pane_json_is_exact() {
 }
 
 #[test]
-fn explain_accepts_a_full_core_ref() {
+fn explain_accepts_a_full_core_action_reference() {
     assert_eq!(
         render_action_explain("core:new-pane", OutputFormat::Json),
         render_action_explain("new-pane", OutputFormat::Json),
@@ -619,8 +626,8 @@ fn explain_accepts_a_full_core_ref() {
 
 #[test]
 fn explain_run_omits_the_koshi_example() {
-    // run is supported but `koshi run` needs a command, so no CLI example is
-    // shown — only the config reference.
+    // `core:run` lists only its config reference `core:run` as an example, and
+    // no `koshi` example.
     let expected_text = r#"{
   "action": "core:run",
   "display_name": "Run Command",
@@ -651,8 +658,8 @@ fn explain_of_an_unknown_action_is_none() {
 
 #[test]
 fn explain_renders_multiple_targets_joined() {
-    // focus-pane targets a pane and a client; both join into one cell. It needs
-    // a --pane flag, so no bare CLI example is shown.
+    // `focus-pane` targets a pane and a client, joined into one cell. It lists
+    // no `koshi` example.
     let expected_text = "\
 action: core:focus-pane
 display_name: Focus Pane
@@ -669,9 +676,7 @@ examples: core:focus-pane
 }
 
 #[test]
-fn an_empty_target_list_renders_as_a_dash() {
-    // Every supported action has at least one target today, so exercise the
-    // join helper directly to keep the empty branch covered.
+fn a_joined_cell_renders_an_empty_list_as_a_dash_and_joins_the_rest_with_commas() {
     assert_eq!(render_joined_text_cell(&[]), "-");
     assert_eq!(
         render_joined_text_cell(&["pane".to_string(), "client".to_string()]),
@@ -679,56 +684,46 @@ fn an_empty_target_list_renders_as_a_dash() {
     );
 }
 
-// --- Cell helpers not reachable through the fixed fake data above ---
+// --- Cell helpers ---
 
 #[test]
 fn format_pane_state_cell_renders_spawning_and_closing() {
-    // Running and both Exited forms are covered via the pane table tests
-    // above; Spawning and Closing are not exercised by any fixed fixture.
     assert_eq!(format_pane_state_cell(PaneLifecycle::Spawning), "spawning");
     assert_eq!(format_pane_state_cell(PaneLifecycle::Closing), "closing");
 }
 
 #[test]
 fn format_time_cell_before_the_unix_epoch_renders_as_a_dash() {
-    // `duration_since` fails for a time earlier than the epoch; the cell
-    // falls back to "-" rather than panicking or underflowing.
-    let before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
-    assert_eq!(format_time_cell(before_epoch), "-");
+    let time_before_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+    assert_eq!(format_time_cell(time_before_epoch), "-");
 }
 
 #[test]
 fn format_scope_label_renders_tab() {
-    // PaneSession and Client are covered indirectly by the `new-pane` and
-    // `focus-pane` explain tests above; Tab is not.
     assert_eq!(format_scope_label(ActionScope::Tab), "tab");
 }
 
 #[test]
 fn format_target_label_renders_session_and_tab() {
-    // Pane and Client are covered indirectly by the `focus-pane` explain test
-    // above; Session and Tab are not.
     assert_eq!(format_target_label(TargetKind::Session), "session");
     assert_eq!(format_target_label(TargetKind::Tab), "tab");
 }
 
 #[test]
-fn table_column_width_counts_characters_not_display_width() {
-    // The table layout pads by `.chars().count()`, not visual/display width.
-    // "文字文字" is 4 Rust chars (each a double-width CJK glyph, 8 terminal
-    // columns), the same char count as the 4-char header "name" — so the
-    // implementation adds no padding, even though the two would not align in
-    // a real terminal. This locks in the actual (character-count) behavior.
+fn table_column_width_counts_terminal_columns() {
+    // `文字文字` is 4 characters and 8 terminal columns wide. The `name`
+    // column widens to 8, and `kind` starts in column 10 on both lines.
     assert_eq!(
-        render_table(&["name"], vec![vec!["文字文字".to_string()]]),
-        "name\n文字文字\n"
+        render_table(
+            &["name", "kind"],
+            vec![vec!["文字文字".to_string(), "tab".to_string()]]
+        ),
+        "name      kind\n文字文字  tab\n"
     );
 }
 
 #[test]
 fn explain_new_tab_reports_tab_scope_and_target() {
-    // `new-tab` is seeded with `ActionScope::Tab` and `TargetKind::Tab`,
-    // neither of which any other explain test exercises end-to-end.
     let expected_text = "\
 action: core:new-tab
 display_name: New Tab
@@ -746,9 +741,6 @@ examples: core:new-tab, koshi new-tab
 
 #[test]
 fn explain_quit_reports_its_client_scope_and_both_target_kinds() {
-    // `quit` is seeded with `ActionScope::Client` and both `ClientTarget`
-    // and `Session` targets, so it exercises the session target label no
-    // other explain test covers end-to-end.
     let expected_text = "\
 action: core:quit
 display_name: Quit
@@ -766,44 +758,17 @@ examples: core:quit
 
 // --- Keys rendering ---
 
-/// Parse a test key sequence with the default leader and depth.
-fn parse_test_key_sequence(key_sequence: &str) -> koshi_core::key::KeySequence {
-    koshi_config::key_sequence::parse_sequence(
-        key_sequence,
-        koshi_config::types::KeybindingsConfig::default().leader,
-        8,
-    )
-    .expect("test sequence parses")
-}
-
-/// Build the offline view for one `normal`-mode user binding.
+/// The offline view for one `normal`-mode user binding of `key_sequence_text`
+/// to `action_reference_text`.
 fn build_test_keymap_view_with_binding(
-    key_text: &str,
-    action_name: &str,
-) -> crate::keymap::KeymapView {
-    use std::collections::BTreeMap;
-    use std::str::FromStr;
-    let mut key_binding_by_sequence = BTreeMap::new();
-    key_binding_by_sequence.insert(
-        parse_test_key_sequence(key_text),
-        koshi_config::types::BoundAction {
-            action_reference: koshi_core::action::ActionReference::from_str(action_name)
-                .expect("valid ref"),
-        },
-    );
-    let mut mode_bindings_by_name = BTreeMap::new();
-    mode_bindings_by_name.insert(
-        koshi_config::types::ModeName::from_text("normal"),
-        koshi_config::types::ModeBindings {
-            bound_action_by_key_sequence: key_binding_by_sequence,
-            removed_key_sequences: Default::default(),
-        },
-    );
-    crate::keymap::build_keymap_view_from_partial(
-        Some(koshi_config::layer::PartialKeybindingsConfig {
-            mode_bindings_by_name: Some(mode_bindings_by_name),
-            ..Default::default()
-        }),
+    key_sequence_text: &str,
+    action_reference_text: &str,
+) -> KeymapView {
+    build_keymap_view_from_partial(
+        Some(build_partial_keybindings_config_with_binding(
+            key_sequence_text,
+            action_reference_text,
+        )),
         None,
         None,
     )
@@ -856,7 +821,7 @@ fn keys_list_scope_filter_keeps_only_the_named_layer() {
 
 #[test]
 fn keys_list_mode_filter_keeps_only_the_named_mode() {
-    let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
     let rendered_text = render_keys_list(&keymap_view, Some("locked"), None, OutputFormat::Json);
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
@@ -870,7 +835,7 @@ fn keys_list_mode_filter_keeps_only_the_named_mode() {
 
 #[test]
 fn keys_describe_renders_the_binding_and_source() {
-    let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
     let rendered_text = render_keys_describe(&keymap_view, "<C-p> x", OutputFormat::Table)
         .expect("sequence parses")
         .expect("bound in normal mode");
@@ -889,7 +854,7 @@ continuous: false
 
 #[test]
 fn keys_describe_json_carries_exactly_its_fields() {
-    let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
     let rendered_text = render_keys_describe(&keymap_view, "<A-f>", OutputFormat::Json)
         .expect("sequence parses")
         .expect("bound in normal mode");
@@ -922,7 +887,7 @@ fn keys_describe_json_carries_exactly_its_fields() {
 
 #[test]
 fn keys_describe_reports_unbound_and_malformed_sequences() {
-    let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
     assert_eq!(
         render_keys_describe(&keymap_view, "<C-z>", OutputFormat::Table),
         Ok(None)
@@ -967,21 +932,26 @@ fn keys_conflicts_renders_the_verdict_and_findings() {
         serde_json::from_str(&rendered_text).expect("valid JSON");
     assert_eq!(json_document["verdict"], serde_json::json!("apply"));
     assert_eq!(json_document["file_error"], serde_json::Value::Null);
-    let findings = json_document["conflict_findings"]
+    let conflict_findings = json_document["conflict_findings"]
         .as_array()
         .expect("array");
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0]["severity"], serde_json::json!("warning"));
+    assert_eq!(conflict_findings.len(), 1);
+    assert_eq!(
+        conflict_findings[0]["severity"],
+        serde_json::json!("warning")
+    );
 }
 
 #[test]
 fn keys_conflicts_carries_an_ignored_file_on_both_formats() {
-    // An unparseable file leaves the defaults running; the answer itself
-    // says so, so a stdout-only consumer never mistakes it for a clean file.
-    let keymap_view =
-        crate::keymap::build_keymap_view_from_partial(None, None, Some("boom".to_string()));
-    let table_rendered = render_keys_conflicts(&keymap_view, OutputFormat::Table);
-    assert_eq!(table_rendered, "file: ignored (boom)\nverdict: apply\n");
+    // A file that did not parse leaves the defaults running. Both formats
+    // name the ignored file's error.
+    let keymap_view = build_keymap_view_from_partial(None, None, Some("boom".to_string()));
+    let rendered_table_text = render_keys_conflicts(&keymap_view, OutputFormat::Table);
+    assert_eq!(
+        rendered_table_text,
+        "file: ignored (boom)\nverdict: apply\n"
+    );
     let json_document: serde_json::Value =
         serde_json::from_str(&render_keys_conflicts(&keymap_view, OutputFormat::Json))
             .expect("valid JSON");
@@ -991,16 +961,17 @@ fn keys_conflicts_carries_an_ignored_file_on_both_formats() {
 
 #[test]
 fn keys_validate_renders_both_outcome_shapes() {
-    let failed = crate::keymap::KeymapValidationOutcome::ParseFailed(vec!["bad node".to_string()]);
+    let parse_failed_outcome = KeymapValidationOutcome::ParseFailed(vec!["bad node".to_string()]);
     assert_eq!(
-        render_keys_validate(&failed, OutputFormat::Table),
+        render_keys_validate(&parse_failed_outcome, OutputFormat::Table),
         "invalid: the file does not parse\nerror: bad node\n"
     );
-    let failed_json: serde_json::Value =
-        serde_json::from_str(&render_keys_validate(&failed, OutputFormat::Json))
-            .expect("valid JSON");
+    let parse_failed_json_document: serde_json::Value = serde_json::from_str(
+        &render_keys_validate(&parse_failed_outcome, OutputFormat::Json),
+    )
+    .expect("valid JSON");
     assert_eq!(
-        failed_json,
+        parse_failed_json_document,
         serde_json::json!({
             "is_valid": false,
             "is_applicable": false,
@@ -1009,25 +980,28 @@ fn keys_validate_renders_both_outcome_shapes() {
         })
     );
 
-    let clean_keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
-    let checked = crate::keymap::KeymapValidationOutcome::Checked {
+    let clean_keymap_view = build_keymap_view_from_partial(None, None, None);
+    let checked_outcome = KeymapValidationOutcome::Checked {
         conflict_report: clean_keymap_view.conflict_report,
         is_applicable: true,
     };
     assert_eq!(
-        render_keys_validate(&checked, OutputFormat::Table),
+        render_keys_validate(&checked_outcome, OutputFormat::Table),
         "valid: a reload would apply this file\n"
     );
-    assert!(is_validation_applicable(&checked));
-    assert!(!is_validation_applicable(&failed));
+    assert!(is_validation_applicable(&checked_outcome));
+    assert!(!is_validation_applicable(&parse_failed_outcome));
 }
 
 /// The offline view for a user file whose `unlock_alternative` sits on a chord
 /// plain typing produces, which detection rejects as fatal.
-fn build_keymap_view_with_typeable_unlock_alternative() -> crate::keymap::KeymapView {
-    crate::keymap::build_keymap_view_from_partial(
-        Some(koshi_config::layer::PartialKeybindingsConfig {
-            unlock_alternative: Some(Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('u')))),
+fn build_keymap_view_with_typeable_unlock_alternative() -> KeymapView {
+    build_keymap_view_from_partial(
+        Some(PartialKeybindingsConfig {
+            unlock_alternative: Some(Some(KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Char('u'),
+            ))),
             ..Default::default()
         }),
         None,
@@ -1037,29 +1011,29 @@ fn build_keymap_view_with_typeable_unlock_alternative() -> crate::keymap::Keymap
 
 #[test]
 fn keys_conflicts_reports_a_reject_verdict_and_a_fatal_finding() {
-    // A typeable unlock alternative is a fatal finding, so the verdict rejects
-    // the file and the offline listing keeps the defaults.
+    // A typeable unlock alternative is a fatal finding. The verdict rejects
+    // the file.
     let keymap_view = build_keymap_view_with_typeable_unlock_alternative();
     let rendered_text = render_keys_conflicts(&keymap_view, OutputFormat::Json);
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
     assert_eq!(json_document["verdict"], serde_json::json!("reject"));
     assert_eq!(json_document["file_error"], serde_json::Value::Null);
-    let findings = json_document["conflict_findings"]
+    let conflict_findings = json_document["conflict_findings"]
         .as_array()
         .expect("array");
     assert!(
-        findings
+        conflict_findings
             .iter()
-            .any(|finding| finding["severity"] == serde_json::json!("fatal")),
+            .any(|conflict_finding| conflict_finding["severity"] == serde_json::json!("fatal")),
         "expected a fatal finding: {rendered_text}"
     );
 }
 
 #[test]
 fn keys_list_marks_a_rejected_user_file_as_reverted() {
-    // The rejected file drops the view back to the defaults, so every listed
-    // binding is a shipped one and none is sourced to the user layer.
+    // The rejected file drops the view back to the defaults. Every listed
+    // binding is a shipped one, and none is sourced to the user layer.
     let keymap_view = build_keymap_view_with_typeable_unlock_alternative();
     let rendered_text = render_keys_list(&keymap_view, None, None, OutputFormat::Json);
     let json_document: serde_json::Value =
@@ -1082,8 +1056,11 @@ fn keys_list_marks_a_rejected_user_file_as_reverted() {
 fn keys_describe_renders_one_field_block_per_mode_the_key_is_bound_in() {
     // The same key bound in two modes prints two field blocks, separated by a
     // blank line, in mode-name order (`locked` before `normal`).
-    let mut keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
-    let key_sequence = KeySequence::from(KeyChord::from_parts(ModFlags::ALT, Key::Char('y')));
+    let mut keymap_view = build_keymap_view_from_partial(None, None, None);
+    let key_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::ALT,
+        Key::Char('y'),
+    ));
     for mode_name in ["locked", "normal"] {
         keymap_view
             .merged_keymap
@@ -1126,7 +1103,7 @@ continuous: false
 
 #[test]
 fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
-    let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
     let rendered_text = render_keys_list(
         &keymap_view,
         None,
@@ -1150,10 +1127,10 @@ fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
 
 #[test]
 fn keys_list_scope_filter_for_session_or_layout_is_empty_offline() {
-    // No session or layout layer is visible offline, so filtering to either
-    // leaves an empty listing: the table is just its header row.
-    let keymap_view = crate::keymap::build_keymap_view_from_partial(None, None, None);
-    let header = "mode  key  action  source\n";
+    // No session or layout layer is visible offline. Filtering to either
+    // leaves the table's header row alone.
+    let keymap_view = build_keymap_view_from_partial(None, None, None);
+    let header_only_table_text = "mode  key  action  source\n";
     assert_eq!(
         render_keys_list(
             &keymap_view,
@@ -1161,7 +1138,7 @@ fn keys_list_scope_filter_for_session_or_layout_is_empty_offline() {
             Some(KeymapScope::Session),
             OutputFormat::Table,
         ),
-        header
+        header_only_table_text
     );
     assert_eq!(
         render_keys_list(
@@ -1170,7 +1147,7 @@ fn keys_list_scope_filter_for_session_or_layout_is_empty_offline() {
             Some(KeymapScope::Layout),
             OutputFormat::Table,
         ),
-        header
+        header_only_table_text
     );
 }
 
@@ -1180,24 +1157,27 @@ fn keys_validate_checked_carries_the_conflict_findings() {
     // applies, and the answer carries the finding on both formats.
     let keymap_view = build_test_keymap_view_with_binding("<C-y>", "core:not-a-real-action");
     let is_applicable = !keymap_view.is_reverted_to_defaults;
-    let checked = crate::keymap::KeymapValidationOutcome::Checked {
+    let checked_outcome = KeymapValidationOutcome::Checked {
         conflict_report: keymap_view.conflict_report,
         is_applicable,
     };
     let json_document: serde_json::Value =
-        serde_json::from_str(&render_keys_validate(&checked, OutputFormat::Json))
+        serde_json::from_str(&render_keys_validate(&checked_outcome, OutputFormat::Json))
             .expect("valid JSON");
     assert_eq!(json_document["is_valid"], serde_json::json!(true));
     assert_eq!(json_document["is_applicable"], serde_json::json!(true));
     assert_eq!(json_document["parse_errors"], serde_json::json!([]));
-    let findings = json_document["conflict_findings"]
+    let conflict_findings = json_document["conflict_findings"]
         .as_array()
         .expect("array");
-    assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0]["severity"], serde_json::json!("warning"));
+    assert_eq!(conflict_findings.len(), 1);
+    assert_eq!(
+        conflict_findings[0]["severity"],
+        serde_json::json!("warning")
+    );
 
-    let table_rendered = render_keys_validate(&checked, OutputFormat::Table);
-    let rendered_lines: Vec<&str> = table_rendered.lines().collect();
+    let rendered_table_text = render_keys_validate(&checked_outcome, OutputFormat::Table);
+    let rendered_lines: Vec<&str> = rendered_table_text.lines().collect();
     assert_eq!(rendered_lines[0], "valid: a reload would apply this file");
     assert_eq!(
         rendered_lines[1].split_whitespace().collect::<Vec<_>>(),
@@ -1259,9 +1239,9 @@ focused_by: 1
 
 #[test]
 fn client_list_table_widens_columns_to_the_widest_row() {
-    // Two clients in differently named sessions, so the `session_name`
-    // column widens to the longer name and the shorter cell pads out.
-    let longer = ClientRow {
+    // Two clients in differently named sessions. The `session_name` column
+    // widens to the longer name.
+    let longer_session_name_client_row = ClientRow {
         session_name: "wandering-heron".to_string(),
         ..build_test_client_row()
     };
@@ -1271,7 +1251,10 @@ client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000
 client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  wandering-heron
 ";
     assert_eq!(
-        render_clients(&[build_test_client_row(), longer], OutputFormat::Table),
+        render_clients(
+            &[build_test_client_row(), longer_session_name_client_row],
+            OutputFormat::Table
+        ),
         expected_text
     );
 }
@@ -1292,8 +1275,8 @@ fn explain_of_an_empty_or_blank_action_name_is_none() {
 
 // --- Debug dumps ---
 
-/// A fixed UUID ending in `suffix_byte`, so the ids inside one dump stay
-/// distinguishable.
+/// A fixed UUID ending in `suffix_byte` as two decimal digits: `4` gives
+/// `00000000-0000-0000-0000-000000000004`.
 fn build_test_uuid_with_suffix(suffix_byte: u8) -> Uuid {
     Uuid::parse_str(&format!(
         "00000000-0000-0000-0000-0000000000{suffix_byte:02}"
@@ -1569,14 +1552,14 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
   clients
     client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000004
 ";
-    let layout = build_test_session_layout(
+    let session_layout = build_test_session_layout(
         build_test_horizontal_split(),
         vec![build_test_tiled_solve()],
         Some(build_test_first_pane_id()),
     );
 
     assert_eq!(
-        render_layouts(&[layout], OutputFormat::Table),
+        render_layouts(&[session_layout], OutputFormat::Table),
         expected_text
     );
 }
@@ -1591,7 +1574,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
     no client views this tab
   clients
 ";
-    let layout = SessionLayout {
+    let session_layout = SessionLayout {
         clients: Vec::new(),
         ..build_test_session_layout(
             LayoutNode::Pane(build_test_first_pane_id()),
@@ -1601,7 +1584,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
     };
 
     assert_eq!(
-        render_layouts(&[layout], OutputFormat::Table),
+        render_layouts(&[session_layout], OutputFormat::Table),
         expected_text
     );
 }
@@ -1629,13 +1612,13 @@ fn dump_layout_table_lists_the_panes_with_no_room() {
         },
         ..build_test_tiled_solve()
     };
-    let layout = build_test_session_layout(
+    let session_layout = build_test_session_layout(
         build_test_horizontal_split(),
         vec![solved_tab],
         Some(build_test_first_pane_id()),
     );
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Table);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
     assert!(
         rendered_text.contains(
@@ -1664,13 +1647,13 @@ fn dump_layout_table_says_when_no_pane_has_room() {
         },
         ..build_test_tiled_solve()
     };
-    let layout = build_test_session_layout(
+    let session_layout = build_test_session_layout(
         LayoutNode::Pane(build_test_first_pane_id()),
         vec![solved_tab],
         Some(build_test_first_pane_id()),
     );
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Table);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
     assert!(
         rendered_text.contains(
@@ -1730,24 +1713,27 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
         }],
         ..build_test_tiled_solve()
     };
-    let stack = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+    let stacked_split = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
         vec![build_test_first_pane_id(), build_test_second_pane_id()],
         0,
     ));
-    let layout =
-        build_test_session_layout(stack, vec![solved_tab], Some(build_test_first_pane_id()));
+    let session_layout = build_test_session_layout(
+        stacked_split,
+        vec![solved_tab],
+        Some(build_test_first_pane_id()),
+    );
 
     assert_eq!(
-        render_layouts(&[layout], OutputFormat::Table),
+        render_layouts(&[session_layout], OutputFormat::Table),
         expected_text
     );
 }
 
 #[test]
 fn dump_layout_table_marks_every_member_but_the_active_one() {
-    // `active` alone decides the mark: an index past the last child names
-    // the last child active, so member 0 is the collapsed one.
-    let stack = LayoutNode::Split(SplitNode {
+    // `active_child_index` alone decides the mark. An index past the last
+    // child names the last child active, and member 0 is the collapsed one.
+    let stacked_split = LayoutNode::Split(SplitNode {
         direction: SplitDirection::Stacked,
         children: vec![
             LayoutNode::Pane(build_test_first_pane_id()),
@@ -1756,9 +1742,9 @@ fn dump_layout_table_marks_every_member_but_the_active_one() {
         weights: vec![SizeWeight::default(), SizeWeight::default()],
         active_child_index: 9,
     });
-    let layout = build_test_session_layout(stack, Vec::new(), None);
+    let session_layout = build_test_session_layout(stacked_split, Vec::new(), None);
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Table);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
     assert!(
         rendered_text.contains(
@@ -1770,16 +1756,16 @@ fn dump_layout_table_marks_every_member_but_the_active_one() {
 
 #[test]
 fn dump_layout_table_shows_a_vertical_split_by_name() {
-    let tree = LayoutNode::Split(SplitNode::with_equal_weights(
+    let vertical_split = LayoutNode::Split(SplitNode::with_equal_weights(
         SplitDirection::Vertical,
         vec![
             LayoutNode::Pane(build_test_first_pane_id()),
             LayoutNode::Pane(build_test_second_pane_id()),
         ],
     ));
-    let layout = build_test_session_layout(tree, Vec::new(), None);
+    let session_layout = build_test_session_layout(vertical_split, Vec::new(), None);
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Table);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
     assert!(
         rendered_text.contains("      vertical split\n"),
@@ -1795,13 +1781,13 @@ fn dump_layout_table_shows_a_fullscreen_client_and_its_pane() {
         },
         ..build_test_tiled_solve()
     };
-    let layout = build_test_session_layout(
+    let session_layout = build_test_session_layout(
         build_test_horizontal_split(),
         vec![solved_tab],
         Some(build_test_second_pane_id()),
     );
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Table);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
     assert!(
         rendered_text.contains(
@@ -1813,13 +1799,13 @@ fn dump_layout_table_shows_a_fullscreen_client_and_its_pane() {
 
 #[test]
 fn dump_layout_table_shows_a_dash_for_a_client_that_has_focused_nothing() {
-    let layout = build_test_session_layout(
+    let session_layout = build_test_session_layout(
         LayoutNode::Pane(build_test_first_pane_id()),
         Vec::new(),
         None,
     );
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Table);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
     assert!(
         rendered_text.contains(
@@ -1845,13 +1831,13 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
         weights: Vec::new(),
         active_child_index: 0,
     });
-    let layout = SessionLayout {
+    let session_layout = SessionLayout {
         clients: Vec::new(),
         ..build_test_session_layout(empty_split, Vec::new(), None)
     };
 
     assert_eq!(
-        render_layouts(&[layout], OutputFormat::Table),
+        render_layouts(&[session_layout], OutputFormat::Table),
         expected_text
     );
 }
@@ -1862,7 +1848,7 @@ fn dump_layout_table_renders_a_session_with_no_tabs_as_its_name_and_no_clients()
 session session-00000000-0000-0000-0000-000000000001 quiet-lake
   clients
 ";
-    let layout = SessionLayout {
+    let session_layout = SessionLayout {
         session_id: build_test_layout_session_id(),
         session_name: "quiet-lake".to_string(),
         tabs: Vec::new(),
@@ -1870,7 +1856,7 @@ session session-00000000-0000-0000-0000-000000000001 quiet-lake
     };
 
     assert_eq!(
-        render_layouts(&[layout], OutputFormat::Table),
+        render_layouts(&[session_layout], OutputFormat::Table),
         expected_text
     );
 }
@@ -1908,7 +1894,7 @@ fn dump_layout_table_renders_every_session_given() {
 
 #[test]
 fn dump_layout_json_is_an_array_of_whole_layouts() {
-    let layout = build_test_session_layout(
+    let session_layout = build_test_session_layout(
         LayoutNode::Pane(build_test_first_pane_id()),
         vec![SolvedTab {
             pane_rects: vec![SolvedPane {
@@ -1923,7 +1909,7 @@ fn dump_layout_json_is_an_array_of_whole_layouts() {
         Some(build_test_first_pane_id()),
     );
 
-    let rendered_text = render_layouts(&[layout], OutputFormat::Json);
+    let rendered_text = render_layouts(&[session_layout], OutputFormat::Json);
     let parsed_json: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("the dump is JSON");
 
@@ -1999,10 +1985,7 @@ session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  Quit         -
     let rendered_text = render_recent_events(
         &[build_session_events(vec![
             build_pane_created_event(),
-            recent_event::record_event(
-                &Event::Quit(koshi_core::event::QuitCause::Requested),
-                build_fixed_test_time(),
-            ),
+            recent_event::record_event(&Event::Quit(QuitCause::Requested), build_fixed_test_time()),
         ])],
         OutputFormat::Table,
     );
@@ -2100,10 +2083,10 @@ session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneFocused  cli
     );
 }
 
-/// A record for `Event::TabCreated`, stamped `at`.
+/// A record for `Event::TabCreated`, stamped `occurred_at`.
 fn build_tab_created_event_at(occurred_at: SystemTime) -> RecentEvent {
     recent_event::record_event(
-        &Event::TabCreated(koshi_core::event::TabCreated {
+        &Event::TabCreated(TabCreated {
             tab_id: build_test_layout_tab_id(),
         }),
         occurred_at,
@@ -2154,13 +2137,14 @@ fn narrowing_by_name_ignores_case_and_matches_any_part_of_it() {
         build_tab_created_event_at(build_fixed_test_time()),
     ];
 
-    let pane_events = filter_recent_events(recent_events.clone(), None, Some("pane"));
-    assert_eq!(pane_events.len(), 1);
-    assert_eq!(pane_events[0].event_name, "PaneCreated");
-
-    let tab_events = filter_recent_events(recent_events.clone(), None, Some("TABCREATED"));
-    assert_eq!(tab_events.len(), 1);
-    assert_eq!(tab_events[0].event_name, "TabCreated");
+    assert_eq!(
+        filter_recent_events(recent_events.clone(), None, Some("pane")),
+        vec![recent_events[0].clone()]
+    );
+    assert_eq!(
+        filter_recent_events(recent_events.clone(), None, Some("TABCREATED")),
+        vec![recent_events[1].clone()]
+    );
 
     assert_eq!(
         filter_recent_events(recent_events, None, Some("NoSuchEvent")),
@@ -2260,9 +2244,9 @@ fn a_filter_that_matches_no_event_name_keeps_nothing() {
 fn a_dotted_capital_i_does_not_match_an_ascii_i_in_an_event_name() {
     // "İ".to_lowercase() is "i" plus a combining dot, which no ASCII name holds.
     let recent_events = vec![recent_event::record_event(
-        &Event::InputModeChanged(koshi_core::event::InputModeChanged {
+        &Event::InputModeChanged(InputModeChanged {
             client_id: build_test_layout_client_id(),
-            lock_mode: koshi_core::lock::LockMode::Normal,
+            lock_mode: LockMode::Normal,
         }),
         build_fixed_test_time(),
     )];
@@ -2272,18 +2256,18 @@ fn a_dotted_capital_i_does_not_match_an_ascii_i_in_an_event_name() {
         Vec::new()
     );
     assert_eq!(
-        filter_recent_events(recent_events, None, Some("i")).len(),
-        1
+        filter_recent_events(recent_events.clone(), None, Some("i")),
+        recent_events
     );
 }
 
 #[test]
-fn debug_events_table_pads_a_non_ascii_session_name_by_characters() {
+fn debug_events_table_pads_a_wide_session_name_by_terminal_columns() {
     let wide_session_events = SessionEvents {
         session_id: SessionId::from_uuid(build_test_uuid_with_suffix(9)),
         session_name: "S-ふるい-みず".to_string(),
         recent_events: vec![recent_event::record_event(
-            &Event::Quit(koshi_core::event::QuitCause::Requested),
+            &Event::Quit(QuitCause::Requested),
             build_fixed_test_time(),
         )],
     };
@@ -2296,28 +2280,30 @@ fn debug_events_table_pads_a_non_ascii_session_name_by_characters() {
         OutputFormat::Table,
     );
 
-    let session_name_column: Vec<&str> = rendered_text
-        .lines()
-        .map(|line| line.split_at(46).1)
-        .map(|remaining_text| remaining_text.split("  ").next().unwrap_or(remaining_text))
-        .collect();
+    // `S-ふるい-みず` is 9 characters and 13 terminal columns wide. The `name`
+    // column widens to 13.
     assert_eq!(
-        session_name_column,
-        ["name", "quiet-lake", "S-ふるい-みず"],
-        "{rendered_text}"
+        rendered_text,
+        "\
+session                                       name           at    event        ids
+session-00000000-0000-0000-0000-000000000001  quiet-lake     1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004
+session-00000000-0000-0000-0000-000000000009  S-ふるい-みず  1234  Quit         -
+"
     );
 }
 
 #[test]
 fn debug_events_table_renders_a_row_for_every_event_a_full_ring_holds() {
-    let recent_events = vec![build_pane_created_event(); 1000];
+    let recent_events = vec![build_pane_created_event(); MAX_RECENT_EVENT_COUNT];
 
     let rendered_text =
         render_recent_events(&[build_session_events(recent_events)], OutputFormat::Table);
 
+    let header_line =
+        "session                                       name        at    event        ids\n";
+    let pane_created_line = "session-00000000-0000-0000-0000-000000000001  quiet-lake  1234  PaneCreated  tab-00000000-0000-0000-0000-000000000002 pane-00000000-0000-0000-0000-000000000004\n";
     assert_eq!(
-        rendered_text.lines().count(),
-        1001,
-        "the header plus one row each"
+        rendered_text,
+        header_line.to_string() + &pane_created_line.repeat(MAX_RECENT_EVENT_COUNT)
     );
 }

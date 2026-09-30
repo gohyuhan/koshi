@@ -18,23 +18,23 @@ use koshi_config::conflict::{
     build_keymap_layers, detect_conflicts, ConflictReport, KeymapVerdict,
 };
 use koshi_config::keybinding::{parse_keybindings, KeybindingParseError};
-use koshi_config::keymap_merge::{merge_keymaps, MergedKeyMap};
+use koshi_config::keymap_merge::{merge_keymaps, MergedKeymap};
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::KeybindingsConfig;
 use koshi_core::registry::ActionRegistry;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The effective keymap as seen from outside a session: the folded
 /// keybinding settings, the merged per-mode lookup, the conflict report that
-/// admitted (or refused) the user layer, and the live core action table.
+/// admitted (or refused) the user layer, and the core action table.
 pub struct KeymapView {
     /// The effective keybinding settings — the built-in defaults with the
     /// user file's fields folded on when its verdict admitted it.
     pub keybindings_config: KeybindingsConfig,
     /// The merged per-mode lookup the renderers read.
-    pub merged_keymap: MergedKeyMap,
+    pub merged_keymap: MergedKeymap,
     /// The core action table the bindings resolve against.
     pub action_registry: ActionRegistry,
     /// Every conflict-detection finding for the user layer, warnings
@@ -52,18 +52,23 @@ pub struct KeymapView {
 }
 
 /// Load the offline keymap view: read `keybinding.kdl` from the koshi config
-/// directory when it exists, and fold it onto the built-in defaults.
+/// directory when it exists, and fold it onto the built-in defaults. An absent
+/// file gives the defaults with no error; any other read failure gives the
+/// defaults with the read error in `keybinding_file_error_message`.
 #[must_use]
 pub fn load_keymap_view() -> KeymapView {
-    let user_keybinding_file_path = koshi_paths::resolve_config_directory()
-        .map(|config_directory| config_directory.join("keybinding.kdl"));
-    let Some(keybinding_file_path) = user_keybinding_file_path
-        .filter(|candidate_keybinding_file_path| candidate_keybinding_file_path.exists())
+    let Some(keybinding_file_path) = koshi_paths::resolve_config_directory()
+        .map(|config_directory| config_directory.join("keybinding.kdl"))
     else {
         return build_keymap_view_from_partial(None, None, None);
     };
     let keybinding_source_text = match fs::read_to_string(&keybinding_file_path) {
         Ok(keybinding_source_text) => keybinding_source_text,
+        Err(keybinding_file_read_error)
+            if keybinding_file_read_error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return build_keymap_view_from_partial(None, None, None);
+        }
         Err(keybinding_file_read_error) => {
             return build_keymap_view_from_partial(
                 None,
@@ -81,7 +86,7 @@ pub fn load_keymap_view() -> KeymapView {
         Err(keybinding_parse_error) => build_keymap_view_from_partial(
             None,
             Some(keybinding_file_path),
-            Some(render_parse_error(&keybinding_parse_error)),
+            Some(list_parse_error_lines(&keybinding_parse_error).join("; ")),
         ),
     }
 }
@@ -174,17 +179,17 @@ pub enum KeymapValidationOutcome {
     },
 }
 
-/// Dry-run the keybinding file at `keymap_file_path`: parse it and run conflict
-/// detection, applying nothing.
+/// Dry-run the keybinding file at `keybinding_file_path`: parse it and run
+/// conflict detection, applying nothing.
 ///
 /// # Errors
 /// An [`std::io::Error`] when the file cannot be read.
-pub fn validate_keymap_file(
-    keymap_file_path: &Path,
+pub fn validate_keybinding_file(
+    keybinding_file_path: &Path,
 ) -> Result<KeymapValidationOutcome, std::io::Error> {
-    let keybinding_source_text = fs::read_to_string(keymap_file_path)?;
+    let keybinding_source_text = fs::read_to_string(keybinding_file_path)?;
     let partial_keybindings_config =
-        match parse_keybindings(keymap_file_path, &keybinding_source_text) {
+        match parse_keybindings(keybinding_file_path, &keybinding_source_text) {
             Ok(partial_keybindings_config) => partial_keybindings_config,
             Err(keybinding_parse_error) => {
                 return Ok(KeymapValidationOutcome::ParseFailed(
@@ -194,7 +199,7 @@ pub fn validate_keymap_file(
         };
     let keymap_view = build_keymap_view_from_partial(
         Some(partial_keybindings_config),
-        Some(keymap_file_path.to_path_buf()),
+        Some(keybinding_file_path.to_path_buf()),
         None,
     );
     Ok(KeymapValidationOutcome::Checked {
@@ -212,9 +217,4 @@ fn list_parse_error_lines(keybinding_parse_error: &KeybindingParseError) -> Vec<
             .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
             .collect(),
     }
-}
-
-/// A parse failure as one string, for the view's `keybinding_file_error_message`.
-fn render_parse_error(keybinding_parse_error: &KeybindingParseError) -> String {
-    list_parse_error_lines(keybinding_parse_error).join("; ")
 }

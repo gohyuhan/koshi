@@ -273,11 +273,12 @@ pub struct Client {
     config_layers: ConfigLayers,
     /// The settings this viewer owns, folded from [`config_layers`](Self::config_layers).
     client_config: ClientConfig,
-    /// The chrome colors [`client_config`](Self::client_config)'s theme resolves to. Held
-    /// resolved, so a frame reads them by borrow.
+    /// The chrome colors [`client_config`](Self::client_config)'s theme
+    /// resolves to, held resolved: a frame reads them by borrow.
     theme: Theme,
     /// The keymap this viewer resolves its own keys against, built from
-    /// [`client_config`](Self::client_config)'s keybindings and the action table.
+    /// [`client_config`](Self::client_config)'s keybindings and the action
+    /// table.
     keymap_catalog: KeymapHintCatalog,
     /// The action table a bound name is checked against — for the hint bar's
     /// labels and the `is_continuous` flag a repeat-capable binding re-arms on.
@@ -285,7 +286,7 @@ pub struct Client {
     registry: ActionRegistry,
     /// This viewer's base input mode. It decides what a key means when no local
     /// submode owns the keyboard. Placement mode overlays this value without
-    /// changing it, so a placement interaction can return to Normal or Locked.
+    /// changing it: a placement interaction returns to Normal or Locked.
     /// The session keeps its own copy, which `koshi lock --client` reaches and
     /// `koshi list-clients` reports.
     lock_mode: LockMode,
@@ -296,8 +297,9 @@ pub struct Client {
     /// The multi-chord binding being typed, if any. Held chords belong to
     /// koshi and never reach a pane.
     pending_key_sequence: Option<PendingKeySequence>,
-    /// The most recent mouse press, which is what tells a double click from two
-    /// separate clicks. `None` before this viewer has pressed anything.
+    /// The most recent mouse press, compared with the next press to tell a
+    /// double click from two separate clicks. `None` before this viewer has
+    /// pressed anything.
     last_mouse_press: Option<LastPress>,
     /// The pane a forwarded press captured, and the button that pressed it.
     /// While a button is held, its drags and its release go to this pane even as
@@ -305,8 +307,9 @@ pub struct Client {
     /// forwarded. Set when this viewer forwards the press; cleared on the next
     /// release.
     ///
-    /// The stored button is the reliable one — a press always names its button,
-    /// while some terminals report every drag and release as the left button.
+    /// A press always names its button; some terminals report every drag and
+    /// release as the left button. Drags and the release read the stored
+    /// button.
     mouse_capture: Option<MouseCapture>,
     /// The pane-border drag under way, held only between the press on a border
     /// that begins it and the release that ends it.
@@ -330,7 +333,7 @@ pub struct Client {
     selection_scroll_origin_row_index: Option<u64>,
     /// The pane this viewer's pointer is over, or `None` when it is over chrome
     /// or off every pane. The renderer draws an unfocused hovered pane in the
-    /// hover color, so the wheel's target is visible before the wheel turns.
+    /// hover color.
     hovered_pane_id: Option<PaneId>,
     /// The pane whose top border currently exposes the placement handle.
     placement_handle_pane_id: Option<PaneId>,
@@ -466,8 +469,8 @@ impl Client {
             &self.client_config.keybindings,
             &self.registry,
         );
-        // The chords held so far were reaching for bindings the new keymap may
-        // not hold, so the sequence is dropped and resolves to nothing.
+        // The new keymap drops the sequence being typed: it resolves to
+        // nothing.
         self.pending_key_sequence = None;
         Some(report)
     }

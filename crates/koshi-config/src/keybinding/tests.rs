@@ -4,12 +4,13 @@
 
 use std::path::Path;
 
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 
 use super::*;
 use crate::types::SCHEMA_VERSION;
 
-/// Parses `keybinding_source_text` as a keybinding file at a fixed test path.
+/// Parses `keybinding_source_text` as the keybinding file `keybinding.kdl`. A
+/// text with no line that starts with `version ` gets `version 1` prepended.
 fn parse_keybinding_text(
     keybinding_source_text: &str,
 ) -> Result<PartialKeybindingsConfig, KeybindingParseError> {
@@ -27,7 +28,8 @@ fn parse_keybinding_text(
     )
 }
 
-/// Parses `keybinding_source_text`, expecting schema violations, and returns their messages.
+/// The schema diagnostic messages of `keybinding_source_text`, in document
+/// order. Panics when the text parses or fails with a KDL syntax error.
 fn collect_keybinding_diagnostic_messages(keybinding_source_text: &str) -> Vec<String> {
     match parse_keybinding_text(keybinding_source_text) {
         Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics
@@ -42,8 +44,8 @@ fn collect_keybinding_diagnostic_messages(keybinding_source_text: &str) -> Vec<S
 }
 
 /// A one-chord sequence.
-fn build_single_chord_sequence(modifiers: ModFlags, key: Key) -> KeySequence {
-    KeySequence::from_first_and_rest(KeyChord::from_parts(modifiers, key), Vec::new())
+fn build_single_chord_sequence(modifier_flags: BindingModifierFlags, key: Key) -> KeySequence {
+    KeySequence::from_first_and_rest(KeyChord::from_parts(modifier_flags, key), Vec::new())
 }
 
 /// A two-chord sequence.
@@ -52,9 +54,13 @@ fn build_two_chord_sequence(first_chord: KeyChord, second_chord: KeyChord) -> Ke
 }
 
 #[test]
-fn version_only_file_yields_the_empty_partial() {
-    let partial = parse_keybinding_text("").expect("empty file is a valid empty layer");
-    assert_eq!(partial, PartialKeybindingsConfig::default());
+fn version_only_file_yields_the_empty_partial_keybindings_config() {
+    let partial_keybindings_config =
+        parse_keybinding_text("").expect("empty file is a valid empty layer");
+    assert_eq!(
+        partial_keybindings_config,
+        PartialKeybindingsConfig::default()
+    );
 }
 
 #[test]
@@ -65,15 +71,17 @@ fn missing_version_is_rejected() {
                 .iter()
                 .map(|diagnostic| diagnostic.get_diagnostic_message().to_string())
                 .collect::<Vec<_>>(),
-            other_error => panic!("expected missing-version error, got {other_error:?}"),
+            unexpected_parse_result => {
+                panic!("expected missing-version error, got {unexpected_parse_result:?}")
+            }
         },
         vec!["keybinding file must declare `version`".to_string()]
     );
 }
 
 #[test]
-fn full_file_round_trips_every_field() {
-    let partial = parse_keybinding_text(
+fn a_full_file_parses_every_field() {
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 version 1
 chord-timeout-ms 750
@@ -95,64 +103,70 @@ mode "locked" {
     )
     .expect("valid file parses");
 
-    assert_eq!(partial.chord_timeout_ms, Some(750));
-    assert_eq!(partial.which_key_delay_ms, Some(300));
-    assert_eq!(partial.maximum_chord_depth, Some(5));
+    assert_eq!(partial_keybindings_config.chord_timeout_ms, Some(750));
+    assert_eq!(partial_keybindings_config.which_key_delay_ms, Some(300));
+    assert_eq!(partial_keybindings_config.maximum_chord_depth, Some(5));
     assert_eq!(
-        partial.leader,
+        partial_keybindings_config.leader,
         Some(Leader::Chord(KeyChord::from_parts(
-            ModFlags::CTRL,
+            BindingModifierFlags::CTRL,
             Key::Char('p')
         )))
     );
     assert_eq!(
-        partial.unlock_alternative,
-        Some(Some(KeyChord::from_parts(ModFlags::ALT, Key::Char('u'))))
+        partial_keybindings_config.unlock_alternative,
+        Some(Some(KeyChord::from_parts(
+            BindingModifierFlags::ALT,
+            Key::Char('u')
+        )))
     );
 
-    let modes = partial.mode_bindings_by_name.expect("mode blocks present");
-    assert_eq!(modes.len(), 2);
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode blocks present");
+    assert_eq!(mode_bindings_by_name.len(), 2);
 
-    let normal = &modes[&ModeName::from_text("normal")];
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 2);
-    let new_tab = &normal.bound_action_by_key_sequence
-        [&build_single_chord_sequence(ModFlags::CTRL, Key::Char('t'))];
+    let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 2);
+    let new_tab_binding = &normal_mode_bindings.bound_action_by_key_sequence
+        [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))];
     assert_eq!(
-        new_tab.action_reference,
+        new_tab_binding.action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
     // `<leader> w` under a chord leader is the leader chord then `w`.
-    let close = &normal.bound_action_by_key_sequence[&build_two_chord_sequence(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('w')),
-    )];
+    let close_pane_binding = &normal_mode_bindings.bound_action_by_key_sequence
+        [&build_two_chord_sequence(
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('w')),
+        )];
     assert_eq!(
-        close.action_reference,
+        close_pane_binding.action_reference,
         ActionReference::from_str("core:close-pane").unwrap()
     );
     assert_eq!(
-        normal.removed_key_sequences,
+        normal_mode_bindings.removed_key_sequences,
         [build_single_chord_sequence(
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             Key::Named(NamedKey::Tab)
         )]
         .into()
     );
 
-    let locked = &modes[&ModeName::from_text("locked")];
-    assert_eq!(locked.bound_action_by_key_sequence.len(), 1);
+    let locked_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("locked")];
+    assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
-        locked.bound_action_by_key_sequence
-            [&build_single_chord_sequence(ModFlags::ALT, Key::Char('q'))]
+        locked_mode_bindings.bound_action_by_key_sequence
+            [&build_single_chord_sequence(BindingModifierFlags::ALT, Key::Char('q'))]
             .action_reference,
         ActionReference::from_str("core:quit").unwrap()
     );
-    assert_eq!(locked.removed_key_sequences, BTreeSet::new());
+    assert_eq!(locked_mode_bindings.removed_key_sequences, BTreeSet::new());
 }
 
 #[test]
 fn leader_node_after_the_mode_block_still_applies() {
-    let partial = parse_keybinding_text(
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 mode "normal" {
     bind "<leader> n" "core:new-pane"
@@ -161,23 +175,25 @@ leader "<C-p>"
 "#,
     )
     .expect("valid file parses");
-    let modes = partial.mode_bindings_by_name.expect("mode present");
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
     let expected_key_sequence = build_two_chord_sequence(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('n')),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')),
     );
-    let normal = &modes[&ModeName::from_text("normal")];
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 1);
+    let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
-        normal.bound_action_by_key_sequence[&expected_key_sequence].action_reference,
+        normal_mode_bindings.bound_action_by_key_sequence[&expected_key_sequence].action_reference,
         ActionReference::from_str("core:new-pane").unwrap()
     );
 }
 
 #[test]
-fn absent_leader_falls_back_to_the_built_in_mods_leader() {
+fn absent_leader_resolves_to_the_built_in_ctrl_leader() {
     // The built-in leader is the Ctrl modifier run: `<leader>t` = `<C-t>`.
-    let partial = parse_keybinding_text(
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 mode "normal" {
     bind "<leader>t" "core:new-tab"
@@ -185,12 +201,14 @@ mode "normal" {
 "#,
     )
     .expect("valid file parses");
-    let modes = partial.mode_bindings_by_name.expect("mode present");
-    let normal = &modes[&ModeName::from_text("normal")];
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 1);
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
+    let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
-        normal.bound_action_by_key_sequence
-            [&build_single_chord_sequence(ModFlags::CTRL, Key::Char('t'))]
+        normal_mode_bindings.bound_action_by_key_sequence
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))]
             .action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
@@ -200,7 +218,7 @@ mode "normal" {
 fn a_modifier_run_leader_node_merges_into_the_binding() {
     // `leader "C-"` is a modifier run. `<leader>t` is the single chord
     // `<C-t>`, not two chords.
-    let partial = parse_keybinding_text(
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 leader "C-"
 mode "normal" {
@@ -209,13 +227,18 @@ mode "normal" {
 "#,
     )
     .expect("valid file parses");
-    assert_eq!(partial.leader, Some(Leader::Mods(ModFlags::CTRL)));
-    let modes = partial.mode_bindings_by_name.expect("mode present");
-    let normal = &modes[&ModeName::from_text("normal")];
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
-        normal.bound_action_by_key_sequence
-            [&build_single_chord_sequence(ModFlags::CTRL, Key::Char('t'))]
+        partial_keybindings_config.leader,
+        Some(Leader::Modifiers(BindingModifierFlags::CTRL))
+    );
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
+    let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
+    assert_eq!(
+        normal_mode_bindings.bound_action_by_key_sequence
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))]
             .action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
@@ -223,9 +246,9 @@ mode "normal" {
 
 #[test]
 fn bind_and_remove_of_the_same_key_in_one_mode_both_hold() {
-    // Own-layer remove + rebind: the remove voids lower layers, the bind is
-    // this layer's claim.
-    let partial = parse_keybinding_text(
+    // The `remove` clears `<Tab>` from lower layers. The `bind` binds `<Tab>`
+    // in this layer. The parsed mode keeps both.
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 mode "normal" {
     remove "<Tab>"
@@ -234,41 +257,49 @@ mode "normal" {
 "#,
     )
     .expect("valid file parses");
-    let mode_bindings_by_name = partial.mode_bindings_by_name.expect("mode present");
-    let normal = &mode_bindings_by_name[&ModeName::from_text("normal")];
-    let tab = build_single_chord_sequence(ModFlags::NONE, Key::Named(NamedKey::Tab));
-    assert_eq!(normal.bound_action_by_key_sequence.len(), 1);
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
+    let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
+    let tab_key_sequence =
+        build_single_chord_sequence(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab));
+    assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 1);
     assert_eq!(
-        normal.bound_action_by_key_sequence[&tab].action_reference,
+        normal_mode_bindings.bound_action_by_key_sequence[&tab_key_sequence].action_reference,
         ActionReference::from_str("core:next-tab").unwrap()
     );
-    assert_eq!(normal.removed_key_sequences, [tab].into());
+    assert_eq!(
+        normal_mode_bindings.removed_key_sequences,
+        [tab_key_sequence].into()
+    );
 }
 
 #[test]
 fn mode_names_are_case_sensitive() {
     // `Normal` and `normal` are two different modes, not a duplicate block.
-    let partial = parse_keybinding_text(
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 mode "normal" { bind "<C-t>" "core:new-tab" }
 mode "Normal" { bind "<C-w>" "core:close-pane" }
 "#,
     )
     .expect("two differently cased names are two modes");
-    let modes = partial.mode_bindings_by_name.expect("modes present");
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("modes present");
     assert_eq!(
-        modes.keys().cloned().collect::<Vec<_>>(),
+        mode_bindings_by_name.keys().cloned().collect::<Vec<_>>(),
         vec![ModeName::from_text("Normal"), ModeName::from_text("normal")]
     );
     assert_eq!(
-        modes[&ModeName::from_text("normal")].bound_action_by_key_sequence
-            [&build_single_chord_sequence(ModFlags::CTRL, Key::Char('t'))]
+        mode_bindings_by_name[&ModeName::from_text("normal")].bound_action_by_key_sequence
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('t'))]
             .action_reference,
         ActionReference::from_str("core:new-tab").unwrap()
     );
     assert_eq!(
-        modes[&ModeName::from_text("Normal")].bound_action_by_key_sequence
-            [&build_single_chord_sequence(ModFlags::CTRL, Key::Char('w'))]
+        mode_bindings_by_name[&ModeName::from_text("Normal")].bound_action_by_key_sequence
+            [&build_single_chord_sequence(BindingModifierFlags::CTRL, Key::Char('w'))]
             .action_reference,
         ActionReference::from_str("core:close-pane").unwrap()
     );
@@ -276,15 +307,18 @@ mode "Normal" { bind "<C-w>" "core:close-pane" }
 
 #[test]
 fn an_empty_mode_name_is_a_mode_of_its_own() {
-    let partial = parse_keybinding_text(r#"mode "" { bind "<C-t>" "core:new-tab" }"#)
-        .expect("valid file parses");
-    let modes = partial.mode_bindings_by_name.expect("mode present");
+    let partial_keybindings_config =
+        parse_keybinding_text(r#"mode "" { bind "<C-t>" "core:new-tab" }"#)
+            .expect("valid file parses");
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
     assert_eq!(
-        modes.keys().cloned().collect::<Vec<_>>(),
+        mode_bindings_by_name.keys().cloned().collect::<Vec<_>>(),
         vec![ModeName::from_text("")]
     );
     assert_eq!(
-        modes[&ModeName::from_text("")]
+        mode_bindings_by_name[&ModeName::from_text("")]
             .bound_action_by_key_sequence
             .len(),
         1
@@ -293,10 +327,13 @@ fn an_empty_mode_name_is_a_mode_of_its_own() {
 
 #[test]
 fn mode_with_no_children_is_the_empty_bindings() {
-    let partial = parse_keybinding_text(r#"mode "normal""#).expect("valid file parses");
-    let modes = partial.mode_bindings_by_name.expect("mode present");
+    let partial_keybindings_config =
+        parse_keybinding_text(r#"mode "normal""#).expect("valid file parses");
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
     assert_eq!(
-        modes[&ModeName::from_text("normal")],
+        mode_bindings_by_name[&ModeName::from_text("normal")],
         ModeBindings::default()
     );
 }
@@ -305,7 +342,7 @@ fn mode_with_no_children_is_the_empty_bindings() {
 fn overlong_sequences_parse_without_a_cap() {
     // The file's own `max-chord-depth` is not applied at parse time: an
     // eight-chord bind parses under `max-chord-depth 2`.
-    let partial = parse_keybinding_text(
+    let partial_keybindings_config = parse_keybinding_text(
         r#"
 max-chord-depth 2
 mode "normal" {
@@ -314,8 +351,10 @@ mode "normal" {
 "#,
     )
     .expect("overlong bind still parses");
-    let modes = partial.mode_bindings_by_name.expect("mode present");
-    let (parsed_key_sequence, _) = modes[&ModeName::from_text("normal")]
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
+    let (parsed_key_sequence, _) = mode_bindings_by_name[&ModeName::from_text("normal")]
         .bound_action_by_key_sequence
         .iter()
         .next()
@@ -323,10 +362,12 @@ mode "normal" {
     assert_eq!(
         *parsed_key_sequence,
         KeySequence::from_first_and_rest(
-            KeyChord::from_parts(ModFlags::CTRL, Key::Char('a')),
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('a')),
             "bcdefgh"
                 .chars()
-                .map(|character| { KeyChord::from_parts(ModFlags::NONE, Key::Char(character)) })
+                .map(|character| {
+                    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(character))
+                })
                 .collect(),
         )
     );
@@ -347,7 +388,8 @@ fn invalid_kdl_syntax_is_a_syntax_error() {
 
 #[test]
 fn one_bad_bind_rejects_the_whole_file() {
-    // All-or-nothing: the good bind does not survive its neighbor's typo.
+    // One invalid bind rejects the file: the valid `<C-t>` bind is not
+    // returned.
     let diagnostic_messages = collect_keybinding_diagnostic_messages(
         r#"
 mode "normal" {
@@ -526,36 +568,38 @@ mode "normal" {
 fn the_parse_time_chord_ceiling_is_255() {
     // The file's own `max-chord-depth` is not applied here. The cap is the
     // widest a `u8` carries: 255 chords parse, 256 do not.
-    let at_ceiling = "a".repeat(255);
-    let partial = parse_keybinding_text(&format!(
-        r#"mode "normal" {{ bind "{at_ceiling}" "core:new-tab" }}"#
+    let sequence_text_at_ceiling = "a".repeat(255);
+    let partial_keybindings_config = parse_keybinding_text(&format!(
+        r#"mode "normal" {{ bind "{sequence_text_at_ceiling}" "core:new-tab" }}"#
     ))
     .expect("255 chords parse");
-    let mode_bindings_by_name = partial.mode_bindings_by_name.expect("mode present");
+    let mode_bindings_by_name = partial_keybindings_config
+        .mode_bindings_by_name
+        .expect("mode present");
     let (parsed_key_sequence, _) = mode_bindings_by_name[&ModeName::from_text("normal")]
         .bound_action_by_key_sequence
         .iter()
         .next()
         .expect("one binding");
-    let repeated_chord = KeyChord::from_parts(ModFlags::NONE, Key::Char('a'));
+    let repeated_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('a'));
     assert_eq!(
         *parsed_key_sequence,
         KeySequence::from_first_and_rest(repeated_chord, vec![repeated_chord; 254])
     );
 
-    let past_ceiling = "a".repeat(256);
+    let sequence_text_past_ceiling = "a".repeat(256);
     assert_eq!(
         collect_keybinding_diagnostic_messages(&format!(
-            r#"mode "normal" {{ bind "{past_ceiling}" "core:new-tab" }}"#
+            r#"mode "normal" {{ bind "{sequence_text_past_ceiling}" "core:new-tab" }}"#
         )),
         [format!(
-            "invalid key `{past_ceiling}`: the sequence has 256 chords; the cap is 255"
+            "invalid key `{sequence_text_past_ceiling}`: the sequence has 256 chords; the cap is 255"
         )]
     );
 }
 
 #[test]
-fn action_without_a_namespace_is_rejected_with_the_full_ref_hint() {
+fn action_without_a_namespace_is_rejected_with_the_full_reference_hint() {
     assert_eq!(
         collect_keybinding_diagnostic_messages(r#"mode "normal" { bind "<C-t>" "new-tab" }"#),
         [concat!(
@@ -570,28 +614,30 @@ fn bad_key_sequence_is_rejected_at_its_entry() {
     let keybinding_text = "version 1\nmode \"normal\" { bind \"Ctrl-g\" \"core:new-tab\" }\n";
     let diagnostics = match parse_keybindings(Path::new("keybinding.kdl"), keybinding_text) {
         Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics,
-        other_error => panic!("expected a schema error, got {other_error:?}"),
+        unexpected_parse_result => {
+            panic!("expected a schema error, got {unexpected_parse_result:?}")
+        }
     };
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
         diagnostics[0].get_diagnostic_message(),
         "invalid key `Ctrl-g`: a multi-character key must be bracketed, as in `<Tab>`"
     );
-    // The caret sits on the key entry, quotes included — not on the whole
-    // `bind` node.
-    let offset = keybinding_text
+    // The span covers the key entry, quotes included, and not the whole `bind`
+    // node.
+    let key_entry_offset = keybinding_text
         .find("\"Ctrl-g\"")
         .expect("key entry is in the source");
     assert_eq!(
         diagnostics[0].get_source_span(),
-        SourceSpan::from(offset..offset + "\"Ctrl-g\"".len())
+        SourceSpan::from(key_entry_offset..key_entry_offset + "\"Ctrl-g\"".len())
     );
 }
 
 #[test]
 fn only_the_first_problem_in_one_bind_node_is_reported() {
-    // `<C-` and `new-tab` are both wrong. The key is checked first and the
-    // node is abandoned there, so the action is never reached.
+    // `<C-` and `new-tab` are both wrong. The key is checked first. The node
+    // stops at the key error: the action is not checked.
     assert_eq!(
         collect_keybinding_diagnostic_messages(r#"mode "normal" { bind "<C-" "new-tab" }"#),
         ["invalid key `<C-`: missing closing `>`"]
@@ -603,23 +649,25 @@ fn a_bad_action_reference_is_rejected_at_its_own_entry() {
     let keybinding_text = "version 1\nmode \"normal\" { bind \"<C-t>\" \"new-tab\" }\n";
     let diagnostics = match parse_keybindings(Path::new("keybinding.kdl"), keybinding_text) {
         Err(KeybindingParseError::Invalid { diagnostics, .. }) => diagnostics,
-        other_error => panic!("expected a schema error, got {other_error:?}"),
+        unexpected_parse_result => {
+            panic!("expected a schema error, got {unexpected_parse_result:?}")
+        }
     };
     assert_eq!(diagnostics.len(), 1);
-    // The caret sits on the action entry, quotes included.
-    let offset = keybinding_text
+    // The span covers the action entry, quotes included.
+    let action_entry_offset = keybinding_text
         .find("\"new-tab\"")
         .expect("action entry is in the source");
     assert_eq!(
         diagnostics[0].get_source_span(),
-        SourceSpan::from(offset..offset + "\"new-tab\"".len())
+        SourceSpan::from(action_entry_offset..action_entry_offset + "\"new-tab\"".len())
     );
 }
 
 #[test]
 fn a_rejected_leader_leaves_the_binds_on_the_built_in_leader() {
-    // The bad `leader` node is the only error: it writes no leader, so
-    // `<leader>t` still resolves against the built-in `C-` run.
+    // The bad `leader` node is the only error. It sets no leader: `<leader>t`
+    // resolves against the built-in `C-` run.
     assert_eq!(
         collect_keybinding_diagnostic_messages(
             r#"
@@ -643,13 +691,16 @@ fn duplicate_leader_node_is_rejected() {
 
 #[test]
 fn integer_settings_accept_their_widest_values() {
-    let partial = parse_keybinding_text(
+    let partial_keybindings_config = parse_keybinding_text(
         "max-chord-depth 255\nchord-timeout-ms 4294967295\nwhich-key-delay-ms 0",
     )
     .expect("boundary values parse");
-    assert_eq!(partial.maximum_chord_depth, Some(u8::MAX));
-    assert_eq!(partial.chord_timeout_ms, Some(u32::MAX));
-    assert_eq!(partial.which_key_delay_ms, Some(0));
+    assert_eq!(
+        partial_keybindings_config.maximum_chord_depth,
+        Some(u8::MAX)
+    );
+    assert_eq!(partial_keybindings_config.chord_timeout_ms, Some(u32::MAX));
+    assert_eq!(partial_keybindings_config.which_key_delay_ms, Some(0));
 }
 
 #[test]
@@ -698,7 +749,11 @@ fn a_duplicate_version_node_is_reported_once_and_the_second_is_not_checked() {
 
 #[test]
 fn current_version_is_accepted() {
-    parse_keybinding_text("version 2").expect("current version parses");
+    assert_eq!(
+        parse_keybinding_text(&format!("version {SCHEMA_VERSION}"))
+            .expect("current version parses"),
+        PartialKeybindingsConfig::default()
+    );
 }
 
 #[test]

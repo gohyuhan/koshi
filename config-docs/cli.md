@@ -16,10 +16,16 @@ flag and accepted value.
 `koshi update` then restarts each running session that can into the new release,
 and after them the background process that tracks sessions. A session keeps its
 panes, the programs running in them and their scrollback. A client from the
-installed build can reattach to that session. The replacement session server
-or router migrates valid `version 1` KDL files to `version 2` before reading
-them. If migration fails, a running session refuses the restart and keeps its
-current build. A new session server or router exits with a config error.
+installed build can reattach to that session. The installed build migrates
+`version 1` KDL files to `version 2` when a running session asks it which
+resume formats it reads, before that session restarts. A session server or
+router migrates them again when it starts. A file with an unknown key or a bad
+value migrates and keeps that setting in its text. If a file cannot be read,
+holds KDL that does not parse, or declares an unusable version, migration
+writes no file and prints the error on standard error. The session still
+restarts and the router still starts, each with the files as they are, and
+the next start migrates them again. A file that does not parse applies no
+settings, as before the update.
 
 Live session handoff is available for sessions started by koshi 0.3.0, 0.4.0,
 or 0.5.0-pr.1. A session started by 0.1.0 or 0.2.0 has no restart handoff;
@@ -27,10 +33,22 @@ the update replaces the installed binary while that session keeps running
 its older build. End that session and start a new one to use the installed
 build.
 
-If the terminal still runs an older client, start the installed build and run
-`koshi attach workspace` for a session named `workspace`.
+A client attached while the update runs comes back to its session by itself. If
+the restarted session does not speak that client's protocol version, the client
+waits up to 30 seconds for the router to restart too, then runs
+`koshi attach <session id>` in the same terminal, with the koshi at the path the
+client was started from. A client from koshi 0.5.0-pr.1 or earlier, and a client
+of a session on another machine, prints the attach command instead. For a
+session named `workspace`, start the installed build and run
+`koshi attach workspace`.
 
-The router converts the remote listener's certificate, access mark, and grants.
+An update run by koshi 0.4.0 cannot read the session and router files that the
+installed build writes. For each session and for the router, it prints that the
+restart was not confirmed, or that it still reports 0.4.0. Those sessions and
+the router did restart into the installed build, and their panes keep running.
+`koshi server-version` prints the build each one runs.
+
+The router converts the remote listener's certificate, remote access record, and grants.
 Koshi converts saved servers on their first read. For example, a saved server
 keeps its secret and certificate pin, and an existing grant keeps its scope and
 expiry.
@@ -64,22 +82,23 @@ the other users of this machine for its whole life, whatever `koshi.kdl` says.
 | `koshi config path` | Print the config directory for this platform |
 | `koshi config explain <KEY>` | Show one file-qualified key's file, default, and meaning |
 | `koshi config check` | Validate every present config file without changing it |
-| `koshi config migrate` | Validate all files, then move old schemas to the newest supported version |
+| `koshi config migrate` | Move every file on an older schema to the newest supported version |
 
 Explain keys include their file kind: `koshi.pane.min-cols`,
 `keybinding.chord-timeout-ms`, `theme.colors.accent`, and `profile.version`.
 An unknown key exits 2 and suggests the nearest known key.
 
 `check` and `migrate` scan `koshi.kdl`, `keybinding.kdl`, `themes/*.kdl`, and
-`profile/*.kdl`. Migration does not repair bad KDL or bad fields. Current
-schema version is `2`. Valid version `1` files migrate to version `2`.
-Valid version `2` files stay unchanged. The replacement session server or
-router runs this migration before reading config; the command also lets
-you run it directly.
+`profile/*.kdl`. Current schema version is `2`. Version `1` files migrate to
+version `2`. Version `2` files stay unchanged. Migration does not repair bad
+fields: `version 1` followed by `made-up-key "x"` becomes `version 2` followed
+by `made-up-key "x"`, and `check` still rejects it. A session server, a router,
+and `koshi resume-support` run this migration before they read config; the
+command also lets you run it directly.
 
-Each path must be a regular file or a symlink to one. Both commands report all
-read and schema errors before migration writes anything. Migration keeps the
-symlink and updates its target.
+Each path must be a regular file or a symlink to one. `check` reports every
+read and schema error. `migrate` reports every read, KDL, and version error
+before it writes anything. Migration keeps the symlink and updates its target.
 
 Migration replaces files one at a time. If a write fails, the error lists files
 already migrated and says the failing file may also contain migrated data.
@@ -388,8 +407,7 @@ koshi attach --remote work web
 
 The secret never appears on a command line. koshi reads it from the
 environment variable `KOSHI_REMOTE_SECRET`, and with that unset asks for it at
-the terminal without printing what is typed. Every argument after the program
-name is readable by other users of the machine, so no flag takes a secret.
+the terminal without printing what is typed. No flag takes a secret.
 
 On the first connection koshi records the fingerprint of the certificate the
 server presented — the sha256 of it, as 64 lowercase hex characters — and
@@ -509,9 +527,8 @@ granted, never the token itself. A token nobody kept is replaced by a fresh
 
 Bare `koshi attach` lists the sessions on every reachable saved server beside
 this machine's own, each row naming the server it belongs to. The remote check
-waits two seconds in total, not two seconds per server, so one unreachable
-machine cannot slow the list. A server not heard from inside that wait is left
-out. A server that answers and refuses the saved secret is not hidden — it
+waits two seconds in total, not two seconds per server. A server not heard from
+inside that wait is left out. A server that answers and refuses the saved secret is not hidden — it
 prints the command that replaces that secret:
 
 ```text
@@ -528,12 +545,11 @@ work` included, is refused:
 --remote works with `attach`, `list-sessions`, and the action verbs, such as `koshi attach --remote <server>`
 ```
 
-A pane is the other way in, and that way is closed too. `koshi share grant`
-prints the new token's secret, and `koshi share list` prints every identity
-holding one. Inside a koshi pane the session paints that pane to every client
-viewing its tab, so a client on another machine reads what it printed.
+`koshi share grant` prints the new token's secret, and `koshi share list`
+prints every identity holding one. Inside a koshi pane, the session paints that
+pane to every client viewing its tab, a client on another machine included.
 
-So `koshi share grant`, `koshi share revoke` and `koshi share list` run inside
+`koshi share grant`, `koshi share revoke` and `koshi share list` run inside
 a koshi pane are refused while any client is attached to that pane's session
 from another machine:
 
@@ -606,10 +622,9 @@ The version column reads:
 | `not running` | Nothing is listening there |
 | `unreachable` | The server could not be asked; the reason prints on standard error |
 
-A server that could not be asked does not sink the rest of the answer: the
-other rows still print, and the command exits 4 so a script reading only the
-rows never takes a partial answer for the whole picture. Everything answering
-exits 0, including a machine running nothing at all.
+A server that could not be asked does not stop the rest of the answer: the
+other rows still print, and the command exits 4. Everything answering exits 0,
+including a machine running nothing at all.
 
 `--session` reports that one session and leaves out the router. It takes the
 session id or its exact generated name. A name must match exactly one running
@@ -732,7 +747,7 @@ stay apart.
 `--since` keeps the events recorded within a length of now — `30s`, `5m`, `2h`,
 `7d`. `--filter` keeps the events whose name contains the text given, matched
 ignoring case, so `--filter pane` keeps `PaneCreated` and `PaneFocused`. An
-empty `--filter` is a usage error, since every name contains it.
+empty `--filter` is a usage error.
 
 Example: `koshi debug events --since 30s --filter tab` prints the tab events of
 the last thirty seconds and nothing else.
