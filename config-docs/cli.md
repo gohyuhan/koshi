@@ -21,10 +21,11 @@ or router migrates valid `version 1` KDL files to `version 2` before reading
 them. If migration fails, a running session refuses the restart and keeps its
 current build. A new session server or router exits with a config error.
 
-Live session handoff is available for sessions started by koshi 0.3.0 or
-0.4.0. A session started by 0.1.0 or 0.2.0 has no restart handoff; the update
-replaces the installed binary while that session keeps running its older
-build. End that session and start a new one to use the installed build.
+Live session handoff is available for sessions started by koshi 0.3.0, 0.4.0,
+or 0.5.0-pr.1. A session started by 0.1.0 or 0.2.0 has no restart handoff;
+the update replaces the installed binary while that session keeps running
+its older build. End that session and start a new one to use the installed
+build.
 
 If the terminal still runs an older client, start the installed build and run
 `koshi attach workspace` for a session named `workspace`.
@@ -580,7 +581,7 @@ Tokens are granted only from the machine holding the sessions.
 
 ```text
 koshi version
-koshi 0.4.0
+koshi 0.5.0-pr.1
 ```
 
 These two answers differ while an update rolls out. `koshi update` installs a
@@ -591,8 +592,8 @@ a newer build than the process answering it:
 ```text
 koshi server-version
 kind     session                                       version
-router   -                                             0.4.0
-session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.4.0
+router   -                                             0.5.0-pr.1
+session  session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40  0.5.0-pr.1
 session  session-91c4de07-2b53-41a8-bf6e-70d9a2c81f35  0.3.0
 ```
 

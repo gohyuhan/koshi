@@ -486,10 +486,10 @@ programs running in them and their scrollback. A client from the installed
 build can reattach to that session. A session that refuses the restart is named
 on standard error and keeps the old build.
 
-Sessions started by koshi 0.3.0 or 0.4.0 support this live handoff. An update
-from 0.1.0 or 0.2.0 replaces the installed binary while existing sessions keep
-running their older build. End those sessions and start new ones to use the
-installed build.
+Sessions started by koshi 0.3.0, 0.4.0, or 0.5.0-pr.1 support this live
+handoff. An update from 0.1.0 or 0.2.0 replaces the installed binary while
+existing sessions keep running their older build. End those sessions and start
+new ones to use the installed build.
 
 If the terminal still runs an older client, start the installed build and run
 `koshi attach workspace` to reattach to a session named `workspace`.
