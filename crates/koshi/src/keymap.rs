@@ -54,7 +54,9 @@ pub struct KeymapView {
 /// Load the offline keymap view: read `keybinding.kdl` from the koshi config
 /// directory when it exists, and fold it onto the built-in defaults. An absent
 /// file gives the defaults with no error; any other read failure gives the
-/// defaults with the read error in `keybinding_file_error_message`.
+/// defaults with the read error in `keybinding_file_error_message`. A file
+/// that does not parse gives the defaults with its parse errors, joined by
+/// `; `, in `keybinding_file_error_message`.
 #[must_use]
 pub fn load_keymap_view() -> KeymapView {
     let Some(keybinding_file_path) = koshi_paths::resolve_config_directory()

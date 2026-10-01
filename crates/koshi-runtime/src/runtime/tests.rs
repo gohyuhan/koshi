@@ -66,7 +66,8 @@ pub(crate) fn dispatch_mouse_input_at_time(
 }
 
 /// Runs every action the viewer decided, in order, the way the binary's loop
-/// does. A scroll's follow-up actions join the end of the queue.
+/// does. The actions `note_scroll_applied` returns after a scroll join the end
+/// of the queue.
 pub(crate) fn apply_mouse_actions(
     server: &mut Server,
     viewer: &mut ViewerClient,
@@ -128,7 +129,7 @@ pub(crate) fn apply_mouse_actions(
                 let command_envelope = CommandEnvelope::from_parts(
                     CommandId::new(),
                     CommandSource::from_mouse(client_id),
-                    command,
+                    *command,
                 );
                 let _ = server.submit_command(command_envelope);
             }

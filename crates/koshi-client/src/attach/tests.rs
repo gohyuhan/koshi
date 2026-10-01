@@ -8,14 +8,13 @@
 //! picker that chooses how long the loop may sleep, and what one frame draws:
 //! the mode it moves the viewer to, the hint bar it lists that mode's bindings
 //! in, and what a pass must move before the loop draws again on its own. It also
-//! covers coming back after the session replaces its own process image: which
-//! endpoint file the wait takes and which it reads past, that the join names the
-//! client record this terminal holds, and every way back that fails reporting
-//! the death a broken connection already reports. It also covers a remote
-//! viewer whose link broke: the pause each redial waits, that dialing again
-//! moves what the viewer paints, what the drain of the stretch with no link
-//! keeps and what it drops, and what a viewer that stopped dialing prints and
-//! exits with. It also covers how a typed value reads as a session id or as a
+//! covers coming back after the session replaces its own process image: that
+//! the join names the client record this terminal holds, and every way back
+//! that fails reporting the death a broken connection already reports. It also
+//! covers a remote viewer whose link broke: the pause each redial waits, that
+//! dialing again moves what the viewer paints, what the drain of the stretch
+//! with no link keeps and what it drops, and what a viewer that stopped dialing
+//! prints and exits with. It also covers how a typed value reads as a session id or as a
 //! display name.
 //! These tests also check that an accepted Enter swap updates the shown pane
 //! rectangles without a resize and that placement messages describe both panes
@@ -74,7 +73,9 @@ use super::*;
 use crate::attach::paint::build_render_snapshot;
 use crate::tests::TEST_VIEWPORT_SIZE;
 use crate::{PlacementMode, PlacementModeLifetime};
-use koshi_test_support::fixtures::build_test_runtime_directory;
+use koshi_test_support::fixtures::{
+    build_test_runtime_directory, write_router_endpoint_file, write_session_endpoint_file,
+};
 
 impl<B: Backend> Screen<B> {
     /// A screen that has drawn nothing yet, with no native image output and no
@@ -363,7 +364,7 @@ fn attaching_by_id_skips_the_selector_lookup() {
     let recorded_request_kind_names = build_recording_router(runtime_directory.path());
     let session_id = SessionId::new();
 
-    let attach_error = attach_session(runtime_directory.path(), session_id)
+    let attach_error = attach_session(runtime_directory.path(), None, session_id)
         .expect_err("no endpoint file advertises that session");
 
     let request_kind_names = recorded_request_kind_names
@@ -683,6 +684,34 @@ fn two_lost_links_are_equal_only_when_their_causes_print_the_same_text() {
 }
 
 #[test]
+fn two_refusals_after_a_restart_are_equal_only_when_their_refusals_print_the_same_text() {
+    let build_refusal_after_restart = |detail: &str| {
+        AttachmentEnding::RefusedAfterRestart(Box::new(CliError::IpcUnavailable {
+            detail: detail.to_string(),
+        }))
+    };
+
+    assert_eq!(
+        build_refusal_after_restart("this session holds no such client"),
+        build_refusal_after_restart("this session holds no such client")
+    );
+    assert_ne!(
+        build_refusal_after_restart("this session holds no such client"),
+        build_refusal_after_restart("this session speaks protocol version 9")
+    );
+    assert_ne!(
+        build_refusal_after_restart("this session holds no such client"),
+        AttachmentEnding::Restarting
+    );
+    assert_ne!(
+        build_refusal_after_restart("this session holds no such client"),
+        AttachmentEnding::LinkLost(Box::new(CliError::IpcUnavailable {
+            detail: "this session holds no such client".to_string(),
+        }))
+    );
+}
+
+#[test]
 fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();
@@ -707,6 +736,131 @@ fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
         "the server desk.local:7654 did not admit the connection"
     );
     assert_eq!(client.reconnecting, None);
+}
+
+#[test]
+fn a_restarted_remote_session_that_refuses_this_protocol_version_ends_the_redial_at_once_with_that_refusal(
+) {
+    let mut dial_count = 0_u32;
+    let redial_result = redial_restarted_remote_session_with(
+        || {
+            dial_count += 1;
+            Err(DialError::Refused(CliError::ProtocolVersionRefused {
+                detail: "this session speaks protocol version 9".to_string(),
+            }))
+        },
+        Instant::now() + RESTART_WINDOW_DURATION,
+    );
+
+    assert_eq!(
+        redial_result.map(|joined| joined.client_id),
+        Err(AttachmentEnding::RefusedAfterRestart(Box::new(
+            CliError::ProtocolVersionRefused {
+                detail: "this session speaks protocol version 9".to_string(),
+            }
+        )))
+    );
+    assert_eq!(dial_count, 1);
+}
+
+#[test]
+fn a_restarted_remote_session_that_refuses_for_another_reason_is_dialed_again() {
+    let mut dial_count = 0_u32;
+    let redial_result = redial_restarted_remote_session_with(
+        || {
+            dial_count += 1;
+            if dial_count == 1 {
+                return Err(DialError::Refused(CliError::IpcUnavailable {
+                    detail: "session 7 is running but did not answer: it is restarting".to_string(),
+                }));
+            }
+            Err(DialError::Refused(CliError::ProtocolVersionRefused {
+                detail: "this session speaks protocol version 9".to_string(),
+            }))
+        },
+        Instant::now() + RESTART_WINDOW_DURATION,
+    );
+
+    assert_eq!(
+        redial_result.map(|joined| joined.client_id),
+        Err(AttachmentEnding::RefusedAfterRestart(Box::new(
+            CliError::ProtocolVersionRefused {
+                detail: "this session speaks protocol version 9".to_string(),
+            }
+        )))
+    );
+    assert_eq!(dial_count, 2);
+}
+
+#[test]
+fn a_restarted_remote_session_still_refusing_past_the_deadline_ends_with_that_refusal() {
+    let mut dial_count = 0_u32;
+    let redial_result = redial_restarted_remote_session_with(
+        || {
+            dial_count += 1;
+            Err(DialError::Refused(CliError::IpcUnavailable {
+                detail: "session 7 is running but did not answer: it is restarting".to_string(),
+            }))
+        },
+        Instant::now(),
+    );
+
+    assert_eq!(
+        redial_result.map(|joined| joined.client_id),
+        Err(AttachmentEnding::RefusedAfterRestart(Box::new(
+            CliError::IpcUnavailable {
+                detail: "session 7 is running but did not answer: it is restarting".to_string(),
+            }
+        )))
+    );
+    assert_eq!(dial_count, 1);
+}
+
+#[test]
+fn a_restarted_remote_session_refused_first_and_unreachable_past_the_deadline_ends_as_restarting() {
+    let restart_deadline = Instant::now() + Duration::from_secs(2);
+    let mut dial_count = 0_u32;
+    let redial_result = redial_restarted_remote_session_with(
+        || {
+            dial_count += 1;
+            if dial_count == 1 {
+                return Err(DialError::Refused(CliError::IpcUnavailable {
+                    detail: "session 7 is running but did not answer: it is restarting".to_string(),
+                }));
+            }
+            thread::sleep(restart_deadline.saturating_duration_since(Instant::now()));
+            Err(DialError::Unreachable(CliError::IpcUnavailable {
+                detail: "connection refused".to_string(),
+            }))
+        },
+        restart_deadline,
+    );
+
+    assert_eq!(
+        redial_result.map(|joined| joined.client_id),
+        Err(AttachmentEnding::Restarting)
+    );
+    assert_eq!(dial_count, 2);
+}
+
+#[test]
+fn a_restarted_remote_session_still_unreachable_past_the_deadline_ends_the_redial() {
+    let mut dial_count = 0_u32;
+    let redial_result = redial_restarted_remote_session_with(
+        || {
+            dial_count += 1;
+            Err(DialError::Unreachable(CliError::IpcUnavailable {
+                detail: "connection refused".to_string(),
+            }))
+        },
+        Instant::now(),
+    );
+
+    assert_eq!(
+        redial_result.map(|joined| joined.client_id),
+        Err(AttachmentEnding::Restarting)
+    );
+    assert_eq!(dial_count, 1);
 }
 
 #[test]
@@ -757,140 +911,12 @@ fn the_restarting_frame_ends_the_stream_to_come_back_on_the_new_socket() {
     );
 }
 
-/// Advertise `session_id` at `connection_token` and `process_id`, the way a session server does
-/// every time it binds, and hand back what was written.
-fn write_advertised_endpoint(
-    runtime_directory: &Path,
-    session_id: SessionId,
-    connection_token: &str,
-    process_id: u32,
-) -> EndpointFile {
-    let advertised_endpoint = EndpointFile {
-        socket_address: compute_socket_address(runtime_directory, session_id),
-        connection_token: ConnectionToken::from_secret(connection_token),
-        process_id,
-    };
-    advertised_endpoint
-        .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-            runtime_directory,
-            session_id,
-        ))
-        .expect("write the session endpoint file");
-    advertised_endpoint
-}
-
 /// The token a test's client attached under, which the wait watches for a
 /// change.
 const OLD_CONNECTION_TOKEN: &str = "the token this client attached under";
 
 /// The token the image replacing the session mints when it binds again.
 const NEW_CONNECTION_TOKEN: &str = "the token the new image minted";
-
-#[test]
-fn the_wait_takes_the_endpoint_file_the_moment_it_names_another_token() {
-    let runtime_directory = build_test_runtime_directory();
-    let session_id = SessionId::new();
-    let advertised_endpoint = write_advertised_endpoint(
-        runtime_directory.path(),
-        session_id,
-        NEW_CONNECTION_TOKEN,
-        4321,
-    );
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    assert_eq!(
-        wait_for_new_endpoint(
-            runtime_directory.path(),
-            session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-            deadline,
-        ),
-        Some(advertised_endpoint)
-    );
-    assert!(
-        Instant::now() < deadline,
-        "the wait returned before its deadline"
-    );
-}
-
-#[test]
-fn the_wait_reads_the_endpoint_file_again_until_the_token_changes() {
-    let runtime_directory = build_test_runtime_directory();
-    let session_id = SessionId::new();
-    write_advertised_endpoint(
-        runtime_directory.path(),
-        session_id,
-        OLD_CONNECTION_TOKEN,
-        4321,
-    );
-
-    let runtime_directory_path = runtime_directory.path().to_path_buf();
-    let endpoint_writer_thread = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        write_advertised_endpoint(
-            &runtime_directory_path,
-            session_id,
-            NEW_CONNECTION_TOKEN,
-            4321,
-        )
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let new_endpoint = wait_for_new_endpoint(
-        runtime_directory.path(),
-        session_id,
-        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        deadline,
-    );
-    let advertised_endpoint = endpoint_writer_thread
-        .join()
-        .expect("the writing thread finished");
-    assert_eq!(new_endpoint, Some(advertised_endpoint));
-    assert!(
-        Instant::now() < deadline,
-        "the wait returned before its deadline"
-    );
-}
-
-#[test]
-fn the_wait_ignores_an_endpoint_file_still_naming_the_token_this_client_attached_under() {
-    let runtime_directory = build_test_runtime_directory();
-    let session_id = SessionId::new();
-    // A different process id under the same token. The wait compares the token
-    // alone.
-    write_advertised_endpoint(
-        runtime_directory.path(),
-        session_id,
-        OLD_CONNECTION_TOKEN,
-        9999,
-    );
-
-    assert_eq!(
-        wait_for_new_endpoint(
-            runtime_directory.path(),
-            session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-            Instant::now(),
-        ),
-        None
-    );
-}
-
-#[test]
-fn the_wait_ends_at_its_deadline_when_the_session_advertises_nothing() {
-    let runtime_directory = build_test_runtime_directory();
-    // No endpoint file at all, which is what the swap leaves while the
-    // session's socket is down.
-    assert_eq!(
-        wait_for_new_endpoint(
-            runtime_directory.path(),
-            SessionId::new(),
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-            Instant::now(),
-        ),
-        None
-    );
-}
 
 /// Build an Attach answer naming `client_id` and `session_id`, echoing
 /// `pane_area`.
@@ -933,7 +959,7 @@ fn spawn_restarted_session(
 ) -> Arc<Mutex<Option<IpcRequestKind>>> {
     let socket_address = compute_socket_address(runtime_directory, session_id);
     let listener = Listener::bind(&socket_address).expect("bind the stand-in session");
-    write_advertised_endpoint(
+    write_session_endpoint_file(
         runtime_directory,
         session_id,
         NEW_CONNECTION_TOKEN,
@@ -1111,7 +1137,7 @@ fn attach_advertises_the_selected_native_protocol() {
 }
 
 #[test]
-fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
+fn a_restarted_session_that_refuses_the_join_ends_with_that_refusal() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
@@ -1132,7 +1158,97 @@ fn a_restarted_session_that_refuses_the_join_leaves_nothing_to_come_back_to() {
     );
     assert_eq!(
         rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        Err(AttachmentEnding::RefusedAfterRestart(Box::new(
+            CliError::IpcUnavailable {
+                detail: "this session holds no such client".to_string(),
+            }
+        )))
+    );
+}
+
+#[test]
+fn a_restarted_session_that_closes_before_answering_the_join_ends_as_restarting() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let listener = Listener::bind(&compute_socket_address(
+        runtime_directory.path(),
+        session_id,
+    ))
+    .expect("bind the stand-in session");
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        std::process::id(),
+    );
+    let stand_in_session_thread = thread::spawn(move || {
+        let mut connection = listener.accept().expect("the client connects");
+        let _hello_request: IpcRequest = connection.recv().expect("the client writes its Hello");
+    });
+
+    let rejoin_result = rejoin_session(
+        runtime_directory.path(),
+        session_id,
+        ClientId::new(),
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        terminal::GraphicsSupport::Unsupported,
+        None,
+    );
+    stand_in_session_thread
+        .join()
+        .expect("the stand-in session read the Hello and closed");
+
+    assert_eq!(
+        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
         Err(AttachmentEnding::Restarting)
+    );
+}
+
+#[test]
+fn a_restarted_session_whose_new_socket_takes_no_connection_ends_as_restarting() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        std::process::id(),
+    );
+
+    let rejoin_result = rejoin_session(
+        runtime_directory.path(),
+        session_id,
+        ClientId::new(),
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        terminal::GraphicsSupport::Unsupported,
+        None,
+    );
+
+    assert_eq!(
+        rejoin_result.map(|(_, rejoined_endpoint, _)| rejoined_endpoint),
+        Err(AttachmentEnding::Restarting)
+    );
+}
+
+#[test]
+fn a_viewer_whose_restarted_session_refuses_the_join_ends_with_that_refusal() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let _recorded_attach_request = spawn_restarted_session(
+        runtime_directory.path(),
+        session_id,
+        None,
+        Err("this session holds no such client"),
+    );
+
+    let (attachment_ending, _client) =
+        run_local_attachment_through_restart(runtime_directory.path(), session_id, ClientId::new());
+
+    assert_eq!(
+        attachment_ending,
+        AttachmentEnding::RefusedAfterRestart(Box::new(CliError::IpcUnavailable {
+            detail: "this session holds no such client".to_string(),
+        }))
     );
 }
 
@@ -1239,9 +1355,31 @@ fn a_restart_this_client_cannot_come_back_from_reports_the_restart_and_the_attac
     assert_eq!(
         ending_error.to_string(),
         format!(
-            "the session restarted into another koshi build and this client could not \
-             reconnect to it\n  \
+            "the session restarted and this client could not reconnect to it\n  \
              run `koshi list-sessions`; if session {session_id} is still listed, \
+             reattach with `koshi attach {session_id}`"
+        )
+    );
+    assert_eq!(CliExitCode::from(&ending_error), CliExitCode::RuntimeAction);
+}
+
+#[test]
+fn a_restart_whose_new_image_refuses_this_client_reports_the_refusal_and_the_attach_command() {
+    let session_id = SessionId::new();
+    let ending_error = report_attachment_ending(
+        &build_local_home(),
+        AttachmentEnding::RefusedAfterRestart(Box::new(CliError::IpcUnavailable {
+            detail: "this session holds no such client".to_string(),
+        })),
+        session_id,
+        None,
+    )
+    .expect_err("a refused restart is an error");
+    assert_eq!(
+        ending_error.to_string(),
+        format!(
+            "the session restarted and refused this client: IPC unavailable: this session holds \
+             no such client\n  run `koshi list-sessions`; if session {session_id} is still listed, \
              reattach with `koshi attach {session_id}`"
         )
     );
@@ -1392,68 +1530,12 @@ fn run_local_attachment_through_restart(
     (attachment_ending, client)
 }
 
-/// Advertise a router in `runtime_directory` under `connection_token`, the way a
-/// router does each time it starts.
-fn write_router_endpoint(runtime_directory: &Path, connection_token: &str) {
-    EndpointFile {
-        socket_address: compute_router_socket_address(runtime_directory),
-        connection_token: ConnectionToken::from_secret(connection_token),
-        process_id: 5000,
-    }
-    .write_to_path(&resolve_router_endpoint_path(runtime_directory))
-    .expect("write the router endpoint file");
-}
-
-#[test]
-fn the_router_wait_ends_on_a_router_advertising_another_token() {
-    let runtime_directory = build_test_runtime_directory();
-    write_router_endpoint(runtime_directory.path(), NEW_CONNECTION_TOKEN);
-
-    assert!(wait_for_router_restart(
-        &resolve_router_endpoint_path(runtime_directory.path()),
-        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        Instant::now(),
-    ));
-}
-
-#[test]
-fn the_router_wait_ends_on_a_router_file_this_build_cannot_read() {
-    let runtime_directory = build_test_runtime_directory();
-    let router_endpoint_path = resolve_router_endpoint_path(runtime_directory.path());
-    std::fs::write(&router_endpoint_path, b"{\"router_socket\": 7}")
-        .expect("write a router file of another build");
-
-    assert!(wait_for_router_restart(
-        &router_endpoint_path,
-        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        Instant::now(),
-    ));
-}
-
-#[test]
-fn the_router_wait_gives_up_at_the_deadline_on_the_same_token_or_no_file() {
-    let runtime_directory = build_test_runtime_directory();
-    let router_endpoint_path = resolve_router_endpoint_path(runtime_directory.path());
-
-    assert!(!wait_for_router_restart(
-        &router_endpoint_path,
-        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        Instant::now(),
-    ));
-    write_router_endpoint(runtime_directory.path(), OLD_CONNECTION_TOKEN);
-    assert!(!wait_for_router_restart(
-        &router_endpoint_path,
-        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-        Instant::now(),
-    ));
-}
-
 #[test]
 fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts() {
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
-    write_router_endpoint(runtime_directory.path(), OLD_CONNECTION_TOKEN);
+    write_router_endpoint_file(runtime_directory.path(), OLD_CONNECTION_TOKEN);
     let _recorded_attach_request = spawn_restarted_session(
         runtime_directory.path(),
         session_id,
@@ -1464,7 +1546,7 @@ fn a_restart_into_an_incompatible_build_returns_only_after_the_router_restarts()
     let router_restart = thread::spawn(move || {
         thread::sleep(Duration::from_millis(200));
         let router_restarted_at = Instant::now();
-        write_router_endpoint(&router_runtime_directory, NEW_CONNECTION_TOKEN);
+        write_router_endpoint_file(&router_runtime_directory, NEW_CONNECTION_TOKEN);
         router_restarted_at
     });
 
@@ -1771,7 +1853,7 @@ fn build_mouse_release(screen_point: Point) -> MouseInput {
 
 /// One highlight change for `pane_id`, ending at line `row_index`.
 fn build_selection_action(pane_id: PaneId, row_index: u64) -> MouseAction {
-    MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+    MouseAction::Command(Box::new(Command::Visual(VisualCommand::SetSelection(
         SetSelectionArgs {
             pane_id,
             selection: Selection {
@@ -1786,7 +1868,7 @@ fn build_selection_action(pane_id: PaneId, row_index: u64) -> MouseAction {
                 },
             },
         },
-    )))
+    ))))
 }
 
 /// One press handed to `pane_id`'s program, at `column_index`.
@@ -1954,6 +2036,53 @@ fn two_highlight_changes_for_one_pane_keep_the_newer() {
             build_selection_action(pane_id, 40)
         ]),
         vec![build_selection_action(pane_id, 40)]
+    );
+}
+
+#[test]
+fn two_highlight_changes_for_two_panes_stay_two_actions() {
+    let first_pane_id = PaneId::new();
+    let second_pane_id = PaneId::new();
+    let selection_actions = vec![
+        build_selection_action(first_pane_id, 12),
+        build_selection_action(second_pane_id, 40),
+    ];
+
+    assert_eq!(
+        coalesce_mouse_actions(selection_actions.clone()),
+        selection_actions
+    );
+}
+
+#[test]
+fn a_highlight_change_after_a_clear_for_one_pane_stays_a_second_action() {
+    let pane_id = PaneId::new();
+    let selection_actions = vec![
+        MouseAction::Command(Box::new(Command::Visual(VisualCommand::ClearSelection(
+            ClearSelectionArgs { pane_id },
+        )))),
+        build_selection_action(pane_id, 40),
+    ];
+
+    assert_eq!(
+        coalesce_mouse_actions(selection_actions.clone()),
+        selection_actions
+    );
+}
+
+#[test]
+fn a_clear_after_a_highlight_change_for_one_pane_stays_a_second_action() {
+    let pane_id = PaneId::new();
+    let selection_actions = vec![
+        build_selection_action(pane_id, 40),
+        MouseAction::Command(Box::new(Command::Visual(VisualCommand::ClearSelection(
+            ClearSelectionArgs { pane_id },
+        )))),
+    ];
+
+    assert_eq!(
+        coalesce_mouse_actions(selection_actions.clone()),
+        selection_actions
     );
 }
 
@@ -2634,7 +2763,7 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
             },
         ]
         .map(
-            |cursor| MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+            |cursor| MouseAction::Command(Box::new(Command::Visual(VisualCommand::SetSelection(
                 SetSelectionArgs {
                     pane_id,
                     selection: Selection {
@@ -2646,7 +2775,7 @@ fn a_run_of_drag_moves_in_one_pass_leaves_as_the_newest_highlight() {
                         cursor,
                     },
                 }
-            )))
+            ))))
         )
         .to_vec(),
         "one whole highlight per move, none written yet"
@@ -3515,7 +3644,7 @@ fn a_border_move_the_session_refused_stops_coming_off_the_next_one() {
     let mut pending_mouse_actions = Vec::new();
 
     // Round 7 asked for three cells and the session took none: the border is
-    // against a wall. The anchor stays put and the sent move is forgotten, so the
+    // against a wall. The anchor stays put and the sent move is forgotten: the
     // pointer's next move asks for its whole distance again.
     apply_mouse_answers(
         &mut client,
@@ -3576,8 +3705,8 @@ fn a_key_the_keymap_does_not_bind_goes_up_the_connection_whole() {
         },
     );
 
-    // The sentinel goes out behind the key, so a key that was never sent reads
-    // back as the sentinel instead of leaving this test waiting.
+    // The sentinel goes out behind the key. A key that was never sent reads
+    // back as the sentinel.
     control_socket
         .uplink
         .send_request(IpcRequestKind::Discovery);
@@ -3612,8 +3741,8 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
     let mut client = build_test_client();
     let client_id = client.get_client_id();
     let mut control_socket = build_test_control_socket();
-    // `<C-p>` is the default pane prefix: it binds nothing on its own, so it
-    // opens a sequence and holds the keyboard.
+    // `<C-p>` is the default pane prefix: it binds nothing on its own, opens a
+    // sequence, and holds the keyboard.
     let sequence_opener_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
 
     process_runtime_input(
@@ -3649,8 +3778,8 @@ fn a_key_release_goes_up_the_connection_and_leaves_an_open_sequence_open() {
         "the release advanced no sequence"
     );
 
-    // The opener was held, so the release is the first thing this connection
-    // carries. The sentinel behind it keeps a missing release from waiting.
+    // The opener was held: the release is the first thing this connection
+    // carries. The sentinel goes out behind it.
     control_socket
         .uplink
         .send_request(IpcRequestKind::Discovery);
@@ -3757,7 +3886,7 @@ fn a_text_only_event_goes_up_the_connection_whole() {
 #[test]
 fn a_key_release_leaves_this_viewers_selection_gesture_running() {
     // The press that typed into the pane already ended the gesture. A release
-    // arriving after a fresh press must not end the next one.
+    // arriving after a fresh press leaves the next gesture running.
     let pane_id = PaneId::new();
     let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
     let mut client = build_test_client();
@@ -3796,7 +3925,7 @@ fn a_key_release_leaves_this_viewers_selection_gesture_running() {
         pending_mouse_actions
             .last()
             .expect("the drag extended the gesture"),
-        &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+        &MouseAction::Command(Box::new(Command::Visual(VisualCommand::SetSelection(
             SetSelectionArgs {
                 pane_id,
                 selection: Selection {
@@ -3811,13 +3940,13 @@ fn a_key_release_leaves_this_viewers_selection_gesture_running() {
                     },
                 },
             }
-        )))
+        ))))
     );
 }
 
 #[test]
 fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
-    // The key is the program's, so the highlight gesture over it is over. The
+    // The key goes to the program, and the highlight gesture over it ends. The
     // highlight it already made stands; only the drag ends.
     let pane_id = PaneId::new();
     let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
@@ -3842,7 +3971,7 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
         pending_mouse_actions
             .last()
             .expect("the drag decided something"),
-        &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+        &MouseAction::Command(Box::new(Command::Visual(VisualCommand::SetSelection(
             SetSelectionArgs {
                 pane_id,
                 selection: Selection {
@@ -3857,7 +3986,7 @@ fn a_key_the_pane_gets_ends_this_viewers_selection_gesture() {
                     },
                 },
             }
-        )))
+        ))))
     );
 
     process_runtime_input(
@@ -3917,8 +4046,8 @@ fn a_terminal_resize_moves_the_viewers_own_size_and_tells_the_session() {
         resized_viewport_size,
         "the viewer's own copy moved"
     );
-    // The sentinel goes out behind the report, so a report that was never sent
-    // reads back as the sentinel instead of leaving this test waiting.
+    // The sentinel goes out behind the report. A report that was never sent
+    // reads back as the sentinel.
     control_socket
         .uplink
         .send_request(IpcRequestKind::Discovery);
@@ -3991,8 +4120,8 @@ fn a_paste_goes_up_the_connection_as_the_text_the_terminal_delivered() {
         },
     );
 
-    // The sentinel goes out behind the paste, so a paste that was never sent
-    // reads back as the sentinel instead of leaving this test waiting.
+    // The sentinel goes out behind the paste. A paste that was never sent
+    // reads back as the sentinel.
     control_socket
         .uplink
         .send_request(IpcRequestKind::Discovery);
@@ -4030,9 +4159,8 @@ fn a_paste_too_big_for_one_frame_is_the_only_thing_lost() {
         .uplink
         .send_request(IpcRequestKind::Discovery);
 
-    // The read runs on its own thread: a writer that ended on the paste writes
-    // nothing more, and this reports that as a failure instead of waiting for a
-    // frame that never comes.
+    // The read runs on its own thread, and a read that gets no frame within the
+    // wait fails the test.
     let (read_result_sender, read_result_receiver) = mpsc::channel();
     let mut session_connection = control_socket.session_connection;
     thread::spawn(move || {
@@ -4062,7 +4190,7 @@ fn a_paste_ends_this_viewers_selection_gesture() {
     let mut control_socket = build_test_control_socket();
     let mut pending_mouse_actions = Vec::new();
 
-    // Press and drag: the gesture is under way, so the move names a highlight.
+    // Press and drag: the gesture is under way, and the move names a highlight.
     handle_mouse_event(
         &mut client,
         &mouse_frame,
@@ -4079,7 +4207,7 @@ fn a_paste_ends_this_viewers_selection_gesture() {
         pending_mouse_actions
             .last()
             .expect("the drag decided something"),
-        &MouseAction::Command(Command::Visual(VisualCommand::SetSelection(
+        &MouseAction::Command(Box::new(Command::Visual(VisualCommand::SetSelection(
             SetSelectionArgs {
                 pane_id,
                 selection: Selection {
@@ -4094,7 +4222,7 @@ fn a_paste_ends_this_viewers_selection_gesture() {
                     },
                 },
             }
-        )))
+        ))))
     );
 
     process_runtime_input(
@@ -4563,9 +4691,9 @@ fn a_failed_paint_keeps_the_visible_frame_and_viewer_state_paired() {
 /// Draw a Normal-mode frame focused on a new pane, open pane placement mode
 /// for that pane until Esc, and draw the placement view. Returns the drawn
 /// frame and the source pane.
-fn draw_pane_placement_mode<TerminalBackend: Backend>(
+fn draw_pane_placement_mode<B: Backend>(
     client: &mut Client,
-    screen: &mut Screen<TerminalBackend>,
+    screen: &mut Screen<B>,
 ) -> (PaintedFrame, PaneId) {
     let source_pane_id = PaneId::new();
     let mut painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
@@ -6151,9 +6279,9 @@ fn a_frame_moves_the_viewer_to_the_mode_it_reports() {
 
 #[test]
 fn a_prefix_key_typed_after_a_frame_in_one_pass_still_draws_its_breadcrumb() {
-    // One drained batch can carry a frame and a keypress together. The frame is
-    // drawn first, and the key opens a sequence after it, so the end of the pass
-    // has to draw again.
+    // One drained batch carries a frame and a keypress together. The frame is
+    // drawn first, the key opens a sequence after it, and the end of the pass
+    // draws again.
     let mut client = build_test_client();
     let mut screen = build_test_screen();
     let painted_frame = build_test_painted_frame_with_lock_mode(LockMode::Normal);
@@ -6875,7 +7003,7 @@ fn the_redial_wait_doubles_to_eight_seconds_and_holds_there() {
 
 #[test]
 fn a_pause_ending_on_or_past_the_window_is_not_taken() {
-    // The first pause always fits, so the ladder always dials at least once.
+    // The first pause always fits: the ladder dials at least once.
     assert!(can_redial_pause_fit(
         Duration::ZERO,
         FIRST_REDIAL_WAIT_DURATION
@@ -6928,58 +7056,6 @@ fn a_pass_that_moves_nothing_leaves_what_the_viewer_paints_alone() {
     assert_eq!(
         ViewerPaint::from_client(&client, active_tab_id, &render_snapshot),
         ViewerPaint::from_client(&client, active_tab_id, &render_snapshot)
-    );
-}
-
-#[test]
-fn a_deadline_already_past_still_takes_a_session_that_is_already_back() {
-    // The wait reads the endpoint file once before it checks the deadline. A
-    // session that came back before a deadline already past is still joined.
-    let runtime_directory = build_test_runtime_directory();
-    let session_id = SessionId::new();
-    let advertised_endpoint = write_advertised_endpoint(
-        runtime_directory.path(),
-        session_id,
-        NEW_CONNECTION_TOKEN,
-        4321,
-    );
-
-    assert_eq!(
-        wait_for_new_endpoint(
-            runtime_directory.path(),
-            session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-            Instant::now() - Duration::from_secs(1),
-        ),
-        Some(advertised_endpoint)
-    );
-}
-
-#[test]
-fn the_wait_reads_past_an_endpoint_file_that_is_not_a_file_this_build_reads() {
-    // An endpoint file holding bytes no build reads is passed over, and the
-    // wait keeps reading until its deadline.
-    let runtime_directory = build_test_runtime_directory();
-    let session_id = SessionId::new();
-    std::fs::write(
-        EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
-        b"{",
-    )
-    .expect("write a half endpoint file");
-
-    let deadline = Instant::now() + Duration::from_millis(200);
-    assert_eq!(
-        wait_for_new_endpoint(
-            runtime_directory.path(),
-            session_id,
-            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
-            deadline,
-        ),
-        None
-    );
-    assert!(
-        Instant::now() >= deadline,
-        "the wait sat out its whole window rather than giving up on the first read"
     );
 }
 
@@ -7075,20 +7151,6 @@ fn a_session_id_reads_as_an_id_and_every_other_value_as_a_display_name() {
         build_session_selector("session-not-a-uuid"),
         SessionSelector::SessionName(String::from("session-not-a-uuid")),
         "the `session-` prefix alone does not make a value an id"
-    );
-}
-
-#[test]
-fn a_selector_reads_in_a_message_as_its_id_or_its_display_name() {
-    let session_id = SessionId::new();
-
-    assert_eq!(
-        format_session_selector_name(&SessionSelector::SessionId(session_id)),
-        session_id.to_string()
-    );
-    assert_eq!(
-        format_session_selector_name(&SessionSelector::SessionName(String::from("quiet-lake"))),
-        "quiet-lake"
     );
 }
 

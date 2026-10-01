@@ -21,6 +21,8 @@
 //!   machine advertises to describe itself and turns the answers into listing
 //!   rows. [`in_session`] answers whether this program is running inside a
 //!   pane, from the `KOSHI_*` variables the pane's shell was given.
+//!   [`server_build`] reads which koshi a server runs from the program file
+//!   it wrote, and names what to do when that server refuses this build.
 //!
 //! [`error`] is the failure both halves report, and the one a koshi program
 //! turns into an exit code. On Unix, `process` replaces the running koshi
@@ -35,4 +37,5 @@ pub mod ipc_client;
 pub mod process;
 pub mod remote_client;
 pub mod router_client;
+pub mod server_build;
 pub mod talk;

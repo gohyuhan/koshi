@@ -393,7 +393,7 @@ fn the_ignore_setting_leaves_a_plain_pane_alone() {
     let pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
     let mut client = build_test_client_with_mouse_config(PartialMouseConfig {
-        wheel: Some(WheelScroll::Ignore),
+        wheel_scroll: Some(WheelScroll::Ignore),
         ..PartialMouseConfig::default()
     });
 
@@ -985,9 +985,10 @@ fn find_set_selection_action(mouse_actions: &[MouseAction]) -> Option<SetSelecti
     mouse_actions
         .iter()
         .find_map(|mouse_action| match mouse_action {
-            MouseAction::Command(Command::Visual(VisualCommand::SetSelection(command_args))) => {
-                Some(*command_args)
-            }
+            MouseAction::Command(command) => match command.as_ref() {
+                Command::Visual(VisualCommand::SetSelection(command_args)) => Some(*command_args),
+                _ => None,
+            },
             _ => None,
         })
 }
@@ -997,9 +998,10 @@ fn find_copy_action(mouse_actions: &[MouseAction]) -> Option<CopyArgs> {
     mouse_actions
         .iter()
         .find_map(|mouse_action| match mouse_action {
-            MouseAction::Command(Command::Visual(VisualCommand::Copy(command_args))) => {
-                Some(*command_args)
-            }
+            MouseAction::Command(command) => match command.as_ref() {
+                Command::Visual(VisualCommand::Copy(command_args)) => Some(*command_args),
+                _ => None,
+            },
             _ => None,
         })
 }
@@ -2193,10 +2195,12 @@ fn a_press_on_an_unfocused_pane_only_focuses_it() {
 
     assert_eq!(
         mouse_actions,
-        vec![MouseAction::Command(Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Pane(other_pane_id),
-            client_id: Some(client.get_client_id()),
-        }))],
+        vec![MouseAction::Command(Box::new(Command::FocusPane(
+            FocusPaneArgs {
+                focus_target: FocusTarget::Pane(other_pane_id),
+                client_id: Some(client.get_client_id()),
+            }
+        )))],
         "the first click focuses and nothing else"
     );
 }
@@ -2378,9 +2382,9 @@ fn mouse_select_mode_takes_a_drag_back_from_a_mouse_aware_program() {
     );
     assert_eq!(
         mouse_actions,
-        vec![MouseAction::Command(Command::Visual(
+        vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::ClearSelection(ClearSelectionArgs { pane_id })
-        ))],
+        )))],
         "the press drops the old highlight and arms a drag"
     );
 }
@@ -2406,9 +2410,9 @@ fn shift_drag_selects_text_from_a_mouse_aware_program() {
     );
     assert_eq!(
         client.handle_mouse(shifted_press, &mouse_frame, current_time),
-        vec![MouseAction::Command(Command::Visual(
+        vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::ClearSelection(ClearSelectionArgs { pane_id })
-        ))],
+        )))],
         "Shift makes the press start Koshi selection"
     );
 
@@ -2423,7 +2427,7 @@ fn shift_drag_selects_text_from_a_mouse_aware_program() {
             &mouse_frame,
             advance_time_by_seconds(current_time, 1)
         ),
-        vec![MouseAction::Command(Command::Visual(
+        vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::SetSelection(SetSelectionArgs {
                 pane_id,
                 selection: Selection {
@@ -2438,7 +2442,7 @@ fn shift_drag_selects_text_from_a_mouse_aware_program() {
                     },
                 },
             })
-        ))],
+        )))],
         "the drag extends the selection instead of reaching the program"
     );
 }

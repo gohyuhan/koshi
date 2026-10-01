@@ -20,10 +20,10 @@
 //! layer sets it; per-element merge is done by the keymap-merge pass, which
 //! knows the element identity to merge on.
 //!
-//! The schema `version` is not layerable: it is a property of the defaults and
-//! of migration, not a per-file override, so it has no partial field here.
+//! The schema `version` has no partial field here: no layer overrides it.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use koshi_core::geometry::Direction;
@@ -200,7 +200,7 @@ pub struct PartialKoshiConfig {
     /// Remote listen address override. The outer `Option` is whether this
     /// layer sets the field; the inner `Option` is the value (`None` = no
     /// address, so nothing binds).
-    pub remote_listen: Option<Option<String>>,
+    pub remote_listen_address: Option<Option<SocketAddr>>,
     /// Shared sessions directory override. The outer `Option` is whether this
     /// layer sets the field; the inner `Option` is the value (`None` = the
     /// platform's machine-wide directory).
@@ -233,7 +233,10 @@ impl PartialKoshiConfig {
             &mut server_config.should_allow_other_users,
             self.should_allow_other_users,
         );
-        merge_override_field(&mut server_config.remote_listen, self.remote_listen);
+        merge_override_field(
+            &mut server_config.remote_listen_address,
+            self.remote_listen_address,
+        );
         merge_override_field(
             &mut server_config.shared_sessions_directory,
             self.shared_sessions_directory,
@@ -289,9 +292,9 @@ impl PartialKoshiConfig {
         );
     }
 
-    /// The effective logging settings from this layer over the built-in
-    /// defaults. Startup resolves logging on its own, before the full config
-    /// merge, so tracing can decide whether — and how — to open the log file.
+    /// The effective logging settings: this layer's `logging` section over
+    /// [`LoggingConfig::default`]. Startup calls this before the full config
+    /// merge.
     #[must_use]
     pub fn get_logging_config(&self) -> LoggingConfig {
         let mut logging_config = LoggingConfig::default();
@@ -457,7 +460,7 @@ pub struct PartialMouseConfig {
     /// Lines scrolled per mouse wheel notch.
     pub scroll_line_count: Option<u16>,
     /// What the wheel does over a plain pane.
-    pub wheel: Option<WheelScroll>,
+    pub wheel_scroll: Option<WheelScroll>,
 }
 
 impl PartialMouseConfig {
@@ -467,7 +470,7 @@ impl PartialMouseConfig {
             self.can_resize_pane_border,
         );
         merge_override_field(&mut mouse_config.scroll_line_count, self.scroll_line_count);
-        merge_override_field(&mut mouse_config.wheel, self.wheel);
+        merge_override_field(&mut mouse_config.wheel_scroll, self.wheel_scroll);
     }
 }
 
@@ -588,7 +591,7 @@ pub struct PartialLoggingConfig {
     /// Whether koshi writes a log file.
     pub is_enabled: Option<bool>,
     /// The lowest severity written to the log file.
-    pub level: Option<LogLevel>,
+    pub log_level: Option<LogLevel>,
     /// How each written log line is rendered.
     pub log_format: Option<LogFormat>,
 }
@@ -596,7 +599,7 @@ pub struct PartialLoggingConfig {
 impl PartialLoggingConfig {
     fn apply_to_logging_config(self, logging_config: &mut LoggingConfig) {
         merge_override_field(&mut logging_config.is_enabled, self.is_enabled);
-        merge_override_field(&mut logging_config.level, self.level);
+        merge_override_field(&mut logging_config.log_level, self.log_level);
         merge_override_field(&mut logging_config.log_format, self.log_format);
     }
 }

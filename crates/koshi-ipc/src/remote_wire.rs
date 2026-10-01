@@ -20,7 +20,10 @@
 //! server's own answer frames, carried through unparsed.
 //!
 //! Every refusal carries the same sentence,
-//! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED).
+//! [`REMOTE_REFUSED`](crate::remote_wire::REMOTE_REFUSED), but two: a remote
+//! protocol range that does not overlap, and an attach that arrives while the
+//! router is about to restart into a new build, which carries
+//! [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE).
 
 use std::time::{Duration, Instant};
 
@@ -56,12 +59,15 @@ pub const REMOTE_HELLO_MAX_BYTE_COUNT: u32 = 4096;
 /// no grant for all read the same.
 ///
 /// A remote protocol range that does not overlap carries
-/// [`format_version_refusal`] instead.
+/// [`format_version_refusal`] instead, and an attach that arrives while the
+/// router is about to restart carries
+/// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE).
 pub const REMOTE_REFUSED: &str = "this server did not admit the connection";
 
 /// The refusal a caller gets when no remote protocol version suits both ends,
-/// naming both ranges and which end is which. The one refusal that is not
-/// [`REMOTE_REFUSED`].
+/// naming both ranges and which end is which. One of the two refusals that
+/// are not [`REMOTE_REFUSED`]; the other is
+/// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE).
 ///
 /// Example — a caller speaking 2 to 3 against a build speaking 1 to 1 reads
 /// `"the caller speaks remote protocol versions 2 to 3, this koshi speaks 1 to
@@ -130,8 +136,10 @@ pub enum RemoteServerFrame {
     },
     /// The stream is not open, or the frame is not served.
     Refused {
-        /// [`REMOTE_REFUSED`], or the sentence [`format_version_refusal`] builds
-        /// when no remote protocol version suits both ends.
+        /// [`REMOTE_REFUSED`]; the sentence [`format_version_refusal`] builds
+        /// when no remote protocol version suits both ends; or
+        /// [`ROUTER_RESTARTING_MESSAGE`](crate::router::ROUTER_RESTARTING_MESSAGE)
+        /// for an attach that arrives while the router is about to restart.
         message: String,
     },
     /// Answers [`RemoteClientFrame::List`]: one row per session this secret

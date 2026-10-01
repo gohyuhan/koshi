@@ -849,7 +849,8 @@ impl TerminalEngine {
         (reply_bytes, shell_integration_facts)
     }
 
-    /// Feed one chunk at `monotonic_timestamp` and report whether bytes reached the terminal parsers.
+    /// Feed one chunk at `monotonic_timestamp` and report whether bytes reached
+    /// the terminal parsers.
     #[must_use = "undelivered replies or shell facts are lost"]
     pub fn process_pty_output_with_shell_integration_at(
         &mut self,

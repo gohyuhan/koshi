@@ -1597,7 +1597,7 @@ fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
             mouse: Some(koshi_config::layer::PartialMouseConfig {
                 can_resize_pane_border: None,
                 scroll_line_count: Some(7),
-                wheel: Some(WheelScroll::Ignore),
+                wheel_scroll: Some(WheelScroll::Ignore),
             }),
             ..PartialKoshiConfig::default()
         }),
@@ -1610,7 +1610,10 @@ fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
         Direction::Down
     );
     assert_eq!(client.get_client_config().mouse.scroll_line_count, 7);
-    assert_eq!(client.get_client_config().mouse.wheel, WheelScroll::Ignore);
+    assert_eq!(
+        client.get_client_config().mouse.wheel_scroll,
+        WheelScroll::Ignore
+    );
 }
 
 #[test]

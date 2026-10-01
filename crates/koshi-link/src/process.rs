@@ -2,14 +2,17 @@
 
 use std::process::Command;
 
+#[cfg(test)]
+mod tests;
+
 /// Replace this process's running image with `command`. The call returns only
 /// when the exec failed, and hands back that error.
 ///
-/// `exec` runs the command's setup steps, then resets SIGPIPE to `SIG_DFL` in
-/// this process before it calls `execvp`, even with no setup step configured
-/// on the command (the standard library's `sys/process/unix/unix.rs`, in
-/// `do_exec`). After a failed exec this function sets SIGPIPE back to
-/// `SIG_IGN` before it returns.
+/// Before it calls `execvp`, `exec` resets SIGPIPE to `SIG_DFL` in this
+/// process, even with no setup step configured on the command, and runs the
+/// command's `pre_exec` closures after that reset (the standard library's
+/// `sys/process/unix/unix.rs`, in `do_exec`). After a failed exec this
+/// function sets SIGPIPE back to `SIG_IGN` before it returns.
 ///
 /// The SIGPIPE reset is the only change this function undoes. The caller
 /// undoes every setup step it adds to `command`.

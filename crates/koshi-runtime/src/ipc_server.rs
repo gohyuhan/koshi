@@ -67,7 +67,7 @@ use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
     compute_socket_address, remove_advertisement_marker, remove_socket_file,
-    resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile,
+    resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile, ServerProgramFile,
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
@@ -91,6 +91,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_terminal::graphics::ImageRecord;
 
+use crate::executable_watch::ExecutableWatch;
 use crate::runtime::bus::build_wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
@@ -296,6 +297,10 @@ pub struct IpcServer {
     socket_address: String,
     /// The endpoint file advertising `socket_address` and the connection token.
     endpoint_path: PathBuf,
+    /// The program file naming the koshi version and program file this
+    /// session runs. `None` for a session served with no executable watch,
+    /// which writes no program file.
+    program_file_path: Option<PathBuf>,
     /// The empty marker naming this session among those other local users may
     /// reach, written on Windows where a pipe has no filesystem entry. `None`
     /// on Unix, and `None` for a session only its own user may reach.
@@ -332,11 +337,21 @@ impl IpcServer {
     /// where the marker naming the pipe is written as well. The endpoint file
     /// is written to the same private path at the same `0600` mode either way;
     /// only the address it carries differs.
+    ///
+    /// `executable_watch` `Some` checks the program file the session started
+    /// from on each connection the socket takes, as
+    /// [`ExecutableWatch::check_executable_file`] states. A file that now
+    /// holds another koshi version sends the dispatcher
+    /// [`RuntimeEvent::IpcRestart`], as a `Restart` request does. The session
+    /// also writes its [`ServerProgramFile`] after the endpoint file, from the
+    /// watch's path and running version, and a failed write unwinds the bind
+    /// as a failed endpoint write does.
     pub fn start(
         runtime_directory: &Path,
         session_id: SessionId,
         inbox_sender: Sender<RuntimeEvent>,
         other_users: Option<OtherUsers>,
+        executable_watch: Option<Arc<ExecutableWatch>>,
     ) -> Result<IpcServer, IpcError> {
         koshi_paths::ensure_private_directory(runtime_directory).map_err(|directory_error| {
             IpcError::Transport {
@@ -386,18 +401,30 @@ impl IpcServer {
             connection_token: connection_token.clone(),
             process_id: std::process::id(),
         };
-        let advertisement_result = endpoint_file.write_to_path(&endpoint_path).and_then(|()| {
-            match &shared_socket_marker_path {
+        let program_file_path = executable_watch.as_ref().map(|_| {
+            ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id)
+        });
+        let advertisement_result = endpoint_file
+            .write_to_path(&endpoint_path)
+            .and_then(|()| match (&executable_watch, &program_file_path) {
+                (Some(executable_watch), Some(program_file_path)) => executable_watch
+                    .build_server_program_file()
+                    .write_to_path(program_file_path),
+                _ => Ok(()),
+            })
+            .and_then(|()| match &shared_socket_marker_path {
                 None => Ok(()),
                 Some(shared_socket_marker_path) => {
                     write_advertisement_marker(shared_socket_marker_path)
                 }
-            }
-        });
+            });
         if let Err(advertisement_error) = advertisement_result {
             // Dropping the listener releases the address and unlinks the socket
             // file on Unix. The endpoint write is atomic: a file left at
             // `endpoint_path` is an older run's, naming the socket removed here.
+            if let Some(program_file_path) = &program_file_path {
+                let _ = std::fs::remove_file(program_file_path);
+            }
             let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
             remove_socket_file(&socket_address);
@@ -419,12 +446,14 @@ impl IpcServer {
                 &accept_shutdown_flag,
                 allow_other_users_setting.as_ref(),
                 &accept_intake,
+                executable_watch.as_ref(),
             );
         });
 
         Ok(IpcServer {
             socket_address,
             endpoint_path,
+            program_file_path,
             shared_socket_marker_path,
             is_shutting_down,
             connection_token,
@@ -493,10 +522,10 @@ impl IpcServer {
     }
 
     /// Stop serving: no further connection is accepted, the accept loop is
-    /// joined, and the endpoint file, the socket and any shared marker are
-    /// removed. Connections already being served run out on their own threads;
-    /// with the dispatcher draining, their in-flight requests end in a closed
-    /// connection rather than a mutation.
+    /// joined, and the program file, the endpoint file, the socket and any
+    /// shared marker are removed, in that order. Connections already being
+    /// served run out on their own threads; with the dispatcher draining, their
+    /// in-flight requests end in a closed connection rather than a mutation.
     ///
     /// Dropping an `IpcServer` runs the same teardown, including when a panic
     /// unwinds the server.
@@ -520,6 +549,9 @@ impl IpcServer {
                 let _ = accept_thread_handle.join();
                 drop(wake_connection);
             }
+        }
+        if let Some(program_file_path) = &self.program_file_path {
+            let _ = std::fs::remove_file(program_file_path);
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
         if let Some(shared_socket_marker_path) = &self.shared_socket_marker_path {
@@ -588,6 +620,12 @@ impl Drop for IpcServer {
 /// starts, and is what that thread hands its events over through. A connection
 /// the intake does not take — it is closed, or the read direction could not be
 /// taken — is closed without being served.
+///
+/// Each connection the intake takes runs a check of `executable_watch`, and
+/// its serving thread runs
+/// [`ExecutableWatch::check_executable_file_after_refused_hello`] for each
+/// Hello refused for its protocol version. When either finds another koshi
+/// version, [`restart_into_installed_version`] asks the dispatcher to restart.
 fn run_accept_loop(
     listener: &Listener,
     connection_token: &RwLock<ConnectionToken>,
@@ -595,6 +633,7 @@ fn run_accept_loop(
     is_shutting_down: &AtomicBool,
     allow_other_users_setting: Option<&OtherUsersSetting>,
     connection_intake: &Arc<Intake>,
+    executable_watch: Option<&Arc<ExecutableWatch>>,
 ) {
     transport::accept_until_shutdown(
         listener,
@@ -608,6 +647,13 @@ fn run_accept_loop(
             let Some(served_connection) = connection_intake.accept_connection(&connection) else {
                 return;
             };
+            if let Some(executable_watch) = executable_watch {
+                executable_watch.check_executable_file(build_installed_version_restart(
+                    connection_intake,
+                    inbox_sender,
+                    executable_watch,
+                ));
+            }
             let peer = Peer::Local {
                 is_same_user,
                 is_other_user_access_allowed: allow_other_users_setting
@@ -624,6 +670,7 @@ fn run_accept_loop(
             // checked against the token rotated last.
             let connection_token = connection_token.read().expect("connection token").clone();
             let inbox_sender = inbox_sender.clone();
+            let executable_watch = executable_watch.cloned();
             std::thread::spawn(move || {
                 serve_connection(
                     connection,
@@ -632,6 +679,7 @@ fn run_accept_loop(
                     peer,
                     live_setting,
                     &served_connection,
+                    executable_watch.as_ref(),
                 );
             });
         },
@@ -653,7 +701,7 @@ fn run_accept_loop(
 /// a `koshi` CLI invocation.
 ///
 /// A `Restart` the dispatcher refuses is answered with
-/// [`IpcErrorCode::MalformedRequest`] carrying the sentence naming what is
+/// [`IpcErrorCode::RequestFailed`] carrying the sentence naming what is
 /// wrong, and the connection keeps serving.
 ///
 /// An answered `Attach` ends the request loop: the connection is handed to
@@ -672,6 +720,12 @@ fn run_accept_loop(
 /// holds this connection's read direction through it, and the entry is removed
 /// when this function returns. An intake that closes ends the connection,
 /// whatever the request was.
+///
+/// A Hello refused for its protocol version runs
+/// [`ExecutableWatch::check_executable_file_after_refused_hello`] on
+/// `executable_watch`, which restarts the session through
+/// [`restart_into_installed_version`] when the program file holds another
+/// koshi version, and the connection keeps serving.
 fn serve_connection(
     mut connection: Connection,
     connection_token: ConnectionToken,
@@ -679,6 +733,7 @@ fn serve_connection(
     peer: Peer,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
+    executable_watch: Option<&Arc<ExecutableWatch>>,
 ) {
     let mut handshake = Handshake::from_expected_token_and_peer(connection_token, peer);
     // The setting is read again for each request. `None` is a connection from
@@ -696,6 +751,18 @@ fn serve_connection(
             &is_admitted,
         ) {
             RequestDisposition::Answered => continue,
+            RequestDisposition::VersionRefused => {
+                if let Some(executable_watch) = executable_watch {
+                    executable_watch.check_executable_file_after_refused_hello(
+                        build_installed_version_restart(
+                            &served_connection.intake,
+                            inbox_sender,
+                            executable_watch,
+                        ),
+                    );
+                }
+                continue;
+            }
             RequestDisposition::Stop => return,
             RequestDisposition::Dispatch {
                 request_id,
@@ -855,11 +922,11 @@ fn serve_connection(
                     },
                     // The dispatcher named what is wrong. Nothing was torn
                     // down, and the connection keeps serving.
-                    Some(Err(restart_error_message)) => IpcResponse {
+                    Some(Err(restart_refusal)) => IpcResponse {
                         request_id,
                         answer_result: IpcResult::Error(IpcErrorPayload {
-                            code: IpcErrorCode::MalformedRequest,
-                            message: restart_error_message,
+                            code: IpcErrorCode::RequestFailed,
+                            message: restart_refusal.to_string(),
                         }),
                     },
                     // No dispatcher left: the connection closes with no
@@ -1708,6 +1775,61 @@ fn stamp_client_command_source(
         CommandSource::from_key_binding(client_id),
         command_envelope.command,
     )
+}
+
+/// What a check of `executable_watch` runs once the program file prints another
+/// koshi version: [`restart_into_installed_version`] with that version, through
+/// `connection_intake` and `inbox_sender`.
+fn build_installed_version_restart(
+    connection_intake: &Arc<Intake>,
+    inbox_sender: &Sender<RuntimeEvent>,
+    executable_watch: &Arc<ExecutableWatch>,
+) -> impl FnOnce(String) + Send + 'static {
+    let restart_intake = Arc::clone(connection_intake);
+    let restart_inbox_sender = inbox_sender.clone();
+    let restart_executable_watch = Arc::clone(executable_watch);
+    move |installed_version| {
+        restart_into_installed_version(
+            &restart_intake,
+            &restart_inbox_sender,
+            &restart_executable_watch,
+            &installed_version,
+        );
+    }
+}
+
+/// Ask the dispatcher to restart this session into its program file, which
+/// now holds koshi `installed_version`, through [`RuntimeEvent::IpcRestart`],
+/// and log the verdict: an accepted restart at info level, a refused one at
+/// warning level with the sentence it was refused with. A refusal that
+/// [`RestartRefusal::can_end_without_file_change`](crate::server::RestartRefusal::can_end_without_file_change)
+/// calls [`ExecutableWatch::schedule_restart_retry`] on `executable_watch`. A closed
+/// intake sends nothing.
+fn restart_into_installed_version(
+    connection_intake: &Intake,
+    inbox_sender: &Sender<RuntimeEvent>,
+    executable_watch: &ExecutableWatch,
+    installed_version: &str,
+) {
+    match request_dispatcher_response(connection_intake, inbox_sender, |response_sender| {
+        RuntimeEvent::IpcRestart { response_sender }
+    }) {
+        Some(Ok(())) => tracing::info!(
+            installed_version,
+            "the program file holds another koshi version; the session restarts into it"
+        ),
+        Some(Err(restart_refusal)) => {
+            tracing::warn!(
+                installed_version,
+                %restart_refusal,
+                "the program file holds another koshi version, and the session cannot restart into it"
+            );
+            if restart_refusal.can_end_without_file_change() {
+                executable_watch.schedule_restart_retry();
+            }
+        }
+        None => {}
+    }
 }
 
 /// Hand one request to the dispatcher thread and wait for its answer: build

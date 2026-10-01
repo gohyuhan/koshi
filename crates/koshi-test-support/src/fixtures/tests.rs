@@ -1,6 +1,11 @@
-//! Tests for the runtime-directory fixture and the key-event fixture.
+//! Tests for the runtime-directory fixture, the key-event fixture, and the
+//! fixture that closes a connection once its peer hangs up.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use koshi_core::key::{Key, NamedKey};
+use koshi_ipc::transport::Listener;
 
 use super::*;
 
@@ -40,4 +45,28 @@ fn runtime_directory_exists_until_its_handle_drops() {
     };
 
     assert!(!runtime_directory_path.exists());
+}
+
+#[test]
+fn close_connection_after_peer_hangs_up_returns_once_the_peer_closed_its_end() {
+    let runtime_directory = build_test_runtime_directory();
+    let socket_address = compute_socket_address(runtime_directory.path(), SessionId::new());
+    let listener = Listener::bind(&socket_address).expect("bind the stand-in socket");
+    let has_peer_hung_up = Arc::new(AtomicBool::new(false));
+    let peer_hang_up_flag = Arc::clone(&has_peer_hung_up);
+    let peer_thread = std::thread::spawn(move || {
+        let peer_connection = Connection::connect(&socket_address).expect("the peer connects");
+        std::thread::sleep(Duration::from_millis(200));
+        peer_hang_up_flag.store(true, Ordering::SeqCst);
+        drop(peer_connection);
+    });
+    let mut stand_in_connection = listener.accept().expect("accept the peer");
+    stand_in_connection
+        .send(&"a frame the peer never reads")
+        .expect("send to the peer");
+
+    close_connection_after_peer_hangs_up(stand_in_connection);
+
+    assert!(has_peer_hung_up.load(Ordering::SeqCst));
+    peer_thread.join().expect("the peer thread ends");
 }

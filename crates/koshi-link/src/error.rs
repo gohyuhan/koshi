@@ -39,6 +39,10 @@ pub enum CliError {
     /// one this build speaks. `detail` is the peer's own sentence.
     #[error("IPC unavailable: {detail}")]
     ProtocolVersionRefused { detail: String },
+    /// The session did not finish answering by the deadline the caller gave
+    /// the exchange.
+    #[error("IPC unavailable: the session did not answer in time")]
+    SessionAnswerTimedOut,
     /// The named (or in-session) session is not running: nothing advertises
     /// its endpoint, or nothing listens behind the advertised socket.
     #[error("session {session_name} is not running")]
@@ -77,9 +81,10 @@ fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String 
 
 /// The single error-to-exit-code table: every [`CliError`] class maps to the
 /// [`CliExitCode`] the binary reports to the OS. A usage or config problem
-/// exits 2, a session that is not running exits 3, an unreachable IPC endpoint
-/// or a refused protocol version exits 4, and a runtime error, a rejected
-/// command, or a failed update exits 1.
+/// exits 2, a session that is not running exits 3, an unreachable IPC
+/// endpoint, a refused protocol version or a session that did not answer in
+/// time exits 4, and a runtime error, a rejected command, or a failed update
+/// exits 1.
 impl From<&CliError> for CliExitCode {
     fn from(cli_error: &CliError) -> Self {
         match cli_error {
@@ -89,9 +94,9 @@ impl From<&CliError> for CliExitCode {
             | CliError::InvalidKeybindingFile { .. }
             | CliError::Config { .. }
             | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
-            CliError::IpcUnavailable { .. } | CliError::ProtocolVersionRefused { .. } => {
-                CliExitCode::IpcUnavailable
-            }
+            CliError::IpcUnavailable { .. }
+            | CliError::ProtocolVersionRefused { .. }
+            | CliError::SessionAnswerTimedOut => CliExitCode::IpcUnavailable,
             CliError::SessionNotFound { .. } | CliError::NoSessions => CliExitCode::SessionNotFound,
             CliError::Runtime { .. }
             | CliError::CommandRejected { .. }

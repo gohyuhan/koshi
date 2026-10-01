@@ -234,11 +234,12 @@ pub enum RuntimeEvent {
     /// process to replace its own image with the binary at the path it started
     /// from. Carries the reply sender the connection thread waits on; the
     /// dispatcher checks what the swap needs and answers `Ok(())` when the
-    /// restart is accepted, or `Err` carrying the sentence naming what is
-    /// wrong. A refused restart changes nothing and the session keeps serving.
+    /// restart is accepted, or `Err` carrying the
+    /// [`RestartRefusal`](crate::server::RestartRefusal). A refused restart
+    /// changes nothing and the session keeps serving.
     IpcRestart {
         /// Where the dispatcher sends its verdict.
-        response_sender: Sender<Result<(), String>>,
+        response_sender: Sender<Result<(), crate::server::RestartRefusal>>,
     },
     /// The grace window for the clients whose records came across an image
     /// swap has closed. The dispatcher detaches every one of those clients

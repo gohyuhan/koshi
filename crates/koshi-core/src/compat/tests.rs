@@ -168,6 +168,8 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
             ("remote access record format", 1, 2, Some(1)),
             ("resume file format", 1, 4, Some(3)),
             ("config schema", 1, 2, Some(1)),
+            ("endpoint file format", 1, 2, Some(1)),
+            ("program file format", 1, 1, None),
         ]
     );
 }

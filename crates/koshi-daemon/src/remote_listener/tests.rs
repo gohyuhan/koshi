@@ -6,19 +6,21 @@
 //! Also [`WarningRateLimiter`], which writes a repeated warning once per window,
 //! [`RemoteConnectionEndReport`], which reports a bridged connection ended once, the two
 //! functions that read and write one frame, the frames an admitted connection
-//! sends, and what [`bind_remote_listener`] refuses.
+//! sends, what [`bind_remote_listener`] refuses, and the check of the router's
+//! program file that each accepted connection runs.
 //!
 //! [`serve_remote_connection`] is served over real TLS on loopback in two places: the
 //! answers a caller reads before it is admitted, and one admitted client held
 //! open while its session keeps emitting events.
 
 use std::io::Cursor;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use super::*;
 
 use koshi_core::ids::SessionId;
-use koshi_ipc::remote_state::CERT_FILE_FORMAT;
+use koshi_ipc::remote_state::CERTIFICATE_FILE_FORMAT;
+use koshi_test_support::fixtures::{build_test_runtime_directory, write_printing_program};
 
 /// The address `10.0.0.<last_ipv4_octet>`, for naming distinct callers in a test.
 fn build_test_caller_ip_address(last_ipv4_octet: u8) -> IpAddr {
@@ -27,11 +29,11 @@ fn build_test_caller_ip_address(last_ipv4_octet: u8) -> IpAddr {
 
 /// A self-signed certificate naming `koshi`, generated fresh for one test
 /// listener.
-fn build_test_certificate() -> CertFile {
+fn build_test_certificate() -> CertificateFile {
     let generated_certificate = rcgen::generate_simple_self_signed(vec!["koshi".to_string()])
         .expect("the test certificate generates");
-    CertFile {
-        file_format: CERT_FILE_FORMAT,
+    CertificateFile {
+        file_format: CERTIFICATE_FILE_FORMAT,
         cert_der: generated_certificate.cert.der().to_vec(),
         key_der: generated_certificate.signing_key.serialize_der(),
     }
@@ -715,7 +717,7 @@ fn one_admitted_connection_lists_and_then_attaches() {
                 assert_eq!(scope, TokenScope::HostWide);
                 assert_eq!(remote_connection_id, 7);
                 assert_eq!(session_selector, SessionSelector::SessionId(session_id));
-                let _ = response_sender.send(Some(held_session_endpoint_path.clone()));
+                let _ = response_sender.send(Ok(held_session_endpoint_path.clone()));
             }
             _ => return,
         }
@@ -796,10 +798,12 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
     );
 }
 
-#[test]
-fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
-    // A session that does not exist and a session the scope does not cover
-    // both reach this loop as the same `None`.
+/// Run one admitted Attach for a fresh session id against a stand-in
+/// dispatcher that answers its Locate with `locate_answer`. Hands back what
+/// the frame loop returned and every frame it wrote.
+fn serve_attach_against_locate_answer(
+    locate_answer: Result<PathBuf, LocateRefusal>,
+) -> (Option<PathBuf>, Vec<RemoteServerFrame>) {
     let session_id = SessionId::new();
     let (router_events_sender, router_events_receiver) = mpsc::channel();
     let dispatcher_thread = std::thread::spawn(move || {
@@ -812,7 +816,7 @@ fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
             panic!("an attach asks the dispatcher where the session listens");
         };
         assert_eq!(session_selector, SessionSelector::SessionId(session_id));
-        let _ = response_sender.send(None);
+        let _ = response_sender.send(locate_answer);
     });
 
     let mut reader = Cursor::new(build_remote_client_frame_bytes(
@@ -834,17 +838,54 @@ fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
         &admitted_connection,
         &router_events_sender,
     );
+    dispatcher_thread
+        .join()
+        .expect("the stand-in dispatcher ended");
+    (
+        attached_session_endpoint_path,
+        parse_remote_server_frames(&writer.written_frame_bytes),
+    )
+}
+
+#[test]
+fn an_attach_the_dispatcher_refuses_ends_the_connection_unattached() {
+    // A session that does not exist and a session the scope does not cover
+    // both reach this loop as the same `LocateRefusal::NotReached`.
+    let (attached_session_endpoint_path, written_server_frames) =
+        serve_attach_against_locate_answer(Err(LocateRefusal::NotReached));
 
     assert_eq!(attached_session_endpoint_path, None);
     assert_eq!(
-        parse_remote_server_frames(&writer.written_frame_bytes),
+        written_server_frames,
         vec![RemoteServerFrame::Refused {
             message: REMOTE_REFUSED.to_string(),
         }],
     );
-    dispatcher_thread
-        .join()
-        .expect("the stand-in dispatcher ended");
+}
+
+#[test]
+fn an_attach_arriving_while_the_router_restarts_is_refused_with_the_restarting_sentence() {
+    let (attached_session_endpoint_path, written_server_frames) =
+        serve_attach_against_locate_answer(Err(LocateRefusal::RouterRestarting));
+
+    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(
+        written_server_frames,
+        vec![RemoteServerFrame::Refused {
+            message: ROUTER_RESTARTING_MESSAGE.to_string(),
+        }],
+    );
+}
+
+#[test]
+fn an_attach_the_dispatcher_locates_hands_back_the_session_endpoint_file() {
+    let session_endpoint_path = PathBuf::from("/home/user/.koshi/session-5000.json");
+
+    let (attached_session_endpoint_path, written_server_frames) =
+        serve_attach_against_locate_answer(Ok(session_endpoint_path.clone()));
+
+    assert_eq!(attached_session_endpoint_path, Some(session_endpoint_path));
+    assert_eq!(written_server_frames, Vec::new());
 }
 
 #[test]
@@ -955,13 +996,15 @@ fn the_hello_the_router_sends_for_a_remote_caller_says_so() {
 
 #[test]
 fn a_certificate_no_tls_configuration_accepts_takes_no_port() {
-    let certificate_file = CertFile {
-        file_format: CERT_FILE_FORMAT,
+    let certificate_file = CertificateFile {
+        file_format: CERTIFICATE_FILE_FORMAT,
         cert_der: vec![1, 2, 3],
         key_der: vec![4, 5, 6],
     };
 
-    let Err(bind_error) = bind_remote_listener("127.0.0.1:0".to_string(), &certificate_file) else {
+    let Err(bind_error) =
+        bind_remote_listener(SocketAddr::from(([127, 0, 0, 1], 0)), &certificate_file)
+    else {
         panic!("bytes that are not a certificate build no TLS configuration");
     };
 
@@ -969,14 +1012,46 @@ fn a_certificate_no_tls_configuration_accepts_takes_no_port() {
 }
 
 #[test]
-fn an_address_that_names_no_socket_takes_no_port() {
-    let Err(bind_error) =
-        bind_remote_listener("not-an-address".to_string(), &build_test_certificate())
-    else {
-        panic!("a string that is not an address binds nothing");
-    };
+fn a_remote_connection_makes_the_restart_due_when_the_program_file_holds_another_version() {
+    // The accept loop serves on a loopback port and is left running on its
+    // thread when the test ends.
+    let program_directory = build_test_runtime_directory();
+    let program_path = write_printing_program(
+        program_directory.path(),
+        "koshi",
+        &program_directory.path().join("started_runs"),
+        "koshi 1.0.0",
+    );
+    let executable_watch = Arc::new(ExecutableWatch::new(program_path.clone(), "1.0.0"));
+    let replacement_path = write_printing_program(
+        program_directory.path(),
+        "replacement",
+        &program_directory.path().join("runs"),
+        "koshi 9.9.9",
+    );
+    std::fs::rename(&replacement_path, &program_path).expect("the program file is replaced");
+    let tls_config = Arc::new(
+        build_remote_server_tls_config(&build_test_certificate()).expect("the TLS config builds"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the test listener");
+    let remote_listen_address = listener.local_addr().expect("read the bound address");
+    let (router_events_sender, router_events_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        run_remote_accept_loop(
+            &listener,
+            &tls_config,
+            &router_events_sender,
+            &executable_watch,
+        );
+    });
 
-    assert_eq!(bind_error.kind(), io::ErrorKind::InvalidInput);
+    let _caller_stream =
+        TcpStream::connect(remote_listen_address).expect("the caller reaches the remote port");
+
+    let router_event = router_events_receiver.recv_timeout(Duration::from_secs(10));
+    let Ok(RouterEvent::RestartDue) = router_event else {
+        panic!("the dispatcher was not told the restart is due");
+    };
 }
 
 mod admission_answers {
@@ -1038,7 +1113,7 @@ mod admission_answers {
                     AdmissionAsk::Locate {
                         response_sender, ..
                     } => {
-                        let _ = response_sender.send(None);
+                        let _ = response_sender.send(Err(LocateRefusal::NotReached));
                     }
                     AdmissionAsk::RemoveConnection { .. } => {}
                 }
@@ -1364,9 +1439,14 @@ mod bridge_round_trip {
             )
             .expect("the session is seeded");
 
-        let ipc_server =
-            IpcServer::start(runtime_directory, session_id, runtime_event_sender, None)
-                .expect("the control socket binds");
+        let ipc_server = IpcServer::start(
+            runtime_directory,
+            session_id,
+            runtime_event_sender,
+            None,
+            None,
+        )
+        .expect("the control socket binds");
         session_server.attach_ipc_server(ipc_server);
 
         loop {
@@ -1450,7 +1530,7 @@ mod bridge_round_trip {
                     AdmissionAsk::Locate {
                         response_sender, ..
                     } => {
-                        let _ = response_sender.send(Some(session_endpoint_path.clone()));
+                        let _ = response_sender.send(Ok(session_endpoint_path.clone()));
                     }
                     AdmissionAsk::RemoveConnection { .. } => {}
                 }

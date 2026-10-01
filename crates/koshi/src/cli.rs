@@ -294,8 +294,8 @@ pub enum CliCommand {
         /// sessions running for this user and on the saved servers.
         #[arg(value_name = "SESSION")]
         session_argument: Option<String>,
-        /// Save a server reached for the first time under this name, so subsequent
-        /// commands name it instead of its address.
+        /// Name to save a server reached for the first time under: `--remote
+        /// NAME` then reaches it. A server already saved refuses this flag.
         #[arg(long, requires = "remote_server_reference", value_name = "NAME")]
         save_as: Option<String>,
     },
@@ -438,8 +438,8 @@ pub enum CliCommand {
     /// is followed by Enter, so the shell runs it; `--no-enter` leaves it
     /// waiting at the prompt.
     Input {
-        /// Text to type into the pane. Text starting with `-` is taken as text,
-        /// not as a flag, so a scripted line is passed through whatever it says.
+        /// Text to type into the pane. Text that starts with `-`, such as `-la`,
+        /// is typed as text, not read as a flag.
         #[arg(value_name = "TEXT", allow_hyphen_values = true)]
         input_text: String,
         /// Pane to type into; defaults to the focused pane.
@@ -567,8 +567,13 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: DebugCommand,
     },
-    /// Download and install the latest koshi release.
+    /// Install a newer koshi release the way this koshi was installed, then
+    /// restart the running servers into the koshi program on disk. A Homebrew
+    /// install runs `brew upgrade`; a build from source downloads nothing.
     Update,
+    /// Restart the router and every running session into the koshi program on
+    /// disk; every pane keeps running.
+    RestartServers,
     /// Print the version of the koshi program running this command.
     Version {
         /// Output format.
@@ -1130,6 +1135,7 @@ impl CliCommand {
             | CliCommand::Remote { .. }
             | CliCommand::Debug { .. }
             | CliCommand::Update
+            | CliCommand::RestartServers
             | CliCommand::Version { .. }
             | CliCommand::ServerVersion { .. }
             | CliCommand::Actions { .. }
@@ -1163,7 +1169,7 @@ impl CliCommand {
     /// (`list-sessions`, `kill-session`, `attach`, `detach`, `doctor`), the
     /// read-only discovery and local queries (`inspect`, the `list-*` verbs,
     /// `actions`, `keys`, `config`, and the `debug` dumps), `update`,
-    /// `version`, `server-version`, `share`, `remote`, and the
+    /// `restart-servers`, `version`, `server-version`, `share`, `remote`, and the
     /// hidden `serve-router`, `serve-session`, `serve-pty-supervisor` and
     /// `resume-support`.
     #[must_use]
@@ -1413,6 +1419,7 @@ impl CliCommand {
             | CliCommand::Remote { .. }
             | CliCommand::Debug { .. }
             | CliCommand::Update
+            | CliCommand::RestartServers
             | CliCommand::Version { .. }
             | CliCommand::ServerVersion { .. }
             | CliCommand::Actions { .. }

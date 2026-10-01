@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use crate::conflict::{build_keymap_layers, KeymapLayer};
 use crate::key::Leader;
-use crate::keymap_merge::{merge_keymaps, MergedKeymap, MergedModeMap};
+use crate::keymap_merge::{merge_keymaps, MergedKeymap, MergedModeKeymap};
 use crate::types::{build_default_prefix_labels, BoundAction, KeybindingsConfig, ModeName};
 use koshi_core::action::ActionReference;
 use koshi_core::key::{KeyChord, KeySequence};
@@ -108,8 +108,9 @@ impl KeymapHintCatalog {
 
     /// Resolve the hint catalog from `keymap_layers` and the effective
     /// keybinding configuration. Reads `chord_timeout_ms`,
-    /// `unlock_alternative`, `maximum_chord_depth` and `leader`; `modes` is not
-    /// read, `keymap_layers` carries the bindings.
+    /// `unlock_alternative`, `maximum_chord_depth` and `leader`;
+    /// `mode_bindings_by_name` and `which_key_delay_ms` are not read, and
+    /// `keymap_layers` carries the bindings.
     ///
     /// Folds the layers with [`merge_keymaps`]: a binding that does not fire
     /// yields no hint — its action unregistered, its arguments unresolvable, a
@@ -136,20 +137,20 @@ impl KeymapHintCatalog {
 
         let unlock_action_reference = ActionReference::from_core_action_name("unlock")
             .expect("the reserved unlock action name satisfies the action-name grammar");
-        let empty_merged_mode_map = MergedModeMap::default();
+        let empty_merged_mode_keymap = MergedModeKeymap::default();
 
         let mut hint_bindings_by_mode_name = BTreeMap::new();
         let mut removed_key_sequences_by_mode_name = BTreeMap::new();
         for lock_mode in LockMode::ALL {
             let mode_name = ModeName::from_text(lock_mode.get_keymap_name());
-            let merged_mode_map = merged_keymap
-                .mode_map_by_name
+            let merged_mode_keymap = merged_keymap
+                .mode_keymap_by_name
                 .get(&mode_name)
-                .unwrap_or(&empty_merged_mode_map);
+                .unwrap_or(&empty_merged_mode_keymap);
             hint_bindings_by_mode_name.insert(
                 mode_name.clone(),
                 Arc::new(build_mode_hint_bindings(
-                    merged_mode_map,
+                    merged_mode_keymap,
                     registry,
                     lock_mode,
                     &unlock_action_reference,
@@ -157,7 +158,7 @@ impl KeymapHintCatalog {
             );
             removed_key_sequences_by_mode_name.insert(
                 mode_name,
-                Arc::new(merged_mode_map.removed_key_sequences.clone()),
+                Arc::new(merged_mode_keymap.removed_key_sequences.clone()),
             );
         }
 
@@ -190,28 +191,28 @@ impl KeymapHintCatalog {
     /// bindings answers `KeyMatch::default()`: `exact_bound_action` is `None`
     /// and `has_longer_key_sequence` is false.
     pub fn match_sequence(&self, lock_mode: LockMode, key_sequence: &KeySequence) -> KeyMatch {
-        let Some(merged_mode_map) = self
+        let Some(merged_mode_keymap) = self
             .merged_keymap
-            .mode_map_by_name
+            .mode_keymap_by_name
             .get(lock_mode.get_keymap_name())
         else {
             return KeyMatch::default();
         };
-        let exact_bound_action = merged_mode_map
+        let exact_bound_action = merged_mode_keymap
             .user_bindings_by_key_sequence
             .get(key_sequence)
             .map(|merged_binding| merged_binding.bound_action.clone())
             .or_else(|| {
-                merged_mode_map
+                merged_mode_keymap
                     .default_bindings_by_key_sequence
                     .get(key_sequence)
                     .cloned()
             });
         let has_longer_key_sequence = has_longer_key_sequence_starting_with(
-            &merged_mode_map.user_bindings_by_key_sequence,
+            &merged_mode_keymap.user_bindings_by_key_sequence,
             key_sequence,
         ) || has_longer_key_sequence_starting_with(
-            &merged_mode_map.default_bindings_by_key_sequence,
+            &merged_mode_keymap.default_bindings_by_key_sequence,
             key_sequence,
         );
         KeyMatch {
@@ -290,16 +291,16 @@ fn has_longer_key_sequence_starting_with<Binding>(
 /// leaves no key in both — reads each action's display name from the
 /// registry, and flags every locked-mode binding firing `unlock` pinned.
 fn build_mode_hint_bindings(
-    merged_mode_map: &MergedModeMap,
+    merged_mode_keymap: &MergedModeKeymap,
     registry: &ActionRegistry,
     lock_mode: LockMode,
     unlock_action_reference: &ActionReference,
 ) -> Vec<HintBinding> {
-    let user_bindings = merged_mode_map
+    let user_bindings = merged_mode_keymap
         .user_bindings_by_key_sequence
         .iter()
         .map(|(key_sequence, merged_binding)| (key_sequence, &merged_binding.bound_action, true));
-    let default_bindings = merged_mode_map
+    let default_bindings = merged_mode_keymap
         .default_bindings_by_key_sequence
         .iter()
         .map(|(key_sequence, bound_action)| (key_sequence, bound_action, false));

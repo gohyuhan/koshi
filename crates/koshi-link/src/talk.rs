@@ -19,7 +19,7 @@ use koshi_core::command::CommandResult;
 use koshi_core::compat::Surface;
 use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::error::IpcError;
-use koshi_ipc::protocol::{IncomingResponse, IpcErrorPayload, IpcResult};
+use koshi_ipc::protocol::{IncomingResponse, IpcErrorCode, IpcErrorPayload, IpcResult};
 use koshi_ipc::router::{IncomingRouterResponse, RouterResult};
 use koshi_ipc::wire::{Answer, MaybeKnown, WireName};
 
@@ -154,13 +154,17 @@ pub(crate) fn filter_rejection_hint(command_result: CommandResult) -> CommandRes
     }
 }
 
-/// A refusal the peer sent at the protocol level — a bad token, a version
-/// mismatch, or a request it could not read — as
-/// [`CliError::IpcUnavailable`] carrying `refusal.message` filtered by
-/// [`sanitize_reported_text`].
+/// A refusal the peer sent at the protocol level, carrying `refusal.message`
+/// filtered by [`sanitize_reported_text`]: [`CliError::ProtocolVersionRefused`]
+/// for [`IpcErrorCode::UnsupportedVersion`], and [`CliError::IpcUnavailable`]
+/// for every other code, such as a bad token or a request the peer could not
+/// read.
 pub fn build_peer_refusal_error(refusal: &IpcErrorPayload) -> CliError {
-    CliError::IpcUnavailable {
-        detail: sanitize_reported_text(&refusal.message),
+    let detail = sanitize_reported_text(&refusal.message);
+    if refusal.code == IpcErrorCode::UnsupportedVersion {
+        CliError::ProtocolVersionRefused { detail }
+    } else {
+        CliError::IpcUnavailable { detail }
     }
 }
 
@@ -174,9 +178,10 @@ pub fn build_peer_refusal_error(refusal: &IpcErrorPayload) -> CliError {
 /// `"\u{1b}[2J0.3.0"` comes back as `"[2J0.3.0"`.
 ///
 /// # Errors
-/// [`CliError::IpcUnavailable`] when the session settled on a version outside
-/// the range this build asked for, refused the Hello, or answered anything
-/// other than a Hello.
+/// - A refused Hello: what [`build_peer_refusal_error`] gives, which is
+///   [`CliError::ProtocolVersionRefused`] for a refused protocol version.
+/// - [`CliError::IpcUnavailable`] when the session settled on a version outside
+///   the range this build asked for, or answered anything other than a Hello.
 pub(crate) fn parse_session_hello_version(
     incoming_response: IncomingResponse,
 ) -> Result<(u32, String), CliError> {
@@ -199,9 +204,10 @@ pub(crate) fn parse_session_hello_version(
 /// [`sanitize_reported_text`], once the version it settled on is checked.
 ///
 /// # Errors
-/// [`CliError::IpcUnavailable`] when the router settled on a version outside
-/// the range this build asked for, refused the Hello, or answered anything
-/// other than a Hello.
+/// - A refused Hello: what [`build_peer_refusal_error`] gives, which is
+///   [`CliError::ProtocolVersionRefused`] for a refused protocol version.
+/// - [`CliError::IpcUnavailable`] when the router settled on a version outside
+///   the range this build asked for, or answered anything other than a Hello.
 pub(crate) fn parse_router_hello_version(
     incoming_response: IncomingRouterResponse,
 ) -> Result<String, CliError> {

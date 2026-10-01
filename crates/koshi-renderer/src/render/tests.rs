@@ -3669,8 +3669,8 @@ fn a_custom_theme_recolors_the_chrome() {
 
 #[test]
 fn overlapping_panes_draw_in_layout_order_last_wins() {
-    // Two visible pane rects overlap: later slots in `pane_slots` paint over
-    // earlier ones, for both the border and the pane content.
+    // Two visible pane rects overlap: each slot in `pane_slots` paints over
+    // the slots before it, for both the border and the pane content.
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(

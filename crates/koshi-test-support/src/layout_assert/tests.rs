@@ -3,7 +3,8 @@
 use super::*;
 use koshi_core::geometry::Point;
 
-/// Create a [`Rect`] at origin (x, y) with size (cols, rows).
+/// Create a [`Rect`] at (`origin_column`, `origin_row`), `column_count` columns
+/// wide and `row_count` rows tall.
 fn build_cell_rect(origin_column: u16, origin_row: u16, column_count: u16, row_count: u16) -> Rect {
     Rect::from_origin_and_size(
         Point {
@@ -49,14 +50,14 @@ fn full_tiling_passes_all_invariants() {
 #[test]
 fn odd_split_remainder_still_tiles() {
     // 81 columns split 40/41 — remainder lands on the right pane.
-    let tab = build_cell_rect(0, 0, 81, 24);
+    let tab_rect = build_cell_rect(0, 0, 81, 24);
     let panes = vec![
         (PaneId::new(), build_cell_rect(0, 0, 40, 24)),
         (PaneId::new(), build_cell_rect(40, 0, 41, 24)),
     ];
-    check_all_space_occupied(&panes, tab).unwrap();
+    check_all_space_occupied(&panes, tab_rect).unwrap();
     check_no_overlap(&panes).unwrap();
-    check_no_outside(&panes, tab).unwrap();
+    check_no_outside(&panes, tab_rect).unwrap();
 }
 
 #[test]
@@ -78,9 +79,9 @@ fn gap_fails_occupancy() {
 
 #[test]
 fn oversized_occupancy_sum_does_not_overflow() {
-    let huge = build_cell_rect(0, 0, u16::MAX, u16::MAX);
-    let panes = vec![(PaneId::new(), huge), (PaneId::new(), huge)];
-    let assertion_error = check_all_space_occupied(&panes, huge).unwrap_err();
+    let maximum_rect = build_cell_rect(0, 0, u16::MAX, u16::MAX);
+    let panes = vec![(PaneId::new(), maximum_rect), (PaneId::new(), maximum_rect)];
+    let assertion_error = check_all_space_occupied(&panes, maximum_rect).unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::SpaceNotFullyOccupied {
@@ -113,13 +114,13 @@ fn overlap_is_detected_and_names_both_panes() {
 
 #[test]
 fn pane_past_tab_edge_fails_no_outside() {
-    let pane = PaneId::new();
-    let panes = vec![(pane, build_cell_rect(40, 0, 41, 24))];
+    let pane_id = PaneId::new();
+    let panes = vec![(pane_id, build_cell_rect(40, 0, 41, 24))];
     let assertion_error = check_no_outside(&panes, build_tab_rect()).unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::OutsideTab {
-            pane_id: pane,
+            pane_id,
             pane_rect: build_cell_rect(40, 0, 41, 24),
             tab_rect: build_tab_rect(),
         }
@@ -128,8 +129,8 @@ fn pane_past_tab_edge_fails_no_outside() {
 
 #[test]
 fn undersized_pane_fails_min_size() {
-    let pane = PaneId::new();
-    let panes = vec![(pane, build_cell_rect(0, 0, 1, 24))];
+    let pane_id = PaneId::new();
+    let panes = vec![(pane_id, build_cell_rect(0, 0, 1, 24))];
     let minimum_size = Size {
         column_count: 2,
         row_count: 1,
@@ -138,7 +139,7 @@ fn undersized_pane_fails_min_size() {
     assert_eq!(
         assertion_error,
         LayoutAssertionError::MinimumSizeViolated {
-            pane_id: pane,
+            pane_id,
             pane_size: Size {
                 column_count: 1,
                 row_count: 24
@@ -157,14 +158,17 @@ fn live_pane_references_pass_when_all_leaf_panes_are_live() {
 }
 
 #[test]
-fn dead_pane_ref_is_detected() {
-    let live_pane = PaneId::new();
-    let dead_pane = PaneId::new();
-    let live = HashSet::from([live_pane]);
-    let assertion_error = check_live_pane_references(&[live_pane, dead_pane], &live).unwrap_err();
+fn dead_pane_reference_is_detected() {
+    let live_pane_id = PaneId::new();
+    let dead_pane_id = PaneId::new();
+    let live_pane_ids = HashSet::from([live_pane_id]);
+    let assertion_error =
+        check_live_pane_references(&[live_pane_id, dead_pane_id], &live_pane_ids).unwrap_err();
     assert_eq!(
         assertion_error,
-        LayoutAssertionError::DeadPaneReference { pane_id: dead_pane }
+        LayoutAssertionError::DeadPaneReference {
+            pane_id: dead_pane_id
+        }
     );
 }
 
@@ -228,12 +232,11 @@ fn corner_touching_panes_do_not_overlap() {
 
 #[test]
 fn pane_at_exact_minimum_size_passes() {
-    let pane = PaneId::new();
     let minimum_size = Size {
         column_count: 2,
         row_count: 1,
     };
-    let panes = vec![(pane, build_cell_rect(0, 0, 2, 1))];
+    let panes = vec![(PaneId::new(), build_cell_rect(0, 0, 2, 1))];
     check_minimum_size_respected(&panes, minimum_size).unwrap();
 }
 
@@ -265,9 +268,9 @@ fn overlap_check_reports_first_pair_found_in_iteration_order() {
 #[test]
 fn suppressed_panes_are_exempt() {
     // A live pane filling the tab plus a suppressed (zero-area) pane.
-    let live = build_cell_rect(0, 0, 80, 24);
+    let live_pane_rect = build_cell_rect(0, 0, 80, 24);
     let panes = vec![
-        (PaneId::new(), live),
+        (PaneId::new(), live_pane_rect),
         (PaneId::new(), Rect::build_empty_at_origin()),
     ];
     // Empty pane adds no area, no overlap, no outside, and skips the floor.
@@ -288,8 +291,8 @@ fn suppressed_panes_are_exempt() {
 fn a_pane_past_any_of_the_four_tab_edges_fails_no_outside() {
     // A tab that does not start at (0, 0), so a pane can sit left of or above
     // it. Its cells are columns 10..30 and rows 5..15.
-    let tab = build_cell_rect(10, 5, 20, 10);
-    let cases = [
+    let tab_rect = build_cell_rect(10, 5, 20, 10);
+    let spilled_rect_by_edge_name = [
         // One column left of the tab's left edge.
         ("left", build_cell_rect(9, 5, 20, 10)),
         // One row above the tab's top edge.
@@ -299,15 +302,15 @@ fn a_pane_past_any_of_the_four_tab_edges_fails_no_outside() {
         // One row past the tab's bottom edge.
         ("bottom", build_cell_rect(10, 6, 20, 10)),
     ];
-    for (edge_name, spilled_rect) in cases {
+    for (edge_name, spilled_rect) in spilled_rect_by_edge_name {
         let pane_id = PaneId::new();
-        let assertion_error = check_no_outside(&[(pane_id, spilled_rect)], tab).unwrap_err();
+        let assertion_error = check_no_outside(&[(pane_id, spilled_rect)], tab_rect).unwrap_err();
         assert_eq!(
             assertion_error,
             LayoutAssertionError::OutsideTab {
                 pane_id,
                 pane_rect: spilled_rect,
-                tab_rect: tab,
+                tab_rect,
             },
             "{edge_name} edge"
         );
@@ -316,15 +319,15 @@ fn a_pane_past_any_of_the_four_tab_edges_fails_no_outside() {
 
 #[test]
 fn a_pane_filling_a_tab_that_does_not_start_at_the_origin_stays_inside() {
-    let tab = build_cell_rect(10, 5, 20, 10);
-    check_no_outside(&[(PaneId::new(), tab)], tab).unwrap();
+    let tab_rect = build_cell_rect(10, 5, 20, 10);
+    check_no_outside(&[(PaneId::new(), tab_rect)], tab_rect).unwrap();
 }
 
 #[test]
 fn a_suppressed_pane_placed_outside_the_tab_is_still_exempt() {
     // The solver clips a pane it cannot fit to zero area. Such a pane covers no
     // cell, so it never spills, wherever its origin lands.
-    let far_away = Rect::from_origin_and_size(
+    let far_away_rect = Rect::from_origin_and_size(
         Point {
             column: 500,
             row: 500,
@@ -334,14 +337,14 @@ fn a_suppressed_pane_placed_outside_the_tab_is_still_exempt() {
             row_count: 0,
         },
     );
-    check_no_outside(&[(PaneId::new(), far_away)], build_tab_rect()).unwrap();
+    check_no_outside(&[(PaneId::new(), far_away_rect)], build_tab_rect()).unwrap();
 }
 
 #[test]
 fn every_error_variant_displays_its_geometry() {
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
-    let cases = [
+    let expected_text_by_assertion_error = [
         (
             LayoutAssertionError::SpaceNotFullyOccupied {
                 tab_cell_area: 1920,
@@ -408,8 +411,8 @@ fn every_error_variant_displays_its_geometry() {
             format!("layout references non-live pane {first_pane_id}"),
         ),
     ];
-    for (error, text) in cases {
-        assert_eq!(error.to_string(), text);
+    for (assertion_error, expected_text) in expected_text_by_assertion_error {
+        assert_eq!(assertion_error.to_string(), expected_text);
     }
 }
 
@@ -438,13 +441,13 @@ fn overlapping_panes_whose_areas_sum_to_the_tab_pass_occupancy_and_fail_overlap(
 
 #[test]
 fn a_pane_outside_the_tab_with_the_tab_area_passes_occupancy_and_fails_no_outside() {
-    let pane = PaneId::new();
-    let panes = vec![(pane, build_cell_rect(80, 0, 80, 24))];
+    let pane_id = PaneId::new();
+    let panes = vec![(pane_id, build_cell_rect(80, 0, 80, 24))];
     check_all_space_occupied(&panes, build_tab_rect()).unwrap();
     assert_eq!(
         check_no_outside(&panes, build_tab_rect()).unwrap_err(),
         LayoutAssertionError::OutsideTab {
-            pane_id: pane,
+            pane_id,
             pane_rect: build_cell_rect(80, 0, 80, 24),
             tab_rect: build_tab_rect(),
         }
@@ -470,16 +473,16 @@ fn a_live_pane_on_an_empty_tab_fails_occupancy_with_zero_tab_area() {
 
 #[test]
 fn a_pane_short_in_rows_only_fails_min_size() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let minimum_size = Size {
         column_count: 2,
         row_count: 3,
     };
-    let panes = vec![(pane, build_cell_rect(0, 0, 80, 2))];
+    let panes = vec![(pane_id, build_cell_rect(0, 0, 80, 2))];
     assert_eq!(
         check_minimum_size_respected(&panes, minimum_size).unwrap_err(),
         LayoutAssertionError::MinimumSizeViolated {
-            pane_id: pane,
+            pane_id,
             pane_size: Size {
                 column_count: 80,
                 row_count: 2
@@ -531,14 +534,14 @@ fn a_zero_minimum_passes_every_live_pane() {
 fn a_pane_whose_edge_passes_u16_max_is_reported_not_wrapped() {
     // x + cols = 65_536 does not fit in u16. The check computes the edge in
     // u32 and reports the pane as outside; a u16 edge would wrap to column 0.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let maximum_tab_rect = build_cell_rect(0, 0, u16::MAX, u16::MAX);
-    let spill = build_cell_rect(u16::MAX - 1, 0, 2, 1);
+    let spilled_rect = build_cell_rect(u16::MAX - 1, 0, 2, 1);
     assert_eq!(
-        check_no_outside(&[(pane, spill)], maximum_tab_rect).unwrap_err(),
+        check_no_outside(&[(pane_id, spilled_rect)], maximum_tab_rect).unwrap_err(),
         LayoutAssertionError::OutsideTab {
-            pane_id: pane,
-            pane_rect: spill,
+            pane_id,
+            pane_rect: spilled_rect,
             tab_rect: maximum_tab_rect,
         }
     );
@@ -546,9 +549,9 @@ fn a_pane_whose_edge_passes_u16_max_is_reported_not_wrapped() {
 
 #[test]
 fn a_pane_ending_exactly_at_u16_max_stays_inside_a_max_tab() {
-    let max_tab = build_cell_rect(0, 0, u16::MAX, u16::MAX);
-    let last_cell = build_cell_rect(u16::MAX - 1, u16::MAX - 1, 1, 1);
-    check_no_outside(&[(PaneId::new(), last_cell)], max_tab).unwrap();
+    let maximum_tab_rect = build_cell_rect(0, 0, u16::MAX, u16::MAX);
+    let last_cell_rect = build_cell_rect(u16::MAX - 1, u16::MAX - 1, 1, 1);
+    check_no_outside(&[(PaneId::new(), last_cell_rect)], maximum_tab_rect).unwrap();
 }
 
 #[test]
@@ -563,12 +566,12 @@ fn edge_touching_panes_do_not_overlap() {
 
 #[test]
 fn an_empty_pane_placed_over_a_live_pane_does_not_overlap_it() {
-    let live = PaneId::new();
-    let empty = PaneId::new();
+    let live_pane_id = PaneId::new();
+    let empty_pane_id = PaneId::new();
     let panes = vec![
-        (live, build_cell_rect(0, 0, 80, 24)),
+        (live_pane_id, build_cell_rect(0, 0, 80, 24)),
         (
-            empty,
+            empty_pane_id,
             Rect::from_origin_and_size(
                 Point {
                     column: 10,
@@ -592,24 +595,26 @@ fn live_pane_references_pass_with_no_leaf_panes() {
 
 #[test]
 fn live_pane_references_report_the_first_dead_pane_in_slice_order() {
-    let live = PaneId::new();
-    let first_dead = PaneId::new();
-    let second_dead = PaneId::new();
-    let assertion_error =
-        check_live_pane_references(&[live, first_dead, second_dead], &HashSet::from([live]))
-            .unwrap_err();
+    let live_pane_id = PaneId::new();
+    let first_dead_pane_id = PaneId::new();
+    let second_dead_pane_id = PaneId::new();
+    let assertion_error = check_live_pane_references(
+        &[live_pane_id, first_dead_pane_id, second_dead_pane_id],
+        &HashSet::from([live_pane_id]),
+    )
+    .unwrap_err();
     assert_eq!(
         assertion_error,
         LayoutAssertionError::DeadPaneReference {
-            pane_id: first_dead
+            pane_id: first_dead_pane_id
         }
     );
 }
 
 #[test]
 fn a_leaf_pane_listed_twice_passes_when_it_is_live() {
-    let pane = PaneId::new();
-    check_live_pane_references(&[pane, pane], &HashSet::from([pane])).unwrap();
+    let pane_id = PaneId::new();
+    check_live_pane_references(&[pane_id, pane_id], &HashSet::from([pane_id])).unwrap();
 }
 
 #[test]

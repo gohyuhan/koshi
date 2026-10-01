@@ -2,27 +2,25 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::{Command, Output, Stdio};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use koshi::cli::Cli;
 use koshi::config_command::migrate_config_for_service_command;
 use koshi_core::ids::SessionId;
-#[cfg(unix)]
 use koshi_daemon::session_server::ResumeSupport;
-#[cfg(unix)]
 use koshi_ipc::router::resolve_router_endpoint_path;
-#[cfg(unix)]
 use koshi_test_support::fixtures::build_test_runtime_directory;
 use tempfile::TempDir;
 
-#[cfg(unix)]
-const STARTUP_TEST_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
+mod common;
 
-#[cfg(unix)]
+use common::{
+    build_koshi_command_under_home, resolve_config_directory_under_home, SESSION_SERVER_NAME,
+    WAIT_DURATION,
+};
+
 const STARTUP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(20);
 
 fn build_service_command_arguments(session_id: SessionId) -> [Vec<String>; 3] {
@@ -219,34 +217,9 @@ fn non_service_commands_leave_released_config_unchanged_on_every_platform() {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn resolve_test_config_directory(home_directory: &Path) -> PathBuf {
-    home_directory.join("Library/Application Support/koshi")
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_test_config_directory(home_directory: &Path) -> PathBuf {
-    home_directory.join(".config/koshi")
-}
-
-#[cfg(unix)]
-fn build_test_koshi_command(home_directory: &Path) -> Command {
-    let mut process_command = Command::new(env!("CARGO_BIN_EXE_koshi"));
-    process_command
-        .env("HOME", home_directory)
-        .env("XDG_CONFIG_HOME", home_directory.join(".config"));
-    process_command
-}
-
-#[cfg(unix)]
 fn run_test_koshi_command(process_command: &mut Command) -> Output {
-    let mut started_process = process_command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("run updated binary");
-    let startup_deadline = Instant::now() + STARTUP_TEST_TIMEOUT_DURATION;
+    let mut started_process = process_command.spawn().expect("run updated binary");
+    let startup_deadline = Instant::now() + WAIT_DURATION;
     loop {
         match started_process.try_wait() {
             Ok(Some(_)) => {
@@ -260,7 +233,7 @@ fn run_test_koshi_command(process_command: &mut Command) -> Output {
             Ok(None) => {
                 let _ = started_process.kill();
                 let _ = started_process.wait();
-                panic!("updated binary did not exit within {STARTUP_TEST_TIMEOUT_DURATION:?}");
+                panic!("updated binary did not exit within {WAIT_DURATION:?}");
             }
             Err(wait_error) => {
                 let _ = started_process.kill();
@@ -274,10 +247,10 @@ fn run_test_koshi_command(process_command: &mut Command) -> Output {
 /// Runs `koshi resume-support` with `home_directory` as the home directory, and
 /// asserts it exits `0`, writes nothing to stderr, and prints this build's
 /// resume-format bounds under both key pairs.
-#[cfg(unix)]
 fn assert_resume_support_answers(home_directory: &Path) {
-    let process_output =
-        run_test_koshi_command(build_test_koshi_command(home_directory).arg("resume-support"));
+    let process_output = run_test_koshi_command(
+        build_koshi_command_under_home(home_directory).arg("resume-support"),
+    );
 
     assert_eq!(process_output.status.code(), Some(0));
     assert_eq!(process_output.stderr, b"");
@@ -294,12 +267,11 @@ fn assert_resume_support_answers(home_directory: &Path) {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
     let test_directory = TempDir::new().expect("create test directory");
     let app_config_path = write_app_config(
-        &resolve_test_config_directory(test_directory.path()),
+        &resolve_config_directory_under_home(test_directory.path()),
         "version 1\n",
     );
 
@@ -311,12 +283,11 @@ fn resume_support_migrates_released_config_before_advertising_a_session_swap() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn resume_support_answers_for_a_released_config_with_an_unknown_key() {
     let test_directory = TempDir::new().expect("create test directory");
     let app_config_path = write_app_config(
-        &resolve_test_config_directory(test_directory.path()),
+        &resolve_config_directory_under_home(test_directory.path()),
         "version 1\nmade-up-key \"x\"\n",
     );
 
@@ -328,11 +299,10 @@ fn resume_support_answers_for_a_released_config_with_an_unknown_key() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn resume_support_accepts_current_config_without_a_migration_lock() {
     let test_directory = TempDir::new().expect("create test directory");
-    let config_directory = resolve_test_config_directory(test_directory.path());
+    let config_directory = resolve_config_directory_under_home(test_directory.path());
     let app_config_path = write_app_config(&config_directory, "version 2\n");
     block_migration_lock(&config_directory);
 
@@ -344,16 +314,15 @@ fn resume_support_accepts_current_config_without_a_migration_lock() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn resume_support_answers_when_its_config_migration_fails() {
     let test_directory = TempDir::new().expect("create test directory");
-    let config_directory = resolve_test_config_directory(test_directory.path());
+    let config_directory = resolve_config_directory_under_home(test_directory.path());
     let app_config_path = write_app_config(&config_directory, "version 1\n");
     let (migration_lock_path, lock_open_error) = block_migration_lock(&config_directory);
 
     let process_output = run_test_koshi_command(
-        build_test_koshi_command(test_directory.path()).arg("resume-support"),
+        build_koshi_command_under_home(test_directory.path()).arg("resume-support"),
     );
 
     assert_eq!(process_output.status.code(), Some(0));
@@ -382,25 +351,22 @@ fn resume_support_answers_when_its_config_migration_fails() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn a_router_whose_config_migration_fails_warns_and_serves() {
     let test_directory = TempDir::new().expect("create test directory");
-    let config_directory = resolve_test_config_directory(test_directory.path());
+    let config_directory = resolve_config_directory_under_home(test_directory.path());
     let app_config_path = write_app_config(&config_directory, "version 1\npane {");
     let runtime_directory = build_test_runtime_directory();
     let router_endpoint_path = resolve_router_endpoint_path(runtime_directory.path());
 
-    let mut router_process = build_test_koshi_command(test_directory.path())
+    let mut router_process = build_koshi_command_under_home(test_directory.path())
         .arg("serve-router")
         .arg("--runtime-dir")
         .arg(runtime_directory.path())
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
         .spawn()
         .expect("start the router");
-    let startup_deadline = Instant::now() + STARTUP_TEST_TIMEOUT_DURATION;
+    let startup_deadline = Instant::now() + WAIT_DURATION;
     while !router_endpoint_path.exists() && Instant::now() < startup_deadline {
         std::thread::sleep(STARTUP_POLL_INTERVAL_DURATION);
     }
@@ -412,7 +378,7 @@ fn a_router_whose_config_migration_fails_warns_and_serves() {
 
     assert!(
         is_router_serving,
-        "the router wrote no endpoint file within {STARTUP_TEST_TIMEOUT_DURATION:?}"
+        "the router wrote no endpoint file within {WAIT_DURATION:?}"
     );
     assert_eq!(
         String::from_utf8_lossy(&router_output.stderr),
@@ -425,5 +391,84 @@ fn a_router_whose_config_migration_fails_warns_and_serves() {
     assert_eq!(
         fs::read_to_string(&app_config_path).expect("read unchanged config"),
         "version 1\npane {"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_test_log_directory(home_directory: &Path) -> PathBuf {
+    home_directory.join("Library/Application Support/koshi/logs")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn resolve_test_log_directory(home_directory: &Path) -> PathBuf {
+    home_directory.join(".local/state/koshi/logs")
+}
+
+#[cfg(windows)]
+fn resolve_test_log_directory(home_directory: &Path) -> PathBuf {
+    home_directory
+        .join("AppData")
+        .join("Local")
+        .join("koshi")
+        .join("data")
+        .join("logs")
+}
+
+/// `koshi.kdl` turns logging on, and `keybinding.kdl` holds KDL that does not
+/// parse: migration fails on `keybinding.kdl`, and the session server writes
+/// that failure to its log file at warn level.
+#[test]
+fn a_session_server_whose_config_migration_fails_writes_the_failure_to_its_log() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let config_directory = resolve_config_directory_under_home(test_directory.path());
+    write_app_config(
+        &config_directory,
+        "version 2\nlogging {\n    enabled #true\n    level \"warning\"\n}\n",
+    );
+    let keybinding_config_path = config_directory.join("keybinding.kdl");
+    fs::write(&keybinding_config_path, "version 1\nnormal {").expect("write keybinding config");
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_log_path = resolve_test_log_directory(test_directory.path())
+        .join(format!("koshi-log-{}.log", session_id.get_uuid()));
+
+    let mut session_server_process = build_koshi_command_under_home(test_directory.path())
+        .arg("serve-session")
+        .arg(session_id.to_string())
+        .arg(SESSION_SERVER_NAME)
+        .arg("--runtime-dir")
+        .arg(runtime_directory.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the session server");
+    let expected_warning = format!(
+        "config failed: config parse error in {}: No closing '}}' for child block",
+        keybinding_config_path.display()
+    );
+    let startup_deadline = Instant::now() + WAIT_DURATION;
+    let mut session_log_text = String::new();
+    while !session_log_text.contains(&expected_warning) && Instant::now() < startup_deadline {
+        std::thread::sleep(STARTUP_POLL_INTERVAL_DURATION);
+        session_log_text = fs::read_to_string(&session_log_path).unwrap_or_default();
+    }
+    let _ = session_server_process.kill();
+    let _ = session_server_process.wait();
+
+    let warning_line = session_log_text
+        .lines()
+        .find(|session_log_line| session_log_line.contains(&expected_warning))
+        .unwrap_or_else(|| {
+            panic!("the session log holds no migration warning:\n{session_log_text}")
+        });
+    let (_log_timestamp, logged_warning) = warning_line
+        .split_once("Z  ")
+        .unwrap_or_else(|| panic!("the warning line starts with a timestamp: {warning_line}"));
+    assert_eq!(
+        logged_warning,
+        format!(
+            "WARN koshi_daemon::session_server: the config files could not be migrated; the \
+             session starts with them as they are, config_migration_error: {expected_warning}"
+        )
     );
 }

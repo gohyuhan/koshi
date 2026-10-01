@@ -1111,7 +1111,7 @@ fn a_wakeup_is_asked_for_only_while_a_drag_is_held_past_an_edge() {
     assert_eq!(
         viewer.compute_next_mouse_wakeup(clock.advance_one_second()),
         Some(Duration::ZERO),
-        "a drag past the bottom edge asks the loop to wake, and one second later the wakeup is overdue"
+        "a drag past the bottom edge asks the loop to wake, and after one second the wakeup is overdue"
     );
 }
 
@@ -2083,7 +2083,7 @@ fn a_held_drag_stops_firing_once_there_is_nowhere_left_to_scroll() {
     assert_eq!(
         viewer.compute_next_mouse_wakeup(current_time),
         Some(Duration::ZERO),
-        "the overshoot arms the scroll, and one second later the wakeup is overdue"
+        "the overshoot arms the scroll, and after one second the wakeup is overdue"
     );
 
     // The firing finds the view already at the live bottom and moves nothing.
@@ -2148,7 +2148,7 @@ fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
     assert_eq!(
         viewer.compute_next_mouse_wakeup(current_time),
         Some(Duration::ZERO),
-        "the overshoot arms the scroll, and one second later the wakeup is overdue"
+        "the overshoot arms the scroll, and after one second the wakeup is overdue"
     );
 
     expire_mouse_scroll(
@@ -2636,11 +2636,11 @@ fn typing_during_a_drag_cancels_the_highlight_and_the_gesture() {
     );
     assert_eq!(get_selection(&mut server, client_id, pane_id), None);
 
-    let later_drag_point = get_pane_screen_cell(&server, client_id, pane_id, 6, 0);
+    let drag_point_after_key_press = get_pane_screen_cell(&server, client_id, pane_id, 6, 0);
     dispatch_mouse_input_at_time(
         &mut server,
         &mut viewer,
-        build_mouse_drag(later_drag_point),
+        build_mouse_drag(drag_point_after_key_press),
         clock.advance_one_second(),
     );
     assert_eq!(

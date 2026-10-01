@@ -8,7 +8,7 @@ use super::*;
 
 use std::thread::JoinHandle;
 
-use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
+use koshi_ipc::endpoint::{compute_socket_address, resolve_resume_file_path, EndpointFile};
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult, PROTOCOL_VERSION};
 use koshi_ipc::router::{
     compute_router_socket_address, resolve_router_endpoint_path, RouterRequest, RouterResponse,
@@ -141,8 +141,9 @@ fn the_router_and_every_session_report_the_build_they_run() {
     let session_thread = spawn_fake_session(runtime_directory.path(), session_id, "0.1.0");
 
     let server_version_rows =
-        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
-            .expect("both servers answer");
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None, None)
+            .expect("both servers answer")
+            .server_version_rows;
 
     assert_eq!(
         server_version_rows,
@@ -174,8 +175,9 @@ fn a_machine_running_nothing_answers_with_the_router_alone() {
     let runtime_directory = build_test_runtime_directory();
 
     let server_version_rows =
-        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
-            .expect("nothing running is an answer");
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None, None)
+            .expect("nothing running is an answer")
+            .server_version_rows;
 
     assert_eq!(
         server_version_rows,
@@ -196,8 +198,9 @@ fn a_server_that_names_no_build_is_told_apart_from_one_that_is_gone() {
     write_stale_endpoint_file(runtime_directory.path(), gone_session_id);
 
     let server_version_rows =
-        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
-            .expect("both sessions answer");
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None, None)
+            .expect("both sessions answer")
+            .server_version_rows;
 
     let silent_server_version_row = server_version_rows
         .iter()
@@ -239,9 +242,11 @@ fn naming_one_session_leaves_out_the_router_and_the_other_sessions() {
 
     let server_version_rows = list_server_version_rows_in_runtime_directory(
         runtime_directory.path(),
+        None,
         Some(&SessionReference::SessionId(requested_session_id)),
     )
-    .expect("the requested session answers");
+    .expect("the requested session answers")
+    .server_version_rows;
 
     assert_eq!(
         server_version_rows,
@@ -265,9 +270,11 @@ fn naming_a_session_that_is_not_running_reports_it_as_not_running() {
 
     let server_version_rows = list_server_version_rows_in_runtime_directory(
         runtime_directory.path(),
+        None,
         Some(&SessionReference::SessionId(gone_session_id)),
     )
-    .expect("a session id that nothing answers is still an answer");
+    .expect("a session id that nothing answers is still an answer")
+    .server_version_rows;
 
     assert_eq!(
         server_version_rows,
@@ -296,8 +303,9 @@ fn the_session_rows_come_back_in_session_id_order() {
     }
 
     let server_version_rows =
-        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
-            .expect("the sessions are listed");
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None, None)
+            .expect("the sessions are listed")
+            .server_version_rows;
 
     let listed_session_ids: Vec<SessionId> = server_version_rows
         .iter()
@@ -318,8 +326,9 @@ fn a_server_that_cannot_be_asked_leaves_the_other_rows_standing() {
         spawn_unresponsive_session(runtime_directory.path(), unresponsive_session_id);
 
     let server_version_rows =
-        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None)
-            .expect("one server failing is still an answer");
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None, None)
+            .expect("one server failing is still an answer")
+            .server_version_rows;
 
     // The router and the answering session are both here, which is the whole
     // point: one wedged server used to take the entire answer with it.
@@ -377,7 +386,7 @@ fn every_server_answering_ends_the_command_with_no_failure() {
     ];
 
     assert!(
-        build_unreachable_server_error(&server_version_rows).is_none(),
+        build_unreachable_server_error(&server_version_rows, 0, 0).is_none(),
         "every server answered, so nothing is missing from this answer"
     );
 }
@@ -403,7 +412,7 @@ fn a_server_that_could_not_be_asked_fails_the_command_after_the_rows_print() {
 
     let Some(CliError::IpcUnavailable {
         detail: unreachable_detail,
-    }) = build_unreachable_server_error(&server_version_rows)
+    }) = build_unreachable_server_error(&server_version_rows, 0, 0)
     else {
         panic!("two unreachable servers must fail the command");
     };
@@ -414,12 +423,178 @@ fn a_server_that_could_not_be_asked_fails_the_command_after_the_rows_print() {
 
     let Some(CliError::IpcUnavailable {
         detail: unreachable_detail,
-    }) = build_unreachable_server_error(&server_version_rows[..1])
+    }) = build_unreachable_server_error(&server_version_rows[..1], 0, 0)
     else {
         panic!("one unreachable server must fail the command");
     };
     assert_eq!(
         unreachable_detail,
         "1 koshi server did not answer, so this answer is incomplete"
+    );
+}
+
+#[test]
+fn sessions_past_the_listing_limit_fail_the_command_with_no_row_of_their_own() {
+    let Some(CliError::IpcUnavailable {
+        detail: unreachable_detail,
+    }) = build_unreachable_server_error(&[], 3, 0)
+    else {
+        panic!("three unlisted sessions must fail the command");
+    };
+    assert_eq!(
+        unreachable_detail,
+        "3 koshi servers did not answer, so this answer is incomplete"
+    );
+}
+
+#[test]
+fn a_session_replacing_its_image_earns_a_row_that_could_not_be_asked() {
+    // A resume file written just now and no endpoint file: the session is
+    // between its old image and its new one.
+    let runtime_directory = build_test_runtime_directory();
+    let restarting_session_id = SessionId::new();
+    std::fs::write(
+        resolve_resume_file_path(runtime_directory.path(), restarting_session_id),
+        b"",
+    )
+    .expect("write the resume file");
+
+    let server_version_report =
+        list_server_version_rows_in_runtime_directory(runtime_directory.path(), None, None)
+            .expect("a restarting session is still an answer");
+
+    assert_eq!(
+        server_version_report,
+        ServerVersionReport {
+            server_version_rows: vec![
+                ServerVersionRow {
+                    server_kind: ServerKind::Router,
+                    session_id: None,
+                    build: ServerBuild::NotRunning,
+                },
+                ServerVersionRow {
+                    server_kind: ServerKind::Session,
+                    session_id: Some(restarting_session_id),
+                    build: ServerBuild::Unreachable {
+                        detail: format!(
+                            "IPC unavailable: session {restarting_session_id} is restarting; \
+                             ask again in a moment"
+                        ),
+                    },
+                },
+            ],
+            unlisted_session_count: 0,
+            unread_path_count: 0,
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_id_two_folders_of_the_shared_directory_advertise_earns_a_row_that_could_not_be_asked() {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
+        .expect("read the runtime directory")
+        .uid();
+    let duplicated_session_id = SessionId::new();
+    for folder_offset in [1, 2] {
+        let user_directory = shared_sessions_base_directory
+            .path()
+            .join((own_user_id + folder_offset).to_string());
+        std::fs::create_dir_all(&user_directory).expect("create a user's folder");
+        drop(
+            std::os::unix::net::UnixListener::bind(
+                user_directory.join(format!("{duplicated_session_id}.sock")),
+            )
+            .expect("plant a socket"),
+        );
+    }
+
+    let server_version_report = list_server_version_rows_in_runtime_directory(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        None,
+    )
+    .expect("a duplicated id is still an answer");
+
+    assert_eq!(
+        server_version_report.server_version_rows[1..],
+        [ServerVersionRow {
+            server_kind: ServerKind::Session,
+            session_id: Some(duplicated_session_id),
+            build: ServerBuild::Unreachable {
+                detail: format!(
+                    "IPC unavailable: session {duplicated_session_id} is advertised 2 times in \
+                     the shared directory, by user id {own_user_id}; koshi reaches none of them"
+                ),
+            },
+        }]
+    );
+    assert_eq!(server_version_report.unlisted_session_count, 0);
+}
+
+#[test]
+fn a_path_that_could_not_be_read_fails_the_command_with_a_clause_of_its_own() {
+    let unreachable_router_row = ServerVersionRow {
+        server_kind: ServerKind::Router,
+        session_id: None,
+        build: ServerBuild::Unreachable {
+            detail: "the socket closed".to_string(),
+        },
+    };
+
+    let Some(CliError::IpcUnavailable {
+        detail: unread_only_detail,
+    }) = build_unreachable_server_error(&[], 0, 2)
+    else {
+        panic!("two unread paths must fail the command");
+    };
+    let Some(CliError::IpcUnavailable {
+        detail: both_gaps_detail,
+    }) = build_unreachable_server_error(&[unreachable_router_row], 0, 1)
+    else {
+        panic!("an unreachable server and an unread path must fail the command");
+    };
+
+    assert_eq!(
+        unread_only_detail,
+        "2 paths could not be read, so this answer is incomplete"
+    );
+    assert_eq!(
+        both_gaps_detail,
+        "1 koshi server did not answer; 1 path could not be read, so this answer is incomplete"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_directory_that_cannot_be_read_is_counted_in_the_report() {
+    // A link to itself fails every read with `ELOOP`.
+    let runtime_directory = build_test_runtime_directory();
+    let looping_shared_directory = runtime_directory.path().join("looping");
+    std::os::unix::fs::symlink("looping", &looping_shared_directory)
+        .expect("link the shared directory to itself");
+
+    let server_version_report = list_server_version_rows_in_runtime_directory(
+        runtime_directory.path(),
+        Some(&looping_shared_directory),
+        None,
+    )
+    .expect("an unread shared directory is still an answer");
+
+    assert_eq!(
+        server_version_report,
+        ServerVersionReport {
+            server_version_rows: vec![ServerVersionRow {
+                server_kind: ServerKind::Router,
+                session_id: None,
+                build: ServerBuild::NotRunning,
+            }],
+            unlisted_session_count: 0,
+            unread_path_count: 1,
+        }
     );
 }

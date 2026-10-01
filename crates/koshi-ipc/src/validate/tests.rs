@@ -4,6 +4,8 @@
 
 use super::*;
 use crate::transport::Listener;
+#[cfg(unix)]
+use tempfile::TempDir;
 
 /// A socket address unique to this test: a temp-dir file path on Unix, a
 /// pipe name on Windows.
@@ -25,15 +27,12 @@ fn build_test_socket_address(socket_label: &str) -> String {
 
 // --- validate_socket_address, Unix: location + privacy ---
 
-/// A fresh directory with mode `0700`, standing in for the runtime dir.
+/// A fresh directory with mode `0700`, standing in for the runtime dir. It is
+/// removed when the returned [`TempDir`] drops.
 #[cfg(unix)]
-fn build_private_runtime_directory(directory_label: &str) -> std::path::PathBuf {
-    let runtime_directory = std::env::temp_dir().join(format!(
-        "koshi-validate-dir-{}-{directory_label}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&runtime_directory).expect("create directory");
-    set_file_mode(&runtime_directory, 0o700);
+fn build_private_runtime_directory() -> TempDir {
+    let runtime_directory = TempDir::new().expect("create directory");
+    set_file_mode(runtime_directory.path(), 0o700);
     runtime_directory
 }
 
@@ -46,12 +45,13 @@ fn set_file_mode(file_path: &Path, file_mode: u32) {
 #[cfg(unix)]
 #[test]
 fn an_address_directly_inside_a_private_runtime_directory_passes() {
-    let runtime_directory = build_private_runtime_directory("passes");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = runtime_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    validate_socket_address(&socket_address, &runtime_directory).expect("validate");
+    validate_socket_address(&socket_address, runtime_directory).expect("validate");
 }
 
 /// The location check compares path components: a trailing slash on
@@ -59,7 +59,8 @@ fn an_address_directly_inside_a_private_runtime_directory_passes() {
 #[cfg(unix)]
 #[test]
 fn a_runtime_directory_spelled_with_a_trailing_slash_still_matches() {
-    let runtime_directory = build_private_runtime_directory("trailingslash");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = runtime_directory
         .join("session.sock")
         .to_string_lossy()
@@ -72,13 +73,13 @@ fn a_runtime_directory_spelled_with_a_trailing_slash_still_matches() {
 #[cfg(unix)]
 #[test]
 fn an_address_outside_the_runtime_directory_is_untrusted() {
-    let runtime_directory = build_private_runtime_directory("outside");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = std::env::temp_dir()
         .join("elsewhere.sock")
         .to_string_lossy()
         .into_owned();
-    let validation_error =
-        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error = validate_socket_address(&socket_address, runtime_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
@@ -88,11 +89,11 @@ fn an_address_outside_the_runtime_directory_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn an_address_nested_below_the_runtime_directory_is_untrusted() {
-    let runtime_directory = build_private_runtime_directory("nested");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = runtime_directory.join("sub").join("session.sock");
     let socket_address = socket_address.to_string_lossy();
-    let validation_error =
-        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error = validate_socket_address(&socket_address, runtime_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
@@ -102,10 +103,10 @@ fn an_address_nested_below_the_runtime_directory_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_dot_dot_step_cannot_escape_the_runtime_directory() {
-    let runtime_directory = build_private_runtime_directory("dotdot");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = format!("{}/../evil.sock", runtime_directory.display());
-    let validation_error =
-        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error = validate_socket_address(&socket_address, runtime_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
@@ -115,10 +116,10 @@ fn a_dot_dot_step_cannot_escape_the_runtime_directory() {
 #[cfg(unix)]
 #[test]
 fn an_address_that_is_the_runtime_directory_itself_is_untrusted() {
-    let runtime_directory = build_private_runtime_directory("self");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = runtime_directory.to_string_lossy().into_owned();
-    let validation_error =
-        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error = validate_socket_address(&socket_address, runtime_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!("untrusted socket address {socket_address}: not directly inside the koshi runtime directory")
@@ -128,14 +129,14 @@ fn an_address_that_is_the_runtime_directory_itself_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_runtime_directory_open_to_the_group_is_untrusted() {
-    let runtime_directory = build_private_runtime_directory("groupopen");
-    set_file_mode(&runtime_directory, 0o750);
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
+    set_file_mode(runtime_directory, 0o750);
     let socket_address = runtime_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    let validation_error =
-        validate_socket_address(&socket_address, &runtime_directory).unwrap_err();
+    let validation_error = validate_socket_address(&socket_address, runtime_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!("untrusted socket address {socket_address}: runtime directory mode is 750, expected 700")
@@ -165,8 +166,8 @@ fn a_missing_runtime_directory_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_regular_file_standing_in_for_the_runtime_directory_is_untrusted() {
-    let blocking_directory_path =
-        std::env::temp_dir().join(format!("koshi-validate-dir-{}-file", std::process::id()));
+    let test_directory = TempDir::new().expect("create directory");
+    let blocking_directory_path = test_directory.path().join("file");
     std::fs::write(&blocking_directory_path, b"not a directory").expect("write file");
     set_file_mode(&blocking_directory_path, 0o700);
     let socket_address = blocking_directory_path
@@ -190,10 +191,11 @@ fn a_symbolic_link_standing_in_for_the_runtime_directory_is_untrusted() {
     // itself is refused, so another user who plants it at the runtime path
     // before koshi first runs cannot place this session's socket inside a
     // directory the user never chose.
-    let linked_directory = build_private_runtime_directory("linktarget");
-    let link = std::env::temp_dir().join(format!("koshi-validate-dir-{}-link", std::process::id()));
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(&linked_directory, &link).expect("symlink");
+    let linked_directory_guard = build_private_runtime_directory();
+    let linked_directory = linked_directory_guard.path();
+    let link_directory = TempDir::new().expect("create directory");
+    let link = link_directory.path().join("link");
+    std::os::unix::fs::symlink(linked_directory, &link).expect("symlink");
     let socket_address = link.join("session.sock").to_string_lossy().into_owned();
 
     let validation_error = validate_socket_address(&socket_address, &link).unwrap_err();
@@ -207,58 +209,58 @@ fn a_symbolic_link_standing_in_for_the_runtime_directory_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_runtime_directory_this_user_owns_passes_the_owner_check() {
-    let runtime_directory = build_private_runtime_directory("owner");
+    let runtime_directory_guard = build_private_runtime_directory();
+    let runtime_directory = runtime_directory_guard.path();
     let socket_address = runtime_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
     let owner = {
         use std::os::unix::fs::MetadataExt;
-        std::fs::symlink_metadata(&runtime_directory)
+        std::fs::symlink_metadata(runtime_directory)
             .expect("read runtime directory metadata")
             .uid()
     };
 
     assert_eq!(owner, unsafe { libc::geteuid() });
-    validate_socket_address(&socket_address, &runtime_directory).expect("validate");
+    validate_socket_address(&socket_address, runtime_directory).expect("validate");
 }
 
 // --- validate_shared_socket_address, Unix: location + shape ---
 
 /// A fresh directory with mode `0755`, standing in for this user's own
-/// subdirectory of the machine-wide shared directory.
+/// subdirectory of the machine-wide shared directory. It is removed when the
+/// returned [`TempDir`] drops.
 #[cfg(unix)]
-fn build_shared_session_directory(directory_label: &str) -> std::path::PathBuf {
-    let shared_directory = std::env::temp_dir().join(format!(
-        "koshi-validate-shared-{}-{directory_label}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&shared_directory).expect("create directory");
-    set_file_mode(&shared_directory, 0o755);
+fn build_shared_session_directory() -> TempDir {
+    let shared_directory = TempDir::new().expect("create directory");
+    set_file_mode(shared_directory.path(), 0o755);
     shared_directory
 }
 
 #[cfg(unix)]
 #[test]
 fn an_address_directly_inside_a_shared_dir_this_user_owns_passes() {
-    let shared_directory = build_shared_session_directory("passes");
+    let shared_directory_guard = build_shared_session_directory();
+    let shared_directory = shared_directory_guard.path();
     let socket_address = shared_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    validate_shared_socket_address(&socket_address, &shared_directory).expect("validate");
+    validate_shared_socket_address(&socket_address, shared_directory).expect("validate");
 }
 
 #[cfg(unix)]
 #[test]
 fn an_address_outside_the_shared_dir_is_untrusted() {
-    let shared_directory = build_shared_session_directory("outside");
+    let shared_directory_guard = build_shared_session_directory();
+    let shared_directory = shared_directory_guard.path();
     let socket_address = std::env::temp_dir()
         .join("elsewhere.sock")
         .to_string_lossy()
         .into_owned();
     let validation_error =
-        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+        validate_shared_socket_address(&socket_address, shared_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!(
@@ -271,10 +273,11 @@ fn an_address_outside_the_shared_dir_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_dot_dot_step_cannot_escape_the_shared_dir() {
-    let shared_directory = build_shared_session_directory("dotdot");
+    let shared_directory_guard = build_shared_session_directory();
+    let shared_directory = shared_directory_guard.path();
     let socket_address = format!("{}/../evil.sock", shared_directory.display());
     let validation_error =
-        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+        validate_shared_socket_address(&socket_address, shared_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!(
@@ -309,8 +312,8 @@ fn a_missing_shared_dir_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_regular_file_standing_in_for_the_shared_dir_is_untrusted() {
-    let blocking_directory_path =
-        std::env::temp_dir().join(format!("koshi-validate-shared-{}-file", std::process::id()));
+    let test_directory = TempDir::new().expect("create directory");
+    let blocking_directory_path = test_directory.path().join("file");
     std::fs::write(&blocking_directory_path, b"not a directory").expect("write file");
     let socket_address = blocking_directory_path
         .join("session.sock")
@@ -327,14 +330,15 @@ fn a_regular_file_standing_in_for_the_shared_dir_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_shared_dir_other_users_may_write_is_untrusted() {
-    let shared_directory = build_shared_session_directory("groupwrite");
-    set_file_mode(&shared_directory, 0o775);
+    let shared_directory_guard = build_shared_session_directory();
+    let shared_directory = shared_directory_guard.path();
+    set_file_mode(shared_directory, 0o775);
     let socket_address = shared_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
     let validation_error =
-        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+        validate_shared_socket_address(&socket_address, shared_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!(
@@ -346,14 +350,15 @@ fn a_shared_dir_other_users_may_write_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_shared_dir_closed_to_other_users_is_untrusted() {
-    let shared_directory = build_shared_session_directory("private");
-    set_file_mode(&shared_directory, 0o700);
+    let shared_directory_guard = build_shared_session_directory();
+    let shared_directory = shared_directory_guard.path();
+    set_file_mode(shared_directory, 0o700);
     let socket_address = shared_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
     let validation_error =
-        validate_shared_socket_address(&socket_address, &shared_directory).unwrap_err();
+        validate_shared_socket_address(&socket_address, shared_directory).unwrap_err();
     assert_eq!(
         validation_error.to_string(),
         format!(
@@ -367,13 +372,14 @@ fn a_shared_dir_closed_to_other_users_is_untrusted() {
 #[cfg(unix)]
 #[test]
 fn a_shared_dir_with_the_sticky_bit_set_passes() {
-    let shared_directory = build_shared_session_directory("sticky");
-    set_file_mode(&shared_directory, 0o1755);
+    let shared_directory_guard = build_shared_session_directory();
+    let shared_directory = shared_directory_guard.path();
+    set_file_mode(shared_directory, 0o1755);
     let socket_address = shared_directory
         .join("session.sock")
         .to_string_lossy()
         .into_owned();
-    validate_shared_socket_address(&socket_address, &shared_directory).expect("validate");
+    validate_shared_socket_address(&socket_address, shared_directory).expect("validate");
 }
 
 #[cfg(unix)]
@@ -381,11 +387,11 @@ fn a_shared_dir_with_the_sticky_bit_set_passes() {
 fn a_symbolic_link_standing_in_for_the_shared_dir_is_untrusted() {
     // The link points at a directory that passes every other check; the link
     // itself is refused.
-    let linked_directory = build_shared_session_directory("linktarget");
-    let link =
-        std::env::temp_dir().join(format!("koshi-validate-shared-{}-link", std::process::id()));
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(&linked_directory, &link).expect("symlink");
+    let linked_directory_guard = build_shared_session_directory();
+    let linked_directory = linked_directory_guard.path();
+    let link_directory = TempDir::new().expect("create directory");
+    let link = link_directory.path().join("link");
+    std::os::unix::fs::symlink(linked_directory, &link).expect("symlink");
     let socket_address = link.join("session.sock").to_string_lossy().into_owned();
 
     let validation_error = validate_shared_socket_address(&socket_address, &link).unwrap_err();

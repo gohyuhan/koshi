@@ -72,8 +72,8 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "koshi.remote-listen",
         "koshi.kdl",
         "unset",
-        "Address the remote listener binds to. Setting it opens nothing; \
-         `koshi share grant` asks before the port opens.",
+        "IP address and port the remote listener binds to, such as 192.168.1.20:7654. Setting \
+         it opens nothing; `koshi share grant` asks before the port opens.",
     ),
     build_config_field_help(
         "koshi.auto-close-session",
@@ -386,7 +386,7 @@ pub fn run_config_command(command: &ConfigCommand) -> Result<(), CliError> {
 /// runs. Other commands and an unresolved config directory make no changes.
 ///
 /// # Errors
-/// Returns validation and migration errors from the config directory.
+/// Returns the errors of [`migrate_config_directory_for_update`].
 pub fn migrate_config_for_service_command(
     command: Option<&CliCommand>,
     config_directory: Option<&Path>,
@@ -413,7 +413,8 @@ pub fn migrate_config_for_service_command(
 /// schema takes no lock and writes nothing.
 ///
 /// # Errors
-/// Returns read, KDL, version, lock, and write errors.
+/// Returns a read error for the directory or a file, any [`migrate_config`]
+/// error, and a lock or write error.
 pub fn migrate_config_directory_for_update(config_directory: &Path) -> Result<(), CliError> {
     let loaded_config_files = load_config_files(config_directory);
     let mut migration_errors = loaded_config_files.config_file_read_errors;

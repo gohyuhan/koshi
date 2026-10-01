@@ -114,13 +114,13 @@ pub fn render_keys_list(
 ) -> String {
     let scope_filter_label = scope_filter.map(format_scope_argument_label);
     let mut key_bindings: Vec<KeyBindingSummary> = Vec::new();
-    for (mode_name, merged_mode_map) in &keymap_view.merged_keymap.mode_map_by_name {
+    for (mode_name, merged_mode_keymap) in &keymap_view.merged_keymap.mode_keymap_by_name {
         if requested_input_mode_name.is_some_and(|requested_input_mode_name| {
             requested_input_mode_name != mode_name.get_name()
         }) {
             continue;
         }
-        for (key_sequence, merged_binding) in &merged_mode_map.user_bindings_by_key_sequence {
+        for (key_sequence, merged_binding) in &merged_mode_keymap.user_bindings_by_key_sequence {
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
                 key_sequence: key_sequence.to_string(),
@@ -128,7 +128,8 @@ pub fn render_keys_list(
                 binding_source: merged_binding.layer_origin.to_string(),
             });
         }
-        for (key_sequence, default_binding) in &merged_mode_map.default_bindings_by_key_sequence {
+        for (key_sequence, default_binding) in &merged_mode_keymap.default_bindings_by_key_sequence
+        {
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
                 key_sequence: key_sequence.to_string(),
@@ -137,7 +138,7 @@ pub fn render_keys_list(
             });
         }
         for (key_sequence, displaced_default_binding) in
-            &merged_mode_map.unbound_default_bindings_by_key_sequence
+            &merged_mode_keymap.unbound_default_bindings_by_key_sequence
         {
             key_bindings.push(KeyBindingSummary {
                 input_mode: mode_name.get_name().to_string(),
@@ -185,8 +186,8 @@ pub fn render_keys_describe(
     .map_err(|parse_error| parse_error.to_string())?;
 
     let mut key_binding_details: Vec<KeyBindingDetail> = Vec::new();
-    for (mode_name, merged_mode_map) in &keymap_view.merged_keymap.mode_map_by_name {
-        let (matched_binding, binding_source) = if let Some(merged_binding) = merged_mode_map
+    for (mode_name, merged_mode_keymap) in &keymap_view.merged_keymap.mode_keymap_by_name {
+        let (matched_binding, binding_source) = if let Some(merged_binding) = merged_mode_keymap
             .user_bindings_by_key_sequence
             .get(&parsed_key_sequence)
         {
@@ -194,7 +195,7 @@ pub fn render_keys_describe(
                 &merged_binding.bound_action,
                 merged_binding.layer_origin.to_string(),
             )
-        } else if let Some(default_binding) = merged_mode_map
+        } else if let Some(default_binding) = merged_mode_keymap
             .default_bindings_by_key_sequence
             .get(&parsed_key_sequence)
         {

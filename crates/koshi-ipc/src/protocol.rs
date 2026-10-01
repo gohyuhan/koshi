@@ -393,6 +393,9 @@ pub enum IpcRequestKind {
         /// client as its viewport minus two rows.
         #[serde(default)]
         pane_area: Option<PaneArea>,
+        /// The native image protocols the caller's terminal proved it can
+        /// receive. Left off the wire when it proved none; absent, it reads as
+        /// none.
         #[serde(default, skip_serializing_if = "GraphicsCapabilities::is_empty")]
         graphics_capabilities: GraphicsCapabilities,
         /// The cell dimensions measured by this terminal before the attach,
@@ -643,8 +646,8 @@ pub enum IpcResult {
 /// [`code`](Self::code) it has no name for. Every refusal carries a
 /// [`message`](Self::message) a person can read.
 ///
-/// Example — a build with no `rate_limited` code reads
-/// `{"code":"rate_limited","message":"too many attach requests"}` as
+/// Example — a build with no `RateLimited` code reads
+/// `{"code":"RateLimited","message":"too many attach requests"}` as
 /// [`IpcErrorCode::Unknown`] and still shows the sentence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IpcErrorPayload {
@@ -669,6 +672,10 @@ pub enum IpcErrorCode {
     UnsupportedKind,
     /// The bytes received are not a request this build can read.
     MalformedRequest,
+    /// The request was read, and this peer could not carry it out. The message
+    /// names what stopped it, such as `the binary at /opt/koshi could not be
+    /// read: No such file or directory`.
+    RequestFailed,
     /// The caller named a target this build does not have. The message names
     /// it.
     NotFound,

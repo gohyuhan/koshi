@@ -52,8 +52,9 @@ use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION,
 };
-use koshi_ipc::router::SessionSelector;
+use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::transport::{FrameReader, FrameWriter};
+use serde_json::value::RawValue;
 
 use crate::error::CliError;
 use crate::talk::{self, build_ipc_unavailable_error, build_peer_refusal_error};
@@ -65,6 +66,10 @@ const SECRET_ENVIRONMENT_VARIABLE: &str = "KOSHI_REMOTE_SECRET";
 /// How long one dial has to open: the name lookup aside, the connect, the TLS
 /// handshake and the secret exchange share it.
 pub const DIAL_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
+/// How long a wait for a server that is restarting pauses between dials. Each
+/// dial runs the whole admission — TLS, the secret, and the scope check.
+pub const REMOTE_RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(250);
 
 /// How long the frames that join a client to a session on another machine have
 /// to arrive: the Attach, the session's Hello carried back through the bridge,
@@ -151,6 +156,9 @@ pub struct RemoteLink {
 pub enum DialError {
     /// The path to the server failed, and dialling again can succeed.
     Unreachable(CliError),
+    /// The server's router answered that it is restarting into a new build,
+    /// and a dial after the restart can succeed.
+    Restarting(CliError),
     /// The server — or the pinned-certificate check — answered, and every
     /// identical dial after it gets the same answer.
     Refused(CliError),
@@ -160,7 +168,9 @@ pub enum DialError {
 impl From<DialError> for CliError {
     fn from(dial_error: DialError) -> Self {
         match dial_error {
-            DialError::Unreachable(cli_error) | DialError::Refused(cli_error) => cli_error,
+            DialError::Unreachable(cli_error)
+            | DialError::Restarting(cli_error)
+            | DialError::Refused(cli_error) => cli_error,
         }
     }
 }
@@ -281,9 +291,9 @@ pub fn update_saved_server_store<UpdateOutcome>(
 /// file this call creates. On Windows both take the data directory's
 /// owner-scoped ACLs.
 ///
-/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up to `lock_wait_duration`.
-/// Dropping the returned file releases the lock, and so does the operating
-/// system when the process holding it dies.
+/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up
+/// to `lock_wait_duration`. Dropping the returned file releases the lock, and
+/// so does the operating system when the process holding it dies.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the directory or the file could not be
@@ -926,7 +936,7 @@ pub fn list_remote_sessions(
 ///
 /// The bytes after this belong to that session's own server. The machine
 /// serving it sends the session-plane Hello carrying that session's endpoint
-/// token and the versions this build named, so the next frame the caller reads
+/// token and the versions this build named. The next frame the caller reads
 /// is that session server's Hello answer.
 ///
 /// # Errors
@@ -944,6 +954,99 @@ pub fn attach_remote_session(
         .send(&RemoteClientFrame::Attach { session_selector })
         .map_err(build_ipc_unavailable_error)?;
     Ok((frame_reader, frame_writer))
+}
+
+/// Read the frame that answers the Hello the serving machine wrote on this
+/// caller's behalf after an Attach for `session_selector`.
+///
+/// Two senders write this one frame: the serving machine writes a refusal when
+/// it does not attach the caller, and otherwise the session server's own
+/// answer arrives unread through the bridge. The frame is held as its JSON
+/// text and decoded as a refusal first, then as an [`IncomingResponse`].
+///
+/// Example — a `Refused` frame carrying [`ROUTER_RESTARTING_MESSAGE`] is
+/// [`DialError::Restarting`]; one carrying any other sentence for the selector
+/// `quiet-lake` is [`DialError::Refused`] reading `the token this server saved
+/// does not reach session quiet-lake`.
+///
+/// # Errors
+/// [`DialError::Unreachable`] when the frame could not be read at all.
+/// [`DialError::Restarting`] for a refusal carrying
+/// [`ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`] for every other
+/// refusal, and for an answer that decodes as neither.
+pub fn read_forwarded_hello_answer(
+    frame_reader: &mut FrameReader,
+    session_selector: &SessionSelector,
+) -> Result<IncomingResponse, DialError> {
+    let hello_answer_frame: Box<RawValue> = frame_reader
+        .recv()
+        .map_err(|ipc_error| DialError::Unreachable(build_ipc_unavailable_error(ipc_error)))?;
+    if let Ok(RemoteServerFrame::Refused {
+        message: refusal_message,
+    }) = serde_json::from_str(hello_answer_frame.get())
+    {
+        if refusal_message == ROUTER_RESTARTING_MESSAGE {
+            return Err(DialError::Restarting(CliError::IpcUnavailable {
+                detail: refusal_message,
+            }));
+        }
+        return Err(DialError::Refused(CliError::Runtime {
+            detail: format!(
+                "the token this server saved does not reach session {}",
+                format_session_selector_name(session_selector)
+            ),
+        }));
+    }
+    serde_json::from_str(hello_answer_frame.get()).map_err(|response_parse_error| {
+        DialError::Refused(CliError::IpcUnavailable {
+            detail: format!(
+                "the server answered with a frame this attach cannot read: {response_parse_error}"
+            ),
+        })
+    })
+}
+
+/// How a selector reads in a message: the id itself, or the display name.
+fn format_session_selector_name(session_selector: &SessionSelector) -> String {
+    match session_selector {
+        SessionSelector::SessionId(session_id) => session_id.to_string(),
+        SessionSelector::SessionName(session_name) => session_name.clone(),
+    }
+}
+
+/// Run `dial_connection`, and dial again while the server's router restarts.
+///
+/// A first dial that is not [`DialError::Restarting`] is the answer. After
+/// one, the pause of [`REMOTE_RESTART_POLL_INTERVAL_DURATION`] comes before
+/// each dial, and a dial that is [`DialError::Restarting`] or
+/// [`DialError::Unreachable`] is dialed again until `restart_window_duration`
+/// has passed since that first answer. A dial while the restarting router's
+/// port is closed is [`DialError::Unreachable`].
+///
+/// Example — a remote `koshi attach work` whose router answers restarting
+/// pauses 250 ms, finds the port closed, pauses again, and joins `work` once
+/// the restarted router answers.
+///
+/// # Errors
+/// The first answer that is neither of the two, or the last dial's answer once
+/// the window has passed.
+pub fn dial_through_router_restart<Joined>(
+    restart_window_duration: Duration,
+    mut dial_connection: impl FnMut() -> Result<Joined, DialError>,
+) -> Result<Joined, DialError> {
+    let first_dial_result = dial_connection();
+    if !matches!(first_dial_result, Err(DialError::Restarting(_))) {
+        return first_dial_result;
+    }
+    let restart_deadline = Instant::now() + restart_window_duration;
+    loop {
+        std::thread::sleep(REMOTE_RESTART_POLL_INTERVAL_DURATION);
+        match dial_connection() {
+            Err(DialError::Restarting(_) | DialError::Unreachable(_))
+                if Instant::now() < restart_deadline => {}
+            dial_result => return dial_result,
+        }
+    }
 }
 
 /// Submit `command` to the session `session_id` on the server argument, and
@@ -1019,18 +1122,28 @@ pub fn fetch_remote_overview(
 /// One request against one remote session: dial, attach, settle the version
 /// from the Hello answer the server sent on this caller's behalf, then send
 /// the IPC request and read its answer.
+///
+/// The dial, the Attach and the Hello answer run through
+/// [`dial_through_router_restart`] with
+/// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION):
+/// a server whose router is restarting is dialed again until it has
+/// restarted or the window has passed.
 fn send_remote_ipc_request(
     server_reference: &ServerReference,
     session_id: SessionId,
     ipc_request: IpcRequest,
 ) -> Result<IpcResult, CliError> {
-    let (remote_link, _) =
-        connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
-    let (mut frame_reader, mut frame_writer) =
-        attach_remote_session(remote_link, SessionSelector::SessionId(session_id))?;
-
-    let hello_response: IncomingResponse =
-        frame_reader.recv().map_err(build_ipc_unavailable_error)?;
+    let session_selector = SessionSelector::SessionId(session_id);
+    let (mut frame_reader, mut frame_writer, hello_response) =
+        dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
+            let (remote_link, _) =
+                connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
+            let (mut frame_reader, frame_writer) =
+                attach_remote_session(remote_link, session_selector.clone())
+                    .map_err(DialError::Unreachable)?;
+            let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
+            Ok((frame_reader, frame_writer, hello_response))
+        })?;
     talk::parse_session_hello_version(hello_response)?;
 
     frame_writer

@@ -10,8 +10,8 @@ use crate::error::{IpcError, RemoteFile};
 use crate::protocol::ConnectionToken;
 use crate::remote_servers::{SavedServer, ServerStore, SERVER_STORE_FORMAT};
 use crate::remote_state::{
-    build_unreadable_remote_file_error, CertFile, EnabledFile, CERT_FILE_FORMAT,
-    ENABLED_FILE_FORMAT,
+    build_unreadable_remote_file_error, CertificateFile, RemoteAccessRecord,
+    CERTIFICATE_FILE_FORMAT, REMOTE_ACCESS_RECORD_FILE_FORMAT,
 };
 use crate::remote_tokens::{TokenRecord, TokenScope, TokenStore, TOKEN_STORE_FORMAT};
 
@@ -150,16 +150,16 @@ pub fn migrate_remote_listener_files(data_directory: &Path) -> Vec<IpcError> {
 
 /// Convert the certificate without changing its DER bytes.
 fn migrate_certificate_file(data_directory: &Path) -> Result<(), IpcError> {
-    let certificate_path = CertFile::resolve_certificate_file_path(data_directory);
-    if let Some(previous_certificate) = load_previous_file::<CertFile, PreviousCertificate>(
+    let certificate_path = CertificateFile::resolve_certificate_file_path(data_directory);
+    if let Some(previous_certificate) = load_previous_file::<CertificateFile, PreviousCertificate>(
         RemoteFile::Certificate,
         &certificate_path,
         |certificate| certificate.file_format,
         |certificate| certificate.format,
-        CERT_FILE_FORMAT,
+        CERTIFICATE_FILE_FORMAT,
     )? {
-        CertFile {
-            file_format: CERT_FILE_FORMAT,
+        CertificateFile {
+            file_format: CERTIFICATE_FILE_FORMAT,
             cert_der: previous_certificate.cert_der,
             key_der: previous_certificate.key_der,
         }
@@ -170,21 +170,22 @@ fn migrate_certificate_file(data_directory: &Path) -> Result<(), IpcError> {
 
 /// Convert the remote access record, keeping its `enabled_at` time.
 fn migrate_remote_access_record_file(data_directory: &Path) -> Result<(), IpcError> {
-    let enabled_file_path = EnabledFile::resolve_enabled_file_path(data_directory);
+    let remote_access_record_path =
+        RemoteAccessRecord::resolve_remote_access_record_path(data_directory);
     if let Some(previous_remote_access_record) =
-        load_previous_file::<EnabledFile, PreviousRemoteAccessRecord>(
+        load_previous_file::<RemoteAccessRecord, PreviousRemoteAccessRecord>(
             RemoteFile::RemoteAccessRecord,
-            &enabled_file_path,
-            |enabled_file| enabled_file.file_format,
+            &remote_access_record_path,
+            |remote_access_record| remote_access_record.file_format,
             |previous_remote_access_record| previous_remote_access_record.format,
-            ENABLED_FILE_FORMAT,
+            REMOTE_ACCESS_RECORD_FILE_FORMAT,
         )?
     {
-        EnabledFile {
-            file_format: ENABLED_FILE_FORMAT,
+        RemoteAccessRecord {
+            file_format: REMOTE_ACCESS_RECORD_FILE_FORMAT,
             enabled_at: previous_remote_access_record.enabled_at,
         }
-        .write_to_path(&enabled_file_path)?;
+        .write_to_path(&remote_access_record_path)?;
     }
     Ok(())
 }

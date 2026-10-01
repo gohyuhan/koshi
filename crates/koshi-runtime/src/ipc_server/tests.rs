@@ -31,9 +31,13 @@ use koshi_renderer::snapshot::{
 use koshi_terminal::graphics::{
     DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay, ImageRecord,
 };
-use koshi_test_support::fixtures::build_key_input_for_chord;
+use koshi_test_support::fixtures::{
+    build_key_input_for_chord, count_program_runs, write_printing_program,
+};
 
+use crate::executable_watch::RESTART_RETRY_INTERVAL_DURATION;
 use crate::runtime::event::{AttachAccepted, EndingNotice, SessionEnding};
+use crate::server::RestartRefusal;
 
 use super::*;
 
@@ -297,7 +301,8 @@ fn spawn_ending_dispatcher(
 
 /// Drain `inbox_receiver` until every inbox sender is gone. The first attach
 /// is answered as `client_id` in `session_id`, streaming `delivery_receiver`
-/// under `ending_notice`. Every later attach and every other event is dropped.
+/// under `ending_notice`. Every attach after it and every other event is
+/// dropped.
 fn answer_first_attach(
     inbox_receiver: &Receiver<RuntimeEvent>,
     client_id: ClientId,
@@ -358,7 +363,7 @@ fn read_first_frame_of_ending_session(
         delivery_receiver,
         Arc::clone(ending_notice),
     );
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
 
@@ -491,7 +496,7 @@ fn start_attachable_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_runtime_events) =
         spawn_attaching_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     (
         ipc_server,
@@ -565,7 +570,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     let session_id = SessionId::new();
     let runtime_directory = build_test_runtime_directory("attach-cell-size");
     let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
     connection
@@ -669,7 +674,7 @@ impl AttachedFrameStream {
         let (inbox_sender, inbox_receiver) = mpsc::channel();
         let (dispatcher_thread, delivery_sender) =
             spawn_frame_dispatcher(inbox_receiver, client_id, session_id);
-        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+        let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
             .expect("start serving");
         let connection = attach_test_client_with_graphics(
             &runtime_directory,
@@ -1129,7 +1134,7 @@ fn start_test_server(
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, session_overview);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     (ipc_server, session_id, runtime_directory, dispatcher_thread)
 }
@@ -1154,6 +1159,7 @@ fn start_shared_test_server(
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(move || is_other_user_access_enabled),
         }),
+        None,
     )
     .expect("start serving");
     (
@@ -1208,7 +1214,7 @@ fn start_reporting_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_command_envelopes) =
         spawn_reporting_dispatcher(inbox_receiver);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     (
         ipc_server,
@@ -1339,7 +1345,7 @@ fn start_layout_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, requested_tab_ids) =
         spawn_layout_dispatcher(inbox_receiver, session_layout);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     (
         ipc_server,
@@ -1903,8 +1909,9 @@ fn a_restart_advertises_a_fresh_token_and_refuses_the_old_one() {
 
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let restarted_dispatcher_thread = spawn_answering_dispatcher(inbox_receiver, None);
-    let restarted_ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
-        .expect("start serving again");
+    let restarted_ipc_server =
+        IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+            .expect("start serving again");
     let restarted_endpoint_file = load_test_endpoint_file(&runtime_directory, session_id);
     assert_ne!(
         restarted_endpoint_file.connection_token, initial_endpoint_file.connection_token,
@@ -2608,7 +2615,7 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
     let session_id = SessionId::new();
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     drop(inbox_receiver);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     let mut connection = connect_to_session_socket(&runtime_directory, session_id);
 
@@ -2724,7 +2731,7 @@ fn a_leftover_socket_file_is_reclaimed_at_start() {
     std::fs::write(&socket_address, b"").expect("plant a leftover file at the socket path");
 
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start reclaims the leftover and serves");
 
     ipc_server.shutdown();
@@ -2738,7 +2745,7 @@ fn a_second_start_on_the_same_session_is_refused_while_serving() {
 
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
     let Err(IpcError::SocketBusy { socket_address }) =
-        IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+        IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
     else {
         panic!("the live listener must refuse a second bind");
     };
@@ -2760,9 +2767,13 @@ fn a_runtime_directory_that_cannot_be_created_refuses_to_start() {
     let runtime_directory = blocking_file_path.join("session");
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
 
-    let Err(IpcError::Transport { error_detail }) =
-        IpcServer::start(&runtime_directory, SessionId::new(), inbox_sender, None)
-    else {
+    let Err(IpcError::Transport { error_detail }) = IpcServer::start(
+        &runtime_directory,
+        SessionId::new(),
+        inbox_sender,
+        None,
+        None,
+    ) else {
         panic!("a runtime directory that cannot be created must refuse the start");
     };
     assert!(
@@ -2790,7 +2801,7 @@ fn a_start_whose_endpoint_file_cannot_be_written_leaves_nothing_listening() {
 
     let Err(IpcError::EndpointFileWrite {
         endpoint_file_path, ..
-    }) = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    }) = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
     else {
         panic!("an endpoint file that cannot be written must refuse the start");
     };
@@ -2924,6 +2935,7 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
             shared_directory: shared_directory.clone(),
             is_enabled: Arc::new(|| true),
         }),
+        None,
     )
     .expect("start serving");
 
@@ -2985,6 +2997,7 @@ fn serve_other_user(
                 other_user_access_setting.load(Ordering::SeqCst)
             })),
             &served_connection,
+            None,
         );
     });
     let caller_connection = Connection::connect(&socket_address).expect("connect");
@@ -3323,7 +3336,7 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
 /// Exits when every inbox sender is gone.
 fn spawn_restart_dispatcher(
     inbox_receiver: Receiver<RuntimeEvent>,
-    restart_verdict: Result<(), String>,
+    restart_verdict: Result<(), RestartRefusal>,
     session_overview: Option<SessionOverview>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
@@ -3345,7 +3358,7 @@ fn spawn_restart_dispatcher(
 /// `restart_verdict` and discovery requests with `session_overview`.
 fn start_restartable_test_server(
     directory_tag: &str,
-    restart_verdict: Result<(), String>,
+    restart_verdict: Result<(), RestartRefusal>,
     session_overview: Option<SessionOverview>,
 ) -> (IpcServer, SessionId, PathBuf, JoinHandle<()>) {
     let runtime_directory = build_test_runtime_directory(directory_tag);
@@ -3353,7 +3366,7 @@ fn start_restartable_test_server(
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let dispatcher_thread =
         spawn_restart_dispatcher(inbox_receiver, restart_verdict, session_overview);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
     (ipc_server, session_id, runtime_directory, dispatcher_thread)
 }
@@ -3491,7 +3504,8 @@ fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_se
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_restartable_test_server(
             "restart-bad-binary",
-            crate::server::is_binary_runnable(&executable_path),
+            crate::server::is_binary_runnable(&executable_path)
+                .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason }),
             Some(session_overview.clone()),
         );
 
@@ -3500,7 +3514,7 @@ fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_se
     assert_eq!(
         restart_result,
         IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
+            code: IpcErrorCode::RequestFailed,
             message: rejection_message,
         }),
     );
@@ -3535,7 +3549,8 @@ fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_
     let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
         start_restartable_test_server(
             "restart-no-fd",
-            crate::server::can_carry_panes(&carried_panes),
+            crate::server::can_carry_panes(&carried_panes)
+                .map_err(|refusal_reason| RestartRefusal::PaneNotReady { refusal_reason }),
             Some(session_overview.clone()),
         );
 
@@ -3544,7 +3559,7 @@ fn a_restart_with_a_pane_that_has_no_terminal_descriptor_is_refused_naming_that_
     assert_eq!(
         restart_result,
         IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
+            code: IpcErrorCode::RequestFailed,
             message: format!(
                 "pane {stranded_pane_id} has no terminal descriptor, \
                  so its terminal cannot cross the swap"
@@ -3727,10 +3742,10 @@ fn every_key_a_client_sent_reaches_the_dispatcher_before_that_client_leaves() {
             .expect("the goodbye frame"),
         SessionEvent::Detached,
     );
-    assert!(matches!(
-        connection.recv::<SessionEvent>(),
-        Err(IpcError::Disconnected),
-    ));
+    let after_goodbye_result = connection.recv::<SessionEvent>();
+    let Err(IpcError::Disconnected) = after_goodbye_result else {
+        panic!("expected the connection to end, got {after_goodbye_result:?}");
+    };
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
@@ -3953,8 +3968,14 @@ fn a_request_a_client_sends_after_the_intake_closes_never_reaches_the_dispatcher
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_runtime_events) =
         spawn_attaching_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender.clone(), None)
-        .expect("start serving");
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender.clone(),
+        None,
+        None,
+    )
+    .expect("start serving");
     let mut connection = attach_test_client(&runtime_directory, session_id, client_id);
     let taken_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('a'));
     let refused_key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('b'));
@@ -4212,7 +4233,7 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let (dispatcher_thread, received_remote_flags) =
         spawn_origin_reporting_dispatcher(inbox_receiver, client_id, session_id);
-    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None)
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
         .expect("start serving");
 
     let local_connection = attach_saying_remote(&runtime_directory, session_id, client_id, false);
@@ -4232,4 +4253,430 @@ fn an_attach_is_marked_remote_exactly_when_its_hello_named_another_machine() {
     drop(local_connection);
     drop(remote_connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+/// A stand-in dispatcher that answers every restart request with `Ok(())` and
+/// reports each one on `restart_report_sender`. Exits when every inbox sender
+/// is gone.
+fn spawn_restart_reporting_dispatcher(
+    inbox_receiver: Receiver<RuntimeEvent>,
+    restart_report_sender: Sender<()>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(runtime_event) = inbox_receiver.recv() {
+            if let RuntimeEvent::IpcRestart { response_sender } = runtime_event {
+                let _ = response_sender.send(Ok(()));
+                let _ = restart_report_sender.send(());
+            }
+        }
+    })
+}
+
+/// A served socket for a session that runs `1.0.0`, whose program file in
+/// `program_directory` is replaced, once the socket serves, by one that prints
+/// `koshi <installed_version>` and counts its runs in the file `runs` beside
+/// it. Hands back the server, the session id, the runtime directory, the
+/// dispatcher thread, the receiver of its restart reports, and the path of the
+/// program file: `koshi` on Unix and `koshi.cmd` on Windows.
+fn start_watched_test_server(
+    directory_tag: &str,
+    program_directory: &Path,
+    installed_version: &str,
+) -> (
+    IpcServer,
+    SessionId,
+    PathBuf,
+    JoinHandle<()>,
+    Receiver<()>,
+    PathBuf,
+) {
+    let program_path = write_printing_program(
+        program_directory,
+        "koshi",
+        &program_directory.join("started_runs"),
+        "koshi 1.0.0",
+    );
+    let runtime_directory = build_test_runtime_directory(directory_tag);
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (restart_report_sender, restart_report_receiver) = mpsc::channel();
+    let dispatcher_thread =
+        spawn_restart_reporting_dispatcher(inbox_receiver, restart_report_sender);
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        None,
+        Some(Arc::new(ExecutableWatch::new(
+            program_path.clone(),
+            "1.0.0",
+        ))),
+    )
+    .expect("start serving");
+    let replacement_path = write_printing_program(
+        program_directory,
+        "replacement",
+        &program_directory.join("runs"),
+        &format!("koshi {installed_version}"),
+    );
+    std::fs::rename(&replacement_path, &program_path).expect("the program file is replaced");
+    (
+        ipc_server,
+        session_id,
+        runtime_directory,
+        dispatcher_thread,
+        restart_report_receiver,
+        program_path,
+    )
+}
+
+#[test]
+fn a_connection_to_a_session_whose_program_file_holds_another_version_restarts_it_once() {
+    let program_directory = tempfile::TempDir::new().expect("a program directory");
+    let (
+        ipc_server,
+        session_id,
+        runtime_directory,
+        dispatcher_thread,
+        restart_report_receiver,
+        _program_path,
+    ) = start_watched_test_server(
+        "program-file-other-version",
+        program_directory.path(),
+        "9.9.9",
+    );
+
+    let first_connection = connect_to_session_socket(&runtime_directory, session_id);
+    assert_eq!(
+        restart_report_receiver.recv_timeout(Duration::from_secs(10)),
+        Ok(())
+    );
+    let second_connection = connect_to_session_socket(&runtime_directory, session_id);
+
+    assert_eq!(
+        restart_report_receiver.recv_timeout(Duration::from_millis(500)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    assert_eq!(
+        count_program_runs(&program_directory.path().join("runs")),
+        1
+    );
+    drop((first_connection, second_connection));
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+/// Send a Hello on `connection` whose whole range sits above this build, for
+/// the session `session_id` advertises in `runtime_directory`, and read the
+/// refusal.
+fn send_hello_sharing_no_version(
+    connection: &mut Connection,
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> IpcResponse {
+    connection
+        .send(&IpcRequest {
+            request_id: 1,
+            request_kind: IpcRequestKind::Hello {
+                minimum_protocol_version: PROTOCOL_VERSION + 1,
+                maximum_protocol_version: PROTOCOL_VERSION + 2,
+                connection_token: load_test_endpoint_file(runtime_directory, session_id)
+                    .connection_token,
+                is_remote: false,
+            },
+        })
+        .expect("send a hello sharing no version");
+    connection.recv().expect("hello reply")
+}
+
+#[test]
+fn a_hello_refused_for_its_version_reads_the_program_file_the_session_started_from() {
+    let program_directory = tempfile::TempDir::new().expect("a program directory");
+    let run_log_path = program_directory.path().join("runs");
+    let program_path = write_printing_program(
+        program_directory.path(),
+        "koshi",
+        &run_log_path,
+        "koshi 9.9.9",
+    );
+    let runtime_directory = build_test_runtime_directory("refused-hello");
+    let session_id = SessionId::new();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let (restart_report_sender, restart_report_receiver) = mpsc::channel();
+    let dispatcher_thread =
+        spawn_restart_reporting_dispatcher(inbox_receiver, restart_report_sender);
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        None,
+        Some(Arc::new(ExecutableWatch::new(program_path, "1.0.0"))),
+    )
+    .expect("start serving");
+    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
+    assert_eq!(
+        restart_report_receiver.recv_timeout(Duration::from_millis(500)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    assert_eq!(count_program_runs(&run_log_path), 0);
+
+    let hello_response =
+        send_hello_sharing_no_version(&mut connection, &runtime_directory, session_id);
+
+    let IpcResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::UnsupportedVersion,
+        ..
+    }) = hello_response.answer_result
+    else {
+        panic!("expected a version refusal, got {hello_response:?}");
+    };
+    assert_eq!(
+        restart_report_receiver.recv_timeout(Duration::from_secs(10)),
+        Ok(())
+    );
+    assert_eq!(count_program_runs(&run_log_path), 1);
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_hello_refused_for_its_version_by_a_session_with_no_watch_reads_nothing() {
+    let (ipc_server, session_id, runtime_directory, dispatcher_thread) =
+        start_test_server("refused-hello-no-watch", None);
+    let mut connection = connect_to_session_socket(&runtime_directory, session_id);
+
+    let hello_response =
+        send_hello_sharing_no_version(&mut connection, &runtime_directory, session_id);
+
+    let IpcResult::Error(IpcErrorPayload {
+        code: IpcErrorCode::UnsupportedVersion,
+        ..
+    }) = hello_response.answer_result
+    else {
+        panic!("expected a version refusal, got {hello_response:?}");
+    };
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_connection_to_a_session_whose_program_file_holds_its_own_version_restarts_nothing() {
+    let program_directory = tempfile::TempDir::new().expect("a program directory");
+    let (
+        ipc_server,
+        session_id,
+        runtime_directory,
+        dispatcher_thread,
+        restart_report_receiver,
+        _program_path,
+    ) = start_watched_test_server(
+        "program-file-same-version",
+        program_directory.path(),
+        "1.0.0",
+    );
+
+    let connection = connect_to_session_socket(&runtime_directory, session_id);
+    let run_wait_end = std::time::Instant::now() + Duration::from_secs(10);
+    while count_program_runs(&program_directory.path().join("runs")) == 0 {
+        assert!(
+            std::time::Instant::now() < run_wait_end,
+            "the program never ran"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        restart_report_receiver.recv_timeout(Duration::from_millis(500)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    drop(connection);
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+}
+
+#[test]
+fn a_session_with_an_executable_watch_writes_its_program_file_and_removes_it_at_shutdown() {
+    let program_directory = tempfile::TempDir::new().expect("a program directory");
+    let (
+        ipc_server,
+        session_id,
+        runtime_directory,
+        dispatcher_thread,
+        _restart_report_receiver,
+        program_path,
+    ) = start_watched_test_server("program-file-written", program_directory.path(), "1.0.0");
+    let program_file_path =
+        ServerProgramFile::resolve_session_program_file_path(&runtime_directory, session_id);
+
+    assert_eq!(
+        ServerProgramFile::load_from_path(&program_file_path).expect("read the program file"),
+        Some(ServerProgramFile {
+            process_id: std::process::id(),
+            build_version: "1.0.0".to_string(),
+            program_path: program_path.to_string_lossy().into_owned(),
+        })
+    );
+
+    stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
+    assert!(
+        !program_file_path.exists(),
+        "shutdown removes the program file"
+    );
+}
+
+#[test]
+fn a_session_without_an_executable_watch_writes_no_program_file() {
+    let runtime_directory = build_test_runtime_directory("no-program-file");
+    let session_id = SessionId::new();
+    let (inbox_sender, _inbox_receiver) = mpsc::channel();
+
+    let ipc_server = IpcServer::start(&runtime_directory, session_id, inbox_sender, None, None)
+        .expect("start serving");
+
+    assert!(
+        !ServerProgramFile::resolve_session_program_file_path(&runtime_directory, session_id)
+            .exists()
+    );
+    ipc_server.shutdown();
+    remove_test_directory(&runtime_directory);
+}
+
+#[test]
+fn a_start_whose_program_file_cannot_be_written_leaves_no_endpoint_file_and_nothing_listening() {
+    // A directory holding a file where the program file goes: the write
+    // cannot rename over it, and the start unwinds the bind it already made.
+    let program_directory = tempfile::TempDir::new().expect("a program directory");
+    let program_path = write_printing_program(
+        program_directory.path(),
+        "koshi",
+        &program_directory.path().join("started_runs"),
+        "koshi 1.0.0",
+    );
+    let runtime_directory = build_test_runtime_directory("program-write-fails");
+    koshi_paths::ensure_private_directory(&runtime_directory).expect("create runtime directory");
+    let session_id = SessionId::new();
+    let program_file_path =
+        ServerProgramFile::resolve_session_program_file_path(&runtime_directory, session_id);
+    std::fs::create_dir_all(&program_file_path).expect("plant a directory where the file goes");
+    std::fs::write(program_file_path.join("held"), b"").expect("fill the planted directory");
+    let socket_address = compute_socket_address(&runtime_directory, session_id);
+    let (inbox_sender, _inbox_receiver) = mpsc::channel();
+
+    let Err(IpcError::ProgramFileWrite {
+        program_file_path: reported_program_file_path,
+        ..
+    }) = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        inbox_sender,
+        None,
+        Some(Arc::new(ExecutableWatch::new(program_path, "1.0.0"))),
+    )
+    else {
+        panic!("a program file that cannot be written must refuse the start");
+    };
+
+    assert_eq!(
+        reported_program_file_path,
+        program_file_path.display().to_string()
+    );
+    assert!(
+        !EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id).exists(),
+        "the refused start removes the endpoint file it wrote"
+    );
+    let Err(IpcError::NoListener {
+        socket_address: refused_socket_address,
+    }) = Connection::connect(&socket_address)
+    else {
+        panic!("nothing listens after a refused start");
+    };
+    assert_eq!(refused_socket_address, socket_address);
+    remove_test_directory(&runtime_directory);
+}
+
+/// Run [`restart_into_installed_version`] for `9.9.9` against a stand-in
+/// dispatcher answering `restart_verdict`, on a watch of a program printing
+/// `koshi 1.0.0`, and hand back the restart retry instant the watch holds with
+/// the instants just before and just after the run.
+fn run_restart_into_installed_version(
+    restart_verdict: Result<(), RestartRefusal>,
+) -> (
+    Option<std::time::Instant>,
+    std::time::Instant,
+    std::time::Instant,
+) {
+    let program_directory = tempfile::TempDir::new().expect("a program directory");
+    let program_path = write_printing_program(
+        program_directory.path(),
+        "koshi",
+        &program_directory.path().join("started_runs"),
+        "koshi 1.0.0",
+    );
+    let executable_watch = ExecutableWatch::new(program_path, "1.0.0");
+    let connection_intake = Intake::default();
+    let (inbox_sender, inbox_receiver) = mpsc::channel();
+    let dispatcher_thread = std::thread::spawn(move || {
+        if let Ok(RuntimeEvent::IpcRestart { response_sender }) = inbox_receiver.recv() {
+            let _ = response_sender.send(restart_verdict);
+        }
+    });
+
+    let started_at = std::time::Instant::now();
+    restart_into_installed_version(
+        &connection_intake,
+        &inbox_sender,
+        &executable_watch,
+        "9.9.9",
+    );
+    let finished_at = std::time::Instant::now();
+    dispatcher_thread.join().expect("the dispatcher ends");
+
+    let restart_retry_at = executable_watch
+        .watch_state
+        .lock()
+        .expect("executable watch")
+        .restart_retry_at;
+    (restart_retry_at, started_at, finished_at)
+}
+
+#[test]
+fn a_restart_refused_for_a_pane_not_ready_schedules_a_retry_on_the_watch() {
+    let (restart_retry_at, started_at, finished_at) =
+        run_restart_into_installed_version(Err(RestartRefusal::PaneNotReady {
+            refusal_reason: "a pane is still being written to".to_string(),
+        }));
+
+    let restart_retry_window = (started_at + RESTART_RETRY_INTERVAL_DURATION)
+        ..=(finished_at + RESTART_RETRY_INTERVAL_DURATION);
+    let Some(restart_retry_at) = restart_retry_at else {
+        panic!("the refused restart schedules a retry");
+    };
+    assert!(
+        restart_retry_window.contains(&restart_retry_at),
+        "the retry is due 30 s after the refusal: {restart_retry_at:?} is outside \
+         {restart_retry_window:?}"
+    );
+}
+
+#[test]
+fn a_restart_refused_for_an_unfit_program_file_schedules_no_retry() {
+    let (restart_retry_at, _started_at, _finished_at) =
+        run_restart_into_installed_version(Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the binary at /x is not executable".to_string(),
+        }));
+
+    assert_eq!(restart_retry_at, None);
+}
+
+#[test]
+fn a_restart_refused_for_a_process_that_cannot_replace_its_image_schedules_no_retry() {
+    let (restart_retry_at, _started_at, _finished_at) =
+        run_restart_into_installed_version(Err(RestartRefusal::ImageReplacementUnsupported));
+
+    assert_eq!(restart_retry_at, None);
+}
+
+#[test]
+fn an_accepted_restart_into_the_installed_version_schedules_no_retry() {
+    let (restart_retry_at, _started_at, _finished_at) = run_restart_into_installed_version(Ok(()));
+
+    assert_eq!(restart_retry_at, None);
 }

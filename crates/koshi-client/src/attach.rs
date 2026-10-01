@@ -107,7 +107,6 @@ use ratatui::crossterm::terminal::size;
 use ratatui::crossterm::tty::IsTty;
 use ratatui::layout::Rect;
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use serde_json::value::RawValue;
 
 use crate::input::KeyOutcome;
 use crate::mouse::MouseAction;
@@ -125,15 +124,13 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseAnswer, MouseInput, MouseKind};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action_with_scroll_line_count, DispatchPlan};
-use koshi_core::text::sanitize_reported_text;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::{IncomingEvent, SessionEvent};
 use koshi_ipc::protocol::{
-    ConnectionToken, IncomingResponse, IpcErrorCode, IpcRequest, IpcRequestKind, IpcResult,
-    WireMouseAction,
+    ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult, WireMouseAction,
 };
-use koshi_ipc::remote_wire::{RemoteServerFrame, RemoteSessionRow};
+use koshi_ipc::remote_wire::RemoteSessionRow;
 use koshi_ipc::router::{
     resolve_router_endpoint_path, RouterRequestKind, RouterResult, SessionAddress, SessionSelector,
 };
@@ -153,8 +150,11 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
-use koshi_link::remote_client::{self, DialError, Reach, ServerReference, REACH_TIMEOUT_DURATION};
-use koshi_link::router_client::submit_router_request;
+use koshi_link::remote_client::{
+    self, DialError, Reach, ServerReference, REACH_TIMEOUT_DURATION,
+    REMOTE_RESTART_POLL_INTERVAL_DURATION,
+};
+use koshi_link::router_client::{self, submit_router_request};
 use koshi_link::talk;
 
 /// Rebuilding the snapshot this terminal paints from the frame the session
@@ -174,17 +174,6 @@ const FALLBACK_VIEWPORT: Size = Size {
 /// The `request_id` the first request the loop sends carries. The Hello is 1
 /// and the Attach is 2.
 const FIRST_POST_ATTACH_REQUEST_ID: u64 = 3;
-
-/// How long the wait for a session that is replacing its own process image
-/// pauses between reads of that session's endpoint file. It bounds how long the
-/// user's terminal sits still after the swap finishes.
-const RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(25);
-
-/// How long the wait for a session on a server that is replacing its own
-/// process image pauses between dials. Each dial runs the whole admission —
-/// TLS, the secret, and the scope check — so it is paced wider than the read of
-/// a local endpoint file.
-const REMOTE_RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(250);
 
 /// How long the first redial after a remote viewer's link dropped waits before
 /// it dials: 1 second.
@@ -1208,22 +1197,27 @@ enum AttachmentEnding {
     /// The session moved this client to the session named here.
     SwitchSession(SessionId),
     /// The session is replacing its own process image. The loop waits for the
-    /// session's new socket and attaches again on it. A loop that cannot ends
-    /// here, and the report names the restart and the attach command.
+    /// session's new socket and attaches again on it. A loop that cannot reach
+    /// the session's new image ends here, and the report names the restart and
+    /// the attach command.
     Restarting,
     /// The session replaced its own process image with a build that refused
     /// this client's protocol version. The koshi at the path this client was
     /// started from runs `koshi attach <session id>` in this terminal next.
     RestartedIntoIncompatibleBuild,
+    /// The session replaced its own process image, and its new image answered
+    /// this client's join with the refusal carried here. The session keeps
+    /// running without this client.
+    RefusedAfterRestart(Box<CliError>),
     /// A remote viewer's link broke and [`redial_remote_session`] gave up, carrying the cause it
     /// gave up on. The session keeps running without this viewer.
     LinkLost(Box<CliError>),
 }
 
 /// Two endings are equal when they are the same variant carrying the same
-/// fields. A [`AttachmentEnding::SwitchSession`] compares its [`SessionId`], and a
-/// [`AttachmentEnding::LinkLost`] compares the text its cause prints, which is what the
-/// viewer shows.
+/// fields. A [`AttachmentEnding::SwitchSession`] compares its [`SessionId`]. A
+/// [`AttachmentEnding::LinkLost`] and a [`AttachmentEnding::RefusedAfterRestart`]
+/// compare the text their cause prints, which is what the viewer shows.
 impl PartialEq for AttachmentEnding {
     fn eq(&self, other_ending: &Self) -> bool {
         match (self, other_ending) {
@@ -1243,6 +1237,10 @@ impl PartialEq for AttachmentEnding {
             (AttachmentEnding::LinkLost(first_cause), AttachmentEnding::LinkLost(second_cause)) => {
                 first_cause.to_string() == second_cause.to_string()
             }
+            (
+                AttachmentEnding::RefusedAfterRestart(first_refusal),
+                AttachmentEnding::RefusedAfterRestart(second_refusal),
+            ) => first_refusal.to_string() == second_refusal.to_string(),
             _ => false,
         }
     }
@@ -1334,18 +1332,18 @@ impl Uplink {
         command_id: CommandId,
         command: Command,
     ) {
-        let envelope = CommandEnvelope::from_parts(
+        let command_envelope = CommandEnvelope::from_parts(
             command_id,
             CommandSource::from_key_binding(client.get_client_id()),
             command,
         );
-        self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
+        self.send_request(IpcRequestKind::SubmitCommand(Box::new(command_envelope)));
     }
 
     /// Queue focus for the pane picked up by a mouse drag. Picking up `pane-123`
     /// sends focus to `pane-123`.
     fn submit_mouse_focus_pane(&mut self, client: &Client, pane_id: PaneId) {
-        let envelope = CommandEnvelope::from_parts(
+        let command_envelope = CommandEnvelope::from_parts(
             CommandId::new(),
             CommandSource::from_mouse(client.get_client_id()),
             Command::FocusPane(FocusPaneArgs {
@@ -1353,7 +1351,7 @@ impl Uplink {
                 client_id: Some(client.get_client_id()),
             }),
         );
-        self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
+        self.send_request(IpcRequestKind::SubmitCommand(Box::new(command_envelope)));
     }
 
     /// Send what one placement key or mouse event asks of the session:
@@ -1406,12 +1404,12 @@ impl Uplink {
         };
         match dispatch_plan {
             DispatchPlan::Command(command) => {
-                let envelope = CommandEnvelope::from_parts(
+                let command_envelope = CommandEnvelope::from_parts(
                     CommandId::new(),
                     CommandSource::from_key_binding(client.get_client_id()),
                     *command,
                 );
-                self.send_request(IpcRequestKind::SubmitCommand(Box::new(envelope)));
+                self.send_request(IpcRequestKind::SubmitCommand(Box::new(command_envelope)));
             }
             DispatchPlan::ClientAction(client_action_kind) => {
                 let placement_input_action = client.apply_client_action(client_action_kind);
@@ -1465,17 +1463,23 @@ struct JoinedSession {
 /// listens.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display
-/// name. `None` picks one from the sessions running for this user instead:
-/// nothing running is a failure, one session is taken straight away, and more
-/// than one is printed as a numbered list to answer on stdin.
+/// name. `None` picks one from the sessions running for this user and the
+/// sessions `shared_sessions_base_directory` advertises instead: nothing
+/// running is a failure, one session is taken straight away, and more than one
+/// is printed as a numbered list to answer on stdin.
 fn resolve_session(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     selector: Option<&str>,
 ) -> Result<SessionAddress, CliError> {
     let selector = match selector {
         Some(selector) => selector.to_string(),
         // No remote rows are offered, so every place is a local one.
-        None => match select_session(runtime_directory, Vec::new())? {
+        None => match select_session(
+            runtime_directory,
+            shared_sessions_base_directory,
+            Vec::new(),
+        )? {
             SessionSelection::Local(session_id) => session_id,
             SessionSelection::Remote(remote_row_index) => {
                 unreachable!(
@@ -1497,13 +1501,18 @@ fn resolve_session(
 /// is printed as a numbered list to answer on stdin.
 pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let config_directory = koshi_paths::resolve_config_directory();
     let Some(selector) = selector else {
-        return attach_selected_session_from_listing(runtime_directory);
+        return attach_selected_session_from_listing(
+            runtime_directory,
+            config_directory.as_deref(),
+        );
     };
     let session_address = lookup_session_address(&runtime_directory, selector)?;
     attach_home(
         &Home::Local { runtime_directory },
         SessionSelector::SessionId(session_address.session_id),
+        config_directory.as_deref(),
     )
 }
 
@@ -1511,7 +1520,7 @@ pub fn attach_selected_session(selector: Option<&str>) -> Result<(), CliError> {
 ///
 /// `server` is either the name this machine saved that server under or the
 /// `host:port` it listens on. `save_as` is the name to save a server reached
-/// for the first time under, so subsequent commands name it instead of its address.
+/// for the first time under; a server already saved refuses it.
 ///
 /// `selector` is a `session-<uuid>` id, a bare UUID, or a session display name,
 /// and the server resolves it against the sessions this machine's secret
@@ -1549,6 +1558,7 @@ pub fn attach_remote_session(
             server: ServerReference::Saved(saved_server),
         },
         session_selector,
+        koshi_paths::resolve_config_directory().as_deref(),
     )
 }
 
@@ -1558,7 +1568,13 @@ pub fn attach_remote_session(
 /// A saved server that answered and did not admit its secret prints one line
 /// on stderr naming the command that replaces that secret. A server not heard
 /// from inside [`REACH_TIMEOUT_DURATION`] prints one stderr line and is left off the list.
-fn attach_selected_session_from_listing(runtime_directory: PathBuf) -> Result<(), CliError> {
+///
+/// `config_directory` holds the `koshi.kdl` that names the shared directory
+/// other users' sessions are listed from, and the config the attachment reads.
+fn attach_selected_session_from_listing(
+    runtime_directory: PathBuf,
+    config_directory: Option<&Path>,
+) -> Result<(), CliError> {
     let reachable_session_rows = list_reachable_session_rows();
     let remote_session_rows = reachable_session_rows
         .iter()
@@ -1570,25 +1586,31 @@ fn attach_selected_session_from_listing(runtime_directory: PathBuf) -> Result<()
             )
         })
         .collect();
-    let (server_label, selected_session_row) =
-        match select_session(&runtime_directory, remote_session_rows)? {
-            SessionSelection::Local(session_identifier) => {
-                let session_address =
-                    lookup_session_address(&runtime_directory, &session_identifier)?;
-                return attach_home(
-                    &Home::Local { runtime_directory },
-                    SessionSelector::SessionId(session_address.session_id),
-                );
-            }
-            SessionSelection::Remote(remote_session_index) => {
-                &reachable_session_rows[remote_session_index]
-            }
-        };
+    let shared_sessions_base_directory =
+        koshi_link::config::find_shared_sessions_base_directory(config_directory);
+    let (server_label, selected_session_row) = match select_session(
+        &runtime_directory,
+        shared_sessions_base_directory.as_deref(),
+        remote_session_rows,
+    )? {
+        SessionSelection::Local(session_identifier) => {
+            let session_address = lookup_session_address(&runtime_directory, &session_identifier)?;
+            return attach_home(
+                &Home::Local { runtime_directory },
+                SessionSelector::SessionId(session_address.session_id),
+                config_directory,
+            );
+        }
+        SessionSelection::Remote(remote_session_index) => {
+            &reachable_session_rows[remote_session_index]
+        }
+    };
     attach_home(
         &Home::Remote {
             server: remote_client::resolve_server(server_label)?,
         },
         SessionSelector::SessionId(selected_session_row.session_id),
+        config_directory,
     )
 }
 
@@ -1685,7 +1707,12 @@ pub fn switch_in_session(
     selector: Option<&str>,
 ) -> Result<CommandResult, CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let address = resolve_session(&runtime_directory, selector)?;
+    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
+    let address = resolve_session(
+        &runtime_directory,
+        shared_sessions_base_directory.as_deref(),
+        selector,
+    )?;
     ipc_client::submit_in_session_command(
         session_context,
         Command::SwitchSession(SwitchSessionArgs {
@@ -1703,16 +1730,27 @@ pub fn switch_in_session(
 /// terminal's keys, mouse and resizes back. A broken connection reports the
 /// cause and how to reattach, and exits non-zero; the other endings print what
 /// happened and exit zero.
+///
+/// `config_directory` holds the `koshi.kdl` that names the shared directory
+/// searched when `runtime_directory` advertises no `session_id`, and the
+/// config the attachment reads. `None` searches `runtime_directory` alone and
+/// attaches with the built-in config.
 pub(crate) fn attach_session(
     runtime_directory: &Path,
+    config_directory: Option<&Path>,
     session_id: SessionId,
 ) -> Result<(), CliError> {
-    ipc_client::load_session_endpoint(runtime_directory, session_id)?;
+    ipc_client::load_session_endpoint(
+        runtime_directory,
+        koshi_link::config::find_shared_sessions_base_directory(config_directory).as_deref(),
+        session_id,
+    )?;
     attach_home(
         &Home::Local {
             runtime_directory: runtime_directory.to_path_buf(),
         },
         SessionSelector::SessionId(session_id),
+        config_directory,
     )
 }
 
@@ -1724,15 +1762,23 @@ pub(crate) fn attach_session(
 /// certificate, the secret and the scope are all checked again before the next
 /// session paints anything.
 ///
-/// The path this program was started from is read once, here, before the first
-/// attachment. `None` when the platform cannot report it.
-fn attach_home(home: &Home, session_selector: SessionSelector) -> Result<(), CliError> {
-    let client_executable_path = std::env::current_exe().ok();
+/// The path this program was started from, as
+/// [`resolve_program_path`](koshi_host::program_path::resolve_program_path)
+/// reads it, is read once, here, before the first attachment. `None` when the
+/// platform cannot report it. `config_directory` is handed to every
+/// attachment.
+fn attach_home(
+    home: &Home,
+    session_selector: SessionSelector,
+    config_directory: Option<&Path>,
+) -> Result<(), CliError> {
+    let client_executable_path = koshi_host::program_path::resolve_program_path().ok();
     let mut next_session_selector = session_selector;
     while let Some(next_session_id) = attach_once(
         home,
         &next_session_selector,
         client_executable_path.as_deref(),
+        config_directory,
     )? {
         next_session_selector = SessionSelector::SessionId(next_session_id);
     }
@@ -1757,12 +1803,17 @@ fn attach_home(home: &Home, session_selector: SessionSelector) -> Result<(), Cli
 /// `client_executable_path` is the path this program was started from, which
 /// [`report_attachment_ending`] runs `koshi attach` from when the session
 /// restarted into a build that refused this client's protocol version.
+///
+/// `config_directory` holds the config files read at the start of each
+/// attachment, and the `koshi.kdl` each dial on this machine reads for the
+/// shared directory.
 fn attach_once(
     home: &Home,
     session_selector: &SessionSelector,
     client_executable_path: Option<&Path>,
+    config_directory: Option<&Path>,
 ) -> Result<Option<SessionId>, CliError> {
-    let (loaded_config, config_warnings) = koshi_link::config::load_config_files();
+    let (loaded_config, config_warnings) = koshi_link::config::load_config_files(config_directory);
     let supports_native_images =
         koshi_link::config::supports_image_output(loaded_config.app_config_layer.clone());
     let mut terminal_owner = terminal::TerminalOwner::open_terminal_owner(supports_native_images)
@@ -1781,6 +1832,7 @@ fn attach_once(
         session_selector,
         graphics_support,
         cell_size_query.get_current_cell_size(),
+        config_directory,
     )?;
 
     // After the session accepts the client, the terminal changes mode. The
@@ -2333,6 +2385,7 @@ fn run_attachment<B: Backend, W: Write>(
                 | AttachmentEnding::TerminalGone
                 | AttachmentEnding::SwitchSession(_)
                 | AttachmentEnding::RestartedIntoIncompatibleBuild
+                | AttachmentEnding::RefusedAfterRestart(_)
                 | AttachmentEnding::LinkLost(_) => None,
             };
             let Some((rejoined_client_id, reader, writer)) = reconnection else {
@@ -2459,14 +2512,24 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 ///
 /// On this machine the session's endpoint file names the socket and holds the
 /// token the Hello presents, and a display name is resolved by the router
-/// first. On a server the whole admission runs — TLS with the pinned
-/// certificate, the secret, and the scope check on the session asked for — and
-/// the server resolves the name against the sessions that secret reaches.
+/// first. A session with no endpoint file in the runtime directory is looked
+/// up in the shared directory `koshi.kdl` in `config_directory` names, read
+/// again on every dial. A session of this user's that refuses this build's
+/// protocol version is dialed again once it has restarted, as
+/// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait)
+/// states. On a server the whole admission runs — TLS with the
+/// pinned certificate, the secret, and the scope check on the session asked
+/// for — and the server resolves the name against the sessions that secret
+/// reaches. A server whose router answers that it is restarting is dialed
+/// again, as
+/// [`dial_through_router_restart`](remote_client::dial_through_router_restart)
+/// states, for up to [`RESTART_WINDOW_DURATION`].
 fn dial_session(
     home: &Home,
     session_selector: &SessionSelector,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    config_directory: Option<&Path>,
 ) -> Result<JoinedSession, CliError> {
     match home {
         Home::Local { runtime_directory } => {
@@ -2479,34 +2542,47 @@ fn dial_session(
                     lookup_session_address(runtime_directory, session_name)?.session_id
                 }
             };
-            let endpoint = ipc_client::load_session_endpoint(runtime_directory, session_id)?;
-            let mut connection = ipc_client::connect_to_session(&endpoint, session_id)?;
-            let (client_id, session_id, resume_token) = join_session(
-                &mut connection,
-                &endpoint.connection_token,
-                None,
-                graphics_support,
-                cell_size,
-            )?;
-            let (reader, writer) = connection.split();
-            Ok(JoinedSession {
-                reader,
-                writer,
-                client_id,
+            ipc_client::run_session_exchange_with_restart_wait(
+                runtime_directory,
+                koshi_link::config::find_shared_sessions_base_directory(config_directory)
+                    .as_deref(),
                 session_id,
-                connection_token: endpoint.connection_token,
-                resume_token,
-            })
+                None,
+                |endpoint| {
+                    let mut connection =
+                        ipc_client::connect_to_session(endpoint, session_id, None)?;
+                    let (client_id, session_id, resume_token) = join_session(
+                        &mut connection,
+                        &endpoint.connection_token,
+                        None,
+                        graphics_support,
+                        cell_size,
+                    )?;
+                    let (reader, writer) = connection.split();
+                    Ok(JoinedSession {
+                        reader,
+                        writer,
+                        client_id,
+                        session_id,
+                        connection_token: endpoint.connection_token.clone(),
+                        resume_token,
+                    })
+                },
+            )
         }
-        Home::Remote { server } => dial_remote(
-            server,
-            session_selector,
-            None,
-            None,
-            graphics_support,
-            cell_size,
-        )
-        .map_err(CliError::from),
+        Home::Remote { server } => {
+            remote_client::dial_through_router_restart(RESTART_WINDOW_DURATION, || {
+                dial_remote(
+                    server,
+                    session_selector,
+                    None,
+                    None,
+                    graphics_support,
+                    cell_size,
+                )
+            })
+            .map_err(CliError::from)
+        }
     }
 }
 
@@ -2522,11 +2598,13 @@ fn dial_session(
 /// # Errors
 /// [`DialError::Unreachable`] when the path to the server failed: the
 /// connection could not be opened, or a frame of the join could not be written
-/// or read. [`DialError::Refused`] when the server answered and every identical
-/// dial after it gets the same answer: the certificate it presents is not the
-/// pinned one, it does not admit the secret, the admitted secret does not reach
-/// `session_selector`, the protocol versions do not overlap, or its answer is a frame this
-/// attach cannot read.
+/// or read. [`DialError::Restarting`] when the serving router refused the join
+/// with [`koshi_ipc::router::ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`]
+/// when the server answered and every identical dial after it gets the same
+/// answer: the certificate it presents is not the pinned one, it does not admit
+/// the secret, the admitted secret does not reach `session_selector`, the
+/// protocol versions do not overlap, or its answer is a frame this attach
+/// cannot read.
 fn dial_remote(
     server: &ServerReference,
     session_selector: &SessionSelector,
@@ -2544,7 +2622,8 @@ fn dial_remote(
     let (mut reader, mut writer) =
         remote_client::attach_remote_session(link, session_selector.clone())
             .map_err(DialError::Unreachable)?;
-    settle_forwarded_hello(&mut reader, session_selector)?;
+    let hello_response = remote_client::read_forwarded_hello_answer(&mut reader, session_selector)?;
+    validate_session_protocol_version(hello_response).map_err(DialError::Refused)?;
     writer
         .send(&build_attach_request(
             resume_client_id,
@@ -2570,69 +2649,26 @@ fn dial_remote(
     })
 }
 
-/// Read the answer to the Hello the serving machine wrote on this client's
-/// behalf, and settle the protocol version from it.
-///
-/// Two senders write this one frame: the serving machine writes a refusal when
-/// the secret it admitted does not reach `session_selector`, and otherwise the session
-/// server's own answer arrives unread through the bridge. The frame is held as
-/// its JSON text and decoded as a refusal first, then as an
-/// [`IncomingResponse`].
-///
-/// # Errors
-/// [`DialError::Unreachable`] when the frame could not be read at all.
-/// [`DialError::Refused`] for every answer that did arrive and does not join:
-/// the serving machine's refusal, an answer this attach cannot read, and a
-/// protocol version this build does not accept.
-fn settle_forwarded_hello(
-    reader: &mut FrameReader,
-    session_selector: &SessionSelector,
-) -> Result<(), DialError> {
-    let hello_response_frame: Box<RawValue> = reader.recv().map_err(build_link_failure)?;
-    if let Ok(RemoteServerFrame::Refused { .. }) = serde_json::from_str(hello_response_frame.get())
-    {
-        return Err(DialError::Refused(CliError::Runtime {
-            detail: format!(
-                "the token this server saved does not reach session {}",
-                format_session_selector_name(session_selector)
-            ),
-        }));
-    }
-    let incoming_response: IncomingResponse = serde_json::from_str(hello_response_frame.get())
-        .map_err(|response_parse_error| {
-            DialError::Refused(CliError::IpcUnavailable {
-                detail: format!(
-                    "the server answered with a frame this attach cannot read: {response_parse_error}"
-                ),
-            })
-        })?;
-    validate_session_protocol_version(incoming_response).map_err(DialError::Refused)
-}
-
-/// The [`DialError::Unreachable`] a failed read or write on the open link maps
-/// to, carrying [`talk::build_ipc_unavailable_error`]'s message.
+/// The [`DialError::Unreachable`] a failed read or write on an open link to a
+/// server, or on an open connection to a session, maps to, carrying
+/// [`talk::build_ipc_unavailable_error`]'s message.
 fn build_link_failure(ipc_error: IpcError) -> DialError {
     DialError::Unreachable(talk::build_ipc_unavailable_error(ipc_error))
-}
-
-/// How a selector reads in a message: the id itself, or the display name.
-fn format_session_selector_name(session_selector: &SessionSelector) -> String {
-    match session_selector {
-        SessionSelector::SessionId(session_id) => session_id.to_string(),
-        SessionSelector::SessionName(session_name) => session_name.clone(),
-    }
 }
 
 /// Come back into `session_id` after it said it is replacing its own process
 /// image, and hand back the client this viewer came back as and the two halves
 /// of the connection it came back on.
 ///
-/// On this machine [`rejoin_session`] waits for the session's new socket, and `connection_token` is
-/// stamped with the token that socket was advertised under. On a server the whole dial runs again —
-/// no endpoint file for that session exists on this machine — until the serving machine reaches the
-/// restarted session or [`RESTART_WINDOW_DURATION`] passes. Each dial is paced by
-/// [`REMOTE_RESTART_POLL_INTERVAL_DURATION`], and the pause comes first, so the dial meets the
-/// session's new image rather than the one it is replacing.
+/// On this machine [`rejoin_session`] waits for the session's new socket, and
+/// `connection_token` is stamped with the token that socket was advertised
+/// under. For a session on another machine the whole dial runs again — no
+/// endpoint file for that session exists on this machine — through
+/// [`redial_restarted_remote_session_with`], until the serving machine reaches
+/// the restarted session, the restarted session refuses this build's protocol
+/// version, or [`RESTART_WINDOW_DURATION`] passes. Each dial waits
+/// [`REMOTE_RESTART_POLL_INTERVAL_DURATION`] before it starts, the first dial
+/// included.
 ///
 /// `resume_token` is stamped with the secret the attach this client came back
 /// on minted: the local rejoin records none, and a fresh dial of a server
@@ -2649,14 +2685,15 @@ fn format_session_selector_name(session_selector: &SessionSelector) -> String {
 /// handed back.
 ///
 /// `Err` carries the ending the attachment reports: what [`rejoin_session`]
-/// answers on this machine, and [`AttachmentEnding::Restarting`] when a server
-/// has not let this client back in by the deadline.
+/// answers on this machine, and what [`redial_restarted_remote_session_with`]
+/// answers on a server.
 ///
 /// On this machine the router's token is read from its endpoint file before the
 /// rejoin starts. A rejoin that ends as
 /// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] returns only after
-/// [`wait_for_router_restart`] sees another token, or after
-/// [`RESTART_WINDOW_DURATION`] passes. No router endpoint file means no wait.
+/// [`wait_for_router_restart`](router_client::wait_for_router_restart) sees another token, or after
+/// [`RESTART_WINDOW_DURATION`] passes with no `koshi update` holding the update
+/// lock. No router endpoint file means no wait.
 fn reconnect_after_restart(
     home: &Home,
     session_id: SessionId,
@@ -2686,8 +2723,8 @@ fn reconnect_after_restart(
                     if let Some(router_connection_token_before_restart) =
                         &router_connection_token_before_restart
                     {
-                        let has_router_restarted = wait_for_router_restart(
-                            &router_endpoint_path,
+                        let has_router_restarted = router_client::wait_for_router_restart(
+                            runtime_directory,
                             router_connection_token_before_restart,
                             Instant::now() + RESTART_WINDOW_DURATION,
                         );
@@ -2708,33 +2745,76 @@ fn reconnect_after_restart(
             Ok((rejoined_client_id, reader, writer))
         }
         Home::Remote { server } => {
-            let deadline = Instant::now() + RESTART_WINDOW_DURATION;
-            loop {
-                thread::sleep(REMOTE_RESTART_POLL_INTERVAL_DURATION);
-                match dial_remote(
-                    server,
-                    &SessionSelector::SessionId(session_id),
-                    Some(client_id),
-                    None,
-                    graphics_support,
-                    cell_size,
-                )
-                .map_err(CliError::from)
-                {
-                    Ok(joined) => {
-                        *connection_token = joined.connection_token;
-                        *resume_token = joined.resume_token;
-                        return Ok((joined.client_id, joined.reader, joined.writer));
-                    }
-                    Err(redial_error) => {
-                        if Instant::now() >= deadline {
-                            tracing::warn!(%redial_error, "could not reach the restarted session");
-                            return Err(AttachmentEnding::Restarting);
-                        }
-                    }
-                }
-            }
+            let joined = redial_restarted_remote_session_with(
+                || {
+                    dial_remote(
+                        server,
+                        &SessionSelector::SessionId(session_id),
+                        Some(client_id),
+                        None,
+                        graphics_support,
+                        cell_size,
+                    )
+                },
+                Instant::now() + RESTART_WINDOW_DURATION,
+            )?;
+            *connection_token = joined.connection_token;
+            *resume_token = joined.resume_token;
+            Ok((joined.client_id, joined.reader, joined.writer))
         }
+    }
+}
+
+/// Dial a session on a server again with `dial_connection` after it said it
+/// is replacing its own process image, and hand back the session it joined.
+///
+/// The pause of [`REMOTE_RESTART_POLL_INTERVAL_DURATION`] comes before each
+/// dial. A dial that fails is dialed again until `restart_deadline` passes. A
+/// [`DialError::Refused`] carrying [`CliError::ProtocolVersionRefused`], which
+/// says the restarted session speaks none of this build's protocol versions,
+/// ends the dialing at once.
+///
+/// # Errors
+/// [`AttachmentEnding::RefusedAfterRestart`] carrying the refused protocol
+/// version, at once. After the first failed dial that ends past
+/// `restart_deadline`: [`AttachmentEnding::RefusedAfterRestart`] carrying that
+/// dial's refusal when it is a [`DialError::Refused`], and
+/// [`AttachmentEnding::Restarting`] when it is a [`DialError::Unreachable`] or a
+/// [`DialError::Restarting`].
+fn redial_restarted_remote_session_with(
+    mut dial_connection: impl FnMut() -> Result<JoinedSession, DialError>,
+    restart_deadline: Instant,
+) -> Result<JoinedSession, AttachmentEnding> {
+    loop {
+        thread::sleep(REMOTE_RESTART_POLL_INTERVAL_DURATION);
+        let redial_error = match dial_connection() {
+            Ok(joined) => return Ok(joined),
+            Err(DialError::Refused(
+                protocol_version_refusal @ CliError::ProtocolVersionRefused { .. },
+            )) => {
+                tracing::warn!(
+                    %protocol_version_refusal,
+                    "the restarted session refused this client's protocol version"
+                );
+                return Err(AttachmentEnding::RefusedAfterRestart(Box::new(
+                    protocol_version_refusal,
+                )));
+            }
+            Err(redial_error) => redial_error,
+        };
+        if Instant::now() < restart_deadline {
+            continue;
+        }
+        return Err(match redial_error {
+            DialError::Refused(redial_refusal) => {
+                tracing::warn!(%redial_refusal, "the restarted session refused this client");
+                AttachmentEnding::RefusedAfterRestart(Box::new(redial_refusal))
+            }
+            DialError::Unreachable(redial_failure) | DialError::Restarting(redial_failure) => {
+                tracing::warn!(%redial_failure, "could not reach the restarted session");
+                AttachmentEnding::Restarting
+            }
+        });
     }
 }
 
@@ -2750,7 +2830,8 @@ fn reconnect_after_restart(
 ///
 /// A [`DialError::Refused`] ends this at once and is the answer: the server
 /// answered, and every identical dial after it gets the same answer, so waiting
-/// changes nothing. Only a [`DialError::Unreachable`] is dialed again.
+/// changes nothing. Only a [`DialError::Unreachable`] or a
+/// [`DialError::Restarting`] is dialed again.
 ///
 /// The pause is taken one second at a time. Each slice records
 /// `Reconnecting { attempt, retry_in_seconds }` on `client` and draws the frame
@@ -2774,7 +2855,7 @@ fn reconnect_after_restart(
 ///
 /// # Errors
 /// The cause of the dial this gave up on: the refusal that ended it, or the last
-/// unreachable-path cause before the window closed.
+/// unreachable or restarting cause before the window closed.
 #[allow(clippy::too_many_arguments)]
 fn redial_remote_session<B: Backend>(
     server: &ServerReference,
@@ -2804,14 +2885,15 @@ fn redial_remote_session<B: Backend>(
     )
 }
 
-/// [`redial_remote_session`]'s loop over any dial: pause, paint the countdown, call `dial_connection`,
-/// and classify its answer — a [`DialError::Refused`] ends the loop at once, a
-/// [`DialError::Unreachable`] widens the pause and dials again while the pause
-/// fits [`REDIAL_WINDOW_DURATION`].
+/// [`redial_remote_session`]'s loop over any dial: pause, paint the countdown,
+/// call `dial_connection`, and classify its answer — a [`DialError::Refused`]
+/// ends the loop at once, a
+/// [`DialError::Unreachable`] or [`DialError::Restarting`] widens the pause and
+/// dials again while the pause fits [`REDIAL_WINDOW_DURATION`].
 ///
 /// # Errors
 /// The cause of the dial this gave up on: the refusal that ended it, or the last
-/// unreachable-path cause before the window closed.
+/// unreachable or restarting cause before the window closed.
 fn redial_remote_session_with<B: Backend>(
     mut dial_connection: impl FnMut() -> Result<JoinedSession, DialError>,
     session_id: SessionId,
@@ -2838,12 +2920,12 @@ fn redial_remote_session_with<B: Backend>(
                 screen.refresh(client, active_tab_id);
                 return Ok(joined);
             }
-            Err(DialError::Refused(error)) => break error,
-            Err(DialError::Unreachable(error)) => {
+            Err(DialError::Refused(redial_refusal)) => break redial_refusal,
+            Err(DialError::Unreachable(redial_failure) | DialError::Restarting(redial_failure)) => {
                 retry_wait = compute_next_redial_wait(retry_wait);
                 redial_attempt += 1;
                 if !can_redial_pause_fit(redial_started_at.elapsed(), retry_wait) {
-                    break error;
+                    break redial_failure;
                 }
             }
         }
@@ -2955,9 +3037,11 @@ fn drop_input_from_the_blackout(
 /// [`SessionSelection::Remote`] at that many places into `remote`.
 fn select_session(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     remote_session_rows: Vec<SessionRow>,
 ) -> Result<SessionSelection, CliError> {
-    let discovered_sessions = discovery::fetch_all_session_overviews(runtime_directory);
+    let discovered_sessions =
+        discovery::fetch_all_session_overviews(runtime_directory, shared_sessions_base_directory);
     let mut session_rows = discovery::build_session_rows(&discovered_sessions.sessions);
     if session_rows.len() < 2 && !discovered_sessions.is_complete() {
         return Err(
@@ -2981,9 +3065,9 @@ fn select_session(
     })
 }
 
-/// Whether a listing of `session_row_count` rows, the first `local_session_row_count` of them on this
-/// machine, settles on its only row without asking: exactly one row, and that
-/// row is local. A single remote row, and every longer listing, is asked.
+/// Whether a listing of `session_row_count` rows, the first
+/// `local_session_row_count` of them on this machine, settles on its only row
+/// without asking: exactly one row, and that row is local. A single remote row, and every longer listing, is asked.
 fn is_single_local_session_selection(
     session_row_count: usize,
     local_session_row_count: usize,
@@ -3146,20 +3230,24 @@ fn build_session_selector(selector: &str) -> SessionSelector {
 ///
 /// The Attach presents no resume token: a join over a connection this machine
 /// opened names the client record it comes back as instead.
+///
+/// # Errors
+/// [`DialError::Unreachable`] when the Hello or the Attach could not be written,
+/// or a reply could not be read. [`DialError::Refused`] for every reply that
+/// arrived and does not join: a refused Hello, a protocol version this build
+/// does not accept, a refused Attach, and an answer of another kind.
 fn join_session(
     connection: &mut Connection,
     connection_token: &ConnectionToken,
     resume_client_id: Option<ClientId>,
     graphics_support: terminal::GraphicsSupport,
     cell_size: Option<koshi_core::geometry::PixelCellSize>,
-) -> Result<(ClientId, SessionId, Option<ConnectionToken>), CliError> {
+) -> Result<(ClientId, SessionId, Option<ConnectionToken>), DialError> {
     let hello = IpcRequest {
         request_id: 1,
         request_kind: IpcRequestKind::build_hello_request(connection_token.clone()),
     };
-    connection
-        .send(&hello)
-        .map_err(talk::build_ipc_unavailable_error)?;
+    connection.send(&hello).map_err(build_link_failure)?;
     connection
         .send(&build_attach_request(
             resume_client_id,
@@ -3167,18 +3255,12 @@ fn join_session(
             graphics_support,
             cell_size,
         ))
-        .map_err(talk::build_ipc_unavailable_error)?;
+        .map_err(build_link_failure)?;
 
-    validate_session_protocol_version(
-        connection
-            .recv()
-            .map_err(talk::build_ipc_unavailable_error)?,
-    )?;
-    parse_attached_session(
-        connection
-            .recv()
-            .map_err(talk::build_ipc_unavailable_error)?,
-    )
+    validate_session_protocol_version(connection.recv().map_err(build_link_failure)?)
+        .map_err(DialError::Refused)?;
+    parse_attached_session(connection.recv().map_err(build_link_failure)?)
+        .map_err(DialError::Refused)
 }
 
 /// The Attach this client writes, numbered 2: the request that follows the
@@ -3211,20 +3293,15 @@ fn build_attach_request(
 /// Check the protocol version a Hello answer settled on against the range this
 /// build asked for.
 ///
-/// A refusal carrying [`IpcErrorCode::UnsupportedVersion`] is
-/// [`CliError::ProtocolVersionRefused`]. Every other refusal is
-/// [`CliError::IpcUnavailable`]. Both carry the session's sentence filtered by
-/// [`sanitize_reported_text`].
+/// A refusal is what [`build_peer_refusal_error`](talk::build_peer_refusal_error)
+/// gives: [`CliError::ProtocolVersionRefused`] for
+/// [`IpcErrorCode::UnsupportedVersion`](koshi_ipc::protocol::IpcErrorCode::UnsupportedVersion),
+/// and [`CliError::IpcUnavailable`] for every other code.
 fn validate_session_protocol_version(incoming_response: IncomingResponse) -> Result<(), CliError> {
     match talk::SESSION_PEER_WORDS.take_response_result(incoming_response)? {
         IpcResult::Hello {
             protocol_version, ..
         } => talk::SESSION_PEER_WORDS.validate_settled_protocol_version(protocol_version),
-        IpcResult::Error(refusal) if refusal.code == IpcErrorCode::UnsupportedVersion => {
-            Err(CliError::ProtocolVersionRefused {
-                detail: sanitize_reported_text(&refusal.message),
-            })
-        }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),
         other => Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&other)),
     }
@@ -3268,11 +3345,14 @@ fn parse_attached_session(
 ///
 /// `Err` carries the ending the attachment reports.
 /// [`AttachmentEnding::RestartedIntoIncompatibleBuild`] when the new socket
-/// refuses this build's protocol version. [`AttachmentEnding::Restarting`] for
-/// every other way the client cannot come back: another local user's session,
-/// which advertises no endpoint file this user can read; a session that has
-/// not come back inside [`RESTART_WINDOW_DURATION`]; and a new socket that
-/// refuses the connection, or refuses the join for another reason.
+/// refuses this build's protocol version.
+/// [`AttachmentEnding::RefusedAfterRestart`] carrying the refusal when the new
+/// socket answers the join with any other refusal.
+/// [`AttachmentEnding::Restarting`] for every other way the client cannot come
+/// back: another local user's session, which advertises no endpoint file this
+/// user can read; a session that has not come back inside
+/// [`RESTART_WINDOW_DURATION`]; and a new socket that refuses the connection,
+/// or that breaks before it answers the join.
 fn rejoin_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -3289,17 +3369,21 @@ fn rejoin_session(
         return Err(AttachmentEnding::Restarting);
     }
     let deadline = Instant::now() + RESTART_WINDOW_DURATION;
-    let Some(endpoint) =
-        wait_for_new_endpoint(runtime_directory, session_id, connection_token, deadline)
-    else {
+    let Some(endpoint) = ipc_client::wait_for_new_session_endpoint(
+        runtime_directory,
+        session_id,
+        connection_token,
+        deadline,
+    ) else {
         tracing::warn!(%session_id, "the session advertised no new socket after its restart");
         return Err(AttachmentEnding::Restarting);
     };
-    let mut connection =
-        ipc_client::connect_to_session(&endpoint, session_id).map_err(|connection_error| {
+    let mut connection = ipc_client::connect_to_session(&endpoint, session_id, None).map_err(
+        |connection_error| {
             tracing::warn!(%connection_error, "could not reach the restarted session");
             AttachmentEnding::Restarting
-        })?;
+        },
+    )?;
     let (rejoined_client_id, _, _) = join_session(
         &mut connection,
         &endpoint.connection_token,
@@ -3307,79 +3391,21 @@ fn rejoin_session(
         graphics_support,
         cell_size,
     )
-    .map_err(|join_error| {
-        tracing::warn!(%join_error, "the restarted session refused this client");
-        match join_error {
-            CliError::ProtocolVersionRefused { .. } => {
-                AttachmentEnding::RestartedIntoIncompatibleBuild
-            }
-            _ => AttachmentEnding::Restarting,
+    .map_err(|join_error| match join_error {
+        DialError::Refused(join_refusal @ CliError::ProtocolVersionRefused { .. }) => {
+            tracing::warn!(%join_refusal, "the restarted session refused this client");
+            AttachmentEnding::RestartedIntoIncompatibleBuild
+        }
+        DialError::Refused(join_refusal) => {
+            tracing::warn!(%join_refusal, "the restarted session refused this client");
+            AttachmentEnding::RefusedAfterRestart(Box::new(join_refusal))
+        }
+        DialError::Unreachable(join_failure) | DialError::Restarting(join_failure) => {
+            tracing::warn!(%join_failure, "could not reach the restarted session");
+            AttachmentEnding::Restarting
         }
     })?;
     Ok((rejoined_client_id, endpoint, connection))
-}
-
-/// Wait for `session_id` to advertise a socket under a token other than
-/// `connection_token`, and hand that endpoint file back. `None` when `restart_deadline` passes
-/// with the connection token still unchanged.
-///
-/// A session server mints a fresh token every time it binds, so another token
-/// means the session's new image is serving. The process id in the file says
-/// nothing: `execvp` keeps it, so a Unix swap comes back under the same one.
-///
-/// The file is read every [`RESTART_POLL_INTERVAL_DURATION`] until the deadline. A missing or
-/// unreadable file is what the swap leaves while the socket is down, so the
-/// wait reads again. The first read happens before the deadline is checked, so
-/// a deadline already passed still takes a session that is already back.
-fn wait_for_new_endpoint(
-    runtime_directory: &Path,
-    session_id: SessionId,
-    connection_token: &ConnectionToken,
-    restart_deadline: Instant,
-) -> Option<EndpointFile> {
-    let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
-    loop {
-        if let Ok(endpoint) = EndpointFile::load_from_path(&endpoint_path) {
-            if endpoint.connection_token != *connection_token {
-                return Some(endpoint);
-            }
-        }
-        if Instant::now() >= restart_deadline {
-            return None;
-        }
-        thread::sleep(RESTART_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// Wait until the router's endpoint file at `router_endpoint_path` no longer
-/// carries `router_connection_token_before_restart`, and return `true`. Return
-/// `false` when `restart_deadline` passes first.
-///
-/// A file with another token ends the wait, and so does a file this build
-/// cannot read. A missing file and a file with the same token are read again
-/// every [`RESTART_POLL_INTERVAL_DURATION`]. The first read happens before the
-/// deadline is checked, so a deadline already passed still sees a router that
-/// already restarted.
-fn wait_for_router_restart(
-    router_endpoint_path: &Path,
-    router_connection_token_before_restart: &ConnectionToken,
-    restart_deadline: Instant,
-) -> bool {
-    loop {
-        match EndpointFile::load_from_path(router_endpoint_path) {
-            Ok(router_endpoint)
-                if router_endpoint.connection_token != *router_connection_token_before_restart =>
-            {
-                return true;
-            }
-            Err(IpcError::EndpointFileUnreadable { .. }) => return true,
-            Ok(_) | Err(_) => {}
-        }
-        if Instant::now() >= restart_deadline {
-            return false;
-        }
-        thread::sleep(RESTART_POLL_INTERVAL_DURATION);
-    }
 }
 
 /// This terminal's size in cells, or [`FALLBACK_VIEWPORT`] when it has none to
@@ -3988,7 +4014,7 @@ fn convert_mouse_action_to_wire(mouse_action: MouseAction) -> WireMouseAction {
             resize_step,
             requested_cell_count,
         },
-        MouseAction::Command(command) => WireMouseAction::Command(Box::new(command)),
+        MouseAction::Command(command) => WireMouseAction::Command(command),
     }
 }
 
@@ -4081,11 +4107,16 @@ fn fold_mouse_action(
             *requested_cell_count = next_requested_cell_count;
             None
         }
-        (
-            MouseAction::Command(Command::Visual(VisualCommand::SetSelection(held))),
-            MouseAction::Command(Command::Visual(VisualCommand::SetSelection(newer))),
-        ) if held.pane_id == newer.pane_id => {
-            *held = newer;
+        (MouseAction::Command(held_command), MouseAction::Command(newer_command))
+            if matches!(
+                (held_command.as_ref(), newer_command.as_ref()),
+                (
+                    Command::Visual(VisualCommand::SetSelection(held_selection_args)),
+                    Command::Visual(VisualCommand::SetSelection(newer_selection_args)),
+                ) if held_selection_args.pane_id == newer_selection_args.pane_id
+            ) =>
+        {
+            *held_command = newer_command;
             None
         }
         (_, next_mouse_action) => Some(next_mouse_action),
@@ -4134,7 +4165,9 @@ fn classify_session_event(
 ///
 /// A restart reaches here only when the client could not come back on the
 /// session's new socket. It says the session restarted, then names the same
-/// way back. A restart into a build that refused this client's protocol
+/// way back. A restart whose new image refused this client prints `the session
+/// restarted and refused this client: <refusal>`, then the same way back. On
+/// this machine, a restart into a build that refused this client's protocol
 /// version runs `koshi attach <session id>` from `client_executable_path`
 /// instead, through [`attach_again_from_client_executable`].
 ///
@@ -4164,14 +4197,19 @@ fn report_attachment_ending(
         }),
         AttachmentEnding::Restarting => Err(CliError::Runtime {
             detail: format!(
-                "the session restarted into another koshi build and this client could not \
-                 reconnect to it\n  {}",
+                "the session restarted and this client could not reconnect to it\n  {}",
                 build_reattach_instructions(home, session_id)
             ),
         }),
         AttachmentEnding::RestartedIntoIncompatibleBuild => {
             attach_again_from_client_executable(home, session_id, client_executable_path)
         }
+        AttachmentEnding::RefusedAfterRestart(refusal) => Err(CliError::Runtime {
+            detail: format!(
+                "the session restarted and refused this client: {refusal}\n  {}",
+                build_reattach_instructions(home, session_id)
+            ),
+        }),
         AttachmentEnding::LinkLost(cause) => Err(CliError::Runtime {
             detail: format!(
                 "{cause}\n  the session continues without you\n  {}",

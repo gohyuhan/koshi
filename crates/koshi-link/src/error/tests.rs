@@ -64,6 +64,11 @@ fn list_every_error_class() -> Vec<(CliError, &'static str, i32)> {
             4,
         ),
         (
+            CliError::SessionAnswerTimedOut,
+            "IPC unavailable: the session did not answer in time",
+            4,
+        ),
+        (
             CliError::SessionNotFound {
                 session_name: "session-x".into(),
             },

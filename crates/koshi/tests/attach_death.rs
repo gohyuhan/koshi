@@ -1,324 +1,77 @@
-//! What an attached client sees when its session server dies.
+//! What an attached client sees when its session server ends.
 //!
-//! A real session server runs as its own process; the test joins it the way the
-//! client does — Hello then Attach on one connection — and reads the stream
-//! after the server is killed. A killed server writes no goodbye, so the read
-//! fails, which the client turns into "the session ended unexpectedly" and a
-//! non-zero exit. A session told to end writes the quit frame first, which the
-//! client turns into "the session ended" and a zero exit.
+//! A real session server runs as its own process. The test joins it — Hello
+//! then Attach on one connection — and reads the event stream after the server
+//! ends:
 //!
-//! Each test serves its own temporary runtime directory, under a short base
-//! because a Unix socket path has an operating-system length cap.
+//! - A killed server writes no frame, and the read fails with `ipc peer
+//!   disconnected`. A `koshi attach` client prints `the session ended
+//!   unexpectedly` and exits with the runtime-action code.
+//! - A session that `koshi kill-session` ends writes [`SessionEvent::Quit`] on
+//!   every attached stream.
+//! - A `koshi detach --all` ends a `koshi attach` client with exit code `0`.
+//! - With `auto-close-session #true`, the session server process ends when its
+//!   last client leaves. With the default, it keeps running.
 //!
-//! Reading a frame blocks forever, so the walk to the ending runs on a thread
-//! this one can stop waiting on: a stream that never ends fails the test
-//! instead of hanging it.
-//!
-//! Some tests run `koshi attach` as its own process and read its exit code and
-//! message; others watch whether the session server itself ends when its last
-//! client leaves, which is what `auto-close-session` decides. Each gets its own
-//! home directory holding the `koshi.kdl` that process reads. Unix-only: on
-//! Windows the config directory comes from a Win32 call no environment
-//! variable redirects.
+//! Each test serves its own temporary runtime directory, and starts every
+//! `koshi` process under its own temporary home. The tests that start `koshi
+//! attach` or write a `koshi.kdl` run on Unix only.
 
 #[cfg(unix)]
 use std::io::Read;
-use std::path::Path;
 #[cfg(unix)]
-use std::path::PathBuf;
-use std::process::{Child, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Child;
+#[cfg(unix)]
+use std::time::Instant;
 
 #[cfg(unix)]
 use koshi_core::command::CliExitCode;
-use koshi_core::geometry::Size;
 use koshi_core::ids::SessionId;
+#[cfg(unix)]
 use koshi_ipc::endpoint::EndpointFile;
-use koshi_ipc::error::IpcError;
+#[cfg(unix)]
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-};
+#[cfg(unix)]
+use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 #[cfg(unix)]
 use koshi_ipc::router::resolve_router_endpoint_path;
-use koshi_ipc::transport::Connection;
 use koshi_test_support::fixtures::build_test_runtime_directory;
-#[cfg(unix)]
-use tempfile::TempDir;
 
 mod common;
 
-#[cfg(unix)]
-use common::build_koshi_command_under_home;
-
-/// How long a poll waits for something a started process has to do before the
-/// test calls it a failure.
-const WAIT_DURATION: Duration = Duration::from_secs(20);
-
-/// How long a poll pauses between attempts.
-const ATTACH_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
-
-/// The terminal size the attaching client in this test reports.
-const ATTACH_VIEWPORT_SIZE: Size = Size {
-    column_count: 80,
-    row_count: 24,
+use common::session_connection::{
+    attach_client_on_connection, read_session_ending, wait_for_session_connection,
 };
-
-/// The display name the session server is started under, standing in for the
-/// one the router generates.
-const SESSION_SERVER_NAME: &str = "workspace";
-
-/// A session server the test started. Dropping it ends that server, so a
-/// failed assertion leaves nothing running.
-struct RunningSession {
-    child_process: Child,
-}
-
-impl RunningSession {
-    /// End the server outright — `SIGKILL` on Unix, `TerminateProcess` on
-    /// Windows — and collect it, so no goodbye of any kind can be written.
-    fn terminate_session_server(&mut self) {
-        self.child_process
-            .kill()
-            .expect("the session server can be ended");
-        self.child_process
-            .wait()
-            .expect("the ended session server is collected");
-    }
-}
-
-impl Drop for RunningSession {
-    fn drop(&mut self) {
-        let _ = self.child_process.kill();
-        let _ = self.child_process.wait();
-    }
-}
-
-/// Start the `koshi` binary as one session's server serving `runtime_directory`,
-/// under the identity the router would have handed it.
-fn start_session_server(runtime_directory: &Path, session_id: SessionId) -> RunningSession {
-    let child_process = std::process::Command::new(env!("CARGO_BIN_EXE_koshi"))
-        .arg("serve-session")
-        .arg(session_id.to_string())
-        .arg(SESSION_SERVER_NAME)
-        .arg("--runtime-dir")
-        .arg(runtime_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the koshi binary starts");
-    RunningSession { child_process }
-}
-
-/// Open a connection to the session server, with its handshake already done,
-/// retrying until the server answers.
-fn open_session_connection(runtime_directory: &Path, session_id: SessionId) -> Connection {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if let Some(connection) = try_open_session_connection(runtime_directory, session_id) {
-            return connection;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no session server answered for {session_id}"
-        );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// One attempt at opening a connection: read the endpoint file, connect, and
-/// send the Hello that opens the connection.
-///
-/// `None` means the session server has yet to bind its socket and advertise
-/// the token the Hello presents; the next attempt reads the file again.
-fn try_open_session_connection(
-    runtime_directory: &Path,
-    session_id: SessionId,
-) -> Option<Connection> {
-    let endpoint = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-        runtime_directory,
-        session_id,
-    ))
-    .ok()?;
-    let mut connection = Connection::connect(&endpoint.socket_address).ok()?;
-    let hello = IpcRequest {
-        request_id: 1,
-        request_kind: IpcRequestKind::Hello {
-            minimum_protocol_version: MIN_PROTOCOL_VERSION,
-            maximum_protocol_version: PROTOCOL_VERSION,
-            connection_token: endpoint.connection_token,
-            is_remote: false,
-        },
-    };
-    connection.send(&hello).ok()?;
-    let ipc_response: IpcResponse = connection.recv().ok()?;
-    match ipc_response.answer_result {
-        IpcResult::Hello { .. } => Some(connection),
-        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
-    }
-}
-
-/// Attach on `connection` the way the attached client does. The connection
-/// carries only that client's event stream afterwards.
-fn attach_test_client(connection: &mut Connection, session_id: SessionId) {
-    let request = IpcRequest {
-        request_id: 2,
-        request_kind: IpcRequestKind::Attach {
-            viewport_size: ATTACH_VIEWPORT_SIZE,
-            resume_client_id: None,
-            resume_token: None,
-            pane_area: None,
-            graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-            cell_size: None,
-        },
-    };
-    connection
-        .send(&request)
-        .expect("the server reads the attach");
-    let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
-    assert_eq!(ipc_response.request_id, Some(2));
-    let IpcResult::Attached {
-        session_id: joined, ..
-    } = ipc_response.answer_result
-    else {
-        panic!(
-            "expected an attach reply, got {:?}",
-            ipc_response.answer_result
-        );
-    };
-    assert_eq!(joined, session_id);
-}
-
-/// Read `connection`'s event stream the way the attached client reads it — a
-/// frame that says nothing about the ending is passed over — and hand back the
-/// frame or the read failure that ended it. Fails the test once [`WAIT_DURATION`] has
-/// passed with no ending.
-fn read_session_ending(mut connection: Connection) -> Result<SessionEvent, IpcError> {
-    let (ending_sender, ending_receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let ending = loop {
-            match connection.recv::<SessionEvent>() {
-                Ok(SessionEvent::Detached) => break Ok(SessionEvent::Detached),
-                Ok(SessionEvent::Quit) => break Ok(SessionEvent::Quit),
-                Ok(_) => {}
-                Err(receive_error) => break Err(receive_error),
-            }
-        };
-        let _ = ending_sender.send(ending);
-    });
-    ending_receiver
-        .recv_timeout(WAIT_DURATION)
-        .expect("the event stream ends")
-}
-
-/// A fresh home directory for the `koshi` processes a test starts to derive
-/// their runtime directory from, so those processes never meet the session a
-/// developer is running. Removed when the test drops it.
-///
-/// The name is one letter and six random characters, so the home is
-/// `/tmp/k` plus six characters — 12 bytes — and the directory a `koshi`
-/// started under it serves is `<home_directory>/run`, 16 bytes. The longest name these
-/// tests bind in that directory is the session socket, `session-<uuid>.sock`
-/// at 49 bytes, which makes the bound path 66 bytes against the 103 bytes a
-/// Unix socket address holds.
 #[cfg(unix)]
-fn build_test_home_directory() -> TempDir {
-    tempfile::Builder::new()
-        .prefix("k")
-        .tempdir_in("/tmp")
-        .expect("a temporary home directory")
-}
+use common::{
+    build_koshi_command_under_home, resolve_runtime_directory_under_home, write_test_config,
+    POLL_INTERVAL_DURATION, WAIT_DURATION,
+};
+use common::{build_short_test_directory, start_session_server_under_home};
 
-/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
-/// serves: `run/` inside the home directory.
+/// The router serving `runtime_directory`, which the attaching client started
+/// on finding none running. Dropping it ends the process the router endpoint
+/// file names, and does nothing when that file cannot be read.
 #[cfg(unix)]
-fn build_runtime_directory_under(home_directory: &Path) -> PathBuf {
-    home_directory.join("run")
-}
-
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
-/// reads: macOS derives it from the home directory alone.
-#[cfg(target_os = "macos")]
-fn resolve_config_directory_under(home_directory: &Path) -> PathBuf {
-    home_directory.join("Library/Application Support/koshi")
-}
-
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
-/// reads: `.config/koshi` inside the home directory.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_config_directory_under(home_directory: &Path) -> PathBuf {
-    home_directory.join(".config/koshi")
-}
-
-/// Write `config_text` as the `koshi.kdl` a process started under `home_directory` reads.
-#[cfg(unix)]
-fn write_test_config(home_directory: &Path, config_text: &str) {
-    let config_directory = resolve_config_directory_under(home_directory);
-    std::fs::create_dir_all(&config_directory).expect("a config directory under the test home");
-    std::fs::write(config_directory.join("koshi.kdl"), config_text)
-        .expect("the config file is written");
-}
-
-/// Start one session's server under `home_directory`, so it reads the `koshi.kdl` written
-/// there rather than the developer's own.
-#[cfg(unix)]
-fn start_session_server_under(
-    home_directory: &Path,
-    runtime_directory: &Path,
-    session_id: SessionId,
-) -> RunningSession {
-    let child_process = build_koshi_command_under_home(home_directory)
-        .arg("serve-session")
-        .arg(session_id.to_string())
-        .arg(SESSION_SERVER_NAME)
-        .arg("--runtime-dir")
-        .arg(runtime_directory)
-        .stdout(Stdio::null())
-        .spawn()
-        .expect("the koshi binary starts");
-    RunningSession { child_process }
-}
-
-/// Wait for `session_process`'s process to exit, and hand back whether it did inside
-/// [`WAIT_DURATION`].
-#[cfg(unix)]
-fn wait_for_session_server_exit(session_process: &mut RunningSession) -> bool {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if matches!(session_process.child_process.try_wait(), Ok(Some(_))) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// The router serving the runtime directory it names, which the attaching
-/// client started on finding none running. Dropping this ends that router, so
-/// a failed assertion leaves nothing running.
-#[cfg(unix)]
-struct RunningRouter {
+struct RouterStartedByClient {
     runtime_directory: PathBuf,
 }
 
 #[cfg(unix)]
-impl Drop for RunningRouter {
+impl Drop for RouterStartedByClient {
     fn drop(&mut self) {
-        let Ok(endpoint) =
+        let Ok(router_endpoint) =
             EndpointFile::load_from_path(&resolve_router_endpoint_path(&self.runtime_directory))
         else {
             return;
         };
-        common::terminate_process(endpoint.process_id);
+        common::terminate_process(router_endpoint.process_id);
     }
 }
 
-/// A `koshi attach` the test started. Dropping it ends that client, so a
-/// failed assertion leaves nothing running.
+/// A `koshi attach` the test started. Dropping it ends that process.
 #[cfg(unix)]
 struct RunningClient {
     child_process: Child,
@@ -344,63 +97,77 @@ fn start_attaching_client(home_directory: &Path, session_id: SessionId) -> Runni
     RunningClient { child_process }
 }
 
-/// Why a started client is no longer running, for a failure message. `None`
-/// while it is still up; otherwise its exit status and stderr, which name the
-/// cause a "no client attached" failure would otherwise hide.
+/// `the client exited <status>: <what it wrote to its error stream>` once
+/// `attaching_client` has ended, for a failure message. `None` while it runs,
+/// or while its state cannot be read.
 #[cfg(unix)]
-fn describe_client_exit(client: &mut RunningClient) -> Option<String> {
-    let exit_status = client.child_process.try_wait().ok().flatten()?;
-    let mut stderr = String::new();
-    if let Some(pipe) = client.child_process.stderr.as_mut() {
-        let _ = pipe.read_to_string(&mut stderr);
+fn describe_client_exit(attaching_client: &mut RunningClient) -> Option<String> {
+    let exit_status = attaching_client.child_process.try_wait().ok().flatten()?;
+    let mut client_error_text = String::new();
+    if let Some(stderr_pipe) = attaching_client.child_process.stderr.as_mut() {
+        let _ = stderr_pipe.read_to_string(&mut client_error_text);
     }
     Some(format!(
         "the client exited {exit_status}: {}",
-        stderr.trim()
+        client_error_text.trim()
     ))
 }
 
-/// Wait until the session server answers, so the router the attaching client
-/// starts holds this session after its opening sweep.
+/// Wait until the session server answers a Hello, then close that connection.
 #[cfg(unix)]
 fn wait_for_session_server(runtime_directory: &Path, session_id: SessionId) {
-    drop(open_session_connection(runtime_directory, session_id));
+    drop(wait_for_session_connection(runtime_directory, session_id));
 }
 
-/// Wait until the session server reports one attached client, so the client
-/// under test is reading the event stream before the test ends the session.
+/// Poll the session server's overview every [`POLL_INTERVAL_DURATION`] until
+/// it lists one attached client.
+///
+/// # Panics
+/// When the overview cannot be read, or lists no single client within
+/// [`WAIT_DURATION`]. The message names how `attaching_client` exited, when it
+/// has.
 #[cfg(unix)]
 fn wait_for_attached_client(
     runtime_directory: &Path,
     session_id: SessionId,
-    client: &mut RunningClient,
+    attaching_client: &mut RunningClient,
 ) {
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
-        let overview =
-            koshi_link::ipc_client::fetch_session_overview(runtime_directory, session_id)
-                .expect("the session server describes itself");
-        if overview.clients.len() == 1 {
+        let session_overview = koshi_link::discovery::fetch_session_overview(
+            runtime_directory,
+            None,
+            session_id,
+            None,
+        )
+        .expect("the session server describes itself");
+        if session_overview.clients.len() == 1 {
             return;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "no client attached to {session_id}; {}",
-            describe_client_exit(client)
+            describe_client_exit(attaching_client)
                 .unwrap_or_else(|| "the client is still running".to_string())
         );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 }
 
-/// What the attaching client left behind: its exit status, its output and its
-/// errors, read once it has ended. Fails the test once [`WAIT_DURATION`] has passed
-/// with the client still running.
+/// Wait for `attaching_client` to end, polling every
+/// [`POLL_INTERVAL_DURATION`], and hand back its exit status, its standard
+/// output, and its error stream.
+///
+/// # Panics
+/// When it still runs after [`WAIT_DURATION`], or either stream is not a pipe
+/// of UTF-8 text.
 #[cfg(unix)]
-fn read_client_ending(client: &mut RunningClient) -> (std::process::ExitStatus, String, String) {
-    let deadline = Instant::now() + WAIT_DURATION;
+fn read_client_ending(
+    attaching_client: &mut RunningClient,
+) -> (std::process::ExitStatus, String, String) {
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     let exit_status = loop {
-        if let Some(exit_status) = client
+        if let Some(exit_status) = attaching_client
             .child_process
             .try_wait()
             .expect("the client's state can be read")
@@ -408,39 +175,45 @@ fn read_client_ending(client: &mut RunningClient) -> (std::process::ExitStatus, 
             break exit_status;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "the attaching client kept running"
         );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     };
 
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    client
+    let mut client_output_text = String::new();
+    let mut client_error_text = String::new();
+    attaching_client
         .child_process
         .stdout
         .take()
         .expect("the client's output is a pipe")
-        .read_to_string(&mut stdout)
+        .read_to_string(&mut client_output_text)
         .expect("the client's output reads as text");
-    client
+    attaching_client
         .child_process
         .stderr
         .take()
         .expect("the client's errors are a pipe")
-        .read_to_string(&mut stderr)
+        .read_to_string(&mut client_error_text)
         .expect("the client's errors read as text");
-    (exit_status, stdout, stderr)
+    (exit_status, client_output_text, client_error_text)
 }
 
 #[test]
 fn a_killed_session_server_ends_the_stream_with_a_read_failure() {
+    let home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let mut session_process = start_session_server(runtime_directory.path(), session_id);
+    let mut session_process = start_session_server_under_home(
+        home_directory.path(),
+        runtime_directory.path(),
+        session_id,
+    );
 
-    let mut viewer_connection = open_session_connection(runtime_directory.path(), session_id);
-    attach_test_client(&mut viewer_connection, session_id);
+    let (mut viewer_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
+    attach_client_on_connection(&mut viewer_connection, session_id);
 
     session_process.terminate_session_server();
 
@@ -454,27 +227,28 @@ fn a_killed_session_server_ends_the_stream_with_a_read_failure() {
 #[cfg(unix)]
 #[test]
 fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
-    let home_directory = build_test_home_directory();
-    let runtime_directory = build_runtime_directory_under(home_directory.path());
+    let home_directory = build_short_test_directory();
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     let session_id = SessionId::new();
-    let mut session_process = start_session_server(&runtime_directory, session_id);
-    let _router = RunningRouter {
+    let mut session_process =
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
+    let _client_started_router = RouterStartedByClient {
         runtime_directory: runtime_directory.clone(),
     };
 
     wait_for_session_server(&runtime_directory, session_id);
-    let mut client = start_attaching_client(home_directory.path(), session_id);
-    wait_for_attached_client(&runtime_directory, session_id, &mut client);
+    let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
+    wait_for_attached_client(&runtime_directory, session_id, &mut attaching_client);
 
     session_process.terminate_session_server();
 
-    let (exit_status, _, stderr) = read_client_ending(&mut client);
+    let (exit_status, _, client_error_text) = read_client_ending(&mut attaching_client);
     assert_eq!(
         exit_status.code(),
         Some(CliExitCode::RuntimeAction.get_exit_code())
     );
     assert_eq!(
-        stderr,
+        client_error_text,
         format!(
             "koshi: the session ended unexpectedly\n  \
              run `koshi list-sessions`; if session {session_id} is still listed, \
@@ -490,23 +264,24 @@ fn a_killed_session_server_ends_the_attaching_client_with_the_death_message() {
 #[cfg(unix)]
 #[test]
 fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
-    let home_directory = build_test_home_directory();
-    let runtime_directory = build_runtime_directory_under(home_directory.path());
+    let home_directory = build_short_test_directory();
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     let session_id = SessionId::new();
-    let _session = start_session_server(&runtime_directory, session_id);
-    let _router = RunningRouter {
+    let _session_process =
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
+    let _client_started_router = RouterStartedByClient {
         runtime_directory: runtime_directory.clone(),
     };
 
     wait_for_session_server(&runtime_directory, session_id);
-    let mut client = start_attaching_client(home_directory.path(), session_id);
-    wait_for_attached_client(&runtime_directory, session_id, &mut client);
+    let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
+    wait_for_attached_client(&runtime_directory, session_id, &mut attaching_client);
 
     let endpoint_before_restart = EndpointFile::load_from_path(
         &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
     )
     .expect("the session advertises a socket");
-    let mut control_connection = open_session_connection(&runtime_directory, session_id);
+    let (mut control_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
     control_connection
         .send(&IpcRequest {
             request_id: 3,
@@ -521,7 +296,7 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
 
     // Every image binds a socket under a fresh token, so a token other than the
     // one read above is the new image serving.
-    let deadline = Instant::now() + WAIT_DURATION;
+    let advertise_deadline = Instant::now() + WAIT_DURATION;
     loop {
         let endpoint_attempt = EndpointFile::load_from_path(
             &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
@@ -533,18 +308,18 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
             break;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < advertise_deadline,
             "the session advertised no new socket; {}",
-            describe_client_exit(&mut client)
+            describe_client_exit(&mut attaching_client)
                 .unwrap_or_else(|| "the client is still running".to_string())
         );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
     // The record is carried across the swap, so it is there before the client
     // comes back and a detach can land while nobody holds it. Asked for until
     // the client takes it.
-    let deadline = Instant::now() + WAIT_DURATION;
-    while client
+    let detach_deadline = Instant::now() + WAIT_DURATION;
+    while attaching_client
         .child_process
         .try_wait()
         .expect("the client's state can be read")
@@ -563,38 +338,40 @@ fn an_attaching_client_comes_back_after_the_session_replaces_its_image() {
             String::from_utf8_lossy(&detach_output.stderr)
         );
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < detach_deadline,
             "the client never took a detach, so it never came back on the new socket"
         );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 
-    let (exit_status, stdout, stderr) = read_client_ending(&mut client);
+    let (exit_status, client_output_text, client_error_text) =
+        read_client_ending(&mut attaching_client);
     assert_eq!(
         exit_status.code(),
         Some(CliExitCode::Success.get_exit_code())
     );
-    assert_eq!(stderr, "");
+    assert_eq!(client_error_text, "");
     assert!(
-        stdout.ends_with(&format!("detached from session {session_id}\n")),
-        "the client ended with {stdout:?}"
+        client_output_text.ends_with(&format!("detached from session {session_id}\n")),
+        "the client ended with {client_output_text:?}"
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn a_detach_ends_the_attaching_client_with_a_success() {
-    let home_directory = build_test_home_directory();
-    let runtime_directory = build_runtime_directory_under(home_directory.path());
+    let home_directory = build_short_test_directory();
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     let session_id = SessionId::new();
-    let _session = start_session_server(&runtime_directory, session_id);
-    let _router = RunningRouter {
+    let _session_process =
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
+    let _client_started_router = RouterStartedByClient {
         runtime_directory: runtime_directory.clone(),
     };
 
     wait_for_session_server(&runtime_directory, session_id);
-    let mut client = start_attaching_client(home_directory.path(), session_id);
-    wait_for_attached_client(&runtime_directory, session_id, &mut client);
+    let mut attaching_client = start_attaching_client(home_directory.path(), session_id);
+    wait_for_attached_client(&runtime_directory, session_id, &mut attaching_client);
 
     // The session keeps running, so the goodbye frame the server writes as it
     // closes the client's queue is the whole ending the client reads.
@@ -611,17 +388,18 @@ fn a_detach_ends_the_attaching_client_with_a_success() {
         String::from_utf8_lossy(&detach_output.stderr)
     );
 
-    let (exit_status, stdout, stderr) = read_client_ending(&mut client);
+    let (exit_status, client_output_text, client_error_text) =
+        read_client_ending(&mut attaching_client);
     assert_eq!(
         exit_status.code(),
         Some(CliExitCode::Success.get_exit_code())
     );
-    assert_eq!(stderr, "");
+    assert_eq!(client_error_text, "");
     // The client leaves the alternate screen before it prints, so what it says
     // about the ending is the last thing on its output.
     assert!(
-        stdout.ends_with(&format!("detached from session {session_id}\n")),
-        "the client ended with {stdout:?}"
+        client_output_text.ends_with(&format!("detached from session {session_id}\n")),
+        "the client ended with {client_output_text:?}"
     );
 }
 
@@ -630,24 +408,24 @@ fn a_detach_ends_the_attaching_client_with_a_success() {
 #[cfg(unix)]
 #[test]
 fn auto_close_ends_the_session_server_process_when_the_last_client_leaves() {
-    let home_directory = build_test_home_directory();
+    let home_directory = build_short_test_directory();
     write_test_config(
         home_directory.path(),
         "version 1\nauto-close-session #true\n",
     );
-    let runtime_directory = build_runtime_directory_under(home_directory.path());
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
 
-    let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-    attach_test_client(&mut viewer_connection, session_id);
+    let (mut viewer_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
+    attach_client_on_connection(&mut viewer_connection, session_id);
     // The connection ending is what the server reads as this client leaving.
     drop(viewer_connection);
 
     assert!(
-        wait_for_session_server_exit(&mut session_process),
+        session_process.wait_for_session_server_exit(),
         "the session server outlived its last client"
     );
 }
@@ -658,19 +436,20 @@ fn auto_close_ends_the_session_server_process_when_the_last_client_leaves() {
 #[cfg(unix)]
 #[test]
 fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
-    let home_directory = build_test_home_directory();
+    let home_directory = build_short_test_directory();
     write_test_config(home_directory.path(), "version 1\n");
-    let runtime_directory = build_runtime_directory_under(home_directory.path());
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
 
-    let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-    attach_test_client(&mut viewer_connection, session_id);
+    let (mut viewer_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
+    attach_client_on_connection(&mut viewer_connection, session_id);
 
-    // `kill-session` names no client, so the session ends rather than one
-    // client leaving it.
+    // The stream is read while `kill-session` runs. `kill-session` names no
+    // client, so the session ends rather than one client leaving it.
+    let session_ending_reader = std::thread::spawn(move || read_session_ending(viewer_connection));
     let kill_output = build_koshi_command_under_home(home_directory.path())
         .arg("kill-session")
         .arg(session_id.to_string())
@@ -678,13 +457,22 @@ fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
         .expect("the koshi binary starts");
 
     assert_eq!(
-        read_session_ending(viewer_connection).expect("the stream ends with a frame"),
+        session_ending_reader
+            .join()
+            .expect("the stream reader ends")
+            .expect("the stream ends with a frame"),
         SessionEvent::Quit,
         "the kill left {}",
         String::from_utf8_lossy(&kill_output.stderr).trim()
     );
+    assert_eq!(
+        kill_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(String::from_utf8_lossy(&kill_output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&kill_output.stderr), "");
     assert!(
-        wait_for_session_server_exit(&mut session_process),
+        session_process.wait_for_session_server_exit(),
         "the session server outlived the kill"
     );
 }
@@ -694,20 +482,20 @@ fn a_kill_session_ends_every_attached_stream_with_the_quit_frame() {
 #[cfg(unix)]
 #[test]
 fn a_session_server_outlives_its_last_client_by_default() {
-    let home_directory = build_test_home_directory();
+    let home_directory = build_short_test_directory();
     write_test_config(home_directory.path(), "version 1\n");
-    let runtime_directory = build_runtime_directory_under(home_directory.path());
+    let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
 
-    let mut viewer_connection = open_session_connection(&runtime_directory, session_id);
-    attach_test_client(&mut viewer_connection, session_id);
+    let (mut viewer_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
+    attach_client_on_connection(&mut viewer_connection, session_id);
     drop(viewer_connection);
 
     // It answers a fresh connection after the client that was attached is gone.
-    let rejoined_connection = open_session_connection(&runtime_directory, session_id);
+    let (rejoined_connection, _) = wait_for_session_connection(&runtime_directory, session_id);
     drop(rejoined_connection);
     assert_eq!(
         session_process

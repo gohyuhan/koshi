@@ -11,26 +11,17 @@ use koshi_core::discovery::SessionDiscovery;
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::SpawnSpec;
+use koshi_ipc::endpoint::RESTART_WINDOW_DURATION;
 use koshi_ipc::layout::TabLayout;
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse};
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
+use koshi_test_support::fixtures::{
+    build_test_runtime_directory, close_connection_after_peer_hangs_up, write_session_endpoint_file,
+};
 
 use super::*;
 use koshi_ipc::protocol::{IpcErrorPayload, PROTOCOL_VERSION};
-
-/// A fresh directory to stand in for the runtime directory, under a short base so
-/// the Unix socket path stays inside the OS path-length cap.
-fn build_test_runtime_directory(test_case_name: &str) -> PathBuf {
-    #[cfg(unix)]
-    let runtime_base_directory = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let runtime_base_directory = std::env::temp_dir();
-    let runtime_directory =
-        runtime_base_directory.join(format!("koshi-cli-{}-{test_case_name}", std::process::id()));
-    std::fs::create_dir_all(&runtime_directory).expect("create runtime directory");
-    runtime_directory
-}
 
 /// A `new-pane` request with nothing chosen: the focused pane splits rightward.
 fn build_default_new_pane_args() -> NewPaneArgs {
@@ -63,116 +54,172 @@ enum SessionScript {
     RefuseHello,
     /// Answer the Hello, then reject the command.
     RejectCommand,
+    /// Refuse the Hello with `UnsupportedVersion` and
+    /// [`VERSION_REFUSAL_SENTENCE`] (and the pipelined command with
+    /// `HelloRequired`).
+    RefuseVersion,
 }
 
-/// Serve one scripted connection for `session_id` at `runtime_directory`: write the
-/// endpoint file, accept one caller, and answer per `session_script`. The returned
-/// receiver carries the envelope the caller submitted.
+/// The sentence a stand-in server refuses this build's protocol version with.
+const VERSION_REFUSAL_SENTENCE: &str =
+    "this server speaks protocol 3 to 4; the caller asked for 5 to 6";
+
+/// Serve one scripted connection per entry of `session_scripts`, in order, for
+/// `session_id` at `runtime_directory`: write the endpoint file, accept one
+/// caller, answer per the entry, and close the connection once the caller hung
+/// up. Before each connection after the first, the session restarts on the
+/// socket it already holds: it writes the endpoint file again under a new
+/// token. The returned receiver carries the envelope each caller submitted, in
+/// order.
 fn spawn_fake_session(
     runtime_directory: &Path,
     session_id: SessionId,
-    session_script: SessionScript,
+    session_scripts: Vec<SessionScript>,
 ) -> (JoinHandle<()>, Receiver<CommandEnvelope>) {
     let session_socket_address =
         koshi_ipc::endpoint::compute_socket_address(runtime_directory, session_id);
-    let session_connection_token = ConnectionToken::generate();
     let session_listener = Listener::bind(&session_socket_address).expect("bind fake session");
-    EndpointFile {
-        socket_address: session_socket_address,
-        connection_token: session_connection_token.clone(),
-        process_id: std::process::id(),
-    }
-    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        runtime_directory,
-        session_id,
-    ))
-    .expect("write endpoint file");
+    let endpoint_file_path =
+        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+    let advertise_session = move |session_connection_token: &ConnectionToken| {
+        EndpointFile {
+            socket_address: session_socket_address.clone(),
+            connection_token: session_connection_token.clone(),
+            process_id: std::process::id(),
+        }
+        .write_to_path(&endpoint_file_path)
+        .expect("write endpoint file");
+    };
+    let mut session_connection_token = ConnectionToken::generate();
+    advertise_session(&session_connection_token);
 
     let (submitted_envelope_sender, submitted_envelope_receiver) = mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let mut session_connection = session_listener.accept().expect("accept the CLI");
-        let hello_request: IpcRequest = session_connection.recv().expect("read hello");
-        let submit_request: IpcRequest = session_connection.recv().expect("read submit");
-        let IpcRequestKind::SubmitCommand(command_envelope) = &submit_request.request_kind else {
-            panic!("expected a SubmitCommand after the Hello");
-        };
-        let IpcRequestKind::Hello {
-            connection_token: presented_token,
-            ..
-        } = &hello_request.request_kind
-        else {
-            panic!("expected a Hello first");
-        };
-        assert_eq!(
-            presented_token, &session_connection_token,
-            "the CLI presents the endpoint's token"
-        );
-        submitted_envelope_sender
-            .send((**command_envelope).clone())
-            .expect("report the envelope submitted");
-
-        match session_script {
-            SessionScript::AcceptAndApply => {
-                send_ipc_result(
-                    &mut session_connection,
-                    hello_request.request_id,
-                    IpcResult::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    },
-                );
-                send_ipc_result(
-                    &mut session_connection,
-                    submit_request.request_id,
-                    IpcResult::CommandResult(CommandResult::Ok {
-                        command_id: command_envelope.command_id,
-                        emitted_events: Vec::new(),
-                    }),
-                );
+    let session_server_thread = std::thread::spawn(move || {
+        for (connection_index, session_script) in session_scripts.into_iter().enumerate() {
+            if connection_index > 0 {
+                session_connection_token = ConnectionToken::generate();
+                advertise_session(&session_connection_token);
             }
-            SessionScript::RefuseHello => {
-                send_ipc_result(
-                    &mut session_connection,
-                    hello_request.request_id,
-                    IpcResult::Error(IpcErrorPayload {
-                        code: IpcErrorCode::BadToken,
-                        message: "the token presented does not match this Koshi's".to_string(),
-                    }),
-                );
-                send_ipc_result_best_effort(
-                    &mut session_connection,
-                    submit_request.request_id,
-                    IpcResult::Error(IpcErrorPayload {
-                        code: IpcErrorCode::HelloRequired,
-                        message: "SubmitCommand arrived before a Hello opened the connection"
-                            .to_string(),
-                    }),
-                );
-            }
-            SessionScript::RejectCommand => {
-                send_ipc_result(
-                    &mut session_connection,
-                    hello_request.request_id,
-                    IpcResult::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        build_version: env!("CARGO_PKG_VERSION").to_string(),
-                    },
-                );
-                send_ipc_result(
-                    &mut session_connection,
-                    submit_request.request_id,
-                    IpcResult::CommandResult(CommandResult::Rejected {
-                        command_id: command_envelope.command_id,
-                        reason: koshi_core::event::RejectReason::Unauthorized,
-                        help: Some(
-                            "\u{1b}[2Jno client is attached\u{7f} to the session".to_string(),
-                        ),
-                    }),
-                );
-            }
+            let mut session_connection = session_listener.accept().expect("accept the CLI");
+            answer_scripted_connection(
+                &mut session_connection,
+                &session_connection_token,
+                session_script,
+                &submitted_envelope_sender,
+            );
+            close_connection_after_peer_hangs_up(session_connection);
         }
     });
-    (handle, submitted_envelope_receiver)
+    (session_server_thread, submitted_envelope_receiver)
+}
+
+/// Read the Hello and the `SubmitCommand` behind it from `session_connection`,
+/// check that the Hello presents `session_connection_token`, send the
+/// submitted envelope down `submitted_envelope_sender`, and answer both
+/// requests per `session_script`.
+fn answer_scripted_connection(
+    session_connection: &mut Connection,
+    session_connection_token: &ConnectionToken,
+    session_script: SessionScript,
+    submitted_envelope_sender: &mpsc::Sender<CommandEnvelope>,
+) {
+    let hello_request: IpcRequest = session_connection.recv().expect("read hello");
+    let submit_request: IpcRequest = session_connection.recv().expect("read submit");
+    let IpcRequestKind::SubmitCommand(command_envelope) = &submit_request.request_kind else {
+        panic!("expected a SubmitCommand after the Hello");
+    };
+    let IpcRequestKind::Hello {
+        connection_token: presented_token,
+        ..
+    } = &hello_request.request_kind
+    else {
+        panic!("expected a Hello first");
+    };
+    assert_eq!(
+        presented_token, session_connection_token,
+        "the CLI presents the endpoint's token"
+    );
+    submitted_envelope_sender
+        .send((**command_envelope).clone())
+        .expect("report the envelope submitted");
+
+    match session_script {
+        SessionScript::AcceptAndApply => {
+            send_ipc_result(
+                session_connection,
+                hello_request.request_id,
+                IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    build_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            );
+            send_ipc_result(
+                session_connection,
+                submit_request.request_id,
+                IpcResult::CommandResult(CommandResult::Ok {
+                    command_id: command_envelope.command_id,
+                    emitted_events: Vec::new(),
+                }),
+            );
+        }
+        SessionScript::RefuseHello => {
+            send_ipc_result(
+                session_connection,
+                hello_request.request_id,
+                IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::BadToken,
+                    message: "the token presented does not match this Koshi's".to_string(),
+                }),
+            );
+            send_ipc_result_best_effort(
+                session_connection,
+                submit_request.request_id,
+                IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::HelloRequired,
+                    message: "SubmitCommand arrived before a Hello opened the connection"
+                        .to_string(),
+                }),
+            );
+        }
+        SessionScript::RefuseVersion => {
+            send_ipc_result(
+                session_connection,
+                hello_request.request_id,
+                IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::UnsupportedVersion,
+                    message: VERSION_REFUSAL_SENTENCE.to_string(),
+                }),
+            );
+            send_ipc_result_best_effort(
+                session_connection,
+                submit_request.request_id,
+                IpcResult::Error(IpcErrorPayload {
+                    code: IpcErrorCode::HelloRequired,
+                    message: "SubmitCommand arrived before a Hello opened the connection"
+                        .to_string(),
+                }),
+            );
+        }
+        SessionScript::RejectCommand => {
+            send_ipc_result(
+                session_connection,
+                hello_request.request_id,
+                IpcResult::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    build_version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            );
+            send_ipc_result(
+                session_connection,
+                submit_request.request_id,
+                IpcResult::CommandResult(CommandResult::Rejected {
+                    command_id: command_envelope.command_id,
+                    reason: koshi_core::event::RejectReason::Unauthorized,
+                    help: Some("\u{1b}[2Jno client is attached\u{7f} to the session".to_string()),
+                }),
+            );
+        }
+    }
 }
 
 /// Answer `request_id` with `ipc_result` on `connection`, requiring it to arrive.
@@ -187,10 +234,8 @@ fn send_ipc_result(connection: &mut Connection, request_id: u64, ipc_result: Ipc
 
 /// Answer `request_id` with `ipc_result`, ignoring a send that fails.
 ///
-/// The CLI closes the connection once the Hello is refused, without reading
-/// the rest of the script, and whether a later reply still lands in the
-/// connection's buffer before that close arrives varies. Only for replies
-/// nothing is left to read.
+/// Used only for a reply the CLI may already have stopped reading: the CLI
+/// closes the connection once the Hello is refused.
 fn send_ipc_result_best_effort(
     connection: &mut Connection,
     request_id: u64,
@@ -204,17 +249,17 @@ fn send_ipc_result_best_effort(
 
 #[test]
 fn a_submitted_command_comes_back_applied() {
-    let runtime_directory = build_test_runtime_directory("apply");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let cli_context = build_in_session_context(session_id);
     let (session_server_thread, submitted_envelopes) = spawn_fake_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
-        SessionScript::AcceptAndApply,
+        vec![SessionScript::AcceptAndApply],
     );
 
     let command_result = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &cli_context,
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -242,24 +287,25 @@ fn a_submitted_command_comes_back_applied() {
             None,
             cli_context.pane_id,
             PathBuf::from(koshi_ipc::endpoint::compute_socket_address(
-                &runtime_directory,
+                runtime_directory.path(),
                 session_id
             )),
         ),
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_rejected_command_comes_back_with_reason_and_help() {
-    let runtime_directory = build_test_runtime_directory("reject");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (session_server_thread, _submitted_envelopes) =
-        spawn_fake_session(&runtime_directory, session_id, SessionScript::RejectCommand);
+    let (session_server_thread, _submitted_envelopes) = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        vec![SessionScript::RejectCommand],
+    );
 
     let command_result = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -268,24 +314,22 @@ fn a_rejected_command_comes_back_with_reason_and_help() {
         panic!("expected the rejection to ride back, got {command_result:?}");
     };
     assert_eq!(reason, koshi_core::event::RejectReason::Unauthorized);
-    // The session that answered writes the hint, and a session reached through
-    // the shared directory belongs to another user, so the hint is filtered.
+    // The hint the session wrote comes back filtered: its `ESC` byte is gone.
     assert_eq!(
         help.as_deref(),
         Some("[2Jno client is attached to the session"),
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_missing_endpoint_file_reports_the_session_not_running() {
-    let runtime_directory = build_test_runtime_directory("no-endpoint");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
 
     let command_error = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -297,27 +341,28 @@ fn a_missing_endpoint_file_reports_the_session_not_running() {
         panic!("expected SessionNotFound, got {command_error:?}");
     };
     assert_eq!(found_session_name, session_id.to_string());
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn an_endpoint_nothing_listens_behind_reports_the_session_not_running() {
-    let runtime_directory = build_test_runtime_directory("dead-socket");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     EndpointFile {
-        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id),
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            runtime_directory.path(),
+            session_id,
+        ),
         connection_token: ConnectionToken::generate(),
         process_id: std::process::id(),
     }
     .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
     ))
     .expect("write endpoint file");
 
     let command_error = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -329,41 +374,40 @@ fn an_endpoint_nothing_listens_behind_reports_the_session_not_running() {
         panic!("expected SessionNotFound, got {command_error:?}");
     };
     assert_eq!(found_session_name, session_id.to_string());
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn an_endpoint_file_that_holds_no_endpoint_reports_ipc_unavailable() {
-    let runtime_directory = build_test_runtime_directory("endpoint-unreadable");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let endpoint_file_path =
-        EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id);
+        EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id);
     std::fs::write(&endpoint_file_path, b"not an endpoint file")
         .expect("write the unreadable endpoint file");
     let endpoint_file_error = EndpointFile::load_from_path(&endpoint_file_path)
         .expect_err("the bytes hold no endpoint file");
 
-    let endpoint_error = load_session_endpoint(&runtime_directory, session_id)
+    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id)
         .expect_err("the endpoint file cannot be read");
 
     let CliError::IpcUnavailable { detail } = endpoint_error else {
         panic!("expected IpcUnavailable, got {endpoint_error:?}");
     };
     assert_eq!(detail, endpoint_file_error.to_string());
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_refused_hello_reports_ipc_unavailable() {
-    let runtime_directory = build_test_runtime_directory("refused");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (session_server_thread, _submitted_envelopes) =
-        spawn_fake_session(&runtime_directory, session_id, SessionScript::RefuseHello);
+    let (session_server_thread, _submitted_envelopes) = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        vec![SessionScript::RefuseHello],
+    );
 
     let command_error = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -374,15 +418,14 @@ fn a_refused_hello_reports_ipc_unavailable() {
     assert_eq!(detail, "the token presented does not match this Koshi's");
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_refused_command_carries_the_sessions_sentence() {
-    let runtime_directory = build_test_runtime_directory("submit-refused");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (server, asked) = spawn_answering_session(
-        &runtime_directory,
+    let (session_server_thread, asked_requests) = spawn_answering_session(
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::NotFound,
@@ -391,7 +434,7 @@ fn a_refused_command_carries_the_sessions_sentence() {
     );
 
     let submit_error = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -402,26 +445,25 @@ fn a_refused_command_carries_the_sessions_sentence() {
     };
     assert_eq!(detail, "this session holds no pane by that id");
     assert_eq!(
-        asked
+        asked_requests
             .recv()
             .expect("the session read one request")
             .get_request_kind_name(),
         "SubmitCommand",
     );
 
-    server.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+    session_server_thread.join().expect("fake session exits");
 }
 
 #[test]
 fn a_command_answered_with_another_reply_kind_names_that_kind() {
-    let runtime_directory = build_test_runtime_directory("submit-wrong-kind");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (server, _asked) =
-        spawn_answering_session(&runtime_directory, session_id, IpcResult::Restarting);
+    let (session_server_thread, _asked_requests) =
+        spawn_answering_session(runtime_directory.path(), session_id, IpcResult::Restarting);
 
     let submit_error = submit_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
         &build_in_session_context(session_id),
         Command::ToggleLockMode(ToggleLockModeArgs::default()),
     )
@@ -435,16 +477,16 @@ fn a_command_answered_with_another_reply_kind_names_that_kind() {
         "the session answered with an unexpected Restarting reply",
     );
 
-    server.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+    session_server_thread.join().expect("fake session exits");
 }
 
 // --- Asking a session for its layout ----------------------------------------
 
 /// A stand-in koshi serving one exchange at `runtime_directory`: write the endpoint
 /// file, accept one caller, read the Hello and the request behind it, answer
-/// the Hello, then answer that request with `ipc_result`. The returned receiver
-/// carries the request the caller actually sent.
+/// the Hello, then answer that request with `ipc_result`, and close the
+/// connection once the caller hung up. The returned receiver carries the
+/// request the caller actually sent.
 fn spawn_answering_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -487,11 +529,12 @@ fn spawn_answering_session(
             query_request.request_id,
             ipc_result,
         );
+        close_connection_after_peer_hangs_up(session_connection);
     });
     (session_server_thread, request_kind_receiver)
 }
 
-/// A layout of one empty session, named so a reply is identifiable.
+/// A layout of one empty session named `session_name`.
 fn build_named_session_layout(session_name: &str, session_id: SessionId) -> SessionLayout {
     SessionLayout {
         session_id,
@@ -521,18 +564,18 @@ fn build_session_layout_with_tab(
 
 #[test]
 fn fetching_a_layout_returns_it_and_asks_for_the_tab_named() {
-    let runtime_directory = build_test_runtime_directory("layout-one-tab");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let tab_id = TabId::new();
     let expected_session_layout = build_session_layout_with_tab("workspace", session_id, tab_id);
     let (session_server_thread, request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Layout(expected_session_layout.clone()),
     );
 
-    let session_layout =
-        fetch_layout(&runtime_directory, session_id, Some(tab_id)).expect("the session answers");
+    let session_layout = fetch_layout(runtime_directory.path(), None, session_id, Some(tab_id))
+        .expect("the session answers");
 
     assert_eq!(session_layout, expected_session_layout);
     assert_eq!(
@@ -543,21 +586,20 @@ fn fetching_a_layout_returns_it_and_asks_for_the_tab_named() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn fetching_the_whole_layout_asks_for_no_tab() {
-    let runtime_directory = build_test_runtime_directory("layout-every-tab");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Layout(build_named_session_layout("workspace", session_id)),
     );
 
-    let session_layout =
-        fetch_layout(&runtime_directory, session_id, None).expect("the session answers");
+    let session_layout = fetch_layout(runtime_directory.path(), None, session_id, None)
+        .expect("the session answers");
 
     assert_eq!(session_layout.session_name, "workspace");
     assert_eq!(
@@ -566,12 +608,11 @@ fn fetching_the_whole_layout_asks_for_no_tab() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
-    let runtime_directory = build_test_runtime_directory("events-round-trip");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let tab_id = TabId::new();
     let expected_recent_events = vec![
@@ -585,13 +626,13 @@ fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
         ),
     ];
     let (session_server_thread, request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::RecentEvents(expected_recent_events.clone()),
     );
 
-    let recent_events =
-        fetch_recent_events(&runtime_directory, session_id).expect("the session answers");
+    let recent_events = fetch_recent_events(runtime_directory.path(), None, session_id)
+        .expect("the session answers");
 
     assert_eq!(recent_events, expected_recent_events);
     assert_eq!(
@@ -600,45 +641,41 @@ fn fetching_recent_events_returns_them_in_the_order_the_session_sent() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_recent_events_request_a_session_has_no_name_for_reports_it_as_too_old() {
-    let runtime_directory = build_test_runtime_directory("events-too-old");
+fn a_recent_events_request_a_session_cannot_read_carries_its_own_message() {
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::UnsupportedKind,
-            message: "this session has no request kind named RecentEvents".to_string(),
+            code: IpcErrorCode::MalformedRequest,
+            message: "the bytes received are not a request this build can read".to_string(),
         }),
     );
 
-    let recent_events_error =
-        fetch_recent_events(&runtime_directory, session_id).expect_err("the request is refused");
+    let recent_events_error = fetch_recent_events(runtime_directory.path(), None, session_id)
+        .expect_err("the request is refused");
 
     assert_eq!(
         recent_events_error.to_string(),
         CliError::IpcUnavailable {
-            detail: "this session was started by an older koshi that keeps no recent-events \
-                     buffer; restart the session to use `debug events`"
-                .to_string(),
+            detail: "the bytes received are not a request this build can read".to_string(),
         }
         .to_string(),
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_recent_events_refusal_that_is_not_about_reading_carries_its_own_message() {
-    let runtime_directory = build_test_runtime_directory("events-refused");
+fn a_recent_events_refusal_with_a_bad_token_carries_the_sessions_own_message() {
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::BadToken,
@@ -646,8 +683,8 @@ fn a_recent_events_refusal_that_is_not_about_reading_carries_its_own_message() {
         }),
     );
 
-    let recent_events_error =
-        fetch_recent_events(&runtime_directory, session_id).expect_err("the request is refused");
+    let recent_events_error = fetch_recent_events(runtime_directory.path(), None, session_id)
+        .expect_err("the request is refused");
 
     assert_eq!(
         recent_events_error.to_string(),
@@ -658,16 +695,15 @@ fn a_recent_events_refusal_that_is_not_about_reading_carries_its_own_message() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
-    let runtime_directory = build_test_runtime_directory("layout-no-endpoint");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
 
-    let layout_error =
-        fetch_layout(&runtime_directory, session_id, None).expect_err("no endpoint file exists");
+    let layout_error = fetch_layout(runtime_directory.path(), None, session_id, None)
+        .expect_err("no endpoint file exists");
 
     assert_eq!(
         layout_error.to_string(),
@@ -676,16 +712,14 @@ fn fetching_a_layout_with_no_endpoint_file_reports_the_session_not_running() {
         }
         .to_string(),
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_layout_request_a_session_cannot_read_reports_the_session_as_too_old() {
-    let runtime_directory = build_test_runtime_directory("layout-too-old");
+fn a_layout_request_a_session_cannot_read_carries_its_own_message() {
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::MalformedRequest,
@@ -693,30 +727,26 @@ fn a_layout_request_a_session_cannot_read_reports_the_session_as_too_old() {
         }),
     );
 
-    let layout_error =
-        fetch_layout(&runtime_directory, session_id, None).expect_err("the request is refused");
+    let layout_error = fetch_layout(runtime_directory.path(), None, session_id, None)
+        .expect_err("the request is refused");
 
     assert_eq!(
         layout_error.to_string(),
         CliError::IpcUnavailable {
-            detail: "this session was started by an older koshi that cannot report its \
-                     layout; restart the session to use `debug dump-layout`, or run \
-                     `koshi debug dump-state`, which this session does answer"
-                .to_string(),
+            detail: "the bytes received are not a request this build can read".to_string(),
         }
         .to_string(),
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_layout_refusal_that_is_not_about_reading_carries_its_own_message() {
-    let runtime_directory = build_test_runtime_directory("layout-refused");
+fn a_layout_refusal_with_a_bad_token_carries_the_sessions_own_message() {
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::BadToken,
@@ -724,8 +754,8 @@ fn a_layout_refusal_that_is_not_about_reading_carries_its_own_message() {
         }),
     );
 
-    let layout_error =
-        fetch_layout(&runtime_directory, session_id, None).expect_err("the request is refused");
+    let layout_error = fetch_layout(runtime_directory.path(), None, session_id, None)
+        .expect_err("the request is refused");
 
     assert_eq!(
         layout_error.to_string(),
@@ -736,23 +766,21 @@ fn a_layout_refusal_that_is_not_about_reading_carries_its_own_message() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
-    // The tab was resolved from a discovery sweep, then closed before the
-    // session answered, so the response describes no tab at all.
-    let runtime_directory = build_test_runtime_directory("layout-tab-gone");
+    // The session answers with a layout that describes no tab.
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let tab_id = TabId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Layout(build_named_session_layout("workspace", session_id)),
     );
 
-    let layout_error = fetch_layout(&runtime_directory, session_id, Some(tab_id))
+    let layout_error = fetch_layout(runtime_directory.path(), None, session_id, Some(tab_id))
         .expect_err("the tab is no longer there");
 
     assert_eq!(
@@ -765,15 +793,14 @@ fn a_layout_for_a_tab_the_session_no_longer_holds_reports_the_tab_missing() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
-    let runtime_directory = build_test_runtime_directory("layout-wrong-kind");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _asked) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -781,7 +808,7 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
         },
     );
 
-    let layout_error = fetch_layout(&runtime_directory, session_id, None)
+    let layout_error = fetch_layout(runtime_directory.path(), None, session_id, None)
         .expect_err("a Hello does not answer a layout request");
 
     let CliError::IpcUnavailable { detail } = layout_error else {
@@ -793,41 +820,44 @@ fn a_layout_request_answered_with_another_reply_kind_names_that_kind() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 // --- Asking a session to describe itself ------------------------------------
 
 #[test]
 fn fetching_an_overview_returns_it_and_asks_for_a_discovery() {
-    let runtime_directory = build_test_runtime_directory("overview-round-trip");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let response = build_named_session_overview("S-quiet-lake", session_id);
-    let (server, asked) = spawn_answering_session(
-        &runtime_directory,
+    let answered_overview = build_named_session_overview("S-quiet-lake", session_id);
+    let (session_server_thread, asked_requests) = spawn_answering_session(
+        runtime_directory.path(),
         session_id,
-        IpcResult::Overview(response.clone()),
+        IpcResult::Overview(answered_overview.clone()),
     );
 
-    let overview =
-        fetch_session_overview(&runtime_directory, session_id).expect("the session answers");
+    let fetched_overview = fetch_session_overview_from_endpoint(
+        &load_session_endpoint(runtime_directory.path(), None, session_id)
+            .expect("the endpoint file"),
+        session_id,
+        None,
+    )
+    .expect("the session answers");
 
-    assert_eq!(overview, response);
+    assert_eq!(fetched_overview, answered_overview);
     assert_eq!(
-        asked.recv().expect("the session read one request"),
+        asked_requests.recv().expect("the session read one request"),
         IpcRequestKind::Discovery,
     );
 
-    server.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+    session_server_thread.join().expect("fake session exits");
 }
 
 #[test]
 fn a_refused_overview_carries_the_sessions_sentence() {
-    let runtime_directory = build_test_runtime_directory("overview-refused");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _asked) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::BadToken,
@@ -835,8 +865,13 @@ fn a_refused_overview_carries_the_sessions_sentence() {
         }),
     );
 
-    let overview_error =
-        fetch_session_overview(&runtime_directory, session_id).expect_err("the request is refused");
+    let overview_error = fetch_session_overview_from_endpoint(
+        &load_session_endpoint(runtime_directory.path(), None, session_id)
+            .expect("the endpoint file"),
+        session_id,
+        None,
+    )
+    .expect_err("the request is refused");
 
     let CliError::IpcUnavailable { detail } = overview_error else {
         panic!("expected IpcUnavailable, got {overview_error:?}");
@@ -844,18 +879,22 @@ fn a_refused_overview_carries_the_sessions_sentence() {
     assert_eq!(detail, "the token presented does not match this Koshi's");
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn an_overview_request_answered_with_another_reply_kind_names_that_kind() {
-    let runtime_directory = build_test_runtime_directory("overview-wrong-kind");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (server, _asked) =
-        spawn_answering_session(&runtime_directory, session_id, IpcResult::Restarting);
+    let (session_server_thread, _asked_requests) =
+        spawn_answering_session(runtime_directory.path(), session_id, IpcResult::Restarting);
 
-    let overview_error = fetch_session_overview(&runtime_directory, session_id)
-        .expect_err("a Restarting does not describe a session");
+    let overview_error = fetch_session_overview_from_endpoint(
+        &load_session_endpoint(runtime_directory.path(), None, session_id)
+            .expect("the endpoint file"),
+        session_id,
+        None,
+    )
+    .expect_err("a Restarting does not describe a session");
 
     let CliError::IpcUnavailable { detail } = overview_error else {
         panic!("expected IpcUnavailable naming the reply kind, got {overview_error:?}");
@@ -865,86 +904,87 @@ fn an_overview_request_answered_with_another_reply_kind_names_that_kind() {
         "the session answered with an unexpected Restarting reply",
     );
 
-    server.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+    session_server_thread.join().expect("fake session exits");
 }
 
 // --- Asking a session to restart --------------------------------------------
 
 #[test]
 fn a_restarting_reply_reports_the_session_restarting_and_asked_for_a_restart() {
-    let runtime_directory = build_test_runtime_directory("restart-ok");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
-    let (server, asked) =
-        spawn_answering_session(&runtime_directory, session_id, IpcResult::Restarting);
+    let (session_server_thread, asked_requests) =
+        spawn_answering_session(runtime_directory.path(), session_id, IpcResult::Restarting);
 
     assert_eq!(
-        restart_running_session(&runtime_directory, session_id).expect("the exchange succeeds"),
+        restart_running_session(runtime_directory.path(), None, session_id)
+            .expect("the exchange succeeds"),
         SessionRestart::Restarting
     );
     assert_eq!(
-        asked.recv().expect("the session read one request"),
+        asked_requests.recv().expect("the session read one request"),
         IpcRequestKind::Restart,
     );
 
-    server.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-}
-
-#[test]
-fn a_session_whose_build_has_no_restart_request_reads_as_too_old() {
-    let runtime_directory = build_test_runtime_directory("restart-too-old");
-    let session_id = SessionId::new();
-    let (session_server_thread, _asked) = spawn_answering_session(
-        &runtime_directory,
-        session_id,
-        IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::UnsupportedKind,
-            message: "this build has no request kind named Restart".to_string(),
-        }),
-    );
-
-    assert_eq!(
-        restart_running_session(&runtime_directory, session_id)
-            .expect("a refusal by name is not an error"),
-        SessionRestart::TooOld
-    );
-
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_session_that_cannot_read_the_restart_request_reads_as_too_old() {
-    // A session older than the tolerant wire cannot decode the request at all,
-    // which says the same thing as naming the kind it lacks.
-    let runtime_directory = build_test_runtime_directory("restart-unreadable");
+fn a_restart_refused_with_the_malformed_request_code_carries_the_sessions_sentence() {
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _asked) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::MalformedRequest,
-            message: "the bytes received are not a request this build can read".to_string(),
+            message: "the binary at /opt/koshi could not be read: Exec format error (os error 8)"
+                .to_string(),
         }),
     );
 
+    let restart_error = restart_running_session(runtime_directory.path(), None, session_id)
+        .expect_err("the restart is refused");
+
     assert_eq!(
-        restart_running_session(&runtime_directory, session_id)
-            .expect("a session that cannot read the request is not an error"),
-        SessionRestart::TooOld
+        restart_error.to_string(),
+        "IPC unavailable: the binary at /opt/koshi could not be read: Exec format error (os error 8)"
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence() {
-    let runtime_directory = build_test_runtime_directory("restart-refused");
+fn a_restart_refused_with_the_request_failed_code_carries_the_sessions_sentence() {
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _asked) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
+        session_id,
+        IpcResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message: "the binary at /opt/koshi could not be read: No such file or directory"
+                .to_string(),
+        }),
+    );
+
+    let restart_error = restart_running_session(runtime_directory.path(), None, session_id)
+        .expect_err("the restart is refused");
+
+    assert_eq!(
+        restart_error.to_string(),
+        "IPC unavailable: the binary at /opt/koshi could not be read: No such file or directory"
+    );
+
+    session_server_thread.join().expect("fake session exits");
+}
+
+#[test]
+fn a_restart_refused_with_a_bad_token_carries_the_sessions_sentence() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, _asked) = spawn_answering_session(
+        runtime_directory.path(),
         session_id,
         IpcResult::Error(IpcErrorPayload {
             code: IpcErrorCode::BadToken,
@@ -952,7 +992,7 @@ fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence()
         }),
     );
 
-    let restart_error = restart_running_session(&runtime_directory, session_id)
+    let restart_error = restart_running_session(runtime_directory.path(), None, session_id)
         .expect_err("the restart is refused");
 
     assert_eq!(
@@ -961,20 +1001,19 @@ fn a_refused_restart_that_is_not_an_unknown_kind_carries_the_sessions_sentence()
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_restart_answered_with_another_reply_kind_names_that_kind() {
-    let runtime_directory = build_test_runtime_directory("restart-wrong-kind");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, _request_kinds) = spawn_answering_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         IpcResult::Overview(build_named_session_overview("workspace", session_id)),
     );
 
-    let restart_error = restart_running_session(&runtime_directory, session_id)
+    let restart_error = restart_running_session(runtime_directory.path(), None, session_id)
         .expect_err("an Overview does not answer a restart");
 
     let CliError::IpcUnavailable { detail } = restart_error else {
@@ -986,62 +1025,60 @@ fn a_restart_answered_with_another_reply_kind_names_that_kind() {
     );
 
     session_server_thread.join().expect("fake session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn asking_a_session_with_no_endpoint_file_to_restart_restarts_nothing() {
-    let runtime_directory = build_test_runtime_directory("restart-no-endpoint");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
 
     assert_eq!(
-        restart_running_session(&runtime_directory, session_id)
+        restart_running_session(runtime_directory.path(), None, session_id)
             .expect("a missing session is not an error"),
         SessionRestart::NotRunning
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn asking_a_session_nothing_listens_behind_to_restart_restarts_nothing() {
-    let runtime_directory = build_test_runtime_directory("restart-dead-socket");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     EndpointFile {
-        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id),
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            runtime_directory.path(),
+            session_id,
+        ),
         connection_token: ConnectionToken::generate(),
         process_id: std::process::id(),
     }
     .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
     ))
     .expect("write endpoint file");
 
     assert_eq!(
-        restart_running_session(&runtime_directory, session_id)
+        restart_running_session(runtime_directory.path(), None, session_id)
             .expect("a dead socket is not an error"),
         SessionRestart::NotRunning
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 // --- Reading a running session's build --------------------------------------
 
 #[test]
 fn a_running_session_reports_the_build_its_hello_named() {
-    let runtime_directory = build_test_runtime_directory("version-hello");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_server_thread, session_requests) = spawn_settled_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         PROTOCOL_VERSION,
         HelloTiming::AtOnce,
     );
 
     assert_eq!(
-        get_running_session_version(&runtime_directory, session_id)
+        find_running_session_version(runtime_directory.path(), None, session_id, None)
             .expect("the session answers its Hello"),
         Some(env!("CARGO_PKG_VERSION").to_string()),
     );
@@ -1060,127 +1097,230 @@ fn a_running_session_reports_the_build_its_hello_named() {
         Err(mpsc::RecvError),
         "reading the build sends nothing besides the Hello",
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_session_with_no_endpoint_file_reports_no_build() {
-    let runtime_directory = build_test_runtime_directory("version-no-endpoint");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
 
     assert_eq!(
-        get_running_session_version(&runtime_directory, session_id)
+        find_running_session_version(runtime_directory.path(), None, session_id, None)
             .expect("a missing session is not an error"),
         None
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_session_nothing_listens_behind_reports_no_build() {
-    let runtime_directory = build_test_runtime_directory("version-dead-socket");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     EndpointFile {
-        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id),
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            runtime_directory.path(),
+            session_id,
+        ),
         connection_token: ConnectionToken::generate(),
         process_id: std::process::id(),
     }
     .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
     ))
     .expect("write endpoint file");
 
     assert_eq!(
-        get_running_session_version(&runtime_directory, session_id)
+        find_running_session_version(runtime_directory.path(), None, session_id, None)
             .expect("a dead socket is not an error"),
         None
     );
+}
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+#[test]
+fn a_version_ask_whose_answer_deadline_has_passed_connects_to_nothing() {
+    // Nothing listens at `socket_address`.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
+
+    let version_answer = find_foreign_session_version(session_id, &socket_address, Instant::now());
+
+    let Err(CliError::SessionAnswerTimedOut) = version_answer else {
+        panic!("expected SessionAnswerTimedOut, got {version_answer:?}");
+    };
+}
+
+#[cfg(windows)]
+#[test]
+fn a_connect_to_a_busy_pipe_ends_at_the_answer_deadline() {
+    // The pipe's one instance holds a caller the listener never accepts. The
+    // OS can end the connect's wait a moment before `answer_deadline`, and the
+    // failure is then `IpcUnavailable`.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
+    let _session_listener = Listener::bind(&socket_address).expect("bind the session's pipe");
+    let _first_connection =
+        Connection::connect(&socket_address).expect("the free pipe instance connects");
+    let ask_started_at = Instant::now();
+
+    let version_answer = find_foreign_session_version(
+        session_id,
+        &socket_address,
+        ask_started_at + Duration::from_millis(300),
+    );
+    let ask_duration = ask_started_at.elapsed();
+
+    match version_answer {
+        Err(CliError::SessionAnswerTimedOut) | Err(CliError::IpcUnavailable { .. }) => {}
+        unexpected_answer => panic!("expected a timed-out connect, got {unexpected_answer:?}"),
+    }
+    assert!(
+        ask_duration >= Duration::from_millis(250),
+        "the connect waits for the busy pipe, the ask took {ask_duration:?}"
+    );
+    assert!(
+        ask_duration < CONNECT_WAIT_DURATION,
+        "the connect ends at the answer deadline, the ask took {ask_duration:?}"
+    );
 }
 
 // --- Which file names a session, and under which suffix ---------------------
 
 #[test]
 fn an_endpoint_file_and_a_resume_file_are_told_apart_by_their_suffix() {
-    // Both names start `session-<uuid>`, so only the suffix separates the
-    // session that advertises a socket from the one that left a resume file.
-    let runtime_directory = build_test_runtime_directory("suffixes");
-    let advertised = SessionId::new();
-    let resumable = SessionId::new();
+    // Both names start `session-<uuid>`. The suffix tells the session that
+    // advertises a socket from the one that left a resume file.
+    let runtime_directory = build_test_runtime_directory();
+    let advertised_session_id = SessionId::new();
+    let resumable_session_id = SessionId::new();
     EndpointFile {
-        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, advertised),
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            runtime_directory.path(),
+            advertised_session_id,
+        ),
         connection_token: ConnectionToken::generate(),
         process_id: std::process::id(),
     }
     .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
-        advertised,
+        runtime_directory.path(),
+        advertised_session_id,
     ))
     .expect("write endpoint file");
     std::fs::write(
-        runtime_directory.join(format!("{resumable}{RESUME_SUFFIX}")),
+        runtime_directory
+            .path()
+            .join(format!("{resumable_session_id}{RESUME_SUFFIX}")),
         b"{}",
     )
     .expect("write resume file");
 
     assert_eq!(
-        list_advertised_sessions(&runtime_directory),
-        vec![advertised]
+        list_advertised_sessions(runtime_directory.path()),
+        Ok(vec![advertised_session_id])
     );
     assert_eq!(
-        list_sessions_with_resume_files(&runtime_directory),
-        vec![resumable]
+        list_sessions_with_resume_files(runtime_directory.path()),
+        Ok(vec![resumable_session_id])
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_file_that_names_no_session_is_passed_over() {
-    let runtime_directory = build_test_runtime_directory("suffixes-junk");
-    let advertised = SessionId::new();
+    let runtime_directory = build_test_runtime_directory();
+    let advertised_session_id = SessionId::new();
     EndpointFile {
-        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, advertised),
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            runtime_directory.path(),
+            advertised_session_id,
+        ),
         connection_token: ConnectionToken::generate(),
         process_id: std::process::id(),
     }
     .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
-        advertised,
+        runtime_directory.path(),
+        advertised_session_id,
     ))
     .expect("write endpoint file");
-    std::fs::write(runtime_directory.join("session-not-a-uuid.json"), b"{}").expect("bad uuid");
-    std::fs::write(runtime_directory.join("router.json"), b"{}").expect("no session prefix");
-    std::fs::write(runtime_directory.join(advertised.to_string()), b"{}").expect("no suffix");
+    std::fs::write(
+        runtime_directory.path().join("session-not-a-uuid.json"),
+        b"{}",
+    )
+    .expect("bad uuid");
+    std::fs::write(runtime_directory.path().join("router.json"), b"{}").expect("no session prefix");
+    std::fs::write(
+        runtime_directory
+            .path()
+            .join(advertised_session_id.to_string()),
+        b"{}",
+    )
+    .expect("no suffix");
 
     assert_eq!(
-        list_advertised_sessions(&runtime_directory),
-        vec![advertised]
+        list_advertised_sessions(runtime_directory.path()),
+        Ok(vec![advertised_session_id])
     );
     assert_eq!(
-        list_sessions_with_resume_files(&runtime_directory),
-        Vec::<SessionId>::new()
+        list_sessions_with_resume_files(runtime_directory.path()),
+        Ok(Vec::new())
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
-fn a_runtime_directory_that_cannot_be_read_names_no_session() {
-    let runtime_directory = build_test_runtime_directory("suffixes-absent");
-    let absent = runtime_directory.join("absent");
+fn a_runtime_directory_that_does_not_exist_names_no_session() {
+    let runtime_directory = build_test_runtime_directory();
+    let absent_runtime_directory = runtime_directory.path().join("absent");
 
-    assert_eq!(list_advertised_sessions(&absent), Vec::<SessionId>::new());
     assert_eq!(
-        list_sessions_with_resume_files(&absent),
-        Vec::<SessionId>::new()
+        list_advertised_sessions(&absent_runtime_directory),
+        Ok(Vec::new())
     );
+    assert_eq!(
+        list_sessions_with_resume_files(&absent_runtime_directory),
+        Ok(Vec::new())
+    );
+    assert_eq!(list_own_sessions(&absent_runtime_directory), Ok(Vec::new()));
+}
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+#[cfg(unix)]
+#[test]
+fn a_runtime_directory_that_cannot_be_read_is_refused_naming_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let runtime_directory = build_test_runtime_directory();
+    write_own_endpoint_file(runtime_directory.path(), SessionId::new());
+    std::fs::set_permissions(
+        runtime_directory.path(),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("make the runtime directory unreadable");
+    let Err(read_error) = std::fs::read_dir(runtime_directory.path()) else {
+        eprintln!(
+            "skipped `a_runtime_directory_that_cannot_be_read_is_refused_naming_it`: \
+             this user reads through a mode-000 directory"
+        );
+        let _ = std::fs::set_permissions(
+            runtime_directory.path(),
+            std::fs::Permissions::from_mode(0o700),
+        );
+        return;
+    };
+
+    let advertised_sessions = list_advertised_sessions(runtime_directory.path());
+    let resumable_sessions = list_sessions_with_resume_files(runtime_directory.path());
+    let own_sessions = list_own_sessions(runtime_directory.path());
+
+    let _ = std::fs::set_permissions(
+        runtime_directory.path(),
+        std::fs::Permissions::from_mode(0o700),
+    );
+    let unread_runtime_directory =
+        UnreadPath::from_read_error(runtime_directory.path(), &read_error);
+    assert_eq!(advertised_sessions, Err(unread_runtime_directory.clone()));
+    assert_eq!(resumable_sessions, Err(unread_runtime_directory.clone()));
+    assert_eq!(own_sessions, Err(unread_runtime_directory));
 }
 
 // --- Sessions other local users started -------------------------------------
@@ -1203,16 +1343,17 @@ fn build_named_session_overview(session_name: &str, session_id: SessionId) -> Se
 
 /// A stand-in koshi another local user started, serving one discovery
 /// exchange at `socket_address`: accept one caller, answer the Hello whatever it
-/// presents, and answer the discovery request with `session_overview`. No endpoint file
-/// is written, since that user's own runtime directory is theirs alone. The
-/// returned receiver carries the token the caller presented.
+/// presents, answer the discovery request with `session_overview`, and close
+/// the connection once the caller hung up. No endpoint file is written, since
+/// that user's own runtime directory is theirs alone. The returned receiver
+/// carries the token the caller presented.
 fn spawn_foreign_session(
     socket_address: &str,
     session_overview: SessionOverview,
 ) -> (JoinHandle<()>, Receiver<ConnectionToken>) {
     let session_listener = Listener::bind(socket_address).expect("bind the other user's session");
     let (presented_token_sender, presented_token_receiver) = mpsc::channel();
-    let handle = std::thread::spawn(move || {
+    let session_server_thread = std::thread::spawn(move || {
         let mut session_connection = session_listener.accept().expect("accept the CLI");
         let hello_request: IpcRequest = session_connection.recv().expect("read hello");
         let discovery_request: IpcRequest =
@@ -1240,8 +1381,52 @@ fn spawn_foreign_session(
             discovery_request.request_id,
             IpcResult::Overview(session_overview),
         );
+        close_connection_after_peer_hangs_up(session_connection);
     });
-    (handle, presented_token_receiver)
+    (session_server_thread, presented_token_receiver)
+}
+
+/// Bind a Unix socket at `socket_path` and close it: the socket file stays,
+/// with nothing listening behind it.
+#[cfg(unix)]
+fn plant_session_socket(socket_path: &Path) {
+    drop(std::os::unix::net::UnixListener::bind(socket_path).expect("bind the planted socket"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_missing_here_is_found_in_the_shared_directory_given() {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
+        .expect("read the runtime directory")
+        .uid();
+    let other_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
+    std::fs::create_dir_all(&other_user_directory).expect("create the other user's directory");
+    let session_id = SessionId::new();
+    let socket_path = other_user_directory.join(format!("{session_id}.sock"));
+    plant_session_socket(&socket_path);
+
+    let endpoint = load_session_endpoint(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        session_id,
+    )
+    .expect("the shared directory advertises the session");
+    let lookup_without_shared_directory =
+        load_session_endpoint(runtime_directory.path(), None, session_id);
+
+    assert_eq!(endpoint.socket_address, socket_path.display().to_string());
+    assert_eq!(endpoint.connection_token.expose_secret(), "");
+    assert_eq!(endpoint.process_id, 0);
+    let Err(CliError::SessionNotFound { session_name }) = lookup_without_shared_directory else {
+        panic!("expected SessionNotFound, got {lookup_without_shared_directory:?}");
+    };
+    assert_eq!(session_name, session_id.to_string());
 }
 
 #[cfg(unix)]
@@ -1249,320 +1434,1003 @@ fn spawn_foreign_session(
 fn the_shared_listing_holds_other_users_sockets_and_not_this_users() {
     use std::os::unix::fs::MetadataExt;
 
-    let runtime_directory = build_test_runtime_directory("shared-unix");
-    let shared = build_test_runtime_directory("shared-unix-base");
-    let own_user_id = std::fs::metadata(&runtime_directory)
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
         .expect("read the runtime directory")
         .uid();
     let other_user_directory_name = (own_user_id + 1).to_string();
-    let mine = SessionId::new();
-    let theirs = SessionId::new();
-    std::fs::create_dir_all(shared.join(own_user_id.to_string()))
-        .expect("create this user's directory");
-    std::fs::create_dir_all(shared.join(&other_user_directory_name))
-        .expect("create the other user's directory");
-    std::fs::write(
-        shared
+    let own_session_id = SessionId::new();
+    let foreign_session_id = SessionId::new();
+    std::fs::create_dir_all(
+        shared_sessions_base_directory
+            .path()
+            .join(own_user_id.to_string()),
+    )
+    .expect("create this user's directory");
+    std::fs::create_dir_all(
+        shared_sessions_base_directory
+            .path()
+            .join(&other_user_directory_name),
+    )
+    .expect("create the other user's directory");
+    plant_session_socket(
+        &shared_sessions_base_directory
+            .path()
             .join(own_user_id.to_string())
-            .join(format!("{mine}.sock")),
-        b"",
-    )
-    .expect("plant this user's socket");
-    std::fs::write(
-        shared
+            .join(format!("{own_session_id}.sock")),
+    );
+    plant_session_socket(
+        &shared_sessions_base_directory
+            .path()
             .join(&other_user_directory_name)
-            .join(format!("{theirs}.sock")),
-        b"",
-    )
-    .expect("plant the other user's socket");
-
-    assert_eq!(
-        list_foreign_sessions(&shared, &runtime_directory),
-        vec![(
-            theirs,
-            shared
-                .join(&other_user_directory_name)
-                .join(format!("{theirs}.sock"))
-                .display()
-                .to_string(),
-        )],
+            .join(format!("{foreign_session_id}.sock")),
     );
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-    let _ = std::fs::remove_dir_all(&shared);
+    assert_eq!(
+        list_foreign_sessions(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path()
+        ),
+        ForeignSessionListing {
+            foreign_sessions: vec![(
+                foreign_session_id,
+                shared_sessions_base_directory
+                    .path()
+                    .join(&other_user_directory_name)
+                    .join(format!("{foreign_session_id}.sock"))
+                    .display()
+                    .to_string(),
+            )],
+            ..ForeignSessionListing::default()
+        },
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn a_foreign_socket_reusing_a_local_session_id_is_left_out() {
-    // Another local user may name a socket after an id this user already
-    // runs; the walk keeps the local session, never the planted one.
+    // A socket in another user's folder named after an id this user's endpoint
+    // file advertises is not listed.
     use std::os::unix::fs::MetadataExt;
 
-    let runtime_directory = build_test_runtime_directory("shared-collide");
-    let shared = build_test_runtime_directory("shared-collide-base");
-    let own = std::fs::metadata(&runtime_directory)
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
         .expect("read the runtime directory")
         .uid();
-    let mine = SessionId::new();
-    EndpointFile {
-        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, mine),
-        connection_token: ConnectionToken::generate(),
-        process_id: std::process::id(),
-    }
-    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
-        mine,
-    ))
-    .expect("advertise this user's session");
-    let theirs_dir = shared.join((own + 1).to_string());
-    std::fs::create_dir_all(&theirs_dir).expect("create the other user's directory");
-    std::fs::write(theirs_dir.join(format!("{mine}.sock")), b"")
-        .expect("plant a socket reusing this user's id");
-
-    assert_eq!(
-        list_foreign_sessions(&shared, &runtime_directory),
-        Vec::new()
-    );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-    let _ = std::fs::remove_dir_all(&shared);
-}
-
-#[cfg(windows)]
-#[test]
-fn the_shared_listing_holds_the_markers_this_user_does_not_advertise() {
-    // A marker names no user, so the endpoint files in this user's runtime
-    // directory are the only record of which sessions are this user's own.
-    let runtime_directory = build_test_runtime_directory("shared-windows");
-    let shared_sessions_base_directory = build_test_runtime_directory("shared-windows-base");
     let own_session_id = SessionId::new();
-    let foreign_session_id = SessionId::new();
-    std::fs::write(
-        shared_sessions_base_directory.join(own_session_id.to_string()),
-        b"",
-    )
-    .expect("plant this user's marker");
-    std::fs::write(
-        shared_sessions_base_directory.join(foreign_session_id.to_string()),
-        b"",
-    )
-    .expect("plant the other user's marker");
     EndpointFile {
         socket_address: koshi_ipc::endpoint::compute_socket_address(
-            &runtime_directory,
+            runtime_directory.path(),
             own_session_id,
         ),
         connection_token: ConnectionToken::generate(),
         process_id: std::process::id(),
     }
     .write_to_path(&EndpointFile::resolve_endpoint_file_path(
-        &runtime_directory,
+        runtime_directory.path(),
+        own_session_id,
+    ))
+    .expect("advertise this user's session");
+    let foreign_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
+    std::fs::create_dir_all(&foreign_user_directory).expect("create the other user's directory");
+    plant_session_socket(&foreign_user_directory.join(format!("{own_session_id}.sock")));
+
+    assert_eq!(
+        list_foreign_sessions(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path()
+        ),
+        ForeignSessionListing::default()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_shared_listing_holds_the_markers_this_user_does_not_advertise() {
+    // A marker whose id this user's endpoint file advertises is not listed.
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_session_id = SessionId::new();
+    let foreign_session_id = SessionId::new();
+    std::fs::write(
+        shared_sessions_base_directory
+            .path()
+            .join(own_session_id.to_string()),
+        b"",
+    )
+    .expect("plant this user's marker");
+    std::fs::write(
+        shared_sessions_base_directory
+            .path()
+            .join(foreign_session_id.to_string()),
+        b"",
+    )
+    .expect("plant the other user's marker");
+    EndpointFile {
+        socket_address: koshi_ipc::endpoint::compute_socket_address(
+            runtime_directory.path(),
+            own_session_id,
+        ),
+        connection_token: ConnectionToken::generate(),
+        process_id: std::process::id(),
+    }
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory.path(),
         own_session_id,
     ))
     .expect("write this user's endpoint file");
 
     assert_eq!(
-        list_foreign_sessions(&shared_sessions_base_directory, &runtime_directory,),
-        vec![(foreign_session_id, format!("koshi-{foreign_session_id}"),)],
+        list_foreign_sessions(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path(),
+        ),
+        ForeignSessionListing {
+            foreign_sessions: vec![(foreign_session_id, format!("koshi-{foreign_session_id}"),)],
+            ..ForeignSessionListing::default()
+        },
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
 }
 
 #[test]
-fn a_shared_directory_that_cannot_be_read_holds_no_session() {
-    let runtime_directory = build_test_runtime_directory("shared-unreadable");
+fn a_shared_directory_that_does_not_exist_holds_no_session() {
+    let runtime_directory = build_test_runtime_directory();
 
     assert_eq!(
-        list_foreign_sessions(&runtime_directory.join("absent"), &runtime_directory),
-        Vec::new(),
+        list_foreign_sessions(
+            &runtime_directory.path().join("absent"),
+            runtime_directory.path()
+        ),
+        ForeignSessionListing::default(),
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[cfg(unix)]
 #[test]
 fn an_absent_runtime_directory_skips_no_shared_subdirectory() {
-    // A user with no runtime directory holds no session, so every
-    // subdirectory of the shared directory — this user's uid included —
-    // yields its rows.
+    // With no runtime directory, the folder named after this user's id is
+    // listed like any other.
     use std::os::unix::fs::MetadataExt;
 
-    let shared_sessions_base_directory = build_test_runtime_directory("shared-absent-runtime-base");
-    let own_user_id = std::fs::metadata(&shared_sessions_base_directory)
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(shared_sessions_base_directory.path())
         .expect("read the shared directory")
         .uid();
     let foreign_session_id = SessionId::new();
-    let foreign_user_directory = shared_sessions_base_directory.join(own_user_id.to_string());
+    let foreign_user_directory = shared_sessions_base_directory
+        .path()
+        .join(own_user_id.to_string());
     std::fs::create_dir_all(&foreign_user_directory).expect("create a user's directory");
-    std::fs::write(
-        foreign_user_directory.join(format!("{foreign_session_id}.sock")),
-        b"",
-    )
-    .expect("plant a socket");
+    plant_session_socket(&foreign_user_directory.join(format!("{foreign_session_id}.sock")));
 
     assert_eq!(
         list_foreign_sessions(
-            &shared_sessions_base_directory,
-            &shared_sessions_base_directory.join("no-runtime-dir-here"),
+            shared_sessions_base_directory.path(),
+            &shared_sessions_base_directory
+                .path()
+                .join("no-runtime-dir-here"),
         ),
-        vec![(
-            foreign_session_id,
-            koshi_ipc::endpoint::compute_socket_address(
-                &foreign_user_directory,
-                foreign_session_id
-            )
-        )],
+        ForeignSessionListing {
+            foreign_sessions: vec![(
+                foreign_session_id,
+                koshi_ipc::endpoint::compute_socket_address(
+                    &foreign_user_directory,
+                    foreign_session_id
+                )
+            )],
+            ..ForeignSessionListing::default()
+        },
     );
-
-    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
 }
 
 #[cfg(unix)]
 #[test]
-fn a_runtime_directory_with_an_unreadable_owner_yields_no_foreign_session() {
-    // The owner of a runtime directory that cannot be read leaves this
-    // user's subdirectory unknown, so the walk yields nothing.
+fn a_runtime_directory_that_cannot_be_read_lists_no_foreign_session_and_names_it() {
+    // The runtime directory sits under a mode-000 folder: the listing keeps
+    // the runtime directory as unread, and a lookup by id fails naming the
+    // endpoint file it could not look up.
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let shared_sessions_base_directory =
-        build_test_runtime_directory("shared-owner-unreadable-base");
-    let own_user_id = std::fs::metadata(&shared_sessions_base_directory)
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(shared_sessions_base_directory.path())
         .expect("read the shared directory")
         .uid();
     if own_user_id == 0 {
         eprintln!(
-            "skipped `a_runtime_directory_with_an_unreadable_owner_yields_no_foreign_session`: \
+            "skipped `a_runtime_directory_that_cannot_be_read_lists_no_foreign_session_and_names_it`: \
              root reads through a mode-000 directory"
         );
-        let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
         return;
     }
     let foreign_session_id = SessionId::new();
-    let foreign_user_directory = shared_sessions_base_directory.join((own_user_id + 1).to_string());
+    let foreign_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
     std::fs::create_dir_all(&foreign_user_directory).expect("create the other user's directory");
-    std::fs::write(
-        foreign_user_directory.join(format!("{foreign_session_id}.sock")),
-        b"",
-    )
-    .expect("plant their socket");
+    plant_session_socket(&foreign_user_directory.join(format!("{foreign_session_id}.sock")));
 
-    let parent = build_test_runtime_directory("shared-owner-unreadable-parent");
-    let runtime_directory = parent.join("runtime");
+    let unreadable_parent_directory = build_test_runtime_directory();
+    let runtime_directory = unreadable_parent_directory.path().join("runtime");
     std::fs::create_dir_all(&runtime_directory).expect("create the runtime directory");
-    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000))
-        .expect("make the parent unsearchable");
+    std::fs::set_permissions(
+        unreadable_parent_directory.path(),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("make the parent unsearchable");
 
-    assert_eq!(
-        list_foreign_sessions(&shared_sessions_base_directory, &runtime_directory,),
-        Vec::new()
+    let runtime_read_error =
+        std::fs::read_dir(&runtime_directory).expect_err("the parent is unsearchable");
+    let endpoint_file_path =
+        EndpointFile::resolve_endpoint_file_path(&runtime_directory, foreign_session_id);
+    let endpoint_read_error =
+        std::fs::symlink_metadata(&endpoint_file_path).expect_err("the parent is unsearchable");
+
+    let foreign_session_listing =
+        list_foreign_sessions(shared_sessions_base_directory.path(), &runtime_directory);
+    let lookup_error = find_foreign_session_address(
+        shared_sessions_base_directory.path(),
+        &runtime_directory,
+        foreign_session_id,
     );
 
-    let _ = std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700));
-    let _ = std::fs::remove_dir_all(&parent);
-    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+    let _ = std::fs::set_permissions(
+        unreadable_parent_directory.path(),
+        std::fs::Permissions::from_mode(0o700),
+    );
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unread_path: Some(UnreadPath::from_read_error(
+                &runtime_directory,
+                &runtime_read_error
+            )),
+            ..ForeignSessionListing::default()
+        }
+    );
+    let Err(ForeignSessionLookupError::PathUnreadable { unread_path }) = lookup_error else {
+        panic!("expected PathUnreadable, got {lookup_error:?}");
+    };
+    assert_eq!(
+        unread_path,
+        UnreadPath::from_read_error(&endpoint_file_path, &endpoint_read_error)
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn entries_another_user_planted_that_name_no_session_are_passed_over() {
-    // Every local user may create an entry in the shared directory, so the
-    // walk meets whatever any of them names. Only a `session-<uuid>.sock`
-    // inside a user's own subdirectory is a session.
+    // Only a `session-<uuid>.sock` inside a folder named like a user id is a
+    // session.
     use std::os::unix::fs::MetadataExt;
 
-    let runtime_directory = build_test_runtime_directory("shared-planted");
-    let shared_sessions_base_directory = build_test_runtime_directory("shared-planted-base");
-    let own_user_id = std::fs::metadata(&runtime_directory)
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
         .expect("read the runtime directory")
         .uid();
-    let foreign_user_directory = shared_sessions_base_directory.join((own_user_id + 1).to_string());
+    let foreign_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
     std::fs::create_dir_all(&foreign_user_directory).expect("create the other user's directory");
     let foreign_session_id = SessionId::new();
-    std::fs::write(
-        foreign_user_directory.join(format!("{foreign_session_id}.sock")),
-        b"",
-    )
-    .expect("plant their socket");
-    std::fs::write(foreign_user_directory.join("session-not-a-uuid.sock"), b"")
-        .expect("plant a bad uuid");
-    std::fs::write(
-        foreign_user_directory.join(foreign_session_id.to_string()),
-        b"",
-    )
-    .expect("plant a name with no suffix");
-    std::fs::write(foreign_user_directory.join("README.sock"), b"")
-        .expect("plant a name with no prefix");
+    plant_session_socket(&foreign_user_directory.join(format!("{foreign_session_id}.sock")));
+    plant_session_socket(&foreign_user_directory.join("session-not-a-uuid.sock"));
+    plant_session_socket(&foreign_user_directory.join(foreign_session_id.to_string()));
+    plant_session_socket(&foreign_user_directory.join("README.sock"));
     std::fs::create_dir_all(foreign_user_directory.join("nested")).expect("plant a subdirectory");
-    std::fs::write(shared_sessions_base_directory.join("loose-file"), b"")
-        .expect("plant a file beside the user directory");
+    std::fs::write(
+        shared_sessions_base_directory.path().join("loose-file"),
+        b"",
+    )
+    .expect("plant a file beside the user directory");
 
     assert_eq!(
-        list_foreign_sessions(&shared_sessions_base_directory, &runtime_directory,),
-        vec![(
-            foreign_session_id,
-            foreign_user_directory
-                .join(format!("{foreign_session_id}.sock"))
-                .display()
-                .to_string(),
-        )],
+        list_foreign_sessions(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path(),
+        ),
+        ForeignSessionListing {
+            foreign_sessions: vec![(
+                foreign_session_id,
+                foreign_user_directory
+                    .join(format!("{foreign_session_id}.sock"))
+                    .display()
+                    .to_string(),
+            )],
+            ..ForeignSessionListing::default()
+        },
     );
+}
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+#[cfg(unix)]
+#[test]
+fn a_plain_file_named_like_a_session_socket_is_passed_over() {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
+        .expect("read the runtime directory")
+        .uid();
+    let foreign_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
+    std::fs::create_dir_all(&foreign_user_directory).expect("create the other user's directory");
+    let plain_file_session_id = SessionId::new();
+    std::fs::write(
+        foreign_user_directory.join(format!("{plain_file_session_id}.sock")),
+        b"",
+    )
+    .expect("plant a plain file");
+
+    assert_eq!(
+        list_foreign_sessions(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path()
+        ),
+        ForeignSessionListing::default()
+    );
 }
 
 #[cfg(windows)]
 #[test]
 fn markers_another_user_planted_that_name_no_session_are_passed_over() {
-    // Every local user may create an entry in the shared directory, so the
-    // walk meets whatever any of them names. Only a `session-<uuid>` is a
-    // session.
-    let runtime_directory = build_test_runtime_directory("shared-planted-windows");
-    let shared_sessions_base_directory =
-        build_test_runtime_directory("shared-planted-windows-base");
+    // Only an entry named `session-<uuid>` is a session.
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let foreign_session_id = SessionId::new();
+    std::fs::write(
+        shared_sessions_base_directory
+            .path()
+            .join(foreign_session_id.to_string()),
+        b"",
+    )
+    .expect("plant their marker");
+    std::fs::write(
+        shared_sessions_base_directory
+            .path()
+            .join("session-not-a-uuid"),
+        b"",
+    )
+    .expect("plant a bad uuid");
+    std::fs::write(shared_sessions_base_directory.path().join("README"), b"")
+        .expect("plant a name with no prefix");
+    std::fs::create_dir_all(shared_sessions_base_directory.path().join("nested"))
+        .expect("plant a subdirectory");
+
+    assert_eq!(
+        list_foreign_sessions(
+            shared_sessions_base_directory.path(),
+            runtime_directory.path()
+        ),
+        ForeignSessionListing {
+            foreign_sessions: vec![(foreign_session_id, format!("koshi-{foreign_session_id}"),)],
+            ..ForeignSessionListing::default()
+        },
+    );
+}
+
+/// A scan of the shared directory that has read `read_entry_count` entries
+/// and counted nothing else.
+fn build_shared_directory_scan(read_entry_count: usize) -> SharedDirectoryScan {
+    SharedDirectoryScan {
+        read_entry_count,
+        ..SharedDirectoryScan::default()
+    }
+}
+
+/// The unread path that a scan of `shared_sessions_base_directory` reports for
+/// the entry past [`MAX_SHARED_DIRECTORY_ENTRY_COUNT`]: `it holds more than
+/// 65536 entries`.
+fn build_entry_limit_unread_path(shared_sessions_base_directory: &Path) -> UnreadPath {
+    UnreadPath {
+        looked_up_path: shared_sessions_base_directory.to_path_buf(),
+        read_error_text: "it holds more than 65536 entries".to_string(),
+    }
+}
+
+/// Plant one user folder in `shared_sessions_base_directory`, named after the
+/// user id one past the id of this user, and the socket of a new session in
+/// that folder. Hands back that session and the address a listing reports for
+/// it. The shared directory then holds 1 entry, and the folder holds 1.
+#[cfg(unix)]
+fn plant_one_foreign_session_socket(shared_sessions_base_directory: &Path) -> (SessionId, String) {
+    let other_user_directory = shared_sessions_base_directory
+        .join((load_own_user_id(shared_sessions_base_directory) + 1).to_string());
+    std::fs::create_dir(&other_user_directory).expect("create the other user's folder");
+    let session_id = SessionId::new();
+    plant_session_socket(&other_user_directory.join(format!("{session_id}.sock")));
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&other_user_directory, session_id);
+    (session_id, socket_address)
+}
+
+/// The user id that owns `shared_sessions_base_directory`: the id of this
+/// user.
+#[cfg(unix)]
+fn load_own_user_id(shared_sessions_base_directory: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(shared_sessions_base_directory)
+        .expect("read the shared directory")
+        .uid()
+}
+
+/// The unread path that a scan of `shared_sessions_base_directory` reports for
+/// the user folder past [`MAX_SHARED_USER_DIRECTORY_COUNT`]: `it holds more
+/// than 256 user folders`.
+#[cfg(unix)]
+fn build_folder_limit_unread_path(shared_sessions_base_directory: &Path) -> UnreadPath {
+    UnreadPath {
+        looked_up_path: shared_sessions_base_directory.to_path_buf(),
+        read_error_text: "it holds more than 256 user folders".to_string(),
+    }
+}
+
+/// Plant the marker of a new session in `shared_sessions_base_directory`, and
+/// hand back that session. The shared directory then holds 1 entry.
+#[cfg(windows)]
+fn plant_one_foreign_session_marker(shared_sessions_base_directory: &Path) -> SessionId {
     let foreign_session_id = SessionId::new();
     std::fs::write(
         shared_sessions_base_directory.join(foreign_session_id.to_string()),
         b"",
     )
     .expect("plant their marker");
-    std::fs::write(
-        shared_sessions_base_directory.join("session-not-a-uuid"),
-        b"",
-    )
-    .expect("plant a bad uuid");
-    std::fs::write(shared_sessions_base_directory.join("README"), b"")
-        .expect("plant a name with no prefix");
-    std::fs::create_dir_all(shared_sessions_base_directory.join("nested"))
-        .expect("plant a subdirectory");
+    foreign_session_id
+}
+
+#[test]
+fn a_scan_reads_the_65536th_entry_and_stops_at_the_next() {
+    let shared_sessions_base_directory = Path::new("/tmp/koshi");
+    let mut shared_directory_scan =
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT - 1);
 
     assert_eq!(
-        list_foreign_sessions(&shared_sessions_base_directory, &runtime_directory),
-        vec![(foreign_session_id, format!("koshi-{foreign_session_id}"),)],
+        shared_directory_scan.count_read_entry(shared_sessions_base_directory),
+        Ok(())
+    );
+    let entry_limit_unread_path = build_entry_limit_unread_path(shared_sessions_base_directory);
+    assert_eq!(
+        shared_directory_scan.count_read_entry(shared_sessions_base_directory),
+        Err(entry_limit_unread_path.clone())
+    );
+    assert_eq!(
+        shared_directory_scan.count_read_entry(shared_sessions_base_directory),
+        Err(entry_limit_unread_path)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_that_reaches_the_entry_limit_at_a_session_socket_lists_that_session() {
+    // The scan holds 65,534 entries. The user folder is entry 65,535, and the
+    // socket in it is entry 65,536.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT - 2),
     );
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(session_id, socket_address)],
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_that_meets_the_entry_past_the_limit_in_a_user_folder_keeps_the_shared_directory_unread(
+) {
+    // The scan holds 65,535 entries. The user folder is entry 65,536, and the
+    // socket in it is the entry past the limit.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT - 1),
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unread_path: Some(build_entry_limit_unread_path(
+                shared_sessions_base_directory
+            )),
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lookup_counts_the_shared_directory_alone_and_finds_a_session_at_the_entry_limit() {
+    // The scan holds 65,535 entries, and the user folder is entry 65,536. The
+    // lookup reads no listing of that folder, and counts no entry for its
+    // socket.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let found_socket_address = find_foreign_session_address_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        session_id,
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT - 1),
+    )
+    .expect("the lookup at the limit reads");
+
+    assert_eq!(found_socket_address, Some(socket_address));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lookup_past_the_entry_limit_keeps_the_shared_directory_unread() {
+    // The scan holds 65,536 entries, and the user folder is the entry past the
+    // limit.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, _) = plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let lookup_error = find_foreign_session_address_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        session_id,
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT),
+    )
+    .expect_err("the lookup stops past the limit");
+
+    let ForeignSessionLookupError::PathUnreadable { unread_path } = lookup_error else {
+        panic!("expected PathUnreadable, got {lookup_error:?}");
+    };
+    assert_eq!(
+        unread_path,
+        build_entry_limit_unread_path(shared_sessions_base_directory)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_marker_listing_that_reaches_the_entry_limit_at_a_marker_lists_that_session() {
+    // The scan holds 65,535 entries, and the marker is entry 65,536.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let foreign_session_id = plant_one_foreign_session_marker(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT - 1),
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(foreign_session_id, format!("koshi-{foreign_session_id}"))],
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_marker_listing_that_meets_a_marker_past_the_entry_limit_keeps_the_shared_directory_unread() {
+    // The scan holds 65,536 entries, and the marker is the entry past the
+    // limit.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    plant_one_foreign_session_marker(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        build_shared_directory_scan(MAX_SHARED_DIRECTORY_ENTRY_COUNT),
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unread_path: Some(build_entry_limit_unread_path(
+                shared_sessions_base_directory
+            )),
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scan_finds_the_256th_user_folder_and_stops_at_the_next() {
+    let shared_sessions_base_directory = Path::new("/tmp/koshi");
+    let mut shared_directory_scan = SharedDirectoryScan {
+        found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
+        ..build_shared_directory_scan(0)
+    };
+
+    assert_eq!(
+        shared_directory_scan.count_found_user_directory(shared_sessions_base_directory),
+        Ok(())
+    );
+    let folder_limit_unread_path = build_folder_limit_unread_path(shared_sessions_base_directory);
+    assert_eq!(
+        shared_directory_scan.count_found_user_directory(shared_sessions_base_directory),
+        Err(folder_limit_unread_path.clone())
+    );
+    assert_eq!(
+        shared_directory_scan.count_found_user_directory(shared_sessions_base_directory),
+        Err(folder_limit_unread_path)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scan_that_finds_the_256th_user_folder_lists_and_looks_up_its_session() {
+    // The scan has found 255 user folders.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
+            ..build_shared_directory_scan(0)
+        },
+    );
+    let found_socket_address = find_foreign_session_address_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        session_id,
+        SharedDirectoryScan {
+            found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
+            ..build_shared_directory_scan(0)
+        },
+    )
+    .expect("the lookup at the limit reads");
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(session_id, socket_address.clone())],
+            ..ForeignSessionListing::default()
+        }
+    );
+    assert_eq!(found_socket_address, Some(socket_address));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scan_that_finds_a_user_folder_past_the_limit_keeps_the_shared_directory_unread() {
+    // The scan has found 256 user folders.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, _) = plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT,
+            ..build_shared_directory_scan(0)
+        },
+    );
+    let lookup_error = find_foreign_session_address_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        session_id,
+        SharedDirectoryScan {
+            found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT,
+            ..build_shared_directory_scan(0)
+        },
+    )
+    .expect_err("the lookup stops past the limit");
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unread_path: Some(build_folder_limit_unread_path(
+                shared_sessions_base_directory
+            )),
+            ..ForeignSessionListing::default()
+        }
+    );
+    let ForeignSessionLookupError::PathUnreadable { unread_path } = lookup_error else {
+        panic!("expected PathUnreadable, got {lookup_error:?}");
+    };
+    assert_eq!(
+        unread_path,
+        build_folder_limit_unread_path(shared_sessions_base_directory)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_checks_the_256th_session_of_one_owner() {
+    // The scan has checked 255 sessions of the owner of the user folder.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            checked_session_count_by_owner: HashMap::from([(
+                load_own_user_id(shared_sessions_base_directory),
+                MAX_SHARED_SESSION_COUNT_PER_OWNER - 1,
+            )]),
+            ..build_shared_directory_scan(0)
+        },
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(session_id, socket_address)],
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_counts_a_session_past_256_of_one_owner_across_their_folders() {
+    // The scan has checked 256 sessions in other folders of the owner of the
+    // user folder.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    plant_one_foreign_session_socket(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            checked_session_count_by_owner: HashMap::from([(
+                load_own_user_id(shared_sessions_base_directory),
+                MAX_SHARED_SESSION_COUNT_PER_OWNER,
+            )]),
+            ..build_shared_directory_scan(0)
+        },
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unlisted_session_count: 1,
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lookup_by_id_finds_a_session_the_listing_counts_past_its_cap() {
+    // Both scans have checked 256 sessions of the owner of the user folder.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+    let own_user_id = load_own_user_id(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            checked_session_count_by_owner: HashMap::from([(
+                own_user_id,
+                MAX_SHARED_SESSION_COUNT_PER_OWNER,
+            )]),
+            ..build_shared_directory_scan(0)
+        },
+    );
+    let found_socket_address = find_foreign_session_address_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        session_id,
+        SharedDirectoryScan {
+            checked_session_count_by_owner: HashMap::from([(
+                own_user_id,
+                MAX_SHARED_SESSION_COUNT_PER_OWNER,
+            )]),
+            ..build_shared_directory_scan(0)
+        },
+    )
+    .expect("the shared directory is read");
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unlisted_session_count: 1,
+            ..ForeignSessionListing::default()
+        }
+    );
+    assert_eq!(found_socket_address, Some(socket_address));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_entry_beside_the_user_folders_that_names_no_user_counts_as_no_user_folder() {
+    // The scan has found 255 user folders. The shared directory holds a file
+    // named `junk` beside the user folder.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+    std::fs::write(shared_sessions_base_directory.join("junk"), b"")
+        .expect("plant a file beside the user folder");
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
+            ..build_shared_directory_scan(0)
+        },
+    );
+    let found_socket_address = find_foreign_session_address_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        session_id,
+        SharedDirectoryScan {
+            found_user_directory_count: MAX_SHARED_USER_DIRECTORY_COUNT - 1,
+            ..build_shared_directory_scan(0)
+        },
+    )
+    .expect("the shared directory is read");
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(session_id, socket_address.clone())],
+            ..ForeignSessionListing::default()
+        }
+    );
+    assert_eq!(found_socket_address, Some(socket_address));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_entry_in_a_user_folder_that_names_no_session_counts_as_no_session() {
+    // The scan has checked 255 sessions of the owner of the user folder. The
+    // folder holds a file named `junk` beside the session socket.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let (session_id, socket_address) =
+        plant_one_foreign_session_socket(shared_sessions_base_directory);
+    let own_user_id = load_own_user_id(shared_sessions_base_directory);
+    std::fs::write(
+        shared_sessions_base_directory
+            .join((own_user_id + 1).to_string())
+            .join("junk"),
+        b"",
+    )
+    .expect("plant a file inside the user folder");
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            checked_session_count_by_owner: HashMap::from([(
+                own_user_id,
+                MAX_SHARED_SESSION_COUNT_PER_OWNER - 1,
+            )]),
+            ..build_shared_directory_scan(0)
+        },
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(session_id, socket_address)],
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_marker_listing_lists_the_256th_marker() {
+    // The scan has listed 255 markers.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    let foreign_session_id = plant_one_foreign_session_marker(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            checked_marker_count: MAX_SHARED_MARKER_COUNT - 1,
+            ..build_shared_directory_scan(0)
+        },
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(foreign_session_id, format!("koshi-{foreign_session_id}"))],
+            ..ForeignSessionListing::default()
+        }
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_marker_listing_counts_a_marker_past_256() {
+    // The scan has listed 256 markers.
+    let shared_directory_guard = build_test_runtime_directory();
+    let shared_sessions_base_directory = shared_directory_guard.path();
+    let missing_runtime_directory = shared_sessions_base_directory.join("missing-runtime");
+    plant_one_foreign_session_marker(shared_sessions_base_directory);
+
+    let foreign_session_listing = list_foreign_sessions_with_scan(
+        shared_sessions_base_directory,
+        &missing_runtime_directory,
+        SharedDirectoryScan {
+            checked_marker_count: MAX_SHARED_MARKER_COUNT,
+            ..build_shared_directory_scan(0)
+        },
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unlisted_session_count: 1,
+            ..ForeignSessionListing::default()
+        }
+    );
 }
 
 #[test]
 fn a_session_another_user_started_is_asked_with_an_empty_token() {
-    // That user's endpoint file is unreadable here, so the session is asked
-    // over the address the shared directory named and admits by position.
-    let runtime_directory = build_test_runtime_directory("shared-empty-token");
+    // The session is asked over the address the shared directory names, with
+    // an empty token.
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let socket_address =
-        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
     let expected_session_overview = build_named_session_overview("S-quiet-lake", session_id);
     let (foreign_session_thread, presented_connection_tokens) =
         spawn_foreign_session(&socket_address, expected_session_overview.clone());
 
-    let session_overview =
-        fetch_foreign_session_overview(session_id, &socket_address).expect("the session answers");
+    let session_overview = fetch_foreign_session_overview(
+        session_id,
+        &socket_address,
+        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+    )
+    .expect("the session answers");
 
     assert_eq!(session_overview, expected_session_overview);
     assert_eq!(
@@ -1575,20 +2443,23 @@ fn a_session_another_user_started_is_asked_with_an_empty_token() {
     foreign_session_thread
         .join()
         .expect("the other user's session exits");
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_shared_advert_nothing_listens_behind_reports_the_session_not_running() {
-    // A crashed session leaves its socket or its marker behind; the listing
-    // must read that as gone, not as a session that could not answer.
-    let runtime_directory = build_test_runtime_directory("shared-dead");
+    // A socket or marker with nothing listening behind it reads as a session
+    // that is not running, not as one that could not answer.
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let socket_address =
-        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
 
-    let session_lookup_error = fetch_foreign_session_overview(session_id, &socket_address)
-        .expect_err("nothing listens at the address");
+    let session_lookup_error = fetch_foreign_session_overview(
+        session_id,
+        &socket_address,
+        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+    )
+    .expect_err("nothing listens at the address");
 
     assert_eq!(
         session_lookup_error.to_string(),
@@ -1597,8 +2468,22 @@ fn a_shared_advert_nothing_listens_behind_reports_the_session_not_running() {
         }
         .to_string(),
     );
+}
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+#[test]
+fn an_overview_ask_whose_answer_deadline_has_passed_connects_to_nothing() {
+    // Nothing listens at `socket_address`.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(runtime_directory.path(), session_id);
+
+    let overview_answer =
+        fetch_foreign_session_overview(session_id, &socket_address, Instant::now());
+
+    let Err(CliError::SessionAnswerTimedOut) = overview_answer else {
+        panic!("expected SessionAnswerTimedOut, got {overview_answer:?}");
+    };
 }
 
 // --- Applying the working directory at send time ---------------------------
@@ -1688,8 +2573,8 @@ enum HelloTiming {
 /// A stand-in session at `runtime_directory` that settles on `protocol_version`.
 ///
 /// Answers the Hello per `timing`, then answers a `SubmitCommand` with
-/// [`CommandResult::Ok`]. Every request it reads goes down the returned
-/// receiver, in arrival order.
+/// [`CommandResult::Ok`], and closes the connection once the caller hung up.
+/// Every request it reads goes down the returned receiver, in arrival order.
 fn spawn_settled_session(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -1739,7 +2624,7 @@ fn spawn_settled_session(
         if let Some(next_request) = next_request {
             if let IpcRequestKind::SubmitCommand(command_envelope) = &next_request.request_kind {
                 // A caller that refused this session's version has already
-                // closed the connection, so this reply has nowhere to land.
+                // closed the connection.
                 send_ipc_result_best_effort(
                     &mut session_connection,
                     next_request.request_id,
@@ -1753,25 +2638,27 @@ fn spawn_settled_session(
                 .send(next_request)
                 .expect("report the request read");
         }
+        close_connection_after_peer_hangs_up(session_connection);
     });
     (session_thread, request_receiver)
 }
 
-/// The Hello and the command go out back to back, so a session that settles on
-/// a version this build does not speak reads both. The caller still gets the
-/// version refusal and never a command result. A session that shares no version
-/// answers every request after the failed Hello with `HelloRequired`, so the
-/// command it read is not acted on.
+/// The Hello and the command go out back to back: a session that settles on a
+/// version this build does not speak reads both. The caller gets the version
+/// refusal and never a command result. A session that shares no version
+/// answers every request after the failed Hello with `HelloRequired`, and does
+/// not act on the command it read.
 #[test]
 fn a_session_speaking_three_refuses_the_caller_and_answers_no_command() {
-    let runtime_directory = build_test_runtime_directory("client-protocol-three-refused");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let (session_thread, received_requests) =
-        spawn_settled_session(&runtime_directory, session_id, 3, HelloTiming::AtOnce);
+        spawn_settled_session(runtime_directory.path(), session_id, 3, HelloTiming::AtOnce);
 
     let command_error = submit_external_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
+        None,
         session_id,
         Some(client_id),
         Command::TogglePaneFullscreen,
@@ -1804,8 +2691,6 @@ fn a_session_speaking_three_refuses_the_caller_and_answers_no_command() {
             .get_request_kind_name(),
         "SubmitCommand",
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 /// A command naming a target client costs one round trip, the same as every
@@ -1813,18 +2698,19 @@ fn a_session_speaking_three_refuses_the_caller_and_answers_no_command() {
 /// and still answers both in order.
 #[test]
 fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
-    let runtime_directory = build_test_runtime_directory("client-hello-last");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let (session_thread, received_requests) = spawn_settled_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         4,
         HelloTiming::AfterTheNextRequest,
     );
 
     let command_result = submit_external_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
+        None,
         session_id,
         Some(client_id),
         Command::TogglePaneFullscreen,
@@ -1857,20 +2743,19 @@ fn a_named_client_command_reaches_a_session_that_answers_the_hello_last() {
         command_envelope.command_source,
         CommandSource::from_external_cli(Some(session_id), Some(client_id)),
     );
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn a_named_client_reaches_a_session_that_speaks_four() {
-    let runtime_directory = build_test_runtime_directory("client-protocol-four");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let client_id = ClientId::new();
     let (session_thread, received_requests) =
-        spawn_settled_session(&runtime_directory, session_id, 4, HelloTiming::AtOnce);
+        spawn_settled_session(runtime_directory.path(), session_id, 4, HelloTiming::AtOnce);
 
     let command_result = submit_external_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
+        None,
         session_id,
         Some(client_id),
         Command::TogglePaneFullscreen,
@@ -1904,23 +2789,22 @@ fn a_named_client_reaches_a_session_that_speaks_four() {
         CommandSource::from_external_cli(Some(session_id), Some(client_id)),
     );
     assert_eq!(command_envelope.command, Command::TogglePaneFullscreen);
-
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
 fn no_named_client_still_costs_one_round_trip() {
-    let runtime_directory = build_test_runtime_directory("client-none-pipelined");
+    let runtime_directory = build_test_runtime_directory();
     let session_id = SessionId::new();
     let (session_thread, received_requests) = spawn_settled_session(
-        &runtime_directory,
+        runtime_directory.path(),
         session_id,
         PROTOCOL_VERSION,
         HelloTiming::AfterTheNextRequest,
     );
 
     let command_result = submit_external_command_via_runtime_directory(
-        &runtime_directory,
+        runtime_directory.path(),
+        None,
         session_id,
         None,
         Command::TogglePaneFullscreen,
@@ -1954,6 +2838,999 @@ fn no_named_client_still_costs_one_round_trip() {
         CommandSource::from_external_cli(Some(session_id), None),
     );
     assert_eq!(command_envelope.command, Command::TogglePaneFullscreen);
+}
 
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+/// Write an empty resume file for `session_id` in `runtime_directory`, stamped
+/// `age_duration` old.
+fn write_aged_resume_file(runtime_directory: &Path, session_id: SessionId, age_duration: Duration) {
+    std::fs::File::create(resolve_resume_file_path(runtime_directory, session_id))
+        .expect("write the resume file")
+        .set_modified(SystemTime::now() - age_duration)
+        .expect("age the resume file");
+}
+
+/// Write an endpoint file for `session_id` in `runtime_directory` naming the
+/// socket address the id gives there.
+fn write_own_endpoint_file(runtime_directory: &Path, session_id: SessionId) {
+    EndpointFile {
+        socket_address: koshi_ipc::endpoint::compute_socket_address(runtime_directory, session_id),
+        connection_token: ConnectionToken::generate(),
+        process_id: std::process::id(),
+    }
+    .write_to_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory,
+        session_id,
+    ))
+    .expect("write the endpoint file");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_id_sockets_in_two_folders_advertise_is_reached_through_neither() {
+    // Both folders belong to the user running the test.
+    use std::os::unix::fs::MetadataExt;
+
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let runtime_directory = shared_sessions_base_directory
+        .path()
+        .join("missing-runtime");
+    let own_user_id = std::fs::metadata(shared_sessions_base_directory.path())
+        .expect("read the shared directory")
+        .uid();
+    let duplicated_session_id = SessionId::new();
+    for folder_offset in [1, 2] {
+        let user_directory = shared_sessions_base_directory
+            .path()
+            .join((own_user_id + folder_offset).to_string());
+        std::fs::create_dir_all(&user_directory).expect("create a user's directory");
+        plant_session_socket(&user_directory.join(format!("{duplicated_session_id}.sock")));
+    }
+    let expected_refusal_text = format!(
+        "session {duplicated_session_id} is advertised 2 times in the shared directory, by user \
+         id {own_user_id}; koshi reaches none of them"
+    );
+
+    let foreign_session_listing =
+        list_foreign_sessions(shared_sessions_base_directory.path(), &runtime_directory);
+    let lookup_result = find_foreign_session_address(
+        shared_sessions_base_directory.path(),
+        &runtime_directory,
+        duplicated_session_id,
+    );
+    let endpoint_lookup_result = load_session_endpoint(
+        &runtime_directory,
+        Some(shared_sessions_base_directory.path()),
+        duplicated_session_id,
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            duplicated_sessions: vec![DuplicatedForeignSession {
+                session_id: duplicated_session_id,
+                advertisement_count: 2,
+                owner_user_ids: vec![own_user_id],
+            }],
+            ..ForeignSessionListing::default()
+        }
+    );
+    let Err(ForeignSessionLookupError::AdvertisedMoreThanOnce { duplicated_session }) =
+        lookup_result
+    else {
+        panic!("expected AdvertisedMoreThanOnce, got {lookup_result:?}");
+    };
+    assert_eq!(duplicated_session.to_string(), expected_refusal_text);
+    let Err(CliError::IpcUnavailable { detail }) = endpoint_lookup_result else {
+        panic!("expected IpcUnavailable, got {endpoint_lookup_result:?}");
+    };
+    assert_eq!(detail, expected_refusal_text);
+}
+
+#[test]
+fn a_duplicated_session_names_each_owner_once() {
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        DuplicatedForeignSession {
+            session_id,
+            advertisement_count: 3,
+            owner_user_ids: vec![1001, 1002],
+        }
+        .to_string(),
+        format!(
+            "session {session_id} is advertised 3 times in the shared directory, by user ids \
+             1001, 1002; koshi reaches none of them"
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_resume_file_of_this_users_keeps_a_foreign_socket_of_that_id_out() {
+    use std::os::unix::fs::MetadataExt;
+
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
+        .expect("read the runtime directory")
+        .uid();
+    let foreign_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
+    std::fs::create_dir_all(&foreign_user_directory).expect("create the other user's directory");
+    let dead_swap_session_id = SessionId::new();
+    let restarting_session_id = SessionId::new();
+    for own_session_id in [dead_swap_session_id, restarting_session_id] {
+        plant_session_socket(&foreign_user_directory.join(format!("{own_session_id}.sock")));
+    }
+    write_aged_resume_file(
+        runtime_directory.path(),
+        dead_swap_session_id,
+        RESTART_WINDOW_DURATION + Duration::from_secs(1),
+    );
+    write_aged_resume_file(
+        runtime_directory.path(),
+        restarting_session_id,
+        Duration::ZERO,
+    );
+
+    let foreign_session_listing = list_foreign_sessions(
+        shared_sessions_base_directory.path(),
+        runtime_directory.path(),
+    );
+    let dead_swap_lookup = find_foreign_session_address(
+        shared_sessions_base_directory.path(),
+        runtime_directory.path(),
+        dead_swap_session_id,
+    )
+    .expect("the shared directory is read");
+    let dead_swap_endpoint_lookup = load_session_endpoint(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        dead_swap_session_id,
+    );
+    let restarting_endpoint_lookup = load_session_endpoint(
+        runtime_directory.path(),
+        Some(shared_sessions_base_directory.path()),
+        restarting_session_id,
+    );
+
+    assert_eq!(foreign_session_listing, ForeignSessionListing::default());
+    assert_eq!(dead_swap_lookup, None);
+    let Err(CliError::SessionNotFound { session_name }) = dead_swap_endpoint_lookup else {
+        panic!("expected SessionNotFound, got {dead_swap_endpoint_lookup:?}");
+    };
+    assert_eq!(session_name, dead_swap_session_id.to_string());
+    let Err(CliError::IpcUnavailable { detail }) = restarting_endpoint_lookup else {
+        panic!("expected IpcUnavailable, got {restarting_endpoint_lookup:?}");
+    };
+    assert_eq!(
+        detail,
+        format!("session {restarting_session_id} is restarting; ask again in a moment")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_lookup_by_id_finds_the_marker_of_that_id_and_no_other() {
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let foreign_session_id = SessionId::new();
+    let own_session_id = SessionId::new();
+    for marked_session_id in [foreign_session_id, own_session_id] {
+        std::fs::write(
+            shared_sessions_base_directory
+                .path()
+                .join(marked_session_id.to_string()),
+            b"",
+        )
+        .expect("plant a marker");
+    }
+    write_own_endpoint_file(runtime_directory.path(), own_session_id);
+
+    let found_socket_addresses: Vec<Option<String>> =
+        [foreign_session_id, own_session_id, SessionId::new()]
+            .into_iter()
+            .map(|session_id| {
+                find_foreign_session_address(
+                    shared_sessions_base_directory.path(),
+                    runtime_directory.path(),
+                    session_id,
+                )
+                .expect("the shared directory is read")
+            })
+            .collect();
+
+    assert_eq!(
+        found_socket_addresses,
+        vec![Some(format!("koshi-{foreign_session_id}")), None, None]
+    );
+}
+
+#[test]
+fn this_users_sessions_are_the_advertised_ones_and_the_ones_restarting() {
+    let runtime_directory = build_test_runtime_directory();
+    let mut advertised_session_ids = vec![SessionId::new(), SessionId::new()];
+    for advertised_session_id in &advertised_session_ids {
+        write_own_endpoint_file(runtime_directory.path(), *advertised_session_id);
+    }
+    write_aged_resume_file(
+        runtime_directory.path(),
+        advertised_session_ids[0],
+        Duration::ZERO,
+    );
+    let restarting_session_id = SessionId::new();
+    write_aged_resume_file(
+        runtime_directory.path(),
+        restarting_session_id,
+        Duration::ZERO,
+    );
+    write_aged_resume_file(
+        runtime_directory.path(),
+        SessionId::new(),
+        RESTART_WINDOW_DURATION + Duration::from_secs(1),
+    );
+
+    let mut own_session_ids =
+        list_own_sessions(runtime_directory.path()).expect("read the runtime directory");
+
+    own_session_ids.sort();
+    advertised_session_ids.push(restarting_session_id);
+    advertised_session_ids.sort();
+    assert_eq!(own_session_ids, advertised_session_ids);
+}
+
+#[test]
+fn every_session_is_answered_in_the_order_it_was_asked() {
+    let session_asks: Vec<usize> = (0..40).collect();
+
+    let session_answers = ask_sessions_at_once(
+        &session_asks,
+        Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+        |session_ask| Ok(*session_ask * 10),
+    );
+
+    assert_eq!(
+        session_answers
+            .into_iter()
+            .map(|session_answer| session_answer.expect("every ask answers"))
+            .collect::<Vec<usize>>(),
+        (0..40)
+            .map(|ask_index| ask_index * 10)
+            .collect::<Vec<usize>>()
+    );
+}
+
+#[test]
+fn a_session_still_unasked_at_the_deadline_is_not_asked_and_answers_that_it_timed_out() {
+    let asked_session_count = std::sync::atomic::AtomicUsize::new(0);
+
+    let session_answers = ask_sessions_at_once(&[1, 2, 3], Instant::now(), |_| {
+        asked_session_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+
+    assert_eq!(asked_session_count.load(Ordering::SeqCst), 0);
+    assert_eq!(session_answers.len(), 3);
+    for session_answer in session_answers {
+        let Err(CliError::SessionAnswerTimedOut) = session_answer else {
+            panic!("expected SessionAnswerTimedOut, got {session_answer:?}");
+        };
+    }
+}
+
+#[test]
+fn sixteen_sessions_are_asked_at_the_same_time() {
+    // Each ask waits until all 16 have started, for at most 5 seconds.
+    let started_ask_count = std::sync::Mutex::new(0_usize);
+    let ask_started = std::sync::Condvar::new();
+    let session_asks: Vec<usize> = (0..MAX_SESSIONS_ASKED_AT_ONCE).collect();
+
+    let session_answers = ask_sessions_at_once(
+        &session_asks,
+        Instant::now() + Duration::from_secs(10),
+        |_| {
+            let mut started_count = started_ask_count.lock().expect("the count is not poisoned");
+            *started_count += 1;
+            ask_started.notify_all();
+            let (started_count, wait_result) = ask_started
+                .wait_timeout_while(started_count, Duration::from_secs(5), |started_count| {
+                    *started_count < MAX_SESSIONS_ASKED_AT_ONCE
+                })
+                .expect("the count is not poisoned");
+            drop(started_count);
+            Ok(wait_result.timed_out())
+        },
+    );
+
+    assert_eq!(
+        session_answers
+            .into_iter()
+            .map(|session_answer| session_answer.expect("every ask answers"))
+            .collect::<Vec<bool>>(),
+        vec![false; MAX_SESSIONS_ASKED_AT_ONCE]
+    );
+}
+
+#[test]
+fn a_panic_in_an_ask_on_a_helper_thread_reaches_the_caller() {
+    // The calling thread's ask waits until a helper thread starts an ask, for
+    // at most 5 seconds. Every ask on a helper thread panics.
+    let has_helper_ask_started = std::sync::Mutex::new(false);
+    let helper_ask_started = std::sync::Condvar::new();
+
+    let ask_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ask_sessions_at_once(
+            &[0_usize, 1],
+            Instant::now() + SESSION_ANSWER_TIMEOUT_DURATION,
+            |_| {
+                if std::thread::current().name() == Some("koshi-session-ask") {
+                    *has_helper_ask_started
+                        .lock()
+                        .expect("the flag is not poisoned") = true;
+                    helper_ask_started.notify_all();
+                    panic!("an ask on a helper thread panicked");
+                }
+                let has_helper_ask_started = has_helper_ask_started
+                    .lock()
+                    .expect("the flag is not poisoned");
+                let _ = helper_ask_started
+                    .wait_timeout_while(
+                        has_helper_ask_started,
+                        Duration::from_secs(5),
+                        |has_helper_ask_started| !*has_helper_ask_started,
+                    )
+                    .expect("the flag is not poisoned");
+                Ok(())
+            },
+        )
+    }));
+
+    let panic_payload = ask_outcome.expect_err("the panic reaches the caller");
+    assert_eq!(
+        panic_payload.downcast_ref::<&str>(),
+        Some(&"an ask on a helper thread panicked")
+    );
+}
+
+#[test]
+fn only_a_path_that_is_gone_not_a_directory_or_closed_to_this_user_advertises_nothing() {
+    for unadvertised_error_kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::NotADirectory,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        assert!(
+            is_unadvertised_path_error(&std::io::Error::from(unadvertised_error_kind)),
+            "{unadvertised_error_kind:?} advertises nothing"
+        );
+    }
+    for failed_read_error_kind in [
+        std::io::ErrorKind::Other,
+        std::io::ErrorKind::OutOfMemory,
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::InvalidData,
+    ] {
+        assert!(
+            !is_unadvertised_path_error(&std::io::Error::from(failed_read_error_kind)),
+            "{failed_read_error_kind:?} is a failed read"
+        );
+    }
+}
+
+#[test]
+fn the_first_failed_read_is_kept_and_a_path_that_advertises_nothing_is_not() {
+    let mut foreign_session_listing = ForeignSessionListing::default();
+
+    foreign_session_listing.record_failed_read(
+        Path::new("/home/user/shared/1001"),
+        &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    );
+    let unread_path_after_closed_folder = foreign_session_listing.unread_path.clone();
+    foreign_session_listing.record_failed_read(
+        Path::new("/home/user/shared/1002"),
+        &std::io::Error::other("first failure"),
+    );
+    foreign_session_listing.record_failed_read(
+        Path::new("/home/user/shared/1003"),
+        &std::io::Error::other("second failure"),
+    );
+
+    assert_eq!(unread_path_after_closed_folder, None);
+    let expected_unread_path = UnreadPath {
+        looked_up_path: PathBuf::from("/home/user/shared/1002"),
+        read_error_text: "first failure".to_string(),
+    };
+    assert_eq!(
+        expected_unread_path.to_string(),
+        "/home/user/shared/1002 could not be read: first failure"
+    );
+    assert_eq!(
+        foreign_session_listing.unread_path,
+        Some(expected_unread_path)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_its_owner_closed_to_other_users_advertises_nothing() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let runtime_directory = build_test_runtime_directory();
+    let shared_sessions_base_directory = build_test_runtime_directory();
+    let own_user_id = std::fs::metadata(runtime_directory.path())
+        .expect("read the runtime directory")
+        .uid();
+    let closed_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 1).to_string());
+    let open_user_directory = shared_sessions_base_directory
+        .path()
+        .join((own_user_id + 2).to_string());
+    let closed_session_id = SessionId::new();
+    let open_session_id = SessionId::new();
+    for (user_directory, session_id) in [
+        (&closed_user_directory, closed_session_id),
+        (&open_user_directory, open_session_id),
+    ] {
+        std::fs::create_dir_all(user_directory).expect("create a user's directory");
+        plant_session_socket(&user_directory.join(format!("{session_id}.sock")));
+    }
+    std::fs::set_permissions(
+        &closed_user_directory,
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("close the folder to every user");
+    if std::fs::read_dir(&closed_user_directory).is_ok() {
+        eprintln!(
+            "skipped `a_folder_its_owner_closed_to_other_users_advertises_nothing`: \
+             this user reads through a mode-000 directory"
+        );
+        let _ = std::fs::set_permissions(
+            &closed_user_directory,
+            std::fs::Permissions::from_mode(0o755),
+        );
+        return;
+    }
+
+    let foreign_session_listing = list_foreign_sessions(
+        shared_sessions_base_directory.path(),
+        runtime_directory.path(),
+    );
+    let closed_session_lookup = find_foreign_session_address(
+        shared_sessions_base_directory.path(),
+        runtime_directory.path(),
+        closed_session_id,
+    );
+    let open_session_lookup = find_foreign_session_address(
+        shared_sessions_base_directory.path(),
+        runtime_directory.path(),
+        open_session_id,
+    );
+
+    let _ = std::fs::set_permissions(
+        &closed_user_directory,
+        std::fs::Permissions::from_mode(0o755),
+    );
+    let open_socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&open_user_directory, open_session_id);
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            foreign_sessions: vec![(open_session_id, open_socket_address.clone())],
+            ..ForeignSessionListing::default()
+        }
+    );
+    let Ok(None) = closed_session_lookup else {
+        panic!("expected Ok(None), got {closed_session_lookup:?}");
+    };
+    let Ok(Some(found_socket_address)) = open_session_lookup else {
+        panic!("expected the open folder's socket, got {open_session_lookup:?}");
+    };
+    assert_eq!(found_socket_address, open_socket_address);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_directory_whose_read_fails_another_way_is_kept_and_refuses_a_lookup() {
+    // A link to itself fails every read with `ELOOP`.
+    let runtime_directory = build_test_runtime_directory();
+    let looping_shared_directory = runtime_directory.path().join("looping");
+    std::os::unix::fs::symlink("looping", &looping_shared_directory)
+        .expect("link the shared directory to itself");
+    let shared_read_error =
+        std::fs::read_dir(&looping_shared_directory).expect_err("a link to itself cannot be read");
+    let unread_shared_directory =
+        UnreadPath::from_read_error(&looping_shared_directory, &shared_read_error);
+
+    let foreign_session_listing =
+        list_foreign_sessions(&looping_shared_directory, runtime_directory.path());
+    let lookup_error = find_foreign_session_address(
+        &looping_shared_directory,
+        runtime_directory.path(),
+        SessionId::new(),
+    );
+
+    assert_eq!(
+        foreign_session_listing,
+        ForeignSessionListing {
+            unread_path: Some(unread_shared_directory.clone()),
+            ..ForeignSessionListing::default()
+        }
+    );
+    let Err(ForeignSessionLookupError::PathUnreadable { unread_path }) = lookup_error else {
+        panic!("expected PathUnreadable, got {lookup_error:?}");
+    };
+    assert_eq!(unread_path, unread_shared_directory);
+}
+
+/// The token a test's caller connected under, which the wait watches for a
+/// change.
+const OLD_CONNECTION_TOKEN: &str = "the token this caller connected under";
+
+/// The token the image replacing the server mints when it binds again.
+const NEW_CONNECTION_TOKEN: &str = "the token the new image minted";
+
+#[test]
+fn wait_for_new_session_endpoint_takes_the_endpoint_file_the_moment_it_names_another_token() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let advertised_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        4321,
+    );
+
+    let wait_deadline = Instant::now() + Duration::from_secs(10);
+    assert_eq!(
+        wait_for_new_session_endpoint(
+            runtime_directory.path(),
+            session_id,
+            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            wait_deadline,
+        ),
+        Some(advertised_endpoint)
+    );
+    assert!(
+        Instant::now() < wait_deadline,
+        "the wait returned before its deadline"
+    );
+}
+
+#[test]
+fn wait_for_new_session_endpoint_reads_the_endpoint_file_again_until_the_token_changes() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        4321,
+    );
+
+    let runtime_directory_path = runtime_directory.path().to_path_buf();
+    let endpoint_writer_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        write_session_endpoint_file(
+            &runtime_directory_path,
+            session_id,
+            NEW_CONNECTION_TOKEN,
+            4321,
+        )
+    });
+
+    let wait_deadline = Instant::now() + Duration::from_secs(10);
+    let new_endpoint = wait_for_new_session_endpoint(
+        runtime_directory.path(),
+        session_id,
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        wait_deadline,
+    );
+    let advertised_endpoint = endpoint_writer_thread
+        .join()
+        .expect("the writing thread finished");
+    assert_eq!(new_endpoint, Some(advertised_endpoint));
+    assert!(
+        Instant::now() < wait_deadline,
+        "the wait returned before its deadline"
+    );
+}
+
+#[test]
+fn wait_for_new_session_endpoint_ignores_an_endpoint_file_still_naming_the_old_token() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    // A different process id under the same token. The wait compares the token
+    // alone.
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        9999,
+    );
+
+    assert_eq!(
+        wait_for_new_session_endpoint(
+            runtime_directory.path(),
+            session_id,
+            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Instant::now(),
+        ),
+        None
+    );
+}
+
+#[test]
+fn wait_for_new_session_endpoint_ends_at_its_deadline_when_the_session_advertises_nothing() {
+    let runtime_directory = build_test_runtime_directory();
+    // No endpoint file exists.
+    assert_eq!(
+        wait_for_new_session_endpoint(
+            runtime_directory.path(),
+            SessionId::new(),
+            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Instant::now(),
+        ),
+        None
+    );
+}
+
+#[test]
+fn wait_for_new_session_endpoint_with_a_deadline_already_past_still_takes_a_session_that_is_back() {
+    // The wait reads the endpoint file once before it checks the deadline. A
+    // session that came back before a deadline already past is still joined.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let advertised_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        NEW_CONNECTION_TOKEN,
+        4321,
+    );
+
+    assert_eq!(
+        wait_for_new_session_endpoint(
+            runtime_directory.path(),
+            session_id,
+            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            Instant::now() - Duration::from_secs(1),
+        ),
+        Some(advertised_endpoint)
+    );
+}
+
+#[test]
+fn wait_for_new_session_endpoint_reads_past_an_endpoint_file_this_build_cannot_read() {
+    // An endpoint file holding bytes no build reads is passed over, and the
+    // wait keeps reading until its deadline.
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    std::fs::write(
+        EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
+        b"{",
+    )
+    .expect("write a half endpoint file");
+
+    let wait_deadline = Instant::now() + Duration::from_millis(200);
+    assert_eq!(
+        wait_for_new_session_endpoint(
+            runtime_directory.path(),
+            session_id,
+            &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+            wait_deadline,
+        ),
+        None
+    );
+    assert!(
+        Instant::now() >= wait_deadline,
+        "the wait sat out its whole window rather than giving up on the first read"
+    );
+}
+
+#[test]
+fn a_session_refusing_this_builds_protocol_version_is_asked_again_once_it_restarts() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let (session_server_thread, submitted_envelopes) = spawn_fake_session(
+        runtime_directory.path(),
+        session_id,
+        vec![SessionScript::RefuseVersion, SessionScript::AcceptAndApply],
+    );
+
+    let command_result = submit_external_command_via_runtime_directory(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect("the restarted session answers");
+
+    session_server_thread.join().expect("fake session exits");
+    let refused_envelope = submitted_envelopes
+        .recv()
+        .expect("the refusing session read one command");
+    let command_envelope = submitted_envelopes
+        .recv()
+        .expect("the restarted session read one command");
+    assert_eq!(refused_envelope.command, command_envelope.command);
+    assert_eq!(
+        command_result,
+        CommandResult::Ok {
+            command_id: command_envelope.command_id,
+            emitted_events: Vec::new(),
+        },
+    );
+}
+
+#[test]
+fn wait_for_refused_session_restart_gives_another_users_session_its_refusal_at_once() {
+    let runtime_directory = build_test_runtime_directory();
+    let foreign_endpoint = build_foreign_session_endpoint("/home/user/shared.sock".to_string());
+    let wait_started_at = Instant::now();
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        SessionId::new(),
+        &foreign_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        None,
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) = wait_result else {
+        panic!("expected ProtocolVersionRefused, got {wait_result:?}");
+    };
+    assert_eq!(detail, VERSION_REFUSAL_SENTENCE);
+    assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn wait_for_refused_session_restart_names_kill_session_for_a_session_that_wrote_no_program_file() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        5000,
+    );
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &refused_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        Some(Instant::now() + Duration::from_millis(200)),
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) = wait_result else {
+        panic!("expected ProtocolVersionRefused, got {wait_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{VERSION_REFUSAL_SENTENCE}; it runs a koshi older than {} that cannot restart into \
+             it; end it with: koshi kill-session {session_id}",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+/// The endpoint file of `session_id` in `runtime_directory`, naming this
+/// process, beside a program file this process wrote naming `build_version`
+/// and `program_path`. Hands back the endpoint file.
+fn write_recorded_session_files(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    build_version: &str,
+    program_path: &Path,
+) -> EndpointFile {
+    let refused_endpoint = write_session_endpoint_file(
+        runtime_directory,
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        std::process::id(),
+    );
+    ServerProgramFile {
+        process_id: std::process::id(),
+        build_version: build_version.to_string(),
+        program_path: program_path.to_string_lossy().into_owned(),
+    }
+    .write_to_path(&ServerProgramFile::resolve_session_program_file_path(
+        runtime_directory,
+        session_id,
+    ))
+    .expect("the program file is written");
+    refused_endpoint
+}
+
+#[test]
+fn wait_for_refused_session_restart_names_the_newer_koshi_a_session_runs_at_once() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_recorded_session_files(
+        runtime_directory.path(),
+        session_id,
+        "999.0.0",
+        Path::new("/opt/koshi/999.0.0/koshi"),
+    );
+    let wait_started_at = Instant::now();
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &refused_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        None,
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) = wait_result else {
+        panic!("expected ProtocolVersionRefused, got {wait_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{VERSION_REFUSAL_SENTENCE}; it runs koshi 999.0.0 from /opt/koshi/999.0.0/koshi, \
+             which is newer than this koshi {}; use /opt/koshi/999.0.0/koshi for it",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn wait_for_refused_session_restart_names_the_other_program_file_of_an_older_session_at_once() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let other_program_path = runtime_directory.path().join("other-koshi");
+    std::fs::write(&other_program_path, b"").expect("the other program file is written");
+    let refused_endpoint = write_recorded_session_files(
+        runtime_directory.path(),
+        session_id,
+        "0.0.1",
+        &other_program_path,
+    );
+    let wait_started_at = Instant::now();
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &refused_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        None,
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) = wait_result else {
+        panic!("expected ProtocolVersionRefused, got {wait_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{VERSION_REFUSAL_SENTENCE}; it runs koshi 0.0.1 from {}, a program file this koshi \
+             does not replace; use that koshi for it, or end it with: koshi kill-session \
+             {session_id}",
+            other_program_path.display()
+        )
+    );
+    assert!(wait_started_at.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn wait_for_refused_session_restart_waits_for_an_older_session_on_this_program_file() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_recorded_session_files(
+        runtime_directory.path(),
+        session_id,
+        "0.0.1",
+        &std::env::current_exe().expect("the test binary has a path"),
+    );
+    let restart_runtime_directory = runtime_directory.path().to_path_buf();
+    let restarting_session_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        write_session_endpoint_file(
+            &restart_runtime_directory,
+            session_id,
+            NEW_CONNECTION_TOKEN,
+            std::process::id(),
+        )
+    });
+
+    let restarted_endpoint = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &refused_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        None,
+    )
+    .expect("the session restarts within the wait");
+
+    assert_eq!(
+        restarted_endpoint,
+        restarting_session_thread
+            .join()
+            .expect("the restarting session writes its endpoint file")
+    );
+}
+
+#[test]
+fn wait_for_refused_session_restart_says_an_older_session_on_this_program_file_tries_again() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_recorded_session_files(
+        runtime_directory.path(),
+        session_id,
+        "0.0.1",
+        &std::env::current_exe().expect("the test binary has a path"),
+    );
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &refused_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        Some(Instant::now() + Duration::from_millis(200)),
+    );
+
+    let Err(CliError::ProtocolVersionRefused { detail }) = wait_result else {
+        panic!("expected ProtocolVersionRefused, got {wait_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "{VERSION_REFUSAL_SENTENCE}; it runs koshi 0.0.1 and has not restarted into this \
+             koshi {} yet; it tries again at each command from this koshi, and its log says \
+             what stopped it",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+#[test]
+fn wait_for_refused_session_restart_waits_through_a_restart_that_has_started() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let refused_endpoint = write_session_endpoint_file(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        5000,
+    );
+    std::fs::remove_file(EndpointFile::resolve_endpoint_file_path(
+        runtime_directory.path(),
+        session_id,
+    ))
+    .expect("the swap takes the endpoint file away");
+    std::fs::write(
+        resolve_resume_file_path(runtime_directory.path(), session_id),
+        b"",
+    )
+    .expect("the swap writes its resume file");
+    let restart_runtime_directory = runtime_directory.path().to_path_buf();
+    let restarted_session_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        write_session_endpoint_file(
+            &restart_runtime_directory,
+            session_id,
+            NEW_CONNECTION_TOKEN,
+            5000,
+        )
+    });
+
+    let wait_result = wait_for_refused_session_restart(
+        runtime_directory.path(),
+        session_id,
+        &refused_endpoint,
+        VERSION_REFUSAL_SENTENCE.to_string(),
+        None,
+    );
+
+    let restarted_endpoint = restarted_session_thread
+        .join()
+        .expect("the restart thread exits");
+    assert_eq!(
+        wait_result.expect("the session restarted"),
+        restarted_endpoint
+    );
 }

@@ -1,6 +1,9 @@
 //! Reading the config files at startup.
 //!
-//! Discovers the config directory and reads the per-section files —
+//! Every loader reads the config directory its caller names. A process entry
+//! resolves that directory through `koshi_paths::resolve_config_directory`
+//! and passes it down; `None` reads no file and leaves every built-in
+//! default in place. Reads the per-section files —
 //! `koshi.kdl` (app settings), the color theme `koshi.kdl` names,
 //! `keybinding.kdl` (key bindings) — parsing each into its override layer. The
 //! runtime's reload transactions turn a parsed layer into live state.
@@ -63,12 +66,12 @@ pub struct LoadedConfig {
 /// (`koshi.kdl`, then the theme it names, then `keybinding.kdl`). The caller
 /// replays the warnings through the log once the tracing subscriber is up.
 ///
-/// With no config directory every layer is `None` and the one warning is
-/// `"no config directory found; using built-in defaults"`.
+/// A `config_directory` of `None` gives every layer `None` and the one
+/// warning `"no config directory found; using built-in defaults"`.
 #[must_use]
-pub fn load_config_files() -> (LoadedConfig, Vec<String>) {
+pub fn load_config_files(config_directory: Option<&Path>) -> (LoadedConfig, Vec<String>) {
     let mut config_warnings = Vec::new();
-    let Some(config_directory) = koshi_paths::resolve_config_directory() else {
+    let Some(config_directory) = config_directory else {
         config_warnings.push("no config directory found; using built-in defaults".to_string());
         return (LoadedConfig::default(), config_warnings);
     };
@@ -82,7 +85,7 @@ pub fn load_config_files() -> (LoadedConfig, Vec<String>) {
     let loaded_config = LoadedConfig {
         app_config_layer,
         theme_config_layer: selected_theme_name.and_then(|theme_name| {
-            load_theme_config(&config_directory, &theme_name, &mut config_warnings)
+            load_theme_config(config_directory, &theme_name, &mut config_warnings)
         }),
         keybindings_config_layer: load_keybindings_config(
             &config_directory.join("keybinding.kdl"),
@@ -92,15 +95,17 @@ pub fn load_config_files() -> (LoadedConfig, Vec<String>) {
     (loaded_config, config_warnings)
 }
 
-/// Read and parse `koshi.kdl` alone, skipping the theme and the keymap.
+/// Read and parse `koshi.kdl` in `config_directory` alone, skipping the theme
+/// and the keymap.
 ///
 /// `koshi.kdl` is the only file carrying the top-level `allow-beta-features`
 /// and `layout.new-pane-direction`: a `koshi new-pane` reads that file and
-/// nothing else. Absent, unreadable, or unparseable yields `None`, which folds
-/// to the built-in defaults. Warnings are dropped.
+/// nothing else. A `config_directory` of `None`, and a file that is absent,
+/// unreadable, or unparseable, yield `None`, which folds to the built-in
+/// defaults. Warnings are dropped.
 #[must_use]
-pub fn load_app_layer() -> Option<PartialKoshiConfig> {
-    let config_directory = koshi_paths::resolve_config_directory()?;
+pub fn load_app_layer(config_directory: Option<&Path>) -> Option<PartialKoshiConfig> {
+    let config_directory = config_directory?;
     let mut config_warnings = Vec::new();
     load_app_config(&config_directory.join("koshi.kdl"), &mut config_warnings)
         .map(|app_config_file| app_config_file.layer)
@@ -120,7 +125,7 @@ pub fn build_logging_parameters(
         .unwrap_or_default();
     LoggingParameters {
         is_enabled: logging_config.is_enabled,
-        log_level: logging_config.level,
+        log_level: logging_config.log_level,
         log_format: logging_config.log_format,
         session_id,
     }
@@ -134,9 +139,9 @@ pub fn build_logging_parameters(
 /// that file's `allow-other-users`.
 ///
 /// A forced switch stays on for the session's whole life. A switch left to the
-/// file is read again on every request from another user: an
-/// `allow-other-users` turned off after the session started closes the
-/// connections it had admitted.
+/// file is read again from `koshi.kdl` in `config_directory` on every request
+/// from another user: an `allow-other-users` turned off after the session
+/// started closes the connections it had admitted.
 ///
 /// The socket's directory is `koshi.kdl`'s `shared-sessions-dir` when it names
 /// one, and the platform's machine-wide location otherwise. No directory from
@@ -145,6 +150,7 @@ pub fn build_logging_parameters(
 pub fn resolve_other_users_policy(
     app_config_layer: Option<&PartialKoshiConfig>,
     is_other_user_access_forced: bool,
+    config_directory: Option<&Path>,
 ) -> Option<OtherUsers> {
     let server_config = merge_server(
         ServerConfig::default(),
@@ -157,7 +163,8 @@ pub fn resolve_other_users_policy(
     let other_user_access_check: OtherUsersSetting = if is_other_user_access_forced {
         Arc::new(|| true)
     } else {
-        Arc::new(is_other_user_access_allowed)
+        let config_directory = config_directory.map(Path::to_path_buf);
+        Arc::new(move || is_other_user_access_allowed(config_directory.as_deref()))
     };
     Some(OtherUsers {
         shared_directory: shared_sessions_directory,
@@ -172,27 +179,45 @@ pub fn resolve_other_users_policy(
 ///
 /// The session server creates its socket here, and a `koshi` command looks
 /// here for the sessions the other local users started.
-pub(crate) fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> Option<PathBuf> {
+pub fn resolve_shared_sessions_directory(server_config: &ServerConfig) -> Option<PathBuf> {
     server_config
         .shared_sessions_directory
         .clone()
         .or_else(koshi_paths::resolve_shared_sessions_directory)
 }
 
-/// The `server` settings `koshi.kdl` carries right now. Reads and parses the
-/// file again on each call: the answer is the one the file holds at this
-/// moment.
+/// The `server` settings `koshi.kdl` in `config_directory` carries right now.
+/// Reads and parses the file again on each call: the answer is the one the
+/// file holds at this moment. A `config_directory` of `None` gives the
+/// built-in defaults.
 #[must_use]
-pub fn load_current_server_config() -> ServerConfig {
+pub fn load_current_server_config(config_directory: Option<&Path>) -> ServerConfig {
     merge_server(
         ServerConfig::default(),
-        load_app_layer().into_iter().collect(),
+        load_app_layer(config_directory).into_iter().collect(),
     )
 }
 
-/// Whether `koshi.kdl` carries `allow-other-users` right now.
-fn is_other_user_access_allowed() -> bool {
-    load_current_server_config().should_allow_other_users
+/// Whether `koshi.kdl` in `config_directory` carries `allow-other-users` right
+/// now.
+fn is_other_user_access_allowed(config_directory: Option<&Path>) -> bool {
+    load_current_server_config(config_directory).should_allow_other_users
+}
+
+/// The machine-wide directory holding the sessions other local users started,
+/// or `None` while `allow-other-users` is off in `koshi.kdl` in
+/// `config_directory`, while `config_directory` is `None`, or while the machine
+/// reports no such directory.
+///
+/// `koshi.kdl` is read again on each call, so the answer is the one the file
+/// holds at this moment.
+#[must_use]
+pub fn find_shared_sessions_base_directory(config_directory: Option<&Path>) -> Option<PathBuf> {
+    let server_config = load_current_server_config(config_directory);
+    if !server_config.should_allow_other_users {
+        return None;
+    }
+    resolve_shared_sessions_directory(&server_config)
 }
 
 /// Records `koshi.kdl`'s top-level `allow-beta-features` on the beta gate that
@@ -385,13 +410,17 @@ fn append_config_field_warnings(
     }
 }
 
-/// Read and parse `profile/<profile_name>.kdl` from the config directory. A
-/// missing, unreadable, or invalid profile is logged and returns `None`; the
-/// caller then starts a single shell. Profiles are all-or-nothing: any schema
-/// violation drops the whole file, and no pane of a broken profile starts.
+/// Read and parse `profile/<profile_name>.kdl` from `config_directory`. A
+/// `config_directory` of `None` returns `None`. A missing, unreadable, or
+/// invalid profile is logged and returns `None`; the caller then starts a
+/// single shell. Profiles are all-or-nothing: any schema violation drops the
+/// whole file, and no pane of a broken profile starts.
 #[must_use]
-pub fn load_profile_template(profile_name: &str) -> Option<ProfileTemplate> {
-    let config_directory = koshi_paths::resolve_config_directory()?;
+pub fn load_profile_template(
+    config_directory: Option<&Path>,
+    profile_name: &str,
+) -> Option<ProfileTemplate> {
+    let config_directory = config_directory?;
     // A profile name is a single file stem under `profile/`. An absolute path,
     // a `..`, or an embedded separator is refused: `--profile ../secret` and
     // `--profile /etc/x` both stop here, before any file is opened.

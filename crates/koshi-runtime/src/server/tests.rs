@@ -176,10 +176,10 @@ fn inbox_delivers_events_to_the_receiver() {
         .send(RuntimeEvent::Quit)
         .expect("send to inbox");
 
-    assert!(matches!(
-        server.get_inbox_receiver().try_recv(),
-        Ok(RuntimeEvent::Quit)
-    ));
+    let received_runtime_event = server.get_inbox_receiver().try_recv();
+    let Ok(RuntimeEvent::Quit) = received_runtime_event else {
+        panic!("expected Quit, got {received_runtime_event:?}");
+    };
 }
 
 #[test]
@@ -1038,12 +1038,51 @@ fn no_pane_holds_a_restart_back_on_windows() {
 }
 
 #[test]
+fn a_restart_refusal_reads_as_its_sentence() {
+    assert_eq!(
+        RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the binary at /x is not executable".to_string(),
+        }
+        .to_string(),
+        "the binary at /x is not executable"
+    );
+    assert_eq!(
+        RestartRefusal::PaneNotReady {
+            refusal_reason: "pane 3 has no terminal descriptor".to_string(),
+        }
+        .to_string(),
+        "pane 3 has no terminal descriptor"
+    );
+    assert_eq!(
+        RestartRefusal::ImageReplacementUnsupported.to_string(),
+        "this koshi cannot replace its own image, so it cannot restart"
+    );
+}
+
+#[test]
+fn only_a_pane_not_ready_can_end_while_the_program_file_stays_the_same() {
+    assert_eq!(
+        [
+            RestartRefusal::UnfitProgramFile {
+                refusal_reason: String::new(),
+            },
+            RestartRefusal::PaneNotReady {
+                refusal_reason: String::new(),
+            },
+            RestartRefusal::ImageReplacementUnsupported,
+        ]
+        .map(|restart_refusal| restart_refusal.can_end_without_file_change()),
+        [false, true, false]
+    );
+}
+
+#[test]
 fn a_restart_is_refused_while_no_check_is_installed_and_leaves_the_flag_down() {
     let (mut server, _inbox_sender) = build_test_server_with_event_sender();
 
     assert_eq!(
         server.handle_ipc_restart(),
-        Err("this koshi cannot replace its own image, so it cannot restart".to_string())
+        Err(RestartRefusal::ImageReplacementUnsupported)
     );
     assert!(!server.is_restart_requested());
 }
@@ -1052,12 +1091,16 @@ fn a_restart_is_refused_while_no_check_is_installed_and_leaves_the_flag_down() {
 fn a_restart_the_check_refuses_leaves_the_flag_down() {
     let (mut server, _inbox_sender) = build_test_server_with_event_sender();
     server.set_restart_check(Arc::new(|| {
-        Err("the binary at /x is not executable".to_string())
+        Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the binary at /x is not executable".to_string(),
+        })
     }));
 
     assert_eq!(
         server.handle_ipc_restart(),
-        Err("the binary at /x is not executable".to_string())
+        Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the binary at /x is not executable".to_string(),
+        })
     );
     assert!(!server.is_restart_requested());
 }
@@ -1078,9 +1121,6 @@ fn a_restart_the_check_passes_raises_the_flag_and_changes_nothing_else() {
 
 #[test]
 fn a_restart_taken_back_lowers_the_flag_and_the_next_one_is_accepted_again() {
-    // A swap the session abandoned before anything irreversible happened puts
-    // the session back on its feet in this same process, so the event loop must
-    // stop asking for the swap and the next restart request must still work.
     let (mut server, _client_id) = boot_server();
     server.set_restart_check(Arc::new(|| Ok(())));
     assert_eq!(server.handle_ipc_restart(), Ok(()));
@@ -1096,21 +1136,30 @@ fn a_restart_taken_back_lowers_the_flag_and_the_next_one_is_accepted_again() {
 
 #[test]
 fn a_check_installed_again_replaces_the_one_before_it() {
-    // The session installs the check again on every server it serves with, so
-    // a session put back after a failed swap answers the next restart through
-    // the check it was given then, not the one it started with.
     let (mut server, _client_id) = boot_server();
-    server.set_restart_check(Arc::new(|| Err("the first check".to_string())));
+    server.set_restart_check(Arc::new(|| {
+        Err(RestartRefusal::PaneNotReady {
+            refusal_reason: "the first check".to_string(),
+        })
+    }));
     assert_eq!(
         server.handle_ipc_restart(),
-        Err("the first check".to_string())
+        Err(RestartRefusal::PaneNotReady {
+            refusal_reason: "the first check".to_string(),
+        })
     );
 
-    server.set_restart_check(Arc::new(|| Err("the second check".to_string())));
+    server.set_restart_check(Arc::new(|| {
+        Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the second check".to_string(),
+        })
+    }));
 
     assert_eq!(
         server.handle_ipc_restart(),
-        Err("the second check".to_string())
+        Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the second check".to_string(),
+        })
     );
     assert!(!server.is_restart_requested());
 }
@@ -2474,20 +2523,23 @@ fn a_second_restart_request_runs_the_check_again_and_leaves_one_swap_asked_for()
 
 #[test]
 fn a_restart_refused_after_one_was_accepted_leaves_the_swap_asked_for() {
-    // The binary on disk can be replaced again between two requests. The second
-    // request is answered with what is wrong now, and the swap the first one
-    // already won is not taken back by it.
+    // The second request is answered with what the check says now, and the
+    // swap the first one asked for stays asked for.
     let (mut server, _client_id) = boot_server();
     server.set_restart_check(Arc::new(|| Ok(())));
     assert_eq!(server.handle_ipc_restart(), Ok(()));
 
     server.set_restart_check(Arc::new(|| {
-        Err("the binary at /x is not executable".to_string())
+        Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the binary at /x is not executable".to_string(),
+        })
     }));
 
     assert_eq!(
         server.handle_ipc_restart(),
-        Err("the binary at /x is not executable".to_string())
+        Err(RestartRefusal::UnfitProgramFile {
+            refusal_reason: "the binary at /x is not executable".to_string(),
+        })
     );
     assert!(server.is_restart_requested());
 }
@@ -2604,12 +2656,15 @@ fn handing_the_inbox_over_keeps_the_receiver_the_panes_deliver_into() {
     sender
         .send(RuntimeEvent::Quit)
         .expect("send after the swap");
-    assert!(matches!(inbox_receiver.try_recv(), Ok(RuntimeEvent::Quit)));
-    assert!(matches!(inbox_receiver.try_recv(), Ok(RuntimeEvent::Quit)));
-    assert!(matches!(
-        inbox_receiver.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
-    ));
+    for _ in 0..2 {
+        let received_runtime_event = inbox_receiver.try_recv();
+        let Ok(RuntimeEvent::Quit) = received_runtime_event else {
+            panic!("expected Quit, got {received_runtime_event:?}");
+        };
+    }
+    let Err(mpsc::TryRecvError::Empty) = inbox_receiver.try_recv() else {
+        panic!("expected nothing more on the inbox");
+    };
 }
 
 /// One live pane as the PTY backend reports it: no terminal descriptor, so no
