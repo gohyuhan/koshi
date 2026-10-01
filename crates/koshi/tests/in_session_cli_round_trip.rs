@@ -7,31 +7,23 @@
 //! dispatcher applies it, the attached client is told what changed, and the answer becomes the exit
 //! code the binary reports.
 //!
-//! The session server runs on a thread of this process, over a
-//! [`FakePtyBackend`] in place of the panes' real children. The backend
-//! records every call, so a close and a resize have exact, observable effects
-//! — a recorded [`KillPolicy`], a recorded [`PtySize`] — with no process to
-//! launch. The socket it serves is real: it is bound in a fresh temporary
-//! runtime directory, and every request here travels it.
+//! Each test starts its own session through
+//! `common::in_process_session::RunningSession::start_session`: a session
+//! server on a thread of this process, a real control socket in a fresh
+//! temporary runtime directory under a short base path, and a fake PTY backend
+//! in place of the panes' real children. The backend records every spawn,
+//! resize and kill — a recorded [`KillPolicy`], a recorded [`PtySize`] — and
+//! launches no process.
 //!
-//! Each test serves its own temporary runtime directory, so the sessions here
-//! never meet the one a developer is running. The directory sits under a short
-//! base because a Unix socket path has an operating-system length cap that a
-//! deep temporary path would break.
-//!
-//! Reading an event stream blocks forever, so each attached client gets a
-//! reader thread that forwards what it reads into a queue this thread polls
-//! with a deadline: a session that never reports the change fails the test
-//! instead of hanging it.
-//!
-//! The session server is held in a guard that stops it when the test drops it,
-//! so a failed assertion leaves no thread serving a socket.
+//! Each attached client has a reader thread that forwards what it reads into a
+//! queue this thread reads with a deadline. A session that never reports the
+//! change fails the test at that deadline. Dropping the session stops its
+//! serving thread.
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+mod common;
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use koshi::cli::{Cli, ResolvedTargets};
@@ -45,294 +37,19 @@ use koshi_core::geometry::{Direction, Size};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::{KillPolicy, PtySize};
-use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-};
-use koshi_ipc::transport::Connection;
+use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_link::error::CliError;
-use koshi_pty::backend::state::PtyBackend;
-use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::runtime::pty_inbox::InboxSink;
-use koshi_runtime::server::Server;
-use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_test_runtime_directory;
-use tempfile::TempDir;
 
-/// How long a poll waits for something the session server has to do before the
-/// test calls it a failure.
-const WAIT_DURATION: Duration = Duration::from_secs(20);
+use common::in_process_session::{
+    attach_test_client, list_emitted_events, AttachedClient, RunningSession,
+};
+use common::session_connection::open_session_connection;
+use common::WAIT_DURATION;
 
 /// How long a poll pauses between attempts.
 const CLI_ROUND_TRIP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
-
-/// The terminal size the session starts at and the attaching client reports.
-const ATTACH_VIEWPORT_SIZE: Size = Size {
-    column_count: 80,
-    row_count: 24,
-};
-
-/// One session server running on its own thread, serving a real control socket
-/// in its own runtime directory over a fake PTY backend. Dropping it stops
-/// that thread and withdraws the socket.
-struct RunningSession {
-    /// The runtime directory the control socket and endpoint file live in.
-    runtime_directory: TempDir,
-    /// The session the server seeded and serves.
-    session_id: SessionId,
-    /// The backend that stands in for the panes' children, so a test can read
-    /// what was spawned, resized and killed.
-    pty: Arc<FakePtyBackend>,
-    /// The runtime inbox, for the hangup that ends the serving thread.
-    inbox_sender: mpsc::Sender<RuntimeEvent>,
-    /// The serving thread, joined at drop. `Option` so the drop can take it
-    /// out of the otherwise-borrowed struct.
-    dispatcher: Option<JoinHandle<()>>,
-}
-
-impl RunningSession {
-    /// Start a session server on its own thread and wait until its socket
-    /// answers.
-    fn start_session() -> RunningSession {
-        let runtime_directory = build_test_runtime_directory();
-        let session_id = SessionId::new();
-        let (inbox_sender, inbox_receiver) = mpsc::channel();
-        let pty = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-            InboxSink::from_event_sender(inbox_sender.clone()),
-        )));
-
-        let serving_runtime_directory = runtime_directory.path().to_path_buf();
-        let serving_pty = Arc::clone(&pty);
-        let serving_sender = inbox_sender.clone();
-        let dispatcher = std::thread::spawn(move || {
-            serve_session(
-                &serving_runtime_directory,
-                session_id,
-                serving_pty,
-                inbox_receiver,
-                serving_sender,
-            );
-        });
-
-        let running_session = RunningSession {
-            runtime_directory,
-            session_id,
-            pty,
-            inbox_sender,
-            dispatcher: Some(dispatcher),
-        };
-        // The endpoint file is written after the socket binds, so a readable
-        // one means the socket is ready to answer.
-        let deadline = Instant::now() + WAIT_DURATION;
-        while EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-            running_session.runtime_directory.path(),
-            running_session.session_id,
-        ))
-        .is_err()
-        {
-            assert!(
-                Instant::now() < deadline,
-                "the session server never advertised its socket"
-            );
-            std::thread::sleep(CLI_ROUND_TRIP_POLL_INTERVAL_DURATION);
-        }
-        running_session
-    }
-
-    /// The panes the backend spawned, in spawn order.
-    fn list_pane_ids(&self) -> Vec<PaneId> {
-        self.pty.list_spawned_pane_ids()
-    }
-
-    /// The session's own report of itself, read over the control socket by the
-    /// library call the `koshi inspect` verbs make.
-    fn fetch_session_overview(&self) -> koshi_core::discovery::SessionOverview {
-        koshi_link::ipc_client::fetch_session_overview(
-            self.runtime_directory.path(),
-            self.session_id,
-        )
-        .expect("the session server describes itself")
-    }
-}
-
-impl Drop for RunningSession {
-    fn drop(&mut self) {
-        // The serving loop stops on a `Quit`; a loop that already stopped on
-        // its own leaves a closed inbox, and the send fails harmlessly.
-        let _ = self.inbox_sender.send(RuntimeEvent::Quit);
-        if let Some(handle) = self.dispatcher.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-/// Build one session's server on `pty`, seed the session, bind its control
-/// socket in `runtime_directory`, and serve the runtime inbox until the session ends.
-///
-/// The order is the running binary's: the session is seeded before the socket
-/// binds, so nothing advertises a session that does not exist yet.
-fn serve_session(
-    runtime_directory: &Path,
-    session_id: SessionId,
-    pty: Arc<FakePtyBackend>,
-    inbox_receiver: mpsc::Receiver<RuntimeEvent>,
-    inbox_sender: mpsc::Sender<RuntimeEvent>,
-) {
-    let backend: Arc<dyn PtyBackend> = pty;
-    let mut server = Server::from_runtime_parts(backend, inbox_receiver);
-    server.load_startup_config(None);
-    server
-        .bootstrap_session(
-            session_id,
-            "quiet-lake".to_string(),
-            ATTACH_VIEWPORT_SIZE,
-            SystemTime::now(),
-            None,
-        )
-        .expect("the session is seeded");
-
-    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_sender, None)
-        .expect("the control socket binds");
-    server.attach_ipc_server(ipc_server);
-
-    run_session_event_loop(&mut server);
-    server.shutdown();
-}
-
-/// Serve the runtime inbox until the session ends: block until an event is due
-/// (bounded by the next render deadline), apply it and any others already
-/// queued, hand a fresh snapshot to any subscriber that lost a critical event,
-/// push every attached client its frame when a render is due, and stop once the
-/// inbox loses its last sender, a hangup arrives, a quit is applied, or no pane
-/// is left running.
-fn run_session_event_loop(server: &mut Server) {
-    loop {
-        let now = Instant::now();
-        let pending_event = match server.compute_next_render_wakeup(now) {
-            Some(timeout_duration) => {
-                match server.get_inbox_receiver().recv_timeout(timeout_duration) {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            None => match server.get_inbox_receiver().recv() {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(_) => break,
-            },
-        };
-        let mut is_quit_requested = false;
-        if let Some(runtime_event) = pending_event {
-            is_quit_requested |= server.handle_runtime_event(runtime_event).is_break();
-        }
-        while let Ok(runtime_event) = server.get_inbox_receiver().try_recv() {
-            is_quit_requested |= server.handle_runtime_event(runtime_event).is_break();
-        }
-        server.resync_lagged();
-        if server.poll_render(Instant::now()) {
-            server.push_frames();
-        }
-        if is_quit_requested || server.is_quit_requested() || !server.has_active_panes() {
-            break;
-        }
-    }
-}
-
-/// A client attached over the control socket, with its event stream drained by
-/// its own thread into a queue this thread polls.
-struct AttachedClient {
-    /// The client the session minted for this connection.
-    client_id: ClientId,
-    /// Every frame the session wrote that says something about its structure,
-    /// in arrival order. A painted frame carries no structure change, so the
-    /// reader passes it over.
-    events: mpsc::Receiver<SessionEvent>,
-}
-
-/// The endpoint file the session server advertises: the socket address and the
-/// token a Hello presents.
-fn get_session_endpoint(session: &RunningSession) -> EndpointFile {
-    EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-        session.runtime_directory.path(),
-        session.session_id,
-    ))
-    .expect("the session server advertises its socket")
-}
-
-/// Open a connection to the socket `endpoint` advertises, with its handshake
-/// already done.
-fn open_session_connection(endpoint: &EndpointFile) -> Connection {
-    let mut connection = Connection::connect(&endpoint.socket_address).expect("the socket answers");
-    let hello = IpcRequest {
-        request_id: 1,
-        request_kind: IpcRequestKind::Hello {
-            minimum_protocol_version: MIN_PROTOCOL_VERSION,
-            maximum_protocol_version: PROTOCOL_VERSION,
-            connection_token: endpoint.connection_token.clone(),
-            is_remote: false,
-        },
-    };
-    connection.send(&hello).expect("the server reads the Hello");
-    let ipc_response: IpcResponse = connection.recv().expect("the server answers the Hello");
-    match ipc_response.answer_result {
-        IpcResult::Hello { .. } => connection,
-        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
-    }
-}
-
-/// Attach to `session` the way the attached client does — Hello then Attach on
-/// one connection — and hand back the client the server minted plus its event
-/// stream.
-///
-/// The connection is moved into the reader thread, which ends when the session
-/// stops serving and closes it.
-fn attach_test_client(session: &RunningSession) -> AttachedClient {
-    let mut connection = open_session_connection(&get_session_endpoint(session));
-    let request = IpcRequest {
-        request_id: 2,
-        request_kind: IpcRequestKind::Attach {
-            viewport_size: ATTACH_VIEWPORT_SIZE,
-            resume_client_id: None,
-            resume_token: None,
-            pane_area: None,
-            graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-            cell_size: None,
-        },
-    };
-    connection
-        .send(&request)
-        .expect("the server reads the attach");
-    let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
-    assert_eq!(ipc_response.request_id, Some(2));
-    let IpcResult::Attached {
-        client_id,
-        session_id,
-        ..
-    } = ipc_response.answer_result
-    else {
-        panic!(
-            "expected an attach reply, got {:?}",
-            ipc_response.answer_result
-        );
-    };
-    assert_eq!(session_id, session.session_id);
-
-    let (events_sender, events) = mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(event) = connection.recv::<SessionEvent>() {
-            if matches!(event, SessionEvent::Painted { .. }) {
-                continue;
-            }
-            if events_sender.send(event).is_err() {
-                break;
-            }
-        }
-    });
-
-    AttachedClient { client_id, events }
-}
 
 /// The next `event_count` frames the attached client is told about the session's
 /// structure, in arrival order. Fails the test once [`WAIT_DURATION`] has passed
@@ -341,14 +58,14 @@ fn receive_session_events(client: &AttachedClient, event_count: usize) -> Vec<Se
     (0..event_count)
         .map(|_| {
             client
-                .events
+                .session_events
                 .recv_timeout(WAIT_DURATION)
                 .expect("the session reports the change")
         })
         .collect()
 }
 
-/// Run one `koshi` invocation typed inside `pane` by `client`, and hand back
+/// Run one `koshi` invocation typed inside `pane_id` by `client`, and hand back
 /// what the session answered and the exit code the binary reports for that
 /// answer.
 ///
@@ -358,18 +75,18 @@ fn receive_session_events(client: &AttachedClient, event_count: usize) -> Vec<Se
 fn run_cli_invocation(
     session: &RunningSession,
     client: &AttachedClient,
-    pane: PaneId,
+    pane_id: PaneId,
     argv: &[&str],
 ) -> (CommandResult, CliExitCode) {
-    let cli = Cli::try_parse_from(argv).expect("the argv parses");
-    let (_, action_command) = cli
+    let parsed_cli = Cli::try_parse_from(argv).expect("the argv parses");
+    let (_, action_command) = parsed_cli
         .command
         .as_ref()
         .expect("the argv carries a subcommand")
         .build_action_command(&ResolvedTargets::default(), Direction::Right)
         .expect("the subcommand is an action verb");
 
-    let command_result = submit_session_command(session, client, pane, action_command);
+    let command_result = submit_session_command(session, client, pane_id, action_command);
     let exit_code = match report_command_result(&command_result) {
         Ok(()) => CliExitCode::Success,
         Err(command_error) => CliExitCode::from(&command_error),
@@ -389,14 +106,18 @@ fn run_external_cli_invocation(
     session: &RunningSession,
     argv: &[&str],
 ) -> (CommandResult, CliExitCode) {
-    let cli = Cli::try_parse_from(argv).expect("the argv parses");
-    let parsed_command = cli.command.as_ref().expect("the argv carries a subcommand");
+    let parsed_cli = Cli::try_parse_from(argv).expect("the argv parses");
+    let parsed_command = parsed_cli
+        .command
+        .as_ref()
+        .expect("the argv carries a subcommand");
     let (_, action_command) = parsed_command
         .build_action_command(&ResolvedTargets::default(), Direction::Right)
         .expect("the subcommand is an action verb");
 
     let command_result = koshi_link::ipc_client::submit_external_command_via_runtime_directory(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         parsed_command.get_source_client_id(),
         action_command,
@@ -410,32 +131,32 @@ fn run_external_cli_invocation(
 }
 
 /// Submit `command` to `session` over its control socket, enveloped the way the
-/// CLI running inside `pane` envelopes it, and hand back the dispatcher's
+/// CLI running inside `pane_id` envelopes it, and hand back the dispatcher's
 /// result.
 fn submit_session_command(
     session: &RunningSession,
     client: &AttachedClient,
-    pane: PaneId,
+    pane_id: PaneId,
     command: Command,
 ) -> CommandResult {
-    let session_endpoint = get_session_endpoint(session);
+    let session_endpoint = session.load_session_endpoint();
     let mut connection = open_session_connection(&session_endpoint);
-    let envelope = CommandEnvelope::from_parts(
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_in_session_cli(
             session.session_id,
             Some(client.client_id),
-            pane,
+            pane_id,
             PathBuf::from(session_endpoint.socket_address),
         ),
         command,
     );
-    let request = IpcRequest {
+    let submit_request = IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
     };
     connection
-        .send(&request)
+        .send(&submit_request)
         .expect("the server reads the command");
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the command");
     assert_eq!(ipc_response.request_id, Some(2));
@@ -457,14 +178,6 @@ fn report_command_result(command_result: &CommandResult) -> Result<(), CliError>
     }
 }
 
-/// The events an applied result carries, or the rejection that carried none.
-fn list_emitted_events(command_result: &CommandResult) -> &[Event] {
-    match command_result {
-        CommandResult::Ok { emitted_events, .. } => emitted_events,
-        unexpected_result => panic!("expected an applied command, got {unexpected_result:?}"),
-    }
-}
-
 /// The tab the session's only tab is, read from its own report.
 fn get_only_tab_id(session: &RunningSession) -> TabId {
     let session_overview = session.fetch_session_overview();
@@ -476,25 +189,25 @@ fn get_only_tab_id(session: &RunningSession) -> TabId {
 /// solved for that pane.
 fn get_last_pane_size(session: &RunningSession, pane_id: PaneId) -> PtySize {
     *session
-        .pty
+        .fake_pty_backend
         .list_pane_sizes(pane_id)
         .expect("the pane was spawned")
         .last()
         .expect("the spawn recorded the pane's first size")
 }
 
-/// The kills the backend recorded for `pane`, waited for. A closed pane's
-/// child is killed on its own thread, so the record lands after the command is
-/// answered.
+/// The kills the backend recorded for `pane_id`, read again until one is
+/// there. A closed pane's child is killed on a thread of its own, and the
+/// record can land after the command is answered.
 fn wait_for_pane_kill_policies(session: &RunningSession, pane_id: PaneId) -> Vec<KillPolicy> {
     let deadline = Instant::now() + WAIT_DURATION;
     loop {
-        let kills = session
-            .pty
+        let pane_kill_policies = session
+            .fake_pty_backend
             .list_pane_kill_policies(pane_id)
             .expect("the pane was spawned");
-        if !kills.is_empty() {
-            return kills;
+        if !pane_kill_policies.is_empty() {
+            return pane_kill_policies;
         }
         assert!(
             Instant::now() < deadline,
@@ -504,7 +217,7 @@ fn wait_for_pane_kill_policies(session: &RunningSession, pane_id: PaneId) -> Vec
     }
 }
 
-/// The lock mode the session holds for `client`.
+/// The lock mode the session holds for `client_id`.
 fn get_client_lock_mode(session: &RunningSession, client_id: ClientId) -> LockMode {
     let session_overview = session.fetch_session_overview();
     let matching_client = session_overview
@@ -522,15 +235,16 @@ fn list_tab_layout_solves(
     session: &RunningSession,
     tab_id: TabId,
 ) -> Vec<koshi_ipc::layout::SolvedTab> {
-    let layout = koshi_link::ipc_client::fetch_layout(
+    let session_layout = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         None,
     )
     .expect("the session describes its layout");
-    assert_eq!(layout.tabs.len(), 1);
-    assert_eq!(layout.tabs[0].tab_id, tab_id);
-    layout.tabs[0].solved_tabs.clone()
+    assert_eq!(session_layout.tabs.len(), 1);
+    assert_eq!(session_layout.tabs[0].tab_id, tab_id);
+    session_layout.tabs[0].solved_tabs.clone()
 }
 
 /// The mode `client_id` uses for the tab, taken from `layout_solves`.
@@ -545,8 +259,8 @@ fn get_client_layout_mode(
         .layout_mode
 }
 
-/// Split `pane_id` in two and hand back the pane the split created, so a test
-/// that needs a neighbor starts from a two-pane tab.
+/// Run `koshi new-pane --direction right` in `pane_id` as `client`, and hand
+/// back the pane it created. The tab then holds the two panes side by side.
 fn build_neighboring_pane(
     session: &RunningSession,
     client: &AttachedClient,
@@ -696,8 +410,8 @@ fn close_pane_over_the_socket_kills_the_child_and_removes_the_pane() {
     );
     assert_eq!(exit_code, CliExitCode::Success);
 
-    // No `--force`, so the pane's own close policy picks the kill: a graceful
-    // one carrying the standard window.
+    // With no `--force`, the pane's own close policy picks the kill: a
+    // graceful one carrying the standard window.
     assert_eq!(
         wait_for_pane_kill_policies(&session, created_pane_id),
         vec![KillPolicy::Graceful {
@@ -871,14 +585,15 @@ fn new_tab_with_a_client_flag_switches_that_client_onto_the_new_tab() {
     assert_eq!(session_overview.tabs[0].tab_id, first_tab_id);
     let new_tab_id = session_overview.tabs[1].tab_id;
 
-    let layout = koshi_link::ipc_client::fetch_layout(
+    let session_layout = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         None,
     )
     .expect("the session describes its layout");
     let get_active_tab_id = |client_id: ClientId| {
-        layout
+        session_layout
             .clients
             .iter()
             .find(|client_focus| client_focus.client_id == client_id)
@@ -965,33 +680,38 @@ fn a_fullscreen_command_naming_no_client_is_refused_and_zooms_nothing() {
 
 #[test]
 fn dump_layout_over_the_socket_describes_a_tab_no_client_is_viewing() {
-    // The session is seeded headless, so its tab has a tree and nothing to
+    // The session is seeded headless: its tab has a tree, and no viewport to
     // solve it against.
     let session = RunningSession::start_session();
     let root_pane_id = session.list_pane_ids()[0];
 
-    let layout = koshi_link::ipc_client::fetch_layout(
+    let session_layout = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         None,
     )
     .expect("the session describes its layout");
 
-    assert_eq!(layout.session_id, session.session_id);
-    assert_eq!(layout.session_name, "quiet-lake");
-    assert_eq!(layout.tabs.len(), 1);
-    assert_eq!(layout.tabs[0].tab_index, 0);
+    assert_eq!(session_layout.session_id, session.session_id);
+    assert_eq!(session_layout.session_name, "quiet-lake");
+    assert_eq!(session_layout.tabs.len(), 1);
+    assert_eq!(session_layout.tabs[0].tab_index, 0);
     assert_eq!(
-        layout.tabs[0].layout_tree,
+        session_layout.tabs[0].layout_tree,
         koshi_layout::tree::LayoutNode::Pane(root_pane_id)
     );
-    assert_eq!(layout.tabs[0].solved_tabs, Vec::new());
-    assert_eq!(layout.clients, Vec::new());
+    assert_eq!(session_layout.tabs[0].solved_tabs, Vec::new());
+    assert_eq!(session_layout.clients, Vec::new());
 
-    let rendered_output = koshi::output::render_layouts(&[layout], koshi::cli::OutputFormat::Table);
-    assert!(
-        rendered_output.contains("    no client views this tab\n"),
-        "{rendered_output}"
+    let expected_output = format!(
+        "session {} quiet-lake\n  tab {} {} index 0\n    tree\n      pane {root_pane_id}\n    \
+         no client views this tab\n  clients\n",
+        session.session_id, session_layout.tabs[0].tab_id, session_layout.tabs[0].tab_name
+    );
+    assert_eq!(
+        koshi::output::render_layouts(&[session_layout], koshi::cli::OutputFormat::Table),
+        expected_output
     );
 }
 
@@ -1001,15 +721,16 @@ fn dump_layout_over_the_socket_shows_the_attached_clients_solved_rectangles() {
     let client = attach_test_client(&session);
     let root_pane_id = session.list_pane_ids()[0];
 
-    let layout = koshi_link::ipc_client::fetch_layout(
+    let session_layout = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         None,
     )
     .expect("the session describes its layout");
 
-    assert_eq!(layout.tabs.len(), 1);
-    let solved_tabs = &layout.tabs[0].solved_tabs;
+    assert_eq!(session_layout.tabs.len(), 1);
+    let solved_tabs = &session_layout.tabs[0].solved_tabs;
     assert_eq!(solved_tabs.len(), 1);
     assert_eq!(solved_tabs[0].client_id, client.client_id);
     // The tab solves against the terminal minus its two chrome rows: an 80x24
@@ -1042,10 +763,10 @@ fn dump_layout_over_the_socket_shows_the_attached_clients_solved_rectangles() {
     assert!(!solved_tabs[0].is_every_pane_suppressed);
     assert_eq!(solved_tabs[0].stack_headers, Vec::new());
     assert_eq!(
-        layout.clients,
+        session_layout.clients,
         vec![koshi_ipc::layout::ClientFocus {
             client_id: client.client_id,
-            active_tab_id: layout.tabs[0].tab_id,
+            active_tab_id: session_layout.tabs[0].tab_id,
             focused_pane_id: Some(root_pane_id),
         }],
     );
@@ -1060,16 +781,17 @@ fn dump_layout_over_the_socket_narrowed_to_one_tab_describes_that_tab_alone() {
     assert_eq!(exit_code, CliExitCode::Success);
     let wanted_tab_id = session.fetch_session_overview().tabs[1].tab_id;
 
-    let layout = koshi_link::ipc_client::fetch_layout(
+    let session_layout = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         Some(wanted_tab_id),
     )
     .expect("the session describes its layout");
 
-    assert_eq!(layout.tabs.len(), 1);
-    assert_eq!(layout.tabs[0].tab_id, wanted_tab_id);
-    assert_eq!(layout.tabs[0].tab_index, 1);
+    assert_eq!(session_layout.tabs.len(), 1);
+    assert_eq!(session_layout.tabs[0].tab_id, wanted_tab_id);
+    assert_eq!(session_layout.tabs[0].tab_index, 1);
 }
 
 #[test]
@@ -1081,6 +803,7 @@ fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_reports_the_tab_missin
 
     let layout_error = koshi_link::ipc_client::fetch_layout(
         session.runtime_directory.path(),
+        None,
         session.session_id,
         Some(unknown_tab_id),
     )
@@ -1099,16 +822,20 @@ fn dump_layout_over_the_socket_narrowed_to_an_unknown_tab_reports_the_tab_missin
 #[test]
 fn dump_layout_against_a_session_that_is_not_running_reports_it_as_not_running() {
     let runtime_directory = build_test_runtime_directory();
-    let session = SessionId::new();
+    let missing_session_id = SessionId::new();
 
-    let session_error =
-        koshi_link::ipc_client::fetch_layout(runtime_directory.path(), session, None)
-            .expect_err("nothing advertises that session");
+    let session_error = koshi_link::ipc_client::fetch_layout(
+        runtime_directory.path(),
+        None,
+        missing_session_id,
+        None,
+    )
+    .expect_err("nothing advertises that session");
 
-    assert!(
-        matches!(&session_error, CliError::SessionNotFound { session_name } if *session_name == session.to_string()),
-        "expected SessionNotFound, got {session_error:?}",
-    );
+    let CliError::SessionNotFound { session_name } = session_error else {
+        panic!("expected SessionNotFound, got {session_error:?}");
+    };
+    assert_eq!(session_name, missing_session_id.to_string());
 }
 
 #[test]
@@ -1154,8 +881,8 @@ fn a_resize_with_no_neighbor_is_refused_and_reports_the_action_exit_code() {
     let client = attach_test_client(&session);
     let root_pane_id = session.list_pane_ids()[0];
 
-    // The session holds one pane, so neither border of it can move: nothing
-    // sits beside it to take the cells from.
+    // The session holds one pane: no pane sits beside it, and neither of its
+    // borders can move.
     let (command_result, exit_code) = run_cli_invocation(
         &session,
         &client,

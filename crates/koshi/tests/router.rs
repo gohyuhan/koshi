@@ -2,172 +2,50 @@
 //! router, it starts real session servers, and the tests speak the
 //! control-plane protocol to it over its own socket.
 //!
-//! Every test serves its own temporary runtime directory, so the routers here
-//! never meet the one a developer is running. The directory sits under a short
-//! base because a Unix socket path has an operating-system length cap that a
-//! deep temporary path would break.
-//!
-//! Every process a test starts is held in a guard that ends it when the test
-//! drops it, so a failed assertion leaves nothing running.
+//! Every test serves its own temporary runtime directory under a short base.
+//! Every router runs under its own temporary home, and so does every session
+//! server it starts. Every process a test starts is held in a guard that ends
+//! it when the test drops it.
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::SessionId;
-use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
+use koshi_ipc::endpoint::{compute_socket_address, EndpointFile, ServerProgramFile};
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload};
 use koshi_ipc::router::{
-    resolve_router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
-    SessionAddress, SessionSelector, MIN_ROUTER_PROTOCOL_VERSION, ROUTER_PROTOCOL_VERSION,
+    resolve_router_endpoint_path, resolve_router_program_file_path, RouterRequest,
+    RouterRequestKind, RouterResponse, RouterResult, SessionAddress, SessionSelector,
 };
 use koshi_ipc::transport::Connection;
 
 mod common;
 
-use common::{copy_koshi_binary, start_koshi_process, terminate_process};
+#[cfg(windows)]
+use common::RunningProcess;
+use common::{
+    build_no_such_session_result, build_short_test_directory, connect_to_router, copy_koshi_binary,
+    create_session, send_attach_lookup, send_router_request, start_router_from_binary,
+    start_router_process, terminate_process, wait_for_session_lookup_refusal, RunningSessions,
+    POLL_INTERVAL_DURATION, WAIT_DURATION,
+};
 use koshi_test_support::fixtures::build_test_runtime_directory;
 
-/// How long a poll waits for something a started process has to do before the
-/// test calls it a failure.
-const WAIT_DURATION: Duration = Duration::from_secs(20);
-
-/// How long a poll waits for the router to end once no session is left. It has
-/// to outlast the router's own idle window.
+/// How long a poll waits for the router to end once no session is left: 90
+/// seconds, longer than the router's own idle window.
 const ROUTER_EXIT_WAIT_DURATION: Duration = Duration::from_secs(90);
-
-/// How long a poll pauses between attempts.
-const ROUTER_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
-
-/// A router the test started. Dropping it ends that router.
-struct RunningRouter {
-    child_process: Child,
-}
-
-impl RunningRouter {
-    /// True once the router process has ended.
-    fn has_router_exited(&mut self) -> bool {
-        self.child_process
-            .try_wait()
-            .expect("the router's state can be read")
-            .is_some()
-    }
-}
-
-impl Drop for RunningRouter {
-    fn drop(&mut self) {
-        let _ = self.child_process.kill();
-        let _ = self.child_process.wait();
-    }
-}
-
-/// The session servers a test made a router start. Dropping it ends them, so a
-/// test that kills its router leaves no session server behind.
-struct RunningSessions {
-    session_server_process_ids: Vec<u32>,
-}
-
-impl Drop for RunningSessions {
-    fn drop(&mut self) {
-        for process_id in &self.session_server_process_ids {
-            terminate_process(*process_id);
-        }
-    }
-}
-
-/// A process the test did not start itself, held by its process id. Dropping
-/// it ends that process.
-#[cfg(windows)]
-struct RunningProcess {
-    process_id: u32,
-}
-
-#[cfg(windows)]
-impl Drop for RunningProcess {
-    fn drop(&mut self) {
-        terminate_process(self.process_id);
-    }
-}
-
-/// Start the `koshi` binary as the router serving `runtime_directory`.
-fn start_router_process(runtime_directory: &Path) -> RunningRouter {
-    start_router_from_binary(Path::new(env!("CARGO_BIN_EXE_koshi")), runtime_directory)
-}
-
-/// Start the binary at `binary_path` as the router serving `runtime_directory`.
-fn start_router_from_binary(binary_path: &Path, runtime_directory: &Path) -> RunningRouter {
-    let child_process = start_koshi_process(
-        Command::new(binary_path)
-            .arg("serve-router")
-            .arg("--runtime-dir")
-            .arg(runtime_directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
-    );
-    RunningRouter { child_process }
-}
-
-/// Open a connection to the router serving `runtime_directory`, with its handshake
-/// already done, retrying until one answers.
-fn connect_to_router(runtime_directory: &Path) -> Connection {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if let Some(connection) = try_connect_to_router(runtime_directory) {
-            return connection;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no router answered in {}",
-            runtime_directory.display()
-        );
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// One attempt at opening a router connection: read the endpoint file,
-/// connect, and send the Hello that opens the connection.
-///
-/// `None` means no router answered yet. A router that has just replaced
-/// another writes its own endpoint file a moment after it binds, so a Hello
-/// carrying the older file's token is refused; the next attempt reads the new
-/// file.
-fn try_connect_to_router(runtime_directory: &Path) -> Option<Connection> {
-    let endpoint =
-        EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory)).ok()?;
-    let mut connection = Connection::connect(&endpoint.socket_address).ok()?;
-    let hello = RouterRequest {
-        request_id: 1,
-        request_kind: RouterRequestKind::Hello {
-            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
-            connection_token: endpoint.connection_token,
-        },
-    };
-    connection.send(&hello).ok()?;
-    let router_response: RouterResponse = connection.recv().ok()?;
-    match router_response.answer_result {
-        RouterResult::Hello { .. } => Some(connection),
-        RouterResult::Error(_) => None,
-        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
-    }
-}
 
 /// The build version the running router reports in its Hello answer, or
 /// `None` when no router answers.
-fn get_router_hello_version(runtime_directory: &Path) -> Option<String> {
-    let endpoint =
+fn find_router_hello_version(runtime_directory: &Path) -> Option<String> {
+    let router_endpoint =
         EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory)).ok()?;
-    let mut connection = Connection::connect(&endpoint.socket_address).ok()?;
-    let hello = RouterRequest {
+    let mut connection = Connection::connect(&router_endpoint.socket_address).ok()?;
+    let hello_request = RouterRequest {
         request_id: 1,
-        request_kind: RouterRequestKind::Hello {
-            minimum_protocol_version: MIN_ROUTER_PROTOCOL_VERSION,
-            maximum_protocol_version: ROUTER_PROTOCOL_VERSION,
-            connection_token: endpoint.connection_token,
-        },
+        request_kind: RouterRequestKind::build_hello_request(router_endpoint.connection_token),
     };
-    connection.send(&hello).ok()?;
+    connection.send(&hello_request).ok()?;
     let router_response: RouterResponse = connection.recv().ok()?;
     match router_response.answer_result {
         RouterResult::Hello { build_version, .. } => Some(build_version),
@@ -175,138 +53,71 @@ fn get_router_hello_version(runtime_directory: &Path) -> Option<String> {
     }
 }
 
-/// Ask the router for `request_kind` on an open connection and hand back its answer.
-fn send_router_request(
-    connection: &mut Connection,
-    request_kind: RouterRequestKind,
-) -> RouterResult {
-    let router_request = RouterRequest {
-        request_id: 2,
-        request_kind,
-    };
-    connection
-        .send(&router_request)
-        .expect("the router reads the request");
-    let router_response: RouterResponse =
-        connection.recv().expect("the router answers the request");
-    assert_eq!(router_response.request_id, Some(2));
-    router_response.answer_result
+/// Assert a lookup of `created_session`'s id is answered with `created_session`
+/// whole: its id, name, address and process id.
+fn assert_router_finds_session(connection: &mut Connection, created_session: &SessionAddress) {
+    assert_eq!(
+        send_attach_lookup(
+            connection,
+            &SessionSelector::SessionId(created_session.session_id)
+        ),
+        RouterResult::Found(created_session.clone())
+    );
 }
 
-/// Ask the router for a new session and hand back where it listens.
-fn build_session(connection: &mut Connection) -> SessionAddress {
-    match send_router_request(
-        connection,
-        RouterRequestKind::CreateSession {
-            profile: None,
-            working_directory: None,
-            is_other_user_access_allowed: None,
-        },
-    ) {
-        RouterResult::Created(address) => address,
-        unexpected_result => panic!("creating a session was answered with {unexpected_result:?}"),
-    }
-}
-
-/// Look one session up, and hand back the answer.
-fn lookup_session_for_attach(
-    connection: &mut Connection,
-    session_selector: &SessionSelector,
-) -> RouterResult {
-    send_router_request(
-        connection,
-        RouterRequestKind::AttachLookup {
-            session_selector: session_selector.clone(),
-        },
-    )
-}
-
-/// Look one session up until the router refuses it, and hand back that
-/// refusal.
-fn wait_for_session_lookup_refusal(
-    connection: &mut Connection,
-    session_selector: &SessionSelector,
-) -> RouterResult {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        let lookup_result = lookup_session_for_attach(connection, session_selector);
-        if matches!(lookup_result, RouterResult::Error(_)) {
-            return lookup_result;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the session stayed in the router's list"
-        );
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// Assert the router lists exactly the session `created_session` names, and nothing
-/// else.
-fn assert_router_lists_only_session(connection: &mut Connection, created_session: &SessionAddress) {
-    match send_router_request(connection, RouterRequestKind::ListSessions) {
-        RouterResult::Sessions(sessions) => {
-            assert_eq!(sessions.len(), 1);
-            assert_eq!(sessions[0].session_id, created_session.session_id);
-            assert_eq!(sessions[0].session_name, created_session.session_name);
-        }
-        unexpected_result => panic!("listing the sessions was answered with {unexpected_result:?}"),
-    }
-}
-
-/// The endpoint file the router serving `runtime_directory` writes after a restart,
-/// waited for by the token it carries.
+/// Read the router endpoint file in `runtime_directory` every
+/// [`POLL_INTERVAL_DURATION`], and hand back the first one whose token differs
+/// from `endpoint_before_restart`'s. A router writes its endpoint file once its
+/// socket is bound, under a token of its own.
 ///
-/// A router writes its endpoint file once its socket is bound, so an answer
-/// here means the restarted router is ready for a connection. The token is
-/// generated per router, so one other than `endpoint_before_restart`'s belongs to the
-/// restarted one.
+/// # Panics
+/// When no such file reads within [`WAIT_DURATION`].
 fn wait_for_restarted_router_endpoint(
     runtime_directory: &Path,
     endpoint_before_restart: &EndpointFile,
 ) -> EndpointFile {
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
-        if let Ok(endpoint) =
+        if let Ok(advertised_endpoint) =
             EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory))
         {
-            if endpoint.connection_token.expose_secret()
+            if advertised_endpoint.connection_token.expose_secret()
                 != endpoint_before_restart.connection_token.expose_secret()
             {
-                return endpoint;
+                return advertised_endpoint;
             }
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "no router advertised itself after the restart"
         );
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
-}
-
-/// The refusal the router answers a lookup with when it holds no such
-/// session.
-fn build_no_such_session_result(session_id: SessionId) -> RouterResult {
-    RouterResult::Error(IpcErrorPayload {
-        code: IpcErrorCode::NotFound,
-        message: format!("no session {session_id} is running"),
-    })
 }
 
 #[test]
 fn a_created_session_is_registered_and_found_by_its_id_and_by_its_name() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    let _router = start_router_process(runtime_directory.path());
+    let _router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
     // The router picks the name and the id, and the session server binds the
     // address those two derive.
-    assert_eq!(created_session.session_name.split('-').next(), Some("S"));
+    let session_name_parts: Vec<&str> = created_session.session_name.split('-').collect();
+    assert_eq!(
+        session_name_parts.len(),
+        3,
+        "{}",
+        created_session.session_name
+    );
+    assert_eq!(session_name_parts[0], "S");
     assert_eq!(
         created_session.socket_address,
         compute_socket_address(runtime_directory.path(), created_session.session_id)
@@ -314,46 +125,54 @@ fn a_created_session_is_registered_and_found_by_its_id_and_by_its_name() {
 
     // The session server advertises the same address, under its own process
     // id — the one the router reported.
-    let endpoint = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
+    let session_endpoint = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
         runtime_directory.path(),
         created_session.session_id,
     ))
     .expect("the session server advertises its socket");
-    assert_eq!(endpoint.socket_address, created_session.socket_address);
-    assert_eq!(endpoint.process_id, created_session.process_id);
+    assert_eq!(
+        session_endpoint.socket_address,
+        created_session.socket_address
+    );
+    assert_eq!(session_endpoint.process_id, created_session.process_id);
 
-    let by_id = lookup_session_for_attach(
+    let lookup_by_id_result = send_attach_lookup(
         &mut connection,
         &SessionSelector::SessionId(created_session.session_id),
     );
-    assert_eq!(by_id, RouterResult::Found(created_session.clone()));
+    assert_eq!(
+        lookup_by_id_result,
+        RouterResult::Found(created_session.clone())
+    );
 
-    let by_name = lookup_session_for_attach(
+    let lookup_by_name_result = send_attach_lookup(
         &mut connection,
         &SessionSelector::SessionName(created_session.session_name.clone()),
     );
-    assert_eq!(by_name, RouterResult::Found(created_session));
+    assert_eq!(lookup_by_name_result, RouterResult::Found(created_session));
 }
 
 #[test]
 fn a_session_server_that_is_killed_leaves_the_list_and_takes_its_files_with_it() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    let _router = start_router_process(runtime_directory.path());
+    let _router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
     terminate_process(created_session.process_id);
 
-    let refused = wait_for_session_lookup_refusal(
+    let lookup_refusal = wait_for_session_lookup_refusal(
         &mut connection,
         &SessionSelector::SessionId(created_session.session_id),
     );
     assert_eq!(
-        refused,
+        lookup_refusal,
         build_no_such_session_result(created_session.session_id)
     );
 
@@ -368,12 +187,13 @@ fn a_session_server_that_is_killed_leaves_the_list_and_takes_its_files_with_it()
 
 #[test]
 fn a_restarted_router_rediscovers_a_session_server_that_outlived_it() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    let first_router = start_router_process(runtime_directory.path());
+    let first_router = start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
@@ -382,36 +202,47 @@ fn a_restarted_router_rediscovers_a_session_server_that_outlived_it() {
     drop(connection);
     drop(first_router);
 
-    let _second_router = start_router_process(runtime_directory.path());
+    let _second_router = start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
 
-    // The startup sweep read the session's name back from the session server
-    // and its process id back from the endpoint file, so the answer is the one
-    // the first router gave.
-    let lookup_result = lookup_session_for_attach(
+    // The startup sweep read the session's name from the session server and
+    // its process id from the endpoint file: the answer equals the one the
+    // first router gave.
+    let lookup_result = send_attach_lookup(
         &mut connection,
         &SessionSelector::SessionId(created_session.session_id),
     );
     assert_eq!(lookup_result, RouterResult::Found(created_session.clone()));
 
-    let overview = koshi_link::ipc_client::fetch_session_overview(
+    let session_overview = koshi_link::discovery::fetch_session_overview(
         runtime_directory.path(),
+        None,
         created_session.session_id,
+        None,
     )
     .expect("the session server describes itself");
-    assert_eq!(overview.session.session_id, created_session.session_id);
-    assert_eq!(overview.session.session_name, created_session.session_name);
+    assert_eq!(
+        session_overview.session.session_id,
+        created_session.session_id
+    );
+    assert_eq!(
+        session_overview.session.session_name,
+        created_session.session_name
+    );
 }
 
 #[test]
 fn two_routers_started_at_once_leave_exactly_one_running() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    let mut first_router_process = start_router_process(runtime_directory.path());
-    let mut second_router_process = start_router_process(runtime_directory.path());
+    let mut first_router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
+    let mut second_router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
 
     // One of the two takes the lock and binds; the other finds the lock held
     // and exits without binding anything.
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
         let running_router_count = usize::from(!first_router_process.has_router_exited())
             + usize::from(!second_router_process.has_router_exited());
@@ -419,41 +250,80 @@ fn two_routers_started_at_once_leave_exactly_one_running() {
             break;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "{running_router_count} of the two routers are running"
         );
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 
     // The one left is the router, and it serves the socket both were started
     // to serve.
     let mut connection = connect_to_router(runtime_directory.path());
+    let missing_session_id = SessionId::new();
     assert_eq!(
-        send_router_request(&mut connection, RouterRequestKind::ListSessions),
-        RouterResult::Sessions(Vec::new())
+        send_attach_lookup(
+            &mut connection,
+            &SessionSelector::SessionId(missing_session_id)
+        ),
+        build_no_such_session_result(missing_session_id)
+    );
+}
+
+#[test]
+fn a_list_sessions_request_is_refused_by_name_and_the_connection_keeps_serving() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_test_runtime_directory();
+    let _router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
+    let mut connection = connect_to_router(runtime_directory.path());
+
+    connection
+        .send(&serde_json::json!({ "request_id": 2, "request_kind": "ListSessions" }))
+        .expect("the router reads the request");
+    let router_response: RouterResponse =
+        connection.recv().expect("the router answers the request");
+    assert_eq!(
+        router_response,
+        RouterResponse {
+            request_id: Some(2),
+            answer_result: RouterResult::Error(IpcErrorPayload {
+                code: IpcErrorCode::UnsupportedKind,
+                message: "this router has no request kind named ListSessions".to_string(),
+            }),
+        }
+    );
+
+    let missing_session_id = SessionId::new();
+    assert_eq!(
+        send_attach_lookup(
+            &mut connection,
+            &SessionSelector::SessionId(missing_session_id)
+        ),
+        build_no_such_session_result(missing_session_id)
     );
 }
 
 #[test]
 fn an_adopted_session_server_that_dies_is_dropped_by_the_next_lookup() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    let first_router = start_router_process(runtime_directory.path());
+    let first_router = start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
     drop(connection);
     drop(first_router);
 
-    // The second router adopted this session through its startup sweep, so it
-    // is not the session server's parent and no child exit reaches it.
-    let _second_router = start_router_process(runtime_directory.path());
+    // The second router adopted this session through its startup sweep: it is
+    // not the session server's parent, and no child exit reaches it.
+    let _second_router = start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
     assert_eq!(
-        lookup_session_for_attach(
+        send_attach_lookup(
             &mut connection,
             &SessionSelector::SessionId(created_session.session_id)
         ),
@@ -462,14 +332,14 @@ fn an_adopted_session_server_that_dies_is_dropped_by_the_next_lookup() {
 
     terminate_process(created_session.process_id);
 
-    // Nothing listens at the address any more, so the lookup that probes it
+    // Nothing listens at the address any more: the lookup that probes it
     // removes the session and the files it left behind.
-    let refused = wait_for_session_lookup_refusal(
+    let lookup_refusal = wait_for_session_lookup_refusal(
         &mut connection,
         &SessionSelector::SessionId(created_session.session_id),
     );
     assert_eq!(
-        refused,
+        lookup_refusal,
         build_no_such_session_result(created_session.session_id)
     );
 
@@ -484,45 +354,53 @@ fn an_adopted_session_server_that_dies_is_dropped_by_the_next_lookup() {
 
 #[test]
 fn the_router_ends_itself_once_no_session_is_left() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    let mut router = start_router_process(runtime_directory.path());
+    let mut router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
-    // The router spawned this session server, so it is the parent and the
-    // child's exit reaches it directly and empties the list.
+    // The router spawned this session server: the child's exit reaches the
+    // router directly and empties the list.
     terminate_process(created_session.process_id);
     drop(connection);
 
     // With the list empty the router waits one idle window for a request and
     // ends when none arrives.
-    let deadline = Instant::now() + ROUTER_EXIT_WAIT_DURATION;
-    while !router.has_router_exited() {
+    let exit_deadline = Instant::now() + ROUTER_EXIT_WAIT_DURATION;
+    while !router_process.has_router_exited() {
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < exit_deadline,
             "the router kept running with no session left"
         );
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 
     assert!(!resolve_router_endpoint_path(runtime_directory.path()).exists());
+    assert!(!resolve_router_program_file_path(runtime_directory.path()).exists());
 }
 
 #[test]
 fn a_restart_keeps_the_sessions_and_the_router_serving() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
-    // The binary on disk never changes here, so the restart starts the same
+    // The copied program file never changes here: the restart starts the same
     // program the router already runs.
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let mut router = start_router_from_binary(&binary_path, runtime_directory.path());
+    let mut router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
@@ -540,38 +418,58 @@ fn a_restart_keeps_the_sessions_and_the_router_serving() {
         wait_for_restarted_router_endpoint(runtime_directory.path(), &endpoint_before_restart);
     let mut connection = connect_to_router(runtime_directory.path());
 
-    // The restarted router rebuilt its list from the endpoint files, so the
+    // The restarted router rebuilt its list from the endpoint files: the
     // session started before the restart is still registered.
-    assert_router_lists_only_session(&mut connection, &created_session);
+    assert_router_finds_session(&mut connection, &created_session);
 
     // The restarted router reports the build version of the binary it now
     // runs — the fact `koshi update` reads to confirm a restart.
     assert_eq!(
-        get_router_hello_version(runtime_directory.path()),
+        find_router_hello_version(runtime_directory.path()),
         Some(env!("CARGO_PKG_VERSION").to_string())
+    );
+
+    // The restarted router's program file names its process, its version,
+    // and the binary it restarts into.
+    let restarted_program_file = ServerProgramFile::load_from_path(
+        &resolve_router_program_file_path(runtime_directory.path()),
+    )
+    .expect("the program file reads")
+    .expect("the restarted router writes its program file");
+    assert_eq!(
+        (
+            restarted_program_file.process_id,
+            restarted_program_file.build_version.as_str(),
+        ),
+        (restarted_endpoint.process_id, env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        std::fs::canonicalize(&restarted_program_file.program_path)
+            .expect("the program path names a file"),
+        std::fs::canonicalize(&binary_path).expect("the copied binary resolves")
     );
 
     #[cfg(unix)]
     {
-        // The restart replaced this process's running image, so the router
-        // still runs under the process id it started with.
-        assert!(!router.has_router_exited());
+        // The restart replaced this process's running image: the router still
+        // runs under the process id it started with.
+        assert!(!router_process.has_router_exited());
         assert_eq!(
             restarted_endpoint.process_id,
             endpoint_before_restart.process_id
         );
     }
     #[cfg(windows)]
-    let _restarted = {
+    let _restarted_router_process = {
         // The restart handed over to a new process, which took the lock the
         // old one released as it exited.
-        let deadline = Instant::now() + WAIT_DURATION;
-        while !router.has_router_exited() {
+        let handoff_deadline = Instant::now() + WAIT_DURATION;
+        while !router_process.has_router_exited() {
             assert!(
-                Instant::now() < deadline,
+                Instant::now() < handoff_deadline,
                 "the router that handed over kept running"
             );
-            std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
+            std::thread::sleep(POLL_INTERVAL_DURATION);
         }
         assert_ne!(
             restarted_endpoint.process_id,
@@ -582,16 +480,20 @@ fn a_restart_keeps_the_sessions_and_the_router_serving() {
         }
     };
 
-    // The restarted router holds the lock, so a router started beside it
-    // binds nothing and exits.
-    let mut rival = start_router_from_binary(&binary_path, runtime_directory.path());
-    let deadline = Instant::now() + WAIT_DURATION;
-    while !rival.has_router_exited() {
+    // The restarted router holds the lock: a router started beside it binds
+    // nothing and exits.
+    let mut rival_router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
+    let rival_exit_deadline = Instant::now() + WAIT_DURATION;
+    while !rival_router_process.has_router_exited() {
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < rival_exit_deadline,
             "a second router kept running beside the restarted one"
         );
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
     assert_eq!(
         EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory.path()))
@@ -603,13 +505,18 @@ fn a_restart_keeps_the_sessions_and_the_router_serving() {
 
 #[test]
 fn a_restart_with_the_binary_gone_is_refused_and_the_old_router_keeps_serving() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let mut router = start_router_from_binary(&binary_path, runtime_directory.path());
+    let mut router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
@@ -623,7 +530,7 @@ fn a_restart_with_the_binary_gone_is_refused_and_the_old_router_keeps_serving() 
     assert_eq!(
         send_router_request(&mut connection, RouterRequestKind::Restart),
         RouterResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
+            code: IpcErrorCode::RequestFailed,
             message: format!(
                 "the binary at {} could not be read: {missing_binary_error}",
                 binary_path.display()
@@ -633,29 +540,32 @@ fn a_restart_with_the_binary_gone_is_refused_and_the_old_router_keeps_serving() 
 
     // Nothing was torn down for the refused restart: the connection that
     // asked for it still serves, and the router still runs.
-    assert_router_lists_only_session(&mut connection, &created_session);
-    assert!(!router.has_router_exited());
+    assert_router_finds_session(&mut connection, &created_session);
+    assert!(!router_process.has_router_exited());
 
     std::fs::rename(&moved_binary_path, &binary_path).expect("the binary is put back");
 }
 
-/// A restart runs `exec`, which only Unix has. On Windows the restart starts a
-/// new process instead, so no failed restart can leave this router's signal
-/// handling changed.
-///
-/// The binary is replaced by a directory, which carries execute permission
-/// and so passes the check before the exec; `execvp` of a directory then
-/// fails with `EACCES`, because the process file is not an ordinary file.
+/// Unix only: the restart runs `execvp`. The program file is replaced by a
+/// directory, which carries execute permission and passes the check before
+/// the exec; `execvp` of a directory fails with `EACCES`. The router serves
+/// on, and five clients that hang up before their answers are written leave
+/// it serving.
 #[cfg(unix)]
 #[test]
 fn a_failed_restart_leaves_the_router_serving_hung_up_clients() {
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let mut router = start_router_from_binary(&binary_path, runtime_directory.path());
+    let mut router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
@@ -668,50 +578,61 @@ fn a_failed_restart_leaves_the_router_serving_hung_up_clients() {
     );
     drop(connection);
 
-    // A listing is answered by the dispatcher, and the dispatcher reads events
+    // A lookup is answered by the dispatcher, and the dispatcher reads events
     // again only once the exec it ended for has returned. The answer is
     // therefore from the resumed router, the one the writes below reach.
     let mut connection = connect_to_router(runtime_directory.path());
-    assert_router_lists_only_session(&mut connection, &created_session);
+    assert_router_finds_session(&mut connection, &created_session);
 
-    // The exec failed, so the endpoint file is the one this router wrote when
-    // it bound.
-    let endpoint =
+    // The exec failed: the endpoint file is the one this router wrote when it
+    // bound.
+    let router_endpoint_file =
         EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory.path()))
             .expect("the router still advertises the socket it bound");
     for _ in 0..5 {
-        let mut hangs_up =
-            Connection::connect(&endpoint.socket_address).expect("the router accepts a connection");
-        let hello = RouterRequest {
+        let mut hanging_up_connection = Connection::connect(&router_endpoint_file.socket_address)
+            .expect("the router accepts a connection");
+        let hello_request = RouterRequest {
             request_id: 1,
-            request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token.clone()),
+            request_kind: RouterRequestKind::build_hello_request(
+                router_endpoint_file.connection_token.clone(),
+            ),
         };
-        let listing = RouterRequest {
+        let lookup_request = RouterRequest {
             request_id: 2,
-            request_kind: RouterRequestKind::ListSessions,
+            request_kind: RouterRequestKind::AttachLookup {
+                session_selector: SessionSelector::SessionId(created_session.session_id),
+            },
         };
-        hangs_up.send(&hello).expect("the router reads the Hello");
-        hangs_up
-            .send(&listing)
-            .expect("the router reads the listing request");
+        hanging_up_connection
+            .send(&hello_request)
+            .expect("the router reads the Hello");
+        hanging_up_connection
+            .send(&lookup_request)
+            .expect("the router reads the lookup request");
         // Both answers are written into a socket whose peer has gone.
-        drop(hangs_up);
-        std::thread::sleep(ROUTER_POLL_INTERVAL_DURATION);
+        drop(hanging_up_connection);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 
-    assert!(!router.has_router_exited());
+    assert!(!router_process.has_router_exited());
 
     let mut connection = connect_to_router(runtime_directory.path());
-    assert_router_lists_only_session(&mut connection, &created_session);
+    assert_router_finds_session(&mut connection, &created_session);
 }
 
 #[test]
-fn a_restart_with_no_session_registered_comes_back_serving_an_empty_list() {
+fn a_restart_with_no_session_registered_comes_back_answering_lookups() {
     // With no session running the dispatcher is inside its idle window, and a
     // delivered restart reply has to end that wait too.
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let _router = start_router_from_binary(&binary_path, runtime_directory.path());
+    let _router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
     let mut connection = connect_to_router(runtime_directory.path());
 
     let endpoint_before_restart =
@@ -727,20 +648,24 @@ fn a_restart_with_no_session_registered_comes_back_serving_an_empty_list() {
     let restarted_endpoint =
         wait_for_restarted_router_endpoint(runtime_directory.path(), &endpoint_before_restart);
     #[cfg(windows)]
-    let _restarted = RunningProcess {
+    let _restarted_router_process = RunningProcess {
         process_id: restarted_endpoint.process_id,
     };
     let mut connection = connect_to_router(runtime_directory.path());
 
-    // The restarted router took back the address the old one served, so a
-    // client finds it where it found the old one.
+    // The restarted router took back the address the old one served: a client
+    // finds it where it found the old one.
     assert_eq!(
         restarted_endpoint.socket_address,
         endpoint_before_restart.socket_address
     );
+    let missing_session_id = SessionId::new();
     assert_eq!(
-        send_router_request(&mut connection, RouterRequestKind::ListSessions),
-        RouterResult::Sessions(Vec::new())
+        send_attach_lookup(
+            &mut connection,
+            &SessionSelector::SessionId(missing_session_id)
+        ),
+        build_no_such_session_result(missing_session_id)
     );
 }
 
@@ -748,13 +673,18 @@ fn a_restart_with_no_session_registered_comes_back_serving_an_empty_list() {
 fn a_router_that_restarted_restarts_again() {
     // The restarted router is a router in full: it holds the lock, serves the
     // socket, and answers a second restart the same way.
+    let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let _router = start_router_from_binary(&binary_path, runtime_directory.path());
+    let _router_process = start_router_from_binary(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+    );
     let mut connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut connection);
-    let _sessions = RunningSessions {
+    let created_session = create_session(&mut connection);
+    let _session_processes = RunningSessions {
         session_server_process_ids: vec![created_session.process_id],
     };
 
@@ -788,7 +718,7 @@ fn a_router_that_restarted_restarts_again() {
         process_id: second_restart_endpoint.process_id,
     };
     #[cfg(unix)]
-    // Both restarts replaced the running image, so the process id the router
+    // Both restarts replaced the running image: the process id the router
     // started with is still the one serving.
     assert_eq!(
         second_restart_endpoint.process_id,
@@ -797,5 +727,5 @@ fn a_router_that_restarted_restarts_again() {
     let mut connection = connect_to_router(runtime_directory.path());
 
     // The session started before either restart is still registered.
-    assert_router_lists_only_session(&mut connection, &created_session);
+    assert_router_finds_session(&mut connection, &created_session);
 }

@@ -104,8 +104,9 @@ pub enum MouseAnswer {
     /// fewer than asked for when the border hit a wall. Consumed by
     /// `Client::note_resize_applied`.
     ///
-    /// `pane_id`, `border_side` and `resize_step` repeat the move this answers,
-    /// so a round carrying several border moves is read back move by move.
+    /// `pane_id`, `border_side` and `resize_step` repeat the move this answers.
+    /// A round carrying several border moves gets one `Resized` per move, in the
+    /// order the moves ran.
     Resized {
         /// The pane whose border the move was asked for.
         pane_id: PaneId,

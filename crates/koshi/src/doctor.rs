@@ -16,10 +16,12 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use koshi_core::process::SpawnSpec;
+use koshi_core::text::format_counted_noun;
 use koshi_ipc::remote_tokens::TokenStore;
 use serde::Serialize;
 
@@ -206,7 +208,7 @@ pub struct DoctorContext {
     /// `koshi.kdl`'s `allow-other-users`.
     pub is_other_user_access_allowed: bool,
     /// `koshi.kdl`'s `remote-listen` address, or `None` when it names none.
-    pub remote_listen: Option<String>,
+    pub remote_listen_address: Option<SocketAddr>,
     /// `koshi.kdl`'s `logging.enabled`.
     pub is_logging_enabled: bool,
     /// How many remote access grants still stand, or the message naming why
@@ -227,7 +229,8 @@ impl DoctorContext {
         let (runtime_directory, runtime_directory_rule) =
             koshi_paths::resolve_runtime_directory_with_rule().unzip();
         let runtime_directory_mode = runtime_directory.as_deref().and_then(read_directory_mode);
-        let server_config = koshi_link::config::load_current_server_config();
+        let server_config =
+            koshi_link::config::load_current_server_config(config_directory.as_deref());
         let shared_sessions_directory = server_config
             .shared_sessions_directory
             .clone()
@@ -275,7 +278,7 @@ impl DoctorContext {
                 .and_then(|environment_value| environment_value.into_string().ok())
                 .filter(|environment_value| !environment_value.is_empty()),
             is_other_user_access_allowed: server_config.should_allow_other_users,
-            remote_listen: server_config.remote_listen,
+            remote_listen_address: server_config.remote_listen_address,
             is_logging_enabled: server_config.logging.is_enabled,
             standing_grant_count,
             router_connections,
@@ -340,7 +343,7 @@ fn build_failure_outcome_from_check_rows(check_rows: &[DoctorCheckRow]) -> Optio
     Some(CliError::Runtime {
         detail: format!(
             "{} failed",
-            format_counted_noun(failed_check_count, "check")
+            format_counted_noun(failed_check_count, "check", "checks")
         ),
     })
 }
@@ -364,7 +367,11 @@ fn check_config(doctor_context: &DoctorContext) -> DoctorOutcome {
     }
     DoctorOutcome::build_success_outcome(format!(
         "{} validated",
-        format_counted_noun(config_report.config_report_lines.len(), "config file")
+        format_counted_noun(
+            config_report.config_report_lines.len(),
+            "config file",
+            "config files"
+        )
     ))
 }
 
@@ -451,15 +458,28 @@ fn check_router(doctor_context: &DoctorContext) -> DoctorOutcome {
         }
         RemoteConnections::OlderBuild => DoctorOutcome::build_warning_outcome(
             "the running router is an older koshi build".to_string(),
-            "end every koshi process on this machine and start one again",
+            "run: koshi restart-servers",
         ),
         RemoteConnections::NoAnswer {
             error_detail: router_error_detail,
-        } => DoctorOutcome::build_failure_outcome(
-            "a router is listening and did not answer".to_string(),
-            "end every koshi process on this machine and start one again",
-        )
-        .with_detail(router_error_detail.clone()),
+            router_process_id,
+        } => {
+            let router_ending_step = match router_process_id {
+                Some(router_process_id) if cfg!(windows) => {
+                    format!("end the router with: taskkill /PID {router_process_id} /F")
+                }
+                Some(router_process_id) => format!("end the router with: kill {router_process_id}"),
+                None => "end the koshi router process".to_string(),
+            };
+            DoctorOutcome::build_failure_outcome(
+                "a router is listening and did not answer".to_string(),
+                &format!(
+                    "{router_ending_step}; every session keeps running, and the next koshi \
+                     command starts a router"
+                ),
+            )
+            .with_detail(router_error_detail.clone())
+        }
     }
 }
 
@@ -545,7 +565,7 @@ fn check_session_directory(doctor_context: &DoctorContext) -> DoctorOutcome {
 }
 
 fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
-    let remote_listen_description = match doctor_context.remote_listen.as_deref() {
+    let remote_listen_description = match doctor_context.remote_listen_address {
         Some(remote_listen_address) => {
             format!("koshi.kdl names the remote listen address {remote_listen_address}")
         }
@@ -554,7 +574,7 @@ fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
     match &doctor_context.standing_grant_count {
         Ok(standing_grant_count) => DoctorOutcome::build_success_outcome(format!(
             "{remote_listen_description}, and this machine holds {}",
-            format_counted_noun(*standing_grant_count, "standing grant")
+            format_counted_noun(*standing_grant_count, "standing grant", "standing grants")
         )),
         Err(grant_read_error) => DoctorOutcome::build_warning_outcome(
             format!(
@@ -567,15 +587,16 @@ fn check_remote_access(doctor_context: &DoctorContext) -> DoctorOutcome {
 
 fn check_remote_connections(doctor_context: &DoctorContext) -> DoctorOutcome {
     match &doctor_context.router_connections {
-        RemoteConnections::Answered(Some(remote_connection_count)) => {
+        RemoteConnections::Answered(remote_connection_count) => {
             DoctorOutcome::build_success_outcome(format!(
                 "this machine holds {} from another machine",
-                format_counted_noun(*remote_connection_count, "open connection")
+                format_counted_noun(
+                    *remote_connection_count,
+                    "open connection",
+                    "open connections"
+                )
             ))
         }
-        RemoteConnections::Answered(None) => DoctorOutcome::build_success_outcome(
-            "the running router reports no count, so this is not known".to_string(),
-        ),
         RemoteConnections::NotRunning => DoctorOutcome::build_success_outcome(
             "no koshi is running, so nothing from another machine is connected".to_string(),
         ),
@@ -834,16 +855,6 @@ fn build_no_home_directory_outcome(directory_kind: &str) -> DoctorOutcome {
         ),
         "give this user a home directory",
     )
-}
-
-/// `quantity` and `singular_noun`, with an `s` on the noun when `quantity` is not 1:
-/// `(2, "grant")` gives `"2 grants"`, `(1, "grant")` gives `"1 grant"`.
-fn format_counted_noun(quantity: usize, singular_noun: &str) -> String {
-    if quantity == 1 {
-        format!("{quantity} {singular_noun}")
-    } else {
-        format!("{quantity} {singular_noun}s")
-    }
 }
 
 #[cfg(test)]

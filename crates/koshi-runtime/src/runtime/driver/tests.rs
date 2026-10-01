@@ -398,7 +398,7 @@ fn a_restart_request_with_no_installed_check_is_refused_and_changes_nothing() {
     assert_eq!(control_flow, ControlFlow::Continue(()));
     assert_eq!(
         response_receiver.recv().expect("the reply"),
-        Err("this koshi cannot replace its own image, so it cannot restart".to_string())
+        Err(crate::server::RestartRefusal::ImageReplacementUnsupported)
     );
     assert!(!server.is_restart_requested);
 }

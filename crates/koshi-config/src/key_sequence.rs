@@ -14,10 +14,10 @@
 
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 
-use crate::key::{create_key_parse_error, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
+use crate::key::{build_key_parse_error, parse_chord, KeyParseError, KeyParseErrorKind, Leader};
 
 /// True when `word_fragment` holds a `-` between two alphanumeric characters.
-fn has_dash_form(word_fragment: &str) -> bool {
+fn has_dash_between_alphanumerics(word_fragment: &str) -> bool {
     let fragment_characters: Vec<char> = word_fragment.chars().collect();
     fragment_characters.windows(3).any(|character_window| {
         character_window[0].is_alphanumeric()
@@ -37,7 +37,7 @@ fn has_dash_form(word_fragment: &str) -> bool {
 fn is_dash_form(word_text: &str) -> bool {
     let mut remaining_word_text = word_text;
     while let Some(open_bracket_index) = remaining_word_text.find('<') {
-        if has_dash_form(&remaining_word_text[..open_bracket_index]) {
+        if has_dash_between_alphanumerics(&remaining_word_text[..open_bracket_index]) {
             return true;
         }
         let Some(close_bracket_relative_index) =
@@ -48,7 +48,7 @@ fn is_dash_form(word_text: &str) -> bool {
         remaining_word_text =
             &remaining_word_text[open_bracket_index + close_bracket_relative_index + 1..];
     }
-    has_dash_form(remaining_word_text)
+    has_dash_between_alphanumerics(remaining_word_text)
 }
 
 /// Splits the next key token off `remaining_sequence_text`: a `<...>` run
@@ -65,7 +65,7 @@ fn split_key_token(remaining_sequence_text: &str) -> Result<(&str, &str), KeyPar
             Some(closing_bracket_relative_index) => {
                 Ok(remaining_sequence_text.split_at(closing_bracket_relative_index + 2))
             }
-            None => Err(create_key_parse_error(
+            None => Err(build_key_parse_error(
                 remaining_sequence_text,
                 KeyParseErrorKind::UnclosedBracket,
             )),
@@ -101,7 +101,7 @@ fn merge_leader_modifier_flags(
         if merged_modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT)
             && !key_character.is_lowercase()
         {
-            return Err(create_key_parse_error(
+            return Err(build_key_parse_error(
                 key_token,
                 KeyParseErrorKind::ShiftOnNonLetter { key_character },
             ));
@@ -131,7 +131,7 @@ pub fn parse_sequence(
 ) -> Result<KeySequence, KeyParseError> {
     for sequence_word in sequence_text.split_whitespace() {
         if is_dash_form(sequence_word) {
-            return Err(create_key_parse_error(
+            return Err(build_key_parse_error(
                 sequence_word,
                 KeyParseErrorKind::UnbracketedMultiChar,
             ));
@@ -149,7 +149,7 @@ pub fn parse_sequence(
 
         if is_leader_token(key_token) {
             if !is_first_token {
-                return Err(create_key_parse_error(
+                return Err(build_key_parse_error(
                     key_token,
                     KeyParseErrorKind::LeaderNotFirst,
                 ));
@@ -194,20 +194,20 @@ pub fn parse_sequence(
 
     if !pending_leader_modifier_flags.is_empty() {
         // The whole sequence was `<leader>` with a modifier-run leader.
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             sequence_text,
             KeyParseErrorKind::DanglingLeaderModifiers,
         ));
     }
     if chords.is_empty() {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             sequence_text,
             KeyParseErrorKind::Empty,
         ));
     }
     let chord_count = chords.len();
     if chord_count > usize::from(maximum_chord_depth) {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             sequence_text,
             KeyParseErrorKind::SequenceTooLong {
                 chord_count,

@@ -85,6 +85,11 @@ pub trait Plane {
 pub enum RequestDisposition<RequestKind> {
     /// The request was answered here. Read the next one.
     Answered,
+    /// A Hello whose version range shares no version with this build's was
+    /// refused here as
+    /// [`UnsupportedVersion`](crate::protocol::IpcErrorCode::UnsupportedVersion),
+    /// and the refusal was written. Read the next one.
+    VersionRefused,
     /// A request the caller's own dispatch decides, already checked by the
     /// gate, with its `request_id` for the answer.
     Dispatch {
@@ -103,9 +108,10 @@ pub enum RequestDisposition<RequestKind> {
 /// and hand back what is left.
 ///
 /// The four decisions are the ones the module doc lists. What this function
-/// answers itself is [`RequestDisposition::Answered`]; what it cannot decide is
-/// [`RequestDisposition::Dispatch`]; what ends the connection is
-/// [`RequestDisposition::Stop`].
+/// answers itself is [`RequestDisposition::Answered`], or
+/// [`RequestDisposition::VersionRefused`] for a Hello refused for its version
+/// range; what it cannot decide is [`RequestDisposition::Dispatch`]; what ends
+/// the connection is [`RequestDisposition::Stop`].
 ///
 /// `is_admitted` is asked after a request decodes and before its answer is
 /// written: `false` ends the connection with nothing written for that
@@ -167,11 +173,17 @@ pub fn read_next_request<Protocol: Plane>(
     };
 
     if let Err(refusal) = gate.validate_request_kind(&request_kind) {
-        return send_answer::<Protocol>(
+        let is_version_refusal = refusal.code == IpcErrorCode::UnsupportedVersion;
+        return match send_answer::<Protocol>(
             connection,
             Some(request_id),
             Protocol::build_refusal_response(refusal),
-        );
+        ) {
+            RequestDisposition::Answered if is_version_refusal => {
+                RequestDisposition::VersionRefused
+            }
+            refusal_disposition => refusal_disposition,
+        };
     }
 
     if Protocol::Gate::is_hello(&request_kind) {

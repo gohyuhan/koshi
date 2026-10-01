@@ -9,6 +9,7 @@ base64.workspace = true
 getrandom.workspace = true
 interprocess.workspace = true
 koshi-core.workspace = true
+koshi-host.workspace = true
 koshi-layout.workspace = true
 koshi-storage.workspace = true
 rustls.workspace = true
@@ -23,11 +24,7 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 widestring.workspace = true
-windows-sys = { workspace = true, features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_System_Threading",
-] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_IO", "Win32_System_Threading"] }
 
 [dev-dependencies]
 rcgen.workspace = true

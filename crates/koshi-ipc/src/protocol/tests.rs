@@ -829,14 +829,14 @@ fn graphics_capabilities_default_and_native_detection_cover_each_protocol() {
 
 #[test]
 fn graphics_capabilities_ignore_unknown_fields_and_default_new_fields() {
-    let decoded_wire_message: GraphicsCapabilities = serde_json::from_value(json!({
+    let decoded_graphics_capabilities: GraphicsCapabilities = serde_json::from_value(json!({
         "supports_kitty": true,
         "vendor_extension": "ignored"
     }))
     .expect("unknown capability fields are ignored");
 
     assert_eq!(
-        decoded_wire_message,
+        decoded_graphics_capabilities,
         GraphicsCapabilities {
             supports_kitty: true,
             supports_iterm: false,
@@ -1086,7 +1086,7 @@ fn an_attach_request_naming_a_client_to_come_back_as_round_trips() {
 fn an_attach_request_written_without_the_resume_fields_decodes_as_no_claim() {
     // An attach written without `resume_client_id` and `resume_token` decodes with both
     // `None`.
-    let decoded_wire_message:IpcRequest = serde_json::from_str(
+    let decoded_wire_message: IpcRequest = serde_json::from_str(
         r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24}}}}"#,
     )
     .expect("an attach without the resume fields decodes");
@@ -1145,7 +1145,7 @@ fn an_attach_request_carrying_a_resume_token_keeps_the_secret_whole() {
 fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_no_token() {
     // An attach written with `resume_client_id` and without `resume_token` decodes with
     // `resume_token: None`.
-    let decoded_wire_message:IpcRequest = serde_json::from_str(
+    let decoded_wire_message: IpcRequest = serde_json::from_str(
         r#"{"request_id":4,"request_kind":{"Attach":{"viewport_size":{"column_count":80,"row_count":24},"resume_client_id":"00000000-0000-0000-0000-000000000001"}}}"#,
     )
     .expect("an attach without the resume token field decodes");
@@ -1172,7 +1172,7 @@ fn an_attach_request_written_without_a_resume_token_beside_a_resume_decodes_as_n
 #[test]
 fn an_attach_request_written_without_a_pane_area_decodes_as_none() {
     // An attach written without `pane_area` decodes with `pane_area: None`.
-    let decoded_wire_message:IpcRequest = serde_json::from_str(
+    let decoded_wire_message: IpcRequest = serde_json::from_str(
         r#"{"request_id":1,"request_kind":{"Attach":{"viewport_size":{"column_count":120,"row_count":40},"resume_client_id":null,"resume_token":null}}}"#,
     )
     .expect("an attach without the pane area field decodes");
@@ -1358,7 +1358,7 @@ fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
 fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
-    let decoded_wire_message:IpcResponse = serde_json::from_str(
+    let decoded_wire_message: IpcResponse = serde_json::from_str(
         r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[],"panes":[]}}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
@@ -1386,7 +1386,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
 fn an_attached_reply_written_without_a_pane_area_decodes_as_none() {
     // An attached answer written without `pane_area` decodes with
     // `pane_area: None`.
-    let decoded_wire_message:IpcResponse = serde_json::from_str(
+    let decoded_wire_message: IpcResponse = serde_json::from_str(
         r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","session_structure":{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","tabs":[{"tab_id":"00000000-0000-0000-0000-000000000001","tab_name":"editor","tab_index":0,"layout":{"Pane":"00000000-0000-0000-0000-000000000001"},"focus_mru":["00000000-0000-0000-0000-000000000001"]}]},"resume_token":null}}}"#,
     )
     .expect("an attached answer without the pane area field decodes");
@@ -1598,7 +1598,7 @@ fn a_resize_request_reporting_a_starving_pane_area_round_trips() {
 #[test]
 fn a_resize_request_written_without_a_pane_area_decodes_as_none() {
     // A resize written without `pane_area` decodes with `pane_area: None`.
-    let decoded_wire_message:IpcRequest = serde_json::from_str(
+    let decoded_wire_message: IpcRequest = serde_json::from_str(
         r#"{"request_id":6,"request_kind":{"Resize":{"viewport_size":{"column_count":120,"row_count":40}}}}"#,
     )
     .expect("a resize without the pane area field decodes");
@@ -1822,7 +1822,7 @@ fn a_hello_response_without_the_build_version_is_refused() {
 
 #[test]
 fn a_hello_answer_carrying_an_unknown_field_ignores_it() {
-    let decoded_wire_message:IpcResponse = serde_json::from_str(
+    let decoded_wire_message: IpcResponse = serde_json::from_str(
         r#"{"request_id":1,"answer_result":{"Hello":{"protocol_version":2,"build_version":"0.3.0","build_date":"2026-01-01"}}}"#,
     )
     .expect("a field this build does not know is ignored");
@@ -2108,6 +2108,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::UnsupportedVersion => "UnsupportedVersion",
         IpcErrorCode::UnsupportedKind => "UnsupportedKind",
         IpcErrorCode::MalformedRequest => "MalformedRequest",
+        IpcErrorCode::RequestFailed => "RequestFailed",
         IpcErrorCode::NotFound => "NotFound",
         IpcErrorCode::HelloRequired => "HelloRequired",
         IpcErrorCode::OtherUsersOff => "OtherUsersOff",
@@ -2120,6 +2121,7 @@ fn every_refusal_code_encodes_to_its_own_wire_name() {
         IpcErrorCode::UnsupportedVersion,
         IpcErrorCode::UnsupportedKind,
         IpcErrorCode::MalformedRequest,
+        IpcErrorCode::RequestFailed,
         IpcErrorCode::NotFound,
         IpcErrorCode::HelloRequired,
         IpcErrorCode::OtherUsersOff,
@@ -2369,7 +2371,7 @@ fn a_response_with_a_misspelled_request_id_is_refused() {
 
 #[test]
 fn a_response_envelope_this_build_reads_decodes() {
-    let decoded_wire_message:IpcResponse = serde_json::from_str(
+    let decoded_wire_message: IpcResponse = serde_json::from_str(
         r#"{"request_id":7,"answer_result":{"Hello":{"protocol_version":4,"build_version":"0.5.0"}}}"#,
     )
     .expect("the same bytes without the misspelling decode");
@@ -2403,7 +2405,7 @@ fn a_request_carrying_an_unknown_field_is_refused() {
 /// The envelope around it refuses one.
 #[test]
 fn a_hello_carrying_an_unknown_field_ignores_it() {
-    let decoded_wire_message:IpcRequest = serde_json::from_str(
+    let decoded_wire_message: IpcRequest = serde_json::from_str(
         r#"{"request_id":1,"request_kind":{"Hello":{"minimum_protocol_version":2,"maximum_protocol_version":2,"connection_token":"k7QxSecret","is_remote":false,"junk":5}}}"#,
     )
     .expect("a field this build does not know is ignored");
@@ -2463,10 +2465,10 @@ fn token_encodes_as_a_bare_string() {
 
 #[test]
 fn token_decodes_from_a_bare_string() {
-    let decoded_wire_message: ConnectionToken =
+    let decoded_connection_token: ConnectionToken =
         serde_json::from_str(r#""k7QxSecret""#).expect("a bare string decodes as a token");
 
-    assert_eq!(decoded_wire_message, build_test_connection_token());
+    assert_eq!(decoded_connection_token, build_test_connection_token());
 }
 
 #[test]

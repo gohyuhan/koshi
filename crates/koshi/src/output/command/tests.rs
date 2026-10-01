@@ -1,4 +1,4 @@
-//! Tests for created-id command output.
+//! Tests for created-id command output and the `kill-session` ending line.
 
 use koshi_core::event::{Event, PaneCreated, QuitCause, TabCreated};
 use koshi_core::ids::{PaneId, TabId};
@@ -65,5 +65,53 @@ fn created_ids_keep_their_event_order() {
     assert_eq!(
         render_created_events(&command_events),
         format!("[PANE ID]: {pane_id}\n[TAB ID]: {tab_id}\n")
+    );
+}
+
+#[test]
+fn a_session_that_quit_with_nothing_left_running_prints_nothing() {
+    assert_eq!(
+        render_session_ending(&SessionEnding::Quit {
+            stopped_process_count: 0
+        }),
+        ""
+    );
+}
+
+#[test]
+fn a_session_that_quit_names_the_processes_koshi_ended_after_it() {
+    assert_eq!(
+        render_session_ending(&SessionEnding::Quit {
+            stopped_process_count: 1
+        }),
+        "the session quit; koshi ended 1 process it left running\n"
+    );
+    assert_eq!(
+        render_session_ending(&SessionEnding::Quit {
+            stopped_process_count: 2
+        }),
+        "the session quit; koshi ended 2 processes it left running\n"
+    );
+}
+
+#[test]
+fn a_session_that_did_not_quit_names_the_quit_failure_and_its_process() {
+    assert_eq!(
+        render_session_ending(&SessionEnding::Stopped {
+            quit_failure: "IPC unavailable: the session did not answer in time".to_string(),
+            session_process_id: 5000,
+            stopped_process_count: 3,
+        }),
+        "the session did not quit (IPC unavailable: the session did not answer in time); \
+         koshi ended its process 5000 and 3 processes under it\n"
+    );
+    assert_eq!(
+        render_session_ending(&SessionEnding::Stopped {
+            quit_failure: "session session-0 is not running".to_string(),
+            session_process_id: 5000,
+            stopped_process_count: 0,
+        }),
+        "the session did not quit (session session-0 is not running); koshi ended its \
+         process 5000 and 0 processes under it\n"
     );
 }

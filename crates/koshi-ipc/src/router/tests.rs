@@ -3,9 +3,10 @@
 //! range overlaps the router's and whose token matches, and the router's
 //! socket, endpoint and lock names sit where the trust checks accept them.
 
+use std::net::SocketAddr;
 use std::time::{Duration, UNIX_EPOCH};
 
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::ids::SessionId;
 
 use super::*;
 use crate::protocol::IpcErrorCode;
@@ -20,7 +21,7 @@ fn build_test_connection_token() -> ConnectionToken {
     ConnectionToken::from_secret("k7QxSecret")
 }
 
-/// One session's address, at fixed values, so its encoding is byte-stable.
+/// One session's address, at fixed values.
 fn build_test_session_address() -> SessionAddress {
     SessionAddress {
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
@@ -30,18 +31,7 @@ fn build_test_session_address() -> SessionAddress {
     }
 }
 
-/// One list row, at fixed ids and times, so its encoding is byte-stable.
-fn build_test_session_discovery() -> SessionDiscovery {
-    SessionDiscovery {
-        session_id: SessionId::from_uuid(build_fixed_test_uuid()),
-        session_name: "quiet-lake".to_string(),
-        created_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
-        attached_client_ids: vec![ClientId::from_uuid(build_fixed_test_uuid())],
-        pane_count: 1,
-    }
-}
-
-/// One remote access grant, at fixed values, so its encoding is byte-stable.
+/// One remote access grant, at fixed values.
 fn build_test_token_entry() -> TokenEntry {
     TokenEntry {
         identity: "build-box".to_string(),
@@ -61,16 +51,7 @@ fn serialize_test_wire_message<T: Serialize>(message: &T) -> String {
 #[test]
 fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     // Every request kind, every answer, and the session server's ready line,
-    // pinned byte for byte.
-    //
-    // Two builds only understand each other's bytes when they agree on this
-    // shape, and the version in the Hello is the only thing that catches a
-    // pair that does not. The version moves once per release cycle, not once
-    // per change, so a shape edit inside an unreleased cycle leaves it alone.
-    //
-    // Shape as of control-plane protocol version 3. Round-trip tests cannot
-    // catch this: one build encoding and decoding its own structs always
-    // agrees with itself.
+    // pinned byte for byte, as of control-plane protocol version 3.
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
             request_id: 1,
@@ -136,13 +117,6 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
             },
         }),
         r#"{"request_id":3,"request_kind":{"AttachLookup":{"session_selector":{"SessionId":"00000000-0000-0000-0000-000000000001"}}}}"#
-    );
-    assert_eq!(
-        serialize_test_wire_message(&RouterRequest {
-            request_id: 4,
-            request_kind: RouterRequestKind::ListSessions,
-        }),
-        r#"{"request_id":4,"request_kind":"ListSessions"}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterRequest {
@@ -238,13 +212,6 @@ fn the_control_plane_wire_shape_belongs_to_this_protocol_version() {
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
-            request_id: Some(4),
-            answer_result: RouterResult::Sessions(vec![build_test_session_discovery()]),
-        }),
-        r#"{"request_id":4,"answer_result":{"Sessions":[{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","created_at":{"secs_since_epoch":1700000000,"nanos_since_epoch":0},"attached_client_ids":["00000000-0000-0000-0000-000000000001"],"pane_count":1}]}}"#
-    );
-    assert_eq!(
-        serialize_test_wire_message(&RouterResponse {
             request_id: Some(5),
             answer_result: RouterResult::Restarting,
         }),
@@ -334,11 +301,11 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(9),
             answer_result: RouterResult::RemoteStatus {
-                remote_listen_address: Some("0.0.0.0:7654".to_string()),
+                remote_listen_address: Some(SocketAddr::from(([0, 0, 0, 0], 7654))),
                 is_remote_access_enabled: true,
                 is_listening: false,
                 certificate_fingerprint: Some("ab".repeat(32)),
-                remote_connection_count: Some(2),
+                remote_connection_count: 2,
             },
         }),
         format!(
@@ -354,16 +321,16 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
                 is_remote_access_enabled: false,
                 is_listening: false,
                 certificate_fingerprint: None,
-                remote_connection_count: None,
+                remote_connection_count: 0,
             },
         }),
-        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null,"remote_connection_count":null}}}"#
+        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null,"remote_connection_count":0}}}"#
     );
     assert_eq!(
         serialize_test_wire_message(&RouterResponse {
             request_id: Some(10),
             answer_result: RouterResult::RemoteEnabled {
-                remote_listen_address: "0.0.0.0:7654".to_string(),
+                remote_listen_address: SocketAddr::from(([0, 0, 0, 0], 7654)),
                 certificate_fingerprint: "ab".repeat(32),
             },
         }),
@@ -371,28 +338,6 @@ fn the_remote_access_answers_keep_their_wire_bytes() {
             r#"{{"request_id":10,"answer_result":{{"RemoteEnabled":{{"remote_listen_address":"0.0.0.0:7654","certificate_fingerprint":"{}"}}}}}}"#,
             "ab".repeat(32)
         )
-    );
-}
-
-#[test]
-fn a_remote_status_without_a_connection_count_decodes_with_none() {
-    let response: RouterResponse = serde_json::from_str(
-        r#"{"request_id":9,"answer_result":{"RemoteStatus":{"remote_listen_address":null,"is_remote_access_enabled":false,"is_listening":false,"certificate_fingerprint":null}}}"#,
-    )
-    .expect("a status without a count decodes");
-
-    assert_eq!(
-        response,
-        RouterResponse {
-            request_id: Some(9),
-            answer_result: RouterResult::RemoteStatus {
-                remote_listen_address: None,
-                is_remote_access_enabled: false,
-                is_listening: false,
-                certificate_fingerprint: None,
-                remote_connection_count: None,
-            },
-        }
     );
 }
 
@@ -432,10 +377,6 @@ fn every_request_kind_names_itself_without_its_payload() {
         "AttachLookup"
     );
     assert_eq!(
-        RouterRequestKind::ListSessions.get_request_kind_name(),
-        "ListSessions"
-    );
-    assert_eq!(
         RouterRequestKind::Restart.get_request_kind_name(),
         "Restart"
     );
@@ -471,9 +412,7 @@ fn every_request_kind_names_itself_without_its_payload() {
 }
 
 /// Every answer this build writes names itself, and both wire lists hold one
-/// entry per variant of their enum. A variant added without its `VARIANTS`
-/// entry would arrive as unknown on the far side, so the two are pinned
-/// together here.
+/// entry per variant of their enum.
 #[test]
 fn every_answer_names_itself_and_both_wire_lists_are_complete() {
     let kinds = [
@@ -490,7 +429,6 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         RouterRequestKind::AttachLookup {
             session_selector: SessionSelector::SessionName("quiet-lake".to_string()),
         },
-        RouterRequestKind::ListSessions,
         RouterRequestKind::Restart,
         RouterRequestKind::GrantToken {
             identity: "build-box".to_string(),
@@ -518,10 +456,6 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
             "Created",
         ),
         (RouterResult::Found(build_test_session_address()), "Found"),
-        (
-            RouterResult::Sessions(vec![build_test_session_discovery()]),
-            "Sessions",
-        ),
         (RouterResult::Restarting, "Restarting"),
         (
             RouterResult::Granted {
@@ -537,17 +471,17 @@ fn every_answer_names_itself_and_both_wire_lists_are_complete() {
         ),
         (
             RouterResult::RemoteStatus {
-                remote_listen_address: Some("0.0.0.0:7654".to_string()),
+                remote_listen_address: Some(SocketAddr::from(([0, 0, 0, 0], 7654))),
                 is_remote_access_enabled: true,
                 is_listening: false,
                 certificate_fingerprint: Some("ab".repeat(32)),
-                remote_connection_count: Some(2),
+                remote_connection_count: 2,
             },
             "RemoteStatus",
         ),
         (
             RouterResult::RemoteEnabled {
-                remote_listen_address: "0.0.0.0:7654".to_string(),
+                remote_listen_address: SocketAddr::from(([0, 0, 0, 0], 7654)),
                 certificate_fingerprint: "ab".repeat(32),
             },
             "RemoteEnabled",
@@ -651,7 +585,7 @@ fn an_answer_this_build_does_not_have_reads_as_unknown_carrying_its_name() {
 #[test]
 fn a_request_missing_its_id_is_refused() {
     let decoded: Result<RouterRequest, _> =
-        serde_json::from_str(r#"{"request_kind":"ListSessions"}"#);
+        serde_json::from_str(r#"{"request_kind":"RemoteStatus"}"#);
 
     assert_eq!(
         decoded
@@ -726,7 +660,7 @@ fn printing_a_granted_answer_reveals_no_secret() {
 #[test]
 fn a_request_carrying_an_unknown_field_is_refused() {
     let decoded: Result<RouterRequest, _> =
-        serde_json::from_str(r#"{"request_id":1,"request_kind":"ListSessions","junk":5}"#);
+        serde_json::from_str(r#"{"request_id":1,"request_kind":"RemoteStatus","junk":5}"#);
 
     assert_eq!(
         decoded
@@ -758,9 +692,8 @@ fn a_create_session_carrying_the_other_users_answer_decodes() {
 
 #[test]
 fn a_create_session_naming_no_other_users_answer_leaves_it_to_the_session() {
-    // What a build that asked for a session before this field existed looks
-    // like here. It reads as "no answer given", which leaves the session's own
-    // `koshi.kdl` to decide, so such a caller keeps the reachability it had.
+    // A `CreateSession` with no `is_other_user_access_allowed` key decodes
+    // with that field `None`.
     let decoded: RouterRequest = serde_json::from_str(
         r#"{"request_id":2,"request_kind":{"CreateSession":{"profile":null,"working_directory":null}}}"#,
     )
@@ -819,9 +752,7 @@ fn a_restart_and_its_answer_read_back_from_their_wire_text() {
 
 #[test]
 fn a_session_address_missing_its_pid_is_refused() {
-    // What a build that advertised no process id looks like here. Decoding
-    // must fail rather than fill in a default, so the mismatch surfaces
-    // instead of producing a row that names process 0.
+    // An address with no `process_id` key does not decode.
     let decoded: Result<SessionAddress, _> = serde_json::from_str(
         r#"{"session_id":"00000000-0000-0000-0000-000000000001","session_name":"quiet-lake","socket_address":"/run/koshi/session.sock"}"#,
     );
@@ -887,7 +818,7 @@ fn an_accepted_hello_opens_the_gate_for_other_requests() {
         Ok(())
     );
     assert_eq!(
-        router_handshake.validate_request_kind(&RouterRequestKind::ListSessions),
+        router_handshake.validate_request_kind(&RouterRequestKind::RemoteStatus),
         Ok(())
     );
 }
@@ -1091,7 +1022,7 @@ fn a_second_hello_with_a_narrower_range_settles_the_version_again_from_that_rang
         Some(MIN_ROUTER_PROTOCOL_VERSION)
     );
     assert_eq!(
-        router_handshake.validate_request_kind(&RouterRequestKind::ListSessions),
+        router_handshake.validate_request_kind(&RouterRequestKind::RemoteStatus),
         Ok(())
     );
 }
@@ -1113,7 +1044,6 @@ fn every_other_kind_is_refused_by_name_before_a_hello_and_served_after_one() {
             },
             "AttachLookup",
         ),
-        (RouterRequestKind::ListSessions, "ListSessions"),
         (RouterRequestKind::Restart, "Restart"),
         (
             RouterRequestKind::GrantToken {
@@ -1244,10 +1174,10 @@ fn a_refused_hello_leaves_the_gate_closed() {
         .expect_err("the Hello is refused");
 
     assert_eq!(
-        router_handshake.validate_request_kind(&RouterRequestKind::ListSessions),
+        router_handshake.validate_request_kind(&RouterRequestKind::RemoteStatus),
         Err(IpcErrorPayload {
             code: IpcErrorCode::HelloRequired,
-            message: "ListSessions arrived before a Hello opened the connection".to_string(),
+            message: "RemoteStatus arrived before a Hello opened the connection".to_string(),
         })
     );
 }
@@ -1362,12 +1292,16 @@ fn the_router_socket_address_passes_the_trust_check() {
 }
 
 #[test]
-fn the_router_endpoint_and_lock_files_sit_beside_the_socket() {
+fn the_router_endpoint_program_and_lock_files_sit_beside_the_socket() {
     let runtime_directory = Path::new("/run/user/1000/koshi");
 
     assert_eq!(
         resolve_router_endpoint_path(runtime_directory),
         PathBuf::from("/run/user/1000/koshi/router.json")
+    );
+    assert_eq!(
+        resolve_router_program_file_path(runtime_directory),
+        PathBuf::from("/run/user/1000/koshi/router.program")
     );
     assert_eq!(
         resolve_router_lock_path(runtime_directory),

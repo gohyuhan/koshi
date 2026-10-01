@@ -86,13 +86,13 @@ fn a_configured_leader_moves_the_offline_defaults_off_ctrl() {
 
     let default_keymap_view = build_keymap_view_from_partial(None, None, None);
     let normal_mode_name = ModeName::from_text("normal");
-    let alt_default_key_sequences: BTreeSet<_> = alt_keymap_view.merged_keymap.mode_map_by_name
+    let alt_default_key_sequences: BTreeSet<_> = alt_keymap_view.merged_keymap.mode_keymap_by_name
         [&normal_mode_name]
         .default_bindings_by_key_sequence
         .keys()
         .collect();
     let built_in_default_key_sequences: BTreeSet<_> =
-        default_keymap_view.merged_keymap.mode_map_by_name[&normal_mode_name]
+        default_keymap_view.merged_keymap.mode_keymap_by_name[&normal_mode_name]
             .default_bindings_by_key_sequence
             .keys()
             .collect();
@@ -105,7 +105,7 @@ fn defaults_only_view_is_not_reverted_and_lists_the_shipped_bindings() {
     assert!(!keymap_view.is_reverted_to_defaults);
     assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
     let normal_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("normal")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     assert_eq!(
         normal_mode_bindings.default_bindings_by_key_sequence[&parse_test_key_sequence("<Tab>")]
             .action_reference,
@@ -128,7 +128,7 @@ fn an_admitted_user_layer_appears_as_user_set() {
     );
     assert!(!keymap_view.is_reverted_to_defaults);
     let normal_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("normal")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     let user_binding =
         &normal_mode_bindings.user_bindings_by_key_sequence[&parse_test_key_sequence("<C-y>")];
     assert_eq!(
@@ -149,7 +149,7 @@ fn a_steal_moves_the_default_to_unbound() {
         None,
     );
     let normal_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("normal")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     assert_eq!(
         normal_mode_bindings.user_bindings_by_key_sequence[&parse_test_key_sequence("<A-f>")]
             .bound_action
@@ -199,7 +199,7 @@ fn a_rejected_user_layer_reverts_its_bindings_and_folded_fields_to_defaults() {
     );
     assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
     let locked_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("locked")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")];
     assert_eq!(
         locked_mode_bindings.default_bindings_by_key_sequence[&parse_test_key_sequence("<C-l>")]
             .action_reference,

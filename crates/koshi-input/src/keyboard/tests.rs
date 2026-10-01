@@ -1347,6 +1347,16 @@ fn a_shifted_alternative_leaves_the_binding_projection_unchanged() {
         decode_binding_chord(shifted_letter_key_event),
         build_optional_key_chord(BindingModifierFlags::SHIFT, Key::Char('a'))
     );
+
+    // `CSI 32:32;2u`: Shift plus Space reports Space; the binding sees `<S-Space>`.
+    let shifted_space_key_event = KeyEvent {
+        shifted_key: Some(' '),
+        ..KeyEvent::from_key_code_and_modifiers(KeyCode::Char(' '), Modifiers::SHIFT)
+    };
+    assert_eq!(
+        decode_binding_chord(shifted_space_key_event),
+        build_optional_key_chord(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Space))
+    );
 }
 
 #[test]
@@ -1711,6 +1721,124 @@ fn always_escape_codes_only_the_keys_legacy_encoding_loses() {
     }
 }
 
+/// The chords `config-docs/koshi.md` lists under "Keys that share legacy
+/// bytes": the 17 keys that share a byte in the table, the Ctrl+Shift form of
+/// each Ctrl key there except Ctrl+Shift+Tab, the capital letters H, I and M
+/// with Ctrl and with Ctrl+Shift, every key of the table with Super held, the
+/// keys that keep a byte included, and each of those with Alt held. Every key
+/// with every mix of Shift, Alt, Ctrl and Super is probed.
+#[test]
+fn the_chords_legacy_encoding_loses_are_exactly_the_documented_set() {
+    let sharing_chords: [(Key, KeyModifierFlags); 17] = [
+        (Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT),
+        (Key::Named(NamedKey::Enter), KeyModifierFlags::CTRL),
+        (Key::Char('m'), KeyModifierFlags::CTRL),
+        (Key::Named(NamedKey::Tab), KeyModifierFlags::CTRL),
+        (Key::Char('i'), KeyModifierFlags::CTRL),
+        (Key::Named(NamedKey::Esc), KeyModifierFlags::SHIFT),
+        (Key::Named(NamedKey::Esc), KeyModifierFlags::CTRL),
+        (Key::Char('['), KeyModifierFlags::CTRL),
+        (Key::Char('3'), KeyModifierFlags::CTRL),
+        (Key::Named(NamedKey::Backspace), KeyModifierFlags::SHIFT),
+        (Key::Char('8'), KeyModifierFlags::CTRL),
+        (Key::Char('?'), KeyModifierFlags::CTRL),
+        (
+            Key::Char('h'),
+            KeyModifierFlags::CTRL | KeyModifierFlags::SHIFT,
+        ),
+        (Key::Named(NamedKey::Backspace), KeyModifierFlags::CTRL),
+        (
+            Key::Named(NamedKey::Space),
+            KeyModifierFlags::CTRL | KeyModifierFlags::SHIFT,
+        ),
+        (Key::Char('2'), KeyModifierFlags::CTRL),
+        (Key::Char('@'), KeyModifierFlags::CTRL),
+    ];
+    let keeping_chords: [(Key, KeyModifierFlags); 6] = [
+        (Key::Named(NamedKey::Tab), KeyModifierFlags::NONE),
+        (Key::Named(NamedKey::Enter), KeyModifierFlags::NONE),
+        (Key::Named(NamedKey::Esc), KeyModifierFlags::NONE),
+        (Key::Named(NamedKey::Backspace), KeyModifierFlags::NONE),
+        (Key::Named(NamedKey::Space), KeyModifierFlags::CTRL),
+        (Key::Char('h'), KeyModifierFlags::CTRL),
+    ];
+    let mut documented_chords: std::collections::BTreeSet<(Key, KeyModifierFlags)> =
+        sharing_chords.into_iter().collect();
+    for (key, modifier_flags) in sharing_chords {
+        if modifier_flags == KeyModifierFlags::CTRL && key != Key::Named(NamedKey::Tab) {
+            documented_chords.insert((key, KeyModifierFlags::CTRL | KeyModifierFlags::SHIFT));
+        }
+    }
+    for capital_letter_key in [Key::Char('H'), Key::Char('I'), Key::Char('M')] {
+        documented_chords.insert((capital_letter_key, KeyModifierFlags::CTRL));
+        documented_chords.insert((
+            capital_letter_key,
+            KeyModifierFlags::CTRL | KeyModifierFlags::SHIFT,
+        ));
+    }
+    assert_eq!(documented_chords.len(), 34);
+    let super_chords: Vec<(Key, KeyModifierFlags)> = documented_chords
+        .iter()
+        .copied()
+        .chain(keeping_chords)
+        .map(|(key, modifier_flags)| (key, modifier_flags | KeyModifierFlags::SUPER))
+        .collect();
+    documented_chords.extend(super_chords);
+    assert_eq!(documented_chords.len(), 74);
+    let alt_chords: Vec<(Key, KeyModifierFlags)> = documented_chords
+        .iter()
+        .map(|(key, modifier_flags)| (*key, *modifier_flags | KeyModifierFlags::ALT))
+        .collect();
+    documented_chords.extend(alt_chords);
+
+    let mut probed_keys: Vec<Key> = [
+        NamedKey::Enter,
+        NamedKey::Tab,
+        NamedKey::Backspace,
+        NamedKey::Esc,
+        NamedKey::Space,
+        NamedKey::Insert,
+        NamedKey::Delete,
+        NamedKey::Home,
+        NamedKey::End,
+        NamedKey::PageUp,
+        NamedKey::PageDown,
+        NamedKey::Left,
+        NamedKey::Right,
+        NamedKey::Up,
+        NamedKey::Down,
+    ]
+    .into_iter()
+    .map(Key::Named)
+    .collect();
+    probed_keys
+        .extend((1..=24).map(|function_key_number| Key::Named(NamedKey::F(function_key_number))));
+    probed_keys.extend(('!'..='~').map(Key::Char));
+    let probed_modifier_flags = [
+        KeyModifierFlags::SHIFT,
+        KeyModifierFlags::ALT,
+        KeyModifierFlags::CTRL,
+        KeyModifierFlags::SUPER,
+    ];
+    let mut lost_chords = std::collections::BTreeSet::new();
+    for key in probed_keys {
+        for modifier_mask in 0..16_u8 {
+            let mut modifier_flags = KeyModifierFlags::NONE;
+            for (modifier_index, probed_modifier_flag) in probed_modifier_flags.iter().enumerate() {
+                if modifier_mask & (1 << modifier_index) != 0 {
+                    modifier_flags |= *probed_modifier_flag;
+                }
+            }
+            if is_key_lost_by_legacy_encoding(&build_key_press(key, modifier_flags)) {
+                lost_chords.insert((key, modifier_flags));
+            }
+        }
+    }
+
+    assert_eq!(lost_chords, documented_chords);
+    assert_eq!(lost_chords.len(), 148);
+}
+
 #[test]
 fn always_writes_presses_and_repeats_and_never_a_release() {
     let mut shift_enter = build_key_press(Key::Named(NamedKey::Enter), KeyModifierFlags::SHIFT);
@@ -1951,6 +2079,7 @@ fn always_converts_exactly_the_chords_legacy_encoding_cannot_tell_apart() {
             "Ctrl+8",
             "Ctrl+?",
             "Ctrl+@",
+            "Ctrl+H",
             "Ctrl+I",
             "Ctrl+M",
             "Ctrl+[",
@@ -1960,19 +2089,23 @@ fn always_converts_exactly_the_chords_legacy_encoding_cannot_tell_apart() {
             "Ctrl+Tab",
             "Ctrl+Backspace",
             "Ctrl+Escape",
+            "Ctrl+Shift+ ",
             "Ctrl+Shift+2",
             "Ctrl+Shift+3",
             "Ctrl+Shift+8",
             "Ctrl+Shift+?",
             "Ctrl+Shift+@",
+            "Ctrl+Shift+H",
             "Ctrl+Shift+I",
             "Ctrl+Shift+M",
             "Ctrl+Shift+[",
+            "Ctrl+Shift+h",
             "Ctrl+Shift+i",
             "Ctrl+Shift+m",
             "Ctrl+Shift+Enter",
             "Ctrl+Shift+Backspace",
             "Ctrl+Shift+Escape",
+            "Ctrl+Shift+Space",
         ]
     );
 }

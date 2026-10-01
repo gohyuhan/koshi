@@ -1,5 +1,6 @@
 //! Tests for the `koshi.kdl` app-config parser.
 
+use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use kdl::KdlDocument;
@@ -228,21 +229,21 @@ fn a_repeated_allow_other_users_line_keeps_the_first_and_warns() {
 #[test]
 fn remote_listen_records_the_address_it_names() {
     assert_eq!(
-        parse_config("remote-listen \"127.0.0.1:7654\"").remote_listen,
-        Some(Some("127.0.0.1:7654".to_string()))
+        parse_config("remote-listen \"127.0.0.1:7654\"").remote_listen_address,
+        Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654))))
     );
 }
 
 #[test]
 fn an_absent_remote_listen_sets_no_layer() {
     // Absent leaves the field unset; no address is named.
-    assert_eq!(parse_config("").remote_listen, None);
+    assert_eq!(parse_config("").remote_listen_address, None);
 }
 
 #[test]
 fn a_non_string_remote_listen_is_skipped_with_a_warning() {
     let (layer, warnings) = parse_with_warnings("remote-listen 7654");
-    assert_eq!(layer.remote_listen, None);
+    assert_eq!(layer.remote_listen_address, None);
     assert_eq!(
         warnings,
         vec!["ignored `remote-listen`: expected a string".to_string()]
@@ -253,10 +254,46 @@ fn a_non_string_remote_listen_is_skipped_with_a_warning() {
 fn a_blank_remote_listen_is_skipped_with_a_warning() {
     // An empty value is skipped; the field stays unset.
     let (layer, warnings) = parse_with_warnings("remote-listen \"\"");
-    assert_eq!(layer.remote_listen, None);
+    assert_eq!(layer.remote_listen_address, None);
     assert_eq!(
         warnings,
         vec!["ignored `remote-listen`: must not be empty".to_string()]
+    );
+}
+
+#[test]
+fn an_ipv6_remote_listen_records_the_address_it_names() {
+    assert_eq!(
+        parse_config("remote-listen \"[::]:7654\"").remote_listen_address,
+        Some(Some(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 7654))))
+    );
+}
+
+#[test]
+fn a_host_name_remote_listen_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("remote-listen \"localhost:7654\"");
+    assert_eq!(layer.remote_listen_address, None);
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored `remote-listen`: `localhost:7654` is not an IP address and port, such as \
+             `192.168.1.20:7654`"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_remote_listen_with_no_port_is_skipped_with_a_warning() {
+    let (layer, warnings) = parse_with_warnings("remote-listen \"192.168.1.20\"");
+    assert_eq!(layer.remote_listen_address, None);
+    assert_eq!(
+        warnings,
+        vec![
+            "ignored `remote-listen`: `192.168.1.20` is not an IP address and port, such as \
+             `192.168.1.20:7654`"
+                .to_string()
+        ]
     );
 }
 
@@ -265,8 +302,8 @@ fn a_repeated_remote_listen_line_keeps_the_first_and_warns() {
     let (layer, warnings) =
         parse_with_warnings("remote-listen \"127.0.0.1:7654\"\nremote-listen \"0.0.0.0:9000\"");
     assert_eq!(
-        layer.remote_listen,
-        Some(Some("127.0.0.1:7654".to_string()))
+        layer.remote_listen_address,
+        Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654))))
     );
     assert_eq!(
         warnings,
@@ -605,7 +642,7 @@ fn mouse_section_parses_every_field() {
     .expect("mouse section present");
     assert_eq!(mouse.can_resize_pane_border, Some(false));
     assert_eq!(mouse.scroll_line_count, Some(5));
-    assert_eq!(mouse.wheel, Some(WheelScroll::Ignore));
+    assert_eq!(mouse.wheel_scroll, Some(WheelScroll::Ignore));
 }
 
 #[test]
@@ -827,7 +864,7 @@ fn logging_section_parses() {
             .logging
             .expect("logging section present");
     assert_eq!(logging.is_enabled, Some(true));
-    assert_eq!(logging.level, Some(LogLevel::Error));
+    assert_eq!(logging.log_level, Some(LogLevel::Error));
     assert_eq!(logging.log_format, Some(LogFormat::Json));
 }
 
@@ -842,7 +879,7 @@ fn logging_level_and_format_accept_each_variant() {
             .logging
             .expect("logging section present");
         assert_eq!(
-            logging.level,
+            logging.log_level,
             Some(expected_log_level),
             "level {log_level_text}"
         );
@@ -868,7 +905,7 @@ fn a_bad_logging_level_is_skipped_with_a_warning() {
     let (layer, warnings) =
         parse_with_warnings("logging {\n    level \"verbose\"\n    enabled #true\n}");
     let logging = layer.logging.expect("logging section present");
-    assert_eq!(logging.level, None, "the bad level is dropped");
+    assert_eq!(logging.log_level, None, "the bad level is dropped");
     assert_eq!(
         logging.is_enabled,
         Some(true),
@@ -1329,8 +1366,8 @@ fn remote_listen_and_shared_sessions_dir_values_are_trimmed() {
     let app_config =
         parse_file("remote-listen \" 127.0.0.1:7654 \"\nshared-sessions-dir \" /var/run/koshi \"");
     assert_eq!(
-        app_config.layer.remote_listen,
-        Some(Some("127.0.0.1:7654".to_string()))
+        app_config.layer.remote_listen_address,
+        Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654))))
     );
     assert_eq!(
         app_config.layer.shared_sessions_directory,
@@ -1448,7 +1485,7 @@ fn wheel_accepts_each_variant() {
         .mouse
         .expect("mouse section present");
         assert_eq!(
-            mouse.wheel,
+            mouse.wheel_scroll,
             Some(expected_wheel_behavior),
             "wheel {wheel_behavior_text}"
         );
@@ -1458,7 +1495,7 @@ fn wheel_accepts_each_variant() {
 #[test]
 fn a_bad_wheel_value_is_skipped_with_a_warning() {
     let (layer, warnings) = parse_with_warnings("mouse {\n    wheel \"zoom\"\n}");
-    assert_eq!(layer.mouse.expect("mouse present").wheel, None);
+    assert_eq!(layer.mouse.expect("mouse present").wheel_scroll, None);
     assert_eq!(
         warnings,
         vec![r#"ignored `mouse.wheel`: expected "scroll-scrollback" or "ignore""#.to_string()]

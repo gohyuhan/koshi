@@ -76,11 +76,11 @@ use placement::draw_pane_placement_presentation;
 /// 8. Draws the tabline in the first committed region, over that margin.
 /// 9. Draws the statusline in the second committed region, over that margin.
 ///
-/// `theme`, `keymap_hints`, `pending_key_sequence`, and `viewer_chrome` come from the viewer: the colors
-/// it paints koshi's chrome in, the statusline data for the mode it is in, the
-/// multi-chord sequence it has open, and the pane its pointer is over together
-/// with where its tab strip is scrolled and whether it is dialing the session
-/// again.
+/// `theme`, `keymap_hints`, `pending_key_sequence`, and `viewer_chrome` come
+/// from the viewer: the colors it paints koshi's chrome in, the statusline data
+/// for the mode it is in, the multi-chord sequence it has open, and the pane its
+/// pointer is over together with where its tab strip is scrolled and whether it
+/// is dialing the session again.
 /// The attached client passes the same [`CommittedRegions`] to this function
 /// and to [`get_cursor_position`]. For example, a left region of 20 columns on a
 /// `120x40` viewport leaves the pane rectangle at `x = 20`.

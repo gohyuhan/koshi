@@ -23,10 +23,12 @@
 //!
 //! Every judgment above runs on **firing bindings only**. A binding fires
 //! when the resolver accepts it as written AND a keypress can reach it. It
-//! is dead when its sequence contains the reserved unlock chord (the chord
-//! resolves the instant it is pressed, and the rest of the sequence is
-//! unreachable), when it is longer than `maximum_chord_depth`, or when a higher
-//! layer `remove`s its key. A dead binding is warned once per layer with the
+//! is dead when it is a locked-mode sequence of two or more chords that holds
+//! the reserved unlock chord (the input path resolves that chord the instant
+//! it is pressed, and the rest of the sequence is unreachable), when it is
+//! longer than `maximum_chord_depth`, or when a higher layer `remove`s its
+//! key. The one-chord locked-mode `<C-l>` is the unlock binding itself and
+//! stays live. A dead binding is warned once per layer with the
 //! most specific reason, claims no key in the collision scan, and steals
 //! nothing. A binding voided by a `remove` gets no warning: removing a key
 //! in one layer and rebinding it in a higher layer moves the key between
@@ -678,10 +680,12 @@ fn is_over_chord_depth_limit(key_sequence: &KeySequence, maximum_chord_depth: u8
 
 /// True when the leader is reachable by plain typing: a chord leader that is
 /// itself typeable, or a modifier-run leader whose modifiers plain typing
-/// produces ([`koshi_core::key::BindingModifierFlags::is_typing`] — Shift alone merges into typed keys).
+/// produces
+/// ([`koshi_core::key::BindingModifierFlags::is_typeable`]: Shift alone
+/// merges into typed keys).
 fn is_leader_typeable(leader: Leader) -> bool {
     match leader {
-        Leader::Modifiers(modifier_flags) => modifier_flags.is_typing(),
+        Leader::Modifiers(modifier_flags) => modifier_flags.is_typeable(),
         Leader::Chord(key_chord) => key_chord.is_typeable(),
     }
 }

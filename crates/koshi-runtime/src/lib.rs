@@ -13,7 +13,10 @@
 //! client's event stream back out. It sets each submitted command's source
 //! from the connection the command arrived on. [`resume`] writes and reads the
 //! file a session server hands to the process image that replaces it.
+//! [`executable_watch`] tells a server when the program file it started from
+//! holds another koshi version.
 
+pub mod executable_watch;
 pub mod ipc_server;
 pub mod resume;
 pub mod runtime;

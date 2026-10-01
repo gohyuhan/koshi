@@ -129,7 +129,7 @@ impl BindingModifierFlags {
     /// modifiers: none of Control, Alt, or Super is held. Shift alone still
     /// types — it gives the key's capital or shifted variant.
     #[must_use]
-    pub const fn is_typing(self) -> bool {
+    pub const fn is_typeable(self) -> bool {
         !self.has_shared_modifier(NON_TYPING_MODIFIER_FLAGS)
     }
 }
@@ -296,7 +296,7 @@ impl KeyChord {
     /// Control, Alt, or Super is held. Characters, Enter, arrows, editing
     /// keys, and function keys all count, with or without Shift.
     pub fn is_typeable(&self) -> bool {
-        self.modifier_flags.is_typing()
+        self.modifier_flags.is_typeable()
     }
 }
 
@@ -583,9 +583,10 @@ impl KeyInput {
     /// Lock held projects to `<C-S-a>`.
     ///
     /// With Shift held on a character key, a reported [`KeyInput::shifted_key`]
-    /// replaces the key and consumes the Shift: key `'1'` with shifted key
-    /// `'!'` projects to `!`, and key `'a'` with shifted key `'A'` projects to
-    /// `<S-a>`.
+    /// that differs from the key replaces the key and consumes the Shift: key
+    /// `'1'` with shifted key `'!'` projects to `!`, and key `'a'` with shifted
+    /// key `'A'` projects to `<S-a>`. A shifted key equal to the key changes
+    /// nothing: key `' '` with shifted key `' '` projects to `<S-Space>`.
     #[must_use]
     pub fn to_binding_chord(&self) -> Option<KeyChord> {
         if self.key_event_kind == KeyEventKind::Release {
@@ -598,16 +599,19 @@ impl KeyInput {
         let is_shift_held = binding_modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT);
         let binding_modifier_flags_without_shift =
             BindingModifierFlags(binding_modifier_flags.0 & !BindingModifierFlags::SHIFT.0);
-        // A reported shifted character stands for the key itself: Shift plus
-        // `1` reports `!`, and `!` is the character a binding names.
-        if let (true, Key::Char(_), Some(shifted_character)) =
+        // A reported shifted character that differs from the key stands for
+        // the key itself: Shift plus `1` reports `!`, and `!` is the character
+        // a binding names.
+        if let (true, Key::Char(key_character), Some(shifted_character)) =
             (is_shift_held, binding_key, self.shifted_key)
         {
-            return Some(build_canonical_chord(
-                Key::Char(shifted_character),
-                binding_modifier_flags_without_shift,
-                false,
-            ));
+            if shifted_character != key_character {
+                return Some(build_canonical_chord(
+                    Key::Char(shifted_character),
+                    binding_modifier_flags_without_shift,
+                    false,
+                ));
+            }
         }
         Some(build_canonical_chord(
             binding_key,
@@ -622,7 +626,8 @@ impl KeyInput {
 /// `' '` becomes [`NamedKey::Space`]. A named key takes `is_shift_held` as a
 /// modifier. A capital that [`fold_uppercase_character`] folds becomes
 /// lowercase plus Shift; a lowercase letter takes `is_shift_held`; any other
-/// character drops it, because a shifted `1` arrives as `!`.
+/// character drops it: `1` with Shift held gives `1`, and `!` with Shift held
+/// gives `!`.
 #[must_use]
 fn build_canonical_chord(
     reported_key: Key,

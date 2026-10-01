@@ -24,15 +24,13 @@ use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::supervisor::compute_supervisor_socket_address;
 use koshi_pty::backend::state::{PtyBackend, PtySink};
 use koshi_pty::supervisor::SupervisorPtyBackend;
-use tempfile::TempDir;
 
 mod common;
 
-use common::{copy_koshi_binary, start_koshi_process};
-
-/// How long a test waits for something it expects promptly, before it calls the
-/// wait a failure.
-const WAIT_DURATION: Duration = Duration::from_secs(20);
+use common::{
+    build_koshi_command_at, build_short_test_directory, copy_koshi_binary, WAIT_DURATION,
+};
+use koshi_test_support::fixtures::start_program_process;
 
 /// How long a poll pauses between attempts.
 const SUPERVISOR_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
@@ -111,39 +109,28 @@ impl PtySink for PtyOutputCollection {
     }
 }
 
-/// A fresh directory, under a short base so the Unix socket path stays inside
-/// the operating system's path-length cap. Removed when the test drops it.
-fn build_short_temporary_directory() -> TempDir {
-    #[cfg(unix)]
-    let temporary_directory_root = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let temporary_directory_root = std::env::temp_dir();
-    tempfile::Builder::new()
-        .prefix("k")
-        .tempdir_in(temporary_directory_root)
-        .expect("a temporary directory")
-}
-
 /// Start the `koshi` binary at `executable_path` as the supervisor for
-/// `session_id`.
+/// `session_id`, with its files under `home_directory`. The supervisor binds
+/// its socket in `runtime_directory` and takes a link that presents
+/// `connection_token`. Both output streams are closed.
 fn start_supervisor_process(
     executable_path: &std::path::Path,
+    home_directory: &std::path::Path,
     runtime_directory: &std::path::Path,
     session_id: SessionId,
     connection_token: &ConnectionToken,
 ) -> RunningSupervisor {
-    let mut command = std::process::Command::new(executable_path);
-    command
+    let mut supervisor_command = build_koshi_command_at(executable_path, home_directory);
+    supervisor_command
         .arg("serve-pty-supervisor")
         .arg(session_id.to_string())
         .arg(connection_token.expose_secret())
         .arg("--runtime-dir")
         .arg(runtime_directory)
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     RunningSupervisor {
-        child_process: start_koshi_process(&mut command),
+        child_process: start_program_process(&mut supervisor_command),
     }
 }
 
@@ -153,7 +140,7 @@ fn connect_to_supervisor(
     session_id: SessionId,
     supervisor: &RunningSupervisor,
     connection_token: &ConnectionToken,
-    sink: Arc<dyn PtySink>,
+    pty_sink: Arc<dyn PtySink>,
 ) -> SupervisorPtyBackend {
     let socket_address = compute_supervisor_socket_address(
         runtime_directory,
@@ -165,7 +152,7 @@ fn connect_to_supervisor(
         match SupervisorPtyBackend::connect(
             &socket_address,
             connection_token.clone(),
-            Arc::clone(&sink),
+            Arc::clone(&pty_sink),
             &[],
         ) {
             Ok(supervisor_backend) => return supervisor_backend,
@@ -230,13 +217,14 @@ fn a_pane_opened_in_the_supervisor_process_prints_back_over_the_link() {
     // separate process holds the pane's terminal, and the child's bytes come
     // back over the link. Nothing here answers the pane terminal's
     // cursor-position query; the pane's own reader does, inside the supervisor.
-    let home_directory = build_short_temporary_directory();
-    let runtime_directory = build_short_temporary_directory();
+    let home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
     let executable_path = copy_koshi_binary(home_directory.path());
     let session_id = SessionId::new();
     let connection_token = ConnectionToken::generate();
     let supervisor = start_supervisor_process(
         &executable_path,
+        home_directory.path(),
         runtime_directory.path(),
         session_id,
         &connection_token,
@@ -291,13 +279,14 @@ fn a_line_written_the_moment_a_pane_opens_reaches_its_child() {
     // before that pane's terminal has said anything. The child ends on the
     // first line it is given, so its exit crossing the link is that line having
     // arrived.
-    let home_directory = build_short_temporary_directory();
-    let runtime_directory = build_short_temporary_directory();
+    let home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
     let executable_path = copy_koshi_binary(home_directory.path());
     let session_id = SessionId::new();
     let connection_token = ConnectionToken::generate();
     let supervisor = start_supervisor_process(
         &executable_path,
+        home_directory.path(),
         runtime_directory.path(),
         session_id,
         &connection_token,

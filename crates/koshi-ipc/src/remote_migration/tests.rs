@@ -22,8 +22,8 @@ fn write_previous_file(file_path: &Path, file_contents: serde_json::Value) {
 fn listener_migration_preserves_certificate_access_mark_and_grant() {
     let test_directory = TempDir::new().expect("create data directory");
     let data_directory = test_directory.path();
-    let certificate_path = CertFile::resolve_certificate_file_path(data_directory);
-    let enabled_path = EnabledFile::resolve_enabled_file_path(data_directory);
+    let certificate_path = CertificateFile::resolve_certificate_file_path(data_directory);
+    let enabled_path = RemoteAccessRecord::resolve_remote_access_record_path(data_directory);
     let token_store_path = crate::remote_tokens::resolve_token_store_path(data_directory);
     let enabled_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
     let issued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
@@ -50,17 +50,17 @@ fn listener_migration_preserves_certificate_access_mark_and_grant() {
 
     assert!(migrate_remote_listener_files(data_directory).is_empty());
     assert_eq!(
-        CertFile::load_from_path(&certificate_path).expect("read certificate"),
-        CertFile {
-            file_format: CERT_FILE_FORMAT,
+        CertificateFile::load_from_path(&certificate_path).expect("read certificate"),
+        CertificateFile {
+            file_format: CERTIFICATE_FILE_FORMAT,
             cert_der: vec![1, 2, 3],
             key_der: vec![4, 5, 6],
         }
     );
     assert_eq!(
-        EnabledFile::load_from_path(&enabled_path).expect("read remote access record"),
-        EnabledFile {
-            file_format: ENABLED_FILE_FORMAT,
+        RemoteAccessRecord::load_from_path(&enabled_path).expect("read remote access record"),
+        RemoteAccessRecord {
+            file_format: REMOTE_ACCESS_RECORD_FILE_FORMAT,
             enabled_at,
         }
     );
@@ -135,7 +135,7 @@ fn saved_server_migration_preserves_secret_pin_and_timestamps() {
 #[test]
 fn unsupported_previous_format_is_refused_without_replacing_file() {
     let test_directory = TempDir::new().expect("create data directory");
-    let certificate_path = CertFile::resolve_certificate_file_path(test_directory.path());
+    let certificate_path = CertificateFile::resolve_certificate_file_path(test_directory.path());
     let previous_file = json!({"format": 7, "cert_der": [1], "key_der": [2]});
     write_previous_file(&certificate_path, previous_file.clone());
 
@@ -162,7 +162,7 @@ fn unsupported_previous_format_is_refused_without_replacing_file() {
 #[test]
 fn unreadable_certificate_does_not_block_grant_migration() {
     let test_directory = TempDir::new().expect("create data directory");
-    let certificate_path = CertFile::resolve_certificate_file_path(test_directory.path());
+    let certificate_path = CertificateFile::resolve_certificate_file_path(test_directory.path());
     let token_store_path = crate::remote_tokens::resolve_token_store_path(test_directory.path());
     write_previous_file(
         &certificate_path,

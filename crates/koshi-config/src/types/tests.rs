@@ -48,7 +48,7 @@ fn default_server_and_client_configs_match_expected_settings() {
 
     assert!(!server_config.should_allow_beta_features);
     assert!(!server_config.should_allow_other_users);
-    assert_eq!(server_config.remote_listen, None);
+    assert_eq!(server_config.remote_listen_address, None);
     assert_eq!(server_config.shared_sessions_directory, None);
     assert!(!server_config.should_auto_close_session);
     assert!(client_config.supports_image_protocols);
@@ -81,7 +81,10 @@ fn default_server_and_client_configs_match_expected_settings() {
 
     assert!(client_config.mouse.can_resize_pane_border);
     assert_eq!(client_config.mouse.scroll_line_count, 3);
-    assert_eq!(client_config.mouse.wheel, WheelScroll::ScrollScrollback);
+    assert_eq!(
+        client_config.mouse.wheel_scroll,
+        WheelScroll::ScrollScrollback
+    );
 
     assert!(client_config.copy.should_trim_trailing_whitespace);
 
@@ -104,7 +107,7 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert_eq!(server_config.logging, LoggingConfig::default());
     assert_eq!(client_config.logging, LoggingConfig::default());
     assert!(!server_config.logging.is_enabled);
-    assert_eq!(server_config.logging.level, LogLevel::Warning);
+    assert_eq!(server_config.logging.log_level, LogLevel::Warning);
     assert_eq!(server_config.logging.log_format, LogFormat::Pretty);
     assert!(!client_config.logging.is_enabled);
 }

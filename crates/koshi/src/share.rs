@@ -1,33 +1,29 @@
 //! The `koshi share` commands: hand one identity a remote access token, stop
 //! the tokens an identity holds, and list the grants this machine has made.
 //!
-//! Every verb reaches the router over the control plane; the router is the
-//! only writer of the token store. A `--session` flag names the one
-//! session a grant reaches; the session is resolved here, through the same
-//! targeting the discovery queries use, so a name that matches no running
-//! session or two of them is refused before anything is asked of the router.
+//! Every verb reaches the router over the control plane, and the router is the
+//! only writer of the token store. A `--session` flag names the one session a
+//! grant reaches. The session is resolved here, through the same targeting the
+//! discovery queries use: a name that matches no running session, or two of
+//! them, is refused before the router is asked anything.
 //!
 //! A grant also asks the router where this machine serves remote clients. With
 //! an address set and remote access switched off, the grant offers to switch
-//! it on and opens the port on a yes, so one command hands out a token and
-//! makes it usable. The token is minted first and the offer follows it, so a
-//! grant that fails never opens a port. The secret is printed whatever the
-//! offer does, and that printing is the only one: a granted token stands from
-//! the moment it is made, and nothing prints its secret again.
+//! it on, and opens the port on a yes. The token is minted first and the offer
+//! follows it: a grant that fails opens no port. A granted token stands from
+//! the moment it is minted. Its secret is printed once, whatever the offer
+//! does, and nothing prints it again.
 //!
-//! A verb run outside every pane is never refused: the router's socket is this
-//! machine's own, no connection from another machine reaches it, and koshi
-//! paints no terminal there. That covers the revoke that cuts a live
-//! connection.
-//!
-//! A verb run in a pane is refused while any client is attached to that pane's
-//! session from another machine: the session paints that pane to them too.
+//! A verb run outside every pane is never refused, the revoke that cuts a live
+//! connection included. A verb run in a pane is refused while any client is
+//! attached to that pane's session from another machine.
 //!
 //! A revoke naming one session, for an identity that also holds a host-wide
 //! grant, asks before it stops anything: a yes stops both grants, a no stops
 //! neither.
 
 use std::io::{self, Write};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -35,6 +31,7 @@ use koshi_core::client::ClientOrigin;
 use koshi_core::discovery::{ClientDiscovery, SessionOverview};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::SessionId;
+use koshi_host::host_addresses::{self, HostAddress};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::router::{RouterRequestKind, RouterResult};
@@ -61,19 +58,14 @@ fn has_client_from_another_machine(client_discoveries: &[ClientDiscovery]) -> bo
         .any(|client_discovery| client_discovery.origin != Some(ClientOrigin::Local))
 }
 
-/// Refuse a `share` verb run in a pane of a session anyone is attached to from
-/// another machine.
-///
-/// `grant` prints the new token's secret and `list` prints every identity
-/// holding one. The session paints that pane to every client viewing its tab,
-/// so a client on another machine reads whatever they printed. A pane of a
-/// session nobody watches from elsewhere prints to that machine alone.
+/// Refuse a `share` verb run in a pane of a session that a client on another
+/// machine is attached to.
 ///
 /// `in_session_context` is the pane environment the calling CLI inherited.
-/// [`run_share_command`] calls
-/// this only when it has one: a run outside every pane prints to a terminal
-/// koshi does not paint, and is never refused. `fetch_session_overview` asks one session to
-/// describe itself; the command passes [`ipc_client::fetch_session_overview`].
+/// [`run_share_command`] calls this only when it has one; a run outside every
+/// pane is never refused. `fetch_session_overview` asks one session to
+/// describe itself; the command passes
+/// [`discovery::fetch_session_overview`](koshi_link::discovery::fetch_session_overview).
 ///
 /// # Errors
 /// [`CliError::CommandRejected`] with [`RejectReason::Unauthorized`] on two
@@ -118,9 +110,16 @@ pub fn run_share_command(
     in_session_context: Option<&InSessionContext>,
 ) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
+    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
     if let Some(in_session_context) = in_session_context {
+        // The pane's own session advertises in this user's runtime directory.
         refuse_while_watched_from_another_machine(in_session_context, |session_id| {
-            ipc_client::fetch_session_overview(&runtime_directory, session_id)
+            koshi_link::discovery::fetch_session_overview(
+                &runtime_directory,
+                None,
+                session_id,
+                None,
+            )
         })?;
     }
     match command {
@@ -129,8 +128,12 @@ pub fn run_share_command(
             session_reference,
             token_expiry,
         } => {
-            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?
-                .unwrap_or(TokenScope::HostWide);
+            let token_scope = resolve_token_scope(
+                &runtime_directory,
+                shared_sessions_base_directory.as_deref(),
+                session_reference.as_ref(),
+            )?
+            .unwrap_or(TokenScope::HostWide);
             let expiration_duration = match token_expiry {
                 Expiry::After(expiration_duration) => Some(*expiration_duration),
                 Expiry::Never => None,
@@ -169,7 +172,11 @@ pub fn run_share_command(
             identity,
             session_reference,
         } => {
-            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?;
+            let token_scope = resolve_token_scope(
+                &runtime_directory,
+                shared_sessions_base_directory.as_deref(),
+                session_reference.as_ref(),
+            )?;
             revoke_share_grants(
                 identity,
                 token_scope.as_ref(),
@@ -183,7 +190,11 @@ pub fn run_share_command(
             session_reference,
             output_format,
         } => {
-            let token_scope = resolve_token_scope(&runtime_directory, session_reference.as_ref())?;
+            let token_scope = resolve_token_scope(
+                &runtime_directory,
+                shared_sessions_base_directory.as_deref(),
+                session_reference.as_ref(),
+            )?;
             match router_client::submit_router_request(
                 &runtime_directory,
                 RouterRequestKind::ListTokens { scope: token_scope },
@@ -204,13 +215,11 @@ pub fn run_share_command(
 /// Stop the grants `identity` holds, narrowed to one session when `token_scope`
 /// names one, and print what stopped.
 ///
-/// A revoke naming no session stops every grant the identity holds, so nothing
-/// wider can survive it.
+/// A revoke naming no session stops every grant the identity holds.
 ///
-/// A revoke naming one session first asks the router for `identity`'s grants. A
-/// host-wide grant still standing reaches that session too, and no revoke stops
-/// a host-wide grant for one session alone, so this names it and asks whether to
-/// stop both. A yes stops the session grant and then the host-wide one, in two
+/// A revoke naming one session first asks the router for `identity`'s grants.
+/// When a host-wide grant still stands, this names it and asks whether to stop
+/// both. A yes stops the session grant and then the host-wide one, in two
 /// requests. A no stops neither and prints `nothing was revoked.`; the grants
 /// are left exactly as they were.
 ///
@@ -417,6 +426,10 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
     };
     if is_remote_access_enabled && is_remote_listener_active {
         return Ok(RemoteReady::On {
+            host_addresses: list_host_addresses_for_listen_address(
+                remote_listen_address,
+                host_addresses::list_host_addresses,
+            ),
             remote_listen_address,
         });
     }
@@ -442,6 +455,10 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
             remote_listen_address,
             ..
         } => Ok(RemoteReady::On {
+            host_addresses: list_host_addresses_for_listen_address(
+                remote_listen_address,
+                host_addresses::list_host_addresses,
+            ),
             remote_listen_address,
         }),
         RouterResult::Error(_) => Ok(RemoteReady::Blocked {
@@ -451,20 +468,48 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
     }
 }
 
+/// The addresses of this machine a client on another machine can connect to
+/// when the remote listener serves on `remote_listen_address`.
+///
+/// `0.0.0.0` gives the IPv4 entries of `list_machine_addresses()` and `[::]`
+/// its IPv6 entries, in the order it gives them. Every other address gives
+/// none and does not call `list_machine_addresses`. The command passes
+/// [`host_addresses::list_host_addresses`].
+///
+/// Example: `0.0.0.0:7654` on a machine with `192.168.1.20` and `2001:db8::20`
+/// gives `192.168.1.20`.
+fn list_host_addresses_for_listen_address(
+    remote_listen_address: SocketAddr,
+    list_machine_addresses: impl FnOnce() -> Vec<HostAddress>,
+) -> Vec<HostAddress> {
+    if !remote_listen_address.ip().is_unspecified() {
+        return Vec::new();
+    }
+    list_machine_addresses()
+        .into_iter()
+        .filter(|host_address| host_address.ip_address.is_ipv4() == remote_listen_address.is_ipv4())
+        .collect()
+}
+
 /// The scope a `--session` flag names: `None` when the flag is absent, else
 /// the id of the one running session the flag resolves to.
 ///
 /// A name matching no running session, or two of them, comes back as the
-/// targeting layer's own refusal.
+/// targeting layer's own refusal. The running sessions are those
+/// `runtime_directory` and `shared_sessions_base_directory` advertise.
 fn resolve_token_scope(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<Option<TokenScope>, CliError> {
     let Some(session_reference) = session_reference else {
         return Ok(None);
     };
-    let discovered_sessions =
-        targeting::resolve_session_scope(runtime_directory, Some(session_reference))?;
+    let discovered_sessions = targeting::resolve_session_scope(
+        runtime_directory,
+        shared_sessions_base_directory,
+        Some(session_reference),
+    )?;
     let session_overview =
         discovered_sessions
             .sessions

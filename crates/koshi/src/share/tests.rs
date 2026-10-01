@@ -1,8 +1,13 @@
 //! Tests for the `share` verbs: how an expiry argument parses, how the three
-//! subcommands parse, and what each of the three answers renders to.
+//! subcommands parse, what each answer renders to, the order the secret is
+//! written and flushed in, the refusal inside a pane someone watches from
+//! another machine, the revoke that narrows to one session, the connect
+//! commands for each listen address, and the host addresses each listen
+//! address lists.
 
 use super::*;
 
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
@@ -17,6 +22,12 @@ use koshi_link::in_session::InSessionContext;
 use uuid::Uuid;
 
 use crate::cli::{parse_expiry, Cli, CliCommand, OutputFormat};
+
+/// The help a `share` verb is refused with in a pane someone watches from
+/// another machine.
+const WATCHED_FROM_ANOTHER_MACHINE_HELP: &str =
+    "someone is attached to this session from another machine, and they see this pane. Run \
+     `koshi share` from a terminal outside koshi.";
 
 /// The one message every bad expiry value comes back with.
 const EXPECTED_EXPIRY_ERROR: &str =
@@ -36,14 +47,19 @@ fn parse_share_command(argv: &[&str]) -> ShareCommand {
     }
 }
 
-/// A fixed session id so scope cells and JSON are exact.
+/// The IP address and port `address_text` names, such as `192.168.1.20:7654`.
+fn parse_listen_address(address_text: &str) -> SocketAddr {
+    address_text.parse().expect("an address literal")
+}
+
+/// The session id `session-0192f0c1-2345-7000-8000-000000000001`.
 fn build_fixed_session_id() -> SessionId {
     SessionId::from_uuid(
         Uuid::parse_str("0192f0c1-2345-7000-8000-000000000001").expect("literal UUID is valid"),
     )
 }
 
-/// The moment `seconds` after the Unix epoch.
+/// The moment `elapsed_seconds` after the Unix epoch.
 fn build_timestamp_at_seconds(elapsed_seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(elapsed_seconds)
 }
@@ -84,8 +100,8 @@ fn an_expiry_that_is_not_a_count_and_a_unit_is_refused_with_one_message() {
 
 #[test]
 fn an_expiry_whose_unit_is_a_multi_byte_character_is_refused_and_never_panics() {
-    // The unit is taken as a whole character, so a value ending in a
-    // multi-byte one refuses instead of splitting the string mid-character.
+    // The unit is read as a whole character: `30é` is refused, and the string
+    // is never split inside `é`.
     assert_eq!(parse_expiry("30é"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
     assert_eq!(parse_expiry("30日"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
     assert_eq!(parse_expiry("é"), Err(EXPECTED_EXPIRY_ERROR.to_string()));
@@ -113,7 +129,7 @@ fn leading_zeros_in_a_count_read_as_the_same_span() {
 #[test]
 fn a_count_of_zero_parses_and_makes_a_grant_that_never_works() {
     // A zero span is taken as written: the grant runs out at the instant it
-    // is made, so the token it prints admits nothing.
+    // is made, and the token it prints admits nothing.
     assert_eq!(parse_expiry("0s"), Ok(Expiry::After(Duration::ZERO)));
     assert_eq!(parse_expiry("0h"), Ok(Expiry::After(Duration::ZERO)));
     assert_eq!(parse_expiry("0d"), Ok(Expiry::After(Duration::ZERO)));
@@ -133,8 +149,8 @@ fn a_count_written_with_a_leading_plus_reads_as_that_count() {
 
 #[test]
 fn a_count_whose_unit_multiply_overflows_is_refused_rather_than_wrapping() {
-    // 18446744073709551615 days is u64::MAX days: the count itself fits, and
-    // the multiply by 86400 seconds is what does not.
+    // 18446744073709551615 days is u64::MAX days: the count fits in a u64,
+    // and the multiply by 86400 seconds overflows.
     assert_eq!(
         parse_expiry("18446744073709551615d"),
         Err(EXPECTED_EXPIRY_ERROR.to_string())
@@ -206,7 +222,7 @@ fn a_grant_block_with_no_listen_address_names_the_config_key_that_sets_one() {
         rendered_output,
         "anyone holding this token can run anything you can.\n\
          f00d\n\
-         no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
+         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl, then \
          run `koshi share grant` again.\n"
     );
     assert_eq!(rendered_output.matches("f00d").count(), 1);
@@ -236,7 +252,8 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
             + &output::render_remote_ready(
                 "alice",
                 &RemoteReady::On {
-                    remote_listen_address: "laptop.local:7654".to_string(),
+                    remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+                    host_addresses: Vec::new(),
                 },
             );
 
@@ -245,13 +262,11 @@ fn a_grant_block_with_remote_access_on_ends_with_the_command_that_connects() {
         "anyone holding this token can run anything you can.\n\
          f00d\n\
          connect from another machine:\n\
-         \x20 koshi attach --remote laptop.local:7654 --save-as alice [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
+         other machine must connect to that address.\n"
     );
-    // The secret is printed once, on its own line, and never inside the
-    // command a reader would paste into a shell.
-    assert_eq!(rendered_output.matches("f00d").count(), 1);
-    assert!(!rendered_output.contains("--remote laptop.local:7654 f00d"));
 }
 
 #[test]
@@ -270,7 +285,7 @@ fn a_grant_block_that_replaced_one_opens_with_the_grant_that_stopped() {
          working.\n\
          anyone holding this token can run anything you can.\n\
          f00d\n\
-         no remote listen address is set; add `remote-listen \"<host:port>\"` to koshi.kdl, then \
+         no remote listen address is set; add `remote-listen \"<ip>:<port>\"` to koshi.kdl, then \
          run `koshi share grant` again.\n"
     );
 }
@@ -400,35 +415,43 @@ fn the_secret_block_stands_on_its_own_and_says_nothing_about_connecting() {
 
 #[test]
 fn an_identity_shaped_like_an_address_is_not_offered_as_a_saved_name() {
-    // `desk:22` has the `host:port` shape, so the flag is left off.
+    // `desk:22` has the `host:port` shape: the command carries no `--save-as`.
     let rendered_output = output::render_remote_ready(
         "desk:22",
         &RemoteReady::On {
-            remote_listen_address: "laptop.local:7654".to_string(),
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine:\n  \
-         koshi attach --remote laptop.local:7654 [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        "connect from another machine:\n\
+         \x20 koshi attach --remote 192.168.1.20:7654 [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
+         other machine must connect to that address.\n"
     );
 }
 
 #[test]
 fn an_identity_with_a_space_in_it_is_not_offered_as_a_saved_name() {
-    // Two words, so the flag is left off.
+    // `ada lovelace` is two words: the command carries no `--save-as`.
     let rendered_output = output::render_remote_ready(
         "ada lovelace",
         &RemoteReady::On {
-            remote_listen_address: "laptop.local:7654".to_string(),
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
         },
     );
 
-    assert!(
-        !rendered_output.contains("--save-as"),
-        "a name that cannot be typed as one word is not offered: {rendered_output}"
+    assert_eq!(
+        rendered_output,
+        "connect from another machine:\n\
+         \x20 koshi attach --remote 192.168.1.20:7654 [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
+         other machine must connect to that address.\n"
     );
 }
 
@@ -437,15 +460,18 @@ fn a_plain_identity_is_still_offered_as_the_saved_name() {
     let rendered_output = output::render_remote_ready(
         "alice",
         &RemoteReady::On {
-            remote_listen_address: "laptop.local:7654".to_string(),
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
         },
     );
 
     assert_eq!(
         rendered_output,
-        "connect from another machine:\n  \
-         koshi attach --remote laptop.local:7654 --save-as alice [SESSION]\n\
-         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+        "connect from another machine:\n\
+         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
+         other machine must connect to that address.\n"
     );
 }
 
@@ -459,12 +485,14 @@ fn a_router_that_could_not_answer_leaves_the_state_unread_rather_than_off() {
     assert_eq!(failed_remote_ready, RemoteReady::Unknown);
 
     let answered_remote_ready = resolve_remote_ready_or_unknown(Ok(RemoteReady::On {
-        remote_listen_address: "laptop.local:7654".to_string(),
+        remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+        host_addresses: Vec::new(),
     }));
     assert_eq!(
         answered_remote_ready,
         RemoteReady::On {
-            remote_listen_address: "laptop.local:7654".to_string()
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
         },
         "an answer is passed through as it stands"
     );
@@ -499,13 +527,13 @@ fn a_port_held_by_something_else_says_what_to_run_to_try_again() {
     let rendered_text = output::render_remote_ready(
         "alice",
         &RemoteReady::Blocked {
-            remote_listen_address: "laptop.local:7654".to_string(),
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
         },
     );
 
     assert_eq!(
         rendered_text,
-        "remote access is on, and nothing is listening on laptop.local:7654: another program \
+        "remote access is on, and nothing is listening on 192.168.1.20:7654: another program \
          holds it. Free that address, then run `koshi share grant` again to open the port. This \
          token cannot be used to connect until then.\n"
     );
@@ -566,16 +594,16 @@ impl std::io::Write for OutputRecorder {
 
 #[test]
 fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
-    // Read from inside the closure: the secret is in `out` before `ready`
-    // runs.
-    let token = ConnectionToken::from_secret("f00d");
+    // Read from inside the closure: the secret is in `output_writer` before
+    // `resolve_remote_ready` runs.
+    let connection_token = ConnectionToken::from_secret("f00d");
     let mut output_recorder = OutputRecorder::new();
     let recorder_snapshot = output_recorder.clone();
     let output_seen_before_prompt = std::cell::RefCell::new(String::new());
 
     write_share_grant(
         &mut output_recorder,
-        &token,
+        &connection_token,
         "alice",
         &TokenScope::HostWide,
         false,
@@ -603,14 +631,14 @@ fn the_secret_is_written_before_anything_that_could_prompt_or_fail() {
 fn the_secret_is_flushed_before_anything_that_could_prompt_or_fail() {
     // Read from inside the closure: the whole secret block has been flushed,
     // not only written.
-    let token = ConnectionToken::from_secret("f00d");
+    let connection_token = ConnectionToken::from_secret("f00d");
     let mut output_recorder = OutputRecorder::new();
     let recorder_snapshot = output_recorder.clone();
     let flushed_output_before_prompt = std::cell::RefCell::new(String::new());
 
     write_share_grant(
         &mut output_recorder,
-        &token,
+        &connection_token,
         "alice",
         &TokenScope::HostWide,
         false,
@@ -728,17 +756,12 @@ fn a_pane_of_a_remotely_watched_session_refuses_share() {
         panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
-    assert!(
-        help.expect("the refusal names why")
-            .contains("someone is attached to this session from another machine"),
-        "the refusal names who sees the pane"
-    );
+    assert_eq!(help, Some(WATCHED_FROM_ANOTHER_MACHINE_HELP.to_string()));
 }
 
 #[test]
 fn a_client_whose_origin_the_session_did_not_answer_refuses_share() {
-    // A session server built before the origin field serves rows with no
-    // origin. That is not a row saying `Local`.
+    // A row with no origin refuses as a row naming another machine does.
     let session_id = SessionId::new();
     let session_overview = build_session_overview_with_clients(
         session_id,
@@ -755,11 +778,7 @@ fn a_client_whose_origin_the_session_did_not_answer_refuses_share() {
         panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
-    assert!(
-        help.expect("the refusal names why")
-            .contains("someone is attached to this session from another machine"),
-        "an unanswered origin takes the same branch a remote row takes"
-    );
+    assert_eq!(help, Some(WATCHED_FROM_ANOTHER_MACHINE_HELP.to_string()));
 }
 
 #[test]
@@ -774,9 +793,6 @@ fn a_pane_of_a_session_nobody_is_attached_to_keeps_share() {
 
 #[test]
 fn a_session_that_cannot_be_asked_refuses_share() {
-    // The session server paints the pane and the router serves `share`; they
-    // are separate processes. One being unreachable says nothing about whether
-    // anyone is watching this pane.
     let session_id = SessionId::new();
 
     let share_error =
@@ -791,18 +807,19 @@ fn a_session_that_cannot_be_asked_refuses_share() {
         panic!("expected a rejection, got {share_error:?}");
     };
     assert_eq!(reason, RejectReason::Unauthorized);
-    assert!(
-        help.expect("the refusal names why")
-            .contains("this session could not say who is attached to it"),
-        "the refusal names what could not be answered"
+    assert_eq!(
+        help,
+        Some(format!(
+            "this session could not say who is attached to it, so whether anyone sees this \
+             pane from another machine is unknown: session {session_id} is not running. Run \
+             `koshi share` from a terminal outside koshi."
+        ))
     );
 }
 
 /// A stand-in router: answers control-plane requests from canned data and
-/// records the scope each `RevokeToken` named.
-///
-/// Opens no socket and starts no process, so it behaves the same on every
-/// platform and can never reach `spawn_router_detached`.
+/// records the scope each `RevokeToken` named. Opens no socket and starts no
+/// process.
 struct StandInRouter {
     token_entries: Vec<TokenEntry>,
     should_refuse_host_wide: bool,
@@ -832,8 +849,8 @@ impl StandInRouter {
     /// held grant it stopped, by the rule
     /// [`TokenStore::revoke_token_grants`](koshi_ipc::remote_tokens::TokenStore::revoke_token_grants)
     /// uses: the identity matches, the grant still stands, and a named scope matches exactly. A
-    /// request that matches nothing answers `Revoked([])`, which is what the router sends when a
-    /// `--session` revoke finds no grant scoped to that session.
+    /// request that matches nothing answers `Revoked([])`, as the router does when a `--session`
+    /// revoke finds no grant scoped to that session.
     fn submit_router_request(
         &mut self,
         router_request_kind: RouterRequestKind,
@@ -878,7 +895,7 @@ impl StandInRouter {
     }
 }
 
-/// One token listing row, live unless `expires_at` is already past.
+/// One token listing row, live unless `expiration_time` is already past.
 fn build_token_entry(
     identity: &str,
     token_scope: TokenScope,
@@ -911,8 +928,7 @@ fn the_host_wide_warning_names_the_grant_and_what_stopping_both_costs() {
 
 /// Run [`revoke_share_grants`] for `identity` narrowed to `session_scope`
 /// against `stand_in_router`, answering the confirm with `is_confirmed`, and
-/// hand back each requested revoke scope.
-/// `RevokeToken` named.
+/// hand back the scope each `RevokeToken` named.
 fn run_session_revoke(
     identity: &str,
     session_scope: TokenScope,
@@ -935,11 +951,10 @@ fn a_confirmed_session_revoke_stops_the_host_wide_grant_with_it() {
     let requested_revoke_scopes = run_session_revoke(
         "alice",
         session_scope.clone(),
-        StandInRouter::from_token_entries(vec![build_token_entry(
-            "alice",
-            TokenScope::HostWide,
-            None,
-        )]),
+        StandInRouter::from_token_entries(vec![
+            build_token_entry("alice", session_scope.clone(), None),
+            build_token_entry("alice", TokenScope::HostWide, None),
+        ]),
         true,
     );
 
@@ -952,9 +967,8 @@ fn a_confirmed_session_revoke_stops_the_host_wide_grant_with_it() {
 
 #[test]
 fn a_session_revoke_that_stops_nothing_still_cascades_to_the_host_wide_grant() {
-    // The identity holds only a host-wide grant, so the router answers the
-    // session revoke with `Revoked([])`. The cascade is decided by what the
-    // listing holds, not by what the first revoke stopped.
+    // alice holds only a host-wide grant: the session revoke stops nothing,
+    // and the host-wide revoke still follows.
     let session_scope = TokenScope::Session(SessionId::new());
     let requested_revoke_scopes = run_session_revoke(
         "alice",
@@ -1050,9 +1064,8 @@ fn an_expired_host_wide_grant_prompts_nothing() {
 
 #[test]
 fn a_refused_second_revoke_reports_the_grant_left_standing() {
-    // The session grant stopped, then the router refused the host-wide one. The
-    // operator is half done, so the answer names what still stands and the
-    // command that finishes it.
+    // The router refuses the host-wide revoke: the error names the grant still
+    // standing and the command that stops it.
     let session_scope = TokenScope::Session(SessionId::new());
     let mut stand_in_router = StandInRouter::from_token_entries(vec![build_token_entry(
         "alice",
@@ -1069,14 +1082,10 @@ fn a_refused_second_revoke_reports_the_grant_left_standing() {
     )
     .expect_err("the second revoke was refused");
 
-    let error_message = revoke_error.to_string();
-    assert!(
-        error_message.contains("alice's host-wide grant is still standing"),
-        "the answer names what survived: {error_message}"
-    );
-    assert!(
-        error_message.contains("run `koshi share revoke alice` to stop it"),
-        "the answer names the command that finishes it: {error_message}"
+    assert_eq!(
+        revoke_error.to_string(),
+        "alice's host-wide grant is still standing, and still reaches that session: the token \
+         store could not be written\n  run `koshi share revoke alice` to stop it"
     );
     assert_eq!(
         stand_in_router.requested_revoke_scopes,
@@ -1118,8 +1127,8 @@ fn a_router_refusal_is_reported_with_the_routers_own_message() {
     assert_eq!(router_error.to_string(), "this caller may not grant tokens");
 }
 
-/// A reply of a kind the request cannot produce is not a refusal, so it is
-/// reported as the control plane answering something else, naming the kind.
+/// A reply of a kind the request cannot produce is reported as an unexpected
+/// reply, naming its wire name.
 #[test]
 fn a_reply_the_request_cannot_produce_is_reported_by_its_wire_name() {
     let router_error = build_router_refusal(&RouterResult::Restarting);
@@ -1127,5 +1136,184 @@ fn a_reply_the_request_cannot_produce_is_reported_by_its_wire_name() {
     assert_eq!(
         router_error.to_string(),
         "IPC unavailable: the router answered with an unexpected Restarting reply"
+    );
+}
+
+/// A [`HostAddress`] on `interface_name` for the address `ip_address_text`.
+fn build_host_address(ip_address_text: &str, interface_name: &str) -> HostAddress {
+    HostAddress {
+        ip_address: ip_address_text.parse().expect("an address literal"),
+        interface_name: interface_name.to_string(),
+    }
+}
+
+#[test]
+fn a_listener_on_every_ipv4_address_names_each_address_of_this_machine_with_its_interface() {
+    let rendered_output = output::render_remote_ready(
+        "alice",
+        &RemoteReady::On {
+            remote_listen_address: parse_listen_address("0.0.0.0:7654"),
+            host_addresses: vec![
+                build_host_address("192.168.1.20", "en0"),
+                build_host_address("100.64.0.2", "utun3"),
+            ],
+        },
+    );
+
+    assert_eq!(
+        rendered_output,
+        "connect from another machine, at the address of this one it can reach:\n\
+         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]   # en0\n\
+         \x20 koshi attach --remote 100.64.0.2:7654 --save-as alice [SESSION]   # utun3\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+}
+
+#[test]
+fn a_listener_on_every_ipv6_address_names_each_address_in_brackets() {
+    let rendered_output = output::render_remote_ready(
+        "desk:22",
+        &RemoteReady::On {
+            remote_listen_address: parse_listen_address("[::]:7654"),
+            host_addresses: vec![build_host_address("2001:db8::20", "Wi-Fi")],
+        },
+    );
+
+    assert_eq!(
+        rendered_output,
+        "connect from another machine, at the address of this one it can reach:\n\
+         \x20 koshi attach --remote [2001:db8::20]:7654 [SESSION]   # Wi-Fi\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+}
+
+#[test]
+fn an_interface_name_is_printed_without_its_control_characters() {
+    let rendered_output = output::render_remote_ready(
+        "alice",
+        &RemoteReady::On {
+            remote_listen_address: parse_listen_address("0.0.0.0:7654"),
+            host_addresses: vec![build_host_address("192.168.1.20", "en0\u{1b}]0;x\u{7}")],
+        },
+    );
+
+    assert_eq!(
+        rendered_output,
+        "connect from another machine, at the address of this one it can reach:\n\
+         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]   # en0]0;x\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+}
+
+#[test]
+fn a_listener_on_every_address_of_a_machine_with_none_names_a_placeholder() {
+    let rendered_output = output::render_remote_ready(
+        "alice",
+        &RemoteReady::On {
+            remote_listen_address: parse_listen_address("0.0.0.0:7654"),
+            host_addresses: Vec::new(),
+        },
+    );
+
+    assert_eq!(
+        rendered_output,
+        "this machine has no network address right now. Connect from another machine with:\n\
+         \x20 koshi attach --remote <this machine's address>:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n"
+    );
+}
+
+#[test]
+fn a_listener_on_one_address_names_it_and_says_it_is_the_only_one() {
+    let rendered_output = output::render_remote_ready(
+        "alice",
+        &RemoteReady::On {
+            remote_listen_address: parse_listen_address("192.168.1.20:7654"),
+            host_addresses: Vec::new(),
+        },
+    );
+
+    assert_eq!(
+        rendered_output,
+        "connect from another machine:\n\
+         \x20 koshi attach --remote 192.168.1.20:7654 --save-as alice [SESSION]\n\
+         set KOSHI_REMOTE_SECRET to the secret above, or paste it when asked.\n\
+         this machine accepts connections on 192.168.1.20 only (remote-listen in koshi.kdl); the \
+         other machine must connect to that address.\n"
+    );
+}
+
+#[test]
+fn a_listener_on_a_loopback_address_says_no_other_machine_can_connect() {
+    for (remote_listen_address, expected_output) in [
+        (
+            "127.0.0.1:7654",
+            "remote-listen in koshi.kdl is 127.0.0.1:7654, a loopback address, so no other \
+             machine can connect to it. Set it to an address of this machine, such as \
+             0.0.0.0:7654, then run `koshi share grant` again.\n",
+        ),
+        (
+            "[::1]:7654",
+            "remote-listen in koshi.kdl is [::1]:7654, a loopback address, so no other machine \
+             can connect to it. Set it to an address of this machine, such as 0.0.0.0:7654, then \
+             run `koshi share grant` again.\n",
+        ),
+    ] {
+        let rendered_output = output::render_remote_ready(
+            "alice",
+            &RemoteReady::On {
+                remote_listen_address: parse_listen_address(remote_listen_address),
+                host_addresses: Vec::new(),
+            },
+        );
+
+        assert_eq!(rendered_output, expected_output);
+    }
+}
+
+#[test]
+fn list_host_addresses_for_listen_address_reads_nothing_for_one_address() {
+    for remote_listen_address in ["192.168.1.20:7654", "[2001:db8::20]:7654", "127.0.0.1:7654"] {
+        assert_eq!(
+            list_host_addresses_for_listen_address(
+                parse_listen_address(remote_listen_address),
+                || panic!("one address lists no machine address"),
+            ),
+            Vec::new(),
+            "{remote_listen_address}"
+        );
+    }
+}
+
+#[test]
+fn list_host_addresses_for_listen_address_keeps_the_family_of_the_listen_address_in_order() {
+    let list_machine_addresses = || {
+        vec![
+            build_host_address("2001:db8::20", "en0"),
+            build_host_address("192.168.1.20", "en0"),
+            build_host_address("fd00::5", "utun3"),
+            build_host_address("100.64.0.2", "utun3"),
+        ]
+    };
+
+    assert_eq!(
+        list_host_addresses_for_listen_address(
+            parse_listen_address("0.0.0.0:7654"),
+            list_machine_addresses
+        ),
+        vec![
+            build_host_address("192.168.1.20", "en0"),
+            build_host_address("100.64.0.2", "utun3"),
+        ]
+    );
+    assert_eq!(
+        list_host_addresses_for_listen_address(
+            parse_listen_address("[::]:7654"),
+            list_machine_addresses
+        ),
+        vec![
+            build_host_address("2001:db8::20", "en0"),
+            build_host_address("fd00::5", "utun3"),
+        ]
     );
 }

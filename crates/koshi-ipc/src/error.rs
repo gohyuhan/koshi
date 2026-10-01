@@ -17,16 +17,20 @@ use thiserror::Error;
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
 /// an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), and a remote
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), a program
+/// file the caller cannot read
+/// ([`ProgramFileUnreadable`](IpcError::ProgramFileUnreadable)), and a remote
 /// access file the caller cannot read or write
 /// ([`RemoteFileUnreadable`](IpcError::RemoteFileUnreadable),
 /// [`RemoteFileWrite`](IpcError::RemoteFileWrite)).
 ///
 /// Session-fatal: a failed endpoint-file write
-/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)) and a failed advert
-/// marker write ([`AdvertWrite`](IpcError::AdvertWrite)). Both happen during
-/// the session's own startup. No caller reaches a session whose endpoint file
-/// never lands.
+/// ([`EndpointFileWrite`](IpcError::EndpointFileWrite)), a failed program-file
+/// write ([`ProgramFileWrite`](IpcError::ProgramFileWrite)), and a failed
+/// advertisement marker write
+/// ([`AdvertisementMarkerWrite`](IpcError::AdvertisementMarkerWrite)). Each happens during
+/// the server's own startup. No caller reaches a server whose endpoint file
+/// and program file never land.
 ///
 /// Recoverable: a frame that arrived whole yet does not decode
 /// ([`MalformedFrame`](IpcError::MalformedFrame)). The stream is still aligned
@@ -93,11 +97,28 @@ pub enum IpcError {
         endpoint_file_path: String,
         error_detail: String,
     },
-    /// Writing the advert marker failed during session startup. No other user
-    /// of this machine finds this session. `path` names the marker.
-    #[error("advert marker {advert_marker_path} could not be written: {error_detail}")]
-    AdvertWrite {
-        advert_marker_path: String,
+    /// A program file that exists but could not be used: reading it failed,
+    /// or its bytes are not a readable program file.
+    #[error("program file {program_file_path} is unreadable: {error_detail}")]
+    ProgramFileUnreadable {
+        program_file_path: String,
+        error_detail: String,
+    },
+    /// Writing the program file failed during server startup. No caller
+    /// finds this server's socket.
+    #[error("program file {program_file_path} could not be written: {error_detail}")]
+    ProgramFileWrite {
+        program_file_path: String,
+        error_detail: String,
+    },
+    /// Writing the advertisement marker at `advertisement_marker_path` failed
+    /// during session startup. No other user of this machine finds this
+    /// session.
+    #[error(
+        "advertisement marker {advertisement_marker_path} could not be written: {error_detail}"
+    )]
+    AdvertisementMarkerWrite {
+        advertisement_marker_path: String,
         error_detail: String,
     },
     /// A remote access file that exists but could not be used: reading it
@@ -117,15 +138,15 @@ pub enum IpcError {
         remote_file_path: String,
         error_detail: String,
     },
-    /// Nothing accepted the TCP connection at `address`.
+    /// Nothing accepted the TCP connection at `server_address`.
     #[error(
         "{server_address} refused the connection: nothing is listening on that port. \
          if remote access is not enabled on that machine, run `koshi share grant` \
          there and answer yes to the offer to open the port"
     )]
     ConnectRefused { server_address: String },
-    /// The TCP connection to `address` was still unanswered when the dial ran
-    /// out of time.
+    /// The TCP connection to `server_address` was still unanswered when the
+    /// dial ran out of time.
     #[error(
         "connecting to {server_address} timed out: nothing answered. check that the \
          machine is up, the address and port are right, and the network path \
@@ -139,8 +160,8 @@ pub enum IpcError {
         server_address: String,
         error_detail: String,
     },
-    /// The server at `address` presented a different certificate than the one
-    /// pinned the first time it was dialled.
+    /// The server at `server_address` presented a different certificate than
+    /// the one pinned the first time it was dialled.
     #[error(
         "the certificate of {server_address} changed: pinned {pinned_certificate}, presented {presented_certificate}. \
          if the server was reinstalled on purpose, run `koshi remote forget {server_address}` \

@@ -8,6 +8,7 @@ license.workspace = true
 fs4.workspace = true
 koshi-config.workspace = true
 koshi-core.workspace = true
+koshi-host.workspace = true
 koshi-ipc.workspace = true
 koshi-link.workspace = true
 koshi-observability.workspace = true

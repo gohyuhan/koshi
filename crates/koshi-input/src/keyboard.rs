@@ -243,7 +243,7 @@ enum FunctionalKeyForm {
 ///
 /// `NamedKey::Up` gives `Cursor(b'A')` and no modifier. `NamedKey::Delete`
 /// gives `Tilde(3)`. `NamedKey::F(13)` gives `Ss3(b'P')` with
-/// `BindingModifierFlags::SHIFT`, because F13 encodes as Shift plus F1.
+/// `BindingModifierFlags::SHIFT`: F13 encodes as Shift plus F1.
 ///
 /// # Panics
 ///
@@ -647,49 +647,51 @@ fn is_text_producing_event(key_input: &KeyInput) -> bool {
 
 /// Whether the legacy bytes for this event are bytes another key also sends.
 ///
-/// The legacy encoding maps several keys onto one C0 byte. Ctrl+`i` sends
-/// `0x09`, which Tab sends; Shift+Enter sends `\r`, which Enter sends. Both
-/// lose which key was pressed, so both are true here. Shift+Tab sends
-/// `ESC [ Z`, which only Shift+Tab sends, so it is false.
+/// The legacy encoding maps several keys onto one C0 byte, and Alt puts `ESC`
+/// in front of that byte. Each shared byte has one chord that owns it, and
+/// with Alt the Alt form of that chord owns `ESC` and the byte. Every other
+/// chord whose legacy bytes are that byte, or `ESC` and that byte, is true here.
+///
+/// Example: Ctrl+`i` sends `0x09`, which Tab owns; Shift+Enter sends `\r`,
+/// which Enter owns; Ctrl+Shift+`h` sends `0x08`, which Ctrl+`h` owns;
+/// Alt+Ctrl+`m` sends `ESC \r`, which Alt+Enter owns. All four are true. Tab,
+/// Ctrl+`h` and Alt+Enter are false. Shift+Tab sends `ESC [ Z`, which is not a
+/// shared byte, and is false.
 fn is_key_lost_by_legacy_encoding(key_input: &KeyInput) -> bool {
     let Some(chord) = key_input.to_binding_chord() else {
         return false;
     };
-    let legacy_bytes = encode_key_chord(chord, false);
-    let Some(owner_key) = find_c0_byte_owner(&legacy_bytes) else {
+    let (shared_byte, owner_alt_modifier_flags) = match encode_key_chord(chord, false).as_slice() {
+        [shared_byte] => (*shared_byte, BindingModifierFlags::NONE),
+        [0x1b, shared_byte] => (*shared_byte, BindingModifierFlags::ALT),
+        _ => return false,
+    };
+    let Some(owner_chord) = find_c0_byte_owner(shared_byte) else {
         return false;
     };
-    if owner_key != chord.key {
-        return true;
-    }
-    // The owner's own key loses a modifier when the modifier changes nothing:
-    // Shift+Enter and Enter both send `\r`.
-    let unmodified_bytes = encode_key_chord(
-        KeyChord::from_parts(BindingModifierFlags::NONE, chord.key),
-        false,
-    );
-    chord.modifier_flags != BindingModifierFlags::NONE && legacy_bytes == unmodified_bytes
+    chord
+        != KeyChord::from_parts(
+            owner_chord.modifier_flags | owner_alt_modifier_flags,
+            owner_chord.key,
+        )
 }
 
-/// The key that owns one C0 byte, or `None` when the bytes are not a C0 byte
-/// two keys share.
+/// The chord that owns the C0 byte `shared_byte`, or `None` when no two keys
+/// share that byte.
 ///
 /// `0x09` belongs to Tab, `0x0d` to Enter, `0x1b` to Esc, `0x7f` to Backspace,
-/// `0x00` to Space and `0x08` to `h`.
-fn find_c0_byte_owner(legacy_bytes: &[u8]) -> Option<Key> {
-    let [single_byte] = legacy_bytes else {
-        return None;
-    };
-    let owner_key = match single_byte {
-        0x09 => Key::Named(NamedKey::Tab),
-        0x0d => Key::Named(NamedKey::Enter),
-        0x1b => Key::Named(NamedKey::Esc),
-        0x7f => Key::Named(NamedKey::Backspace),
-        0x00 => Key::Named(NamedKey::Space),
-        0x08 => Key::Char('h'),
+/// `0x00` to Ctrl+Space and `0x08` to Ctrl+`h`.
+fn find_c0_byte_owner(shared_byte: u8) -> Option<KeyChord> {
+    let (owner_modifier_flags, owner_key) = match shared_byte {
+        0x09 => (BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
+        0x0d => (BindingModifierFlags::NONE, Key::Named(NamedKey::Enter)),
+        0x1b => (BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
+        0x7f => (BindingModifierFlags::NONE, Key::Named(NamedKey::Backspace)),
+        0x00 => (BindingModifierFlags::CTRL, Key::Named(NamedKey::Space)),
+        0x08 => (BindingModifierFlags::CTRL, Key::Char('h')),
         _ => return None,
     };
-    Some(owner_key)
+    Some(KeyChord::from_parts(owner_modifier_flags, owner_key))
 }
 
 /// The key number a `CSI u` report names `key` by.

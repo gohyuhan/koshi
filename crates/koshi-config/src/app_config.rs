@@ -36,6 +36,7 @@
 //! [`Direction::Down`], leaving every other field at its built-in default.
 
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use kdl::KdlNode;
@@ -221,11 +222,22 @@ pub fn parse_app_config(
                 config_section_name,
                 &mut parse_warnings,
             ),
-            // `remote-listen` is `Option<Option<String>>`: the outer layer
-            // marks the field set, the inner carries the address.
+            // `remote-listen` is `Option<Option<SocketAddr>>`: the outer
+            // layer marks the field set, the inner carries the IP address and
+            // port. No host name is looked up.
             "remote-listen" => set_top_level_field(
-                &mut partial_koshi_config.remote_listen,
-                parse_nonempty_string_kdl_value(config_node).map(Some),
+                &mut partial_koshi_config.remote_listen_address,
+                parse_nonempty_string_kdl_value(config_node).and_then(|remote_listen_text| {
+                    remote_listen_text
+                        .parse::<SocketAddr>()
+                        .map(Some)
+                        .map_err(|_| {
+                            format!(
+                                "`{remote_listen_text}` is not an IP address and port, such as \
+                                 `192.168.1.20:7654`"
+                            )
+                        })
+                }),
                 config_section_name,
                 &mut parse_warnings,
             ),
@@ -474,7 +486,7 @@ fn parse_mouse_config(
                 parse_warnings,
             ),
             "wheel" => set_parsed_field(
-                &mut partial_mouse_config.wheel,
+                &mut partial_mouse_config.wheel_scroll,
                 parse_wheel_scroll(field_node),
                 "mouse",
                 field_name,
@@ -604,7 +616,7 @@ fn parse_logging_config(
                 parse_warnings,
             ),
             "level" => set_parsed_field(
-                &mut partial_logging_config.level,
+                &mut partial_logging_config.log_level,
                 parse_log_level(field_node),
                 "logging",
                 field_name,

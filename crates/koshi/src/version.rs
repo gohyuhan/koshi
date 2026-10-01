@@ -8,6 +8,7 @@
 //! This module only gathers the answers. [`crate::output`] renders them.
 
 use std::path::Path;
+use std::time::Instant;
 
 use koshi_core::ids::SessionId;
 use serde::Serialize;
@@ -15,7 +16,7 @@ use serde::Serialize;
 use crate::cli::SessionReference;
 use crate::targeting;
 use koshi_link::error::CliError;
-use koshi_link::{ipc_client, router_client};
+use koshi_link::{discovery, ipc_client, router_client};
 
 /// The build of the koshi program that ran this command, as `koshi version`
 /// reports it.
@@ -81,9 +82,9 @@ impl ServerVersionRow {
     /// running, an empty string is a server too old to name its build, and an
     /// error is a server that could not be asked.
     ///
-    /// A server that could not be asked also says so on standard error as the
-    /// probe returns, so the reason is visible beside a table that has no room
-    /// for it.
+    /// A server that could not be asked also prints
+    /// `koshi: <server> did not answer: <reason>` on standard error as the
+    /// probe returns.
     fn from_version_probe(
         server_kind: ServerKind,
         session_id: Option<SessionId>,
@@ -112,40 +113,86 @@ impl ServerVersionRow {
     }
 }
 
+/// What `koshi server-version` gathered: one row per koshi server asked, and
+/// what was not asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerVersionReport {
+    /// The router's row first, then one row per session, in session id order.
+    pub server_version_rows: Vec<ServerVersionRow>,
+    /// How many sessions the shared directory holds past its caps, as
+    /// [`ForeignSessionListing::unlisted_session_count`](ipc_client::ForeignSessionListing::unlisted_session_count)
+    /// counts them. They earn no row.
+    pub unlisted_session_count: usize,
+    /// How many paths the listings of sessions could not read, as
+    /// [`SessionCensusPlan::unread_paths`](discovery::SessionCensusPlan::unread_paths)
+    /// holds them. The sessions under each one earn no row.
+    pub unread_path_count: usize,
+}
+
 /// The failure a version answer ends with when a server could not be asked, or
 /// `None` when every one of them answered.
 ///
-/// The rows print either way — a partial answer beats none — so this is what
-/// stops a caller reading only standard output and the exit code from taking
-/// those rows for the whole picture.
+/// The caller prints the rows either way, then ends with this failure. Each
+/// row that could not be asked counts,
+/// and so does each of `unlisted_session_count` sessions that earned no row.
+/// Each of `unread_path_count` paths adds its own clause.
+///
+/// Example: one row that could not be asked and `unread_path_count` 1 give
+/// `1 koshi server did not answer; 1 path could not be read, so this answer is
+/// incomplete`.
 #[must_use]
 pub fn build_unreachable_server_error(
     server_version_rows: &[ServerVersionRow],
+    unlisted_session_count: usize,
+    unread_path_count: usize,
 ) -> Option<CliError> {
     let unreachable_server_count = server_version_rows
         .iter()
         .filter(|server_version_row| {
             matches!(server_version_row.build, ServerBuild::Unreachable { .. })
         })
-        .count();
-    if unreachable_server_count == 0 {
+        .count()
+        + unlisted_session_count;
+    let mut unanswered_clauses = Vec::new();
+    match unreachable_server_count {
+        0 => {}
+        1 => unanswered_clauses.push("1 koshi server did not answer".to_string()),
+        unreachable_server_count => unanswered_clauses.push(format!(
+            "{unreachable_server_count} koshi servers did not answer"
+        )),
+    }
+    if unread_path_count > 0 {
+        unanswered_clauses.push(discovery::format_unread_path_count(unread_path_count));
+    }
+    if unanswered_clauses.is_empty() {
         return None;
     }
-    let unreachable_server_summary = if unreachable_server_count == 1 {
-        "1 koshi server did not answer".to_string()
-    } else {
-        format!("{unreachable_server_count} koshi servers did not answer")
-    };
     Some(CliError::IpcUnavailable {
-        detail: format!("{unreachable_server_summary}, so this answer is incomplete"),
+        detail: format!(
+            "{}, so this answer is incomplete",
+            unanswered_clauses.join("; ")
+        ),
     })
 }
 
 /// Every koshi server this user can reach and the build it named: the router
 /// first, then one row per session, in session id order.
 ///
-/// The sessions are the same set `list-sessions` shows — this user's own, and
-/// while `allow-other-users` is on, the ones other local users started.
+/// The sessions are the same set `list-sessions` asks — this user's own, as
+/// [`list_own_sessions`](ipc_client::list_own_sessions) gives them, and while
+/// `allow-other-users` is on, the ones other local users started, as
+/// [`list_foreign_sessions`](ipc_client::list_foreign_sessions) lists them.
+/// Up to [`MAX_SESSIONS_ASKED_AT_ONCE`](ipc_client::MAX_SESSIONS_ASKED_AT_ONCE)
+/// sessions are asked at the same time through
+/// [`ask_sessions_at_once`](ipc_client::ask_sessions_at_once), and every
+/// exchange ends by one deadline,
+/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// after the router answered. A session restarting earns a row that could not
+/// be asked, and so does each session id the shared directory advertises more
+/// than once. The sessions the shared directory holds past its caps earn no
+/// row: their count is in the report, and stderr says so. Neither do the
+/// sessions under a path a listing could not read: the count of those paths is
+/// in the report, and stderr names each one.
 ///
 /// `session` narrows the answer to that one session and leaves out the
 /// router. An id is asked directly; a name is looked up against the running
@@ -156,55 +203,105 @@ pub fn build_unreachable_server_error(
 /// the caller ends with.
 pub fn list_server_version_rows(
     session_reference: Option<&SessionReference>,
-) -> Result<Vec<ServerVersionRow>, CliError> {
+) -> Result<ServerVersionReport, CliError> {
     list_server_version_rows_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
         session_reference,
     )
 }
 
-/// [`list_server_version_rows`] against an explicit runtime directory.
+/// [`list_server_version_rows`] against an explicit runtime directory, with
+/// `shared_sessions_base_directory` naming where other users' sessions are
+/// listed from.
 fn list_server_version_rows_in_runtime_directory(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
-) -> Result<Vec<ServerVersionRow>, CliError> {
+) -> Result<ServerVersionReport, CliError> {
     if let Some(session_reference) = session_reference {
-        let session_id = resolve_session_id(runtime_directory, session_reference)?;
-        return Ok(vec![build_session_version_row(
+        let session_id = resolve_session_id(
             runtime_directory,
-            session_id,
-        )]);
+            shared_sessions_base_directory,
+            session_reference,
+        )?;
+        return Ok(ServerVersionReport {
+            server_version_rows: vec![build_session_version_row(
+                runtime_directory,
+                shared_sessions_base_directory,
+                session_id,
+            )],
+            unlisted_session_count: 0,
+            unread_path_count: 0,
+        });
     }
 
     let mut server_version_rows = vec![ServerVersionRow::from_version_probe(
         ServerKind::Router,
         None,
-        router_client::get_running_router_version(runtime_directory),
+        router_client::find_running_router_version(runtime_directory),
     )];
-    // The two sources never overlap: `list_foreign_sessions` drops every id
-    // `list_advertised_sessions` reports, so no session earns two rows.
-    let mut session_ids = ipc_client::list_advertised_sessions(runtime_directory);
-    session_ids.extend(
-        ipc_client::resolve_shared_sessions_base_directory()
-            .into_iter()
-            .flat_map(|shared_base_directory| {
-                ipc_client::list_foreign_sessions(&shared_base_directory, runtime_directory)
-            })
-            .map(|(session_id, _)| session_id),
-    );
-    session_ids.sort();
-    for session_id in session_ids {
-        server_version_rows.push(build_session_version_row(runtime_directory, session_id));
+    let answer_deadline = Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION;
+    let census_plan =
+        discovery::plan_session_census(runtime_directory, shared_sessions_base_directory);
+    discovery::print_census_gap_notes(&census_plan);
+    for duplicated_session in &census_plan.duplicated_sessions {
+        server_version_rows.push(ServerVersionRow::from_version_probe(
+            ServerKind::Session,
+            Some(duplicated_session.session_id),
+            Err(duplicated_session.build_refusal_error()),
+        ));
     }
-    Ok(server_version_rows)
+    let session_asks = census_plan.session_asks;
+    let version_answers = ipc_client::ask_sessions_at_once(
+        &session_asks,
+        answer_deadline,
+        |(session_id, foreign_socket_address)| match foreign_socket_address {
+            None => ipc_client::find_running_session_version(
+                runtime_directory,
+                None,
+                *session_id,
+                Some(answer_deadline),
+            ),
+            Some(foreign_socket_address) => ipc_client::find_foreign_session_version(
+                *session_id,
+                foreign_socket_address,
+                answer_deadline,
+            ),
+        },
+    );
+    for ((session_id, _), version_answer) in session_asks.iter().zip(version_answers) {
+        server_version_rows.push(ServerVersionRow::from_version_probe(
+            ServerKind::Session,
+            Some(*session_id),
+            version_answer,
+        ));
+    }
+    server_version_rows[1..].sort_by_key(|server_version_row| server_version_row.session_id);
+    Ok(ServerVersionReport {
+        server_version_rows,
+        unlisted_session_count: census_plan.unlisted_session_count,
+        unread_path_count: census_plan.unread_paths.len(),
+    })
 }
 
-/// Ask one session's server for its build.
-fn build_session_version_row(runtime_directory: &Path, session_id: SessionId) -> ServerVersionRow {
+/// Ask one session's server for its build. The session has
+/// [`SESSION_ANSWER_TIMEOUT_DURATION`](ipc_client::SESSION_ANSWER_TIMEOUT_DURATION)
+/// to answer.
+fn build_session_version_row(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+) -> ServerVersionRow {
     ServerVersionRow::from_version_probe(
         ServerKind::Session,
         Some(session_id),
-        ipc_client::get_running_session_version(runtime_directory, session_id),
+        ipc_client::find_running_session_version(
+            runtime_directory,
+            shared_sessions_base_directory,
+            session_id,
+            Some(Instant::now() + ipc_client::SESSION_ANSWER_TIMEOUT_DURATION),
+        ),
     )
 }
 
@@ -212,19 +309,22 @@ fn build_session_version_row(runtime_directory: &Path, session_id: SessionId) ->
 /// name is looked up over a census of the running sessions.
 fn resolve_session_id(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: &SessionReference,
 ) -> Result<SessionId, CliError> {
     match session_reference {
         SessionReference::SessionId(session_id) => Ok(*session_id),
-        SessionReference::SessionName(session_name) => {
-            targeting::resolve_session_scope(runtime_directory, Some(session_reference))?
-                .sessions
-                .first()
-                .map(|overview| overview.session.session_id)
-                .ok_or_else(|| CliError::SessionNotFound {
-                    session_name: session_name.clone(),
-                })
-        }
+        SessionReference::SessionName(session_name) => targeting::resolve_session_scope(
+            runtime_directory,
+            shared_sessions_base_directory,
+            Some(session_reference),
+        )?
+        .sessions
+        .first()
+        .map(|overview| overview.session.session_id)
+        .ok_or_else(|| CliError::SessionNotFound {
+            session_name: session_name.clone(),
+        }),
     }
 }
 

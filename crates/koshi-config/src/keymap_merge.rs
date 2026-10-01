@@ -51,7 +51,7 @@ pub struct MergedBinding {
 /// One mode's merged lookup tables plus its removal and displacement
 /// records.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MergedModeMap {
+pub struct MergedModeKeymap {
     /// The winning user-authored binding per key.
     pub user_bindings_by_key_sequence: BTreeMap<KeySequence, MergedBinding>,
     /// The surviving built-in binding per key: firing shipped defaults no
@@ -66,12 +66,12 @@ pub struct MergedModeMap {
     pub unbound_default_bindings_by_key_sequence: BTreeMap<KeySequence, BoundAction>,
 }
 
-/// The merged keymap: one [`MergedModeMap`] per registered mode any layer
+/// The merged keymap: one [`MergedModeKeymap`] per registered mode any layer
 /// names, whether or not that mode's block holds an entry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MergedKeymap {
     /// Per-mode merged tables.
-    pub mode_map_by_name: BTreeMap<ModeName, MergedModeMap>,
+    pub mode_keymap_by_name: BTreeMap<ModeName, MergedModeKeymap>,
 }
 
 /// Folds keybinding layers (ordered lowest precedence first) into the
@@ -86,14 +86,14 @@ pub struct MergedKeymap {
 ///
 /// Per key, the highest firing entry wins. A firing user-authored entry on a
 /// defaulted key takes it, and the displaced default moves to
-/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence);
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeKeymap::unbound_default_bindings_by_key_sequence);
 /// a remove above the defaults layer does the same. A dead binding enters no
 /// map. A binding is dead when the registry refuses it, when it is a
 /// locked-mode sequence that holds the reserved unlock chord, or when it is
 /// longer than `maximum_chord_depth`. A dead user entry leaves the default
 /// beneath it in `default_bindings_by_key_sequence`. A dead default is in
 /// neither `default_bindings_by_key_sequence` nor
-/// [`unbound_default_bindings_by_key_sequence`](MergedModeMap::unbound_default_bindings_by_key_sequence).
+/// [`unbound_default_bindings_by_key_sequence`](MergedModeKeymap::unbound_default_bindings_by_key_sequence).
 #[must_use]
 pub fn merge_keymaps(
     layers: &[KeymapLayer],
@@ -112,18 +112,18 @@ pub fn merge_keymaps(
         maximum_chord_depth,
     };
 
-    let mut merged_mode_map_by_name: BTreeMap<ModeName, MergedModeMap> = BTreeMap::new();
+    let mut merged_mode_keymap_by_name: BTreeMap<ModeName, MergedModeKeymap> = BTreeMap::new();
 
     for (layer_index, layer) in layers.iter().enumerate() {
         for (mode_name, mode_bindings) in &layer.mode_bindings_by_name {
             if !known_mode_names.contains(mode_name) {
                 continue;
             }
-            let merged_mode_map = merged_mode_map_by_name
+            let merged_mode_keymap = merged_mode_keymap_by_name
                 .entry(mode_name.clone())
                 .or_default();
 
-            merged_mode_map
+            merged_mode_keymap
                 .removed_key_sequences
                 .extend(mode_bindings.removed_key_sequences.iter().cloned());
 
@@ -141,14 +141,14 @@ pub fn merge_keymaps(
                     // `unbound_default_bindings_by_key_sequence`; a removed
                     // user entry enters no map at all.
                     if !layer.origin.is_user_authored() {
-                        merged_mode_map
+                        merged_mode_keymap
                             .unbound_default_bindings_by_key_sequence
                             .insert(key_sequence.clone(), bound_action.clone());
                     }
                     continue;
                 }
                 if layer.origin.is_user_authored() {
-                    merged_mode_map.user_bindings_by_key_sequence.insert(
+                    merged_mode_keymap.user_bindings_by_key_sequence.insert(
                         key_sequence.clone(),
                         MergedBinding {
                             bound_action: bound_action.clone(),
@@ -156,7 +156,7 @@ pub fn merge_keymaps(
                         },
                     );
                 } else {
-                    merged_mode_map
+                    merged_mode_keymap
                         .default_bindings_by_key_sequence
                         .insert(key_sequence.clone(), bound_action.clone());
                 }
@@ -164,13 +164,13 @@ pub fn merge_keymaps(
         }
     }
 
-    for merged_mode_map in merged_mode_map_by_name.values_mut() {
-        for key_sequence in merged_mode_map.user_bindings_by_key_sequence.keys() {
-            if let Some(bound_action) = merged_mode_map
+    for merged_mode_keymap in merged_mode_keymap_by_name.values_mut() {
+        for key_sequence in merged_mode_keymap.user_bindings_by_key_sequence.keys() {
+            if let Some(bound_action) = merged_mode_keymap
                 .default_bindings_by_key_sequence
                 .remove(key_sequence)
             {
-                merged_mode_map
+                merged_mode_keymap
                     .unbound_default_bindings_by_key_sequence
                     .insert(key_sequence.clone(), bound_action);
             }
@@ -178,7 +178,7 @@ pub fn merge_keymaps(
     }
 
     MergedKeymap {
-        mode_map_by_name: merged_mode_map_by_name,
+        mode_keymap_by_name: merged_mode_keymap_by_name,
     }
 }
 

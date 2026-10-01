@@ -93,6 +93,7 @@ fn build_complete_discovery<const N: usize>(session_overviews: [SessionOverview;
     Discovered {
         sessions: session_overviews.to_vec(),
         unasked_session_count: 0,
+        unread_path_count: 0,
     }
 }
 
@@ -105,6 +106,7 @@ fn build_incomplete_discovery<const N: usize>(
     Discovered {
         sessions: session_overviews.to_vec(),
         unasked_session_count,
+        unread_path_count: 0,
     }
 }
 
@@ -955,6 +957,7 @@ fn tab_id_outside_the_session_is_not_found() {
 
 #[test]
 fn in_session_command_with_no_flags_routes_home_without_probing() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
         session_id: SessionId::new(),
         client_id: None,
@@ -964,13 +967,19 @@ fn in_session_command_with_no_flags_routes_home_without_probing() {
         pane_id: None,
         should_force_close: false,
     };
-    let command_route = resolve_command_route(&command, Some(&in_session_context))
-        .expect("home route needs no probe");
+    let command_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("home route needs no probe");
     assert_eq!(command_route, Route::InSession(ResolvedTargets::default()));
 }
 
 #[test]
 fn in_session_tab_id_routes_home_and_rides_into_the_command() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
         session_id: SessionId::new(),
         client_id: None,
@@ -984,8 +993,13 @@ fn in_session_tab_id_routes_home_and_rides_into_the_command() {
     };
     // An id needs no lookup: the route resolves nothing and `build_action_command`
     // carries the id into the command directly.
-    let command_route =
-        resolve_command_route(&command, Some(&in_session_context)).expect("id needs no lookup");
+    let command_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("id needs no lookup");
     let Route::InSession(resolved_targets) = command_route else {
         panic!("expected the home route, got {command_route:?}");
     };
@@ -1005,6 +1019,7 @@ fn in_session_tab_id_routes_home_and_rides_into_the_command() {
 
 #[test]
 fn in_session_move_tab_by_id_routes_home_and_rides_into_the_command() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
         session_id: SessionId::new(),
         client_id: None,
@@ -1017,8 +1032,13 @@ fn in_session_move_tab_by_id_routes_home_and_rides_into_the_command() {
     };
     // No runtime directory exists under test, so answering at all proves no
     // session was probed.
-    let command_route =
-        resolve_command_route(&command, Some(&in_session_context)).expect("id needs no lookup");
+    let command_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("id needs no lookup");
     let Route::InSession(resolved_targets) = command_route else {
         panic!("expected the home route, got {command_route:?}");
     };
@@ -1037,6 +1057,7 @@ fn in_session_move_tab_by_id_routes_home_and_rides_into_the_command() {
 
 #[test]
 fn in_session_focus_tab_by_id_routes_home_and_rides_into_the_command() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
         session_id: SessionId::new(),
         client_id: None,
@@ -1048,8 +1069,13 @@ fn in_session_focus_tab_by_id_routes_home_and_rides_into_the_command() {
         tab_reference: Some(TabReference::TabId(tab_id)),
         client_id: None,
     };
-    let command_route =
-        resolve_command_route(&command, Some(&in_session_context)).expect("id needs no lookup");
+    let command_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("id needs no lookup");
     let Route::InSession(resolved_targets) = command_route else {
         panic!("expected the home route, got {command_route:?}");
     };
@@ -1068,29 +1094,47 @@ fn in_session_focus_tab_by_id_routes_home_and_rides_into_the_command() {
 
 #[test]
 fn a_named_client_leaves_the_home_route() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
         session_id: SessionId::new(),
         client_id: None,
         pane_id: PaneId::new(),
     };
     let bare = CliCommand::TogglePaneFullscreen { client_id: None };
-    let home_route =
-        resolve_command_route(&bare, Some(&in_session_context)).expect("no flag needs no lookup");
+    let home_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &bare,
+        Some(&in_session_context),
+    )
+    .expect("no flag needs no lookup");
     assert_eq!(home_route, Route::InSession(ResolvedTargets::default()));
 
+    // The named client leaves home and is looked up across the running
+    // sessions, of which the empty runtime directory has none.
+    let named_client_id = ClientId::new();
     let client_named_command = CliCommand::TogglePaneFullscreen {
-        client_id: Some(ClientId::new()),
+        client_id: Some(named_client_id),
     };
-    match resolve_command_route(&client_named_command, Some(&in_session_context)) {
-        Ok(Route::InSession(resolved_targets)) => {
-            panic!("a named client must leave the home route, got {resolved_targets:?}")
-        }
-        Ok(Route::External { .. }) | Err(_) => {}
-    }
+    let client_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &client_named_command,
+        Some(&in_session_context),
+    );
+    let Err(CliError::CommandRejected { reason, help }) = client_route else {
+        panic!("expected the client lookup to be refused, got {client_route:?}");
+    };
+    assert_eq!(reason, RejectReason::TargetNotFound);
+    assert_eq!(
+        help,
+        Some(format!("no running session has client {named_client_id}"))
+    );
 }
 
 #[test]
 fn in_session_new_tab_with_a_client_stays_home() {
+    let runtime_directory = koshi_test_support::fixtures::build_test_runtime_directory();
     let in_session_context = InSessionContext {
         session_id: SessionId::new(),
         client_id: None,
@@ -1101,8 +1145,13 @@ fn in_session_new_tab_with_a_client_stays_home() {
         session_reference: None,
         client_id: Some(client_id),
     };
-    let command_route = resolve_command_route(&command, Some(&in_session_context))
-        .expect("a client needs no lookup");
+    let command_route = resolve_command_route_in_runtime_directory(
+        runtime_directory.path(),
+        None,
+        &command,
+        Some(&in_session_context),
+    )
+    .expect("a client needs no lookup");
     let Route::InSession(resolved_targets) = command_route else {
         panic!("expected the home route, got {command_route:?}");
     };
@@ -1174,6 +1223,7 @@ fn a_session_id_scopes_to_that_session_alone() {
 
     let discovered_sessions = resolve_session_scope(
         &runtime_directory,
+        None,
         Some(&SessionReference::SessionId(target_session_id)),
     )
     .expect("id scope answers");

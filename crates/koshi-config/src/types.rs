@@ -8,7 +8,8 @@
 //! session spawns, and a session cannot set a viewer's colors.
 //!
 //! Every field has a default via [`Default`]: koshi runs with no user config,
-//! and each side's `default()` is the baseline that user layers fold onto. This module owns the schema and defaults only. The sibling
+//! and each side's `default()` is the baseline that user layers fold onto.
+//! This module owns the schema and defaults only. The sibling
 //! [`layer`](crate::layer) module folds override layers onto these defaults,
 //! [`keybinding`](crate::keybinding) parses keybinding-file KDL, and
 //! [`migration`](crate::migration) validates versioned files and moves them
@@ -16,6 +17,7 @@
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -66,9 +68,10 @@ pub struct ServerConfig {
     pub should_allow_beta_features: bool,
     /// Whether other users of this machine may reach this session's socket.
     pub should_allow_other_users: bool,
-    /// The TCP address the remote listener binds, such as `"0.0.0.0:7654"`.
-    /// Setting it opens nothing; `koshi share grant` switches remote access on.
-    pub remote_listen: Option<String>,
+    /// The IP address and port the remote listener binds, such as
+    /// `0.0.0.0:7654`. Setting it opens nothing; `koshi share grant` switches
+    /// remote access on.
+    pub remote_listen_address: Option<SocketAddr>,
     /// The directory the session sockets other users reach live in. `None`
     /// takes the platform's machine-wide directory, `/tmp/koshi` on Unix and
     /// `%ProgramData%\koshi` on Windows.
@@ -87,7 +90,7 @@ impl Default for ServerConfig {
             logging: LoggingConfig::default(),
             should_allow_beta_features: false,
             should_allow_other_users: false,
-            remote_listen: None,
+            remote_listen_address: None,
             shared_sessions_directory: None,
             should_auto_close_session: false,
         }
@@ -335,7 +338,8 @@ pub struct BoundAction {
 
 /// The bindings for one input mode, keyed by the key sequence pressed.
 ///
-/// The map key is the sequence: one sequence resolves to exactly one action. The reverse is open: several sequences in one mode may name the
+/// The map key is the sequence: one sequence resolves to exactly one action.
+/// The reverse is open: several sequences in one mode may name the
 /// same action, though no shipped default does — within a mode every default
 /// action has exactly one key (`core:focus-pane-left` is reachable only as
 /// `<C-p> <Left>`). An action bound in two modes is two entries in two maps:
@@ -679,7 +683,7 @@ pub struct MouseConfig {
     /// cases are fixed: a highlight holds and scrolls koshi's own scrollback, a
     /// mouse-aware program gets the wheel as a report, and an alternate-screen
     /// program with `?1007` on gets arrow keys.
-    pub wheel: WheelScroll,
+    pub wheel_scroll: WheelScroll,
 }
 
 impl Default for MouseConfig {
@@ -687,12 +691,12 @@ impl Default for MouseConfig {
         Self {
             can_resize_pane_border: true,
             scroll_line_count: DEFAULT_SCROLL_LINE_COUNT,
-            wheel: WheelScroll::default(),
+            wheel_scroll: WheelScroll::default(),
         }
     }
 }
 
-/// What the mouse wheel does over a plain pane (see [`MouseConfig::wheel`]).
+/// What the mouse wheel does over a plain pane (see [`MouseConfig::wheel_scroll`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WheelScroll {
     /// Scroll koshi's own scrollback view of the pane the pointer is over.
@@ -900,12 +904,12 @@ impl FromStr for RgbColor {
 pub struct LoggingConfig {
     /// Whether koshi writes a log file. Disabled, nothing is logged and no
     /// log file or `logs/` directory is created; enabled, log lines at or
-    /// above [`level`](Self::level) are written to a per-session file under
+    /// above [`log_level`](Self::log_level) are written to a per-session file under
     /// the platform state directory, created on the first line written.
     pub is_enabled: bool,
     /// The lowest severity that gets written. A line below this is dropped —
     /// e.g. [`LogLevel::Warning`] drops `info` lines.
-    pub level: LogLevel,
+    pub log_level: LogLevel,
     /// How each written line is rendered.
     pub log_format: LogFormat,
 }
@@ -916,7 +920,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             is_enabled: false,
-            level: LogLevel::Warning,
+            log_level: LogLevel::Warning,
             log_format: LogFormat::Pretty,
         }
     }

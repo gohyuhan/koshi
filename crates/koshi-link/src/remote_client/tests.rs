@@ -8,6 +8,8 @@
 use std::time::SystemTime;
 
 use koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
+use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload, IpcResponse};
+use koshi_ipc::wire::MaybeKnown;
 
 use super::*;
 
@@ -600,7 +602,7 @@ fn build_remote_link(server_frame_bytes: Vec<u8>) -> (RemoteLink, SharedWrittenB
 }
 
 /// Encode the `server_frame` bytes a server sends.
-fn encode_server_frame(server_frame: &RemoteServerFrame) -> Vec<u8> {
+fn encode_server_frame(server_frame: &impl serde::Serialize) -> Vec<u8> {
     let (remote_link, written_bytes) = build_remote_link(Vec::new());
     let mut frame_writer = remote_link.frame_writer;
     frame_writer
@@ -1084,4 +1086,259 @@ fn a_bare_ipv6_literal_is_not_an_address() {
     assert!(!is_server_address("::1"));
     assert!(!is_server_address("fe80::1"));
     assert!(!is_server_address("desk.local:+7654"), "a port is digits");
+}
+
+#[test]
+fn a_selector_reads_in_a_message_as_its_id_or_its_display_name() {
+    let session_id = SessionId::new();
+
+    assert_eq!(
+        format_session_selector_name(&SessionSelector::SessionId(session_id)),
+        session_id.to_string()
+    );
+    assert_eq!(
+        format_session_selector_name(&SessionSelector::SessionName(String::from("quiet-lake"))),
+        "quiet-lake"
+    );
+}
+
+/// The reading half of a link whose server side sent `server_frame_bytes`.
+fn build_frame_reader(server_frame_bytes: Vec<u8>) -> FrameReader {
+    build_remote_link(server_frame_bytes).0.frame_reader
+}
+
+#[test]
+fn a_forwarded_answer_carrying_the_restarting_sentence_reads_as_restarting() {
+    let mut frame_reader = build_frame_reader(encode_server_frame(&RemoteServerFrame::Refused {
+        message: ROUTER_RESTARTING_MESSAGE.to_string(),
+    }));
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Restarting(CliError::IpcUnavailable { detail })) = forwarded_answer_result
+    else {
+        panic!("expected a restarting answer, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(detail, ROUTER_RESTARTING_MESSAGE);
+}
+
+#[test]
+fn any_other_forwarded_refusal_reads_as_the_token_not_reaching_the_session() {
+    let mut frame_reader = build_frame_reader(encode_server_frame(&RemoteServerFrame::Refused {
+        message: remote_wire::REMOTE_REFUSED.to_string(),
+    }));
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Refused(CliError::Runtime { detail })) = forwarded_answer_result else {
+        panic!("expected a refusal, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(
+        detail,
+        "the token this server saved does not reach session quiet-lake"
+    );
+}
+
+#[test]
+fn a_forwarded_session_answer_decodes_as_the_session_response() {
+    let session_refusal = IpcErrorPayload {
+        code: IpcErrorCode::RequestFailed,
+        message: "the session is ending".to_string(),
+    };
+    let mut frame_reader = build_frame_reader(encode_server_frame(&IpcResponse {
+        request_id: Some(1),
+        answer_result: IpcResult::Error(session_refusal.clone()),
+    }));
+
+    let incoming_response = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    )
+    .expect("a session answer is handed back");
+
+    assert_eq!(
+        incoming_response,
+        IncomingResponse {
+            request_id: Some(1),
+            answer_result: MaybeKnown::Known(IpcResult::Error(session_refusal)),
+        }
+    );
+}
+
+#[test]
+fn a_forwarded_answer_that_decodes_as_neither_is_refused_naming_the_decode_error() {
+    let welcome_frame = RemoteServerFrame::Welcome {
+        remote_protocol_version: REMOTE_PROTOCOL_VERSION,
+    };
+    let response_parse_error = serde_json::from_str::<IncomingResponse>(
+        &serde_json::to_string(&welcome_frame).expect("a frame encodes"),
+    )
+    .expect_err("a Welcome is no session answer");
+    let mut frame_reader = build_frame_reader(encode_server_frame(&welcome_frame));
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Refused(CliError::IpcUnavailable { detail })) = forwarded_answer_result
+    else {
+        panic!("expected a refusal, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!("the server answered with a frame this attach cannot read: {response_parse_error}")
+    );
+}
+
+#[test]
+fn a_link_that_ends_before_the_forwarded_answer_is_unreachable() {
+    let mut frame_reader = build_frame_reader(Vec::new());
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Unreachable(unreachable_error)) = forwarded_answer_result else {
+        panic!("expected an unreachable answer, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(
+        unreachable_error.to_string(),
+        build_ipc_unavailable_error(IpcError::Disconnected).to_string()
+    );
+}
+
+/// A dial that answers each of `dial_answers` in turn, and counts the dials
+/// in `dial_count`. A dial past the last answer panics.
+fn build_scripted_dial(
+    dial_answers: Vec<Result<u32, DialError>>,
+    dial_count: &std::cell::Cell<usize>,
+) -> impl FnMut() -> Result<u32, DialError> + '_ {
+    let mut dial_answers = dial_answers.into_iter();
+    move || {
+        dial_count.set(dial_count.get() + 1);
+        dial_answers
+            .next()
+            .expect("no dial past the scripted answers")
+    }
+}
+
+/// A [`CliError`] carrying `detail`, for a scripted dial answer.
+fn build_dial_error_detail(detail: &str) -> CliError {
+    CliError::IpcUnavailable {
+        detail: detail.to_string(),
+    }
+}
+
+#[test]
+fn a_first_dial_that_is_not_restarting_is_the_answer_and_nothing_is_dialed_again() {
+    let dial_count = std::cell::Cell::new(0);
+
+    let dial_result = dial_through_router_restart(
+        Duration::from_secs(30),
+        build_scripted_dial(
+            vec![Err(DialError::Unreachable(build_dial_error_detail(
+                "connection refused",
+            )))],
+            &dial_count,
+        ),
+    );
+
+    let Err(DialError::Unreachable(unreachable_error)) = dial_result else {
+        panic!("expected the first answer, got {dial_result:?}");
+    };
+    assert_eq!(
+        unreachable_error.to_string(),
+        "IPC unavailable: connection refused"
+    );
+    assert_eq!(dial_count.get(), 1);
+}
+
+#[test]
+fn a_restarting_answer_is_dialed_through_a_closed_port_until_a_dial_joins() {
+    let dial_count = std::cell::Cell::new(0);
+
+    let dial_result = dial_through_router_restart(
+        Duration::from_secs(30),
+        build_scripted_dial(
+            vec![
+                Err(DialError::Restarting(build_dial_error_detail(
+                    ROUTER_RESTARTING_MESSAGE,
+                ))),
+                Err(DialError::Unreachable(build_dial_error_detail(
+                    "connection refused",
+                ))),
+                Err(DialError::Restarting(build_dial_error_detail(
+                    ROUTER_RESTARTING_MESSAGE,
+                ))),
+                Ok(7),
+            ],
+            &dial_count,
+        ),
+    );
+
+    assert_eq!(dial_result.expect("the last dial joins"), 7);
+    assert_eq!(dial_count.get(), 4);
+}
+
+#[test]
+fn a_refusal_after_a_restarting_answer_ends_the_dialing() {
+    let dial_count = std::cell::Cell::new(0);
+
+    let dial_result = dial_through_router_restart(
+        Duration::from_secs(30),
+        build_scripted_dial(
+            vec![
+                Err(DialError::Restarting(build_dial_error_detail(
+                    ROUTER_RESTARTING_MESSAGE,
+                ))),
+                Err(DialError::Refused(build_dial_error_detail(
+                    "certificate changed",
+                ))),
+            ],
+            &dial_count,
+        ),
+    );
+
+    let Err(DialError::Refused(refusal)) = dial_result else {
+        panic!("expected the refusal, got {dial_result:?}");
+    };
+    assert_eq!(refusal.to_string(), "IPC unavailable: certificate changed");
+    assert_eq!(dial_count.get(), 2);
+}
+
+#[test]
+fn a_restart_window_that_has_passed_hands_back_the_last_dials_answer() {
+    let dial_count = std::cell::Cell::new(0);
+
+    let dial_result = dial_through_router_restart(
+        Duration::ZERO,
+        build_scripted_dial(
+            vec![
+                Err(DialError::Restarting(build_dial_error_detail(
+                    ROUTER_RESTARTING_MESSAGE,
+                ))),
+                Err(DialError::Unreachable(build_dial_error_detail(
+                    "connection refused",
+                ))),
+            ],
+            &dial_count,
+        ),
+    );
+
+    let Err(DialError::Unreachable(unreachable_error)) = dial_result else {
+        panic!("expected the last dial's answer, got {dial_result:?}");
+    };
+    assert_eq!(
+        unreachable_error.to_string(),
+        "IPC unavailable: connection refused"
+    );
+    assert_eq!(dial_count.get(), 2);
 }

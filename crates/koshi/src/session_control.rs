@@ -6,6 +6,7 @@ use koshi_core::command::{Command, CommandResult, DetachArgs};
 use koshi_core::ids::{ClientId, SessionId};
 
 use crate::cli::SessionReference;
+use crate::session_end::{end_session, SessionEnding};
 use crate::targeting;
 use koshi_core::ids::parse_prefixed_uuid;
 use koshi_link::discovery::{self, Discovered};
@@ -13,30 +14,40 @@ use koshi_link::error::CliError;
 use koshi_link::ipc_client;
 
 /// End the session named by `session_reference`, or the only running session when
-/// absent. An id goes straight to that session; a name is resolved against
-/// every running session first.
+/// absent, through [`end_session`]. An id goes straight to that session; a name
+/// is resolved against every running session first.
 ///
-/// Killing a session also shuts its control socket down, so the success reply
-/// and the shutdown race: the reply almost always arrives first, but if the
-/// socket closes before it does, the session has still ended and this returns
-/// [`CliError::IpcUnavailable`] instead of the applied [`CommandResult`].
+/// From the start, this process ignores `SIGHUP`, `SIGINT` and `SIGQUIT`, or
+/// Ctrl+C on Windows, through
+/// [`ignore_terminal_signals`](koshi_host::process_tree::ignore_terminal_signals).
 pub fn kill_session(
     session_reference: Option<&SessionReference>,
-) -> Result<CommandResult, CliError> {
-    kill_session_in_runtime_directory(&ipc_client::resolve_runtime_directory()?, session_reference)
+) -> Result<SessionEnding, CliError> {
+    koshi_host::process_tree::ignore_terminal_signals();
+    kill_session_in_runtime_directory(
+        &ipc_client::resolve_runtime_directory()?,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        session_reference,
+    )
 }
 
-/// [`kill_session`] against an explicit runtime directory.
+/// [`kill_session`] against an explicit runtime directory, with
+/// `shared_sessions_base_directory` naming where other users' sessions are
+/// looked up.
 fn kill_session_in_runtime_directory(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
-) -> Result<CommandResult, CliError> {
-    let session_id = resolve_session_id_from_reference(runtime_directory, session_reference)?;
-    ipc_client::submit_external_command_via_runtime_directory(
+) -> Result<SessionEnding, CliError> {
+    let session_id = resolve_session_id_from_reference(
         runtime_directory,
+        shared_sessions_base_directory,
+        session_reference,
+    )?;
+    end_session(
+        runtime_directory,
+        shared_sessions_base_directory,
         session_id,
-        None,
-        Command::Quit,
     )
 }
 
@@ -45,6 +56,7 @@ fn kill_session_in_runtime_directory(
 /// every running session by [`resolve_discovered_session_id`].
 fn resolve_session_id_from_reference(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<SessionId, CliError> {
     let session_name = match session_reference {
@@ -53,7 +65,7 @@ fn resolve_session_id_from_reference(
         None => None,
     };
     resolve_discovered_session_id(
-        &discovery::fetch_all_session_overviews(runtime_directory),
+        &discovery::fetch_all_session_overviews(runtime_directory, shared_sessions_base_directory),
         session_name,
     )
 }
@@ -84,18 +96,27 @@ fn resolve_discovered_session_id(
 pub fn detach_client_or_session(detach_target_text: &str) -> Result<CommandResult, CliError> {
     detach_client_or_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
         detach_target_text,
     )
 }
 
-/// [`detach_client_or_session`] against an explicit runtime directory.
+/// [`detach_client_or_session`] against an explicit runtime directory, with
+/// `shared_sessions_base_directory` naming where other users' sessions are
+/// looked up.
 fn detach_client_or_session_in_runtime_directory(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     detach_target_text: &str,
 ) -> Result<CommandResult, CliError> {
-    let (session_id, client_id) = resolve_detach_target(runtime_directory, detach_target_text)?;
+    let (session_id, client_id) = resolve_detach_target(
+        runtime_directory,
+        shared_sessions_base_directory,
+        detach_target_text,
+    )?;
     ipc_client::submit_external_command_via_runtime_directory(
         runtime_directory,
+        shared_sessions_base_directory,
         session_id,
         None,
         Command::Detach(DetachArgs { client_id }),
@@ -115,6 +136,7 @@ fn detach_client_or_session_in_runtime_directory(
 /// session itself picks the client.
 fn resolve_detach_target(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     detach_target_text: &str,
 ) -> Result<(SessionId, Option<ClientId>), CliError> {
     if detach_target_text.starts_with("session-") {
@@ -127,7 +149,8 @@ fn resolve_detach_target(
         return Ok((SessionId::from_uuid(target_uuid), None));
     }
 
-    let discovered_sessions = discovery::fetch_all_session_overviews(runtime_directory);
+    let discovered_sessions =
+        discovery::fetch_all_session_overviews(runtime_directory, shared_sessions_base_directory);
     let Ok(target_uuid) = parse_prefixed_uuid(detach_target_text, "client") else {
         return Ok((
             resolve_discovered_session_id(&discovered_sessions, Some(detach_target_text))?,
@@ -187,18 +210,27 @@ pub fn detach_all_session(
 ) -> Result<CommandResult, CliError> {
     detach_all_session_in_runtime_directory(
         &ipc_client::resolve_runtime_directory()?,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
         session_reference,
     )
 }
 
-/// [`detach_all_session`] against an explicit runtime directory.
+/// [`detach_all_session`] against an explicit runtime directory, with
+/// `shared_sessions_base_directory` naming where other users' sessions are
+/// looked up.
 fn detach_all_session_in_runtime_directory(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<CommandResult, CliError> {
-    let session_id = resolve_session_id_from_reference(runtime_directory, session_reference)?;
+    let session_id = resolve_session_id_from_reference(
+        runtime_directory,
+        shared_sessions_base_directory,
+        session_reference,
+    )?;
     ipc_client::submit_external_command_via_runtime_directory(
         runtime_directory,
+        shared_sessions_base_directory,
         session_id,
         None,
         Command::DetachAll,

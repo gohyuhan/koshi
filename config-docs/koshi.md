@@ -111,32 +111,34 @@ terminal {
 
 With legacy key encoding, some keys send the same bytes as another key.
 Shift+Enter and Enter both send `0x0d`, so the program cannot tell them apart.
+Six bytes are shared. One key keeps each byte, and every other key that sends
+it shares it:
 
-| What you press | Legacy bytes | The key that keeps those bytes |
+| Byte | The key that keeps it | The keys that share it |
 |---|---|---|
-| Shift+Enter | `0x0d` | Enter |
-| Ctrl+Enter | `0x0d` | Enter |
-| Ctrl+m | `0x0d` | Enter |
-| Ctrl+i | `0x09` | Tab |
-| Ctrl+Tab | `0x09` | Tab |
-| Ctrl+[ | `0x1b` | Escape |
-| Ctrl+3 | `0x1b` | Escape |
-| Shift+Escape | `0x1b` | Escape |
-| Ctrl+Escape | `0x1b` | Escape |
-| Ctrl+Backspace | `0x08` | Ctrl+h |
-| Shift+Backspace | `0x7f` | Backspace |
-| Ctrl+8 | `0x7f` | Backspace |
-| Ctrl+? | `0x7f` | Backspace |
-| Ctrl+2 | `0x00` | Ctrl+Space |
-| Ctrl+@ | `0x00` | Ctrl+Space |
+| `0x0d` | Enter | Shift+Enter, Ctrl+Enter, Ctrl+m |
+| `0x09` | Tab | Ctrl+Tab, Ctrl+i |
+| `0x1b` | Escape | Shift+Escape, Ctrl+Escape, Ctrl+[, Ctrl+3 |
+| `0x7f` | Backspace | Shift+Backspace, Ctrl+8, Ctrl+? |
+| `0x08` | Ctrl+h | Ctrl+Shift+h, Ctrl+Backspace |
+| `0x00` | Ctrl+Space | Ctrl+Shift+Space, Ctrl+2, Ctrl+@ |
 
-The Ctrl+Shift form of each Ctrl key in the table shares its bytes too, except
-Ctrl+Shift+Tab. Ctrl+I and Ctrl+M with a capital letter behave the same as
-Ctrl+i and Ctrl+m, with and without Shift. That makes 30 keys in total.
+The Ctrl+Shift form of each Ctrl key in the right-hand column shares the byte
+too, except Ctrl+Shift+Tab. A capital letter is the letter with Shift: Ctrl+M
+is Ctrl+Shift+m.
 
-The key in the right-hand column always keeps its legacy bytes: Enter sends
-`0x0d`, Tab sends `0x09`, Escape sends `0x1b`, Ctrl+h sends `0x08`, Backspace
-sends `0x7f` and Ctrl+Space sends `0x00` under both values.
+Super changes no legacy byte. With Super held, every key in the table shares
+its byte, the key that keeps it included: Super+Enter sends `0x0d` like Enter.
+
+Alt puts `ESC` in front of the byte. With Alt held, the key that keeps a byte
+keeps `ESC` and that byte: Alt+Enter keeps `ESC 0x0d`. Every other key that
+shares the byte, and every key in the table with Super held, shares those two
+bytes with Alt held: Alt+Shift+Enter, Alt+Ctrl+m and Alt+Super+Enter all send
+`ESC 0x0d`.
+
+The key that keeps a byte sends it under both values: Enter sends `0x0d`, Tab
+`0x09`, Escape `0x1b`, Backspace `0x7f`, Ctrl+h `0x08` and Ctrl+Space `0x00`,
+and Alt+Enter sends `ESC 0x0d`.
 
 #### The `CSI u` form
 
@@ -165,14 +167,14 @@ Example: `ESC [ > 11 u` asks for 1, 2 and 8.
 | Value | A program that asked | A program that did not ask |
 |---|---|---|
 | `"on-request"` (default) | the detail it asked for | legacy bytes for every key |
-| `"always"` | the detail it asked for, and the `CSI u` form for the 30 keys above | legacy bytes, except the `CSI u` form for the 30 keys above |
+| `"always"` | the detail it asked for, and the `CSI u` form for every key that shares legacy bytes | legacy bytes, except the `CSI u` form for every key that shares legacy bytes |
 
 Under `"on-request"`, a program that asked with `1` alone receives `0x0d` for
 Shift+Enter. With `8`, it receives `ESC [ 13 ; 2 u`. Under `"always"`, it
 receives `ESC [ 13 ; 2 u` with `1` alone.
 
-`"always"` changes only the 30 keys above. Every other key sends the same bytes
-under both values:
+`"always"` changes only the keys that share legacy bytes. Every other key sends
+the same bytes under both values:
 
 ```
 Tab           -> 0x09           under both values
@@ -182,12 +184,15 @@ Up arrow      -> ESC [ A        under both values
 Shift+Tab     -> ESC [ Z        under both values
 Ctrl+Right    -> ESC [ 1;5 C    under both values
 
+Alt+Enter     -> ESC 0x0d       under both values
+
 Shift+Enter   -> ESC [ 13;2 u   under "always", 0x0d under "on-request"
 Ctrl+i        -> ESC [ 105;5 u  under "always", 0x09 under "on-request"
+Alt+Ctrl+m    -> ESC [ 109;7 u  under "always", ESC 0x0d under "on-request"
 ```
 
-Under `"always"`, a program that does not read the `CSI u` form receives the 30
-keys as bytes it does not know. In bash 3.2 and zsh 5.9, typing `ab`,
+Under `"always"`, a program that does not read the `CSI u` form receives the
+keys that share legacy bytes as bytes it does not know. In bash 3.2 and zsh 5.9, typing `ab`,
 Shift+Enter, `cd` gives the command line `ab3;2ucd`, and typing `ab`,
 Shift+Backspace, `cd` gives `ab27;2ucd`.
 
@@ -199,14 +204,17 @@ gives koshi no Shift, so a pane receives Shift+Enter as Enter under both
 values.
 
 To check your terminal, run this in the terminal itself, not inside koshi,
-then press Shift+Enter once:
+then press Shift+Enter once within 2 seconds:
 
 ```sh
-stty -icanon -icrnl -echo min 1 time 0; printf '\033[>8u'; dd bs=16 count=1 2>/dev/null | od -c; printf '\033[<u'; stty sane
+stty -icanon -icrnl -echo min 0 time 0; printf '\033[>8u'; sleep 2; dd bs=64 count=1 2>/dev/null | cat -v; echo; printf '\033[<u'; stty sane
 ```
 
-`033 [ 1 3 ; 2 u` means that your terminal reports Shift+Enter. `\r` means
-that it does not. The command restores your terminal before it exits.
+The command prints every byte the terminal sent in those 2 seconds. A terminal
+that reports Shift+Enter prints `^[[13;2u` among them, and it can also print a
+report for the Shift key alone, such as `^[[57441;2u`. A terminal that does not
+report Shift+Enter prints `^M`. The command restores your terminal before it
+exits.
 
 ## `logging`
 
@@ -244,15 +252,17 @@ Example: a panic at 2026-08-08 12:00:00 UTC writes `crash-1786190400.txt`.
 
 ## `update`
 
-Self-update settings. Each installed koshi reads these from its own `koshi.kdl`
-and updates itself. A bad value here drops the whole `koshi.kdl` for that
+Self-update settings. Each installed koshi reads these from its own
+`koshi.kdl`. `koshi update` installs a newer release the way that koshi was
+installed: a Homebrew install runs `brew upgrade`, and a build from source
+downloads nothing. A bad value here drops the whole `koshi.kdl` for that
 launch.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `auto-check` | boolean — check GitHub for a newer koshi at startup | `#true` | ≥ 0.1.0 |
+| `auto-check` | boolean — check GitHub for a newer koshi at startup; a build from source checks nothing | `#true` | ≥ 0.1.0 |
 | `check-interval-days` | integer — days between checks | `14` | ≥ 0.1.0 |
-| `allow-prerelease` | boolean — offer pre-release builds too | `#false` | ≥ 0.1.0 |
+| `allow-prerelease` | boolean — offer pre-release builds too; a Homebrew install takes stable releases only | `#false` | ≥ 0.1.0 |
 
 ## `allow-beta-features`
 
@@ -424,11 +434,64 @@ connection is refused, and a terminal already attached is dropped the next time
 it types. Each command reads the file again as it runs, so a listing shows what
 your file says at that moment. Turning it on reaches the sessions you start
 after the change. A running session keeps the socket it already has until it
-restarts. `koshi update` restarts every session it finds, and a restarted
-session reads this key again and binds where your file says at that moment.
+restarts. `koshi restart-servers` restarts every session, and so does `koshi
+update` on a build from source; `koshi update` on a release install restarts
+every session that does not run the installed version. A restarted session
+reads this key again and binds where your file says at that moment.
 
 A session started with `koshi --headless --allow-other-users` keeps other users
 for its whole life. That session never reads this key.
+
+While this is on, your `koshi` lists the other users' sessions with limits:
+
+- A session socket counts only when it is a socket, owned by the user who owns
+  the folder holding it. A plain file or a link with a session's name is
+  skipped.
+- Every entry of the shared directory is read, up to 65,536 entries in all,
+  counting the entries of each user's folder that is opened. An entry whose
+  name is not a user id, such as `notes`, and a file in a user's folder whose
+  name is not `session-<uuid>.sock`, are skipped without being opened.
+- On Unix, at most 256 user folders are opened. A shared directory that holds
+  one entry or one user folder past either limit is not read further. A
+  listing shows the sessions read before the limit, names the directory on
+  standard error and exits with code 4, for example `koshi: some sessions were
+  not asked: /tmp/koshi could not be read: it holds more than 256 user
+  folders`. A lookup by name is refused and names it the same way, and koshi
+  attaches to none of those sessions by name until the whole directory can be
+  read.
+- At most 256 sessions of one user are listed, 256 in all on Windows. Each one
+  past that is not asked: standard error names how many, and a listing counts
+  them among the sessions that did not answer.
+- A lookup by session id reads only that session's own path in each user's
+  folder, within the same limits.
+- A session id that two sockets advertise is reached through neither.
+  `koshi attach <id>` is refused with `session <id> is advertised 2 times in
+  the shared directory, by user ids 1001, 1002; koshi reaches none of them`,
+  and a listing counts that session among the sessions that did not answer.
+- A socket that another user names after one of your session ids is never
+  taken for that session, also while that session restarts.
+- `koshi list-sessions` and `koshi server-version` ask up to 16 sessions at
+  the same time. `koshi list-sessions` stops waiting 5 seconds after it starts, and
+  `koshi server-version` 5 seconds after it checked the router. A session that
+  has not answered by then is named on standard error and left out of the
+  listing.
+- A user's folder that its owner closed to you, such as one at mode `0700`,
+  advertises nothing. Its sessions are not listed and not counted.
+- A read of the shared directory that fails another way, such as with
+  `Input/output error`, is named on standard error, and a listing exits with
+  code 4. A lookup is refused and names the path, for example ``cannot tell
+  whether `quiet-lake` is unique (/tmp/koshi/1002 could not be read:
+  Input/output error (os error 5))``.
+- The router asks at most 16 of the other users' sessions at once, and a
+  lookup by session id asks only that session. A session past that limit is
+  not asked. A lookup by its id is refused with `session <id> is running but
+  did not answer: 16 sessions other local users started are already being
+  asked; run the command again`. A lookup by name counts it among the running
+  sessions that did not answer.
+- A lookup by name that matches one session another user started, while any
+  other session did not answer, is refused with ``cannot tell whether
+  `quiet-lake` is unique (1 running session did not answer)``. A session of
+  yours with that name is used even then.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -457,13 +520,19 @@ This only says where the sockets go. Nobody else reaches them until
 does nothing else: writing this line opens no port and makes this machine
 reachable by nobody. The port opens the first time you run `koshi share grant`
 and answer yes to the offer it makes, and on every start after that.
+The value is an IP address and a port: IPv4 such as `192.168.1.20:7654`, or
+IPv6 in brackets such as `[::1]:7654`. A host name, such as
+`laptop.local:7654`, is ignored with a warning, and nothing binds. `0.0.0.0`
+and `[::]` accept connections on every IPv4 or IPv6 address of this machine.
+`koshi share grant` then names each of those addresses in its connect command,
+as `koshi share grant` in `cli.md` shows.
 
 `allow-other-users` is a separate switch, about other users logged in to this
 same machine. Neither key turns the other on.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `remote-listen` | string — host:port the remote TLS listener binds | unset — nothing binds | ≥ 0.3.0 |
+| `remote-listen` | string — IP address and port the remote TLS listener binds, such as `0.0.0.0:7654` | unset — nothing binds | ≥ 0.3.0 |
 
 ## Full example
 

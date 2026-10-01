@@ -1,7 +1,7 @@
 //! Tests for CLI output rendering — discovery, action and keymap
-//! introspection, and the `debug` dumps: exact JSON schema snapshots (the
-//! stable scripting surface) and exact table/field renderings, all over fixed
-//! fake data.
+//! introspection, the `debug` dumps, and the `debug events` listing and its
+//! `--since` window: exact JSON schema snapshots (the stable scripting surface)
+//! and exact table/field renderings, all over fixed fake data.
 
 use koshi_core::client::ClientOrigin;
 use std::path::PathBuf;
@@ -228,10 +228,19 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
         pane_name: None,
         ..build_test_pane_row()
     };
-    let rendered_text = render_panes(&[untitled_pane_row], OutputFormat::Json);
-    assert!(
-        rendered_text.contains("\"pane_name\": null,"),
-        "unexpected name form: {rendered_text}"
+    assert_eq!(
+        render_panes(&[untitled_pane_row], OutputFormat::Json),
+        r#"[
+  {
+    "pane_id": "00000000-0000-0000-0000-000000000001",
+    "pane_name": null,
+    "tab_id": "00000000-0000-0000-0000-000000000001",
+    "tab_name": "amber-fox",
+    "session_id": "00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake"
+  }
+]
+"#
     );
 }
 
@@ -340,11 +349,28 @@ fn build_non_utf8_path() -> PathBuf {
 fn an_exited_pane_lifecycle_json_carries_the_exit_code() {
     let mut pane_discovery = build_test_pane_discovery();
     pane_discovery.lifecycle = PaneLifecycle::Exited { exit_code: Some(0) };
-    let rendered_text = render_pane(&pane_discovery, OutputFormat::Json);
-    assert!(
-        rendered_text
-            .contains("\"lifecycle\": {\n    \"Exited\": {\n      \"exit_code\": 0\n    }\n  }"),
-        "unexpected state form: {rendered_text}"
+    assert_eq!(
+        render_pane(&pane_discovery, OutputFormat::Json),
+        r#"{
+  "pane_id": "00000000-0000-0000-0000-000000000001",
+  "tab_id": "00000000-0000-0000-0000-000000000001",
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "pane_title": "htop",
+  "working_directory": "/home/user",
+  "command_argv": [
+    "htop",
+    "--tree"
+  ],
+  "lifecycle": {
+    "Exited": {
+      "exit_code": 0
+    }
+  },
+  "focused_by_client_ids": [
+    "00000000-0000-0000-0000-000000000001"
+  ]
+}
+"#
     );
 }
 
@@ -384,13 +410,31 @@ fn a_reported_pane_area_json_is_a_tagged_size() {
         ..build_test_client_discovery()
     };
 
-    let rendered_text = render_client(&reported_client_discovery, OutputFormat::Json);
-
-    assert!(
-        rendered_text.contains(
-            "\"pane_area\": {\n    \"Reported\": {\n      \"column_count\": 100,\n      \"row_count\": 30\n    }\n  }"
-        ),
-        "unexpected pane_area form: {rendered_text}"
+    assert_eq!(
+        render_client(&reported_client_discovery, OutputFormat::Json),
+        r#"{
+  "client_id": "00000000-0000-0000-0000-000000000001",
+  "session_id": "00000000-0000-0000-0000-000000000001",
+  "attached_at": {
+    "secs_since_epoch": 1234,
+    "nanos_since_epoch": 0
+  },
+  "viewport_size": {
+    "column_count": 120,
+    "row_count": 40
+  },
+  "active_tab_id": "00000000-0000-0000-0000-000000000001",
+  "focused_pane_id": null,
+  "lock_mode": "Normal",
+  "origin": "Local",
+  "pane_area": {
+    "Reported": {
+      "column_count": 100,
+      "row_count": 30
+    }
+  }
+}
+"#
     );
 }
 
@@ -516,11 +560,17 @@ fn a_starving_client_prints_starving_in_the_pane_area_column() {
         ..build_test_client_discovery()
     };
 
-    let rendered_text = render_client(&starving_client_discovery, OutputFormat::Table);
-
-    assert!(
-        rendered_text.contains("\npane_area: starving\n"),
-        "unexpected pane_area line: {rendered_text}"
+    assert_eq!(
+        render_client(&starving_client_discovery, OutputFormat::Table),
+        r#"id: client-00000000-0000-0000-0000-000000000001
+session: session-00000000-0000-0000-0000-000000000001
+attached_at: 1234
+viewport: 120x40
+pane_area: starving
+active_tab: tab-00000000-0000-0000-0000-000000000001
+focused_pane: -
+lock: Normal
+"#
     );
 }
 
@@ -534,11 +584,17 @@ fn a_reported_pane_area_prints_as_columns_by_rows() {
         ..build_test_client_discovery()
     };
 
-    let rendered_text = render_client(&reported_client_discovery, OutputFormat::Table);
-
-    assert!(
-        rendered_text.contains("\npane_area: 100x30\n"),
-        "unexpected pane_area line: {rendered_text}"
+    assert_eq!(
+        render_client(&reported_client_discovery, OutputFormat::Table),
+        r#"id: client-00000000-0000-0000-0000-000000000001
+session: session-00000000-0000-0000-0000-000000000001
+attached_at: 1234
+viewport: 120x40
+pane_area: 100x30
+active_tab: tab-00000000-0000-0000-0000-000000000001
+focused_pane: -
+lock: Normal
+"#
     );
 }
 
@@ -780,24 +836,28 @@ fn keys_list_shows_a_steal_and_its_unbound_default() {
     let rendered_text = render_keys_list(&keymap_view, Some("normal"), None, OutputFormat::Json);
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    let binding_records = json_document["key_bindings"].as_array().expect("array");
-    assert!(
-        binding_records.contains(&serde_json::json!({
-            "input_mode": "normal",
-            "key_sequence": "<A-f>",
-            "action_reference": "core:close-pane",
-            "binding_source": "user",
-        })),
-        "got: {rendered_text}"
-    );
-    assert!(
-        binding_records.contains(&serde_json::json!({
-            "input_mode": "normal",
-            "key_sequence": "<A-f>",
-            "action_reference": "core:toggle-pane-fullscreen",
-            "binding_source": "defaults (unbound)",
-        })),
-        "got: {rendered_text}"
+    let stolen_key_records: Vec<&serde_json::Value> = json_document["key_bindings"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter(|binding| binding["key_sequence"] == serde_json::json!("<A-f>"))
+        .collect();
+    assert_eq!(
+        stolen_key_records,
+        [
+            &serde_json::json!({
+                "input_mode": "normal",
+                "key_sequence": "<A-f>",
+                "action_reference": "core:close-pane",
+                "binding_source": "user",
+            }),
+            &serde_json::json!({
+                "input_mode": "normal",
+                "key_sequence": "<A-f>",
+                "action_reference": "core:toggle-pane-fullscreen",
+                "binding_source": "defaults (unbound)",
+            }),
+        ]
     );
 }
 
@@ -826,11 +886,25 @@ fn keys_list_mode_filter_keeps_only_the_named_mode() {
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
     assert_eq!(json_document["is_reverted"], serde_json::json!(false));
-    let binding_records = json_document["key_bindings"].as_array().expect("array");
-    assert!(!binding_records.is_empty());
-    assert!(binding_records
+    let unfiltered_json_document: serde_json::Value = serde_json::from_str(&render_keys_list(
+        &keymap_view,
+        None,
+        None,
+        OutputFormat::Json,
+    ))
+    .expect("valid JSON");
+    let locked_binding_records: Vec<serde_json::Value> = unfiltered_json_document["key_bindings"]
+        .as_array()
+        .expect("array")
         .iter()
-        .all(|binding| binding["input_mode"] == serde_json::json!("locked")));
+        .filter(|binding| binding["input_mode"] == serde_json::json!("locked"))
+        .cloned()
+        .collect();
+    assert_ne!(locked_binding_records, Vec::<serde_json::Value>::new());
+    assert_eq!(
+        json_document["key_bindings"],
+        serde_json::Value::Array(locked_binding_records)
+    );
 }
 
 #[test]
@@ -1014,19 +1088,23 @@ fn keys_conflicts_reports_a_reject_verdict_and_a_fatal_finding() {
     // A typeable unlock alternative is a fatal finding. The verdict rejects
     // the file.
     let keymap_view = build_keymap_view_with_typeable_unlock_alternative();
-    let rendered_text = render_keys_conflicts(&keymap_view, OutputFormat::Json);
-    let json_document: serde_json::Value =
-        serde_json::from_str(&rendered_text).expect("valid JSON");
-    assert_eq!(json_document["verdict"], serde_json::json!("reject"));
-    assert_eq!(json_document["file_error"], serde_json::Value::Null);
-    let conflict_findings = json_document["conflict_findings"]
-        .as_array()
-        .expect("array");
-    assert!(
-        conflict_findings
-            .iter()
-            .any(|conflict_finding| conflict_finding["severity"] == serde_json::json!("fatal")),
-        "expected a fatal finding: {rendered_text}"
+    assert_eq!(
+        render_keys_conflicts(&keymap_view, OutputFormat::Json),
+        r#"{
+  "verdict": "reject",
+  "file_error": null,
+  "conflict_findings": [
+    {
+      "severity": "fatal",
+      "finding_message": "`unlock_alternative` `u` is a key plain typing produces; hold Ctrl, Alt, or Super"
+    },
+    {
+      "severity": "fatal",
+      "finding_message": "locked mode has no binding from `u` to `core:unlock`; the unlock escape would be unreachable"
+    }
+  ]
+}
+"#
     );
 }
 
@@ -1039,16 +1117,16 @@ fn keys_list_marks_a_rejected_user_file_as_reverted() {
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
     assert_eq!(json_document["is_reverted"], serde_json::json!(true));
-    let binding_records = json_document["key_bindings"].as_array().expect("array");
-    assert!(
-        !binding_records.is_empty(),
-        "defaults still list: {rendered_text}"
-    );
-    assert!(
-        binding_records
-            .iter()
-            .all(|binding| binding["binding_source"] != serde_json::json!("user")),
-        "a rejected file must contribute no user bindings: {rendered_text}"
+    let defaults_json_document: serde_json::Value = serde_json::from_str(&render_keys_list(
+        &build_keymap_view_from_partial(None, None, None),
+        None,
+        None,
+        OutputFormat::Json,
+    ))
+    .expect("valid JSON");
+    assert_eq!(
+        json_document["key_bindings"],
+        defaults_json_document["key_bindings"]
     );
 }
 
@@ -1064,7 +1142,7 @@ fn keys_describe_renders_one_field_block_per_mode_the_key_is_bound_in() {
     for mode_name in ["locked", "normal"] {
         keymap_view
             .merged_keymap
-            .mode_map_by_name
+            .mode_keymap_by_name
             .get_mut(&ModeName::from_text(mode_name))
             .expect("built-in mode is merged")
             .default_bindings_by_key_sequence
@@ -1112,16 +1190,32 @@ fn keys_list_scope_filter_for_defaults_keeps_only_shipped_bindings() {
     );
     let json_document: serde_json::Value =
         serde_json::from_str(&rendered_text).expect("valid JSON");
-    let binding_records = json_document["key_bindings"].as_array().expect("array");
-    assert!(
-        !binding_records.is_empty(),
-        "defaults exist: {rendered_text}"
+    let unfiltered_json_document: serde_json::Value = serde_json::from_str(&render_keys_list(
+        &keymap_view,
+        None,
+        None,
+        OutputFormat::Json,
+    ))
+    .expect("valid JSON");
+    let default_binding_records: Vec<serde_json::Value> = unfiltered_json_document["key_bindings"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter(|binding| binding["binding_source"] == serde_json::json!("defaults"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        default_binding_records.len(),
+        unfiltered_json_document["key_bindings"]
+            .as_array()
+            .expect("array")
+            .len(),
+        "with no user file, every listed binding is a default"
     );
-    assert!(
-        binding_records
-            .iter()
-            .all(|binding| binding["binding_source"] == serde_json::json!("defaults")),
-        "the defaults filter keeps only defaults: {rendered_text}"
+    assert_ne!(default_binding_records, Vec::<serde_json::Value>::new());
+    assert_eq!(
+        json_document["key_bindings"],
+        serde_json::Value::Array(default_binding_records)
     );
 }
 
@@ -1176,14 +1270,13 @@ fn keys_validate_checked_carries_the_conflict_findings() {
         serde_json::json!("warning")
     );
 
-    let rendered_table_text = render_keys_validate(&checked_outcome, OutputFormat::Table);
-    let rendered_lines: Vec<&str> = rendered_table_text.lines().collect();
-    assert_eq!(rendered_lines[0], "valid: a reload would apply this file");
     assert_eq!(
-        rendered_lines[1].split_whitespace().collect::<Vec<_>>(),
-        ["severity", "finding"]
+        render_keys_validate(&checked_outcome, OutputFormat::Table),
+        r#"valid: a reload would apply this file
+severity  finding
+warning   `<C-y>` in mode `normal` (user) names unknown action `core:not-a-real-action`; the binding is inactive until the action is registered
+"#
     );
-    assert_eq!(rendered_lines[2].split_whitespace().next(), Some("warning"));
 }
 
 // --- Entity inspect (single-item) renderings ---
@@ -1445,11 +1538,25 @@ fn dump_state_table_prints_a_hidden_argument_as_it_was_given() {
         ..build_test_session_overview()
     };
 
-    let rendered_text = render_dump_state(&[hidden_session_overview], OutputFormat::Table);
+    assert_eq!(
+        render_dump_state(&[hidden_session_overview], OutputFormat::Table),
+        r#"sessions
+id                                            name        created_at  clients  panes
+session-00000000-0000-0000-0000-000000000001  quiet-lake  1234        1        3
 
-    assert!(
-        rendered_text.contains("  mysql ***  running  1\n"),
-        "the command column must print the redacted pane command argv verbatim: {rendered_text}",
+tabs
+id                                        session                                       name       index  active_pane                                panes
+tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
+
+panes
+id                                         tab                                       session                                       title  cwd         command    state    focused_by
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  mysql ***  running  1
+
+clients
+id                                           session                                       attached_at  viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
+
+"#
     );
 }
 
@@ -1463,23 +1570,32 @@ fn dump_state_table_spans_every_session_given() {
         ..build_test_session_overview()
     };
 
-    let rendered_text = render_dump_state(
-        &[build_test_session_overview(), second_session_overview],
-        OutputFormat::Table,
-    );
+    assert_eq!(
+        render_dump_state(
+            &[build_test_session_overview(), second_session_overview],
+            OutputFormat::Table,
+        ),
+        r#"sessions
+id                                            name             created_at  clients  panes
+session-00000000-0000-0000-0000-000000000001  quiet-lake       1234        1        3
+session-00000000-0000-0000-0000-000000000001  wandering-heron  1234        1        3
 
-    assert_eq!(rendered_text.matches("quiet-lake").count(), 1);
-    assert_eq!(
-        rendered_text.matches("wandering-heron").count(),
-        1,
-        "{rendered_text}"
-    );
-    assert_eq!(
-        rendered_text
-            .matches("pane-00000000-0000-0000-0000-000000000001  tab-")
-            .count(),
-        2,
-        "both sessions' panes are listed: {rendered_text}",
+tabs
+id                                        session                                       name       index  active_pane                                panes
+tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
+tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  amber-fox  1      pane-00000000-0000-0000-0000-000000000001  2
+
+panes
+id                                         tab                                       session                                       title  cwd         command      state    focused_by
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
+pane-00000000-0000-0000-0000-000000000001  tab-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  htop   /home/user  htop --tree  running  1
+
+clients
+id                                           session                                       attached_at  viewport  pane_area  active_tab                                focused_pane  lock
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
+client-00000000-0000-0000-0000-000000000001  session-00000000-0000-0000-0000-000000000001  1234         120x40    -          tab-00000000-0000-0000-0000-000000000001  -             Normal
+
+"#
     );
 }
 
@@ -1620,15 +1736,21 @@ fn dump_layout_table_lists_the_panes_with_no_room() {
 
     let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
-    assert!(
-        rendered_text.contains(
-            "      pane pane-00000000-0000-0000-0000-000000000005 rect 0,0 0x0\n      no room: pane-00000000-0000-0000-0000-000000000005\n"
-        ),
-        "{rendered_text}",
-    );
-    assert!(
-        !rendered_text.contains("no room for any pane"),
-        "one pane still has room: {rendered_text}",
+    assert_eq!(
+        rendered_text,
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split
+        pane pane-00000000-0000-0000-0000-000000000004
+        pane pane-00000000-0000-0000-0000-000000000005
+    client client-00000000-0000-0000-0000-000000000003 tiled viewport 6x4
+      pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 6x4
+      pane pane-00000000-0000-0000-0000-000000000005 rect 0,0 0x0
+      no room: pane-00000000-0000-0000-0000-000000000005
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000004
+"#
     );
 }
 
@@ -1655,11 +1777,19 @@ fn dump_layout_table_says_when_no_pane_has_room() {
 
     let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
-    assert!(
-        rendered_text.contains(
-            "      no room: pane-00000000-0000-0000-0000-000000000004\n      no room for any pane\n"
-        ),
-        "{rendered_text}",
+    assert_eq!(
+        rendered_text,
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000004
+    client client-00000000-0000-0000-0000-000000000003 tiled viewport 3x3
+      pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 0x0
+      no room: pane-00000000-0000-0000-0000-000000000004
+      no room for any pane
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000004
+"#
     );
 }
 
@@ -1746,11 +1876,18 @@ fn dump_layout_table_marks_every_member_but_the_active_one() {
 
     let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
-    assert!(
-        rendered_text.contains(
-            "      stacked split, active member 9\n        pane pane-00000000-0000-0000-0000-000000000004 (collapsed)\n        pane pane-00000000-0000-0000-0000-000000000005\n"
-        ),
-        "{rendered_text}",
+    assert_eq!(
+        rendered_text,
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      stacked split, active member 9
+        pane pane-00000000-0000-0000-0000-000000000004 (collapsed)
+        pane pane-00000000-0000-0000-0000-000000000005
+    no client views this tab
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
+"#
     );
 }
 
@@ -1767,9 +1904,18 @@ fn dump_layout_table_shows_a_vertical_split_by_name() {
 
     let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
-    assert!(
-        rendered_text.contains("      vertical split\n"),
-        "{rendered_text}"
+    assert_eq!(
+        rendered_text,
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      vertical split
+        pane pane-00000000-0000-0000-0000-000000000004
+        pane pane-00000000-0000-0000-0000-000000000005
+    no client views this tab
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
+"#
     );
 }
 
@@ -1789,11 +1935,20 @@ fn dump_layout_table_shows_a_fullscreen_client_and_its_pane() {
 
     let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
-    assert!(
-        rendered_text.contains(
-            "    client client-00000000-0000-0000-0000-000000000003 fullscreen pane-00000000-0000-0000-0000-000000000005 viewport 80x22\n"
-        ),
-        "{rendered_text}",
+    assert_eq!(
+        rendered_text,
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      horizontal split
+        pane pane-00000000-0000-0000-0000-000000000004
+        pane pane-00000000-0000-0000-0000-000000000005
+    client client-00000000-0000-0000-0000-000000000003 fullscreen pane-00000000-0000-0000-0000-000000000005 viewport 80x22
+      pane pane-00000000-0000-0000-0000-000000000004 rect 0,0 40x22
+      pane pane-00000000-0000-0000-0000-000000000005 rect 40,0 40x22
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus pane-00000000-0000-0000-0000-000000000005
+"#
     );
 }
 
@@ -1807,11 +1962,16 @@ fn dump_layout_table_shows_a_dash_for_a_client_that_has_focused_nothing() {
 
     let rendered_text = render_layouts(&[session_layout], OutputFormat::Table);
 
-    assert!(
-        rendered_text.contains(
-            "    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -\n"
-        ),
-        "{rendered_text}",
+    assert_eq!(
+        rendered_text,
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000004
+    no client views this tab
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
+"#
     );
 }
 
@@ -1882,14 +2042,27 @@ fn dump_layout_table_renders_every_session_given() {
         )
     };
 
-    let rendered_text = render_layouts(
-        &[first_session_layout, second_session_layout],
-        OutputFormat::Table,
+    assert_eq!(
+        render_layouts(
+            &[first_session_layout, second_session_layout],
+            OutputFormat::Table,
+        ),
+        r#"session session-00000000-0000-0000-0000-000000000001 quiet-lake
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000004
+    no client views this tab
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
+session session-00000000-0000-0000-0000-000000000001 amber-fox
+  tab tab-00000000-0000-0000-0000-000000000002 editor index 0
+    tree
+      pane pane-00000000-0000-0000-0000-000000000005
+    no client views this tab
+  clients
+    client-00000000-0000-0000-0000-000000000003 tab tab-00000000-0000-0000-0000-000000000002 focus -
+"#
     );
-
-    assert_eq!(rendered_text.matches("session session-").count(), 2);
-    assert_eq!(rendered_text.matches("quiet-lake").count(), 1);
-    assert_eq!(rendered_text.matches("amber-fox").count(), 1);
 }
 
 #[test]

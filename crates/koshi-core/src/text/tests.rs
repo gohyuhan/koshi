@@ -1,4 +1,5 @@
-//! Tests for `sanitize_reported_text` and `MAX_REPORTED_TEXT_BYTE_COUNT`.
+//! Tests for `sanitize_reported_text`, `MAX_REPORTED_TEXT_BYTE_COUNT` and
+//! `format_counted_noun`.
 //!
 //! Every refused character is asserted from a literal in the test.
 
@@ -31,8 +32,8 @@ fn assert_kept_character(character: char) {
 #[test]
 fn ordinary_text_passes_through_unchanged() {
     assert_eq!(
-        sanitize_reported_text("~/Projects/koshi"),
-        "~/Projects/koshi"
+        sanitize_reported_text("/home/user/project"),
+        "/home/user/project"
     );
     assert_eq!(sanitize_reported_text(""), "");
     assert_eq!(sanitize_reported_text("日本語"), "日本語");
@@ -221,7 +222,7 @@ fn reported_text_with_only_refused_characters_becomes_empty() {
 #[test]
 fn sanitized_reported_text_is_stable_under_a_second_pass() {
     for reported_text in [
-        "~/Projects/koshi",
+        "/home/user/project",
         "a\u{7f}b",
         &"日".repeat(1_000),
         "👩‍💻",
@@ -234,4 +235,17 @@ fn sanitized_reported_text_is_stable_under_a_second_pass() {
             "not stable for {reported_text:?}"
         );
     }
+}
+
+#[test]
+fn format_counted_noun_takes_the_singular_for_one_alone() {
+    assert_eq!(
+        format_counted_noun(0, "process", "processes"),
+        "0 processes"
+    );
+    assert_eq!(format_counted_noun(1, "process", "processes"), "1 process");
+    assert_eq!(
+        format_counted_noun(2, "process", "processes"),
+        "2 processes"
+    );
 }

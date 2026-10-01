@@ -1,7 +1,6 @@
 //! Tests for creating, choosing and ending a running session.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
@@ -10,32 +9,17 @@ use koshi_core::discovery::{SessionDiscovery, SessionOverview};
 use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
-    ConnectionToken, IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse,
-    IpcResult, PROTOCOL_VERSION,
-};
-use koshi_ipc::router::{
-    compute_router_socket_address, resolve_router_endpoint_path, RouterHandshake, RouterRequest,
-    RouterResponse, SessionAddress, ROUTER_PROTOCOL_VERSION,
+    ConnectionToken, IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
-use koshi_link::router_client::request_new_session;
 use uuid::Uuid;
 
 use super::*;
-use koshi_ipc::router::{RouterRequestKind, RouterResult};
 
 /// The answer an accepted session Hello earns.
 fn build_hello_accepted() -> IpcResult {
     IpcResult::Hello {
         protocol_version: PROTOCOL_VERSION,
-        build_version: env!("CARGO_PKG_VERSION").to_string(),
-    }
-}
-
-/// The answer an accepted router Hello earns.
-fn build_router_hello_accepted() -> RouterResult {
-    RouterResult::Hello {
-        protocol_version: ROUTER_PROTOCOL_VERSION,
         build_version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
@@ -63,6 +47,7 @@ fn build_complete_discovery(session_overviews: Vec<SessionOverview>) -> Discover
     Discovered {
         sessions: session_overviews,
         unasked_session_count: 0,
+        unread_path_count: 0,
     }
 }
 
@@ -70,6 +55,7 @@ fn build_incomplete_discovery(session_overviews: Vec<SessionOverview>) -> Discov
     Discovered {
         sessions: session_overviews,
         unasked_session_count: 1,
+        unread_path_count: 0,
     }
 }
 
@@ -118,17 +104,11 @@ fn serve_kill_session(
         let hello_request: IpcRequest = discovery_connection.recv().expect("read discovery hello");
         let discovery_request: IpcRequest =
             discovery_connection.recv().expect("read discovery request");
-        assert!(matches!(
-            &hello_request.request_kind,
-            IpcRequestKind::Hello {
-                connection_token: presented_connection_token,
-                ..
-            } if presented_connection_token == &connection_token
-        ));
-        assert!(matches!(
-            discovery_request.request_kind,
-            IpcRequestKind::Discovery
-        ));
+        assert_eq!(
+            hello_request.request_kind,
+            IpcRequestKind::build_hello_request(connection_token.clone())
+        );
+        assert_eq!(discovery_request.request_kind, IpcRequestKind::Discovery);
         send_ipc_reply(
             &mut discovery_connection,
             hello_request.request_id,
@@ -165,9 +145,10 @@ fn serve_kill_session(
     })
 }
 
-/// A stand-in session that scripts the kill exchange alone. A discovery
-/// request on the first connection fails the scripted thread, so joining it
-/// proves the caller asked no session to describe itself.
+/// A stand-in session for `session_id` that serves one connection: a Hello,
+/// then a submitted [`Command::Quit`], answered with
+/// [`QuitCause::Requested`]. Any other first request after the Hello, such as
+/// a discovery request, panics the thread, and joining it raises that panic.
 fn serve_kill_session_without_discovery(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -190,13 +171,10 @@ fn serve_kill_session_without_discovery(
         let mut kill_connection = listener.accept().expect("accept kill command");
         let kill_hello_request: IpcRequest = kill_connection.recv().expect("read kill hello");
         let kill_command_request: IpcRequest = kill_connection.recv().expect("read kill request");
-        assert!(matches!(
-            &kill_hello_request.request_kind,
-            IpcRequestKind::Hello {
-                connection_token: presented_connection_token,
-                ..
-            } if presented_connection_token == &connection_token
-        ));
+        assert_eq!(
+            kill_hello_request.request_kind,
+            IpcRequestKind::build_hello_request(connection_token.clone())
+        );
         let IpcRequestKind::SubmitCommand(command_envelope) = kill_command_request.request_kind
         else {
             panic!("expected a submitted command as the first request");
@@ -216,237 +194,6 @@ fn serve_kill_session_without_discovery(
             }),
         );
     })
-}
-
-/// What a stand-in router saw on the one connection it served.
-#[derive(Default)]
-struct RouterLog {
-    /// Whether the Hello presented a connection token the gate accepted.
-    is_hello_accepted: bool,
-    /// The request pipelined behind the Hello.
-    router_request_kind: Option<RouterRequestKind>,
-}
-
-/// The create request a caller is expected to put on the wire for `profile_name` and
-/// `is_other_user_access_allowed`.
-fn build_expected_create_session_request(
-    profile_name: Option<&str>,
-    is_other_user_access_allowed: Option<bool>,
-) -> RouterRequestKind {
-    RouterRequestKind::CreateSession {
-        profile: profile_name.map(str::to_string),
-        working_directory: Some(
-            std::env::current_dir().expect("this test process has a directory"),
-        ),
-        is_other_user_access_allowed,
-    }
-}
-
-/// A stand-in router that accepts one caller's Hello and answers the request
-/// pipelined behind it with `router_result`. What it saw goes in the returned log for
-/// the test to assert on.
-///
-/// The bind and the endpoint file are both done before this returns, so a
-/// caller that runs next finds the stand-in ready and never starts a router of
-/// its own.
-///
-/// It records before it replies, so a caller that has its answer is a caller
-/// whose request is already in the log. That ordering is what lets a test read
-/// the log without joining the thread.
-///
-/// Both replies go out whatever the Hello and the request turn out to be: a
-/// stand-in that stops early strands the caller on a reply that never comes.
-fn serve_router_request(
-    runtime_directory: &Path,
-    router_result: RouterResult,
-) -> Arc<Mutex<RouterLog>> {
-    let connection_token = ConnectionToken::generate();
-    let socket_address = compute_router_socket_address(runtime_directory);
-    let listener = Listener::bind(&socket_address).expect("stand-in router binds");
-    EndpointFile {
-        socket_address,
-        connection_token: connection_token.clone(),
-        process_id: std::process::id(),
-    }
-    .write_to_path(&resolve_router_endpoint_path(runtime_directory))
-    .expect("endpoint file written");
-
-    let router_log = Arc::new(Mutex::new(RouterLog::default()));
-    let shared_router_log = Arc::clone(&router_log);
-    std::thread::spawn(move || {
-        let Ok(mut router_connection) = listener.accept() else {
-            return;
-        };
-        let mut router_handshake = RouterHandshake::from_connection_token(connection_token);
-        let Ok(hello_request) = router_connection.recv::<RouterRequest>() else {
-            return;
-        };
-        let Ok(router_request) = router_connection.recv::<RouterRequest>() else {
-            return;
-        };
-
-        {
-            let mut router_log = shared_router_log
-                .lock()
-                .expect("the log outlives every panic");
-            router_log.is_hello_accepted = router_handshake
-                .validate_request_kind(&hello_request.request_kind)
-                .is_ok();
-            router_log.router_request_kind = Some(router_request.request_kind);
-        }
-
-        let _ = router_connection.send(&RouterResponse {
-            request_id: Some(hello_request.request_id),
-            answer_result: build_router_hello_accepted(),
-        });
-        let _ = router_connection.send(&RouterResponse {
-            request_id: Some(router_request.request_id),
-            answer_result: router_result,
-        });
-    });
-    router_log
-}
-
-/// The Hello and the request a stand-in router saw, once its caller has been
-/// answered.
-fn read_router_log(router_log: &Arc<Mutex<RouterLog>>) -> (bool, Option<RouterRequestKind>) {
-    let stored_router_log = router_log.lock().expect("the log outlives every panic");
-    (
-        stored_router_log.is_hello_accepted,
-        stored_router_log.router_request_kind.clone(),
-    )
-}
-
-#[test]
-fn a_created_answer_hands_back_the_new_session_id() {
-    let runtime_directory = build_test_runtime_directory("headless-created");
-    let session_id = SessionId::from_uuid(Uuid::from_u128(7));
-    let router_log = serve_router_request(
-        &runtime_directory,
-        RouterResult::Created(SessionAddress {
-            session_id,
-            session_name: "quiet-lake".to_string(),
-            socket_address: "unused".to_string(),
-            process_id: std::process::id(),
-        }),
-    );
-
-    let created_session_id =
-        request_new_session(&runtime_directory, None, None).expect("the router created a session");
-
-    assert_eq!(created_session_id, session_id);
-    let (is_hello_accepted, router_request_kind) = read_router_log(&router_log);
-    assert!(is_hello_accepted, "the hello opens the gate");
-    assert_eq!(
-        router_request_kind,
-        Some(build_expected_create_session_request(None, None))
-    );
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-}
-
-/// A create naming a profile carries that name to the router.
-#[test]
-fn a_create_naming_a_profile_carries_that_name_to_the_router() {
-    let runtime_directory = build_test_runtime_directory("create-with-profile");
-    let session_id = SessionId::from_uuid(Uuid::from_u128(11));
-    let router_log = serve_router_request(
-        &runtime_directory,
-        RouterResult::Created(SessionAddress {
-            session_id,
-            session_name: "amber-fox".to_string(),
-            socket_address: "unused".to_string(),
-            process_id: std::process::id(),
-        }),
-    );
-
-    let created_session_id = request_new_session(&runtime_directory, Some("work"), None)
-        .expect("the router created a session");
-
-    assert_eq!(created_session_id, session_id);
-    let (is_hello_accepted, router_request_kind) = read_router_log(&router_log);
-    assert!(is_hello_accepted, "the hello opens the gate");
-    assert_eq!(
-        router_request_kind,
-        Some(build_expected_create_session_request(Some("work"), None))
-    );
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-}
-
-/// The wire is the only place `--allow-other-users` can travel, so a create
-/// that does not carry it leaves the new session as private as any other.
-#[test]
-fn a_headless_create_forcing_the_other_users_on_carries_that_answer_to_the_router() {
-    let runtime_directory = build_test_runtime_directory("create-other-users");
-    let session_id = SessionId::from_uuid(Uuid::from_u128(12));
-    let router_log = serve_router_request(
-        &runtime_directory,
-        RouterResult::Created(SessionAddress {
-            session_id,
-            session_name: "amber-fox".to_string(),
-            socket_address: "unused".to_string(),
-            process_id: std::process::id(),
-        }),
-    );
-
-    let created_session_id = request_new_session(&runtime_directory, None, Some(true))
-        .expect("the router created a session");
-
-    assert_eq!(created_session_id, session_id);
-    let (is_hello_accepted, router_request_kind) = read_router_log(&router_log);
-    assert!(is_hello_accepted, "the hello opens the gate");
-    assert_eq!(
-        router_request_kind,
-        Some(build_expected_create_session_request(None, Some(true)))
-    );
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-}
-
-#[test]
-fn a_refused_create_reports_the_routers_own_message() {
-    let runtime_directory = build_test_runtime_directory("headless-refused");
-    let router_log = serve_router_request(
-        &runtime_directory,
-        RouterResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
-            message: "the session server did not start".to_string(),
-        }),
-    );
-
-    let create_error =
-        request_new_session(&runtime_directory, None, None).expect_err("the router refused");
-
-    let CliError::IpcUnavailable { detail } = create_error else {
-        panic!("expected IpcUnavailable, got {create_error:?}");
-    };
-    assert_eq!(detail, "the session server did not start");
-    let (is_hello_accepted, router_request_kind) = read_router_log(&router_log);
-    assert!(is_hello_accepted, "the hello opens the gate");
-    assert_eq!(
-        router_request_kind,
-        Some(build_expected_create_session_request(None, None))
-    );
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-}
-
-#[test]
-fn an_answer_to_another_request_names_what_came_back() {
-    let runtime_directory = build_test_runtime_directory("headless-wrong-answer");
-    let router_log = serve_router_request(&runtime_directory, build_router_hello_accepted());
-
-    let create_error =
-        request_new_session(&runtime_directory, None, None).expect_err("the answer fits no create");
-
-    let CliError::IpcUnavailable { detail } = create_error else {
-        panic!("expected IpcUnavailable, got {create_error:?}");
-    };
-    assert_eq!(detail, "the router answered with an unexpected Hello reply");
-    let (is_hello_accepted, router_request_kind) = read_router_log(&router_log);
-    assert!(is_hello_accepted, "the hello opens the gate");
-    assert_eq!(
-        router_request_kind,
-        Some(build_expected_create_session_request(None, None))
-    );
-    let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
 #[test]
@@ -488,14 +235,14 @@ fn an_unknown_name_uses_the_session_not_found_exit_code() {
     )
     .expect_err("name is absent");
 
-    assert!(matches!(
-        &session_resolution_error,
-        CliError::SessionNotFound { session_name } if session_name == "missing"
-    ));
     assert_eq!(
         CliExitCode::from(&session_resolution_error),
         CliExitCode::SessionNotFound
     );
+    let CliError::SessionNotFound { session_name } = session_resolution_error else {
+        panic!("expected SessionNotFound, got {session_resolution_error:?}");
+    };
+    assert_eq!(session_name, "missing");
 }
 
 #[test]
@@ -504,11 +251,13 @@ fn no_running_session_uses_the_session_not_found_exit_code() {
         resolve_discovered_session_id(&build_complete_discovery(Vec::new()), None)
             .expect_err("nothing to kill");
 
-    assert!(matches!(session_resolution_error, CliError::NoSessions));
     assert_eq!(
         CliExitCode::from(&session_resolution_error),
         CliExitCode::SessionNotFound
     );
+    let CliError::NoSessions = session_resolution_error else {
+        panic!("expected NoSessions, got {session_resolution_error:?}");
+    };
 }
 
 #[test]
@@ -598,19 +347,19 @@ fn kill_by_name_submits_quit_to_that_session() {
     let quiet_session_overview = build_session_overview("quiet-lake");
     let kill_server_thread = serve_kill_session(&runtime_directory, quiet_session_overview);
 
-    let command_result = kill_session_in_runtime_directory(
+    let session_ending = kill_session_in_runtime_directory(
         &runtime_directory,
+        None,
         Some(&SessionReference::SessionName("quiet-lake".to_string())),
     )
     .expect("kill exchange succeeds");
 
-    assert!(matches!(
-        command_result,
-        CommandResult::Ok {
-            emitted_events,
-            ..
-        } if emitted_events == vec![Event::Quit(QuitCause::Requested)]
-    ));
+    assert_eq!(
+        session_ending,
+        SessionEnding::Quit {
+            stopped_process_count: 0
+        }
+    );
     kill_server_thread.join().expect("stand-in session exits");
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
@@ -621,16 +370,15 @@ fn kill_without_a_name_submits_quit_to_the_only_session() {
     let quiet_session_overview = build_session_overview("quiet-lake");
     let kill_server_thread = serve_kill_session(&runtime_directory, quiet_session_overview);
 
-    let command_result = kill_session_in_runtime_directory(&runtime_directory, None)
+    let session_ending = kill_session_in_runtime_directory(&runtime_directory, None, None)
         .expect("kill exchange succeeds");
 
-    assert!(matches!(
-        command_result,
-        CommandResult::Ok {
-            emitted_events,
-            ..
-        } if emitted_events == vec![Event::Quit(QuitCause::Requested)]
-    ));
+    assert_eq!(
+        session_ending,
+        SessionEnding::Quit {
+            stopped_process_count: 0
+        }
+    );
     kill_server_thread.join().expect("stand-in session exits");
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
@@ -641,19 +389,19 @@ fn kill_by_session_id_submits_quit_without_discovery() {
     let session_id = SessionId::new();
     let kill_server_thread = serve_kill_session_without_discovery(&runtime_directory, session_id);
 
-    let command_result = kill_session_in_runtime_directory(
+    let session_ending = kill_session_in_runtime_directory(
         &runtime_directory,
+        None,
         Some(&SessionReference::SessionId(session_id)),
     )
     .expect("kill exchange succeeds");
 
-    assert!(matches!(
-        command_result,
-        CommandResult::Ok {
-            emitted_events,
-            ..
-        } if emitted_events == vec![Event::Quit(QuitCause::Requested)]
-    ));
+    assert_eq!(
+        session_ending,
+        SessionEnding::Quit {
+            stopped_process_count: 0
+        }
+    );
     kill_server_thread
         .join()
         .expect("stand-in session saw no discovery");
@@ -667,15 +415,15 @@ fn kill_by_unknown_session_id_is_session_not_found() {
 
     let kill_error = kill_session_in_runtime_directory(
         &runtime_directory,
+        None,
         Some(&SessionReference::SessionId(session_id)),
     )
     .expect_err("nothing advertises that id");
 
-    assert!(matches!(
-        &kill_error,
-        CliError::SessionNotFound { session_name }
-            if session_name.as_str() == session_id.to_string()
-    ));
     assert_eq!(CliExitCode::from(&kill_error), CliExitCode::SessionNotFound);
+    let CliError::SessionNotFound { session_name } = kill_error else {
+        panic!("expected SessionNotFound, got {kill_error:?}");
+    };
+    assert_eq!(session_name, session_id.to_string());
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }

@@ -1017,6 +1017,7 @@ dependencies = [
  "koshi-config",
  "koshi-core",
  "koshi-daemon",
+ "koshi-host",
  "koshi-ipc",
  "koshi-layout",
  "koshi-link",
@@ -1037,6 +1038,7 @@ dependencies = [
  "unicode-width 0.2.2",
  "ureq",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -1056,6 +1058,7 @@ dependencies = [
  "base64 0.23.1",
  "koshi-config",
  "koshi-core",
+ "koshi-host",
  "koshi-image",
  "koshi-input",
  "koshi-ipc",
@@ -1110,6 +1113,7 @@ dependencies = [
  "koshi",
  "koshi-config",
  "koshi-core",
+ "koshi-host",
  "koshi-ipc",
  "koshi-link",
  "koshi-observability",
@@ -1127,6 +1131,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "koshi-host"
+version = "0.5.0-pr.1"
+dependencies = [
+ "libc",
+ "nix",
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1156,6 +1170,7 @@ dependencies = [
  "getrandom 0.4.3",
  "interprocess",
  "koshi-core",
+ "koshi-host",
  "koshi-layout",
  "koshi-storage",
  "libc",
@@ -1215,6 +1230,7 @@ dependencies = [
  "koshi-beta",
  "koshi-config",
  "koshi-core",
+ "koshi-host",
  "koshi-ipc",
  "koshi-layout",
  "koshi-observability",
@@ -1222,7 +1238,9 @@ dependencies = [
  "koshi-runtime",
  "koshi-test-support",
  "libc",
+ "semver",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -1460,6 +1478,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1529,6 +1556,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

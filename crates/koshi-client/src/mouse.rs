@@ -149,7 +149,7 @@ pub enum MouseAction {
     /// Run `command` through the session's command door, attributed to this
     /// client's mouse. Focus and every selection change travel this way, and the
     /// session validates them as it validates a command typed at the CLI.
-    Command(Command),
+    Command(Box<Command>),
     /// Move `pane_id`'s `border_side` border `requested_cell_count` cells, one cell per step, in the
     /// direction `resize_step` names — `1` outward (the pane grows), `-1` inward.
     ///
@@ -811,7 +811,7 @@ impl Client {
         ) else {
             return Vec::new();
         };
-        vec![MouseAction::Command(Command::Visual(
+        vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::SetSelection(SetSelectionArgs {
                 pane_id,
                 selection: Selection {
@@ -823,7 +823,7 @@ impl Client {
                     },
                 },
             }),
-        ))]
+        )))]
     }
 
     /// Drop the selection gesture under way, if any, leaving the highlight it
@@ -866,7 +866,7 @@ impl Client {
     /// 2. else a program asking for the mouse gets the tick as a report;
     /// 3. else an alternate-screen program with `?1007` on gets arrow keys;
     /// 4. else this viewer's
-    ///    [`mouse.wheel`](koshi_config::types::MouseConfig::wheel) decides —
+    ///    [`mouse.wheel`](koshi_config::types::MouseConfig::wheel_scroll) decides —
     ///    scroll koshi's scrollback (the default), or do nothing.
     ///
     /// A wheel up over a plain shell with `scroll_line_count = 3` yields
@@ -936,7 +936,7 @@ impl Client {
                 }
             });
         }
-        match self.client_config.mouse.wheel {
+        match self.client_config.mouse.wheel_scroll {
             WheelScroll::ScrollScrollback => {
                 build_scroll_action(pane_id, scroll_direction, scroll_line_count)
             }
@@ -955,10 +955,12 @@ impl Client {
             HitRegion::Tab { tab_id } => {
                 // The click reveals the tab it names, so any peek is over.
                 self.tabline_peek = None;
-                vec![MouseAction::Command(Command::FocusTab(FocusTabArgs {
-                    focus_target: TabTarget::Id(tab_id),
-                    client_id: Some(self.client_id),
-                }))]
+                vec![MouseAction::Command(Box::new(Command::FocusTab(
+                    FocusTabArgs {
+                        focus_target: TabTarget::Id(tab_id),
+                        client_id: Some(self.client_id),
+                    },
+                )))]
             }
             HitRegion::TablineScrollLeft { target_tab_index }
             | HitRegion::TablineScrollRight { target_tab_index } => {
@@ -1092,9 +1094,9 @@ impl Client {
                 .is_some_and(|mouse_pane| mouse_pane.is_on_alternate_screen),
         };
         self.selection_drag = Some(selection_drag);
-        let mut selection_actions = vec![MouseAction::Command(Command::Visual(
+        let mut selection_actions = vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::ClearSelection(ClearSelectionArgs { pane_id }),
-        ))];
+        )))];
         if matches!(selection_kind, SelectionKind::Word | SelectionKind::Line) {
             // Both ends are the press; the session grows them outward to the
             // whole word or line as it applies the highlight.
@@ -1152,7 +1154,7 @@ impl Client {
         // A plain click, whose press highlighted nothing, has no highlight to
         // copy; the session finds none and copies nothing.
         match selection_drag {
-            Some(selection_drag) => vec![MouseAction::Command(Command::Visual(
+            Some(selection_drag) => vec![MouseAction::Command(Box::new(Command::Visual(
                 VisualCommand::Copy(CopyArgs {
                     pane_id: selection_drag.pane_id,
                     should_trim_trailing_whitespace: self
@@ -1160,7 +1162,7 @@ impl Client {
                         .copy
                         .should_trim_trailing_whitespace,
                 }),
-            ))],
+            )))],
             None => Vec::new(),
         }
     }
@@ -1206,7 +1208,7 @@ impl Client {
         ) else {
             return Vec::new();
         };
-        vec![MouseAction::Command(Command::Visual(
+        vec![MouseAction::Command(Box::new(Command::Visual(
             VisualCommand::SetSelection(SetSelectionArgs {
                 pane_id: selection_drag.pane_id,
                 selection: Selection {
@@ -1215,7 +1217,7 @@ impl Client {
                     cursor: cursor_grid_position,
                 },
             }),
-        ))]
+        )))]
     }
 
     /// Move the grabbed border to follow a drag whose pointer is now at `pointer_position`.
@@ -1574,10 +1576,10 @@ impl Client {
 /// A `FocusPane` for `pane_id`, naming `client_id` so the switch moves that viewer's
 /// focus and no other's.
 fn build_focus_pane_action(client_id: ClientId, pane_id: PaneId) -> MouseAction {
-    MouseAction::Command(Command::FocusPane(FocusPaneArgs {
+    MouseAction::Command(Box::new(Command::FocusPane(FocusPaneArgs {
         focus_target: FocusTarget::Pane(pane_id),
         client_id: Some(client_id),
-    }))
+    })))
 }
 
 /// The pane a hit-tested `hit_region` sits in, or `None` when it is chrome. Only a

@@ -110,14 +110,14 @@ fn endpoint_file_write_display_names_the_path_and_detail() {
 }
 
 #[test]
-fn advert_write_display_names_the_marker_and_detail() {
-    let ipc_error = IpcError::AdvertWrite {
-        advert_marker_path: "/tmp/koshi/501/session-1".to_string(),
+fn advertisement_marker_write_display_names_the_marker_and_detail() {
+    let ipc_error = IpcError::AdvertisementMarkerWrite {
+        advertisement_marker_path: "/tmp/koshi/501/session-1".to_string(),
         error_detail: "No such file or directory (os error 2)".to_string(),
     };
     assert_eq!(
         ipc_error.to_string(),
-        "advert marker /tmp/koshi/501/session-1 could not be written: \
+        "advertisement marker /tmp/koshi/501/session-1 could not be written: \
          No such file or directory (os error 2)"
     );
 }

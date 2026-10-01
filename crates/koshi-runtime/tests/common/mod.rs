@@ -150,6 +150,7 @@ pub fn start_test_session<ExchangeResult: Send + 'static>(
         session_id,
         runtime_event_sender.clone(),
         None,
+        None,
     )
     .expect("start serving");
 

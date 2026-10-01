@@ -10,8 +10,9 @@
 //! The two `--remote` refusals land before any connection is opened. Naming a
 //! server that was never saved changes nothing about either answer.
 
-use std::path::Path;
-use std::process::Command;
+mod common;
+
+use common::{build_koshi_command_under_home, build_short_test_directory};
 
 /// Every `share` verb, without the `--remote` flag.
 const SHARE_COMMAND_ARGUMENTS: [&[&str]; 3] = [
@@ -23,9 +24,11 @@ const SHARE_COMMAND_ARGUMENTS: [&[&str]; 3] = [
 /// A server name this machine has not saved.
 const UNSAVED_SERVER_NAME: &str = "some-other-box";
 
-/// Run the koshi binary with `arguments` and hand back `(exit code, stdout, stderr)`.
+/// Run the koshi binary under a fresh test home with `arguments` and hand back
+/// `(exit code, stdout, stderr)`.
 fn run_koshi_with_arguments(arguments: &[&str]) -> (Option<i32>, String, String) {
-    let process_output = Command::new(env!("CARGO_BIN_EXE_koshi"))
+    let test_home_directory = build_short_test_directory();
+    let process_output = build_koshi_command_under_home(test_home_directory.path())
         .args(arguments)
         .output()
         .expect("the koshi binary runs");
@@ -103,28 +106,19 @@ const PANE_SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
 /// The pane the pane variables name.
 const PANE_ID: &str = "22222222-2222-4222-8222-222222222222";
 
-/// Run `koshi share list --session ghost-session` and hand back
-/// `(exit code, stdout, stderr)`.
+/// Run `koshi share list --session ghost-session` under a fresh test home and
+/// hand back `(exit code, stdout, stderr)`.
 ///
-/// `KOSHI_RUNTIME_DIR` names a directory nothing creates. The run finds no
-/// session endpoint and no router socket, and starts no router.
+/// The runtime directory the run names is one nothing creates. The run finds
+/// no session endpoint and no router socket, and starts no router.
 ///
 /// `is_in_pane` true sets the variables a session server exports into a pane:
-/// `KOSHI`, `KOSHI_SESSION_ID`, and `KOSHI_PANE_ID`. False clears them, and the
-/// run carries no pane environment even when the test suite runs in a pane.
+/// `KOSHI`, `KOSHI_SESSION_ID`, and `KOSHI_PANE_ID`. False leaves the run with
+/// no pane variable, even when the test suite runs in a pane.
 fn run_share_list_command(is_in_pane: bool) -> (Option<i32>, String, String) {
-    let mut process_command = Command::new(env!("CARGO_BIN_EXE_koshi"));
-    process_command
-        .args(["share", "list", "--session", UNKNOWN_SESSION_NAME])
-        .env(
-            "KOSHI_RUNTIME_DIR",
-            Path::new(env!("CARGO_TARGET_TMPDIR")).join("share-gate-has-no-runtime-dir"),
-        )
-        .env_remove("KOSHI")
-        .env_remove("KOSHI_SESSION_ID")
-        .env_remove("KOSHI_CLIENT_ID")
-        .env_remove("KOSHI_PANE_ID")
-        .env_remove("KOSHI_SOCKET");
+    let test_home_directory = build_short_test_directory();
+    let mut process_command = build_koshi_command_under_home(test_home_directory.path());
+    process_command.args(["share", "list", "--session", UNKNOWN_SESSION_NAME]);
     if is_in_pane {
         process_command
             .env("KOSHI", "1")

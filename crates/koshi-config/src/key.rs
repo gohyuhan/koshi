@@ -106,7 +106,7 @@ pub enum KeyParseErrorKind {
 }
 
 /// Attaches the failing `key_token` to an `error_kind`.
-pub(crate) fn create_key_parse_error(
+pub(crate) fn build_key_parse_error(
     key_token: &str,
     error_kind: KeyParseErrorKind,
 ) -> KeyParseError {
@@ -149,7 +149,7 @@ fn split_modifier_flags<'a>(
             return Ok((modifier_flags, remaining_key_text));
         };
         let Some(modifier_flag) = resolve_modifier_flag(modifier_character) else {
-            return Err(create_key_parse_error(
+            return Err(build_key_parse_error(
                 key_token,
                 KeyParseErrorKind::UnknownModifier {
                     modifier: modifier_character,
@@ -157,7 +157,7 @@ fn split_modifier_flags<'a>(
             ));
         };
         if modifier_flags.has_all_modifiers(modifier_flag) {
-            return Err(create_key_parse_error(
+            return Err(build_key_parse_error(
                 key_token,
                 KeyParseErrorKind::DuplicateModifier {
                     modifier: modifier_character,
@@ -179,7 +179,7 @@ fn finish_key_character(
     key_character: char,
 ) -> Result<KeyChord, KeyParseError> {
     if key_character.is_whitespace() || key_character.is_control() {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             key_token,
             KeyParseErrorKind::RawWhitespaceOrControl { key_character },
         ));
@@ -191,7 +191,7 @@ fn finish_key_character(
     if modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT)
         && !canonical_key_character.is_lowercase()
     {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             key_token,
             KeyParseErrorKind::ShiftOnNonLetter {
                 key_character: canonical_key_character,
@@ -222,7 +222,7 @@ fn resolve_named_key(key_token: &str, key_name: &str) -> Result<NamedKey, KeyPar
             .filter(|function_key_number| (1..=24).contains(function_key_number))
             .map(NamedKey::F)
             .ok_or_else(|| {
-                create_key_parse_error(
+                build_key_parse_error(
                     key_token,
                     KeyParseErrorKind::FunctionKeyOutOfRange {
                         function_key_number_text: function_key_number_text.to_string(),
@@ -247,7 +247,7 @@ fn resolve_named_key(key_token: &str, key_name: &str) -> Result<NamedKey, KeyPar
         6 if key_name.eq_ignore_ascii_case("pageup") => NamedKey::PageUp,
         8 if key_name.eq_ignore_ascii_case("pagedown") => NamedKey::PageDown,
         _ => {
-            return Err(create_key_parse_error(
+            return Err(build_key_parse_error(
                 key_token,
                 KeyParseErrorKind::UnknownNamedKey {
                     key_name: key_name.to_string(),
@@ -281,7 +281,7 @@ fn resolve_named_key(key_token: &str, key_name: &str) -> Result<NamedKey, KeyPar
 /// literal tab.
 pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
     if chord_text.is_empty() {
-        return Err(create_key_parse_error(chord_text, KeyParseErrorKind::Empty));
+        return Err(build_key_parse_error(chord_text, KeyParseErrorKind::Empty));
     }
 
     // No leading `<`: a single bare printable character.
@@ -289,7 +289,7 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
         let mut chord_characters = chord_text.chars();
         let key_character = chord_characters.next().expect("chord_text is not empty");
         if chord_characters.next().is_some() {
-            return Err(create_key_parse_error(
+            return Err(build_key_parse_error(
                 chord_text,
                 KeyParseErrorKind::UnbracketedMultiChar,
             ));
@@ -299,19 +299,19 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
 
     // Bracketed form: must close with `>`.
     let Some(bracketed_key_text) = key_text_after_opening_bracket.strip_suffix('>') else {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             chord_text,
             KeyParseErrorKind::UnclosedBracket,
         ));
     };
     if bracketed_key_text.is_empty() {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             chord_text,
             KeyParseErrorKind::MissingKey,
         ));
     }
     if bracketed_key_text.eq_ignore_ascii_case("leader") {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             chord_text,
             KeyParseErrorKind::LeaderNotAChord,
         ));
@@ -321,7 +321,7 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
     let (modifier_flags, remaining_key_text) =
         split_modifier_flags(chord_text, bracketed_key_text)?;
     if remaining_key_text.is_empty() {
-        return Err(create_key_parse_error(
+        return Err(build_key_parse_error(
             chord_text,
             KeyParseErrorKind::MissingKey,
         ));
@@ -351,7 +351,7 @@ pub fn parse_chord(chord_text: &str) -> Result<KeyChord, KeyParseError> {
 /// Space then `l`.
 ///
 /// A leader that [`KeyChord::is_typeable`] reports as typeable, or a modifier
-/// run that [`BindingModifierFlags::is_typing`] reports as typing, puts every
+/// run that [`BindingModifierFlags::is_typeable`] reports as typing, puts every
 /// leader-relative binding on a key plain typing produces, and those keys
 /// stop reaching the pane while the client is unlocked. The default is `C-`,
 /// which plain typing never produces.
@@ -388,10 +388,7 @@ impl fmt::Display for Leader {
 /// reports what [`parse_chord`] rejects it for.
 pub fn parse_leader(leader_text: &str) -> Result<Leader, KeyParseError> {
     if leader_text.is_empty() {
-        return Err(create_key_parse_error(
-            leader_text,
-            KeyParseErrorKind::Empty,
-        ));
+        return Err(build_key_parse_error(leader_text, KeyParseErrorKind::Empty));
     }
     if !leader_text.starts_with('<') && leader_text.ends_with('-') {
         let (modifier_flags, remaining_key_text) = split_modifier_flags(leader_text, leader_text)?;

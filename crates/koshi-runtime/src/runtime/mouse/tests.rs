@@ -59,7 +59,7 @@ fn build_viewer_with_wheel(
     viewer.load_startup_config(
         Some(PartialKoshiConfig {
             mouse: Some(PartialMouseConfig {
-                wheel: Some(wheel_scroll),
+                wheel_scroll: Some(wheel_scroll),
                 ..PartialMouseConfig::default()
             }),
             ..PartialKoshiConfig::default()

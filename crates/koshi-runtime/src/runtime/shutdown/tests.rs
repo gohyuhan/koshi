@@ -25,8 +25,8 @@ const TEST_PTY_SIZE: PtySize = PtySize {
     row_count: 24,
 };
 
-/// A runtime sharing one fake PTY backend, returned alongside it so a test can
-/// assert on the kills shutdown issues. The sender queues events on the inbox.
+/// A runtime and the fake PTY backend it shares, which records every kill
+/// shutdown issues. The sender queues events on the runtime's inbox.
 fn build_test_server_with_fake_pty_backend(
 ) -> (Server, Arc<FakePtyBackend>, mpsc::Sender<RuntimeEvent>) {
     let (event_sender, inbox_receiver) = mpsc::channel();
@@ -38,8 +38,8 @@ fn build_test_server_with_fake_pty_backend(
     (runtime, fake_pty_backend, event_sender)
 }
 
-/// Spawn a pane in the fake PTY backend and park its handle in the runtime, so the
-/// pane is live in both — the backend can record kills and shutdown reaches it.
+/// Spawn pane `pane_id` in the fake PTY backend and park its handle in the
+/// runtime. The pane is live in both.
 fn spawn_test_pane_and_park(
     runtime: &mut Server,
     fake_pty_backend: &FakePtyBackend,
@@ -55,9 +55,10 @@ fn spawn_test_pane_and_park(
     runtime.park_pane_pty(pane_id, TEST_PTY_SIZE);
 }
 
-/// A fresh directory to stand in for the runtime directory, under a short base so the
-/// Unix socket path stays inside the OS path-length cap.
-/// [`IpcServer::start`] creates it private itself.
+/// The path of a runtime directory under a short base: `/tmp` on Unix, the
+/// temporary directory on Windows, named
+/// `koshi-quit-<process id>-<directory_tag>`. [`IpcServer::start`] creates it,
+/// private.
 fn build_test_server_directory(directory_tag: &str) -> PathBuf {
     #[cfg(unix)]
     let base_path = PathBuf::from("/tmp");
@@ -93,28 +94,27 @@ fn a_natural_ending_group_kills_every_pane_gracefully_with_the_configured_timeou
 
     runtime.shutdown();
 
-    let graceful = KillPolicy::GracefulTree {
+    let graceful_kill_policy = KillPolicy::GracefulTree {
         timeout_duration: GRACEFUL_TIMEOUT_DURATION,
     };
     assert_eq!(
         fake_pty_backend
             .list_pane_kill_policies(first_pane_id)
             .expect("first pane"),
-        vec![graceful]
+        vec![graceful_kill_policy]
     );
     assert_eq!(
         fake_pty_backend
             .list_pane_kill_policies(second_pane_id)
             .expect("second pane"),
-        vec![graceful]
+        vec![graceful_kill_policy]
     );
 }
 
 #[test]
 fn shutdown_with_no_parked_panes_kills_nothing() {
     let (mut runtime, fake_pty_backend, _event_sender) = build_test_server_with_fake_pty_backend();
-    // Spawn a pane in the backend but never park it, so it is not a live pane
-    // the runtime tracks; shutdown must not reach it.
+    // The pane is spawned in the backend and never parked in the runtime.
     let unparked_pane_id = PaneId::new();
     fake_pty_backend
         .spawn_pane(
@@ -185,11 +185,17 @@ fn a_pane_the_backend_cannot_kill_leaves_every_other_pane_killed() {
 #[test]
 fn shutdown_stops_the_attached_control_socket_and_removes_its_endpoint_file() {
     let (mut runtime, _fake_pty_backend, event_sender) = build_test_server_with_fake_pty_backend();
-    let session = SessionId::new();
+    let session_id = SessionId::new();
     let runtime_directory = build_test_server_directory("socket");
-    let ipc_server =
-        IpcServer::start(&runtime_directory, session, event_sender.clone(), None).expect("serving");
-    let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session);
+    let ipc_server = IpcServer::start(
+        &runtime_directory,
+        session_id,
+        event_sender.clone(),
+        None,
+        None,
+    )
+    .expect("serving");
+    let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id);
     assert!(endpoint_path.exists(), "the session is advertised");
     runtime.attach_ipc_server(ipc_server);
 

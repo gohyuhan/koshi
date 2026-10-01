@@ -638,18 +638,20 @@ fn build_done_or_refused_result(
     }
 }
 
-/// Start the supervisor that will hold `session_id`'s panes, and hand back its
+/// Start the supervisor that holds `session_id`'s panes, and hand back its
 /// process id once it is running.
 ///
-/// It runs the binary this process runs, under
-/// [`PTY_SUPERVISOR_SUBCOMMAND`], with no console of its own and a process
-/// group of its own, and its input and output go nowhere.
+/// It runs the koshi program file at the path
+/// [`resolve_program_path`](koshi_host::program_path::resolve_program_path)
+/// gives, under [`PTY_SUPERVISOR_SUBCOMMAND`], with no console of its own and
+/// a process group of its own, and its input and output go nowhere. After an
+/// update, that file can hold a newer koshi than this process runs.
 ///
-/// The process id is what the caller derives the supervisor's link address
-/// from, since the supervisor binds the address its own id names.
+/// The supervisor binds the link address that its own process id names. The
+/// caller derives that address from the process id handed back.
 ///
-/// `connection_token` is the secret the session server will present at Hello; it reaches
-/// the supervisor on the command line and nowhere else.
+/// `connection_token` is the secret the session server presents at Hello. It
+/// reaches the supervisor on the command line only.
 ///
 /// # Errors
 /// Returns the [`std::io::Error`] of a supervisor that could not be started,
@@ -661,7 +663,7 @@ pub(crate) fn spawn_pty_supervisor(
     connection_token: &ConnectionToken,
 ) -> std::io::Result<u32> {
     crate::process::configure_detached_process(&mut std::process::Command::new(
-        std::env::current_exe()?,
+        koshi_host::program_path::resolve_program_path()?,
     ))
     .arg(PTY_SUPERVISOR_SUBCOMMAND)
     .arg(session_id.to_string())

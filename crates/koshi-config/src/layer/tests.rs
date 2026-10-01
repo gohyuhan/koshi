@@ -160,26 +160,26 @@ fn remote_listen_is_unset_without_a_configured_address() {
     // The built-in default: with no `koshi.kdl`, no listen address is set.
     let merged_server_config =
         merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
-    assert_eq!(merged_server_config.remote_listen, None);
+    assert_eq!(merged_server_config.remote_listen_address, None);
 }
 
 #[test]
 fn remote_listen_folds_onto_the_session_side_only() {
     let layer = PartialKoshiConfig {
-        remote_listen: Some(Some("127.0.0.1:7654".to_string())),
+        remote_listen_address: Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654)))),
         ..Default::default()
     };
 
     // The session side takes the address.
     let merged_server_config = merge_server(ServerConfig::default(), vec![layer.clone()]);
     assert_eq!(
-        merged_server_config.remote_listen,
-        Some("127.0.0.1:7654".to_string())
+        merged_server_config.remote_listen_address,
+        Some(SocketAddr::from(([127, 0, 0, 1], 7654)))
     );
     assert_eq!(
         merged_server_config,
         ServerConfig {
-            remote_listen: Some("127.0.0.1:7654".to_string()),
+            remote_listen_address: Some(SocketAddr::from(([127, 0, 0, 1], 7654))),
             ..ServerConfig::default()
         }
     );
@@ -192,19 +192,19 @@ fn remote_listen_folds_onto_the_session_side_only() {
 #[test]
 fn a_higher_precedence_layer_wins_on_the_listen_address() {
     let user_layer = PartialKoshiConfig {
-        remote_listen: Some(Some("127.0.0.1:7654".to_string())),
+        remote_listen_address: Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654)))),
         ..Default::default()
     };
     let session_layer = PartialKoshiConfig {
-        remote_listen: Some(Some("0.0.0.0:9000".to_string())),
+        remote_listen_address: Some(Some(SocketAddr::from(([0, 0, 0, 0], 9000)))),
         ..Default::default()
     };
 
     let merged_server_config =
         merge_server(ServerConfig::default(), vec![user_layer, session_layer]);
     assert_eq!(
-        merged_server_config.remote_listen,
-        Some("0.0.0.0:9000".to_string())
+        merged_server_config.remote_listen_address,
+        Some(SocketAddr::from(([0, 0, 0, 0], 9000)))
     );
 }
 
@@ -455,7 +455,7 @@ fn logging_override_sets_enabled_level_and_format() {
     let layer = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
             is_enabled: Some(true),
-            level: Some(LogLevel::Error),
+            log_level: Some(LogLevel::Error),
             log_format: Some(LogFormat::Json),
         }),
         ..Default::default()
@@ -466,17 +466,17 @@ fn logging_override_sets_enabled_level_and_format() {
     let merged_client_config = merge_client(ClientConfig::default(), vec![layer]);
 
     assert!(merged_server_config.logging.is_enabled);
-    assert_eq!(merged_server_config.logging.level, LogLevel::Error);
+    assert_eq!(merged_server_config.logging.log_level, LogLevel::Error);
     assert_eq!(merged_server_config.logging.log_format, LogFormat::Json);
     assert!(merged_client_config.logging.is_enabled);
-    assert_eq!(merged_client_config.logging.level, LogLevel::Error);
+    assert_eq!(merged_client_config.logging.log_level, LogLevel::Error);
     assert_eq!(merged_client_config.logging.log_format, LogFormat::Json);
 
     // An absent logging section leaves the defaults (disabled, warning, pretty).
     let default_server_config =
         merge_server(ServerConfig::default(), vec![PartialKoshiConfig::default()]);
     assert!(!default_server_config.logging.is_enabled);
-    assert_eq!(default_server_config.logging.level, LogLevel::Warning);
+    assert_eq!(default_server_config.logging.log_level, LogLevel::Warning);
     assert_eq!(default_server_config.logging.log_format, LogFormat::Pretty);
 }
 
@@ -493,14 +493,14 @@ fn partial_logging_config_keeps_unset_fields_at_defaults() {
     let partial_logging_config = PartialKoshiConfig {
         logging: Some(PartialLoggingConfig {
             is_enabled: Some(true),
-            level: Some(LogLevel::Info),
+            log_level: Some(LogLevel::Info),
             log_format: None,
         }),
         ..Default::default()
     };
     let resolved_logging_config = partial_logging_config.get_logging_config();
     assert!(resolved_logging_config.is_enabled);
-    assert_eq!(resolved_logging_config.level, LogLevel::Info);
+    assert_eq!(resolved_logging_config.log_level, LogLevel::Info);
     assert_eq!(
         resolved_logging_config.log_format,
         LogFormat::Pretty,
@@ -845,7 +845,7 @@ fn mouse_overrides_fold_onto_the_viewer_side_only() {
         mouse: Some(PartialMouseConfig {
             can_resize_pane_border: Some(false),
             scroll_line_count: Some(9),
-            wheel: Some(WheelScroll::Ignore),
+            wheel_scroll: Some(WheelScroll::Ignore),
         }),
         ..Default::default()
     };
@@ -853,7 +853,7 @@ fn mouse_overrides_fold_onto_the_viewer_side_only() {
     let merged_client_config = merge_client(ClientConfig::default(), vec![layer.clone()]);
     assert!(!merged_client_config.mouse.can_resize_pane_border);
     assert_eq!(merged_client_config.mouse.scroll_line_count, 9);
-    assert_eq!(merged_client_config.mouse.wheel, WheelScroll::Ignore);
+    assert_eq!(merged_client_config.mouse.wheel_scroll, WheelScroll::Ignore);
 
     // A session folds the same file and is untouched by it.
     let merged_server_config = merge_server(ServerConfig::default(), vec![layer]);
@@ -935,17 +935,17 @@ fn every_color_role_can_be_overridden() {
 #[test]
 fn a_higher_precedence_layer_can_clear_the_listen_address() {
     let user_layer = PartialKoshiConfig {
-        remote_listen: Some(Some("127.0.0.1:7654".to_string())),
+        remote_listen_address: Some(Some(SocketAddr::from(([127, 0, 0, 1], 7654)))),
         ..Default::default()
     };
     let session_layer = PartialKoshiConfig {
-        remote_listen: Some(None),
+        remote_listen_address: Some(None),
         ..Default::default()
     };
 
     let merged_server_config =
         merge_server(ServerConfig::default(), vec![user_layer, session_layer]);
-    assert_eq!(merged_server_config.remote_listen, None);
+    assert_eq!(merged_server_config.remote_listen_address, None);
 }
 
 #[test]

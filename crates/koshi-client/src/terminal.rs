@@ -1064,7 +1064,8 @@ impl CellSizeQuery {
         self.current_cell_size
     }
 
-    /// Replace the measurement with `measured_cell_size` for a resized viewport.
+    /// Replace the measurement for a resized viewport: `measured_cell_size`, or
+    /// `None` while this attachment writes no terminal queries.
     ///
     /// A pending CSI 16t reply is marked for discard, and the call returns
     /// `false`. With no reply pending, the call returns `true` when the resized

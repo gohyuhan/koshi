@@ -18,7 +18,9 @@
 //! ## Replacing its own image
 //!
 //! A restart request accepted over the control socket ends the serve loop into
-//! the swap. The swap holds every pane's reader still, tells every attached
+//! the swap. So does a connection whose check of the program file finds
+//! another koshi version there: the check queues the restart on the runtime
+//! inbox. The swap holds every pane's reader still, tells every attached
 //! client to come back, writes the session's whole state to the resume file
 //! beside the endpoint file, withdraws the control socket, and replaces this
 //! process's image with the binary on disk. On Unix that is `execvp`, which
@@ -31,14 +33,16 @@
 //! removes it once it is older than
 //! [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION).
 //!
-//! Nothing irreversible happens before the panes are held still, so a swap that
+//! Nothing irreversible happens before the panes are held still. A swap that
 //! cannot start leaves the session serving in this process with every pane and
-//! every reader running.
+//! every reader running. The program file check asks for the restart again
+//! once
+//! [`RESTART_RETRY_INTERVAL_DURATION`](koshi_runtime::executable_watch::RESTART_RETRY_INTERVAL_DURATION)
+//! has passed.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -47,11 +51,12 @@ use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
-use koshi_ipc::endpoint::{resolve_resume_file_path, RESTART_WINDOW_DURATION};
+use koshi_ipc::endpoint::resolve_resume_file_path;
 use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{SessionServerReady, ROUTER_PROTOCOL_VERSION};
 use koshi_observability::logging::initialize_tracing;
 use koshi_pty::backend::state::{CarriedPtyPane, PtyBackend, PtySink};
+use koshi_runtime::executable_watch::{read_first_output_line, ExecutableWatch, OutputLineError};
 use koshi_runtime::ipc_server::IpcServer;
 use koshi_runtime::resume::{
     self, ResumeBody, ResumeHeader, RESUME_FORMAT, RESUME_FORMAT_MIN,
@@ -59,10 +64,13 @@ use koshi_runtime::resume::{
 };
 use koshi_runtime::runtime::event::RuntimeEvent;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
-use koshi_runtime::server::{can_carry_panes, is_binary_runnable, RestartCheck, Server};
+use koshi_runtime::server::{
+    can_carry_panes, is_binary_runnable, RestartCheck, RestartRefusal, Server,
+};
 use koshi_storage::error::StorageError;
 use serde::{Deserialize, Serialize};
 
+use koshi_link::error::CliError;
 use koshi_link::router_client::RUNTIME_DIRECTORY_FLAG;
 
 #[cfg(unix)]
@@ -80,8 +88,8 @@ use koshi_pty::supervisor::SupervisorPtyBackend;
 #[cfg(test)]
 mod tests;
 
-/// The size the session's first pane starts at. No client is attached yet, so
-/// there is no terminal to read a size from; the first attach resizes it.
+/// The size the session's first pane starts at: 80 columns by 24 rows. The
+/// first attach resizes it.
 const STARTING_VIEWPORT: Size = Size {
     column_count: 80,
     row_count: 24,
@@ -97,8 +105,7 @@ pub const SESSION_SERVER_SUBCOMMAND: &str = "serve-session";
 
 /// The flag telling a session server to let the other users of this machine
 /// reach the session, whatever its `koshi.kdl` says. A session server
-/// replacing its own image passes it on, so the rebound socket keeps that
-/// reach.
+/// replacing its own image passes it on to the new image.
 pub(crate) const ALLOW_OTHER_USERS_FLAG: &str = "--allow-other-users";
 
 /// The subcommand a session server runs the newly installed binary under to
@@ -116,9 +123,8 @@ const RESUME_FLAG: &str = "--resume";
 const SUPERVISOR_TOKEN_FLAG: &str = "--supervisor-token";
 
 /// The flag carrying the process id of the process holding this session's
-/// panes. That id is part of the link's address, so the image replacing this
-/// one needs it to reach the same panes. Passed on beside
-/// [`SUPERVISOR_TOKEN_FLAG`], and Windows only for the same reason.
+/// panes. That id is part of the link's address. Passed on beside
+/// [`SUPERVISOR_TOKEN_FLAG`] to the image replacing this one; Windows only.
 const SUPERVISOR_PID_FLAG: &str = "--supervisor-pid";
 
 /// How long a client whose record came across an image swap has to attach
@@ -126,8 +132,7 @@ const SUPERVISOR_PID_FLAG: &str = "--supervisor-pid";
 const RECONNECT_GRACE_DURATION: Duration = Duration::from_secs(30);
 
 /// How long the newly installed binary has to say which resume formats it
-/// reads. One that has not answered by then is refused, so a binary that never
-/// exits cannot hold the thread serving the session.
+/// reads: 5 seconds. One that has not answered by then is refused.
 const RESUME_SUPPORT_WAIT_DURATION: Duration = Duration::from_secs(5);
 
 /// How long a session server waits for the process holding its panes to start
@@ -165,14 +170,13 @@ const OPEN_FILE_DESCRIPTOR_DIRECTORY: &str = "/dev/fd";
 /// The backend this session server drives its panes through.
 ///
 /// On Unix every pane is this process's own child on this process's own
-/// backend: `execvp` keeps the process id, so the children keep their parent
-/// and their terminals across a swap. On Windows a pane's pseudoconsole cannot
-/// leave the process that opened it, so the panes live in a helper process and
-/// this backend is the link to it.
+/// backend, and `execvp` keeps the process id: the children keep their parent
+/// and their terminals across a swap. On Windows the panes live in a helper
+/// process, and this backend is the link to it.
 ///
 /// The swap reaches `pause_readers`, `resume_readers`, `flush_writers` and
-/// `list_carried_panes` through this concrete type, so the session server keeps it
-/// beside the `Arc<dyn PtyBackend>` the server holds.
+/// `list_carried_panes` through this concrete type, which the session server
+/// keeps beside the `Arc<dyn PtyBackend>` the server holds.
 #[cfg(unix)]
 type PtyOwner = PortablePtyBackend;
 
@@ -184,9 +188,8 @@ type PtyOwner = SupervisorPtyBackend;
 /// The one line `koshi resume-support` prints: which resume-file formats that
 /// build takes back.
 ///
-/// A session server asks the newly installed binary this before it does
-/// anything it cannot undo: the install already replaced the old binary on
-/// disk.
+/// A session server asks the binary at its program path this before it does
+/// anything it cannot undo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeSupport {
     /// The oldest resume-file format this build reads.
@@ -209,10 +212,10 @@ impl ResumeSupport {
 /// What this session server was started with: the identity the router gave it,
 /// where it serves, and how the image that replaces it is started.
 ///
-/// Every argument here is passed on to that image, so the resumed session comes
+/// Every argument here is passed on to that image: the resumed session comes
 /// up under the same id and name, in the same directory, under the same
-/// `--allow-other-users` flag. The profile is absent: it opened this session's
-/// tabs and panes once, and the carried state is what brings them back.
+/// `--allow-other-users` flag. No profile is passed on; the carried state
+/// holds the tabs and panes.
 struct SessionStart {
     /// The directory this session serves in.
     runtime_directory: PathBuf,
@@ -221,13 +224,18 @@ struct SessionStart {
     /// The session's display name, which the router generated.
     session_name: String,
     /// Whether `--allow-other-users` was on this process's command line. It
-    /// forces the socket's reach on whatever `koshi.kdl` says, so it is passed
-    /// on and the rebound socket stays reachable by the same users. With the
-    /// flag off, the rebound socket takes the reach `koshi.kdl` holds at that
-    /// moment.
+    /// forces the socket's reach on whatever `koshi.kdl` says, and is passed
+    /// on to the image replacing this one. With the flag off, the rebound
+    /// socket takes the reach `koshi.kdl` holds at that moment.
     is_other_user_access_allowed: bool,
-    /// The path this program was started from. A swap runs the binary there.
-    executable_path: PathBuf,
+    /// The watch of the program file this process started from, made when the
+    /// process started. A swap runs the binary at its path, and the control
+    /// socket checks that file on each connection.
+    executable_watch: Arc<ExecutableWatch>,
+    /// The directory holding `koshi.kdl` and the profiles this session reads,
+    /// or `None` when the machine has none and the session runs on the
+    /// built-in config.
+    config_directory: Option<PathBuf>,
     /// The secret the link to the process holding the panes presents at Hello.
     /// `None` on Unix, where the panes are this process's own children.
     supervisor_token: Option<String>,
@@ -242,7 +250,8 @@ struct SessionStart {
 enum ServeOutcome {
     /// The session is over, on the terms [`run_session_serve_loop`] states.
     Ended,
-    /// A restart request was accepted, so this process replaces its own image.
+    /// A restart is due: a request was accepted over the control socket, or
+    /// the program file check queued one. This process replaces its own image.
     Restart,
 }
 
@@ -251,9 +260,8 @@ enum ServeOutcome {
 /// output, then loop until the session ends.
 ///
 /// The ready line is printed only once the session is seeded and the socket is
-/// bound. Any failure before that returns `Err` having printed nothing, so a
-/// caller reading standard output sees end of stream and knows the session
-/// never started.
+/// bound. Any failure before that returns `Err` having printed nothing: a
+/// caller reading standard output sees end of stream.
 ///
 /// `profile_name` names the profile the session opens its tabs and panes from.
 /// `None`, a name no profile file answers to, and a profile that will not
@@ -265,14 +273,22 @@ enum ServeOutcome {
 ///
 /// `resume_file_path` is the `--resume` flag the image being replaced passes on: the
 /// carried state this session comes up from instead of being seeded. A resume
-/// run reads no profile, since the carried state already holds the tabs and
-/// panes the profile opened. `supervisor_token` and `supervisor_process_id` are the
+/// run reads no profile. `supervisor_token` and `supervisor_process_id` are the
 /// `--supervisor-token` and `--supervisor-pid` flags that go with it on
 /// Windows, naming the secret the link to the process holding the panes
 /// presents and the process id its address is derived from.
+///
+/// `config_migration_error` is the failure of the config migration that ran
+/// before this call, or `None` when it did not fail. A failure is written to the
+/// session log at warn level, after the `logging started` line.
+///
+/// `config_directory` holds the `koshi.kdl` and the profiles the session reads,
+/// at the start and again at every rebind and resume. `None` runs the session
+/// on the built-in config.
 #[allow(clippy::too_many_arguments)]
 pub fn run_session_server(
     runtime_directory: &Path,
+    config_directory: Option<&Path>,
     session_id: SessionId,
     session_name: String,
     profile_name: Option<&str>,
@@ -280,27 +296,38 @@ pub fn run_session_server(
     resume_file_path: Option<&Path>,
     supervisor_token: Option<&str>,
     supervisor_process_id: Option<u32>,
+    config_migration_error: Option<&CliError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let app_config = koshi_link::config::load_app_layer();
+    let app_config = koshi_link::config::load_app_layer(config_directory);
     let logging_parameters =
         koshi_link::config::build_logging_parameters(app_config.as_ref(), session_id);
     let (log_level, log_format) = (logging_parameters.log_level, logging_parameters.log_format);
     let _ = initialize_tracing(logging_parameters);
-    // The first line written, so a log file that exists at all already says
-    // which level and format the session ran under.
+    // The first line written: it names the level and format the session runs
+    // under.
     tracing::info!(
         session_id = %session_id,
         level = ?log_level,
         format = ?log_format,
         "logging started"
     );
+    if let Some(config_migration_error) = config_migration_error {
+        tracing::warn!(
+            %config_migration_error,
+            "the config files could not be migrated; the session starts with them as they are"
+        );
+    }
 
     let mut session_start = SessionStart {
         runtime_directory: runtime_directory.to_path_buf(),
         session_id,
         session_name: session_name.clone(),
         is_other_user_access_allowed: should_allow_other_users_override == Some(true),
-        executable_path: std::env::current_exe()?,
+        executable_watch: Arc::new(ExecutableWatch::new(
+            koshi_host::program_path::resolve_program_path()?,
+            env!("CARGO_PKG_VERSION"),
+        )),
+        config_directory: config_directory.map(Path::to_path_buf),
         supervisor_token: supervisor_token.map(str::to_string),
         supervisor_process_id,
     };
@@ -332,7 +359,7 @@ pub fn run_session_server(
     install_restart_check(
         &mut session_server,
         &pty_owner,
-        &session_start.executable_path,
+        session_start.executable_watch.get_executable_path(),
     );
 
     report_ready(&ipc_server, resume_file_path.is_some())?;
@@ -350,26 +377,27 @@ pub fn run_session_server(
                 // The session runs in another process from here; this one ends
                 // without touching a single pane.
                 None => return Ok(()),
+                // The swap did not happen: the session keeps serving here, and
+                // its program file watch tries the restart again.
                 Some((restored_session_server, restored_ipc_server)) => {
                     session_server = restored_session_server;
                     ipc_server = restored_ipc_server;
                     install_restart_check(
                         &mut session_server,
                         &pty_owner,
-                        &session_start.executable_path,
+                        session_start.executable_watch.get_executable_path(),
                     );
+                    session_start.executable_watch.schedule_restart_retry();
                 }
             },
         }
     }
 
     // Every attached client is told the session ended, and holds that frame,
-    // before anything is torn down: nothing else joins the threads writing to
-    // the clients.
+    // before anything is torn down.
     session_server.announce_quit();
 
-    // The socket stops before the panes are killed, so nothing advertises a
-    // session that is ending.
+    // The socket stops before the panes are killed.
     ipc_server.shutdown();
     session_server.shutdown();
     Ok(())
@@ -379,7 +407,7 @@ pub fn run_session_server(
 ///
 /// No client is minted here: this process serves whoever attaches over the
 /// control socket, and until one does the session holds none. A profile that
-/// will not launch falls back to one shell, so the session always comes up.
+/// will not launch falls back to one shell.
 fn seed_initial_session(
     session_start: &mut SessionStart,
     profile_name: Option<&str>,
@@ -392,8 +420,12 @@ fn seed_initial_session(
         build_server_over_new_panes(session_start, app_config, pty_sink, runtime_event_receiver)?;
 
     let session_start_time = SystemTime::now();
-    let profile_template_document =
-        profile_name.and_then(koshi_link::config::load_profile_template);
+    let profile_template_document = profile_name.and_then(|profile_name| {
+        koshi_link::config::load_profile_template(
+            session_start.config_directory.as_deref(),
+            profile_name,
+        )
+    });
     let is_profile_seeded = match profile_template_document {
         // The name is the router's, not a fresh one: the router registered this
         // session under it and a `koshi attach <name>` resolves against it.
@@ -436,8 +468,7 @@ fn seed_initial_session(
 /// id, or from the helper process holding it, by [`build_from_carried_state`].
 /// A header that does not read names no pane: every terminal this process
 /// inherited is released by [`release_panes_without_header`], and one fresh
-/// shell is seeded under the same id and name, so the session id the router
-/// registered still answers. Its screen receives
+/// shell is seeded under the same id and name. Its screen receives
 /// [`SESSION_NOT_RESTORED_NOTICE_BYTES`], and its statusline keeps a recovery
 /// notice until input reaches a pane in that session.
 ///
@@ -445,9 +476,10 @@ fn seed_initial_session(
 /// dropping its link. [`resume_readers_and_rebuild`] is the other path: it
 /// rebuilds the same state over panes that were never released.
 ///
-/// The file is deleted on every way out of this call. It outlives the socket
-/// being bound. While it exists, the router leaves this session's
-/// advertisement in place through the swap.
+/// The file is deleted once this call has bound the control socket or failed,
+/// on every way out. While it exists, the router and the CLI read this session
+/// as restarting through [`is_replacing_its_image`](koshi_ipc::endpoint::is_replacing_its_image),
+/// and the router leaves this session's advertisement in place.
 ///
 /// # Errors
 /// Returns the failure of fresh panes that could not be opened, of a fresh
@@ -461,38 +493,38 @@ fn resume_from_file(
     runtime_event_receiver: Receiver<RuntimeEvent>,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, Arc<PtyOwner>, IpcServer), Box<dyn std::error::Error>> {
-    let (resume_header, encoded_resume_body) = match resume::read_resume_header(resume_file_path) {
-        Ok(resume_header_and_body) => resume_header_and_body,
+    let rebuilt_session = match resume::read_resume_header(resume_file_path) {
+        Ok((resume_header, encoded_resume_body)) => {
+            let resume_body =
+                resume::read_resume_body(resume_header.resume_format, &encoded_resume_body);
+            build_from_carried_state(
+                &resume_header,
+                resume_body,
+                session_start,
+                app_config,
+                pty_sink,
+                runtime_event_receiver,
+                runtime_event_sender,
+            )
+        }
         Err(resume_read_error) => {
             tracing::error!(
                 %resume_read_error,
                 "the carried state names no pane that can be read; the session comes back with one shell"
             );
             release_panes_without_header(session_start, Arc::clone(&pty_sink));
-            let _ = std::fs::remove_file(resume_file_path);
-            let (session_server, pty_owner) = seed_session_after_failed_restore(
+            seed_session_after_failed_restore(
                 session_start,
                 app_config,
                 pty_sink,
                 runtime_event_receiver,
-            )?;
-            let ipc_server = bind_session_socket(session_start, runtime_event_sender)?;
-            return Ok((session_server, pty_owner, ipc_server));
+            )
+            .and_then(|(session_server, pty_owner)| {
+                let ipc_server = bind_session_socket(session_start, runtime_event_sender)?;
+                Ok((session_server, pty_owner, ipc_server))
+            })
         }
     };
-
-    let resume_body = resume::read_resume_body(resume_header.resume_format, &encoded_resume_body);
-    let rebuilt_session = build_from_carried_state(
-        &resume_header,
-        resume_body,
-        session_start,
-        app_config,
-        pty_sink,
-        runtime_event_receiver,
-        runtime_event_sender,
-    );
-    // The state is in memory and the socket carries a fresh token, or nothing
-    // came up at all; either way the file has done its work.
     let _ = std::fs::remove_file(resume_file_path);
     rebuilt_session
 }
@@ -619,11 +651,12 @@ fn build_from_carried_state(
 /// On Unix they are this process's own children on its own backend. On Windows
 /// they belong to a helper process this starts and outlive an image swap; the
 /// secret its link presents and its process id are recorded on
-/// `session_start`, since the image replacing this one needs both to reach the same
-/// panes.
+/// `session_start`, and the image replacing this one reaches the same panes
+/// through both.
 ///
-/// The helper's address carries its process id, so the helper started here
-/// never binds the address a helper this session is leaving behind still holds.
+/// The helper's address carries its process id: the helper started here binds
+/// an address of its own, never one a helper this session is leaving behind
+/// still holds.
 ///
 /// # Errors
 /// Returns the failure of a helper process that could not be started or could
@@ -742,7 +775,7 @@ type TakenBackPtyState = (
 /// Take back every pane the resume header names that can be taken back, and
 /// return the backend, live pane sizes, and exits received during the link.
 ///
-/// A pane's terminal descriptor crossed the swap open, so each pane is taken
+/// Each pane's terminal descriptor crossed the swap open. Each pane is taken
 /// back on its own from that descriptor and its child's process id by
 /// [`take_one_pane_back`]. A pane that cannot be taken back has its terminal
 /// master closed and its child ended by [`end_carried_child`]. Every other pane
@@ -856,16 +889,16 @@ fn find_conflicting_carried_pane_indexes(resume_header: &ResumeHeader) -> HashSe
 ///
 /// What the number names is checked before this process owns it.
 ///
-/// 1. A number that names no pseudoterminal master is refused, so a number
-///    naming an ordinary file, a pipe, this process's own standard error, or
-///    nothing at all never becomes a pane's terminal.
+/// 1. A number that names no pseudoterminal master is refused: an ordinary
+///    file, a pipe, this process's own standard error, or nothing at all never
+///    becomes a pane's terminal.
 /// 2. A master becomes an owned descriptor. A recorded terminal name that
 ///    differs from its current name refuses the pane and closes that master.
 ///    A header that recorded no name leaves step 1 to decide.
 ///
 /// Close-on-exec goes back on the descriptor once both steps pass. The exit
-/// status the header carried goes to the pane as well, so a child the previous
-/// image reaped is reported with the code it really ended with.
+/// status the header carried goes to the pane as well: a child the previous
+/// image reaped is reported with the code it ended with.
 ///
 /// Before → after: the header carries `terminal_fd = 7` and
 /// `terminal_name = "/dev/ttys009"` for pane 3, and descriptor 7 is now the
@@ -923,9 +956,9 @@ fn take_one_pane_back(
 
 /// Close one carried pane's terminal descriptor.
 ///
-/// What the number names is read first: only a pseudoterminal master is closed,
-/// so a number that names an ordinary file, a pipe, a socket or this process's
-/// own standard error is left open and logged.
+/// What the number names is read first: only a pseudoterminal master is closed.
+/// A number that names an ordinary file, a pipe, a socket or this process's own
+/// standard error is left open and logged.
 ///
 /// Before → after: the header carries `terminal_fd = 2` and descriptor 2 is
 /// this process's own standard error → descriptor 2 stays open.
@@ -952,7 +985,7 @@ fn close_carried_terminal(carried_pane: &resume::CarriedPane) {
 /// one's terminal holds.
 ///
 /// The panes never moved: the helper process opened every pseudoconsole and
-/// still owns it. Linking names which panes this session claims, so the helper
+/// still owns it. Linking names which panes this session claims: the helper
 /// ends any it holds that this session does not, and reports any claimed pane
 /// it does not hold as ended. The returned sizes name only panes the helper
 /// reported as live. The panes
@@ -1003,8 +1036,7 @@ fn take_panes_back(
     ) {
         Ok(pty_owner) => pty_owner,
         Err(link_error) => {
-            // The link is the only way to reach the panes, so ending them is
-            // tried once more over a link of its own.
+            // Ending the panes is tried once more over a link of its own.
             release_panes_without_header(session_start, pty_sink);
             return Err(link_error.into());
         }
@@ -1127,8 +1159,8 @@ fn list_child_process_ids() -> Vec<u32> {
     }
 }
 
-/// Every child process of this one. This platform offers no way to list them,
-/// so the list is empty.
+/// Every child process of this one. On this platform the list is always
+/// empty.
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn list_child_process_ids() -> Vec<u32> {
     tracing::warn!("the child processes cannot be listed on this platform; none is ended");
@@ -1261,16 +1293,15 @@ fn end_carried_child(process_id: u32) -> Option<libc::pid_t> {
     Some(child_process_id)
 }
 
-/// End every pane the helper process holds, and tell the helper to end itself,
-/// so the fresh session that follows starts a helper process of its own.
+/// End every pane the helper process holds, and tell the helper to end itself.
+/// The fresh session that follows starts a helper process of its own.
 ///
 /// Linking while claiming no pane is what ends them: the helper process ends
 /// every pane the session server does not claim.
 ///
 /// This path and [`take_panes_back`] both build the helper's address from the
 /// identity the router started this process for and the helper's process id
-/// passed on beside it, so the two always name the same helper. Nothing here
-/// reads the resume header.
+/// passed on beside it. Nothing here reads the resume header.
 #[cfg(windows)]
 fn release_panes_without_header(session_start: &SessionStart, pty_sink: Arc<dyn PtySink>) {
     let Some(supervisor_token) = session_start.supervisor_token.as_deref() else {
@@ -1310,12 +1341,12 @@ fn release_panes_without_header(session_start: &SessionStart, pty_sink: Arc<dyn 
 /// `supervisor_process_id` is that helper's process id, which its address is derived
 /// from.
 ///
-/// A helper process that has just been started is not listening yet, so a link
-/// that cannot be opened is tried again every [`SUPERVISOR_LINK_POLL_INTERVAL_DURATION`] until
-/// [`SUPERVISOR_LINK_WAIT_DURATION`] runs out. That window bounds when the last attempt
-/// starts, not how long one attempt lasts: an attempt that reaches the helper
-/// waits its own bounded time for each answer, so the call can return one
-/// answer wait past the window.
+/// A link that cannot be opened is tried again every
+/// [`SUPERVISOR_LINK_POLL_INTERVAL_DURATION`] until
+/// [`SUPERVISOR_LINK_WAIT_DURATION`] runs out. That window bounds when the
+/// last attempt starts, not how long one attempt lasts. An attempt that
+/// reaches the helper waits its own bounded time for each answer, so the call
+/// can return up to one answer wait past the window.
 ///
 /// # Errors
 /// Returns the last failure of a helper process that never answered.
@@ -1374,6 +1405,10 @@ fn build_carried_pty_sizes(resume_header: &ResumeHeader) -> HashMap<PaneId, PtyS
 /// the one a rebuilt session takes. The token a client waits for changes once
 /// per bind.
 ///
+/// The socket checks the program file on each connection it takes, through
+/// `session_start.executable_watch`. When that file holds another koshi
+/// version, the session restarts into it.
+///
 /// # Errors
 /// Returns the failure of an address that could not be bound or an endpoint
 /// file that could not be written.
@@ -1381,15 +1416,18 @@ fn bind_session_socket(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<IpcServer, IpcError> {
+    let config_directory = session_start.config_directory.as_deref();
     let other_users_policy = koshi_link::config::resolve_other_users_policy(
-        koshi_link::config::load_app_layer().as_ref(),
+        koshi_link::config::load_app_layer(config_directory).as_ref(),
         session_start.is_other_user_access_allowed,
+        config_directory,
     );
     IpcServer::start(
         &session_start.runtime_directory,
         session_start.session_id,
         runtime_event_sender.clone(),
         other_users_policy,
+        Some(Arc::clone(&session_start.executable_watch)),
     )
 }
 
@@ -1440,16 +1478,25 @@ fn install_restart_check(
     let executable_path = executable_path.to_path_buf();
     let pty_owner = Arc::clone(pty_owner);
     // The three checks this process makes on its own run first; the new binary
-    // is run only once all three pass.
+    // is run only once all three pass. A file that is not runnable, or that
+    // does not read this build's resume file, is an unfit program file; a pane
+    // without a terminal descriptor or with a writer that does not settle is a
+    // pane not ready.
     let restart_check: RestartCheck = Arc::new(move || {
-        is_binary_runnable(&executable_path)?;
-        can_carry_panes(&pty_owner.list_carried_panes())?;
-        // A child that stopped reading its stdin blocks its pane's writer, and
-        // the bytes behind that write cannot cross the swap.
+        is_binary_runnable(&executable_path)
+            .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason })?;
+        can_carry_panes(&pty_owner.list_carried_panes())
+            .map_err(|refusal_reason| RestartRefusal::PaneNotReady { refusal_reason })?;
         pty_owner
             .flush_writers()
-            .map_err(|flush_writers_error| flush_writers_error.to_string())?;
-        reads_the_format_this_build_writes(read_resume_support(&executable_path)?, &executable_path)
+            .map_err(|flush_writers_error| RestartRefusal::PaneNotReady {
+                refusal_reason: flush_writers_error.to_string(),
+            })?;
+        read_resume_support(&executable_path)
+            .and_then(|resume_support| {
+                reads_the_format_this_build_writes(resume_support, &executable_path)
+            })
+            .map_err(|refusal_reason| RestartRefusal::UnfitProgramFile { refusal_reason })
     });
     session_server.set_restart_check(restart_check);
 }
@@ -1460,47 +1507,20 @@ fn install_restart_check(
 /// A binary that cannot run on this machine, such as a broken download or one
 /// built for another architecture, fails here, before the swap.
 ///
-/// A thread of its own reads the first line of the binary's standard output; a
-/// stream that ends before a newline gives whatever it held. The wait lasts at
-/// most [`RESUME_SUPPORT_WAIT_DURATION`], and the binary is ended either way.
-/// This runs on the thread serving the session, which every pane's output also
-/// passes through.
+/// The first line of the binary's standard output is read through
+/// [`read_first_output_line`]: a stream that ends before a newline gives
+/// whatever it held. The wait lasts at most [`RESUME_SUPPORT_WAIT_DURATION`],
+/// and the binary is ended either way. This runs on the thread serving the
+/// session, which every pane's output also passes through.
 ///
 /// # Errors
 /// Returns the sentence naming the binary and what is wrong with it.
 fn read_resume_support(executable_path: &Path) -> Result<ResumeSupport, String> {
-    let mut child_process = std::process::Command::new(executable_path)
-        .arg(RESUME_SUPPORT_SUBCOMMAND)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|process_spawn_error| {
-            format!(
-                "the binary at {} could not be run: {process_spawn_error}",
-                executable_path.display()
-            )
-        })?;
-    let child_standard_output = child_process
-        .stdout
-        .take()
-        .expect("the binary was spawned with its standard output piped");
-    let (resume_support_line_sender, resume_support_line_receiver) = mpsc::channel();
-    let _ = std::thread::Builder::new()
-        .name("koshi-resume-support".to_string())
-        .spawn(move || {
-            let mut resume_support_line = String::new();
-            let _ = BufReader::new(child_standard_output).read_line(&mut resume_support_line);
-            let _ = resume_support_line_sender.send(resume_support_line);
-        });
-    let resume_support_line_result =
-        resume_support_line_receiver.recv_timeout(RESUME_SUPPORT_WAIT_DURATION);
-    // Ending the binary closes the pipe and ends the thread reading it. A
-    // binary that never answered leaves neither a process nor a thread behind.
-    let _ = child_process.kill();
-    let _ = child_process.wait();
-
-    match resume_support_line_result {
+    match read_first_output_line(
+        executable_path,
+        RESUME_SUPPORT_SUBCOMMAND,
+        RESUME_SUPPORT_WAIT_DURATION,
+    ) {
         Ok(resume_support_line) => {
             parse_resume_support(resume_support_line.trim()).map_err(|resume_support_parse_error| {
                 format!(
@@ -1509,7 +1529,11 @@ fn read_resume_support(executable_path: &Path) -> Result<ResumeSupport, String> 
                 )
             })
         }
-        Err(_resume_support_read_error) => Err(format!(
+        Err(OutputLineError::NotStarted(process_spawn_error)) => Err(format!(
+            "the binary at {} could not be run: {process_spawn_error}",
+            executable_path.display()
+        )),
+        Err(OutputLineError::NoLineInTime) => Err(format!(
             "the binary at {} did not say which resume formats it reads within {} seconds",
             executable_path.display(),
             RESUME_SUPPORT_WAIT_DURATION.as_secs()
@@ -1550,29 +1574,6 @@ fn reads_the_format_this_build_writes(
     ))
 }
 
-/// Whether `session_id` is replacing its own process image right now: its resume
-/// file exists and is younger than [`RESTART_WINDOW_DURATION`].
-///
-/// The router asks this before it drops a session that stopped answering, and
-/// again before it removes a resume file no session claims. A resume file older
-/// than the window reads as a dead swap: the session is dropped as usual, and
-/// the file goes with it. A file stamped ahead of this machine's clock reads as
-/// fresh.
-#[must_use]
-pub(crate) fn is_replacing_its_image(runtime_directory: &Path, session_id: SessionId) -> bool {
-    let Ok(resume_file_modified_at) =
-        std::fs::metadata(resolve_resume_file_path(runtime_directory, session_id))
-            .and_then(|resume_file_metadata| resume_file_metadata.modified())
-    else {
-        return false;
-    };
-    resume_file_modified_at
-        .elapsed()
-        .map_or(true, |resume_file_age| {
-            resume_file_age < RESTART_WINDOW_DURATION
-        })
-}
-
 /// Start the one-shot timer that closes the wait for the clients whose records
 /// came across an image swap.
 ///
@@ -1592,12 +1593,11 @@ fn start_reconnect_deadline(runtime_event_sender: Sender<RuntimeEvent>) {
 
 /// Put the session back to serving in this process after the swap was
 /// abandoned: every pane's reader goes back to its terminal, and the accepted
-/// restart is taken back so the serve loop the caller returns to stops asking
+/// restart is taken back. The serve loop the caller returns to no longer asks
 /// for the swap.
 ///
 /// Called only from the abandon paths that run before any client was told and
-/// before any state moved, so the server this hands back is the one the session
-/// carries on with.
+/// before any state moved.
 fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>) -> Server {
     pty_owner.resume_readers();
     session_server.cancel_restart();
@@ -1607,31 +1607,29 @@ fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>
 /// Replace this process's image with the binary it was started from, carrying
 /// the whole session and every pane across.
 ///
-/// The order is what makes the swap lossless:
+/// The swap runs in this order:
 ///
 /// 1. Apply the inbox, hold every pane's reader still, apply the inbox again,
 ///    then wait for every pane's writer to finish. Once the readers are parked,
 ///    no byte has been read from a terminal without reaching an engine. Each
-///    inbox pass hands every client what it produced, so the escape a copy
+///    inbox pass hands every client what it produced: the escape a copy
 ///    queued for a client's own terminal goes out here. Both passes detach a
-///    client that hung up, since no client has been told anything yet.
-/// 2. Tell every attached client, and wait until each one holds that frame:
-///    nothing else joins the threads writing to the clients. From here every
-///    path ends with a socket carrying a fresh token, which is what a client
-///    that was told watches for.
+///    client that hung up.
+/// 2. Tell every attached client, and wait until each one holds that frame.
+///    From here every path ends with a socket carrying a fresh token.
 /// 3. Wait for every told client to leave, applying the inbox on each pass. A
 ///    client that read the frame step 2 wrote sends `Leaving` and writes nothing
-///    after it, so its connection ends once the session has read every key,
+///    after it: its connection ends once the session has read every key,
 ///    paste, mouse round and command it sent. All of them are applied here.
-///    A client that stopped reading its socket never leaves, so the wait ends
-///    after [`CLIENTS_LEFT_WAIT_DURATION`]. The intake then closes, ending the
-///    connections that are left, and a last pass applies what they had already
-///    handed over. Nothing arrives after that pass.
-/// 4. Carry the state out and wait for every pane's writer again, so no byte
-///    the session took for a child — a typed key, a paste, a reply to a device
-///    query — is still queued in a thread the swap destroys. Then write the
-///    carried state, withdraw the control socket so the new image can bind it,
-///    and replace the image.
+///    The wait ends after [`CLIENTS_LEFT_WAIT_DURATION`] even when a client
+///    that stopped reading its socket has not left. The intake then closes,
+///    ending the connections that are left, and a last pass applies what they
+///    had already handed over. Nothing arrives after that pass.
+/// 4. Carry the state out and wait for every pane's writer again: no byte the
+///    session took for a child — a typed key, a paste, a reply to a device
+///    query — is still queued in a writer thread. Then write the carried state,
+///    withdraw the control socket, and replace the image. The new image binds
+///    the socket again.
 ///
 /// A session that keeps serving on either check in step 4 — a pane's writer
 /// that will not settle, or carried state that cannot be written — keeps the
@@ -1650,7 +1648,7 @@ fn restore_session_serving(mut session_server: Server, pty_owner: &Arc<PtyOwner>
 ///
 /// # Errors
 /// Returns the failure of a session that can neither swap nor be put back. Every
-/// pane is ended first, so nothing is left running with no owner.
+/// pane is ended first.
 fn swap_session_image(
     mut session_server: Server,
     ipc_server: IpcServer,
@@ -1660,9 +1658,9 @@ fn swap_session_image(
 ) -> Result<Option<(Server, IpcServer)>, Box<dyn std::error::Error>> {
     apply_queued_runtime_events(&mut session_server, DetachPolicy::Apply);
 
-    // Nothing has been told and nothing has moved, so a pane whose reader
-    // cannot be held still leaves the session exactly as it was, with every
-    // client still streaming. The two checks below stand on the same ground.
+    // Nothing has been told and nothing has moved. A pane whose reader cannot
+    // be held still leaves the session as it was, with every client still
+    // streaming. So do the two checks below.
     if let Err(pause_readers_error) = pty_owner.pause_readers() {
         tracing::warn!(
             %pause_readers_error,
@@ -1687,8 +1685,7 @@ fn swap_session_image(
     }
 
     // The pass above queues the replies to the device queries carried in the
-    // chunks the parked readers delivered, so the writers are waited on after
-    // it.
+    // chunks the parked readers delivered. The writers are waited on after it.
     if let Err(flush_writers_error) = pty_owner.flush_writers() {
         tracing::warn!(
             %flush_writers_error,
@@ -1702,11 +1699,11 @@ fn swap_session_image(
 
     session_server.announce_restarting();
 
-    // Every told client sends `Leaving` and writes nothing after it, so its
+    // Every told client sends `Leaving` and writes nothing after it: its
     // connection ends once the session has read every key, paste, mouse round
     // and command it sent while the frame above was on its way. Each pass
-    // applies what those connections handed over. A client that stopped reading
-    // its socket never leaves, so the wait ends after CLIENTS_LEFT_WAIT_DURATION.
+    // applies what those connections handed over. The wait ends after
+    // CLIENTS_LEFT_WAIT_DURATION.
     let client_leave_deadline = Instant::now() + CLIENTS_LEFT_WAIT_DURATION;
     loop {
         drain_runtime_event_inbox(&mut session_server, DetachPolicy::Skip);
@@ -1731,11 +1728,10 @@ fn swap_session_image(
     apply_queued_runtime_events(&mut session_server, DetachPolicy::Skip);
 
     // A `core:quit` applied by the pass above rides the swap out in the carried
-    // state, with its kind, rather than ending the session here. The clients
-    // have already been told to wait for the next socket, so the swap is what
-    // brings them back; the next image serves until each carried client has
-    // attached again or its window has closed, and ends then. A quit naming one
-    // client only detaches it and carries nothing.
+    // state, with its kind; the session does not end here. The next image
+    // serves until each carried client has attached again or its window has
+    // closed, and ends then. A quit naming one client only detaches it and
+    // carries nothing.
     if session_server.is_quit_requested() {
         tracing::info!("a quit arrived while the swap was starting; the next image carries it out");
     }
@@ -1753,10 +1749,9 @@ fn swap_session_image(
     let resume_file_path =
         resolve_resume_file_path(&session_start.runtime_directory, session_start.session_id);
 
-    // The pass above handed the panes' writers whatever it applied, so the
-    // writers are waited on again. Every client has been told by now, so a pane
-    // that cannot settle puts the session back on a socket carrying a fresh
-    // token.
+    // The pass above handed the panes' writers whatever it applied. The
+    // writers are waited on again. A pane that cannot settle puts the session
+    // back on a socket carrying a fresh token.
     if let Err(flush_writers_error) = pty_owner.flush_writers() {
         tracing::warn!(
             %flush_writers_error,
@@ -1777,9 +1772,8 @@ fn swap_session_image(
         .map(Some);
     }
 
-    // The panes were read to build the header a few steps back, so a child that
-    // ended in between was reaped by this image's watcher and its status is
-    // known only here.
+    // A child that ended after the header was built was reaped by this image's
+    // watcher. Its exit status goes into the header here.
     refresh_carried_exits(&mut resume_header, &pty_owner.list_carried_panes());
 
     // Written before the socket is released. A session that cannot write it
@@ -1821,9 +1815,8 @@ fn swap_session_image(
     ) {
         Ok(rebuilt_session) => Ok(Some(rebuilt_session)),
         Err(rebuild_error) => {
-            // Nothing can serve these panes any more, so they are ended rather
-            // than left running with no reader. The rebuild has already taken
-            // the file away.
+            // Every carried pane is ended. The rebuild has already taken the
+            // file away.
             for carried_pty_pane in pty_owner.list_carried_panes() {
                 let _ = pty_owner.kill_pane(carried_pty_pane.pane_id, KillPolicy::Tree);
             }
@@ -1836,9 +1829,9 @@ fn swap_session_image(
 ///
 /// `true` means the session runs in another process from here and this one
 /// ends. On Unix that answer never comes back: `execvp` replaces this process
-/// in place, so a return at all means the swap did not start and every pane's
-/// terminal has its close-on-exec flag back. `false` is that failure, logged
-/// with the reason.
+/// in place. A return means the swap did not start, and every pane's terminal
+/// has its close-on-exec flag back. `false` is that failure, logged with its
+/// cause.
 #[cfg(unix)]
 fn start_replacement_image(
     session_start: &SessionStart,
@@ -1859,8 +1852,8 @@ fn start_replacement_image(
             );
         }
     }
-    // No image was replaced, so every terminal is this process's own again and
-    // takes the flag it was carried without back.
+    // No image was replaced: every terminal takes back the close-on-exec flag
+    // it was carried without.
     put_close_on_exec_back(resume_header);
     false
 }
@@ -1868,8 +1861,8 @@ fn start_replacement_image(
 /// Start the image replacing this one, from the state written at `resume_file_path`.
 ///
 /// `true` means the new image was started and the session runs in it from here.
-/// `false` is a start that failed, logged with the reason; the panes stay in the
-/// helper process either way, so nothing about them changes.
+/// `false` is a start that failed, logged with its cause. The panes stay in the
+/// helper process either way.
 #[cfg(windows)]
 fn start_replacement_image(
     session_start: &SessionStart,
@@ -1888,9 +1881,9 @@ fn start_replacement_image(
 /// What [`apply_queued_runtime_events`] does with a `ClientDetached` it drains.
 #[derive(Clone, Copy)]
 enum DetachPolicy {
-    /// Apply it, so a client that hung up leaves the session's records.
+    /// Apply it: a client that hung up leaves the session's records.
     Apply,
-    /// Pass it over, so the client keeps its record.
+    /// Pass it over: the client keeps its record.
     Skip,
 }
 
@@ -1898,27 +1891,22 @@ enum DetachPolicy {
 /// client what applying it produced.
 ///
 /// `detach_policy` says what a queued `ClientDetached` does. Every pass before the
-/// restart is announced takes [`DetachPolicy::Apply`]: no client has been told
-/// anything yet, so a detach there is a client that really hung up, and the
-/// session keeps serving without it whether the swap starts or is abandoned.
-/// The passes after the announce take [`DetachPolicy::Skip`]: every told client's
-/// connection ends as that client leaves, and the swap carries each record
-/// across so the client attaches again onto it. The grace window after the swap
-/// drops a record nobody claims. The last of those passes runs after
-/// [`IpcServer::close_intake`], so what a client sent is already in the inbox
-/// when it starts and nothing arrives after it.
+/// restart is announced takes [`DetachPolicy::Apply`]: the session keeps
+/// serving without that client whether the swap starts or is abandoned. The
+/// passes after the announce take [`DetachPolicy::Skip`]: the swap carries each
+/// told client's record across, and the client attaches again onto it. The
+/// grace window after the swap drops a record nobody claims. The last of those
+/// passes runs after [`IpcServer::close_intake`]: nothing arrives after it.
 ///
-/// The push is what delivers the bytes a command queued for a client's own
-/// terminal — the escape a copy writes to the clipboard — since the serve loop
-/// that pushes has already returned.
+/// The push delivers the bytes a command queued for a client's own terminal —
+/// the escape a copy writes to the clipboard.
 fn apply_queued_runtime_events(session_server: &mut Server, detach_policy: DetachPolicy) {
     drain_runtime_event_inbox(session_server, detach_policy);
     session_server.push_frames();
 }
 
 /// Apply every event the runtime inbox holds, on the terms [`apply_queued_runtime_events`]
-/// states, and push no frames. A push builds each subscriber's whole frame, so
-/// a caller passing over the inbox repeatedly pushes once at the end.
+/// states, and push no frames.
 fn drain_runtime_event_inbox(session_server: &mut Server, detach_policy: DetachPolicy) {
     while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
         if matches!(
@@ -1935,17 +1923,14 @@ fn drain_runtime_event_inbox(session_server: &mut Server, detach_policy: DetachP
 /// start, from the state it had already carried out.
 ///
 /// The panes were never released: the backend still holds every one and every
-/// watcher is still on its child, so the readers pick up where they stopped and
+/// watcher is still on its child. The readers pick up where they stopped, and
 /// the rebuilt server drives every pane the header names through that same
 /// backend.
 ///
-/// The control socket is bound again here, and its fresh token is what every
-/// client that was told the session is restarting watches for. The caller has
+/// The control socket is bound again here, under a fresh token. The caller has
 /// already withdrawn the socket the session was serving on.
 ///
-/// The resume file is deleted on every way out of this call, so a session that
-/// comes back here and one that cannot come back anywhere both leave nothing on
-/// the disk.
+/// The resume file is deleted on every way out of this call.
 ///
 /// # Errors
 /// Returns the failure of a control socket that could not be bound.
@@ -1957,8 +1942,13 @@ fn resume_readers_and_rebuild(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
-    let mut rebuilt_session =
-        resume_session_readers(session_server, pty_owner, resume_header, resume_body);
+    let mut rebuilt_session = resume_session_readers(
+        session_server,
+        pty_owner,
+        resume_header,
+        resume_body,
+        session_start.config_directory.as_deref(),
+    );
 
     let bound_session_socket = bind_session_socket(session_start, runtime_event_sender);
     let _ = std::fs::remove_file(resolve_resume_file_path(
@@ -1988,8 +1978,13 @@ fn resume_readers_and_keep_socket(
     session_start: &SessionStart,
     runtime_event_sender: &Sender<RuntimeEvent>,
 ) -> Result<(Server, IpcServer), Box<dyn std::error::Error>> {
-    let mut rebuilt_session =
-        resume_session_readers(session_server, pty_owner, resume_header, resume_body);
+    let mut rebuilt_session = resume_session_readers(
+        session_server,
+        pty_owner,
+        resume_header,
+        resume_body,
+        session_start.config_directory.as_deref(),
+    );
 
     let token_rotation_result = session_socket.rotate_token();
     let _ = std::fs::remove_file(resolve_resume_file_path(
@@ -2002,12 +1997,13 @@ fn resume_readers_and_keep_socket(
 }
 
 /// Resume every pane's reader and build the session back from `resume_body`, on the
-/// `koshi.kdl` now on disk. Touches no control socket.
+/// `koshi.kdl` now on disk in `config_directory`. Touches no control socket.
 fn resume_session_readers(
     session_server: Server,
     pty_owner: &Arc<PtyOwner>,
     resume_header: &ResumeHeader,
     resume_body: ResumeBody,
+    config_directory: Option<&Path>,
 ) -> Server {
     pty_owner.resume_readers();
 
@@ -2016,7 +2012,7 @@ fn resume_session_readers(
     Server::resume(
         pty_backend,
         session_server.into_inbox_receiver(),
-        koshi_link::config::load_app_layer(),
+        koshi_link::config::load_app_layer(config_directory),
         resume_body,
         build_carried_pty_sizes(resume_header),
         HashMap::new(),
@@ -2043,7 +2039,8 @@ fn build_resume_command(
     session_start: &SessionStart,
     resume_file_path: &Path,
 ) -> std::process::Command {
-    let mut process_command = std::process::Command::new(&session_start.executable_path);
+    let mut process_command =
+        std::process::Command::new(session_start.executable_watch.get_executable_path());
     process_command
         .arg(SESSION_SERVER_SUBCOMMAND)
         .arg(session_start.session_id.to_string())
@@ -2105,7 +2102,7 @@ fn put_close_on_exec_back(resume_header: &ResumeHeader) {
 /// states.
 ///
 /// A successful exec keeps every pane's terminal, whose close-on-exec flag was
-/// cleared just before. The process id does not change, so each pane's child
+/// cleared just before. The process id does not change: each pane's child
 /// keeps its parent and can still be waited on.
 #[cfg(unix)]
 fn restart_session_by_exec(
@@ -2142,16 +2139,14 @@ fn hand_over_session_to_new_image(
 /// push every attached client its frame when a render is due, and stop once the
 /// inbox loses its last sender, a [`RuntimeEvent::Quit`] arrives, a `core:quit`
 /// command is applied — in this loop or before it was entered, the swap
-/// included — no pane is left running, or a restart request is accepted.
+/// included — no pane is left running, or a restart is due.
 ///
-/// A quit waits while any client is still expected back from an image swap, so
-/// that client attaches and reads what ended the session instead of finding one
-/// that stopped answering. Its window empties that set, so the wait is bounded.
-/// A session with no pane left running ends either way.
+/// A quit waits while any client is still expected back from an image swap,
+/// at most until that client's reconnect window closes. A session with no pane
+/// left running ends either way.
 ///
-/// Serving the inbox is what makes the control socket work: a command
-/// forwarded over it and a discovery query asking what this session holds both
-/// arrive here as events.
+/// A command forwarded over the control socket and a discovery query asking
+/// what this session holds both arrive here as events.
 ///
 /// This process paints nothing itself; the frames it builds go out over the
 /// socket to the clients attached to it.
@@ -2162,9 +2157,7 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
         // rebuild after a swap that did not start applies it again.
         //
         // A session still expecting a client back from an image swap keeps
-        // serving instead, so that client attaches and reads the quit rather
-        // than finding a session that stopped answering. Its window empties
-        // the set, so this waits at most that long.
+        // serving until that client attaches or its window closes.
         if session_server.is_quit_requested() && !session_server.is_awaiting_client() {
             return ServeOutcome::Ended;
         }
@@ -2196,8 +2189,8 @@ fn run_session_serve_loop(session_server: &mut Server) -> ServeOutcome {
                 .is_break();
         }
         // A subscriber that lost a critical event is paused until it is handed
-        // a fresh snapshot; queue that snapshot now so it is applied in this
-        // pass and the frame pushed below is built from it.
+        // a fresh snapshot. The snapshot is queued now, applied in this pass,
+        // and the frame pushed below is built from it.
         session_server.resync_lagged();
         if session_server.poll_render(Instant::now()) {
             session_server.push_frames();

@@ -708,6 +708,50 @@ fn a_shifted_alternative_replaces_the_key_and_consumes_the_shift() {
 }
 
 #[test]
+fn a_shifted_alternative_equal_to_the_key_keeps_the_shift() {
+    // `CSI 32:32;2u` reports Space as the shifted key of Shift plus Space.
+    let shifted_space = KeyInput {
+        shifted_key: Some(' '),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char(' '))
+    };
+    assert_eq!(
+        shifted_space.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::SHIFT,
+            Key::Named(NamedKey::Space)
+        ))
+    );
+
+    let shifted_letter = KeyInput {
+        shifted_key: Some('a'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char('a'))
+    };
+    assert_eq!(
+        shifted_letter.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::SHIFT,
+            Key::Char('a')
+        ))
+    );
+
+    // A digit drops Shift whether or not a shifted key is reported.
+    let shifted_digit = KeyInput {
+        shifted_key: Some('1'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char('1'))
+    };
+    assert_eq!(
+        shifted_digit.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('1')
+        ))
+    );
+}
+
+#[test]
 fn a_shifted_alternative_never_replaces_a_named_key() {
     let shifted_tab = KeyInput {
         shifted_key: Some('A'),

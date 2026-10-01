@@ -89,13 +89,15 @@ fn parse_cli_arguments() -> Cli {
 /// socket does not serve yet reports IPC unavailable.
 fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // A service command whose config migration fails prints the failure on
-    // stderr and starts anyway. The config files stay as they are, and the
-    // next service start migrates them again.
+    // stderr and starts anyway. A session server also writes it to its log.
+    // The next service start runs the migration again.
     let config_directory = koshi_paths::resolve_config_directory();
-    if let Err(config_migration_error) = config_command::migrate_config_for_service_command(
+    let config_migration_error = config_command::migrate_config_for_service_command(
         cli.command.as_ref(),
         config_directory.as_deref(),
-    ) {
+    )
+    .err();
+    if let Some(config_migration_error) = &config_migration_error {
         eprintln!("koshi: {config_migration_error}; starting with the config files as they are");
     }
 
@@ -103,7 +105,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     // entry point reads, before any verb dispatches. One
     // `allow-beta-features` answer covers the CLI verbs and the interactive
     // launch alike.
-    let app_config_layer = config::load_app_layer();
+    let app_config_layer = config::load_app_layer(config_directory.as_deref());
     config::apply_beta_gate(app_config_layer.clone());
 
     // `layout.new-pane-direction` from this machine's `koshi.kdl`. A
@@ -179,11 +181,14 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             Some(runtime_directory_path) => runtime_directory_path.clone(),
             None => ipc_client::resolve_runtime_directory()?,
         };
-        return router::run_router(&runtime_directory, *should_wait_for_lock).map_err(
-            |runtime_error| CliError::Runtime {
-                detail: runtime_error.to_string(),
-            },
-        );
+        return router::run_router(
+            &runtime_directory,
+            config_directory.as_deref(),
+            *should_wait_for_lock,
+        )
+        .map_err(|runtime_error| CliError::Runtime {
+            detail: runtime_error.to_string(),
+        });
     }
 
     if let Some(CliCommand::ServeSession {
@@ -206,6 +211,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         };
         return session_server::run_session_server(
             &runtime_directory,
+            config_directory.as_deref(),
             *session_id,
             session_name.clone(),
             profile_name.as_deref(),
@@ -213,6 +219,7 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
             resume_state_path.as_deref(),
             supervisor_token.as_deref(),
             *supervisor_pid,
+            config_migration_error.as_ref(),
         )
         .map_err(|runtime_error| CliError::Runtime {
             detail: runtime_error.to_string(),
@@ -262,9 +269,12 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::Update) = &cli.command {
-        // `update` runs locally: it talks to GitHub and the local filesystem,
-        // not the session daemon.
+        // `update` dispatches here, before any session is looked up.
         return updater::run_update_command();
+    }
+
+    if let Some(CliCommand::RestartServers) = &cli.command {
+        return updater::run_restart_servers_command();
     }
 
     if let Some(CliCommand::Version { output_format }) = &cli.command {
@@ -287,13 +297,19 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
         // Each koshi server names its own build in its greeting; this
         // dispatches no command. The rows print whether or not every server
         // answered, and the exit code carries the gap.
-        let list_server_version_rows =
-            version::list_server_version_rows(session_reference.as_ref())?;
+        let server_version_report = version::list_server_version_rows(session_reference.as_ref())?;
         print!(
             "{}",
-            output::render_server_versions(&list_server_version_rows, *output_format)
+            output::render_server_versions(
+                &server_version_report.server_version_rows,
+                *output_format
+            )
         );
-        return match version::build_unreachable_server_error(&list_server_version_rows) {
+        return match version::build_unreachable_server_error(
+            &server_version_report.server_version_rows,
+            server_version_report.unlisted_session_count,
+            server_version_report.unread_path_count,
+        ) {
             Some(unreachable_server_error) => Err(unreachable_server_error),
             None => Ok(()),
         };
@@ -315,7 +331,9 @@ fn run_cli_invocation(cli: &Cli) -> Result<(), CliError> {
     }
 
     if let Some(CliCommand::KillSession { session_reference }) = &cli.command {
-        return render_command_result(session_control::kill_session(session_reference.as_ref())?);
+        let session_ending = session_control::kill_session(session_reference.as_ref())?;
+        print!("{}", output::render_session_ending(&session_ending));
+        return Ok(());
     }
 
     if cli.is_headless {
@@ -522,6 +540,7 @@ fn run_discovery(
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let discovered_sessions = targeting::resolve_session_scope(
         &runtime_directory,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
         command.get_discovery_session_reference(),
     )?;
     let session_overviews = discovered_sessions.sessions.as_slice();
@@ -661,7 +680,10 @@ fn run_debug(command: &DebugCommand) -> Result<(), CliError> {
 /// Prints every session it reached, then fails when one could not answer.
 fn run_dump_state(output_format: OutputFormat) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let mut discovered_sessions = discovery::fetch_all_session_overviews(&runtime_directory);
+    let mut discovered_sessions = discovery::fetch_all_session_overviews(
+        &runtime_directory,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+    );
     discovery::redact_pane_commands(&mut discovered_sessions.sessions);
     print!(
         "{}",
@@ -685,7 +707,12 @@ fn run_dump_layout(
     output_format: OutputFormat,
 ) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let discovered_sessions = targeting::resolve_session_scope(&runtime_directory, None)?;
+    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
+    let discovered_sessions = targeting::resolve_session_scope(
+        &runtime_directory,
+        shared_sessions_base_directory.as_deref(),
+        None,
+    )?;
 
     let tab_layouts = match tab_reference {
         Some(tab_reference) => {
@@ -693,6 +720,7 @@ fn run_dump_layout(
             let session_id = discovery::find_tab(&discovered_sessions, tab_id)?.session_id;
             vec![ipc_client::fetch_layout(
                 &runtime_directory,
+                shared_sessions_base_directory.as_deref(),
                 session_id,
                 Some(tab_id),
             )?]
@@ -703,6 +731,7 @@ fn run_dump_layout(
             .map(|session_overview| {
                 ipc_client::fetch_layout(
                     &runtime_directory,
+                    shared_sessions_base_directory.as_deref(),
                     session_overview.session.session_id,
                     None,
                 )
@@ -735,7 +764,12 @@ fn run_debug_events(
     output_format: OutputFormat,
 ) -> Result<(), CliError> {
     let runtime_directory = ipc_client::resolve_runtime_directory()?;
-    let discovered_sessions = targeting::resolve_session_scope(&runtime_directory, None)?;
+    let shared_sessions_base_directory = ipc_client::resolve_shared_sessions_base_directory();
+    let discovered_sessions = targeting::resolve_session_scope(
+        &runtime_directory,
+        shared_sessions_base_directory.as_deref(),
+        None,
+    )?;
     let oldest_event_time = output::compute_oldest_event_time(SystemTime::now(), since_duration);
 
     let session_events = discovered_sessions
@@ -744,6 +778,7 @@ fn run_debug_events(
         .map(|session_overview| {
             let recent_events = ipc_client::fetch_recent_events(
                 &runtime_directory,
+                shared_sessions_base_directory.as_deref(),
                 session_overview.session.session_id,
             )?;
             Ok(output::SessionEvents {
@@ -792,8 +827,8 @@ fn run_actions(command: &ActionsCommand) -> Result<(), CliError> {
 }
 
 /// Serve a `koshi keys` query from the offline keymap view: the user's
-/// keybinding file folded onto the built-in defaults. The running session's
-/// own layers (`session`, `layout`) arrive with the IPC client.
+/// keybinding file folded onto the built-in defaults. No running session is
+/// asked, so its own layers (`session`, `layout`) are not shown.
 fn run_keys_query(command: &KeysCommand) -> Result<(), CliError> {
     match command {
         KeysCommand::List {
