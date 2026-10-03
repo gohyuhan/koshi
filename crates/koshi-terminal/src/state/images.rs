@@ -4098,11 +4098,12 @@ fn resolve_relative_image_target(
         return Err(ImagePlacementError::RelativeDepth);
     }
     let (image_record, anchor) = &relative_image_targets[relative_image_target_index];
-    let display = &image_record.display;
-    let resolved_anchor = if let Some(parent_image_id) =
-        display.relative_image_id.filter(|image_id| *image_id != 0)
+    let image_display = &image_record.display;
+    let resolved_anchor = if let Some(parent_image_id) = image_display
+        .relative_image_id
+        .filter(|image_id| *image_id != 0)
     {
-        let parent_placement_id = display
+        let parent_placement_id = image_display
             .relative_placement_id
             .filter(|placement_id| *placement_id != 0);
         let parent_image_target_index = relative_image_targets
@@ -4127,9 +4128,9 @@ fn resolve_relative_image_target(
         )?
         .map(|(parent_row_offset, parent_column_offset)| {
             let resolved_row_offset =
-                parent_row_offset.checked_add(i64::from(display.relative_row_offset));
+                parent_row_offset.checked_add(i64::from(image_display.relative_row_offset));
             let resolved_column_offset =
-                parent_column_offset.checked_add(i64::from(display.relative_column_offset));
+                parent_column_offset.checked_add(i64::from(image_display.relative_column_offset));
             match (resolved_row_offset, resolved_column_offset) {
                 (Some(row_offset), Some(column_offset)) => Ok((row_offset, column_offset)),
                 _ => Err(ImagePlacementError::RelativeOffsetOutOfBounds {
@@ -4139,10 +4140,10 @@ fn resolve_relative_image_target(
             }
         })
         .transpose()?
-    } else if display.relative_image_id.is_some()
-        || display.relative_placement_id.is_some()
-        || display.relative_column_offset != 0
-        || display.relative_row_offset != 0
+    } else if image_display.relative_image_id.is_some()
+        || image_display.relative_placement_id.is_some()
+        || image_display.relative_column_offset != 0
+        || image_display.relative_row_offset != 0
     {
         return Err(ImagePlacementError::ParentNotFound);
     } else {

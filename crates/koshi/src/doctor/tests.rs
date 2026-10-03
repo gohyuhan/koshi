@@ -31,7 +31,7 @@ fn build_doctor_context(root_directory: &Path) -> DoctorContext {
         term: Some("xterm-256color".to_string()),
         colorterm: None,
         is_other_user_access_allowed: false,
-        remote_listen: None,
+        remote_listen_address: None,
         is_logging_enabled: false,
         standing_grant_count: Ok(0),
         router_connections: RemoteConnections::NotRunning,
@@ -531,12 +531,12 @@ fn runtime_directory_says_nothing_about_the_router() {
     };
 
     for router_connections in [
-        RemoteConnections::Answered(Some(0)),
-        RemoteConnections::Answered(None),
+        RemoteConnections::Answered(0),
         RemoteConnections::NotRunning,
         RemoteConnections::OlderBuild,
         RemoteConnections::NoAnswer {
             error_detail: "connection refused".to_string(),
+            router_process_id: Some(5000),
         },
     ] {
         doctor_context.router_connections = router_connections;
@@ -616,24 +616,7 @@ fn runtime_directory_names_the_data_directory_rule() {
 fn router_is_ok_when_one_answered() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::Answered(Some(2));
-
-    assert_eq!(
-        check_router(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Ok,
-            reason: "a router answers on its control socket".to_string(),
-            help: None,
-            detail: None,
-        }
-    );
-}
-
-#[test]
-fn router_is_ok_when_one_answered_without_a_count() {
-    let test_directory = TempDir::new().unwrap();
-    let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::Answered(None);
+    doctor_context.router_connections = RemoteConnections::Answered(2);
 
     assert_eq!(
         check_router(&doctor_context),
@@ -674,18 +657,24 @@ fn router_warns_on_an_older_build_and_does_not_fail_the_run() {
         DoctorOutcome {
             verdict: Verdict::Warn,
             reason: "the running router is an older koshi build".to_string(),
-            help: Some("end every koshi process on this machine and start one again".to_string()),
+            help: Some("run: koshi restart-servers".to_string()),
             detail: None,
         }
     );
 }
 
 #[test]
-fn router_fails_when_a_listening_router_did_not_answer_and_keeps_the_full_text() {
+fn router_fails_when_a_listening_router_did_not_answer_and_names_the_command_ending_it() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
     doctor_context.router_connections = RemoteConnections::NoAnswer {
         error_detail: "connection refused".to_string(),
+        router_process_id: Some(5000),
+    };
+    let expected_router_ending_step = if cfg!(windows) {
+        "end the router with: taskkill /PID 5000 /F"
+    } else {
+        "end the router with: kill 5000"
     };
 
     assert_eq!(
@@ -693,7 +682,34 @@ fn router_fails_when_a_listening_router_did_not_answer_and_keeps_the_full_text()
         DoctorOutcome {
             verdict: Verdict::Fail,
             reason: "a router is listening and did not answer".to_string(),
-            help: Some("end every koshi process on this machine and start one again".to_string()),
+            help: Some(format!(
+                "{expected_router_ending_step}; every session keeps running, and the next koshi \
+                 command starts a router"
+            )),
+            detail: Some("connection refused".to_string()),
+        }
+    );
+}
+
+#[test]
+fn router_fails_when_a_listening_router_did_not_answer_and_its_process_id_is_unknown() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    doctor_context.router_connections = RemoteConnections::NoAnswer {
+        error_detail: "connection refused".to_string(),
+        router_process_id: None,
+    };
+
+    assert_eq!(
+        check_router(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Fail,
+            reason: "a router is listening and did not answer".to_string(),
+            help: Some(
+                "end the koshi router process; every session keeps running, and the next koshi \
+                 command starts a router"
+                    .to_string()
+            ),
             detail: Some("connection refused".to_string()),
         }
     );
@@ -1065,7 +1081,7 @@ fn remote_access_without_an_address_counts_zero_one_and_two_grants() {
 fn remote_access_with_an_address_counts_zero_one_and_two_grants() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.remote_listen = Some("0.0.0.0:7777".to_string());
+    doctor_context.remote_listen_address = Some(SocketAddr::from(([0, 0, 0, 0], 7777)));
 
     assert_eq!(
         check_remote_access(&doctor_context),
@@ -1164,7 +1180,7 @@ fn doctor_counts_previous_grants_without_changing_the_file() {
 fn remote_connections_counts_what_the_router_answered() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::Answered(Some(0));
+    doctor_context.router_connections = RemoteConnections::Answered(0);
 
     assert_eq!(
         check_remote_connections(&doctor_context),
@@ -1176,7 +1192,7 @@ fn remote_connections_counts_what_the_router_answered() {
         }
     );
 
-    doctor_context.router_connections = RemoteConnections::Answered(Some(1));
+    doctor_context.router_connections = RemoteConnections::Answered(1);
     assert_eq!(
         check_remote_connections(&doctor_context),
         DoctorOutcome {
@@ -1205,23 +1221,6 @@ fn remote_connections_is_ok_when_no_router_runs() {
 }
 
 #[test]
-fn remote_connections_never_reads_a_missing_count_as_zero() {
-    let test_directory = TempDir::new().unwrap();
-    let mut doctor_context = build_doctor_context(test_directory.path());
-    doctor_context.router_connections = RemoteConnections::Answered(None);
-
-    assert_eq!(
-        check_remote_connections(&doctor_context),
-        DoctorOutcome {
-            verdict: Verdict::Ok,
-            reason: "the running router reports no count, so this is not known".to_string(),
-            help: None,
-            detail: None,
-        }
-    );
-}
-
-#[test]
 fn remote_connections_reports_not_known_and_never_rates_a_router_that_did_not_answer() {
     let test_directory = TempDir::new().unwrap();
     let mut doctor_context = build_doctor_context(test_directory.path());
@@ -1236,6 +1235,7 @@ fn remote_connections_reports_not_known_and_never_rates_a_router_that_did_not_an
         RemoteConnections::OlderBuild,
         RemoteConnections::NoAnswer {
             error_detail: "connection refused".to_string(),
+            router_process_id: Some(5000),
         },
     ] {
         doctor_context.router_connections = router_connections;
@@ -1271,10 +1271,10 @@ fn no_session_or_remote_access_check_ever_fails() {
         assert_eq!(check_session_directory(doctor_context).verdict, Verdict::Ok);
     }
 
-    for remote_listen_address in [None, Some("0.0.0.0:7777".to_string())] {
+    for remote_listen_address in [None, Some(SocketAddr::from(([0, 0, 0, 0], 7777)))] {
         for standing_grant_count in [Ok(0), Ok(1), Ok(2), Err("unreadable".to_string())] {
             let mut doctor_context = build_doctor_context(test_directory.path());
-            doctor_context.remote_listen = remote_listen_address.clone();
+            doctor_context.remote_listen_address = remote_listen_address;
             let expected_verdict = if standing_grant_count.is_ok() {
                 Verdict::Ok
             } else {
@@ -1289,12 +1289,12 @@ fn no_session_or_remote_access_check_ever_fails() {
     }
 
     for router_connections in [
-        RemoteConnections::Answered(Some(3)),
-        RemoteConnections::Answered(None),
+        RemoteConnections::Answered(3),
         RemoteConnections::NotRunning,
         RemoteConnections::OlderBuild,
         RemoteConnections::NoAnswer {
             error_detail: "connection refused".to_string(),
+            router_process_id: Some(5000),
         },
     ] {
         let mut doctor_context = build_doctor_context(test_directory.path());
@@ -1342,13 +1342,6 @@ fn count_standing_grants_counts_only_the_grants_that_still_stand() {
     };
 
     assert_eq!(count_standing_grants(&token_store, current_time), 2);
-}
-
-#[test]
-fn format_counted_noun_puts_an_s_on_every_count_but_one() {
-    assert_eq!(format_counted_noun(0, "grant"), "0 grants");
-    assert_eq!(format_counted_noun(1, "grant"), "1 grant");
-    assert_eq!(format_counted_noun(2, "grant"), "2 grants");
 }
 
 #[test]
@@ -1721,6 +1714,30 @@ fn runtime_directory_fails_when_the_directory_itself_points_nowhere() {
     );
 }
 
+/// The failure [`check_runtime_directory`] gives for a `KOSHI_RUNTIME_DIR`
+/// directory at `runtime_directory_path` that does not exist, when the closest
+/// name above it that exists is `existing_path` and takes no new directory.
+#[cfg(unix)]
+fn build_unwritable_parent_outcome(
+    runtime_directory_path: &Path,
+    existing_path: &Path,
+) -> DoctorOutcome {
+    DoctorOutcome {
+        verdict: Verdict::Fail,
+        reason: format!(
+            "{} does not exist and koshi cannot create it: nothing new can be written in {}; \
+             KOSHI_RUNTIME_DIR names it",
+            runtime_directory_path.display(),
+            existing_path.display()
+        ),
+        help: Some(format!(
+            "make sure you can write in {}",
+            existing_path.display()
+        )),
+        detail: None,
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn runtime_directory_fails_when_the_directory_points_at_a_regular_file() {
@@ -1733,9 +1750,11 @@ fn runtime_directory_fails_when_the_directory_points_at_a_regular_file() {
     doctor_context.runtime_directory = Some(runtime_directory_path.join("run"));
 
     assert_eq!(
-        check_runtime_directory(&doctor_context).verdict,
-        Verdict::Fail,
-        "a runtime directory under a link to a regular file must not report ok"
+        check_runtime_directory(&doctor_context),
+        build_unwritable_parent_outcome(
+            &runtime_directory_path.join("run"),
+            &runtime_directory_path
+        )
     );
 }
 
@@ -1751,9 +1770,8 @@ fn runtime_directory_fails_on_a_symlink_loop() {
     doctor_context.runtime_directory = Some(first_symlink_path.join("koshi"));
 
     assert_eq!(
-        check_runtime_directory(&doctor_context).verdict,
-        Verdict::Fail,
-        "a runtime directory under a symlink loop must not report ok"
+        check_runtime_directory(&doctor_context),
+        build_unwritable_parent_outcome(&first_symlink_path.join("koshi"), &first_symlink_path)
     );
 }
 
@@ -1767,9 +1785,8 @@ fn runtime_directory_fails_when_a_name_above_it_is_a_regular_file() {
     doctor_context.runtime_directory = Some(regular_file_path.join("koshi"));
 
     assert_eq!(
-        check_runtime_directory(&doctor_context).verdict,
-        Verdict::Fail,
-        "a runtime directory under a regular file must not report ok"
+        check_runtime_directory(&doctor_context),
+        build_unwritable_parent_outcome(&regular_file_path.join("koshi"), &regular_file_path)
     );
 }
 

@@ -4,8 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use koshi_image::{
-    compute_rgba_byte_count, validate_image_dimensions, DecodedImage, GraphicsProtocol,
-    MAX_GRAPHICS_TRANSFER_BYTE_COUNT,
+    compute_rgba_byte_count, DecodedImage, GraphicsProtocol, MAX_GRAPHICS_TRANSFER_BYTE_COUNT,
 };
 use thiserror::Error;
 
@@ -592,15 +591,6 @@ fn validate_decoded_image(
             pixel_width: decoded_image.pixel_width,
             pixel_height: decoded_image.pixel_height,
         }
-    })?;
-    validate_image_dimensions(
-        GraphicsProtocol::Sixel,
-        image_width_pixels,
-        image_height_pixels,
-    )
-    .map_err(|_| SixelEncodeError::InvalidDimensions {
-        pixel_width: decoded_image.pixel_width,
-        pixel_height: decoded_image.pixel_height,
     })?;
     let expected_rgba_byte_count = compute_rgba_byte_count(
         GraphicsProtocol::Sixel,

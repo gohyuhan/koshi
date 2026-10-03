@@ -29,7 +29,9 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::{Direction, Rect};
 use koshi_core::ids::{CommandId, PaneId, TabId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey, PendingKeySequence};
+use koshi_core::key::{
+    BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey, PendingKeySequence,
+};
 use koshi_core::lock::LockMode;
 use koshi_ipc::placement::{PanePlacementSizing, PanePlacementSnapshot, PanePlacementTabSnapshot};
 use koshi_layout::mode::LayoutMode;
@@ -46,7 +48,8 @@ use crate::{Client, PendingPlacementCommand, PlacementInputAction};
 mod tests;
 
 /// The chord that backs out of an open multi-chord sequence.
-const ESCAPE_KEY_CHORD: KeyChord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc));
+const ESCAPE_KEY_CHORD: KeyChord =
+    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc));
 
 /// What the viewer decided one keypress means.
 ///
@@ -62,12 +65,11 @@ pub enum KeyOutcome {
     /// bar changes; nothing else does.
     Pending,
     /// Nothing bound the chord and the mode passes what it does not bind. The
-    /// session encodes it for the focused pane, reading that pane's cursor-key
-    /// mode at the instant it writes so the bytes cannot be stale.
+    /// session encodes it for the focused pane with that pane's cursor-key mode
+    /// at the instant it writes.
     PassThrough(KeyChord),
     /// Consumed with nothing to do: no sequence is open, the chord binds
-    /// nothing, and the mode is a modal one that owns the keyboard rather than
-    /// passing what it does not bind.
+    /// nothing, and the mode discards what it does not bind.
     Discard,
 }
 
@@ -97,8 +99,8 @@ impl Client {
     ///
     /// Called both when this viewer's own `core:lock` fires and when the
     /// session reports a mode change aimed at this viewer (`koshi lock
-    /// --client`). Held chords were typed at koshi, so a mode change drops
-    /// them and no pane ever sees them.
+    /// --client`). A mode change drops the held chords, and no pane receives
+    /// them.
     pub fn set_lock_mode(&mut self, lock_mode: LockMode) {
         if self.lock_mode != lock_mode {
             if self.is_placement_mode_active() {
@@ -419,16 +421,15 @@ impl Client {
     /// Decide what `chord` means in this viewer's current mode.
     ///
     /// `<C-l>` while locked yields `Fire(core:unlock)` whatever the keymap
-    /// says; `<C-p>` in the default keymap yields `Pending` because it opens
-    /// the pane group; a plain `a` with nothing bound yields
-    /// `PassThrough('a')`.
+    /// says; `<C-p>` in the default keymap opens the pane group and yields
+    /// `Pending`; a plain `a` with nothing bound yields `PassThrough('a')`.
     pub fn resolve_key(&mut self, chord: KeyChord, current_time: Instant) -> KeyOutcome {
         let active_input_mode = self.get_active_input_mode();
         let open_key_sequence = self.pending_key_sequence.take();
 
-        // The guaranteed escape from locked base mode remains ahead of the
-        // keymap. Placement mode owns the keyboard while it is active, so its
-        // pane map has priority over this base-mode escape.
+        // In locked base mode the unlock chord fires before the keymap is
+        // read. While placement mode is active, this check is skipped and the
+        // placement keymap resolves the chord.
         if !self.is_placement_mode_active()
             && self.lock_mode == LockMode::Locked
             && chord == self.keymap_catalog.get_unlock_chord()
@@ -437,8 +438,7 @@ impl Client {
         }
 
         // The open sequence's chords with this one after them, or this one on
-        // its own. One keypress allocates the chord list once and the sequence
-        // once.
+        // its own.
         let key_sequence = match open_key_sequence.as_ref() {
             Some(open_key_sequence) => {
                 let held_chords = open_key_sequence.sequence.list_chords();
@@ -478,10 +478,8 @@ impl Client {
                 // Escape leaves an open sequence: the held chords are dropped
                 // and the Escape itself is consumed rather than typed.
                 Some(_) if chord == ESCAPE_KEY_CHORD => KeyOutcome::Pending,
-                // A key that continues nothing is discarded and the sequence
-                // stands unchanged, deadline included: the viewer is inside a
-                // koshi context, so a key that context cannot use goes nowhere
-                // rather than surprising the program underneath.
+                // A key that continues nothing is discarded, and the sequence
+                // stands unchanged, deadline included.
                 Some(held_key_sequence) => {
                     self.pending_key_sequence = Some(held_key_sequence);
                     KeyOutcome::Pending
@@ -495,9 +493,8 @@ impl Client {
         }
     }
 
-    /// How long until an open sequence's ambiguity deadline, so the event loop
-    /// can wake for it. Prefix-only sequences carry no deadline and never wake
-    /// it.
+    /// How long until an open sequence's ambiguity deadline. A prefix-only
+    /// sequence carries no deadline and returns `None`.
     #[must_use]
     pub fn compute_next_key_wakeup(&self, current_time: Instant) -> Option<Duration> {
         self.pending_key_sequence
@@ -509,10 +506,9 @@ impl Client {
     /// Fire the open sequence's complete binding if its ambiguity deadline has
     /// passed.
     ///
-    /// The deadline was armed because the sequence was itself a complete
-    /// binding, so it normally still is. A keymap change can retire that
-    /// binding while the sequence waits; the held chords then resolve to
-    /// nothing and are dropped, never typed at the pane.
+    /// A sequence whose binding a keymap change retired while it waited
+    /// resolves to nothing: the held chords are dropped, never typed at the
+    /// pane, and the call returns `None`.
     pub fn expire_key_sequence(&mut self, current_time: Instant) -> Option<BoundAction> {
         let is_ambiguity_deadline_due = self
             .pending_key_sequence

@@ -4,6 +4,7 @@
 use std::io::Cursor;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use super::*;
 use crate::protocol::{
@@ -634,6 +635,128 @@ fn split_halves_carry_frames_both_ways_from_two_threads() {
         vec![Some(11), Some(12)]
     );
     assert_eq!(server.join().expect("server thread"), vec![21, 22]);
+}
+
+/// A caller connected to a fresh listener at `test_case_tag`'s address, and
+/// the listener's end of that connection, accepted on another thread.
+fn connect_caller_and_peer(test_case_tag: &str) -> (Connection, Connection) {
+    let socket_address = build_test_socket_address(test_case_tag);
+    let listener = Listener::bind(&socket_address).expect("bind");
+    let accepting_thread = thread::spawn(move || listener.accept().expect("accept"));
+    let caller = Connection::connect(&socket_address).expect("connect");
+    (caller, accepting_thread.join().expect("accepting thread"))
+}
+
+/// The detail of `ipc_error`, which must be [`IpcError::Transport`].
+fn read_transport_error_detail(ipc_error: IpcError) -> String {
+    let IpcError::Transport { error_detail } = ipc_error else {
+        panic!("not a transport error: {ipc_error}");
+    };
+    error_detail
+}
+
+#[test]
+fn a_read_under_a_deadline_ends_at_the_deadline_while_the_peer_stays_silent() {
+    let (caller, silent_peer) = connect_caller_and_peer("read-deadline");
+    let (mut reader, _writer) = caller.split();
+    let read_started_at = Instant::now();
+    reader.set_deadline(Some(read_started_at + Duration::from_millis(200)));
+
+    let receive_error = reader.recv::<IpcResponse>().unwrap_err();
+
+    let read_duration = read_started_at.elapsed();
+    assert_eq!(
+        read_transport_error_detail(receive_error),
+        "this step ran out of time"
+    );
+    assert!(
+        read_duration >= Duration::from_millis(199),
+        "the read runs to the deadline, it took {read_duration:?}"
+    );
+    assert!(
+        read_duration < Duration::from_secs(2),
+        "the read ends at the deadline, it took {read_duration:?}"
+    );
+    drop(silent_peer);
+}
+
+#[test]
+fn a_write_under_a_deadline_ends_at_the_deadline_while_the_peer_reads_nothing() {
+    // 8 MiB is more than the socket or the pipe holds unread.
+    let (caller, unread_peer) = connect_caller_and_peer("write-deadline");
+    let (_reader, mut writer) = caller.split();
+    let write_started_at = Instant::now();
+    writer.set_deadline(Some(write_started_at + Duration::from_millis(300)));
+
+    let send_error = writer.send(&"x".repeat(8 * 1024 * 1024)).unwrap_err();
+
+    let write_duration = write_started_at.elapsed();
+    assert_eq!(
+        read_transport_error_detail(send_error),
+        "this step ran out of time"
+    );
+    assert!(
+        write_duration >= Duration::from_millis(299),
+        "the write runs to the deadline, it took {write_duration:?}"
+    );
+    assert!(
+        write_duration < Duration::from_secs(2),
+        "the write ends at the deadline, it took {write_duration:?}"
+    );
+    drop(unread_peer);
+}
+
+#[test]
+fn a_frame_the_peer_sent_before_hanging_up_is_read_under_a_deadline() {
+    let (caller, mut answering_peer) = connect_caller_and_peer("answer-then-hang-up");
+    let sent_response = IpcResponse {
+        request_id: Some(7),
+        answer_result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    };
+    answering_peer.send(&sent_response).expect("peer send");
+    drop(answering_peer);
+    let (mut reader, _writer) = caller.split();
+    reader.set_deadline(Some(Instant::now() + Duration::from_secs(2)));
+
+    let received_response: IpcResponse = reader.recv().expect("the sent frame is read");
+
+    assert_eq!(received_response, sent_response);
+    let IpcError::Disconnected = reader.recv::<IpcResponse>().unwrap_err() else {
+        panic!("the read after the frame is the end of the stream");
+    };
+}
+
+#[test]
+fn a_read_after_the_deadline_is_cleared_waits_past_the_old_deadline() {
+    // The first frame arrives under a 300 ms deadline. The second arrives
+    // 600 ms after the deadline was given, once it is cleared.
+    let (caller, mut answering_peer) = connect_caller_and_peer("cleared-deadline");
+    let (mut reader, _writer) = caller.split();
+    let deadline_given_at = Instant::now();
+    reader.set_deadline(Some(deadline_given_at + Duration::from_millis(300)));
+    let answering_thread = thread::spawn(move || {
+        for request_id in [1, 2] {
+            answering_peer
+                .send(&build_hello_request(request_id))
+                .expect("peer send");
+            thread::sleep(Duration::from_millis(600));
+        }
+        answering_peer
+    });
+
+    let first_request: IpcRequest = reader.recv().expect("the first frame is read");
+    reader.set_deadline(None);
+    let second_request: IpcRequest = reader.recv().expect("the second frame is read");
+
+    assert_eq!(
+        (first_request.request_id, second_request.request_id),
+        (1, 2)
+    );
+    assert!(deadline_given_at.elapsed() >= Duration::from_millis(600));
+    drop(answering_thread.join().expect("answering thread"));
 }
 
 #[test]

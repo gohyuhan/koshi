@@ -30,7 +30,7 @@ use koshi_core::command::{
 };
 use koshi_core::geometry::Direction;
 use koshi_core::ids::{ClientId, CommandId, PaneId};
-use koshi_core::key::{Key, KeyChord, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::mouse::{is_mouse_kind_reported, MouseAnswer, MouseInput, MouseKind};
 use koshi_input::keyboard::encode_key_chord;
 use koshi_ipc::protocol::WireMouseAction;
@@ -96,7 +96,7 @@ impl Server {
     /// it.
     ///
     /// The whole distance travels in one [`Command::ResizePane`], which is
-    /// asked for `step * cells`. A refusal at a pane minimum names the cells
+    /// asked for `resize_step * requested_cell_count`. A refusal at a pane minimum names the cells
     /// the donating pane can still give, and the next round asks for exactly
     /// those. The layout re-measures that spare from the freshly solved rects
     /// on every call. The rounds stop when one takes the whole remainder, or
@@ -208,16 +208,16 @@ impl Server {
             })
     }
 
-    /// Hand `mouse` to the program in `pane_id`, encoded as the mouse report
+    /// Hand `mouse_input` to the program in `pane_id`, encoded as the mouse report
     /// that pane's mode asks for.
     ///
     /// The tracking level and encoding are read here, at the moment of the
-    /// write, so a program that turned mouse reporting off since the frame the
+    /// write: a program that turned mouse reporting off since the frame the
     /// viewer decided from receives nothing.
     ///
-    /// The pointer's cell is clamped into the pane, so an event that landed on
-    /// chrome (a border, the status line) or left the pane mid-drag still
-    /// reaches it at the nearest edge.
+    /// The pointer's cell is clamped into the pane: an event that landed on
+    /// chrome (a border, the status line) or left the pane mid-drag reaches it
+    /// at the nearest edge.
     ///
     /// An event that reaches the pane's writer also drops this client's
     /// highlight in that pane, whether the write succeeds or fails. A wheel
@@ -254,7 +254,7 @@ impl Server {
         };
         // A mouse report addresses the program's own grid, whose top-left
         // content cell is `(1, 1)`.
-        let Some((column_index, row_index)) = compute_clamped_pane_cell(
+        let Some((column_number, row_number)) = compute_clamped_pane_cell(
             owned_frame_layout.build_frame_layout(ViewerChrome::default()),
             pane_id,
             mouse_input.position,
@@ -265,8 +265,8 @@ impl Server {
         let Some(mouse_report_bytes) = encode_mouse(
             mouse_input.mouse_kind,
             mouse_input.modifier_flags,
-            column_index,
-            row_index,
+            column_number,
+            row_number,
             mouse_tracking,
             mouse_encoding,
         ) else {
@@ -324,7 +324,7 @@ impl Server {
             return;
         };
         let arrow_key_bytes = encode_key_chord(
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(arrow_key)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(arrow_key)),
             is_application_cursor_keys_enabled,
         );
         let mut arrow_key_bytes_to_write = Vec::with_capacity(arrow_count * arrow_key_bytes.len());

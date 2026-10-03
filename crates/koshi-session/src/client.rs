@@ -13,7 +13,7 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
-    geometry::{PaneArea, Size},
+    geometry::{PaneArea, PixelCellSize, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
@@ -42,7 +42,7 @@ pub struct Client {
     attached_at: SystemTime,
     viewport_size: Size,
     /// The client's measured terminal cell size in pixels.
-    cell_size: Option<koshi_core::geometry::PixelCellSize>,
+    cell_size: Option<PixelCellSize>,
     /// The pane region this client reported for the tab it views. `None`
     /// when the client reported none.
     pane_area: Option<PaneArea>,
@@ -71,13 +71,12 @@ pub struct Client {
     /// same text as output arrives, rather than following the newest line — is
     /// derived by [`is_view_held`](Self::is_view_held).
     scroll_offset_by_pane_id: HashMap<PaneId, usize>,
-    /// This client's highlighted text, keyed by the pane it is in — the whole of
-    /// visual mode, since a highlight existing *is* being in visual mode for that
-    /// pane and it clearing *is* leaving. A pane absent from the map has no
-    /// highlight.
+    /// This client's highlighted text, keyed by the pane it is in. A highlight
+    /// in a pane is visual mode for that pane, and clearing the highlight
+    /// leaves visual mode. A pane absent from the map has no highlight.
     ///
     /// **A highlight belongs to one pane, and panes keep their own.** Highlighting
-    /// in a second pane leaves the first pane's highlight where it is, so several
+    /// in a second pane leaves the first pane's highlight where it is: several
     /// can be up at once. Only input that reaches a pane's own child clears that
     /// pane's highlight.
     ///
@@ -93,7 +92,6 @@ pub struct Client {
     /// itself stays unchanged.
     zoomed_pane_id_by_tab_id: HashMap<TabId, PaneId>,
     /// Generation of this client's committed geometry and view.
-    #[serde(default)]
     placement_revision: u64,
 }
 
@@ -204,14 +202,14 @@ impl Client {
 
     /// Return this client's measured terminal cell size in pixels.
     #[must_use]
-    pub fn get_cell_size(&self) -> Option<koshi_core::geometry::PixelCellSize> {
+    pub fn get_cell_size(&self) -> Option<PixelCellSize> {
         self.cell_size
     }
 
     /// Replace this client's measured terminal cell size in pixels. `None`
     /// clears it.
-    pub fn replace_cell_size(&mut self, size: Option<koshi_core::geometry::PixelCellSize>) {
-        self.cell_size = size;
+    pub fn update_cell_size(&mut self, cell_size: Option<PixelCellSize>) {
+        self.cell_size = cell_size;
     }
 
     /// The tab this client is currently viewing. Once the session's last tab
@@ -243,7 +241,7 @@ impl Client {
 
     /// How `tab_id` is laid out **for this client**: zoomed on one pane, or
     /// tiled. The tab's tree is the same either way; this only says how this
-    /// client solves it, so another client can be tiled on the same tab at the
+    /// client solves it. Another client can be tiled on the same tab at the
     /// same moment.
     #[must_use]
     pub fn get_layout_mode(&self, tab_id: TabId) -> LayoutMode {
@@ -278,13 +276,13 @@ impl Client {
         self.zoomed_pane_id_by_tab_id.remove(&tab_id);
     }
 
-    /// Leave zoom in every tab where this client was zoomed on `pane_id`, so the
+    /// Leave zoom in every tab where this client was zoomed on `pane_id`. The
     /// client sees those tabs tiled again.
     ///
     /// Called when a pane is removed.
     pub fn clear_zoom_of_pane(&mut self, pane_id: PaneId) {
         self.zoomed_pane_id_by_tab_id
-            .retain(|_, zoomed| *zoomed != pane_id);
+            .retain(|_, zoomed_pane_id| *zoomed_pane_id != pane_id);
     }
 
     /// Returns how many lines `pane_id` is scrolled above the live bottom.
@@ -298,13 +296,14 @@ impl Client {
             .unwrap_or_default()
     }
 
-    /// Set where this client's view of `pane_id` sits. An offset of `0` removes
-    /// the entry, so the map holds only scrolled-up panes.
-    pub fn set_scroll_offset(&mut self, pane_id: PaneId, offset: usize) {
-        if offset == 0 {
+    /// Set where this client's view of `pane_id` sits, `scroll_offset` lines
+    /// above the live bottom. An offset of `0` removes the entry: the map holds
+    /// only scrolled-up panes.
+    pub fn set_scroll_offset(&mut self, pane_id: PaneId, scroll_offset: usize) {
+        if scroll_offset == 0 {
             self.scroll_offset_by_pane_id.remove(&pane_id);
         } else {
-            self.scroll_offset_by_pane_id.insert(pane_id, offset);
+            self.scroll_offset_by_pane_id.insert(pane_id, scroll_offset);
         }
     }
 
@@ -385,14 +384,14 @@ impl Client {
     /// stays on. Every path that moves focus — a keybinding, a `focus-pane`
     /// command, focus repair after a close — runs through here.
     pub fn update_focused_pane(&mut self, tab_id: TabId, pane_id: PaneId) -> Option<PaneId> {
-        if let Some(zoomed) = self.zoomed_pane_id_by_tab_id.get_mut(&tab_id) {
-            *zoomed = pane_id;
+        if let Some(zoomed_pane_id) = self.zoomed_pane_id_by_tab_id.get_mut(&tab_id) {
+            *zoomed_pane_id = pane_id;
         }
         self.focused_pane_id_by_tab_id.insert(tab_id, pane_id)
     }
 
-    /// Forget the pane this client focused in `tab_id`, and leave any zoom there:
-    /// with no focused pane there is no pane for a zoom to show.
+    /// Forget the pane this client focused in `tab_id`, and leave any zoom in
+    /// that tab.
     pub fn remove_focused_pane(&mut self, tab_id: TabId) {
         self.focused_pane_id_by_tab_id.remove(&tab_id);
         self.zoomed_pane_id_by_tab_id.remove(&tab_id);
@@ -471,8 +470,8 @@ impl ClientRegistry {
     /// active tab, per-tab focus, lock mode, viewport. `None` if no client is
     /// attached under `client_id`.
     ///
-    /// A client's id is read-only, so the entry stays keyed under `client_id`
-    /// for as long as it is attached. Changing a client's id means
+    /// A client's id is read-only: the entry stays keyed under `client_id` for
+    /// as long as it is attached. Changing a client's id means
     /// [`detach_client`](Self::detach_client) then [`attach_client`](Self::attach_client).
     pub fn get_client_mut_by_id(&mut self, client_id: ClientId) -> Option<&mut Client> {
         self.client_by_id.get_mut(&client_id)

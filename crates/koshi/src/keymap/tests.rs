@@ -8,21 +8,22 @@ use koshi_config::key::Leader;
 use koshi_config::key_sequence::parse_sequence;
 use koshi_config::types::{BoundAction, KeybindingsConfig, ModeBindings, ModeName};
 use koshi_core::action::ActionReference;
-use koshi_core::key::{KeySequence, ModFlags};
+use koshi_core::key::{BindingModifierFlags, KeySequence};
 
 use super::*;
 
 use koshi_config::conflict::LayerOrigin;
 use koshi_config::types::build_default_mode_bindings;
 
-/// Parse a test key sequence with the default leader and depth.
-fn parse_test_key_sequence(key_sequence: &str) -> KeySequence {
-    parse_sequence(key_sequence, KeybindingsConfig::default().leader, 8)
+/// Parse `key_sequence_text` with the default leader and a depth of 8.
+pub(crate) fn parse_test_key_sequence(key_sequence_text: &str) -> KeySequence {
+    parse_sequence(key_sequence_text, KeybindingsConfig::default().leader, 8)
         .expect("test sequence parses")
 }
 
-/// A user partial holding one `normal`-mode binding of `key` to `action`.
-fn build_partial_keybindings_config_with_binding(
+/// A user partial holding one `normal`-mode binding of `key_sequence_text` to
+/// `action_reference_text`.
+pub(crate) fn build_partial_keybindings_config_with_binding(
     key_sequence_text: &str,
     action_reference_text: &str,
 ) -> PartialKeybindingsConfig {
@@ -50,11 +51,11 @@ fn build_partial_keybindings_config_with_binding(
 
 #[test]
 fn the_offline_default_layer_follows_the_configured_leader() {
-    let alt_leader = Leader::Mods(ModFlags::ALT);
+    let alt_leader = Leader::Modifiers(BindingModifierFlags::ALT);
     let keymap_layers = build_keymap_layers(None, alt_leader);
     assert_eq!(keymap_layers.len(), 1);
-    // The default table is built against the passed leader — the same one a
-    // running koshi uses — not the built-in Ctrl table.
+    // The default table is built against `alt_leader`, not against the
+    // built-in Ctrl leader.
     assert_eq!(
         keymap_layers[0].mode_bindings_by_name,
         build_default_mode_bindings(alt_leader)
@@ -67,13 +68,12 @@ fn the_offline_default_layer_follows_the_configured_leader() {
 
 #[test]
 fn a_configured_leader_moves_the_offline_defaults_off_ctrl() {
-    // The whole offline view path: a file that only sets `leader "A-"` admits,
-    // and its default bindings resolve against Alt, so they differ from the
-    // built-in Ctrl defaults. Fails if `build_keymap_view_from_partial` stops threading the
-    // effective leader into the default layer.
+    // The whole offline view path: a file that sets only `leader "A-"` admits,
+    // and its default bindings resolve against Alt. They differ from the
+    // built-in Ctrl defaults.
     let alt_keymap_view = build_keymap_view_from_partial(
         Some(PartialKeybindingsConfig {
-            leader: Some(Leader::Mods(ModFlags::ALT)),
+            leader: Some(Leader::Modifiers(BindingModifierFlags::ALT)),
             ..PartialKeybindingsConfig::default()
         }),
         None,
@@ -86,13 +86,13 @@ fn a_configured_leader_moves_the_offline_defaults_off_ctrl() {
 
     let default_keymap_view = build_keymap_view_from_partial(None, None, None);
     let normal_mode_name = ModeName::from_text("normal");
-    let alt_default_key_sequences: BTreeSet<_> = alt_keymap_view.merged_keymap.mode_map_by_name
+    let alt_default_key_sequences: BTreeSet<_> = alt_keymap_view.merged_keymap.mode_keymap_by_name
         [&normal_mode_name]
         .default_bindings_by_key_sequence
         .keys()
         .collect();
     let built_in_default_key_sequences: BTreeSet<_> =
-        default_keymap_view.merged_keymap.mode_map_by_name[&normal_mode_name]
+        default_keymap_view.merged_keymap.mode_keymap_by_name[&normal_mode_name]
             .default_bindings_by_key_sequence
             .keys()
             .collect();
@@ -105,7 +105,7 @@ fn defaults_only_view_is_not_reverted_and_lists_the_shipped_bindings() {
     assert!(!keymap_view.is_reverted_to_defaults);
     assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
     let normal_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("normal")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     assert_eq!(
         normal_mode_bindings.default_bindings_by_key_sequence[&parse_test_key_sequence("<Tab>")]
             .action_reference,
@@ -128,7 +128,7 @@ fn an_admitted_user_layer_appears_as_user_set() {
     );
     assert!(!keymap_view.is_reverted_to_defaults);
     let normal_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("normal")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     let user_binding =
         &normal_mode_bindings.user_bindings_by_key_sequence[&parse_test_key_sequence("<C-y>")];
     assert_eq!(
@@ -149,7 +149,7 @@ fn a_steal_moves_the_default_to_unbound() {
         None,
     );
     let normal_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("normal")];
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("normal")];
     assert_eq!(
         normal_mode_bindings.user_bindings_by_key_sequence[&parse_test_key_sequence("<A-f>")]
             .bound_action
@@ -168,155 +168,9 @@ fn a_steal_moves_the_default_to_unbound() {
 }
 
 #[test]
-fn a_fatal_user_layer_reverts_the_view_to_defaults() {
-    // Removing the locked-mode reserved unlock is a fatal finding.
-    let mut mode_bindings_by_name = BTreeMap::new();
-    let mut removed_key_sequences = std::collections::BTreeSet::new();
-    removed_key_sequences.insert(parse_test_key_sequence("<C-l>"));
-    mode_bindings_by_name.insert(
-        ModeName::from_text("locked"),
-        ModeBindings {
-            bound_action_by_key_sequence: BTreeMap::new(),
-            removed_key_sequences,
-        },
-    );
-    let partial_keybindings_config = PartialKeybindingsConfig {
-        mode_bindings_by_name: Some(mode_bindings_by_name),
-        ..PartialKeybindingsConfig::default()
-    };
-
-    let keymap_view = build_keymap_view_from_partial(Some(partial_keybindings_config), None, None);
-    assert!(keymap_view.is_reverted_to_defaults);
-    assert_ne!(
-        keymap_view.conflict_report.get_verdict(),
-        KeymapVerdict::Apply
-    );
-    // The defaults survive: the reserved unlock still fires.
-    let locked_mode_bindings =
-        &keymap_view.merged_keymap.mode_map_by_name[&ModeName::from_text("locked")];
-    assert_eq!(
-        locked_mode_bindings.default_bindings_by_key_sequence[&parse_test_key_sequence("<C-l>")]
-            .action_reference,
-        ActionReference::from_core_action_name("unlock").unwrap()
-    );
-}
-
-#[test]
-fn a_file_error_reverts_the_view_and_carries_the_reason() {
-    let keymap_view = build_keymap_view_from_partial(None, None, Some("boom".to_string()));
-    assert!(keymap_view.is_reverted_to_defaults);
-    assert_eq!(
-        keymap_view.keybinding_file_error_message.as_deref(),
-        Some("boom")
-    );
-    assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
-}
-
-#[test]
-fn an_admitted_user_layer_folds_its_timeout_and_depth_fields_onto_the_defaults() {
-    // A file that only tweaks the chord timers and depth has no conflicts, so
-    // it admits and its values replace the defaults in the effective config.
-    let keymap_view = build_keymap_view_from_partial(
-        Some(PartialKeybindingsConfig {
-            chord_timeout_ms: Some(750),
-            which_key_delay_ms: Some(250),
-            maximum_chord_depth: Some(6),
-            ..PartialKeybindingsConfig::default()
-        }),
-        None,
-        None,
-    );
-    assert!(!keymap_view.is_reverted_to_defaults);
-    assert_eq!(keymap_view.keybindings_config.chord_timeout_ms, 750);
-    assert_eq!(keymap_view.keybindings_config.which_key_delay_ms, 250);
-    assert_eq!(keymap_view.keybindings_config.maximum_chord_depth, 6);
-}
-
-#[test]
-fn a_syntax_error_renders_as_one_line_that_render_joins_unchanged() {
-    // An unbalanced brace is a KDL syntax error, so the parser returns the
-    // `Syntax` variant. That branch renders as exactly one line, and the
-    // single-string render is that same line.
-    let keybinding_parse_error =
-        parse_keybindings(Path::new("keybinding.kdl"), "mode \"normal\" {")
-            .expect_err("unbalanced brace is a syntax error");
-    match &keybinding_parse_error {
-        KeybindingParseError::Syntax(syntax_error) => {
-            assert_eq!(
-                list_parse_error_lines(&keybinding_parse_error),
-                vec![syntax_error.to_string()]
-            );
-            assert_eq!(
-                render_parse_error(&keybinding_parse_error),
-                syntax_error.to_string()
-            );
-        }
-        other_parse_error => panic!("expected a syntax error, got {other_parse_error:?}"),
-    }
-}
-
-#[test]
-fn validate_keymap_file_reports_parse_failures_and_accepts_clean_files() {
-    // A directory of this run's own: this crate builds a library and a binary
-    // target, so the whole suite runs this test in two processes at once and a
-    // shared file name is written and deleted by both.
-    let test_directory = tempfile::tempdir().expect("test directory");
-    let valid_keymap_path = test_directory.path().join("good.kdl");
-    let invalid_keymap_path = test_directory.path().join("bad.kdl");
-    std::fs::write(
-        &valid_keymap_path,
-        "version 1\nmode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
-    )
-    .expect("write");
-    std::fs::write(
-        &invalid_keymap_path,
-        "version 1\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n",
-    )
-    .expect("write");
-
-    match validate_keymap_file(&valid_keymap_path).expect("readable") {
-        KeymapValidationOutcome::Checked {
-            is_applicable,
-            conflict_report,
-        } => {
-            assert!(is_applicable);
-            assert_eq!(conflict_report.get_verdict(), KeymapVerdict::Apply);
-        }
-        KeymapValidationOutcome::ParseFailed(keybinding_parse_error_messages) => {
-            panic!("expected clean check, got {keybinding_parse_error_messages:?}")
-        }
-    }
-    match validate_keymap_file(&invalid_keymap_path).expect("readable") {
-        KeymapValidationOutcome::ParseFailed(keybinding_parse_error_messages) => {
-            assert_eq!(keybinding_parse_error_messages.len(), 1);
-            assert!(
-                keybinding_parse_error_messages[0].contains("<C-"),
-                "got: {}",
-                keybinding_parse_error_messages[0]
-            );
-        }
-        KeymapValidationOutcome::Checked { .. } => panic!("expected a parse failure"),
-    }
-}
-
-#[test]
-fn validate_keymap_file_returns_not_found_for_a_missing_path() {
-    let test_directory = tempfile::tempdir().expect("test directory");
-    let missing_keymap_file_path = test_directory.path().join("absent.kdl");
-
-    match validate_keymap_file(&missing_keymap_file_path) {
-        Err(keymap_read_error) => {
-            assert_eq!(keymap_read_error.kind(), std::io::ErrorKind::NotFound)
-        }
-        Ok(_) => panic!("expected a read error"),
-    }
-}
-
-#[test]
-fn a_refused_user_layer_drops_its_folded_scalar_fields_too() {
+fn a_rejected_user_layer_reverts_its_bindings_and_folded_fields_to_defaults() {
     // The file sets a chord timeout and removes the locked-mode reserved
-    // unlock. The removal is fatal, so the whole section reverts and the
-    // timeout goes back to the built-in value.
+    // unlock `<C-l>`. Removing the reserved unlock is a fatal finding.
     let mut removed_key_sequences = BTreeSet::new();
     removed_key_sequences.insert(parse_test_key_sequence("<C-l>"));
     let mut mode_bindings_by_name = BTreeMap::new();
@@ -339,24 +193,138 @@ fn a_refused_user_layer_drops_its_folded_scalar_fields_too() {
     );
 
     assert!(keymap_view.is_reverted_to_defaults);
+    assert_eq!(
+        keymap_view.conflict_report.get_verdict(),
+        KeymapVerdict::Reject
+    );
+    assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
+    let locked_mode_bindings =
+        &keymap_view.merged_keymap.mode_keymap_by_name[&ModeName::from_text("locked")];
+    assert_eq!(
+        locked_mode_bindings.default_bindings_by_key_sequence[&parse_test_key_sequence("<C-l>")]
+            .action_reference,
+        ActionReference::from_core_action_name("unlock").unwrap()
+    );
+}
+
+#[test]
+fn a_file_error_reverts_the_view_and_carries_the_reason() {
+    let keymap_view = build_keymap_view_from_partial(None, None, Some("boom".to_string()));
+    assert!(keymap_view.is_reverted_to_defaults);
+    assert_eq!(
+        keymap_view.keybinding_file_error_message.as_deref(),
+        Some("boom")
+    );
     assert_eq!(keymap_view.keybindings_config, KeybindingsConfig::default());
 }
 
 #[test]
-fn two_invalid_binds_render_as_two_lines_that_render_joins_with_a_semicolon() {
+fn an_admitted_user_layer_folds_its_timeout_and_depth_fields_onto_the_defaults() {
+    // A file that sets only the chord timers and depth has no conflicts. It
+    // admits, and its values replace the defaults in the effective config.
+    let keymap_view = build_keymap_view_from_partial(
+        Some(PartialKeybindingsConfig {
+            chord_timeout_ms: Some(750),
+            which_key_delay_ms: Some(250),
+            maximum_chord_depth: Some(6),
+            ..PartialKeybindingsConfig::default()
+        }),
+        None,
+        None,
+    );
+    assert!(!keymap_view.is_reverted_to_defaults);
+    assert_eq!(keymap_view.keybindings_config.chord_timeout_ms, 750);
+    assert_eq!(keymap_view.keybindings_config.which_key_delay_ms, 250);
+    assert_eq!(keymap_view.keybindings_config.maximum_chord_depth, 6);
+}
+
+#[test]
+fn a_syntax_error_lists_as_one_line() {
+    // An unbalanced brace is a KDL syntax error: the parser returns the
+    // `Syntax` variant, and it lists as exactly one line.
+    let keybinding_parse_error =
+        parse_keybindings(Path::new("keybinding.kdl"), "mode \"normal\" {")
+            .expect_err("unbalanced brace is a syntax error");
+    match &keybinding_parse_error {
+        KeybindingParseError::Syntax(syntax_error) => {
+            assert_eq!(
+                list_parse_error_lines(&keybinding_parse_error),
+                vec![syntax_error.to_string()]
+            );
+        }
+        other_parse_error => panic!("expected a syntax error, got {other_parse_error:?}"),
+    }
+}
+
+#[test]
+fn validate_keybinding_file_reports_parse_failures_and_accepts_clean_files() {
+    // Each run writes its two files into a temporary directory of its own.
+    let test_directory = tempfile::tempdir().expect("test directory");
+    let valid_keybinding_file_path = test_directory.path().join("good.kdl");
+    let invalid_keybinding_file_path = test_directory.path().join("bad.kdl");
+    std::fs::write(
+        &valid_keybinding_file_path,
+        "version 1\nmode \"normal\" {\n    bind \"<C-y>\" \"core:new-tab\"\n}\n",
+    )
+    .expect("write");
+    std::fs::write(
+        &invalid_keybinding_file_path,
+        "version 1\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n}\n",
+    )
+    .expect("write");
+
+    match validate_keybinding_file(&valid_keybinding_file_path).expect("readable") {
+        KeymapValidationOutcome::Checked {
+            is_applicable,
+            conflict_report,
+        } => {
+            assert!(is_applicable);
+            assert_eq!(conflict_report.get_verdict(), KeymapVerdict::Apply);
+        }
+        KeymapValidationOutcome::ParseFailed(keybinding_parse_error_messages) => {
+            panic!("expected clean check, got {keybinding_parse_error_messages:?}")
+        }
+    }
+    match validate_keybinding_file(&invalid_keybinding_file_path).expect("readable") {
+        KeymapValidationOutcome::ParseFailed(keybinding_parse_error_messages) => {
+            assert_eq!(
+                keybinding_parse_error_messages,
+                vec!["invalid key `<C-`: missing closing `>`".to_string()]
+            );
+        }
+        KeymapValidationOutcome::Checked { .. } => panic!("expected a parse failure"),
+    }
+}
+
+#[test]
+fn validate_keybinding_file_returns_not_found_for_a_missing_path() {
+    let test_directory = tempfile::tempdir().expect("test directory");
+    let missing_keybinding_file_path = test_directory.path().join("absent.kdl");
+
+    match validate_keybinding_file(&missing_keybinding_file_path) {
+        Err(keybinding_file_read_error) => {
+            assert_eq!(
+                keybinding_file_read_error.kind(),
+                std::io::ErrorKind::NotFound
+            )
+        }
+        Ok(_) => panic!("expected a read error"),
+    }
+}
+
+#[test]
+fn two_invalid_binds_list_as_two_lines_in_file_order() {
     let keybinding_parse_error = parse_keybindings(
         Path::new("keybinding.kdl"),
         "version 1\nmode \"normal\" {\n    bind \"<C-\" \"core:new-tab\"\n    bind \"<A-\" \"core:quit\"\n}\n",
     )
     .expect_err("both key strings are invalid");
 
-    let keybinding_parse_error_lines = list_parse_error_lines(&keybinding_parse_error);
-    assert_eq!(keybinding_parse_error_lines.len(), 2);
     assert_eq!(
-        render_parse_error(&keybinding_parse_error),
-        format!(
-            "{}; {}",
-            keybinding_parse_error_lines[0], keybinding_parse_error_lines[1]
-        )
+        list_parse_error_lines(&keybinding_parse_error),
+        vec![
+            "invalid key `<C-`: missing closing `>`".to_string(),
+            "invalid key `<A-`: missing closing `>`".to_string(),
+        ]
     );
 }

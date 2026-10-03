@@ -22,7 +22,7 @@
 
 use crate::geometry::{Direction, Point};
 use crate::ids::PaneId;
-use crate::key::ModFlags;
+use crate::key::BindingModifierFlags;
 use serde::{Deserialize, Serialize};
 
 /// A mouse button.
@@ -82,7 +82,7 @@ pub struct MouseInput {
     /// The client cell the event landed on — raw, not yet hit-tested.
     pub position: Point,
     /// The modifier keys held during the event.
-    pub modifier_flags: ModFlags,
+    pub modifier_flags: BindingModifierFlags,
 }
 
 /// What the session reports back about a mouse action it carried out.
@@ -104,8 +104,9 @@ pub enum MouseAnswer {
     /// fewer than asked for when the border hit a wall. Consumed by
     /// `Client::note_resize_applied`.
     ///
-    /// `pane_id`, `border_side` and `resize_step` repeat the move this answers,
-    /// so a round carrying several border moves is read back move by move.
+    /// `pane_id`, `border_side` and `resize_step` repeat the move this answers.
+    /// A round carrying several border moves gets one `Resized` per move, in the
+    /// order the moves ran.
     Resized {
         /// The pane whose border the move was asked for.
         pane_id: PaneId,

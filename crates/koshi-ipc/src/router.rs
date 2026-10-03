@@ -1,5 +1,5 @@
-//! The control-plane protocol: how a client asks the router to create, find,
-//! or list sessions, and to restart the router itself.
+//! The control-plane protocol: how a client asks the router to create or find
+//! sessions, and to restart the router itself.
 //!
 //! The router is one process per user. It owns the list of running sessions
 //! and nothing else: a caller asks it for a session's control-socket address,
@@ -22,11 +22,11 @@
 //! A session server is a router client too, so a command issued inside one
 //! session that targets another travels the same way.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use koshi_core::compat::CONTROL_PROTOCOL;
-use koshi_core::discovery::SessionDiscovery;
 use koshi_core::ids::SessionId;
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,12 @@ pub const ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.maximum_version;
 ///
 /// The floor is 3. Raising it drops support for every build below it.
 pub const MIN_ROUTER_PROTOCOL_VERSION: u32 = CONTROL_PROTOCOL.minimum_version;
+
+/// The sentence a router refuses a session lookup, a session creation, and a
+/// remote attach with between deciding to restart into a new build and the
+/// restart. The same router answers again once it has restarted.
+pub const ROUTER_RESTARTING_MESSAGE: &str =
+    "the router is restarting into a new build; run the command again";
 
 /// Which session a request means: the id, or the generated display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,8 +122,6 @@ pub enum RouterRequestKind {
         /// Which session to look up.
         session_selector: SessionSelector,
     },
-    /// List the running sessions.
-    ListSessions,
     /// Restart the router: it sends its answer, then restarts into the binary
     /// at the path it started from. The session list is rebuilt from the
     /// endpoint files; every running session stays registered.
@@ -184,7 +188,6 @@ impl RouterRequestKind {
             RouterRequestKind::Hello { .. } => "Hello",
             RouterRequestKind::CreateSession { .. } => "CreateSession",
             RouterRequestKind::AttachLookup { .. } => "AttachLookup",
-            RouterRequestKind::ListSessions => "ListSessions",
             RouterRequestKind::Restart => "Restart",
             RouterRequestKind::GrantToken { .. } => "GrantToken",
             RouterRequestKind::RevokeToken { .. } => "RevokeToken",
@@ -248,9 +251,6 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::AttachLookup`]: where the named session
     /// listens.
     Found(SessionAddress),
-    /// Answers [`RouterRequestKind::ListSessions`]: one record per running
-    /// session.
-    Sessions(Vec<SessionDiscovery>),
     /// Answers [`RouterRequestKind::Restart`]: the reply is sent, then the
     /// router restarts into the binary now on disk.
     Restarting,
@@ -272,9 +272,10 @@ pub enum RouterResult {
     /// Answers [`RouterRequestKind::RemoteStatus`]: what this machine's
     /// remote access is set to.
     RemoteStatus {
-        /// Where remote clients would be served, as `host:port`, or `None`
-        /// when `koshi.kdl` names no listen address.
-        remote_listen_address: Option<String>,
+        /// The IP address and port remote clients would be served on, such
+        /// as `192.168.1.20:7654`, or `None` when `koshi.kdl` names no listen
+        /// address.
+        remote_listen_address: Option<SocketAddr>,
         /// Whether the operator has switched remote access on. This is the
         /// answer they gave, which outlives any one run.
         is_remote_access_enabled: bool,
@@ -287,15 +288,14 @@ pub enum RouterResult {
         certificate_fingerprint: Option<String>,
         /// How many connections from another machine this router holds
         /// admitted right now, whether they have attached to a session or
-        /// not. `Some(0)` is a router holding none; `None` is a router whose
-        /// build reports no count at all.
-        #[serde(default)]
-        remote_connection_count: Option<usize>,
+        /// not.
+        remote_connection_count: usize,
     },
     /// Answers [`RouterRequestKind::EnableRemote`]: remote access is on.
     RemoteEnabled {
-        /// Where remote clients are served, as `host:port`.
-        remote_listen_address: String,
+        /// The IP address and port remote clients are served on, such as
+        /// `192.168.1.20:7654`.
+        remote_listen_address: SocketAddr,
         /// The fingerprint of this machine's certificate, as 64 lowercase
         /// hex characters. The dialling side pins it.
         certificate_fingerprint: String,
@@ -449,6 +449,15 @@ pub fn resolve_router_endpoint_path(runtime_directory: &Path) -> PathBuf {
     runtime_directory.join("router.json")
 }
 
+/// Where the router's program file lives: `router.program` directly inside
+/// `runtime_directory`. It holds the
+/// [`ServerProgramFile`](crate::endpoint::ServerProgramFile) of the running
+/// router.
+#[must_use]
+pub fn resolve_router_program_file_path(runtime_directory: &Path) -> PathBuf {
+    runtime_directory.join("router.program")
+}
+
 /// Where the router's lock file lives: `router.lock` directly inside
 /// `runtime_directory`. Holding the advisory lock on that file is what makes one
 /// router the only router.
@@ -467,7 +476,6 @@ impl WireVariants for RouterRequestKind {
         "Hello",
         "CreateSession",
         "AttachLookup",
-        "ListSessions",
         "Restart",
         "GrantToken",
         "RevokeToken",
@@ -490,7 +498,6 @@ impl WireVariants for RouterResult {
         "Hello",
         "Created",
         "Found",
-        "Sessions",
         "Restarting",
         "Granted",
         "Revoked",
@@ -507,7 +514,6 @@ impl WireName for RouterResult {
             RouterResult::Hello { .. } => "Hello",
             RouterResult::Created(_) => "Created",
             RouterResult::Found(_) => "Found",
-            RouterResult::Sessions(_) => "Sessions",
             RouterResult::Restarting => "Restarting",
             RouterResult::Granted { .. } => "Granted",
             RouterResult::Revoked(_) => "Revoked",

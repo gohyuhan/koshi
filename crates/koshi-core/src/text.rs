@@ -1,9 +1,10 @@
-//! Bounding and filtering the short strings koshi takes from something it does
-//! not control: what a pane's own program reports about itself through
-//! `OSC 0/1/2` and `OSC 7`, and what a remote peer reports about its sessions,
-//! tabs, panes and server.
+//! Short strings: bounding and filtering the ones koshi takes from something it
+//! does not control, and counting a noun in the ones it prints.
 //!
-//! A pane's screen content is not reported text and passes through untouched.
+//! Reported text is what a pane's own program reports about itself through
+//! `OSC 0/1/2` and `OSC 7`, and what a remote peer reports about its sessions,
+//! tabs, panes and server. A pane's screen content is not reported text and
+//! passes through untouched.
 
 /// The longest string [`sanitize_reported_text`] returns, in bytes. A longer
 /// one is cut at the last character boundary that fits. 512 bytes holds 512
@@ -66,6 +67,18 @@ pub fn sanitize_reported_text(raw_reported_text: &str) -> String {
         sanitized_text.push(character);
     }
     sanitized_text
+}
+
+/// `quantity` and the noun for it: `singular_noun` when `quantity` is 1,
+/// `plural_noun` otherwise. `(2, "grant", "grants")` gives `"2 grants"`, and
+/// `(1, "process", "processes")` gives `"1 process"`.
+#[must_use]
+pub fn format_counted_noun(quantity: usize, singular_noun: &str, plural_noun: &str) -> String {
+    if quantity == 1 {
+        format!("{quantity} {singular_noun}")
+    } else {
+        format!("{quantity} {plural_noun}")
+    }
 }
 
 #[cfg(test)]

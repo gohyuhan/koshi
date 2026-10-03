@@ -523,7 +523,7 @@ fn every_request_kind_and_event_travels_under_the_name_it_reports() {
         SupervisorRequestKind::ResumeOutput,
         SupervisorRequestKind::Shutdown,
     ];
-    let events = [
+    let supervisor_events = [
         SupervisorEvent::Output {
             pane_id: build_test_pane_id(),
             output_bytes: vec![104],
@@ -546,10 +546,13 @@ fn every_request_kind_and_event_travels_under_the_name_it_reports() {
         .collect();
     assert_eq!(request_kind_names, SupervisorRequestKind::VARIANTS);
 
-    for event in &events {
+    for event in &supervisor_events {
         assert_eq!(event.get_wire_name(), event.get_event_name());
     }
-    let event_names: Vec<&str> = events.iter().map(SupervisorEvent::get_wire_name).collect();
+    let event_names: Vec<&str> = supervisor_events
+        .iter()
+        .map(SupervisorEvent::get_wire_name)
+        .collect();
     assert_eq!(event_names, SupervisorEvent::VARIANTS);
 }
 

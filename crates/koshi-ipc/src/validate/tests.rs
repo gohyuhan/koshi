@@ -489,9 +489,11 @@ fn reclaiming_an_address_holding_a_directory_reports_the_unlink_failure() {
     let socket_address = build_test_socket_address("directory");
     std::fs::create_dir_all(&socket_address).expect("create dir");
     // The same unlink on a second directory gives the OS text the error carries.
-    let control = build_test_socket_address("directory-control");
-    std::fs::create_dir_all(&control).expect("create control dir");
-    let expected_detail = std::fs::remove_file(&control).unwrap_err().to_string();
+    let control_directory_address = build_test_socket_address("directory-control");
+    std::fs::create_dir_all(&control_directory_address).expect("create control dir");
+    let expected_detail = std::fs::remove_file(&control_directory_address)
+        .unwrap_err()
+        .to_string();
 
     let reclaim_error = reclaim_stale_socket(&socket_address).unwrap_err();
 
@@ -501,7 +503,7 @@ fn reclaiming_an_address_holding_a_directory_reports_the_unlink_failure() {
     assert_eq!(error_detail, expected_detail);
     assert!(Path::new(&socket_address).is_dir());
     std::fs::remove_dir(&socket_address).expect("cleanup");
-    std::fs::remove_dir(&control).expect("cleanup control");
+    std::fs::remove_dir(&control_directory_address).expect("cleanup control");
 }
 
 #[cfg(unix)]

@@ -234,7 +234,7 @@ fn pending_shell_facts_survive_a_state_round_trip() {
         column_count: 8,
         row_count: 3,
     });
-    let mut parser = vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();
+    let mut parser = vte::Parser::<OSC_BUFFER_BYTE_CAPACITY>::new_with_size();
     parser.advance(&mut terminal_state, b"\x1b]133;C\x07");
 
     let serialized_terminal_state =
@@ -255,7 +255,7 @@ fn prompt_marks_survive_scrollback_and_eviction() {
             column_count: 4,
             row_count: 2,
         },
-        crate::scrollback::ScrollbackLimit::from_line_and_byte_limits(1, 1_000),
+        ScrollbackLimit::from_line_and_byte_limits(1, 1_000),
     );
     let _ = engine.process_pty_output(b"\x1b]133;A\x07\r\nx\r\n");
 
@@ -382,7 +382,7 @@ fn process_pty_output_drains_the_reply_queue_each_call() {
 }
 
 #[test]
-fn resize_resizes_the_state() {
+fn resize_terminal_state_changes_the_grid_dimensions() {
     let mut engine = build_test_terminal_engine();
 
     engine.resize_terminal_state(PtySize {
@@ -508,15 +508,11 @@ fn rejected_graphics_placements_do_not_consume_the_image_byte_budget() {
     };
 
     engine.process_graphics_operation(
-        Ok(crate::graphics::GraphicsOperation::Image(
-            create_rejected_graphics(),
-        )),
+        Ok(GraphicsOperation::Image(create_rejected_graphics())),
         (0, 0),
     );
     engine.process_graphics_operation(
-        Ok(crate::graphics::GraphicsOperation::Image(
-            create_rejected_graphics(),
-        )),
+        Ok(GraphicsOperation::Image(create_rejected_graphics())),
         (0, 0),
     );
 
@@ -858,9 +854,10 @@ fn synchronized_control_lookalikes_inside_strings_do_not_release() {
             (vec![], vec![], false)
         );
         assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
-        assert!(engine
-            .get_synchronized_output_transport(test_timestamp)
-            .is_some());
+        assert_eq!(
+            engine.get_next_synchronized_output_delay(test_timestamp),
+            Some(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
+        );
 
         let (_, _, has_advanced_terminal_state) = engine
             .process_pty_output_with_shell_integration_at(
@@ -1040,9 +1037,10 @@ fn end_then_begin_in_one_chunk_commits_one_group_and_keeps_the_next() {
     assert!(has_advanced_terminal_state);
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'A');
     assert_eq!(get_terminal_cell_character(&engine, 0, 1), ' ');
-    assert!(engine
-        .get_synchronized_output_transport(test_timestamp)
-        .is_some());
+    assert_eq!(
+        engine.get_next_synchronized_output_delay(test_timestamp),
+        Some(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
+    );
 
     let (_, _, has_advanced_terminal_state) = engine.process_pty_output_with_shell_integration_at(
         END_SYNCHRONIZED_OUTPUT_BYTES,
@@ -1198,9 +1196,10 @@ fn synchronized_output_deadline_keeps_elapsed_process_swap_time() {
         restored_engine.expire_synchronized_output(restored_timestamp + Duration::from_millis(9)),
         None
     );
-    assert!(restored_engine
-        .expire_synchronized_output(restored_timestamp + Duration::from_millis(10))
-        .is_some());
+    assert_eq!(
+        restored_engine.expire_synchronized_output(restored_timestamp + Duration::from_millis(10)),
+        Some((Vec::new(), Vec::new()))
+    );
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'R');
 }
 
@@ -1585,8 +1584,8 @@ fn a_partial_decode_survives_a_resize() {
 // --- Adversarial: chunk-split torture and scale ---
 
 /// A mixed run of SGR, cursor moves, an erase, line feeds, and text. Fed both
-/// whole and one byte at a time, the parser must reach byte-identical state:
-/// splitting a sequence at any boundary may never change the outcome.
+/// whole and one byte at a time, the parser reaches byte-identical state:
+/// splitting a sequence at any boundary does not change the outcome.
 #[test]
 fn a_sequence_split_at_every_byte_boundary_matches_the_whole_feed() {
     let terminal_input_sequence = b"\x1b[1;31mAB\x1b[2;3HCD\r\n\x1b[Kxy";
@@ -1599,7 +1598,7 @@ fn a_sequence_split_at_every_byte_boundary_matches_the_whole_feed() {
         let _ = split_input_engine.process_pty_output(&[*terminal_input_byte]);
     }
 
-    // Concrete landmarks so the comparison is not vacuously two blank grids.
+    // Concrete landmarks: the comparison below is between two non-blank grids.
     assert_eq!(get_terminal_cell_character(&whole_input_engine, 0, 0), 'A');
     assert_eq!(get_terminal_cell_character(&whole_input_engine, 1, 2), 'C');
     assert_eq!(get_terminal_cell_character(&whole_input_engine, 2, 0), 'x');
@@ -1683,8 +1682,8 @@ fn a_ten_thousand_column_line_wraps_without_panicking() {
     let terminal_input_bytes = vec![b'a'; 10_000];
     let _ = engine.process_pty_output(&terminal_input_bytes);
 
-    // 10000 / 80 = 125 logical rows; the last parks unscrolled, so the bottom
-    // row holds the final run and the cursor rests on the last column.
+    // 10000 / 80 = 125 logical rows; the last stays on screen unscrolled: the
+    // bottom row holds the final run and the cursor rests on the last column.
     assert_eq!(
         engine.get_terminal_state().get_active_cursor_position(),
         (23, 79)
@@ -1736,7 +1735,7 @@ fn many_line_feeds_cap_the_scrollback_at_its_line_limit() {
 
 // --- Taking the state apart and rebuilding it ---
 
-/// Everything the state holds must survive being written out and read back:
+/// Everything the state holds survives being written out and read back:
 /// both screen buffers, both cursors and their saved snapshots, the pen, the
 /// modes, the scrollback with its line counts, the title, and the
 /// grapheme cluster still open at the cursor.
@@ -1750,7 +1749,7 @@ fn a_driven_engine_state_survives_a_serde_round_trip() {
         ScrollbackLimit::from_line_and_byte_limits(4, 4096),
     );
 
-    // Bold red pen, then ten characters on an eight-column row, so the row
+    // Bold red pen, then ten characters on an eight-column row: the row
     // soft-wraps onto the row below it.
     let _ = engine.process_pty_output(b"\x1b[1;31mabcdefghij");
     // A wide CJK glyph, which takes two columns.
@@ -1760,7 +1759,7 @@ fn a_driven_engine_state_survives_a_serde_round_trip() {
     // Paint the alternate screen, then return to the primary.
     let _ = engine.process_pty_output(b"\x1b[?1049hALT\x1b[?1049l");
     // Ten line feeds on a three-row screen hand more rows to history than the
-    // four-line cap holds, so the oldest are dropped.
+    // four-line cap holds: the oldest are dropped.
     let _ = engine.process_pty_output(b"\n\n\n\n\n\n\n\n\n\n");
     // A title, then a base character with a combining acute over it: the
     // cluster is still open when the state is taken apart.
@@ -1768,7 +1767,7 @@ fn a_driven_engine_state_survives_a_serde_round_trip() {
 
     let terminal_state = engine.into_terminal_state();
 
-    // Landmarks, so the comparison below is not two blank states.
+    // Landmarks: the comparison below is between two non-blank states.
     assert_eq!(terminal_state.get_title(), Some("koshi"));
     assert_eq!(terminal_state.get_active_screen(), Screen::Primary);
     assert_eq!(terminal_state.get_scrollback().get_retained_line_count(), 4);
@@ -1815,16 +1814,16 @@ fn a_finished_chunk_leaves_the_parser_holding_nothing() {
     assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
 }
 
-/// A working-directory report (OSC 7) cut in half is carried whole, so the pane
-/// keeps its old directory until the report finishes and no part of the URI
+/// A working-directory report (OSC 7) cut in half is carried whole: the pane
+/// keeps its old directory until the report finishes, and no part of the URI
 /// prints as text.
 #[test]
 fn a_split_working_directory_report_is_carried_whole() {
     let mut engine = build_test_terminal_engine();
 
-    // The shell reports /Users/yuhan/Projects/koshi, and the chunk ends after
+    // The shell reports /home/user/Projects/koshi, and the chunk ends after
     // `/Proj`.
-    let _ = engine.process_pty_output(b"\x1b]7;file://host/Users/yuhan/Proj");
+    let _ = engine.process_pty_output(b"\x1b]7;file://host/home/user/Proj");
 
     assert_eq!(
         engine.get_terminal_state().get_current_working_directory(),
@@ -1832,7 +1831,7 @@ fn a_split_working_directory_report_is_carried_whole() {
     );
     assert_eq!(
         engine.get_undecoded_terminal_bytes(),
-        b"\x1b]7;file://host/Users/yuhan/Proj"
+        b"\x1b]7;file://host/home/user/Proj"
     );
 
     let mut restored_engine = rebuild_terminal_engine(engine);
@@ -1845,7 +1844,7 @@ fn a_split_working_directory_report_is_carried_whole() {
     assert_eq!(reported_working_directory.get_host(), Some("host"));
     assert_eq!(
         reported_working_directory.get_working_directory_path(),
-        Path::new("/Users/yuhan/Projects/koshi")
+        Path::new("/home/user/Projects/koshi")
     );
     // The tail joined the sequence instead of landing on the screen.
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), ' ');
@@ -1857,7 +1856,7 @@ fn a_split_working_directory_report_is_carried_whole() {
     );
 }
 
-/// A title report (OSC 0) cut in half is carried whole, so the title changes
+/// A title report (OSC 0) cut in half is carried whole: the title changes
 /// once, to the whole payload.
 #[test]
 fn a_split_title_report_is_carried_whole() {
@@ -1878,7 +1877,7 @@ fn a_split_title_report_is_carried_whole() {
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), ' ');
 }
 
-/// A CSI cut in half is carried whole, so its final byte completes the sequence
+/// A CSI cut in half is carried whole: its final byte completes the sequence
 /// in the next parser instead of printing as text.
 #[test]
 fn a_split_csi_is_carried_whole() {
@@ -1909,8 +1908,8 @@ fn a_split_csi_is_carried_whole() {
     );
 }
 
-/// A UTF-8 code point cut in half is carried whole, so the next parser prints
-/// the glyph rather than two replacement characters.
+/// A UTF-8 code point cut in half is carried whole: the next parser prints the
+/// glyph, not two replacement characters.
 #[test]
 fn a_split_code_point_is_carried_whole() {
     let mut engine = build_test_terminal_engine();
@@ -1954,8 +1953,8 @@ fn a_sequence_spread_over_three_chunks_is_carried_whole() {
     );
 }
 
-/// Text after a finished sequence leaves the parser holding nothing, so the
-/// carry never replays glyphs that already reached the screen.
+/// Text after a finished sequence leaves the parser holding nothing: the carry
+/// never replays glyphs that already reached the screen.
 #[test]
 fn text_after_a_finished_sequence_is_not_carried() {
     let mut engine = build_test_terminal_engine();
@@ -2017,8 +2016,8 @@ fn a_sequence_holding_a_control_character_is_carried_without_repeating_it() {
 }
 
 /// A device control string cut in the middle of its body carries its opening
-/// bytes, so the rest of the body is swallowed after the swap instead of
-/// printing as text.
+/// bytes: the rest of the body is swallowed after the swap instead of printing
+/// as text.
 #[test]
 fn a_split_device_control_string_carries_its_opening_bytes() {
     let mut engine = build_test_terminal_engine();
@@ -2057,7 +2056,7 @@ fn a_split_device_control_string_carries_its_opening_bytes() {
 
 /// A device control string closed by the 8-bit terminator `0x9c` — the one
 /// ending that reaches no escape byte — leaves the parser on a sequence
-/// boundary, so nothing is carried and the text after it prints as text.
+/// boundary: nothing is carried, and the text after it prints as text.
 #[test]
 fn a_device_control_string_closed_by_the_eight_bit_terminator_is_not_carried() {
     let mut engine = build_test_terminal_engine();
@@ -2084,7 +2083,7 @@ fn a_device_control_string_closed_by_the_eight_bit_terminator_is_not_carried() {
     );
 }
 
-/// `CAN` (`0x18`) abandons the sequence it lands in without dispatching it, so
+/// `CAN` (`0x18`) abandons the sequence it lands in without dispatching it:
 /// the parser is back on a sequence boundary and nothing is carried.
 #[test]
 fn a_cancelled_sequence_is_not_carried() {
@@ -2125,8 +2124,8 @@ fn plain_chunks_on_a_sequence_boundary_carry_nothing() {
 }
 
 /// A clipboard write (OSC 52) can span many reads. The carry holds the payload
-/// up to `MAX_UNDECODED_BYTE_COUNT` and drops it past that, so the pane's memory does not
-/// grow with the payload.
+/// up to `MAX_UNDECODED_BYTE_COUNT` and drops it past that: the pane's memory
+/// does not grow with the payload.
 #[test]
 fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
     const CLIPBOARD_PAYLOAD_BYTE_COUNT: usize = 8 * 1024 * 1024;
@@ -2155,8 +2154,8 @@ fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
         }
     }
 
-    // The payload passed `MAX_UNDECODED_BYTE_COUNT`, so the carry is empty. The real
-    // parser still swallows the body: no part of it printed.
+    // The payload passed `MAX_UNDECODED_BYTE_COUNT`: the carry is empty. The
+    // real parser still swallows the body: no part of it printed.
     assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
     assert_eq!(
@@ -2164,8 +2163,8 @@ fn a_large_clipboard_write_keeps_bounded_carry_and_terminal_state() {
         (0, 0)
     );
 
-    // koshi handles no clipboard write, so the terminator only closes the
-    // sequence and the `Z` after it prints.
+    // koshi handles no clipboard write: the terminator only closes the
+    // sequence, and the `Z` after it prints.
     let _ = engine.process_pty_output(b"\x07Z");
 
     assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
@@ -2211,7 +2210,7 @@ fn benchmark_chunked_clipboard_write() {
 }
 
 /// A device control string that ends inside the chunk that opened it leaves the
-/// parser on a sequence boundary, so nothing is carried.
+/// parser on a sequence boundary: nothing is carried.
 #[test]
 fn a_finished_device_control_string_is_not_carried() {
     let mut engine = build_test_terminal_engine();
@@ -2233,8 +2232,8 @@ fn a_finished_device_control_string_is_not_carried() {
 }
 
 /// The parser drops the body of a start of string, a privacy message and an
-/// application program command, so each one carries its two opening bytes and
-/// no more, however long the body runs.
+/// application program command: each one carries its two opening bytes and no
+/// more, however long the body runs.
 #[test]
 fn a_string_whose_body_the_parser_drops_carries_only_its_opening_bytes() {
     for string_opening_bytes in [b"\x1bX", b"\x1b^", b"\x1b_"] {
@@ -2299,9 +2298,9 @@ fn a_split_application_program_command_opening_carries_both_of_its_bytes() {
     );
 }
 
-/// An operating system command longer than `MAX_UNDECODED_BYTE_COUNT` stops being held, so
-/// one pane cannot grow the engine's memory without a bound. The real parser
-/// still swallows the body, and the sequence's end returns the carry to empty.
+/// An operating system command longer than `MAX_UNDECODED_BYTE_COUNT` stops
+/// being held. The real parser still swallows the body, and the sequence's end
+/// returns the carry to empty.
 #[test]
 fn an_operating_system_command_past_the_limit_is_not_held() {
     let mut engine = build_test_terminal_engine();
@@ -2320,7 +2319,7 @@ fn an_operating_system_command_past_the_limit_is_not_held() {
     );
 
     // The next chunk passes the limit, and the carry drops to empty. The
-    // buffer is released, not cleared, so the pane keeps no room for it.
+    // buffer is released, not cleared: its capacity drops to 0.
     let _ = engine.process_pty_output(&[b'A'; READ_CHUNK_BYTE_COUNT]);
     assert_eq!(engine.get_undecoded_terminal_bytes(), b"");
     assert_eq!(engine.undecoded_terminal_bytes.capacity(), 0);
@@ -2673,13 +2672,12 @@ fn an_ignored_control_sequence_is_held_until_the_next_escape_or_print() {
     assert_eq!(restored_engine.get_undecoded_terminal_bytes(), b"\x1b[3");
 }
 
-/// The engine holds its OSC buffer inline, so its own size bounds how much one
+/// The engine holds its OSC buffer inline: its own size bounds how much one
 /// unterminated sequence can accumulate.
 #[test]
 fn the_engine_carries_a_bounded_osc_buffer() {
-    // One engine exists per pane, so its size is a per-pane cost. The bound is
-    // an absolute figure: expressing it against `OSC_BUFFER_BYTE_CAPACITY` would rise with
-    // the capacity it is meant to bound.
+    // One engine exists per pane. The bound is an absolute figure,
+    // independent of `OSC_BUFFER_BYTE_CAPACITY`.
     const PER_PANE_BYTE_COUNT_LIMIT: usize = 64 * 1024;
     let terminal_engine_size_bytes = std::mem::size_of::<TerminalEngine>();
     assert!(
@@ -2715,8 +2713,8 @@ fn an_unterminated_osc_leaves_the_parser_usable() {
 
 #[test]
 fn a_title_split_across_chunks_is_still_bounded() {
-    // vte holds the open sequence between calls, so the cap must apply to the
-    // assembled payload rather than to one chunk.
+    // vte holds the open sequence between calls: the cap applies to the
+    // assembled payload, not to one chunk.
     let mut engine = TerminalEngine::from_pty_size(PtySize {
         row_count: 24,
         column_count: 80,
@@ -2734,8 +2732,8 @@ fn a_title_split_across_chunks_is_still_bounded() {
 
 #[test]
 fn a_refused_character_split_across_chunks_is_still_removed() {
-    // A multi-byte character delivered one byte at a time must be filtered as
-    // the character it forms, not passed through as bytes.
+    // A multi-byte character delivered one byte at a time is filtered as the
+    // character it forms.
     let mut engine = TerminalEngine::from_pty_size(PtySize {
         row_count: 24,
         column_count: 80,
@@ -2788,10 +2786,10 @@ fn a_title_survives_a_reset_and_can_be_set_again() {
 
 #[test]
 fn a_title_past_the_parser_capacity_is_identical_to_one_within_it() {
-    // The parser stops taking bytes at `OSC_BUFFER_BYTE_CAPACITY`, so a longer sequence
-    // reaches `osc_dispatch` short. For a title that changes nothing: the cut
-    // to `MAX_REPORTED_TEXT_BYTE_COUNT` happens well below the capacity, so both
-    // lengths yield the same bytes.
+    // The parser stops taking bytes at `OSC_BUFFER_BYTE_CAPACITY`: a longer
+    // sequence reaches `osc_dispatch` short. The title cut to
+    // `MAX_REPORTED_TEXT_BYTE_COUNT` is below the capacity: both lengths yield
+    // the same bytes.
     let title_within_parser_capacity = {
         let mut engine = TerminalEngine::from_pty_size(PtySize {
             row_count: 24,

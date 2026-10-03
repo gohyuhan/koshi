@@ -9,8 +9,9 @@ on Linux, `~/Library/Application Support/koshi/koshi.kdl` on macOS,
 `%APPDATA%\koshi\config\koshi.kdl` on Windows. See [README](README.md#where-the-files-go).
 
 **Bad fields:** startup skips them, keeps their defaults, and logs each one.
-`koshi config check` and `migrate` reject them. A bad value in `update` rejects
-the whole app file for that launch.
+`koshi config check` rejects them. `koshi config migrate` keeps them in the
+migrated file. A bad value in `update` rejects the whole app file for that
+launch.
 
 Settings use blocks. `theme`, `image-support`, `reduced-motion`,
 `stay-in-pane-placement-mode-after-placement`, `allow-beta-features`, `allow-other-users`,
@@ -93,12 +94,12 @@ that decides what they are told.
 | `term` | string — the `TERM` value child programs see | `"xterm-256color"` | ≥ 0.1.0 |
 | `colorterm` | string — the `COLORTERM` value child programs see | `"truecolor"` | ≥ 0.1.0 |
 | `default-shell` | string — the shell to launch | your `$SHELL` (`%COMSPEC%` on Windows) | ≥ 0.1.0 |
-| `extended-keys` | `"on-request"` or `"always"` — whether keys like Shift+Enter reach programs that never ask for them | `"on-request"` | ≥ 0.5.0 |
+| `extended-keys` | `"on-request"` or `"always"` — what a pane program receives for a key whose legacy bytes another key also sends | `"on-request"` | ≥ 0.5.0 |
 
 ### `extended-keys`
 
-**Short version:** if Shift+Enter does nothing useful in a program you run inside
-koshi, set this to `"always"`.
+`extended-keys` sets what a pane program receives for a key whose legacy
+bytes another key also sends. The default is `"on-request"`.
 
 ```kdl
 terminal {
@@ -106,157 +107,114 @@ terminal {
 }
 ```
 
-#### The problem
+#### Keys that share legacy bytes
 
-Press Shift+Enter in a terminal and the program you are running receives the byte
-`0x0d`. Press plain Enter and it receives `0x0d`. The same byte. The program has
-no way to know you held Shift.
+With legacy key encoding, some keys send the same bytes as another key.
+Shift+Enter and Enter both send `0x0d`, so the program cannot tell them apart.
+Six bytes are shared. One key keeps each byte, and every other key that sends
+it shares it:
 
-This is not a koshi bug. Terminals have worked this way since the 1970s. Six
-bytes carry more than one key, and these are the combinations people actually
-press:
-
-| What you press | What the program receives | The key that already owns those bytes |
+| Byte | The key that keeps it | The keys that share it |
 |---|---|---|
-| Shift+Enter | `0x0d` | Enter |
-| Ctrl+Enter | `0x0d` | Enter |
-| Ctrl+m | `0x0d` | Enter |
-| Ctrl+i | `0x09` | Tab |
-| Ctrl+[ | `0x1b` | Escape |
-| Shift+Escape | `0x1b` | Escape |
-| Ctrl+Backspace | `0x08` | Ctrl+h |
-| Shift+Backspace | `0x7f` | Backspace |
+| `0x0d` | Enter | Shift+Enter, Ctrl+Enter, Ctrl+m |
+| `0x09` | Tab | Ctrl+Tab, Ctrl+i |
+| `0x1b` | Escape | Shift+Escape, Ctrl+Escape, Ctrl+[, Ctrl+3 |
+| `0x7f` | Backspace | Shift+Backspace, Ctrl+8, Ctrl+? |
+| `0x08` | Ctrl+h | Ctrl+Shift+h, Ctrl+Backspace |
+| `0x00` | Ctrl+Space | Ctrl+Shift+Space, Ctrl+2, Ctrl+@ |
 
-The right-hand column is the key that keeps those bytes. Enter stays `0x0d`, Tab
-stays `0x09`, Escape stays `0x1b`, Ctrl+h stays `0x08` and Backspace stays
-`0x7f`. Only the key in the left-hand column is the one with no way to announce
-itself.
+The Ctrl+Shift form of each Ctrl key in the right-hand column shares the byte
+too, except Ctrl+Shift+Tab. A capital letter is the letter with Shift: Ctrl+M
+is Ctrl+Shift+m.
 
-A few rarer combinations collide too, for the same reason: Ctrl+Tab and
-Ctrl+Escape (the modifier changes nothing), Ctrl+@ and Ctrl+2 (both `0x00`),
-Ctrl+3 (`0x1b`), and Ctrl+8 and Ctrl+? (both `0x7f`).
+Super changes no legacy byte. With Super held, every key in the table shares
+its byte, the key that keeps it included: Super+Enter sends `0x0d` like Enter.
 
-So a chat-style program cannot use Shift+Enter for "new line" and Enter for
-"send", because both keys arrive identically.
+Alt puts `ESC` in front of the byte. With Alt held, the key that keeps a byte
+keeps `ESC` and that byte: Alt+Enter keeps `ESC 0x0d`. Every other key that
+shares the byte, and every key in the table with Super held, shares those two
+bytes with Alt held: Alt+Shift+Enter, Alt+Ctrl+m and Alt+Super+Enter all send
+`ESC 0x0d`.
 
-#### The fix, and why it is not automatic
+The key that keeps a byte sends it under both values: Enter sends `0x0d`, Tab
+`0x09`, Escape `0x1b`, Backspace `0x7f`, Ctrl+h `0x08` and Ctrl+Space `0x00`,
+and Alt+Enter sends `ESC 0x0d`.
 
-There is a newer way to send keys that names the key and the modifiers instead
-of squeezing them into one byte. Shift+Enter becomes `ESC [ 13 ; 2 u` — "key 13,
-modifier 2", which reads as Enter plus Shift.
+#### The `CSI u` form
 
-Koshi does not send that form to every program, because a program that does not
-understand it would see garbage. So the rule is: a program gets the new form
-after it asks for it.
+The `CSI u` form names the key and the modifiers. Shift+Enter in this form is
+`ESC [ 13 ; 2 u`: key 13 is Enter, and modifier 2 is Shift.
 
-**How a program asks.** A program does not only receive keys from its terminal.
-It also writes back to it. That is how it switches to a full-screen view, turns
-on mouse reporting, or asks for the new key form:
+A program asks for this form when it writes `ESC [ > <number> u` to its
+terminal. Koshi reads that request from the program's output. Each pane keeps
+its own request, and the full-screen view of a pane keeps a request separate
+from its normal view.
 
-| The program writes | It is telling koshi |
+The number is a sum. Each part turns on one kind of detail:
+
+| Number | What the program receives |
 |---|---|
-| `ESC [ ? 1049 h` | switch to the full-screen view |
-| `ESC [ ? 1003 h` | start sending me mouse events |
-| `ESC [ ? 2004 h` | mark the text I paste |
-| `ESC [ > 1 u` | send me keys in the new form |
+| 1 | an escape code for every key that produces no text, except Enter, Tab and Backspace: Escape and Ctrl+a arrive in the `CSI u` form |
+| 2 | a report when a key repeats and when it is released |
+| 4 | the shifted letter and the base-layout letter as well |
+| 8 | an escape code for every key, text keys, Enter, Tab and Backspace included |
+| 16 | the text the key produced |
 
-The last line is the request. Koshi reads it off the program's own output, the
-same output it paints on your screen. Koshi itself does exactly this to the
-terminal it runs inside.
+Example: `ESC [ > 11 u` asks for 1, 2 and 8.
 
-Neovim, Helix and Kakoune ask. Bash, Zsh and most command-line tools do not.
+#### The two values
 
-**A program asks for as much or as little as it wants.** The number in the
-request is a sum, and each part switches on one kind of detail:
-
-| Number | What the program is asking for |
-|---|---|
-| 1 | tell keys apart that otherwise share bytes — **except Enter, Tab and Backspace** |
-| 2 | tell me when a key repeats and when it is released |
-| 4 | tell me the shifted and base-layout letters as well |
-| 8 | send every key in the new form, Enter, Tab and Backspace included |
-| 16 | include the text the key produced |
-
-A program adds up the parts it wants: `ESC [ > 1 u` asks for the first only,
-`ESC [ > 11 u` asks for 1, 2 and 8 together.
-
-**This is why asking is not always enough.** Number 1 deliberately leaves Enter,
-Tab and Backspace alone, so that a shell still works if a crashed program left
-the mode switched on. A program that asks with `1` alone still receives `0x0d`
-for Shift+Enter — the exact problem it was trying to solve. Only number 8 covers
-those three keys.
-
-#### Why the setting exists
-
-Some programs read the new form but never ask for it. Claude Code is one: it
-understands `ESC [ 13 ; 2 u` perfectly, and it sends no request. Koshi cannot
-tell such a program apart from `bash`, because the request is the only signal
-there is — a program has no way to say "I understand it" other than asking.
-
-That is what you are deciding with this setting.
-
-| Value | What a program that asks gets | What a program that never asks gets |
+| Value | A program that asked | A program that did not ask |
 |---|---|---|
-| `"on-request"` (default) | exactly the detail it asked for | the old bytes — Shift+Enter arrives as Enter |
-| `"always"` | the detail it asked for, plus the colliding keys above | the old bytes, except the colliding keys above |
+| `"on-request"` (default) | the detail it asked for | legacy bytes for every key |
+| `"always"` | the detail it asked for, and the `CSI u` form for every key that shares legacy bytes | legacy bytes, except the `CSI u` form for every key that shares legacy bytes |
 
-`"always"` adds to a request, it never replaces one. A program that asked with
-`1` alone keeps everything that answer gave it, and gains Shift+Enter and the
-other seven.
+Under `"on-request"`, a program that asked with `1` alone receives `0x0d` for
+Shift+Enter. With `8`, it receives `ESC [ 13 ; 2 u`. Under `"always"`, it
+receives `ESC [ 13 ; 2 u` with `1` alone.
 
-#### What `"always"` changes, exactly
-
-It changes the colliding keys, and nothing else. The rule is exact: a key changes
-only when its old bytes are bytes another key also sends. Every other key is
-byte-for-byte identical in both settings:
+`"always"` changes only the keys that share legacy bytes. Every other key sends
+the same bytes under both values:
 
 ```
-Tab           -> 0x09          unchanged
-Enter         -> 0x0d          unchanged
-typing "a"    -> a             unchanged
-Up arrow      -> ESC [ A       unchanged
-Shift+Tab     -> ESC [ Z       unchanged
-Ctrl+Right    -> ESC [ 1;5 C   unchanged
+Tab           -> 0x09           under both values
+Enter         -> 0x0d           under both values
+typing "a"    -> a              under both values
+Up arrow      -> ESC [ A        under both values
+Shift+Tab     -> ESC [ Z        under both values
+Ctrl+Right    -> ESC [ 1;5 C    under both values
 
-Shift+Enter   -> ESC [ 13;2 u  was 0x0d
-Ctrl+i        -> ESC [ 105;5 u was 0x09
+Alt+Enter     -> ESC 0x0d       under both values
+
+Shift+Enter   -> ESC [ 13;2 u   under "always", 0x0d under "on-request"
+Ctrl+i        -> ESC [ 105;5 u  under "always", 0x09 under "on-request"
+Alt+Ctrl+m    -> ESC [ 109;7 u  under "always", ESC 0x0d under "on-request"
 ```
 
-#### The cost of `"always"`
+Under `"always"`, a program that does not read the `CSI u` form receives the
+keys that share legacy bytes as bytes it does not know. In bash 3.2 and zsh 5.9, typing `ab`,
+Shift+Enter, `cd` gives the command line `ab3;2ucd`, and typing `ab`,
+Shift+Backspace, `cd` gives `ab27;2ucd`.
 
-A program that does not understand the new form stops understanding the colliding
-keys:
+#### Your own terminal
 
-- In `bash`, Shift+Enter today runs the command. With `"always"` it does
-  nothing.
-- In an editor that has not asked for the new form, Ctrl+[ stops acting as
-  Escape and Ctrl+i stops acting as Tab.
+Koshi writes `ESC [ > 31 u` to the terminal it runs in, and receives each key
+as that terminal reports it. A terminal that reports Shift+Enter as `0x0d`
+gives koshi no Shift, so a pane receives Shift+Enter as Enter under both
+values.
 
-That is the whole trade. Nothing else is affected.
-
-#### Your own terminal has to support it too
-
-Koshi can only pass on a key that your terminal reports in the first place. Ask
-your terminal for the new form at startup, and if it does not support it, it
-reports Shift+Enter as plain Enter and koshi never learns you held Shift. No
-setting can recover that.
-
-Terminals that support it include kitty, Ghostty, WezTerm, foot and Alacritty.
-Apple Terminal does not.
-
-To check yours, run this in the terminal itself — not inside koshi — press
-Shift+Enter, then press Ctrl+C:
+To check your terminal, run this in the terminal itself, not inside koshi,
+then press Shift+Enter once within 2 seconds:
 
 ```sh
-stty -icanon -echo min 1 time 0; printf '\033[>1u'; cat -v
+stty -icanon -icrnl -echo min 0 time 0; printf '\033[>8u'; sleep 2; dd bs=64 count=1 2>/dev/null | cat -v; echo; printf '\033[<u'; stty sane
 ```
 
-`^[[13;2u` means your terminal supports it. `^M` means it does not. Then restore
-your terminal:
-
-```sh
-printf '\033[<u'; stty sane
-```
+The command prints every byte the terminal sent in those 2 seconds. A terminal
+that reports Shift+Enter prints `^[[13;2u` among them, and it can also print a
+report for the Shift key alone, such as `^[[57441;2u`. A terminal that does not
+report Shift+Enter prints `^M`. The command restores your terminal before it
+exits.
 
 ## `logging`
 
@@ -294,15 +252,17 @@ Example: a panic at 2026-08-08 12:00:00 UTC writes `crash-1786190400.txt`.
 
 ## `update`
 
-Self-update settings. Each installed koshi reads these from its own `koshi.kdl`
-and updates itself. A bad value here drops the whole `koshi.kdl` for that
+Self-update settings. Each installed koshi reads these from its own
+`koshi.kdl`. `koshi update` installs a newer release the way that koshi was
+installed: a Homebrew install runs `brew upgrade`, and a build from source
+downloads nothing. A bad value here drops the whole `koshi.kdl` for that
 launch.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `auto-check` | boolean — check GitHub for a newer koshi at startup | `#true` | ≥ 0.1.0 |
+| `auto-check` | boolean — check GitHub for a newer koshi at startup; a build from source checks nothing | `#true` | ≥ 0.1.0 |
 | `check-interval-days` | integer — days between checks | `14` | ≥ 0.1.0 |
-| `allow-prerelease` | boolean — offer pre-release builds too | `#false` | ≥ 0.1.0 |
+| `allow-prerelease` | boolean — offer pre-release builds too; a Homebrew install takes stable releases only | `#false` | ≥ 0.1.0 |
 
 ## `allow-beta-features`
 
@@ -474,11 +434,64 @@ connection is refused, and a terminal already attached is dropped the next time
 it types. Each command reads the file again as it runs, so a listing shows what
 your file says at that moment. Turning it on reaches the sessions you start
 after the change. A running session keeps the socket it already has until it
-restarts. `koshi update` restarts every session it finds, and a restarted
-session reads this key again and binds where your file says at that moment.
+restarts. `koshi restart-servers` restarts every session, and so does `koshi
+update` on a build from source; `koshi update` on a release install restarts
+every session that does not run the installed version. A restarted session
+reads this key again and binds where your file says at that moment.
 
 A session started with `koshi --headless --allow-other-users` keeps other users
 for its whole life. That session never reads this key.
+
+While this is on, your `koshi` lists the other users' sessions with limits:
+
+- A session socket counts only when it is a socket, owned by the user who owns
+  the folder holding it. A plain file or a link with a session's name is
+  skipped.
+- Every entry of the shared directory is read, up to 65,536 entries in all,
+  counting the entries of each user's folder that is opened. An entry whose
+  name is not a user id, such as `notes`, and a file in a user's folder whose
+  name is not `session-<uuid>.sock`, are skipped without being opened.
+- On Unix, at most 256 user folders are opened. A shared directory that holds
+  one entry or one user folder past either limit is not read further. A
+  listing shows the sessions read before the limit, names the directory on
+  standard error and exits with code 4, for example `koshi: some sessions were
+  not asked: /tmp/koshi could not be read: it holds more than 256 user
+  folders`. A lookup by name is refused and names it the same way, and koshi
+  attaches to none of those sessions by name until the whole directory can be
+  read.
+- At most 256 sessions of one user are listed, 256 in all on Windows. Each one
+  past that is not asked: standard error names how many, and a listing counts
+  them among the sessions that did not answer.
+- A lookup by session id reads only that session's own path in each user's
+  folder, within the same limits.
+- A session id that two sockets advertise is reached through neither.
+  `koshi attach <id>` is refused with `session <id> is advertised 2 times in
+  the shared directory, by user ids 1001, 1002; koshi reaches none of them`,
+  and a listing counts that session among the sessions that did not answer.
+- A socket that another user names after one of your session ids is never
+  taken for that session, also while that session restarts.
+- `koshi list-sessions` and `koshi server-version` ask up to 16 sessions at
+  the same time. `koshi list-sessions` stops waiting 5 seconds after it starts, and
+  `koshi server-version` 5 seconds after it checked the router. A session that
+  has not answered by then is named on standard error and left out of the
+  listing.
+- A user's folder that its owner closed to you, such as one at mode `0700`,
+  advertises nothing. Its sessions are not listed and not counted.
+- A read of the shared directory that fails another way, such as with
+  `Input/output error`, is named on standard error, and a listing exits with
+  code 4. A lookup is refused and names the path, for example ``cannot tell
+  whether `quiet-lake` is unique (/tmp/koshi/1002 could not be read:
+  Input/output error (os error 5))``.
+- The router asks at most 16 of the other users' sessions at once, and a
+  lookup by session id asks only that session. A session past that limit is
+  not asked. A lookup by its id is refused with `session <id> is running but
+  did not answer: 16 sessions other local users started are already being
+  asked; run the command again`. A lookup by name counts it among the running
+  sessions that did not answer.
+- A lookup by name that matches one session another user started, while any
+  other session did not answer, is refused with ``cannot tell whether
+  `quiet-lake` is unique (1 running session did not answer)``. A session of
+  yours with that name is used even then.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
@@ -507,13 +520,19 @@ This only says where the sockets go. Nobody else reaches them until
 does nothing else: writing this line opens no port and makes this machine
 reachable by nobody. The port opens the first time you run `koshi share grant`
 and answer yes to the offer it makes, and on every start after that.
+The value is an IP address and a port: IPv4 such as `192.168.1.20:7654`, or
+IPv6 in brackets such as `[::1]:7654`. A host name, such as
+`laptop.local:7654`, is ignored with a warning, and nothing binds. `0.0.0.0`
+and `[::]` accept connections on every IPv4 or IPv6 address of this machine.
+`koshi share grant` then names each of those addresses in its connect command,
+as `koshi share grant` in `cli.md` shows.
 
 `allow-other-users` is a separate switch, about other users logged in to this
 same machine. Neither key turns the other on.
 
 | Key | Value / type | Default | Since |
 |---|---|---|---|
-| `remote-listen` | string — host:port the remote TLS listener binds | unset — nothing binds | ≥ 0.3.0 |
+| `remote-listen` | string — IP address and port the remote TLS listener binds, such as `0.0.0.0:7654` | unset — nothing binds | ≥ 0.3.0 |
 
 ## Full example
 

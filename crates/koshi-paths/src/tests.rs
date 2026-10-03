@@ -45,6 +45,16 @@ impl EnvGuard {
         std::env::remove_var(environment_name);
     }
 
+    /// On Windows, unset `APPDATA` and `LOCALAPPDATA`: the resolvers fall back
+    /// to the known folders. On every other platform, do nothing.
+    fn clear_app_data_variables(&mut self) {
+        #[cfg(windows)]
+        {
+            self.unset_environment_variable("APPDATA");
+            self.unset_environment_variable("LOCALAPPDATA");
+        }
+    }
+
     fn save_environment_variable(&mut self, environment_name: &'static str) {
         if self
             .saved_environment_values
@@ -71,7 +81,8 @@ impl Drop for EnvGuard {
 #[test]
 fn each_resolver_routes_to_its_own_platform_dir() {
     // Holds `ENV_LOCK` while the resolvers read the environment.
-    let _environment_guard = EnvGuard::new();
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.clear_app_data_variables();
 
     let project_directories =
         resolve_project_directories().expect("test machine has a home directory");
@@ -99,6 +110,7 @@ fn unrecognized_koshi_directory_environment_variables_are_ignored() {
     // Setting `KOSHI_CONFIG_DIR`, `KOSHI_DATA_DIR` and `KOSHI_STATE_DIR`
     // leaves every resolved directory at its platform default.
     let mut environment_guard = EnvGuard::new();
+    environment_guard.clear_app_data_variables();
     environment_guard.set_environment_variable("KOSHI_CONFIG_DIR", "/override/config");
     environment_guard.set_environment_variable("KOSHI_DATA_DIR", "/override/data");
     environment_guard.set_environment_variable("KOSHI_STATE_DIR", "/override/state");
@@ -329,7 +341,8 @@ fn macos_project_directories_resolve_under_library_application_support() {
 #[cfg(windows)]
 #[test]
 fn windows_config_directory_resolves_under_appdata_config() {
-    let _environment_guard = EnvGuard::new();
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.clear_app_data_variables();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
 
     assert_eq!(
@@ -341,7 +354,8 @@ fn windows_config_directory_resolves_under_appdata_config() {
 #[cfg(windows)]
 #[test]
 fn windows_state_directory_resolves_under_local_appdata_data() {
-    let _environment_guard = EnvGuard::new();
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.clear_app_data_variables();
     let platform_directories = directories::BaseDirs::new().expect("home directory");
 
     assert_eq!(
@@ -352,6 +366,56 @@ fn windows_state_directory_resolves_under_local_appdata_data() {
                 .join("koshi")
                 .join("data")
         )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn absolute_app_data_variables_move_the_windows_per_user_directories() {
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.unset_environment_variable("KOSHI_RUNTIME_DIR");
+    environment_guard.set_environment_variable("APPDATA", r"C:\override\roaming");
+    environment_guard.set_environment_variable("LOCALAPPDATA", r"C:\override\local");
+
+    assert_eq!(
+        resolve_config_directory(),
+        Some(PathBuf::from(r"C:\override\roaming\koshi\config"))
+    );
+    assert_eq!(
+        resolve_data_directory(),
+        Some(PathBuf::from(r"C:\override\roaming\koshi\data"))
+    );
+    assert_eq!(
+        resolve_state_directory(),
+        Some(PathBuf::from(r"C:\override\local\koshi\data"))
+    );
+    assert_eq!(
+        resolve_runtime_directory(),
+        Some(PathBuf::from(r"C:\override\roaming\koshi\data\run"))
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn relative_or_empty_app_data_variables_are_ignored() {
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.clear_app_data_variables();
+    let known_folder_directories = (
+        resolve_config_directory(),
+        resolve_data_directory(),
+        resolve_state_directory(),
+    );
+
+    environment_guard.set_environment_variable("APPDATA", r"override\roaming");
+    environment_guard.set_environment_variable("LOCALAPPDATA", "");
+
+    assert_eq!(
+        (
+            resolve_config_directory(),
+            resolve_data_directory(),
+            resolve_state_directory(),
+        ),
+        known_folder_directories
     );
 }
 
@@ -618,6 +682,40 @@ fn ensure_private_directory_refuses_a_dangling_symbolic_link() {
     assert!(
         !target_directory_path.exists(),
         "the link's target must be left uncreated"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mode_change_reaches_the_opened_directory_and_never_a_link_planted_after_the_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_directory = tempfile::tempdir().expect("tempdir");
+    let checked_directory_path = test_directory.path().join("checked");
+    plant_directory(&checked_directory_path, 0o700);
+    let opened_directory =
+        open_directory_without_following(&checked_directory_path).expect("open the directory");
+    let moved_directory_path = test_directory.path().join("moved");
+    std::fs::rename(&checked_directory_path, &moved_directory_path)
+        .expect("move the opened directory away");
+    let link_target_path = test_directory.path().join("private-key");
+    std::fs::write(&link_target_path, b"key").expect("write the link target");
+    std::fs::set_permissions(&link_target_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict the link target");
+    std::os::unix::fs::symlink(&link_target_path, &checked_directory_path)
+        .expect("plant the link where the directory was");
+
+    verify_directory_mode(&opened_directory, &checked_directory_path, 0o755)
+        .expect("the opened directory takes the mode");
+
+    assert_eq!(get_directory_mode(&moved_directory_path), 0o755);
+    assert_eq!(
+        std::fs::metadata(&link_target_path)
+            .expect("read the link target")
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o600
     );
 }
 

@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use koshi_core::{
     constant::MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
-    geometry::Size,
+    geometry::{PixelCellSize, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
 };
 use koshi_layout::tree::LayoutNode;
@@ -41,19 +41,19 @@ pub struct Tab {
 
 impl Tab {
     /// A freshly created tab showing a single pane, with no focus recorded
-    /// yet; `root_pane` is its only layout leaf.
+    /// yet; `root_pane_id` is its only layout leaf.
     #[must_use]
     pub fn from_root_pane(
         tab_id: TabId,
         tab_name: String,
         tab_index: usize,
-        root_pane: PaneId,
+        root_pane_id: PaneId,
     ) -> Self {
         Self {
             tab_id,
             tab_name,
             tab_index,
-            layout: LayoutNode::Pane(root_pane),
+            layout: LayoutNode::Pane(root_pane_id),
             focus_mru: Vec::new(),
         }
     }
@@ -94,7 +94,7 @@ impl Tab {
         self.layout = layout;
     }
 
-    /// Records `pane` as the most-recently focused: moves it to the front,
+    /// Records `pane_id` as the most-recently focused: moves it to the front,
     /// keeping one entry per pane, then cuts the history back to
     /// [`MAX_TAB_FOCUS_MRU_ENTRY_COUNT`] entries, dropping the oldest.
     ///
@@ -149,10 +149,8 @@ pub struct Session {
     /// True while the next client to attach must start in
     /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked). A profile
     /// carrying the `lock` marker sets it; [`Session::take_start_lock`] reads
-    /// it and clears it, so exactly one attach is locked. A session seeded
-    /// without that marker holds `false` and locks nobody. Absent from a
-    /// stored session, it reads back `false`.
-    #[serde(default)]
+    /// it and clears it: exactly one attach is locked. A session seeded
+    /// without that marker holds `false` and locks nobody.
     pub should_start_locked: bool,
 
     /// A restart seeded a new shell after the carried session could not be
@@ -161,7 +159,6 @@ pub struct Session {
     pub is_recovery_notice_visible: bool,
 
     /// Generation of committed layout, membership, and shared sizing inputs.
-    #[serde(default)]
     placement_revision: u64,
 
     lifecycle: SessionLifecycle,
@@ -197,8 +194,8 @@ impl Session {
     /// [`LockMode::Locked`](koshi_core::lock::LockMode::Locked), clearing the
     /// flag as it reads it.
     ///
-    /// Reads [`should_start_locked`](Self::should_start_locked) and clears it in one step,
-    /// so it returns `true` at most once per session.
+    /// Reads [`should_start_locked`](Self::should_start_locked) and clears it in one step:
+    /// it returns `true` at most once per session.
     pub fn take_start_lock(&mut self) -> bool {
         std::mem::take(&mut self.should_start_locked)
     }
@@ -231,10 +228,10 @@ impl Session {
 
     /// Apply a `lifecycle_event`, advancing the session's state, or return
     /// [`InvalidTransition`] if the move is illegal from the current state.
-    /// Crate-internal — callers drive the lifecycle through the typed wrappers
+    /// Crate-internal: callers drive the lifecycle through the typed wrappers
     /// ([`Session::attach_client`], [`Session::detach_client`],
     /// [`Session::request_session_stop`], [`Session::complete_session_stop`]) or the tab
-    /// operations, so the firing conditions stay in one place. Each caller
+    /// operations. Each caller
     /// decides whether a rejected event is an expected no-op to ignore (a
     /// re-attach to an already-`Running` session) or a fault to abort on (a tab
     /// created under a wound-down session).
@@ -293,9 +290,11 @@ impl Session {
             .reduce(Size::compute_minimum_axes)
     }
 
-    /// Return the oldest measured viewer's cell dimensions for this tab.
+    /// The cell size of the earliest-attached client viewing `tab_id` that
+    /// reported one, ties broken by the lower client id. `None` when no client
+    /// viewing `tab_id` reported a cell size.
     #[must_use]
-    pub fn get_tab_cell_size(&self, tab_id: TabId) -> Option<koshi_core::geometry::PixelCellSize> {
+    pub fn get_tab_cell_size(&self, tab_id: TabId) -> Option<PixelCellSize> {
         self.clients
             .list_attached_clients()
             .filter(|client| {
@@ -329,16 +328,16 @@ impl Session {
     /// trees; and each attached client's session id, active tab, focus and
     /// zoom. See [`SessionConsistencyError`] for the individual checks. The
     /// returned violations arrive in a fixed order: the checks run in the order
-    /// listed above, and each one walks its own subjects by id or by bar index,
-    /// so one session always reports the same list.
+    /// listed above, and each one walks its own subjects by id or by bar index.
+    /// One session always reports the same list.
     pub fn validate_session_consistency(&self) -> Result<(), Vec<SessionConsistencyError>> {
         let mut consistency_violations = vec![];
         // Pane id -> the tabs whose layout holds it as a leaf. Built once here,
-        // then reused to check the leaf/registry relationship in both
-        // directions. Sorted, so two violations from one walk always come out
-        // in the same order.
+        // then read to check the leaf/registry relationship in both
+        // directions. Sorted: two violations from one walk come out in the
+        // same order.
         let mut tab_ids_by_pane_id: BTreeMap<PaneId, Vec<TabId>> = BTreeMap::new();
-        // Bar position -> how many tabs claim it, to catch collisions.
+        // Bar position -> how many tabs claim it.
         let mut tab_count_by_index: BTreeMap<usize, usize> = BTreeMap::new();
 
         for (tab_id, tab) in self.tabs.iter() {
@@ -365,7 +364,7 @@ impl Session {
                     });
                     continue;
                 };
-                // A `Removed` pane should be gone from both layout and registry.
+                // A `Removed` pane still in a layout is a violation.
                 if *pane_record.get_lifecycle() == PaneLifecycle::Removed {
                     consistency_violations.push(SessionConsistencyError::RemovedPaneInLayout {
                         tab_id: tab.tab_id,
@@ -420,7 +419,7 @@ impl Session {
 
             // The tab a client is currently showing must exist. Checked only
             // while the session still holds tabs: a session emptied by its last
-            // tab closing leaves every client's `active_tab` naming that closed
+            // tab closing leaves every client's `active_tab_id` naming that closed
             // tab until the transport disconnects them.
             if !self.tabs.is_empty() && !self.tabs.contains_key(&client.get_active_tab_id()) {
                 consistency_violations.push(SessionConsistencyError::ActiveTabMissing {

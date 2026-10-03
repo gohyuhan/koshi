@@ -68,7 +68,7 @@ fn build_image_placement_snapshot() -> ImagePlacementSnapshot {
     .expect("test image placement is valid")
 }
 
-/// The transfer metadata for [`image_placement`].
+/// The transfer metadata for [`build_image_placement_snapshot`].
 fn build_image_transfer(image_content_id: u64) -> FrameImageTransfer {
     FrameImageTransfer {
         image_content_id,
@@ -107,7 +107,7 @@ fn build_image_transfer(image_content_id: u64) -> FrameImageTransfer {
     }
 }
 
-/// All RGBA bytes for [`image_transfer`] in one final chunk.
+/// All RGBA bytes for [`build_image_transfer`] in one final chunk.
 fn build_image_chunk(image_transfer_id: u64) -> FrameImageChunk {
     FrameImageChunk {
         image_transfer_id,
@@ -200,8 +200,7 @@ fn placement_metadata_cannot_change_cached_pixel_dimensions() {
     );
 }
 
-/// Every style field set away from its default, so a field lost on the way
-/// there or back shows up.
+/// Sets every style field away from its default.
 fn build_test_style() -> Style {
     let mut terminal_style = Style::default();
     terminal_style.set_foreground_color(Color::Indexed(4));
@@ -240,7 +239,7 @@ fn build_test_grid() -> Grid {
     terminal_grid
 }
 
-/// The pane holding [`grid`]: scrolled 7 lines back, reporting any-motion mouse
+/// The pane holding [`build_test_grid`]: scrolled 7 lines back, reporting any-motion mouse
 /// tracking, showing a shaped blinking cursor, and highlighting the first row's
 /// columns 1 to 2.
 fn build_content_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
@@ -312,7 +311,7 @@ fn build_empty_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
 }
 
 /// A frame with one tab, two slots, and the two panes handed in.
-fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
+fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
     let content_pane_id = pane_snapshots[0].pane_id;
     let empty_pane_id = pane_snapshots[1].pane_id;
     let active_tab_id = TabId::new();
@@ -404,35 +403,35 @@ fn build_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSnapshot {
 
 #[test]
 fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
-    let mut expected_render_snapshot = build_render_snapshot(vec![
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
     expected_render_snapshot.is_recovery_notice_visible = true;
     assert_eq!(
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot)),
+        build_render_snapshot(&build_wire_frame(&expected_render_snapshot)),
         expected_render_snapshot
     );
 }
 
 #[test]
 fn a_frame_waits_for_the_complete_image_record() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut cache = ImageCache::new();
+    let painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut image_cache = ImageCache::new();
 
-    let initial_snapshot = cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let initial_snapshot = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the placement frame reads");
     assert_eq!(initial_snapshot, None);
 
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
-    let rebuilt_snapshot = cache
+    let rebuilt_snapshot = image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the complete chunk reads")
         .expect("the last missing record produces a redraw");
@@ -457,79 +456,102 @@ fn a_frame_waits_for_the_complete_image_record() {
 }
 
 #[test]
-fn a_complete_cached_image_is_reused_by_the_next_frame() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+fn a_frame_whose_placements_are_unavailable_paints_without_waiting() {
+    let render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes.clone()))
+    let mut painted_frame = build_wire_frame(&render_snapshot);
+    let image_placement = &mut painted_frame.pane_snapshots[0].image_placement_snapshots[0];
+    image_placement.image_record = None;
+    image_placement.is_available = false;
+    let mut image_cache = ImageCache::new();
+
+    let painted_snapshot = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
+        .expect("the placement frame reads")
+        .expect("a frame with no available placement paints at once");
+
+    assert_eq!(
+        painted_snapshot.pane_snapshots[0].image_placement_snapshots[0].get_image_record(),
+        None
+    );
+}
+
+#[test]
+fn a_complete_cached_image_is_reused_by_the_next_frame() {
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
+        build_content_pane_snapshot_with_image(PaneId::new()),
+        build_empty_pane_snapshot(PaneId::new()),
+    ]);
+    let painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame.clone()))
         .expect("the first placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
-    cache
+    image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the complete chunk reads")
         .expect("the image produces a redraw");
 
-    let reused_snapshot = cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let reused_snapshot = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the repeated placement frame reads");
 
     assert_eq!(reused_snapshot, Some(expected_render_snapshot));
-    assert_eq!(cache.image_record_by_content_id.len(), 1);
-    assert!(cache.missing_painted_image_content_ids.is_empty());
-    assert!(cache.missing_placement_image_content_ids.is_empty());
+    assert_eq!(image_cache.image_record_by_content_id.len(), 1);
+    assert!(image_cache.missing_painted_image_content_ids.is_empty());
+    assert!(image_cache.missing_placement_image_content_ids.is_empty());
     assert_eq!(
-        cache
+        image_cache
             .pending_image_transfer
             .as_ref()
-            .map(|pending_image| pending_image.received_byte_count),
+            .map(|pending_image_transfer| pending_image_transfer.received_byte_count),
         None
     );
 }
 
 #[test]
 fn a_cached_record_cannot_hide_an_invalid_new_placement() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes.clone()))
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame.clone()))
         .expect("the valid frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
-    cache
+    image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the complete chunk reads")
         .expect("the image produces a redraw");
-    frame_bytes.pane_snapshots[0].image_placement_snapshots[0].anchor_cell = (u16::MAX, 0);
-    frame_bytes.pane_snapshots[0].image_placement_snapshots[0].row_count = 2;
+    painted_frame.pane_snapshots[0].image_placement_snapshots[0].anchor_cell = (u16::MAX, 0);
+    painted_frame.pane_snapshots[0].image_placement_snapshots[0].row_count = 2;
 
-    let image_assembly_error = cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let image_assembly_error = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect_err("the cached record cannot make bad geometry valid");
 
     assert_eq!(image_assembly_error, ImageAssemblyError::InvalidPlacement);
-    assert_eq!(cache.image_record_by_content_id.len(), 1);
-    assert_eq!(cache.retained_image_byte_count, 8);
+    assert_eq!(image_cache.image_record_by_content_id.len(), 1);
+    assert_eq!(image_cache.retained_image_byte_count, 8);
 }
 
 #[test]
 fn a_frame_redraws_only_after_every_missing_image_record_arrives() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    frame_bytes.pane_snapshots[0]
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    painted_frame.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
             cell_geometry: None,
@@ -541,48 +563,50 @@ fn a_frame_redraws_only_after_every_missing_image_record_arrives() {
             column_count: 1,
             row_count: 1,
         });
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the placement frame reads");
 
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the first transfer starts");
-    let after_first_image = cache
+    let snapshot_after_first_image = image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the first complete record reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(2))
         .expect("the second transfer starts");
-    let after_second_image = cache
+    let snapshot_after_second_image = image_cache
         .accept_image_chunk(build_image_chunk(2))
         .expect("the second complete record reads")
         .expect("the last record produces one redraw");
 
-    assert_eq!(after_first_image, None);
+    assert_eq!(snapshot_after_first_image, None);
     assert_eq!(
-        after_second_image.pane_snapshots[0]
+        snapshot_after_second_image.pane_snapshots[0]
             .image_placement_snapshots
             .len(),
         2
     );
     assert_eq!(
-        after_second_image.pane_snapshots[0].image_placement_snapshots[0].get_image_content_id(),
+        snapshot_after_second_image.pane_snapshots[0].image_placement_snapshots[0]
+            .get_image_content_id(),
         1
     );
     assert_eq!(
-        after_second_image.pane_snapshots[0].image_placement_snapshots[0]
+        snapshot_after_second_image.pane_snapshots[0].image_placement_snapshots[0]
             .get_image_record()
             .map(|image_record| image_record.image.rgba_bytes.as_slice()),
         Some([255, 0, 0, 255, 0, 255, 0, 255].as_slice())
     );
     assert_eq!(
-        after_second_image.pane_snapshots[0].image_placement_snapshots[1].get_image_content_id(),
+        snapshot_after_second_image.pane_snapshots[0].image_placement_snapshots[1]
+            .get_image_content_id(),
         2
     );
     assert_eq!(
-        after_second_image.pane_snapshots[0].image_placement_snapshots[1]
+        snapshot_after_second_image.pane_snapshots[0].image_placement_snapshots[1]
             .get_image_record()
             .map(|image_record| image_record.image.rgba_bytes.as_slice()),
         Some([255, 0, 0, 255, 0, 255, 0, 255].as_slice())
@@ -591,28 +615,28 @@ fn a_frame_redraws_only_after_every_missing_image_record_arrives() {
 
 #[test]
 fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes.clone()))
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame.clone()))
         .expect("the placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
-    cache
+    image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the image reads")
         .expect("the image produces a redraw");
-    frame_bytes.pane_snapshots[0]
+    painted_frame.pane_snapshots[0]
         .image_placement_snapshots
         .clear();
 
-    let snapshot_without_image = cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let snapshot_without_image = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the frame without the placement reads")
         .expect("the frame without an image is complete");
 
@@ -620,67 +644,70 @@ fn a_frame_without_a_cached_placement_releases_its_rgba_bytes() {
         snapshot_without_image.pane_snapshots[0].image_placement_snapshots,
         Vec::new()
     );
-    assert_eq!(cache.image_record_by_content_id.len(), 0);
-    assert_eq!(cache.retained_image_byte_count, 0);
-    assert_eq!(cache.missing_painted_image_content_ids.len(), 0);
-    assert_eq!(cache.missing_placement_image_content_ids.len(), 0);
+    assert_eq!(image_cache.image_record_by_content_id.len(), 0);
+    assert_eq!(image_cache.retained_image_byte_count, 0);
+    assert_eq!(image_cache.missing_painted_image_content_ids.len(), 0);
+    assert_eq!(image_cache.missing_placement_image_content_ids.len(), 0);
 }
 
 #[test]
 fn a_returning_image_waits_for_its_new_connection_identity() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let initial_frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut frame_without_image = initial_frame_bytes.clone();
-    frame_without_image.pane_snapshots[0]
+    let initial_painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut painted_frame_without_image = initial_painted_frame.clone();
+    painted_frame_without_image.pane_snapshots[0]
         .image_placement_snapshots
         .clear();
-    let mut returning_frame_bytes = initial_frame_bytes.clone();
-    returning_frame_bytes.pane_snapshots[0].image_placement_snapshots[0].image_content_id = 2;
-    let mut cache = ImageCache::new();
+    let mut returning_painted_frame = initial_painted_frame.clone();
+    returning_painted_frame.pane_snapshots[0].image_placement_snapshots[0].image_content_id = 2;
+    let mut image_cache = ImageCache::new();
 
     assert_eq!(
-        cache
-            .adopt_painted_frame(Box::new(initial_frame_bytes))
+        image_cache
+            .adopt_painted_frame(Box::new(initial_painted_frame))
             .expect("the first frame reads"),
         None
     );
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the first transfer starts");
-    cache
+    image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the first transfer reads")
         .expect("the first image completes the frame");
-    let snapshot_without_image = cache
-        .adopt_painted_frame(Box::new(frame_without_image))
+    let snapshot_without_image = image_cache
+        .adopt_painted_frame(Box::new(painted_frame_without_image))
         .expect("the frame without the image reads")
         .expect("the frame without the image is complete");
     assert_eq!(
         snapshot_without_image.pane_snapshots[0].image_placement_snapshots,
         []
     );
-    assert_eq!(cache.image_record_by_content_id.len(), 0);
+    assert_eq!(image_cache.image_record_by_content_id.len(), 0);
 
     assert_eq!(
-        cache
-            .adopt_painted_frame(Box::new(returning_frame_bytes))
+        image_cache
+            .adopt_painted_frame(Box::new(returning_painted_frame))
             .expect("the returning frame reads"),
         None
     );
-    assert_eq!(cache.image_record_by_content_id.len(), 0);
-    assert_eq!(cache.missing_painted_image_content_ids, HashSet::from([2]));
-    assert!(cache.missing_placement_image_content_ids.is_empty());
+    assert_eq!(image_cache.image_record_by_content_id.len(), 0);
+    assert_eq!(
+        image_cache.missing_painted_image_content_ids,
+        HashSet::from([2])
+    );
+    assert!(image_cache.missing_placement_image_content_ids.is_empty());
     let mut image_transfer = build_image_transfer(2);
     image_transfer.image_content_id = 2;
-    cache
+    image_cache
         .start_image_transfer(image_transfer)
         .expect("the returning transfer starts");
     let mut image_chunk = build_image_chunk(2);
     image_chunk.image_transfer_id = 2;
-    let rebuilt_snapshot = cache
+    let rebuilt_snapshot = image_cache
         .accept_image_chunk(image_chunk)
         .expect("the returning transfer reads")
         .expect("the returning image completes the frame");
@@ -701,18 +728,18 @@ fn a_returning_image_waits_for_its_new_connection_identity() {
 
 #[test]
 fn a_rejected_chunk_closes_its_transfer_and_allows_an_exact_restart() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut cache = ImageCache::new();
-    cache
+    let mut image_cache = ImageCache::new();
+    image_cache
         .adopt_painted_frame(Box::new(build_wire_frame(&expected_render_snapshot)))
         .expect("the placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the first transfer starts");
-    let image_assembly_error = cache
+    let image_assembly_error = image_cache
         .accept_image_chunk(FrameImageChunk {
             image_transfer_id: 1,
             byte_offset: 1,
@@ -730,17 +757,17 @@ fn a_rejected_chunk_closes_its_transfer_and_allows_an_exact_restart() {
         }
     );
     assert_eq!(
-        cache
+        image_cache
             .pending_image_transfer
             .as_ref()
-            .map(|pending| pending.received_byte_count),
+            .map(|pending_image_transfer| pending_image_transfer.received_byte_count),
         None
     );
 
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the same transfer can restart");
-    let completed_snapshot = cache
+    let completed_snapshot = image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the restarted transfer reads")
         .expect("the restarted transfer produces a redraw");
@@ -749,87 +776,87 @@ fn a_rejected_chunk_closes_its_transfer_and_allows_an_exact_restart() {
 
 #[test]
 fn one_pane_cannot_repeat_a_terminal_image_placement_identity() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
     let mut repeated_image_placement =
-        frame_bytes.pane_snapshots[0].image_placement_snapshots[0].clone();
+        painted_frame.pane_snapshots[0].image_placement_snapshots[0].clone();
     repeated_image_placement.image_content_id = 2;
-    frame_bytes.pane_snapshots[0]
+    painted_frame.pane_snapshots[0]
         .image_placement_snapshots
         .push(repeated_image_placement);
-    let mut cache = ImageCache::new();
+    let mut image_cache = ImageCache::new();
 
-    let image_assembly_error = cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let image_assembly_error = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect_err("the repeated placement identity is refused");
 
     assert_eq!(image_assembly_error, ImageAssemblyError::DuplicatePlacement);
-    assert_eq!(cache.image_record_by_content_id.len(), 0);
-    assert_eq!(cache.retained_image_byte_count, 0);
-    assert_eq!(cache.painted_frame, None);
-    assert_eq!(cache.missing_painted_image_content_ids.len(), 0);
-    assert_eq!(cache.missing_placement_image_content_ids.len(), 0);
+    assert_eq!(image_cache.image_record_by_content_id.len(), 0);
+    assert_eq!(image_cache.retained_image_byte_count, 0);
+    assert_eq!(image_cache.painted_frame, None);
+    assert_eq!(image_cache.missing_painted_image_content_ids.len(), 0);
+    assert_eq!(image_cache.missing_placement_image_content_ids.len(), 0);
     assert_eq!(
-        cache
+        image_cache
             .pending_image_transfer
             .as_ref()
-            .map(|pending_image| pending_image.received_byte_count),
+            .map(|pending_image_transfer| pending_image_transfer.received_byte_count),
         None
     );
 }
 
 #[test]
 fn an_image_cache_reset_discards_complete_and_incomplete_connection_state() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut cache = ImageCache::new();
-    cache
+    let mut image_cache = ImageCache::new();
+    image_cache
         .adopt_painted_frame(Box::new(build_wire_frame(&expected_render_snapshot)))
         .expect("the placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
 
-    cache.clear_image_cache();
+    image_cache.clear_image_cache();
 
-    assert_eq!(cache.image_record_by_content_id.len(), 0);
-    assert_eq!(cache.retained_image_byte_count, 0);
-    assert_eq!(cache.painted_frame, None);
-    assert_eq!(cache.missing_painted_image_content_ids.len(), 0);
-    assert_eq!(cache.missing_placement_image_content_ids.len(), 0);
+    assert_eq!(image_cache.image_record_by_content_id.len(), 0);
+    assert_eq!(image_cache.retained_image_byte_count, 0);
+    assert_eq!(image_cache.painted_frame, None);
+    assert_eq!(image_cache.missing_painted_image_content_ids.len(), 0);
+    assert_eq!(image_cache.missing_placement_image_content_ids.len(), 0);
     assert_eq!(
-        cache
+        image_cache
             .pending_image_transfer
             .as_ref()
-            .map(|pending_image| pending_image.received_byte_count),
+            .map(|pending_image_transfer| pending_image_transfer.received_byte_count),
         None
     );
     assert_eq!(
-        cache.start_image_transfer(build_image_transfer(1)),
+        image_cache.start_image_transfer(build_image_transfer(1)),
         Err(ImageAssemblyError::MissingBaseFrame)
     );
 }
 
 #[test]
 fn an_image_chunk_with_a_wrong_offset_is_refused_exactly() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
-    let image_assembly_error = cache
+    let image_assembly_error = image_cache
         .accept_image_chunk(FrameImageChunk {
             image_transfer_id: 1,
             byte_offset: 1,
@@ -850,23 +877,23 @@ fn an_image_chunk_with_a_wrong_offset_is_refused_exactly() {
 
 #[test]
 fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes.clone()))
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame.clone()))
         .expect("the first placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the first transfer starts");
-    cache
+    image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the first image reads")
         .expect("the first image produces a redraw");
-    frame_bytes.pane_snapshots[0]
+    painted_frame.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
             cell_geometry: None,
@@ -878,8 +905,8 @@ fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
             column_count: 1,
             row_count: 1,
         });
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the two-placement frame reads");
     let oversized_image_transfer = FrameImageTransfer {
         image_content_id: 2,
@@ -894,7 +921,7 @@ fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
         image_byte_count: MAX_FRAME_IMAGE_TRANSFER_BYTE_COUNT,
     };
 
-    let image_assembly_error = cache
+    let image_assembly_error = image_cache
         .start_image_transfer(oversized_image_transfer)
         .expect_err("the retained and incoming records are over the limit");
     assert_eq!(
@@ -905,12 +932,12 @@ fn image_transfer_metadata_cannot_reserve_more_than_the_frame_limit() {
 
 #[test]
 fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    frame_bytes.pane_snapshots[0].image_placement_snapshots = (0..MAX_FRAME_IMAGE_TRANSFER_COUNT)
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    painted_frame.pane_snapshots[0].image_placement_snapshots = (0..MAX_FRAME_IMAGE_TRANSFER_COUNT)
         .map(|placement_index| FrameImagePlacement {
             cell_geometry: None,
             image_record: None,
@@ -923,7 +950,7 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
             row_count: 1,
         })
         .collect();
-    frame_bytes.pane_snapshots[1]
+    painted_frame.pane_snapshots[1]
         .image_placement_snapshots
         .push(FrameImagePlacement {
             cell_geometry: None,
@@ -936,10 +963,10 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
             column_count: 1,
             row_count: 1,
         });
-    let mut cache = ImageCache::new();
+    let mut image_cache = ImageCache::new();
 
-    let rebuilt_snapshot = cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let rebuilt_snapshot = image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("placements in distinct panes are accepted")
         .expect("unavailable placements need no image transfer");
 
@@ -959,12 +986,12 @@ fn image_placements_from_several_panes_do_not_share_one_pane_limit() {
 
 #[test]
 fn one_painted_frame_accepts_at_most_4096_image_transfers() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    frame_bytes.pane_snapshots[0]
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    painted_frame.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
             cell_geometry: None,
@@ -976,19 +1003,19 @@ fn one_painted_frame_accepts_at_most_4096_image_transfers() {
             column_count: 1,
             row_count: 1,
         });
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the placement frame reads");
-    cache.image_transfer_count = MAX_FRAME_IMAGE_TRANSFER_COUNT - 1;
-    cache
+    image_cache.image_transfer_count = MAX_FRAME_IMAGE_TRANSFER_COUNT - 1;
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("transfer 4096 starts");
-    cache
+    image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("transfer 4096 completes");
 
-    let image_assembly_error = cache
+    let image_assembly_error = image_cache
         .start_image_transfer(build_image_transfer(2))
         .expect_err("transfer 4097 is rejected");
 
@@ -1000,12 +1027,12 @@ fn one_painted_frame_accepts_at_most_4096_image_transfers() {
 
 #[test]
 fn an_unavailable_placement_does_not_hold_back_an_available_image() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    frame_bytes.pane_snapshots[0]
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    painted_frame.pane_snapshots[0]
         .image_placement_snapshots
         .push(FrameImagePlacement {
             cell_geometry: None,
@@ -1017,15 +1044,15 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
             column_count: 1,
             row_count: 1,
         });
-    let mut cache = ImageCache::new();
-    cache
-        .adopt_painted_frame(Box::new(frame_bytes))
+    let mut image_cache = ImageCache::new();
+    image_cache
+        .adopt_painted_frame(Box::new(painted_frame))
         .expect("the mixed placement frame reads");
-    cache
+    image_cache
         .start_image_transfer(build_image_transfer(1))
         .expect("the transfer starts");
 
-    let rebuilt_snapshot = cache
+    let rebuilt_snapshot = image_cache
         .accept_image_chunk(build_image_chunk(1))
         .expect("the available image completes")
         .expect("the available image produces a redraw");
@@ -1044,7 +1071,7 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
         None
     );
     assert_eq!(
-        cache.start_image_transfer(build_image_transfer(2)),
+        image_cache.start_image_transfer(build_image_transfer(2)),
         Err(ImageAssemblyError::UnknownTransfer {
             image_content_id: 2,
         })
@@ -1053,11 +1080,11 @@ fn an_unavailable_placement_does_not_hold_back_an_available_image() {
 
 #[test]
 fn stale_placement_image_transfers_are_drained_without_cache_mutation() {
-    let image_render_snapshot = build_render_snapshot(vec![
+    let image_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot_with_image(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let empty_render_snapshot = build_render_snapshot(vec![
+    let empty_render_snapshot = build_two_pane_render_snapshot(vec![
         build_empty_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
@@ -1098,18 +1125,18 @@ fn stale_placement_image_transfers_are_drained_without_cache_mutation() {
 
 #[test]
 fn the_tabs_gap_arrives_with_the_frame() {
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
-    let mut frame_bytes = build_wire_frame(&expected_render_snapshot);
-    frame_bytes
+    let mut painted_frame = build_wire_frame(&expected_render_snapshot);
+    painted_frame
         .session_snapshot
         .active_tab_snapshot
         .gap_cell_count = 2;
 
     assert_eq!(
-        super::build_render_snapshot(&frame_bytes)
+        build_render_snapshot(&painted_frame)
             .session_snapshot
             .active_tab_snapshot
             .gap_cell_count,
@@ -1119,10 +1146,8 @@ fn the_tabs_gap_arrives_with_the_frame() {
 
 #[test]
 fn a_soft_wrapped_row_arrives_still_soft_wrapped() {
-    // A shell printing a line longer than the pane is wide leaves the first row
-    // soft-wrapped and the last row hard-ended. Without the row-end state on the
-    // wire every row reads as hard, and copying the text out breaks the line at
-    // the wrap.
+    // Row 0 ends `RowEnd::Soft`, row 1 ends `RowEnd::SoftWide`, and row 2 ends
+    // `RowEnd::Hard`. The frame carries each row's end.
     let mut terminal_grid = Grid::from_rows(
         vec![
             vec![Cell::from_character('a', 1, Style::default())],
@@ -1140,13 +1165,12 @@ fn a_soft_wrapped_row_arrives_still_soft_wrapped() {
         grid: Arc::new(terminal_grid),
         view_row_offset: 0,
     });
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         content_pane_snapshot,
         build_empty_pane_snapshot(PaneId::new()),
     ]);
 
-    let received_snapshot =
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+    let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     let received_grid_view = received_snapshot.pane_snapshots[0]
         .terminal_grid_view
@@ -1160,28 +1184,26 @@ fn a_soft_wrapped_row_arrives_still_soft_wrapped() {
 
 #[test]
 fn a_highlight_scrolled_entirely_off_screen_arrives_as_no_highlight() {
-    // The session resolves the highlight to the rows this frame shows before
-    // it builds the pane, so a highlight above every visible row leaves
-    // `selection` empty while `has_selection` still reports it exists.
+    // A highlight above every visible row arrives with `selection_spans` set to
+    // `None` and `has_selection` set to `true`.
     let mut off_screen_pane_snapshot = build_content_pane_snapshot(PaneId::new());
     off_screen_pane_snapshot.selection_spans = None;
     off_screen_pane_snapshot.has_selection = true;
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         off_screen_pane_snapshot,
         build_empty_pane_snapshot(PaneId::new()),
     ]);
 
-    let received_snapshot =
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+    let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(received_snapshot.pane_snapshots[0].selection_spans, None);
     assert!(received_snapshot.pane_snapshots[0].has_selection);
     assert_eq!(received_snapshot, expected_render_snapshot);
 }
 
-/// The session decides this viewer's lock mode and whether mouse-select is on,
-/// so a painted frame is where both are read from, and the same frame cut down
-/// to [`MouseFrame`] is what the next mouse event is placed against.
+/// Applying a frame sets this viewer's lock mode and mouse-select state from the
+/// frame. A [`MouseFrame`] built from the same frame carries the frame's active
+/// tab and focused pane.
 #[test]
 fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     let (_events_sender, events_receiver) = std::sync::mpsc::sync_channel(8);
@@ -1199,7 +1221,7 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
     assert!(!client.is_mouse_selection_enabled());
 
-    let render_snapshot = build_render_snapshot(vec![
+    let render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
@@ -1221,9 +1243,9 @@ fn adopting_a_frame_takes_the_viewer_state_the_session_decided() {
     assert_eq!(mouse_frame.client_snapshot.focused_pane_id, focused_pane_id);
 }
 
-/// Each underline style has its own wire spelling, so a variant read back as
-/// another one shows up here. The cell also carries a default foreground, which
-/// is the one color whose wire spelling names no value.
+/// Each underline style reads back as itself. The cell also carries
+/// `Color::Default` as its foreground, the one color whose wire spelling names
+/// no value.
 #[test]
 fn every_underline_style_reads_back_as_itself() {
     for underline_style in [
@@ -1247,13 +1269,12 @@ fn every_underline_style_reads_back_as_itself() {
             grid: Arc::new(terminal_grid),
             view_row_offset: 0,
         });
-        let expected_render_snapshot = build_render_snapshot(vec![
+        let expected_render_snapshot = build_two_pane_render_snapshot(vec![
             content_pane_snapshot,
             build_empty_pane_snapshot(PaneId::new()),
         ]);
 
-        let received_snapshot =
-            super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+        let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
         let received_grid_view = received_snapshot.pane_snapshots[0]
             .terminal_grid_view
@@ -1290,13 +1311,12 @@ fn every_cursor_shape_reads_back_as_itself() {
     ] {
         let mut content_pane_snapshot = build_content_pane_snapshot(PaneId::new());
         content_pane_snapshot.cursor_snapshot.shape = cursor_shape;
-        let expected_render_snapshot = build_render_snapshot(vec![
+        let expected_render_snapshot = build_two_pane_render_snapshot(vec![
             content_pane_snapshot,
             build_empty_pane_snapshot(PaneId::new()),
         ]);
 
-        let received_snapshot =
-            super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+        let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
         assert_eq!(
             received_snapshot.pane_snapshots[0].cursor_snapshot.shape,
@@ -1306,8 +1326,8 @@ fn every_cursor_shape_reads_back_as_itself() {
     }
 }
 
-/// A run stands for every cell it covers, so a blank 80-column row travels as
-/// one run of 80 and rebuilds into 80 cells.
+/// A blank 80-column row travels as one run with `repeat_count` 80 and rebuilds
+/// into 80 cells.
 #[test]
 fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
     let mut content_pane_snapshot = build_content_pane_snapshot(PaneId::new());
@@ -1315,13 +1335,13 @@ fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
         grid: Arc::new(Grid::build_blank(1, 80, Style::default())),
         view_row_offset: 0,
     });
-    let expected_render_snapshot = build_render_snapshot(vec![
+    let expected_render_snapshot = build_two_pane_render_snapshot(vec![
         content_pane_snapshot,
         build_empty_pane_snapshot(PaneId::new()),
     ]);
 
-    let frame_bytes = build_wire_frame(&expected_render_snapshot);
-    let terminal_window = frame_bytes.pane_snapshots[0]
+    let painted_frame = build_wire_frame(&expected_render_snapshot);
+    let terminal_window = painted_frame.pane_snapshots[0]
         .terminal_window
         .as_ref()
         .expect("the pane carries a window");
@@ -1333,7 +1353,7 @@ fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
         80
     );
 
-    let received_snapshot = super::build_render_snapshot(&frame_bytes);
+    let received_snapshot = build_render_snapshot(&painted_frame);
     let received_grid_view = received_snapshot.pane_snapshots[0]
         .terminal_grid_view
         .as_ref()
@@ -1347,14 +1367,13 @@ fn a_blank_eighty_column_row_travels_as_one_run_and_rebuilds_eighty_cells() {
 /// none.
 #[test]
 fn a_frame_carrying_no_panes_reads_back_with_no_panes() {
-    let mut expected_render_snapshot = build_render_snapshot(vec![
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
     expected_render_snapshot.pane_snapshots = Vec::new();
 
-    let received_snapshot =
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+    let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(received_snapshot.pane_snapshots, Vec::<PaneSnapshot>::new());
     assert_eq!(received_snapshot, expected_render_snapshot);
@@ -1362,10 +1381,10 @@ fn a_frame_carrying_no_panes_reads_back_with_no_panes() {
 
 #[test]
 fn every_name_the_answering_session_chose_reads_back_filtered() {
-    // This process paints all four into its own terminal, and puts the session
-    // name and the focused pane's title inside an `OSC 0` window title.
+    // Each name reads back with its control characters removed: `BEL`, `ESC`,
+    // the 8-bit `CSI` (U+009B), and the right-to-left override (U+202E).
     let focused_pane_id = PaneId::new();
-    let mut expected_render_snapshot = build_render_snapshot(vec![
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(focused_pane_id),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
@@ -1382,8 +1401,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
     expected_render_snapshot.pane_snapshots[0].pane_title =
         Some(String::from("~/work\u{7}\u{1b}]0;owned\u{7}"));
 
-    let received_snapshot =
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+    let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(
         received_snapshot.session_snapshot.session_name,
@@ -1414,15 +1432,14 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
 #[test]
 fn a_name_past_the_reported_text_cap_reads_back_cut_to_it() {
     let reported_text_byte_limit = koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
-    let mut expected_render_snapshot = build_render_snapshot(vec![
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(PaneId::new()),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
     expected_render_snapshot.session_snapshot.session_name =
         "a".repeat(reported_text_byte_limit + 1);
 
-    let received_snapshot =
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+    let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     assert_eq!(
         received_snapshot.session_snapshot.session_name,
@@ -1432,10 +1449,10 @@ fn a_name_past_the_reported_text_cap_reads_back_cut_to_it() {
 
 #[test]
 fn a_pane_cell_holding_a_control_character_reads_back_holding_it() {
-    // A cell is the pane's own screen. The grid stores what the pane drew, and
-    // the renderer places each cell rather than writing it through.
+    // A grid cell keeps its control character. The frame does not filter cell
+    // text.
     let content_pane_id = PaneId::new();
-    let mut expected_render_snapshot = build_render_snapshot(vec![
+    let mut expected_render_snapshot = build_two_pane_render_snapshot(vec![
         build_content_pane_snapshot(content_pane_id),
         build_empty_pane_snapshot(PaneId::new()),
     ]);
@@ -1449,8 +1466,7 @@ fn a_pane_cell_holding_a_control_character_reads_back_holding_it() {
         view_row_offset: 0,
     });
 
-    let received_snapshot =
-        super::build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
+    let received_snapshot = build_render_snapshot(&build_wire_frame(&expected_render_snapshot));
 
     let received_grid_view = received_snapshot.pane_snapshots[0]
         .terminal_grid_view

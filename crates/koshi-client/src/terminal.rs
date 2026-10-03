@@ -81,12 +81,10 @@ const CELL_SIZE_QUERY_BYTES: &[u8] = b"\x1b[16t";
 /// event Koshi sends, encoded for that pane's own flags.
 ///
 /// Flags `8` and `16` together move ordinary typing into `CSI u` reports that
-/// carry the text the key produced, so typing `å` reaches a pane as `å`. Flag
-/// `8` alone would drop that text, and the specification defines `16` only
-/// beside `8`.
+/// carry the text the key produced: typing `å` reaches a pane as `å`.
 ///
 /// A terminal that ignores the push keeps reporting legacy bytes, and every
-/// key reaches a pane as it does today.
+/// key reaches a pane as those legacy bytes.
 const APPLICATION_MODE_SETUP_BYTES: &[u8] =
     b"\x1b[?1049h\x1b[>31u\x1b[?1003h\x1b[?1006h\x1b[?2004h";
 
@@ -108,15 +106,15 @@ const APPLICATION_MODE_CLEANUP_BYTES: &[u8] =
 /// slot in the retained placement snapshot.
 pub(crate) struct SnapshotWidget<'a> {
     /// The frame the session handed out.
-    pub(crate) snapshot: &'a RenderSnapshot,
+    pub(crate) render_snapshot: &'a RenderSnapshot,
     /// The colors this viewer paints koshi's chrome in.
     pub(crate) theme: &'a Theme,
     /// The hint-bar data for the mode this viewer is in.
-    pub(crate) hints: &'a KeymapHints,
+    pub(crate) keymap_hints: &'a KeymapHints,
     /// The multi-chord sequence this viewer has open.
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
     /// The pane this viewer's pointer is over, and where its tab strip sits.
-    pub(crate) chrome: ViewerChrome,
+    pub(crate) viewer_chrome: ViewerChrome,
     /// The region solve committed with the frame being painted.
     pub(crate) committed_regions: &'a CommittedRegions,
     /// The image mode selected for this outer terminal.
@@ -136,12 +134,12 @@ pub(crate) struct SnapshotWidget<'a> {
 impl Widget for SnapshotWidget<'_> {
     fn render(self, render_area: Rect, render_buffer: &mut Buffer) {
         render_frame(
-            self.snapshot,
+            self.render_snapshot,
             self.committed_regions,
             self.theme,
-            self.hints,
+            self.keymap_hints,
             self.pending_key_sequence,
-            self.chrome,
+            self.viewer_chrome,
             self.image_mode,
             self.available_image_placement_keys,
             self.placement_presentation,
@@ -157,7 +155,7 @@ impl Widget for SnapshotWidget<'_> {
                 draw_placement_target_outline(
                     placement_snapshot,
                     placement_display_snapshot,
-                    self.snapshot,
+                    self.render_snapshot,
                     placement_target,
                     self.theme,
                     self.committed_regions,
@@ -742,7 +740,9 @@ fn interpolate_coordinate(from_coordinate: u16, to_coordinate: u16, progress: f3
         .clamp(0.0, f32::from(u16::MAX)) as u16
 }
 
-/// Convert the viewer target into the pure layout target used for the draft.
+/// Convert a placement target into the layout crate's `PlacementTarget`:
+/// `Swap` stays `Swap`, and `Split` becomes `Insert` with the same anchor and
+/// direction.
 pub(crate) fn build_layout_placement_target(
     placement_target: &PanePlacementTarget,
 ) -> PlacementTarget {
@@ -967,8 +967,7 @@ impl GraphicsSupport {
     pub(crate) fn get_image_render_mode(self) -> ImageRenderMode {
         match self {
             Self::Unsupported => ImageRenderMode::Placeholder,
-            Self::Kitty => ImageRenderMode::Native,
-            Self::Iterm | Self::Sixel { .. } => ImageRenderMode::Native,
+            Self::Kitty | Self::Iterm | Self::Sixel { .. } => ImageRenderMode::Native,
         }
     }
 
@@ -1065,10 +1064,12 @@ impl CellSizeQuery {
         self.current_cell_size
     }
 
-    /// Invalidate or replace the measurement for a resized viewport.
+    /// Replace the measurement for a resized viewport: `measured_cell_size`, or
+    /// `None` while this attachment writes no terminal queries.
     ///
-    /// A pending reply is discarded because CSI 16t carries no request id. A
-    /// fresh request is needed only when the resize has no usable local metric.
+    /// A pending CSI 16t reply is marked for discard, and the call returns
+    /// `false`. With no reply pending, the call returns `true` when the resized
+    /// viewport has no measured cell size and a fresh request must be written.
     pub(crate) fn update_cell_size_for_resize(
         &mut self,
         measured_cell_size: Option<PixelCellSize>,
@@ -1241,14 +1242,14 @@ impl TerminalOwner {
     }
 
     /// Register panic-safe image cleanup and terminal restoration.
-    pub(crate) fn register_restore(&self, cleanup: &TerminalCleanupGuard) {
+    pub(crate) fn register_terminal_restore(&self, terminal_cleanup_guard: &TerminalCleanupGuard) {
         let terminal = Arc::clone(&self.terminal);
         let graphics_support = self.graphics_support;
         let is_shutdown_requested = Arc::clone(&self.is_shutdown_requested);
         let waker = self.waker.clone();
         let has_active_application_modes = Arc::clone(&self.has_active_application_modes);
         let is_image_cleanup_claimed = Arc::clone(&self.is_image_cleanup_claimed);
-        cleanup.register_cleanup(Box::new(move || {
+        terminal_cleanup_guard.register_cleanup(Box::new(move || {
             is_shutdown_requested.store(true, Ordering::Release);
             if let Some(waker) = &waker {
                 let _ = waker.wake();
@@ -1263,7 +1264,7 @@ impl TerminalOwner {
     }
 
     /// Enable terminal modes and start input delivery after Attach succeeds.
-    pub(crate) fn activate(
+    pub(crate) fn activate_terminal(
         &mut self,
         runtime_event_sender: mpsc::SyncSender<RuntimeEvent>,
         client_id: ClientId,
@@ -1326,7 +1327,7 @@ impl TerminalOwner {
     }
 
     /// Stop input delivery and restore the host terminal state.
-    pub(crate) fn shutdown(mut self) {
+    pub(crate) fn shutdown_terminal(mut self) {
         self.stop_terminal_owner();
     }
 
@@ -1362,10 +1363,10 @@ fn needs_terminal_device(is_input_terminal: bool, is_output_terminal: bool) -> b
 /// Probe only when standard output is the terminal that will receive images.
 fn resolve_graphics_support_for_output(
     is_output_terminal: bool,
-    probe: impl FnOnce() -> io::Result<TerminalProbe>,
+    run_terminal_probe: impl FnOnce() -> io::Result<TerminalProbe>,
 ) -> io::Result<TerminalProbe> {
     if is_output_terminal {
-        probe()
+        run_terminal_probe()
     } else {
         Ok(TerminalProbe::build_unsupported())
     }
@@ -1398,7 +1399,7 @@ fn lock_terminal(
 ) -> std::sync::MutexGuard<'_, Option<TerminalDevice>> {
     terminal_mutex
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poison_error| poison_error.into_inner())
 }
 
 /// Restore the shared terminal once, waiting for an in-progress terminal write.
@@ -1429,7 +1430,7 @@ fn try_restore_shared_terminal(
 ) {
     let mut terminal_guard = match shared_terminal.try_lock() {
         Ok(terminal_guard) => terminal_guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::Poisoned(poison_error)) => poison_error.into_inner(),
         Err(TryLockError::WouldBlock) => {
             write_fallback_terminal_cleanup(
                 graphics_support,
@@ -1503,7 +1504,7 @@ fn probe_terminal<EventSourceType: reader::EventSource, OutputWriter: Write>(
             break;
         }
         let probe_event = reader.read_matching_event(is_probe_event)?;
-        probe_replies.observe(probe_event);
+        probe_replies.record_probe_event(probe_event);
         if Instant::now() >= probe_deadline {
             break;
         }
@@ -1525,7 +1526,7 @@ struct ProbeReplies {
 
 impl ProbeReplies {
     /// Retain one parsed event that belongs to the capability probe.
-    fn observe(&mut self, probe_event: Event) {
+    fn record_probe_event(&mut self, probe_event: Event) {
         match probe_event {
             Event::KittyGraphicsReply(kitty_reply)
                 if kitty_reply.image_id == KITTY_QUERY_IMAGE_ID =>
@@ -1587,7 +1588,11 @@ impl ProbeReplies {
         }
     }
 
-    /// Build bounded Sixel support from the terminal's positive evidence.
+    /// Return Sixel support when the DA1 reply lists attribute `4`, the iTerm2
+    /// feature reply lists Sixel, or the geometry reply succeeded; otherwise
+    /// `None`. A palette reply below `2` colors returns `None`. The palette is
+    /// capped at `256` colors and is `2` when the palette reply failed or never
+    /// came. A geometry width or height of `0` means no limit.
     fn build_sixel_graphics_support(&self) -> Option<GraphicsSupport> {
         let is_sixel_advertised = self.supports_da1_sixel
             || self.supports_iterm_sixel
@@ -1650,7 +1655,8 @@ fn enable_terminal_modes<W: Write>(
 
 /// Request Shift mouse reports while pane placement owns the mouse gesture.
 /// The outer terminal may ignore this request. A successful write and flush
-/// records the requested mode so unchanged frames send no sequence.
+/// records the requested mode. A call whose mode equals the recorded mode
+/// writes nothing.
 pub(crate) fn update_shift_mouse_capture<W: Write>(
     writer: &mut W,
     should_request_shift_mouse_capture: bool,
@@ -1844,19 +1850,21 @@ fn compute_pixel_cell_size(window_size: WindowSize) -> Option<PixelCellSize> {
     )
 }
 
-/// Build the viewer half and apply `loaded_config`'s viewer-owned files, in one step.
+/// Build the viewer half and apply `loaded_config`'s viewer-owned files, in
+/// one step.
 ///
 /// `client_id` is the id this viewer's input events and commands carry.
-/// `viewport_size` is this terminal's size in cells. `frame_delivery_receiver` is the frame feed; a
-/// client owns no session, so the receiver it is handed has no sender and its
-/// frames arrive over the connection instead. `terminal_cleanup_guard` is the guard that
-/// restores the outer terminal.
+/// `viewport_size` is this terminal's size in cells. `frame_delivery_receiver`
+/// is the frame feed: the receiver a client is handed has no sender, and its
+/// frames arrive over the connection. `terminal_cleanup_guard` is the guard
+/// that restores the outer terminal.
 ///
-/// `loaded_config.app_config_layer` and `loaded_config.theme_config_layer` fold into the viewer's
-/// settings and chrome colors and always apply. `loaded_config.keybindings` is validated: a verdict
-/// other than [`Apply`](koshi_config::conflict::KeymapVerdict::Apply) logs a warning naming `koshi
-/// keys conflicts`, an `Apply` logs `"keybinding.kdl applied"`, and a `None` keymap layer logs
-/// nothing.
+/// `loaded_config.app_config_layer` and `loaded_config.theme_config_layer`
+/// fold into the viewer's settings and chrome colors and always apply.
+/// `loaded_config.keybindings_config_layer` is validated: a verdict other than
+/// [`Apply`](koshi_config::conflict::KeymapVerdict::Apply) logs a warning
+/// naming `koshi keys conflicts`, an `Apply` logs `"keybinding.kdl applied"`,
+/// and a `None` keymap layer logs nothing.
 pub(crate) fn build_client_with_loaded_config(
     client_id: ClientId,
     viewport_size: Size,
@@ -1873,7 +1881,7 @@ pub(crate) fn build_client_with_loaded_config(
     match viewer_client.load_startup_config(
         loaded_config.app_config_layer,
         loaded_config.theme_config_layer,
-        loaded_config.keybindings,
+        loaded_config.keybindings_config_layer,
     ) {
         Some(report) if report.get_verdict() != koshi_config::conflict::KeymapVerdict::Apply => {
             tracing::warn!("keybinding.kdl was not applied; run `koshi keys conflicts` to see why");
@@ -2070,11 +2078,11 @@ fn paint_frame_with_writer<B: Backend, W: Write>(
                         .filter(|_| !is_focused_pane_softened);
                 render_frame.render_widget(
                     SnapshotWidget {
-                        snapshot: displayed_snapshot,
+                        render_snapshot: displayed_snapshot,
                         theme: client.get_theme(),
-                        hints: &keymap_hints,
+                        keymap_hints: &keymap_hints,
                         pending_key_sequence: frame_paint.pending_key_sequence.as_ref(),
-                        chrome: frame_paint.chrome,
+                        viewer_chrome: frame_paint.chrome,
                         committed_regions,
                         image_mode,
                         available_image_placement_keys,
@@ -2138,6 +2146,9 @@ fn recover_synchronized_frame<W: Write>(writer: &mut W) {
     let _ = writer.flush();
 }
 
+/// Write a CUP sequence that moves the cursor to `cursor_position` (sent as
+/// 1-based row and column), or `ESC [ ? 25 l` that hides it when
+/// `cursor_position` is `None`.
 fn restore_cursor_state<W: Write>(
     writer: &mut W,
     cursor_position: Option<ratatui::layout::Position>,

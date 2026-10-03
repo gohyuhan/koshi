@@ -20,9 +20,9 @@
 //! left out while other panes keep their screens and the session keeps its layout.
 //!
 //! Example: a server holding two panes writes
-//! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":51234,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
+//! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":5000,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
 //! The next image reads the header, checks that descriptor 9 is still the master of `/dev/ttys009`,
-//! takes it and process 51234 back as that pane, then reads the body and puts the pane's screen
+//! takes it and process 5000 back as that pane, then reads the body and puts the pane's screen
 //! back under it.
 
 use std::collections::{HashMap, HashSet};
@@ -88,18 +88,14 @@ pub struct CarriedPane {
     /// the descriptor it is handed and takes the pane back only when the two
     /// agree. Always `None` on Windows.
     ///
-    /// `None` is also what a header written by a build that recorded no name
-    /// carries; the next image then reads the descriptor's kind alone.
-    #[serde(default)]
+    /// `None` makes the next image check the descriptor's kind alone.
     pub terminal_name: Option<String>,
     /// How the pane's child ended, when the writing process reaped it before it
     /// wrote this file. The next image reports this status and does not wait on
     /// the process id.
     ///
     /// `None` says the child was still running and the next image waits on it
-    /// itself. It is also what a header written by a build that recorded no
-    /// status carries.
-    #[serde(default)]
+    /// itself.
     pub exit_status: Option<ExitStatus>,
 }
 
@@ -224,9 +220,7 @@ struct PreviousCarriedPane {
     rows: u16,
     cols: u16,
     terminal_fd: Option<i32>,
-    #[serde(default)]
     terminal_name: Option<String>,
-    #[serde(default)]
     exit: Option<ExitStatus>,
 }
 
@@ -324,8 +318,8 @@ pub fn write_resume_file(
 /// [`read_resume_body`].
 ///
 /// This reads the current header or converts a header written with formats 1
-/// through 3. It leaves the body as raw JSON, so a caller can still take the
-/// panes back when their saved screens cannot be decoded.
+/// through 3. It leaves the body as raw JSON. The returned header names every
+/// carried pane even when the body cannot be decoded.
 ///
 /// # Errors
 /// Returns [`StorageError::Io`] when the file cannot be read, and
@@ -396,7 +390,7 @@ pub fn read_resume_header(
 /// alone, and a warning names `B`.
 ///
 /// # Errors
-/// Returns [`StorageError::Corrupt`] when `format` is outside
+/// Returns [`StorageError::Corrupt`] when `resume_format` is outside
 /// `RESUME_FORMAT_MIN..=RESUME_FORMAT`, and when the sessions, the carried quit
 /// or the map of pane states is not that format's shape.
 pub fn read_resume_body(

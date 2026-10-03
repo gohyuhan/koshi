@@ -9,10 +9,8 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Number, Value};
 
 use koshi_core::ids::{PaneId, SessionId};
-use koshi_core::process::PtySize;
 use koshi_session::session::state::Session;
 use koshi_storage::error::StorageError;
-use koshi_terminal::state::TerminalState;
 
 use super::{CarriedPaneState, CarriedQuit, ResumeBody, RESUME_FORMAT};
 
@@ -58,6 +56,11 @@ impl<'de> Deserialize<'de> for ParsedJsonObject<'de> {
         deserializer.deserialize_map(ParsedJsonObjectVisitor)
     }
 }
+
+/// The JSON field names whose array values pass through a migration as the
+/// original text, without a parse into one JSON number per byte.
+const OPAQUE_BYTE_ARRAY_FIELD_NAMES: [&str; 4] =
+    ["rgba", "rgba_bytes", "indices", "pixel_register_indices"];
 
 struct OpaqueByteArraySeed<'storage, 'de> {
     opaque_byte_arrays: &'storage mut Vec<&'de RawValue>,
@@ -124,10 +127,8 @@ impl<'de> DeserializeSeed<'de> for OpaqueByteArraySeed<'_, 'de> {
             fn visit_map<A: MapAccess<'de>>(self, mut json_map: A) -> Result<Value, A::Error> {
                 let mut json_fields = Map::new();
                 while let Some(field_name) = json_map.next_key::<String>()? {
-                    let json_field = if matches!(
-                        field_name.as_str(),
-                        "rgba" | "rgba_bytes" | "indices" | "pixel_register_indices"
-                    ) {
+                    let json_field = if OPAQUE_BYTE_ARRAY_FIELD_NAMES.contains(&field_name.as_str())
+                    {
                         let raw_field = json_map.next_value::<&'de RawValue>()?;
                         if raw_field.get().trim_start().starts_with('[') {
                             let array_index = self.opaque_byte_arrays.len();
@@ -179,20 +180,18 @@ impl Serialize for JsonWithOpaqueByteArrays<'_, '_> {
             Value::Object(json_fields) => {
                 let mut json_map = serializer.serialize_map(Some(json_fields.len()))?;
                 for (field_name, json_field) in json_fields {
-                    let opaque_array = if matches!(
-                        field_name.as_str(),
-                        "rgba" | "rgba_bytes" | "indices" | "pixel_register_indices"
-                    ) {
-                        json_field
-                            .as_array()
-                            .filter(|array| array.len() == 1)
-                            .and_then(|array| array[0].as_u64())
-                            .and_then(|array_index| {
-                                self.opaque_byte_arrays.get(array_index as usize)
-                            })
-                    } else {
-                        None
-                    };
+                    let opaque_array =
+                        if OPAQUE_BYTE_ARRAY_FIELD_NAMES.contains(&field_name.as_str()) {
+                            json_field
+                                .as_array()
+                                .filter(|array| array.len() == 1)
+                                .and_then(|array| array[0].as_u64())
+                                .and_then(|array_index| {
+                                    self.opaque_byte_arrays.get(array_index as usize)
+                                })
+                        } else {
+                            None
+                        };
                     if let Some(raw_array) = opaque_array {
                         json_map.serialize_entry(field_name, raw_array)?;
                     } else {
@@ -288,6 +287,15 @@ fn migrate_json_array_elements(
     Ok(())
 }
 
+/// The body fields besides `engines` that hold one entry per pane, keyed by
+/// pane id. Each pane's entries travel with its terminal through the steps.
+const ANCILLARY_PANE_FIELD_NAMES: [&str; 4] = [
+    "undecoded",
+    "graphics_events",
+    "graphics_transport",
+    "synchronized_output",
+];
+
 pub(super) fn migrate_resume_body(
     source_resume_format: u32,
     raw_resume_body: &str,
@@ -309,12 +317,7 @@ pub(super) fn migrate_resume_body(
     let terminal_engines = parse_json_object_fields(raw_terminal_engines.get(), "body.engines")?;
     let mut ancillary_pane_fields = BTreeMap::new();
     let mut repeated_pane_keys = terminal_engines.repeated_json_field_names;
-    for field_name in [
-        "undecoded",
-        "graphics_events",
-        "graphics_transport",
-        "synchronized_output",
-    ] {
+    for field_name in ANCILLARY_PANE_FIELD_NAMES {
         if let Some(raw_fields) = root_fields.get(field_name) {
             let ancillary_fields_for_panes =
                 parse_json_object_fields(raw_fields.get(), field_name)?;
@@ -333,42 +336,14 @@ pub(super) fn migrate_resume_body(
 
     let mut session_by_id = HashMap::with_capacity(sessions.len());
     for (session_key, raw_session) in sessions {
-        let mut opaque_byte_arrays = Vec::new();
-        let session = parse_json_fragment(raw_session.get(), &mut opaque_byte_arrays).map_err(
-            |parse_error| {
-                build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
-            },
-        )?;
-        let mut single_session_by_id = Map::new();
-        single_session_by_id.insert(session_key.clone(), session);
-        let mut body_fields = Map::new();
-        body_fields.insert("sessions".to_string(), Value::Object(single_session_by_id));
-        body_fields.insert("engines".to_string(), Value::Object(Map::new()));
-        let mut single_session_body = Value::Object(body_fields);
-        apply_resume_migrations(source_resume_format, &mut single_session_body)?;
-        let migrated_session = get_required_json_field(
-            get_json_object(&mut single_session_body, "body")?,
-            "session_by_id",
-            "body",
-        )?
-        .get(&session_key)
-        .ok_or_else(|| {
-            build_invalid_resume_error(format!("body.session_by_id.{session_key} is missing"))
-        })?;
+        let migrated_session_bytes =
+            migrate_previous_session_json(source_resume_format, &session_key, raw_session)?;
         let session_id = serde_json::from_value::<SessionId>(Value::String(session_key.clone()))
             .map_err(|parse_error| {
                 build_invalid_resume_error(format!(
                     "resume body has invalid session id {session_key}: {parse_error}"
                 ))
             })?;
-        let mut migrated_session_bytes = Vec::new();
-        write_migrated_json(
-            &mut migrated_session_bytes,
-            &JsonWithOpaqueByteArrays {
-                json_value: migrated_session,
-                opaque_byte_arrays: &opaque_byte_arrays,
-            },
-        )?;
         let migrated_session: Session =
             serde_json::from_slice(&migrated_session_bytes).map_err(|parse_error| {
                 build_invalid_resume_error(format!(
@@ -400,8 +375,8 @@ pub(super) fn migrate_resume_body(
         HashMap::with_capacity(terminal_engines.json_fields.len());
     for (pane_key, raw_terminal_engine) in terminal_engines.json_fields {
         let pane_id = match serde_json::from_value::<PaneId>(Value::String(pane_key.clone())) {
-            Ok(pane_id) => pane_id,
-            Err(_) => {
+            Ok(pane_id) if !repeated_pane_ids.contains(&pane_id) => pane_id,
+            _ => {
                 tracing::warn!(
                     pane_key = %pane_key,
                     "a carried pane state is keyed by no pane id or by one named twice; that pane comes back with a blank screen"
@@ -409,13 +384,6 @@ pub(super) fn migrate_resume_body(
                 continue;
             }
         };
-        if repeated_pane_ids.contains(&pane_id) {
-            tracing::warn!(
-                pane_key = %pane_key,
-                "a carried pane state is keyed by no pane id or by one named twice; that pane comes back with a blank screen"
-            );
-            continue;
-        }
         match migrate_previous_pane_state(
             source_resume_format,
             &pane_key,
@@ -439,12 +407,83 @@ pub(super) fn migrate_resume_body(
     })
 }
 
+/// Run every resume step from `source_resume_format` on the saved session
+/// `raw_session`, stored under `session_key`, and hand back the migrated
+/// session as JSON bytes in the current [`Session`] shape.
+///
+/// # Errors
+/// Returns an invalid-resume error when the session JSON cannot be read or a
+/// step cannot convert it.
+fn migrate_previous_session_json(
+    source_resume_format: u32,
+    session_key: &str,
+    raw_session: &RawValue,
+) -> Result<Vec<u8>, StorageError> {
+    let mut opaque_byte_arrays = Vec::new();
+    let session_json =
+        parse_json_fragment(raw_session.get(), &mut opaque_byte_arrays).map_err(|parse_error| {
+            build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
+        })?;
+    let mut single_session_by_id = Map::new();
+    single_session_by_id.insert(session_key.to_string(), session_json);
+    let mut body_fields = Map::new();
+    body_fields.insert("sessions".to_string(), Value::Object(single_session_by_id));
+    body_fields.insert("engines".to_string(), Value::Object(Map::new()));
+    let mut single_session_body = Value::Object(body_fields);
+    apply_resume_migrations(source_resume_format, &mut single_session_body)?;
+    let migrated_session = get_required_json_field(
+        get_json_object(&mut single_session_body, "body")?,
+        "session_by_id",
+        "body",
+    )?
+    .get(session_key)
+    .ok_or_else(|| {
+        build_invalid_resume_error(format!("body.session_by_id.{session_key} is missing"))
+    })?;
+    let mut migrated_session_bytes = Vec::new();
+    write_migrated_json(
+        &mut migrated_session_bytes,
+        &JsonWithOpaqueByteArrays {
+            json_value: migrated_session,
+            opaque_byte_arrays: &opaque_byte_arrays,
+        },
+    )?;
+    Ok(migrated_session_bytes)
+}
+
 fn migrate_previous_pane_state(
     source_resume_format: u32,
     pane_key: &str,
     raw_terminal_engine: &RawValue,
     ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
 ) -> Result<CarriedPaneState, StorageError> {
+    let migrated_pane_bytes = migrate_previous_pane_json(
+        source_resume_format,
+        pane_key,
+        raw_terminal_engine,
+        ancillary_pane_fields,
+    )?;
+    serde_json::from_slice(&migrated_pane_bytes).map_err(|parse_error| {
+        build_invalid_resume_error(format!(
+            "migrated pane {pane_key} is unreadable: {parse_error}"
+        ))
+    })
+}
+
+/// Run every resume step from `source_resume_format` on the saved terminal
+/// `raw_terminal_engine` of the pane stored under `pane_key`, together with
+/// that pane's entry in each of `ancillary_pane_fields`, and hand back the
+/// migrated pane as JSON bytes in the current [`CarriedPaneState`] shape.
+///
+/// # Errors
+/// Returns an invalid-resume error when the pane JSON cannot be read or a step
+/// cannot convert it.
+fn migrate_previous_pane_json(
+    source_resume_format: u32,
+    pane_key: &str,
+    raw_terminal_engine: &RawValue,
+    ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
+) -> Result<Vec<u8>, StorageError> {
     let mut opaque_byte_arrays = Vec::new();
     let terminal_engine = parse_json_fragment(raw_terminal_engine.get(), &mut opaque_byte_arrays)
         .map_err(|parse_error| {
@@ -492,11 +531,7 @@ fn migrate_previous_pane_state(
             opaque_byte_arrays: &opaque_byte_arrays,
         },
     )?;
-    serde_json::from_slice(&migrated_pane_bytes).map_err(|parse_error| {
-        build_invalid_resume_error(format!(
-            "migrated pane {pane_key} is unreadable: {parse_error}"
-        ))
-    })
+    Ok(migrated_pane_bytes)
 }
 
 fn parse_json_object_fields<'a>(
@@ -532,6 +567,14 @@ fn write_migrated_json(
     })
 }
 
+/// Runs the steps from `source_resume_format` up to [`RESUME_FORMAT`] on
+/// `resume_body`, in order. Step 1 converts format 1 to format 2. Step 2 adds
+/// the format-3 fields. Step 3 converts format 3 to format 4. A body saved at
+/// format 3 also gets the step-2 fields before step 3. Step 2 adds only the
+/// fields that are missing.
+///
+/// # Errors
+/// Returns an invalid-resume error when a step cannot convert `resume_body`.
 fn apply_resume_migrations(
     source_resume_format: u32,
     resume_body: &mut Value,
@@ -539,8 +582,13 @@ fn apply_resume_migrations(
     for migration_format in source_resume_format..RESUME_FORMAT {
         match migration_format {
             1 => migrate_resume_one_to_two(resume_body)?,
-            2 => migrate_resume_two_to_three(resume_body)?,
-            3 => migrate_resume_three_to_four(resume_body)?,
+            2 => migrate_resume_to_format_three_shape(resume_body)?,
+            3 => {
+                if source_resume_format == 3 {
+                    migrate_resume_to_format_three_shape(resume_body)?;
+                }
+                migrate_resume_three_to_four(resume_body)?;
+            }
             _ => {
                 return Err(build_invalid_resume_error(format!(
                     "no resume migration from format {migration_format}"
@@ -573,25 +621,85 @@ fn migrate_resume_one_to_two(resume_body: &mut Value) -> Result<(), StorageError
     })
 }
 
-fn migrate_resume_two_to_three(resume_body: &mut Value) -> Result<(), StorageError> {
-    let default_terminal = serde_json::to_value(TerminalState::from_pty_size(PtySize {
-        row_count: 1,
-        column_count: 1,
-    }))
-    .map_err(|encode_error| {
-        build_invalid_resume_error(format!("encode terminal defaults: {encode_error}"))
-    })?;
-    let default_terminal_fields = default_terminal
-        .as_object()
-        .ok_or_else(|| build_invalid_resume_error("terminal defaults must be an object"))?;
+/// The 16 VT340 Sixel register colors a format-3 terminal starts with, as RGB
+/// bytes. Registers 16 through 255 start black.
+const FORMAT_THREE_SIXEL_REGISTER_COLORS: [[u8; 3]; 16] = [
+    [0, 0, 0],
+    [51, 51, 204],
+    [204, 33, 33],
+    [51, 204, 51],
+    [204, 51, 204],
+    [51, 204, 204],
+    [204, 204, 51],
+    [135, 135, 135],
+    [66, 66, 66],
+    [84, 84, 153],
+    [153, 66, 66],
+    [84, 153, 84],
+    [153, 84, 153],
+    [84, 153, 153],
+    [153, 153, 84],
+    [204, 204, 204],
+];
+
+/// The number of Sixel registers in a format-3 terminal's `sixel_palette`.
+const FORMAT_THREE_SIXEL_REGISTER_COUNT: usize = 256;
+
+/// The terminal fields format 3 added, each with the value it takes in a body
+/// written before format 3: `cell_size` is `null`, every image list is empty,
+/// both next image ids are `1`, `sixel_palette` holds
+/// [`FORMAT_THREE_SIXEL_REGISTER_COLORS`] then black registers up to
+/// [`FORMAT_THREE_SIXEL_REGISTER_COUNT`], and `shell_integration_state` is
+/// `"Prompt"`.
+fn build_format_three_terminal_defaults() -> [(&'static str, Value); 11] {
+    let mut sixel_register_colors: Vec<Value> = FORMAT_THREE_SIXEL_REGISTER_COLORS
+        .iter()
+        .map(|register_color| serde_json::json!(register_color))
+        .collect();
+    sixel_register_colors.resize(
+        FORMAT_THREE_SIXEL_REGISTER_COUNT,
+        serde_json::json!([0, 0, 0]),
+    );
+    [
+        ("cell_size", Value::Null),
+        ("primary_image_placements", serde_json::json!([])),
+        ("primary_image_history", serde_json::json!([])),
+        ("alternate_image_placements", serde_json::json!([])),
+        ("kitty_images", serde_json::json!([])),
+        ("image_contents", serde_json::json!([])),
+        ("next_image_content_id", serde_json::json!(1)),
+        ("next_image_placement_id", serde_json::json!(1)),
+        ("sixel_palette", Value::Array(sixel_register_colors)),
+        ("shell_integration_state", serde_json::json!("Prompt")),
+        ("shell_integration_facts", serde_json::json!([])),
+    ]
+}
+
+fn migrate_resume_to_format_three_shape(resume_body: &mut Value) -> Result<(), StorageError> {
+    let format_three_terminal_defaults = build_format_three_terminal_defaults();
     let body_fields = get_json_object(resume_body, "body")?;
     let sessions = get_required_json_field(body_fields, "sessions", "body")?;
     migrate_json_object_members(sessions, "body.sessions", |session, session_path| {
-        let tabs = get_required_json_field(
-            get_json_object(session, session_path)?,
-            "tabs",
-            session_path,
+        let session_fields = get_json_object(session, session_path)?;
+        session_fields.remove("config_snapshot");
+        session_fields
+            .entry("start_locked")
+            .or_insert(Value::Bool(false));
+        let panes = get_required_json_field(session_fields, "panes", session_path)?;
+        let pane_records_by_id = get_required_json_field(
+            get_json_object(panes, "session.panes")?,
+            "records",
+            "session.panes",
         )?;
+        migrate_json_object_members(
+            pane_records_by_id,
+            "session.panes.records",
+            |pane_record, pane_record_path| {
+                get_json_object(pane_record, pane_record_path)?.remove("env");
+                Ok(())
+            },
+        )?;
+        let tabs = get_required_json_field(session_fields, "tabs", session_path)?;
         migrate_json_object_members(tabs, "session.tabs", |tab, tab_path| {
             let layout =
                 get_required_json_field(get_json_object(tab, tab_path)?, "layout", tab_path)?;
@@ -604,28 +712,10 @@ fn migrate_resume_two_to_three(resume_body: &mut Value) -> Result<(), StorageErr
         "body.engines",
         |terminal_engine, engine_path| {
             let engine_fields = get_json_object(terminal_engine, engine_path)?;
-            for field_name in [
-                "cell_size",
-                "primary_image_placements",
-                "primary_image_history",
-                "alternate_image_placements",
-                "kitty_images",
-                "image_contents",
-                "next_image_content_id",
-                "next_image_placement_id",
-                "sixel_palette",
-                "shell_integration_state",
-                "shell_integration_facts",
-            ] {
-                if !engine_fields.contains_key(field_name) {
-                    engine_fields.insert(
-                        field_name.to_string(),
-                        default_terminal_fields
-                            .get(field_name)
-                            .expect("terminal default is serialized")
-                            .clone(),
-                    );
-                }
+            for (field_name, default_value) in &format_three_terminal_defaults {
+                engine_fields
+                    .entry(*field_name)
+                    .or_insert_with(|| default_value.clone());
             }
             engine_fields
                 .entry("native_image_coverage")
@@ -645,29 +735,30 @@ fn migrate_resume_two_to_three(resume_body: &mut Value) -> Result<(), StorageErr
                 let screen = get_required_json_field(engine_fields, screen_name, engine_path)?;
                 let screen_fields = get_json_object(screen, screen_name)?;
                 if let Some(row_ends) = screen_fields.remove("row_ends") {
-                    let ends = row_ends.as_array().ok_or_else(|| {
+                    let row_ends = row_ends.as_array().ok_or_else(|| {
                         build_invalid_resume_error(format!(
                             "{screen_name}.row_ends must be an array"
                         ))
                     })?;
-                    let rows = get_required_json_field(screen_fields, "rows", screen_name)?
+                    let screen_rows = get_required_json_field(screen_fields, "rows", screen_name)?
                         .as_array()
                         .ok_or_else(|| {
                             build_invalid_resume_error(format!(
                                 "{screen_name}.rows must be an array"
                             ))
                         })?;
-                    if ends.len() != rows.len() {
+                    if row_ends.len() != screen_rows.len() {
                         return Err(build_invalid_resume_error(format!(
                             "{screen_name} has {} row ends for {} rows",
-                            ends.len(),
-                            rows.len()
+                            row_ends.len(),
+                            screen_rows.len()
                         )));
                     }
                     screen_fields.insert(
                         "row_meta".to_string(),
                         Value::Array(
-                            ends.iter()
+                            row_ends
+                                .iter()
                                 .map(|row_end| serde_json::json!({"end": row_end, "prompt": false}))
                                 .collect(),
                         ),
@@ -743,45 +834,39 @@ fn migrate_resume_three_to_four(resume_body: &mut Value) -> Result<(), StorageEr
     let terminal_engines = body_fields
         .remove("engines")
         .ok_or_else(|| build_invalid_resume_error("body.engines is missing"))?;
-    let mut pane_states = Map::new();
     let Value::Object(terminal_engines) = terminal_engines else {
         return Err(build_invalid_resume_error("body.engines must be an object"));
     };
-    for (pane_id, mut terminal_state) in terminal_engines {
-        migrate_terminal_state(&mut terminal_state, &format!("body.engines.{pane_id}"))?;
-        let mut carried_pane_state = Map::new();
-        carried_pane_state.insert("terminal_state".to_string(), terminal_state);
-        for (previous_field_name, current_field_name) in [
-            ("undecoded", "undecoded_bytes"),
-            ("graphics_events", "graphics_events"),
-            ("graphics_transport", "graphics_transport"),
-            ("synchronized_output", "synchronized_output"),
-        ] {
-            let mut pane_field = body_fields
-                .get(previous_field_name)
-                .and_then(Value::as_object)
-                .and_then(|pane_fields| pane_fields.get(&pane_id))
-                .cloned()
-                .unwrap_or_else(|| match previous_field_name {
-                    "undecoded" | "graphics_events" => Value::Array(Vec::new()),
-                    _ => Value::Null,
-                });
-            if previous_field_name == "graphics_transport" && !pane_field.is_null() {
-                migrate_graphics_transport(&mut pane_field, 0)?;
-            }
-            if previous_field_name == "graphics_events" {
-                migrate_graphics_events(&mut pane_field)?;
-            }
-            if previous_field_name == "synchronized_output" && !pane_field.is_null() {
-                migrate_synchronized_output(&mut pane_field)?;
-            }
-            carried_pane_state.insert(current_field_name.to_string(), pane_field);
+    let mut carried_pane_state_by_pane_key = Map::new();
+    for (pane_key, mut terminal_state) in terminal_engines {
+        migrate_terminal_state(&mut terminal_state, &format!("body.engines.{pane_key}"))?;
+        let undecoded_bytes = remove_pane_field(body_fields, "undecoded", &pane_key)
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let mut graphics_events = remove_pane_field(body_fields, "graphics_events", &pane_key)
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        migrate_graphics_events(&mut graphics_events)?;
+        let mut graphics_transport =
+            remove_pane_field(body_fields, "graphics_transport", &pane_key).unwrap_or(Value::Null);
+        if !graphics_transport.is_null() {
+            migrate_graphics_transport(&mut graphics_transport, 0)?;
         }
-        pane_states.insert(pane_id, Value::Object(carried_pane_state));
+        let mut synchronized_output =
+            remove_pane_field(body_fields, "synchronized_output", &pane_key).unwrap_or(Value::Null);
+        if !synchronized_output.is_null() {
+            migrate_synchronized_output(&mut synchronized_output)?;
+        }
+        let carried_pane_state = serde_json::json!({
+            "terminal_state": terminal_state,
+            "undecoded_bytes": undecoded_bytes,
+            "graphics_events": graphics_events,
+            "graphics_transport": graphics_transport,
+            "synchronized_output": synchronized_output,
+        });
+        carried_pane_state_by_pane_key.insert(pane_key, carried_pane_state);
     }
     body_fields.insert(
         "carried_pane_state_by_pane_id".to_string(),
-        Value::Object(pane_states),
+        Value::Object(carried_pane_state_by_pane_key),
     );
     for previous_field_name in [
         "undecoded",
@@ -799,6 +884,20 @@ fn migrate_resume_three_to_four(resume_body: &mut Value) -> Result<(), StorageEr
     Ok(())
 }
 
+/// Removes and returns the entry stored under `pane_key` in the body object
+/// field `field_name`. Returns `None` when the field is absent, is not an
+/// object, or holds no entry for `pane_key`.
+fn remove_pane_field(
+    body_fields: &mut Map<String, Value>,
+    field_name: &str,
+    pane_key: &str,
+) -> Option<Value> {
+    body_fields
+        .get_mut(field_name)
+        .and_then(Value::as_object_mut)
+        .and_then(|pane_fields| pane_fields.remove(pane_key))
+}
+
 fn migrate_session(session: &mut Value, json_path: &str) -> Result<(), StorageError> {
     let json_fields = get_json_object(session, json_path)?;
     rename_json_fields(
@@ -809,6 +908,9 @@ fn migrate_session(session: &mut Value, json_path: &str) -> Result<(), StorageEr
             ("start_locked", "should_start_locked"),
         ],
     );
+    json_fields
+        .entry("placement_revision")
+        .or_insert(Value::from(0));
     let tabs = get_required_json_field(json_fields, "tabs", json_path)?;
     migrate_json_object_members(tabs, "session.tabs", migrate_tab)?;
     let panes = get_required_json_field(json_fields, "panes", json_path)?;
@@ -930,6 +1032,15 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
     );
     json_fields.entry("cell_size").or_insert(Value::Null);
     json_fields.entry("pane_area").or_insert(Value::Null);
+    json_fields
+        .entry("placement_revision")
+        .or_insert(Value::from(0));
+    if let Some(cell_size) = json_fields
+        .get_mut("cell_size")
+        .filter(|cell_size| !cell_size.is_null())
+    {
+        migrate_pixel_cell_size(cell_size)?;
+    }
     migrate_size(get_required_json_field(
         json_fields,
         "viewport_size",
@@ -970,6 +1081,14 @@ fn migrate_size(size: &mut Value) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn migrate_pixel_cell_size(cell_size: &mut Value) -> Result<(), StorageError> {
+    rename_json_fields(
+        get_json_object(cell_size, "cell_size")?,
+        &[("width", "pixel_width"), ("height", "pixel_height")],
+    );
+    Ok(())
+}
+
 fn migrate_pane_area(pane_area: &mut Value) -> Result<(), StorageError> {
     if pane_area == "Starving" {
         return Ok(());
@@ -1005,6 +1124,22 @@ fn migrate_terminal_state(terminal_state: &mut Value, json_path: &str) -> Result
             ("replies", "device_query_replies"),
         ],
     );
+    if let Some(reported_working_directory) = json_fields
+        .get_mut("reported_working_directory")
+        .filter(|reported_working_directory| !reported_working_directory.is_null())
+    {
+        rename_json_field(
+            get_json_object(reported_working_directory, "reported_working_directory")?,
+            "path",
+            "working_directory_path",
+        );
+    }
+    if let Some(cell_size) = json_fields
+        .get_mut("cell_size")
+        .filter(|cell_size| !cell_size.is_null())
+    {
+        migrate_pixel_cell_size(cell_size)?;
+    }
     for screen_name in ["primary", "alternate"] {
         migrate_grid(get_required_json_field(
             json_fields,
@@ -1077,8 +1212,45 @@ fn migrate_cells(cells: &mut Value, json_path: &str) -> Result<(), StorageError>
             cell_fields,
             &[("ch", "character"), ("width", "display_width")],
         );
+        if let Some(cell_extra) = cell_fields
+            .get_mut("combining")
+            .filter(|cell_extra| !cell_extra.is_null())
+        {
+            migrate_cell_extra(cell_extra)?;
+        }
         migrate_style(get_required_json_field(cell_fields, "style", cell_path)?)
     })
+}
+
+fn migrate_cell_extra(cell_extra: &mut Value) -> Result<(), StorageError> {
+    let cell_extra_fields = get_json_object(cell_extra, "cell.combining")?;
+    if let Some(image_placeholder) = cell_extra_fields
+        .get_mut("image_placeholder")
+        .filter(|image_placeholder| !image_placeholder.is_null())
+    {
+        rename_json_fields(
+            get_json_object(image_placeholder, "cell.image_placeholder")?,
+            &[("row", "source_row"), ("column", "source_column")],
+        );
+    }
+    if let Some(image_fragments) = cell_extra_fields.get_mut("image_fragments") {
+        migrate_json_array_elements(
+            image_fragments,
+            "cell.image_fragments",
+            |image_fragment, fragment_path| {
+                rename_json_fields(
+                    get_json_object(image_fragment, fragment_path)?,
+                    &[
+                        ("source", "image_source_id"),
+                        ("row", "source_row_index"),
+                        ("column", "source_column_index"),
+                    ],
+                );
+                Ok(())
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate_row_metadata(metadata: &mut Value, json_path: &str) -> Result<(), StorageError> {
@@ -1101,7 +1273,16 @@ fn migrate_cursor(cursor: &mut Value) -> Result<(), StorageError> {
         .filter(|saved| !saved.is_null())
     {
         let saved_fields = get_json_object(saved, "cursor.saved")?;
-        rename_json_field(saved_fields, "col", "column");
+        rename_json_fields(
+            saved_fields,
+            &[("col", "column"), ("pending_wrap", "is_wrap_pending")],
+        );
+        saved_fields.insert("is_origin_mode_enabled".to_string(), Value::Bool(false));
+        migrate_render(get_required_json_field(
+            saved_fields,
+            "render",
+            "cursor.saved",
+        )?)?;
     }
     Ok(())
 }
@@ -1372,8 +1553,9 @@ fn migrate_image_record(image_record: &mut Value, has_image: bool) -> Result<(),
 }
 
 fn migrate_image_display(display: &mut Value) -> Result<(), StorageError> {
+    let display_fields = get_json_object(display, "image_display")?;
     rename_json_fields(
-        get_json_object(display, "image_display")?,
+        display_fields,
         &[
             ("width", "requested_width"),
             ("height", "requested_height"),
@@ -1391,6 +1573,15 @@ fn migrate_image_display(display: &mut Value) -> Result<(), StorageError> {
             ("quiet", "response_suppression_level"),
         ],
     );
+    for (field_name, default_value) in [
+        ("relative_image_id", Value::Null),
+        ("relative_placement_id", Value::Null),
+        ("relative_column_offset", Value::from(0)),
+        ("relative_row_offset", Value::from(0)),
+        ("response_suppression_level", Value::from(0)),
+    ] {
+        display_fields.entry(field_name).or_insert(default_value);
+    }
     Ok(())
 }
 
@@ -1543,11 +1734,11 @@ fn migrate_raster_plan(plan: &mut Value) -> Result<(), StorageError> {
         "full_size",
         "image_geometry",
     )?)?;
-    let offset = get_json_object(
+    let cell_offset = get_json_object(
         get_required_json_field(geometry, "cell_offset", "image_geometry")?,
         "image_offset",
     )?;
-    rename_json_fields(offset, &[("x", "column"), ("y", "row")]);
+    rename_json_fields(cell_offset, &[("x", "column"), ("y", "row")]);
     Ok(())
 }
 
@@ -1564,6 +1755,9 @@ fn migrate_animation(animation: &mut Value) -> Result<(), StorageError> {
                     ("gapless", "is_gapless"),
                 ],
             );
+            frame_fields
+                .entry("is_gapless")
+                .or_insert(Value::Bool(false));
             migrate_decoded_image(get_required_json_field(
                 frame_fields,
                 "decoded_image",

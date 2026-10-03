@@ -52,8 +52,9 @@ use koshi_ipc::remote_wire::{
     self, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow, MIN_REMOTE_PROTOCOL_VERSION,
     REMOTE_PROTOCOL_VERSION,
 };
-use koshi_ipc::router::SessionSelector;
+use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::transport::{FrameReader, FrameWriter};
+use serde_json::value::RawValue;
 
 use crate::error::CliError;
 use crate::talk::{self, build_ipc_unavailable_error, build_peer_refusal_error};
@@ -65,6 +66,10 @@ const SECRET_ENVIRONMENT_VARIABLE: &str = "KOSHI_REMOTE_SECRET";
 /// How long one dial has to open: the name lookup aside, the connect, the TLS
 /// handshake and the secret exchange share it.
 pub const DIAL_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
+
+/// How long a wait for a server that is restarting pauses between dials. Each
+/// dial runs the whole admission — TLS, the secret, and the scope check.
+pub const REMOTE_RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(250);
 
 /// How long the frames that join a client to a session on another machine have
 /// to arrive: the Attach, the session's Hello carried back through the bridge,
@@ -138,9 +143,9 @@ fn format_saved_server_label(saved_server: &SavedServer) -> String {
 #[derive(Debug)]
 pub struct RemoteLink {
     /// The frames the server sends.
-    pub reader: FrameReader,
+    pub frame_reader: FrameReader,
     /// The frames this client sends.
-    pub writer: FrameWriter,
+    pub frame_writer: FrameWriter,
     /// The sha256 of the certificate the server presented, as 64 lowercase
     /// hex characters.
     pub certificate_fingerprint: String,
@@ -151,6 +156,9 @@ pub struct RemoteLink {
 pub enum DialError {
     /// The path to the server failed, and dialling again can succeed.
     Unreachable(CliError),
+    /// The server's router answered that it is restarting into a new build,
+    /// and a dial after the restart can succeed.
+    Restarting(CliError),
     /// The server — or the pinned-certificate check — answered, and every
     /// identical dial after it gets the same answer.
     Refused(CliError),
@@ -160,7 +168,9 @@ pub enum DialError {
 impl From<DialError> for CliError {
     fn from(dial_error: DialError) -> Self {
         match dial_error {
-            DialError::Unreachable(cli_error) | DialError::Refused(cli_error) => cli_error,
+            DialError::Unreachable(cli_error)
+            | DialError::Restarting(cli_error)
+            | DialError::Refused(cli_error) => cli_error,
         }
     }
 }
@@ -172,12 +182,12 @@ pub enum Reach {
     Reached {
         /// The server's name when it has one, else its address.
         server_label: String,
-        /// The sessions, in the order the server holds them.
+        /// The sessions, in the order the server sent them.
         session_rows: Vec<RemoteSessionRow>,
     },
     /// The server answered with a refusal: it did not admit the saved secret,
-    /// it settled on a doorway version outside the range this build speaks, or
-    /// it refused the listing.
+    /// it settled on a remote protocol version outside the range this build
+    /// speaks, or it refused the listing.
     Refused {
         /// The server's name when it has one, else its address.
         server_label: String,
@@ -244,7 +254,7 @@ fn resolve_private_data_directory() -> Result<PathBuf, CliError> {
 /// what it held.
 ///
 /// The lock is taken again every 20 milliseconds for up to 5 seconds. A wait
-/// that runs out reports the other koshi rather than writing over it.
+/// that runs out returns an error naming the other koshi, and writes nothing.
 ///
 /// Nothing inside `update_store` may ask the user a question: every other
 /// koshi that changes the store waits for this one to finish.
@@ -253,9 +263,9 @@ fn resolve_private_data_directory() -> Result<PathBuf, CliError> {
 /// [`CliError::IpcUnavailable`] when the machine has no data directory, when
 /// the lock could not be taken, when the store could not be read, and when it
 /// could not be written. Whatever `update_store` reports, with nothing written.
-pub fn update_saved_server_store<T>(
-    update_store: impl FnOnce(&mut ServerStore) -> Result<T, CliError>,
-) -> Result<T, CliError> {
+pub fn update_saved_server_store<UpdateOutcome>(
+    update_store: impl FnOnce(&mut ServerStore) -> Result<UpdateOutcome, CliError>,
+) -> Result<UpdateOutcome, CliError> {
     let private_data_directory = resolve_private_data_directory()?;
     let saved_server_store_path = resolve_server_store_path(&private_data_directory);
     let store_lock_file = acquire_store_lock(
@@ -265,12 +275,12 @@ pub fn update_saved_server_store<T>(
     migrate_saved_server_file(&saved_server_store_path).map_err(build_saved_server_store_error)?;
     let mut saved_server_store = ServerStore::load_server_store_from_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
-    let store_update_response = update_store(&mut saved_server_store)?;
+    let store_update_outcome = update_store(&mut saved_server_store)?;
     saved_server_store
         .write_server_store_to_path(&saved_server_store_path)
         .map_err(build_saved_server_store_error)?;
     drop(store_lock_file);
-    Ok(store_update_response)
+    Ok(store_update_outcome)
 }
 
 /// Take the advisory lock on the file at `lock_file_path`, creating the file and the
@@ -281,9 +291,9 @@ pub fn update_saved_server_store<T>(
 /// file this call creates. On Windows both take the data directory's
 /// owner-scoped ACLs.
 ///
-/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up to `lock_wait_duration`.
-/// Dropping the returned file releases the lock, and so does the operating
-/// system when the process holding it dies.
+/// The attempt is repeated every [`STORE_LOCK_POLL_INTERVAL_DURATION`] for up
+/// to `lock_wait_duration`. Dropping the returned file releases the lock, and
+/// so does the operating system when the process holding it dies.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the directory or the file could not be
@@ -332,12 +342,12 @@ fn acquire_store_lock(
             lock_file_path.display()
         ))
     })?;
-    let deadline = Instant::now() + lock_wait_duration;
+    let lock_deadline = Instant::now() + lock_wait_duration;
     loop {
         match FileExt::try_lock(&lock_file) {
             Ok(()) => return Ok(lock_file),
             Err(TryLockError::WouldBlock) => {
-                if Instant::now() >= deadline {
+                if Instant::now() >= lock_deadline {
                     return Err(build_unavailable_error(
                         "another koshi is changing the saved servers; try again".to_string(),
                     ));
@@ -373,7 +383,7 @@ fn build_saved_server_store_error(ipc_error: IpcError) -> CliError {
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the selector matches no record and is not an
-/// address, so there is nothing to dial, and when it matches more than one.
+/// address, and when it matches more than one.
 pub fn resolve_server(server_selector_text: &str) -> Result<ServerReference, CliError> {
     let (_, saved_server_store) = load_saved_server_store()?;
     resolve_server_reference(
@@ -420,24 +430,27 @@ fn resolve_server_reference(
 /// Whether the selector has the `host:port` shape: a host before the last colon, and
 /// a port of decimal digits after it.
 ///
-/// A host holding a colon of its own must be bracketed, so a bare IPv6 literal
-/// is not an address. The port is digits alone: no sign and no spaces.
+/// A host holding a colon of its own must be bracketed: a bare IPv6 literal is
+/// not an address. The port is digits alone: no sign and no spaces.
 ///
 /// Example — `laptop.local:7654` and `[::1]:22` are addresses; `work`,
 /// `laptop.local`, `laptop.local:door`, `fe80::1` and `desk.local:+7654` are
 /// not.
 #[must_use]
 pub fn is_server_address(server_selector_text: &str) -> bool {
-    let Some((host, port)) = server_selector_text.rsplit_once(':') else {
+    let Some((host_text, port_text)) = server_selector_text.rsplit_once(':') else {
         return false;
     };
-    if host.is_empty() || port.is_empty() {
+    if host_text.is_empty() || port_text.is_empty() {
         return false;
     }
-    let host_is_shaped = !host.contains(':') || (host.starts_with('[') && host.ends_with(']'));
-    host_is_shaped
-        && port.bytes().all(|port_byte| port_byte.is_ascii_digit())
-        && port.parse::<u16>().is_ok()
+    let is_host_shaped =
+        !host_text.contains(':') || (host_text.starts_with('[') && host_text.ends_with(']'));
+    is_host_shaped
+        && port_text
+            .bytes()
+            .all(|port_byte| port_byte.is_ascii_digit())
+        && port_text.parse::<u16>().is_ok()
 }
 
 /// Refuse a saved name that is empty or has the `host:port` shape.
@@ -474,7 +487,7 @@ fn validate_save_as(saved_server_name: &str, server_address: &str) -> Result<(),
     validate_saved_server_name(saved_server_name)?;
     let (_, saved_server_store) = load_saved_server_store()?;
     if !saved_server_store.is_server_name_free(saved_server_name, server_address) {
-        let taken = saved_server_store
+        let owning_server_address = saved_server_store
             .saved_servers
             .iter()
             .find(|saved_server| {
@@ -485,7 +498,7 @@ fn validate_save_as(saved_server_name: &str, server_address: &str) -> Result<(),
             .unwrap_or_default();
         return Err(CliError::InvalidArgs {
             detail: format!(
-                "the name {saved_server_name} already belongs to {taken}; run `koshi remote forget {saved_server_name}` \
+                "the name {saved_server_name} already belongs to {owning_server_address}; run `koshi remote forget {saved_server_name}` \
                  first, or pick another name"
             ),
         });
@@ -504,7 +517,7 @@ fn validate_save_as(saved_server_name: &str, server_address: &str) -> Result<(),
 /// could not be read.
 pub fn resolve_server_connection_token(server_address: &str) -> Result<ConnectionToken, CliError> {
     let secret_text = match std::env::var(SECRET_ENVIRONMENT_VARIABLE) {
-        Ok(secret) => secret,
+        Ok(environment_secret_text) => environment_secret_text,
         Err(_) => read_terminal_secret(&format!("secret for {server_address}: "))?,
     };
     let trimmed_secret_text = secret_text.trim();
@@ -554,10 +567,10 @@ fn read_terminal_secret(prompt: &str) -> Result<String, CliError> {
     if crossterm::terminal::enable_raw_mode().is_err() {
         return read_terminal_line();
     }
-    let secret_input = read_hidden_terminal_line(&mut io::stdin().lock());
+    let hidden_line_read = read_hidden_terminal_line(&mut io::stdin().lock());
     let _ = crossterm::terminal::disable_raw_mode();
     println!();
-    secret_input.map_err(build_prompt_error)
+    hidden_line_read.map_err(build_prompt_error)
 }
 
 /// Read one line from standard input, as the terminal echoes it.
@@ -640,7 +653,7 @@ fn build_input_ended_error() -> CliError {
 /// # Errors
 /// [`DialError::Unreachable`] when the connection could not be opened or the
 /// exchange ran out of time. [`DialError::Refused`] when the certificate
-/// changed, the server did not admit the secret, the doorway version it
+/// changed, the server did not admit the secret, the remote protocol version it
 /// settled on is one this build does not speak, or it answered something else.
 pub fn connect_remote_server(
     server_address: &str,
@@ -667,8 +680,8 @@ pub fn connect_remote_server(
         .map_err(classify_dial_failure)?;
     validate_remote_server_answer(server_address, &remote_server_answer)?;
     Ok(RemoteLink {
-        reader: frame_reader,
-        writer: frame_writer,
+        frame_reader,
+        frame_writer,
         certificate_fingerprint,
     })
 }
@@ -686,9 +699,9 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
     }
 }
 
-/// `Ok(())` when `remote_server_frame` is a `Welcome` carrying a doorway version between
-/// [`MIN_REMOTE_PROTOCOL_VERSION`] and [`REMOTE_PROTOCOL_VERSION`], else the
-/// [`DialError::Refused`] to report.
+/// `Ok(())` when `remote_server_frame` is a `Welcome` carrying a remote
+/// protocol version between [`MIN_REMOTE_PROTOCOL_VERSION`] and
+/// [`REMOTE_PROTOCOL_VERSION`], else the [`DialError::Refused`] to report.
 ///
 /// A `Refused` frame carrying
 /// [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) reads as a
@@ -696,10 +709,10 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
 /// refusal message is the server's own sentence, filtered by
 /// [`sanitize_reported_text`], with `server_address` after it.
 ///
-/// Every refusal built here carries [`CliError::Runtime`], which is what
+/// Every refusal built here carries [`CliError::Runtime`].
 /// [`probe_saved_server`] reads a [`DialError::Refused`] carrying
-/// [`CliError::IpcUnavailable`]
-/// as the pinned-certificate check.
+/// [`CliError::IpcUnavailable`] as the pinned-certificate check, and one
+/// carrying [`CliError::Runtime`] as a server refusal.
 ///
 /// Example — a `Refused` frame carrying `"the session is gone"` from
 /// `desk.local:7654` reads `"the session is gone (server desk.local:7654)"`.
@@ -721,9 +734,9 @@ fn validate_remote_server_answer(
         } => {
             Err(DialError::Refused(CliError::Runtime {
                 detail: format!(
-                    "server {server_address} settled on remote doorway {remote_protocol_version}, which this \
-                     koshi does not speak: it speaks {MIN_REMOTE_PROTOCOL_VERSION} to \
-                     {REMOTE_PROTOCOL_VERSION}"
+                    "server {server_address} settled on remote protocol version \
+                     {remote_protocol_version}, which this koshi does not speak: it speaks \
+                     {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}"
                 ),
             }))
         }
@@ -818,9 +831,10 @@ pub fn connect_saved_server(
                 DIAL_TIMEOUT_DURATION,
                 reply_timeout,
             )?;
-            let now = SystemTime::now();
+            let connection_opened_at = SystemTime::now();
             let store_update_result = update_saved_server_store(|saved_server_store| {
-                saved_server_store.mark_server_used(&saved_server_record.server_address, now);
+                saved_server_store
+                    .mark_server_used(&saved_server_record.server_address, connection_opened_at);
                 if saved_server_record.certificate_fingerprint.is_none() {
                     saved_server_store.pin_certificate_fingerprint(
                         &saved_server_record.server_address,
@@ -835,7 +849,7 @@ pub fn connect_saved_server(
             let mut updated_saved_server = saved_server_record.clone();
             updated_saved_server.certificate_fingerprint =
                 Some(remote_link.certificate_fingerprint.clone());
-            updated_saved_server.last_used_at = Some(now);
+            updated_saved_server.last_used_at = Some(connection_opened_at);
             Ok((remote_link, updated_saved_server))
         }
         ServerReference::New { server_address } => {
@@ -851,14 +865,14 @@ pub fn connect_saved_server(
                 DIAL_TIMEOUT_DURATION,
                 reply_timeout,
             )?;
-            let now = SystemTime::now();
+            let connection_opened_at = SystemTime::now();
             let new_saved_server = SavedServer {
                 server_name: save_as.map(str::to_string),
                 server_address: server_address.clone(),
                 connection_token,
                 certificate_fingerprint: Some(remote_link.certificate_fingerprint.clone()),
-                added_at: now,
-                last_used_at: Some(now),
+                added_at: connection_opened_at,
+                last_used_at: Some(connection_opened_at),
             };
             update_saved_server_store(|saved_server_store| {
                 saved_server_store
@@ -895,12 +909,15 @@ fn find_pinned_certificate_fingerprint(
 /// server's own sentence filtered by [`sanitize_reported_text`], and
 /// [`CliError::IpcUnavailable`] when the exchange failed or the server
 /// answered something else.
-pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRow>, CliError> {
-    link.writer
+pub fn list_remote_sessions(
+    remote_link: &mut RemoteLink,
+) -> Result<Vec<RemoteSessionRow>, CliError> {
+    remote_link
+        .frame_writer
         .send(&RemoteClientFrame::List)
         .map_err(build_ipc_unavailable_error)?;
-    match link
-        .reader
+    match remote_link
+        .frame_reader
         .recv::<RemoteServerFrame>()
         .map_err(build_ipc_unavailable_error)?
     {
@@ -914,28 +931,122 @@ pub fn list_remote_sessions(link: &mut RemoteLink) -> Result<Vec<RemoteSessionRo
     }
 }
 
-/// Ask to attach to `selector` and hand the connection's two halves back.
+/// Ask to attach to `session_selector` and hand the connection's two halves
+/// back.
 ///
 /// The bytes after this belong to that session's own server. The machine
 /// serving it sends the session-plane Hello carrying that session's endpoint
-/// token and the versions this build named, so the next frame the caller reads
+/// token and the versions this build named. The next frame the caller reads
 /// is that session server's Hello answer.
 ///
 /// # Errors
 /// [`CliError::IpcUnavailable`] when the request could not be sent.
 pub fn attach_remote_session(
-    link: RemoteLink,
-    selector: SessionSelector,
+    remote_link: RemoteLink,
+    session_selector: SessionSelector,
 ) -> Result<(FrameReader, FrameWriter), CliError> {
     let RemoteLink {
-        reader, mut writer, ..
-    } = link;
-    writer
-        .send(&RemoteClientFrame::Attach {
-            session_selector: selector,
-        })
+        frame_reader,
+        mut frame_writer,
+        ..
+    } = remote_link;
+    frame_writer
+        .send(&RemoteClientFrame::Attach { session_selector })
         .map_err(build_ipc_unavailable_error)?;
-    Ok((reader, writer))
+    Ok((frame_reader, frame_writer))
+}
+
+/// Read the frame that answers the Hello the serving machine wrote on this
+/// caller's behalf after an Attach for `session_selector`.
+///
+/// Two senders write this one frame: the serving machine writes a refusal when
+/// it does not attach the caller, and otherwise the session server's own
+/// answer arrives unread through the bridge. The frame is held as its JSON
+/// text and decoded as a refusal first, then as an [`IncomingResponse`].
+///
+/// Example — a `Refused` frame carrying [`ROUTER_RESTARTING_MESSAGE`] is
+/// [`DialError::Restarting`]; one carrying any other sentence for the selector
+/// `quiet-lake` is [`DialError::Refused`] reading `the token this server saved
+/// does not reach session quiet-lake`.
+///
+/// # Errors
+/// [`DialError::Unreachable`] when the frame could not be read at all.
+/// [`DialError::Restarting`] for a refusal carrying
+/// [`ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`] for every other
+/// refusal, and for an answer that decodes as neither.
+pub fn read_forwarded_hello_answer(
+    frame_reader: &mut FrameReader,
+    session_selector: &SessionSelector,
+) -> Result<IncomingResponse, DialError> {
+    let hello_answer_frame: Box<RawValue> = frame_reader
+        .recv()
+        .map_err(|ipc_error| DialError::Unreachable(build_ipc_unavailable_error(ipc_error)))?;
+    if let Ok(RemoteServerFrame::Refused {
+        message: refusal_message,
+    }) = serde_json::from_str(hello_answer_frame.get())
+    {
+        if refusal_message == ROUTER_RESTARTING_MESSAGE {
+            return Err(DialError::Restarting(CliError::IpcUnavailable {
+                detail: refusal_message,
+            }));
+        }
+        return Err(DialError::Refused(CliError::Runtime {
+            detail: format!(
+                "the token this server saved does not reach session {}",
+                format_session_selector_name(session_selector)
+            ),
+        }));
+    }
+    serde_json::from_str(hello_answer_frame.get()).map_err(|response_parse_error| {
+        DialError::Refused(CliError::IpcUnavailable {
+            detail: format!(
+                "the server answered with a frame this attach cannot read: {response_parse_error}"
+            ),
+        })
+    })
+}
+
+/// How a selector reads in a message: the id itself, or the display name.
+fn format_session_selector_name(session_selector: &SessionSelector) -> String {
+    match session_selector {
+        SessionSelector::SessionId(session_id) => session_id.to_string(),
+        SessionSelector::SessionName(session_name) => session_name.clone(),
+    }
+}
+
+/// Run `dial_connection`, and dial again while the server's router restarts.
+///
+/// A first dial that is not [`DialError::Restarting`] is the answer. After
+/// one, the pause of [`REMOTE_RESTART_POLL_INTERVAL_DURATION`] comes before
+/// each dial, and a dial that is [`DialError::Restarting`] or
+/// [`DialError::Unreachable`] is dialed again until `restart_window_duration`
+/// has passed since that first answer. A dial while the restarting router's
+/// port is closed is [`DialError::Unreachable`].
+///
+/// Example — a remote `koshi attach work` whose router answers restarting
+/// pauses 250 ms, finds the port closed, pauses again, and joins `work` once
+/// the restarted router answers.
+///
+/// # Errors
+/// The first answer that is neither of the two, or the last dial's answer once
+/// the window has passed.
+pub fn dial_through_router_restart<Joined>(
+    restart_window_duration: Duration,
+    mut dial_connection: impl FnMut() -> Result<Joined, DialError>,
+) -> Result<Joined, DialError> {
+    let first_dial_result = dial_connection();
+    if !matches!(first_dial_result, Err(DialError::Restarting(_))) {
+        return first_dial_result;
+    }
+    let restart_deadline = Instant::now() + restart_window_duration;
+    loop {
+        std::thread::sleep(REMOTE_RESTART_POLL_INTERVAL_DURATION);
+        match dial_connection() {
+            Err(DialError::Restarting(_) | DialError::Unreachable(_))
+                if Instant::now() < restart_deadline => {}
+            dial_result => return dial_result,
+        }
+    }
 }
 
 /// Submit `command` to the session `session_id` on the server argument, and
@@ -969,9 +1080,9 @@ pub fn submit_remote_command(
     };
     match send_remote_ipc_request(server_reference, session_id, command_request)? {
         IpcResult::CommandResult(command_result) => Ok(talk::filter_rejection_hint(command_result)),
-        IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
-        unexpected_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+        IpcResult::Error(ipc_error_payload) => Err(build_peer_refusal_error(&ipc_error_payload)),
+        unexpected_ipc_result => {
+            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_ipc_result))
         }
     }
 }
@@ -982,7 +1093,7 @@ pub fn submit_remote_command(
 /// Sends [`IpcRequestKind::Discovery`] over one remote connection of its own.
 /// The answer passes through
 /// [`filter_session_overview_text`](crate::discovery::filter_session_overview_text) before it
-/// is handed back, so the session name, the tab names, and each pane's title,
+/// is handed back: the session name, the tab names, and each pane's title,
 /// working directory and argv are filtered.
 ///
 /// # Errors
@@ -1001,9 +1112,9 @@ pub fn fetch_remote_overview(
             crate::discovery::filter_session_overview_text(&mut session_overview);
             Ok(session_overview)
         }
-        IpcResult::Error(refusal) => Err(build_peer_refusal_error(&refusal)),
-        unexpected_result => {
-            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+        IpcResult::Error(ipc_error_payload) => Err(build_peer_refusal_error(&ipc_error_payload)),
+        unexpected_ipc_result => {
+            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_ipc_result))
         }
     }
 }
@@ -1011,18 +1122,28 @@ pub fn fetch_remote_overview(
 /// One request against one remote session: dial, attach, settle the version
 /// from the Hello answer the server sent on this caller's behalf, then send
 /// the IPC request and read its answer.
+///
+/// The dial, the Attach and the Hello answer run through
+/// [`dial_through_router_restart`] with
+/// [`RESTART_WINDOW_DURATION`](koshi_ipc::endpoint::RESTART_WINDOW_DURATION):
+/// a server whose router is restarting is dialed again until it has
+/// restarted or the window has passed.
 fn send_remote_ipc_request(
     server_reference: &ServerReference,
     session_id: SessionId,
     ipc_request: IpcRequest,
 ) -> Result<IpcResult, CliError> {
-    let (remote_link, _) =
-        connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
-    let (mut frame_reader, mut frame_writer) =
-        attach_remote_session(remote_link, SessionSelector::SessionId(session_id))?;
-
-    let hello_response: IncomingResponse =
-        frame_reader.recv().map_err(build_ipc_unavailable_error)?;
+    let session_selector = SessionSelector::SessionId(session_id);
+    let (mut frame_reader, mut frame_writer, hello_response) =
+        dial_through_router_restart(koshi_ipc::endpoint::RESTART_WINDOW_DURATION, || {
+            let (remote_link, _) =
+                connect_saved_server(server_reference, None, Some(REPLY_TIMEOUT_DURATION))?;
+            let (mut frame_reader, frame_writer) =
+                attach_remote_session(remote_link, session_selector.clone())
+                    .map_err(DialError::Unreachable)?;
+            let hello_response = read_forwarded_hello_answer(&mut frame_reader, &session_selector)?;
+            Ok((frame_reader, frame_writer, hello_response))
+        })?;
     talk::parse_session_hello_version(hello_response)?;
 
     frame_writer
@@ -1034,10 +1155,10 @@ fn send_remote_ipc_request(
 }
 
 /// Ask every saved server for its sessions at once, and return inside
-/// `timeout` whatever the servers do.
+/// `reach_timeout` whatever the servers do.
 ///
-/// `timeout` is one deadline over the whole call, not a budget each server
-/// gets. Each record is asked on its own thread. A thread still running at
+/// `reach_timeout` is one deadline over the whole call, not a budget each
+/// server gets. Each record is asked on its own thread. A thread still running at
 /// the deadline is never joined; it writes no file.
 ///
 /// At most 16 records are asked. The rest are named on stderr and left out.
@@ -1052,8 +1173,8 @@ fn send_remote_ipc_request(
 /// record comes back as exactly one entry, sorted by server name. A store that
 /// cannot be read reads as no saved servers.
 #[must_use]
-pub fn reach_all_saved_servers(timeout: Duration) -> Vec<Reach> {
-    let deadline = Instant::now() + timeout;
+pub fn reach_all_saved_servers(reach_timeout: Duration) -> Vec<Reach> {
+    let reach_deadline = Instant::now() + reach_timeout;
     let Ok((_, saved_server_store)) = load_saved_server_store() else {
         return Vec::new();
     };
@@ -1084,7 +1205,7 @@ pub fn reach_all_saved_servers(timeout: Duration) -> Vec<Reach> {
         let spawn_result = std::thread::Builder::new()
             .name("koshi-remote-reach".to_string())
             .spawn(move || {
-                let _ = reach_sender.send(probe_saved_server(&saved_server_record, deadline));
+                let _ = reach_sender.send(probe_saved_server(&saved_server_record, reach_deadline));
             });
         if spawn_result.is_ok() {
             requested_server_count += 1;
@@ -1094,12 +1215,12 @@ pub fn reach_all_saved_servers(timeout: Duration) -> Vec<Reach> {
 
     let mut received_reaches = Vec::with_capacity(requested_server_count);
     while received_reaches.len() < requested_server_count {
-        let remaining_wait_duration = deadline.saturating_duration_since(Instant::now());
+        let remaining_wait_duration = reach_deadline.saturating_duration_since(Instant::now());
         if remaining_wait_duration.is_zero() {
             break;
         }
         match reach_receiver.recv_timeout(remaining_wait_duration) {
-            Ok(reach_result) => received_reaches.push(reach_result),
+            Ok(received_reach) => received_reaches.push(received_reach),
             Err(_) => break,
         }
     }
@@ -1128,10 +1249,10 @@ fn complete_reach_results(
     mut received_reaches: Vec<Reach>,
     mut requested_server_labels: Vec<String>,
 ) -> Vec<Reach> {
-    for reach_result in &received_reaches {
+    for received_reach in &received_reaches {
         if let Some(removal_index) = requested_server_labels
             .iter()
-            .position(|server_label| server_label == get_reach_server_label(reach_result))
+            .position(|server_label| server_label == get_reach_server_label(received_reach))
         {
             requested_server_labels.remove(removal_index);
         }
@@ -1154,20 +1275,21 @@ fn complete_reach_results(
 /// A failure carrying [`CliError::Runtime`] — every refusal the server sent —
 /// is [`Reach::Refused`]. A dial refused with [`CliError::IpcUnavailable`] is
 /// the pinned-certificate check and is [`Reach::CertificateChanged`]:
-/// [`classify_dial_failure`] is the only place that builds one, and every refusal
-/// [`validate_remote_server_answer`] builds carries [`CliError::Runtime`]. Every other failure
-/// is [`Reach::Unreachable`].
+/// [`classify_dial_failure`] is the only place that builds one, and every
+/// refusal [`validate_remote_server_answer`] builds carries
+/// [`CliError::Runtime`]. Every other failure is [`Reach::Unreachable`].
 ///
-/// The time left until `deadline` is given to the dial and again to the reply,
-/// so this returns up to twice that after `deadline` passes. Writes no file.
-fn probe_saved_server(saved_server_record: &SavedServer, deadline: Instant) -> Reach {
+/// The time left until `reach_deadline` is given to the dial and again to the
+/// reply: this returns up to twice that after `reach_deadline` passes. Writes no
+/// file.
+fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant) -> Reach {
     let server_label = format_saved_server_label(saved_server_record);
     let Some(pinned_certificate_fingerprint) =
         saved_server_record.certificate_fingerprint.as_deref()
     else {
         return Reach::Unchecked { server_label };
     };
-    let remaining_wait_duration = deadline.saturating_duration_since(Instant::now());
+    let remaining_wait_duration = reach_deadline.saturating_duration_since(Instant::now());
     let mut remote_link = match connect_remote_server(
         &saved_server_record.server_address,
         &saved_server_record.connection_token,
@@ -1199,11 +1321,12 @@ fn probe_saved_server(saved_server_record: &SavedServer, deadline: Instant) -> R
     }
 }
 
-/// The sentence naming a doorway frame the request cannot produce, in the
-/// words [`talk::PeerWords::build_unexpected_wire_name_error`] uses for a session-plane one.
+/// The sentence naming a remote frame the request cannot produce, in the
+/// words [`talk::PeerWords::build_unexpected_wire_name_error`] uses for a
+/// session-plane one.
 ///
-/// `server_address` is the address dialled or `"the server"`; `remote_frame_name` is the
-/// [`RemoteServerFrame`] variant that came back. `("desk.local:7654",
+/// `server_address` is the address dialled or `"the server"`;
+/// `remote_frame_name` is the [`RemoteServerFrame`] variant that came back. `("desk.local:7654",
 /// "Sessions")` gives `desk.local:7654 answered with an unexpected Sessions
 /// reply`.
 fn format_unexpected_remote_answer(server_address: &str, remote_frame_name: &str) -> String {

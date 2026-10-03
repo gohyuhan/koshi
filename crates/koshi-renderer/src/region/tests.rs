@@ -1,21 +1,17 @@
-//! Tests for the two chrome-row inputs: assembling either one twice borrows
-//! the same data both times and copies nothing behind it, and the compiled-in
-//! region solve keeps one rectangle per region down to a zero-size viewport.
+//! Tests for the compiled-in region solve, which keeps one rectangle per
+//! region down to a zero-size viewport, and for the tabline inputs a frame
+//! borrows from its snapshot.
 
 use super::*;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, SessionId, TabId};
-use koshi_core::key::{Key, KeyChord, ModFlags};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
 use crate::snapshot::{
-    ClientSnapshot, CommittedRegions, HintBinding, Reconnecting, RenderSnapshot, SessionSnapshot,
-    TabMetadata, TabSnapshot, ViewerChrome,
+    ClientSnapshot, CommittedRegions, Reconnecting, RenderSnapshot, SessionSnapshot, TabMetadata,
+    TabSnapshot, ViewerChrome,
 };
 
 /// A frame of one session named `one`, holding one tab named `first` with no
@@ -62,24 +58,6 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
             lock_mode: LockMode::Normal,
             is_mouse_selection_enabled: false,
         },
-    }
-}
-
-/// Hints holding one binding: `<C-l>` labeled `Lock`.
-fn build_region_test_keymap_hints() -> KeymapHints {
-    KeymapHints {
-        hint_bindings: Arc::new(vec![HintBinding {
-            key_sequence: KeySequence::from_first_and_rest(
-                KeyChord::from_parts(ModFlags::CTRL, Key::Char('l')),
-                Vec::new(),
-            ),
-            action_display_name: "Lock".to_string(),
-            is_user_authored: false,
-            is_pinned: false,
-        }]),
-        prefix_labels: Arc::new(BTreeMap::new()),
-        removed_key_sequences: Arc::new(BTreeSet::new()),
-        is_reverted_to_defaults: false,
     }
 }
 
@@ -222,63 +200,7 @@ fn solve_core_regions_keeps_a_rectangle_per_region_on_short_viewports() {
 }
 
 #[test]
-fn assembling_statusline_inputs_twice_shares_every_allocation() {
-    let keymap_hints = build_region_test_keymap_hints();
-    let pending_key_sequence = KeySequence::from_first_and_rest(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
-        Vec::new(),
-    );
-
-    let first_statusline_inputs = StatuslineInputs {
-        keymap_hints: &keymap_hints,
-        pending_key_sequence: Some(&pending_key_sequence),
-        is_recovery_notice_visible: false,
-    };
-    let second_statusline_inputs = StatuslineInputs {
-        keymap_hints: &keymap_hints,
-        pending_key_sequence: Some(&pending_key_sequence),
-        is_recovery_notice_visible: false,
-    };
-
-    assert!(
-        Arc::ptr_eq(
-            &first_statusline_inputs.keymap_hints.hint_bindings,
-            &second_statusline_inputs.keymap_hints.hint_bindings,
-        ),
-        "hint_bindings was copied"
-    );
-    assert!(
-        Arc::ptr_eq(
-            &first_statusline_inputs.keymap_hints.prefix_labels,
-            &second_statusline_inputs.keymap_hints.prefix_labels,
-        ),
-        "prefix_labels was copied"
-    );
-    assert!(
-        Arc::ptr_eq(
-            &first_statusline_inputs.keymap_hints.removed_key_sequences,
-            &second_statusline_inputs.keymap_hints.removed_key_sequences,
-        ),
-        "removed_key_sequences was copied"
-    );
-    assert!(
-        std::ptr::eq(
-            first_statusline_inputs.keymap_hints,
-            second_statusline_inputs.keymap_hints,
-        ),
-        "keymap_hints was copied"
-    );
-    assert!(
-        std::ptr::eq(
-            first_statusline_inputs.pending_key_sequence.unwrap(),
-            second_statusline_inputs.pending_key_sequence.unwrap(),
-        ),
-        "pending_key_sequence was copied"
-    );
-}
-
-#[test]
-fn assembling_tabline_inputs_twice_borrows_each_shared_field() {
+fn tabline_inputs_borrow_the_session_and_copy_the_client_and_viewer_state() {
     let mut render_snapshot = build_region_test_render_snapshot();
     render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
     render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
@@ -292,67 +214,35 @@ fn assembling_tabline_inputs_twice_borrows_each_shared_field() {
         ..ViewerChrome::default()
     };
 
-    let first_tabline_inputs = TablineInputs {
-        session_name: &render_snapshot.session_snapshot.session_name,
-        tabs_metadata: &render_snapshot.session_snapshot.tabs_metadata,
-        lock_mode: render_snapshot.client_snapshot.lock_mode,
-        is_mouse_selection_enabled: render_snapshot.client_snapshot.is_mouse_selection_enabled,
-        reconnecting: viewer_chrome.reconnecting,
-        tabline_offset: viewer_chrome.tabline_offset,
-    };
-    let second_tabline_inputs = TablineInputs {
-        session_name: &render_snapshot.session_snapshot.session_name,
-        tabs_metadata: &render_snapshot.session_snapshot.tabs_metadata,
-        lock_mode: render_snapshot.client_snapshot.lock_mode,
-        is_mouse_selection_enabled: render_snapshot.client_snapshot.is_mouse_selection_enabled,
-        reconnecting: viewer_chrome.reconnecting,
-        tabline_offset: viewer_chrome.tabline_offset,
-    };
-
-    assert_eq!(first_tabline_inputs.session_name, "one");
-    assert_eq!(first_tabline_inputs.tabs_metadata[0].tab_name, "first");
-    assert_eq!(first_tabline_inputs.lock_mode, LockMode::Locked);
-    assert!(first_tabline_inputs.is_mouse_selection_enabled);
-    assert_eq!(
-        first_tabline_inputs.reconnecting,
-        Some(Reconnecting {
-            attempt: 3,
-            retry_in_seconds: 8,
-        })
-    );
-    assert_eq!(first_tabline_inputs.tabline_offset, Some(2));
-    assert!(
-        std::ptr::eq(
-            first_tabline_inputs.session_name,
-            second_tabline_inputs.session_name,
-        ),
-        "session name was copied"
-    );
-    assert!(
-        std::ptr::eq(
-            first_tabline_inputs.tabs_metadata,
-            second_tabline_inputs.tabs_metadata,
-        ),
-        "tabs_metadata were copied"
-    );
-    assert_eq!(
-        first_tabline_inputs.lock_mode,
-        second_tabline_inputs.lock_mode
-    );
-    assert_eq!(
-        first_tabline_inputs.is_mouse_selection_enabled,
-        second_tabline_inputs.is_mouse_selection_enabled
-    );
-    assert_eq!(
-        first_tabline_inputs.reconnecting,
-        second_tabline_inputs.reconnecting
-    );
-    assert_eq!(
-        first_tabline_inputs.tabline_offset,
-        second_tabline_inputs.tabline_offset
-    );
-
-    // The frame yields the same value, field for field.
     let frame_layout = render_snapshot.build_frame_layout(viewer_chrome);
-    assert_eq!(first_tabline_inputs, frame_layout.get_tabline_inputs());
+    let tabline_inputs = frame_layout.get_tabline_inputs();
+
+    assert_eq!(
+        tabline_inputs,
+        TablineInputs {
+            session_name: "one",
+            tabs_metadata: &render_snapshot.session_snapshot.tabs_metadata,
+            lock_mode: LockMode::Locked,
+            is_mouse_selection_enabled: true,
+            reconnecting: Some(Reconnecting {
+                attempt: 3,
+                retry_in_seconds: 8,
+            }),
+            tabline_offset: Some(2),
+        }
+    );
+    assert!(
+        std::ptr::eq(
+            tabline_inputs.session_name,
+            render_snapshot.session_snapshot.session_name.as_str(),
+        ),
+        "the session name is borrowed from the snapshot"
+    );
+    assert!(
+        std::ptr::eq(
+            tabline_inputs.tabs_metadata,
+            render_snapshot.session_snapshot.tabs_metadata.as_slice(),
+        ),
+        "the tab metadata is borrowed from the snapshot"
+    );
 }

@@ -110,14 +110,14 @@ fn endpoint_file_write_display_names_the_path_and_detail() {
 }
 
 #[test]
-fn advert_write_display_names_the_marker_and_detail() {
-    let ipc_error = IpcError::AdvertWrite {
-        advert_marker_path: "/tmp/koshi/501/session-1".to_string(),
+fn advertisement_marker_write_display_names_the_marker_and_detail() {
+    let ipc_error = IpcError::AdvertisementMarkerWrite {
+        advertisement_marker_path: "/tmp/koshi/501/session-1".to_string(),
         error_detail: "No such file or directory (os error 2)".to_string(),
     };
     assert_eq!(
         ipc_error.to_string(),
-        "advert marker /tmp/koshi/501/session-1 could not be written: \
+        "advertisement marker /tmp/koshi/501/session-1 could not be written: \
          No such file or directory (os error 2)"
     );
 }
@@ -168,7 +168,7 @@ fn each_remote_file_displays_as_its_own_name() {
         "remote access certificate"
     );
     assert_eq!(
-        RemoteFile::RemoteAccessMark.to_string(),
+        RemoteFile::RemoteAccessRecord.to_string(),
         "remote access record"
     );
     assert_eq!(
@@ -204,7 +204,7 @@ fn a_remote_file_names_which_file_it_is_as_well_as_its_path() {
     );
     assert_eq!(
         IpcError::RemoteFileWrite {
-            remote_file: RemoteFile::RemoteAccessMark,
+            remote_file: RemoteFile::RemoteAccessRecord,
             remote_file_path: "/var/lib/koshi/remote/enabled".to_string(),
             error_detail: "permission denied".to_string(),
         }

@@ -1,11 +1,10 @@
 //! Who besides the user who started a session may reach it.
 //!
 //! Every test starts the real `koshi` binary as one session's server —
-//! `serve-session` with `--runtime-dir` — and then reaches that session the way
-//! a user would. Each side gets its own temporary home directory holding the
-//! `koshi.kdl` that side reads, so the sessions here never meet the one a
-//! developer is running. The directories sit under a short base because a Unix
-//! socket path has an operating-system length cap.
+//! `serve-session` with `--runtime-dir` — under a temporary home directory, and
+//! then reaches that session the way a user would. Each side's home holds the
+//! `koshi.kdl` that side reads. The directories sit under `/tmp` on Unix and
+//! under the system temporary directory on Windows.
 //!
 //! `allow-other-users` in `koshi.kdl` is the switch. Off, the session's socket
 //! stays inside the private runtime directory, which carries mode `0700`, so no
@@ -20,20 +19,19 @@
 //! Windows takes the same switch through a different shape: a named pipe has no
 //! filesystem location, so an empty marker file in the shared directory is what
 //! names a session other local users may reach, and `%ProgramData%` is where
-//! that directory sits. A second Windows account cannot be made from a test, so
-//! the Windows tests cover the marker, a connection from this user, and the
-//! discovery walk over the shared directory. They reach the runtime directory
-//! and the shared directory through explicit paths, because Windows resolves
-//! the config directory through a Win32 call no environment variable redirects.
+//! that directory sits. The Windows tests cover the marker, a connection from
+//! this user, and `koshi list-sessions` over the shared directory. Each session
+//! server takes the runtime directory and the switch on the command line, and
+//! `ProgramData` names the folder that holds the shared directory. `APPDATA`
+//! and `LOCALAPPDATA` point inside the test home, which holds the `koshi.kdl`
+//! the listing reads.
 
-use std::io::Read;
-use std::path::Path;
-#[cfg(any(unix, windows))]
-use std::path::PathBuf;
-use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Stdio;
+#[cfg(windows)]
+use std::time::Instant;
 
-#[cfg(unix)]
 use koshi_core::command::CliExitCode;
 #[cfg(windows)]
 use koshi_core::command::{Command, CommandEnvelope, CommandSource};
@@ -47,158 +45,50 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, PROTOCOL_VERSION};
 #[cfg(windows)]
 use koshi_ipc::transport::Connection;
+#[cfg(unix)]
 use tempfile::TempDir;
 
 mod common;
 
-#[cfg(any(unix, windows))]
-use common::start_koshi_process;
+#[cfg(windows)]
+use common::session_connection::build_hello_request;
 #[cfg(unix)]
-use common::{build_koshi_command_at, build_koshi_command_under_home, copy_koshi_binary};
+use common::{
+    build_koshi_command_at, copy_koshi_binary, resolve_config_directory_under_home,
+    start_session_server_under_home,
+};
+use common::{
+    build_koshi_command_under_home, build_short_test_directory,
+    resolve_runtime_directory_under_home, write_test_config, SESSION_SERVER_NAME,
+};
+#[cfg(windows)]
+use common::{SessionProcess, POLL_INTERVAL_DURATION, WAIT_DURATION};
+use koshi_test_support::fixtures::start_program_process;
 
-/// How long a poll waits for something a started process has to do before the
-/// test calls it a failure.
-const WAIT_DURATION: Duration = Duration::from_secs(20);
-
-/// How long a poll pauses between attempts.
-const ATTACH_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
-
-/// The display name the session server is started under, standing in for the
-/// one the router generates.
-const SESSION_SERVER_NAME: &str = "workspace";
-
-/// A session server the test started. Dropping it ends that server, so a
-/// failed assertion leaves nothing running.
-struct RunningSession {
-    child_process: Child,
+/// Run `process_command` to its end and hand back its exit status and both output
+/// streams. Starting goes through [`start_program_process`], which waits out a program
+/// file the operating system reports as busy.
+fn run_koshi_command(process_command: &mut std::process::Command) -> std::process::Output {
+    start_program_process(process_command)
+        .wait_with_output()
+        .expect("the koshi binary runs to its end")
 }
 
-impl RunningSession {
-    /// Whether the server is still up, and its exit status plus what it wrote
-    /// to its error stream once it is not — for a failure message.
-    fn format_process_status(&mut self) -> String {
-        let Some(exit_status) = self
-            .child_process
-            .try_wait()
-            .expect("the session server's state can be read")
-        else {
-            return "it is still running".to_string();
-        };
-        let mut stderr = String::new();
-        if let Some(stderr_pipe) = self.child_process.stderr.as_mut() {
-            let _ = stderr_pipe.read_to_string(&mut stderr);
-        }
-        format!("it exited {exit_status}: {}", stderr.trim())
-    }
-}
-
-impl Drop for RunningSession {
-    fn drop(&mut self) {
-        let _ = self.child_process.kill();
-        let _ = self.child_process.wait();
-    }
-}
-
-/// Wait for the endpoint file the session server writes once its socket is
-/// bound, and hand it back. Fails the test once [`WAIT_DURATION`] has passed with
-/// nothing advertised, naming why the server is gone when it is.
-fn wait_for_session_endpoint(
-    session_process: &mut RunningSession,
-    runtime_directory: &Path,
-    session_id: SessionId,
-) -> EndpointFile {
-    let endpoint_file_path =
-        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if let Ok(endpoint) = EndpointFile::load_from_path(&endpoint_file_path) {
-            return endpoint;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no session server advertised {session_id}; {}",
-            session_process.format_process_status()
-        );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// Wait for `session_process`'s process to exit, and hand back whether it did inside
-/// [`WAIT_DURATION`].
-fn wait_for_session_server_exit(session_process: &mut RunningSession) -> bool {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if session_process
-            .child_process
-            .try_wait()
-            .expect("the session server's state can be read")
-            .is_some()
-        {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
-    }
+/// The exact `koshi list-sessions` table for one session: the header row, then
+/// that session's id and name. Each column is padded to its widest cell and
+/// separated by two spaces, with no trailing spaces.
+fn render_single_session_listing(session_id: SessionId) -> String {
+    let session_id_text = session_id.to_string();
+    let session_name_column_width = SESSION_SERVER_NAME.len().max("name".len());
+    format!(
+        "{:session_id_column_width$}  {:session_name_column_width$}  server\n{session_id_text}  {SESSION_SERVER_NAME:session_name_column_width$}  local\n",
+        "id",
+        "name",
+        session_id_column_width = session_id_text.len(),
+    )
 }
 
 // --- Unix ---
-
-/// A fresh home directory for the `koshi` processes a test starts to derive
-/// their runtime and config directories from. Removed when the test drops it.
-///
-/// The name is one letter and six random characters, so the home is
-/// `/tmp/k` plus six characters — 12 bytes — and the directory a `koshi`
-/// started under it serves is `<home_directory>/run`, 16 bytes. The longest name these
-/// tests bind in that directory is the session socket, `session-<uuid>.sock`
-/// at 49 bytes, which makes the bound path 66 bytes against the 103 bytes a
-/// Unix socket address holds.
-#[cfg(unix)]
-fn build_test_home_directory() -> TempDir {
-    tempfile::Builder::new()
-        .prefix("k")
-        .tempdir_in("/tmp")
-        .expect("a temporary home directory")
-}
-
-/// A fresh directory to stand in for the machine-wide shared directory, under a
-/// short base for the same length cap. The session server creates this user's
-/// directory inside it and binds the socket there.
-#[cfg(unix)]
-fn build_test_shared_directory_base() -> TempDir {
-    TempDir::new_in("/tmp").expect("a temporary shared session directory")
-}
-
-/// The runtime directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
-/// serves: `run/` inside the home directory.
-#[cfg(unix)]
-fn resolve_runtime_directory_under_home(home_directory: &Path) -> PathBuf {
-    home_directory.join("run")
-}
-
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
-/// reads: macOS derives it from the home directory alone.
-#[cfg(target_os = "macos")]
-fn resolve_config_directory_under_home(home_directory: &Path) -> PathBuf {
-    home_directory.join("Library/Application Support/koshi")
-}
-
-/// The config directory a `koshi` started by [`build_koshi_command_under_home`] with `home_directory`
-/// reads: `.config/koshi` inside the home directory.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_config_directory_under_home(home_directory: &Path) -> PathBuf {
-    home_directory.join(".config/koshi")
-}
-
-/// Write `config_text` as the `koshi.kdl` a process started under `home_directory` reads.
-#[cfg(unix)]
-fn write_test_config(home_directory: &Path, config_text: &str) {
-    let config_directory = resolve_config_directory_under_home(home_directory);
-    std::fs::create_dir_all(&config_directory).expect("a config directory under the test home");
-    std::fs::write(config_directory.join("koshi.kdl"), config_text)
-        .expect("the config file is written");
-}
 
 /// A `koshi.kdl` with the switch on, sharing sessions through `shared_directory_base`.
 #[cfg(unix)]
@@ -242,7 +132,7 @@ fn set_config_read_permissions_for_every_user(home_directory: &Path) {
         .expect("the config file opens to every local user");
 }
 
-/// The permission bits of `path`, without the file-type bits.
+/// The permission bits of `file_path`, without the file-type bits.
 #[cfg(unix)]
 fn get_file_permission_mode(file_path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
@@ -290,7 +180,7 @@ fn get_nobody_user_and_group_ids() -> Option<(u32, u32)> {
 fn build_koshi_binary_for_every_user() -> (TempDir, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
 
-    let test_home_directory = build_test_home_directory();
+    let test_home_directory = build_short_test_directory();
     std::fs::set_permissions(
         test_home_directory.path(),
         std::fs::Permissions::from_mode(0o755),
@@ -315,51 +205,6 @@ fn build_koshi_command_as_user(
     let mut process_command = build_koshi_command_at(binary_path, home_directory);
     process_command.gid(group_id).uid(user_id);
     process_command
-}
-
-/// Run `process_command` to its end and hand back its exit status and both output
-/// streams. Starting goes through [`start_koshi_process`], which waits out a program
-/// file the operating system reports as busy.
-#[cfg(unix)]
-fn run_koshi_command(process_command: &mut std::process::Command) -> std::process::Output {
-    start_koshi_process(process_command)
-        .wait_with_output()
-        .expect("the koshi binary runs to its end")
-}
-
-/// Start one session's server under `home_directory`, so it reads the `koshi.kdl` written
-/// there rather than the developer's own.
-#[cfg(unix)]
-fn start_session_server_under(
-    home_directory: &Path,
-    runtime_directory: &Path,
-    session_id: SessionId,
-) -> RunningSession {
-    let child_process = start_koshi_process(
-        build_koshi_command_under_home(home_directory)
-            .arg("serve-session")
-            .arg(session_id.to_string())
-            .arg(SESSION_SERVER_NAME)
-            .arg("--runtime-dir")
-            .arg(runtime_directory)
-            .stdout(Stdio::null()),
-    );
-    RunningSession { child_process }
-}
-
-/// The exact `koshi list-sessions` table for one session: the header row, then
-/// that session's id and name. Each column is padded to its widest cell and
-/// separated by two spaces, with no trailing spaces.
-#[cfg(unix)]
-fn render_single_session_listing(session_id: SessionId) -> String {
-    let session_id_text = session_id.to_string();
-    let session_name_column_width = SESSION_SERVER_NAME.len().max("name".len());
-    format!(
-        "{:session_id_column_width$}  {:session_name_column_width$}  server\n{session_id_text}  {SESSION_SERVER_NAME:session_name_column_width$}  local\n",
-        "id",
-        "name",
-        session_id_column_width = session_id_text.len(),
-    )
 }
 
 /// The answer `koshi server-version --format json` gives when the only server
@@ -395,19 +240,19 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
         return;
     };
 
-    let shared_directory_base = build_test_shared_directory_base();
+    let shared_directory_base = build_short_test_directory();
     let config_text = build_switched_on_config(shared_directory_base.path());
 
-    let owner_home = build_test_home_directory();
+    let owner_home = build_short_test_directory();
     write_test_config(owner_home.path(), &config_text);
     let owner_runtime_directory = resolve_runtime_directory_under_home(owner_home.path());
     std::fs::create_dir_all(&owner_runtime_directory)
         .expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(owner_home.path(), &owner_runtime_directory, session_id);
+        start_session_server_under_home(owner_home.path(), &owner_runtime_directory, session_id);
     let endpoint_file =
-        wait_for_session_endpoint(&mut session_process, &owner_runtime_directory, session_id);
+        session_process.wait_for_session_endpoint(&owner_runtime_directory, session_id);
 
     // The switch moved the socket out of the private runtime directory, so the
     // second user below really walks the shared one.
@@ -419,7 +264,7 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
         Some(owner_shared_directory.as_path())
     );
 
-    let other_home = build_test_home_directory();
+    let other_home = build_short_test_directory();
     write_test_config(other_home.path(), &config_text);
     set_config_read_permissions_for_every_user(other_home.path());
     let (_koshi_binary_directory, koshi_binary_path) = build_koshi_binary_for_every_user();
@@ -464,7 +309,7 @@ fn another_local_user_lists_and_kills_a_session_while_the_switch_is_on() {
     // The success reply races the socket shutdown, so the server process
     // ending is what says the kill landed, not the exit code.
     assert!(
-        wait_for_session_server_exit(&mut session_process),
+        session_process.wait_for_session_server_exit(),
         "the session server outlived the other user's kill; it exited {} saying {}",
         kill_output.status,
         String::from_utf8_lossy(&kill_output.stderr).trim()
@@ -491,17 +336,17 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
         return;
     };
 
-    let owner_home = build_test_home_directory();
+    let owner_home = build_short_test_directory();
     write_test_config(owner_home.path(), "version 1\n");
     let owner_runtime_directory = resolve_runtime_directory_under_home(owner_home.path());
     std::fs::create_dir_all(&owner_runtime_directory)
         .expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(owner_home.path(), &owner_runtime_directory, session_id);
-    wait_for_session_endpoint(&mut session_process, &owner_runtime_directory, session_id);
+        start_session_server_under_home(owner_home.path(), &owner_runtime_directory, session_id);
+    session_process.wait_for_session_endpoint(&owner_runtime_directory, session_id);
 
-    let other_home = build_test_home_directory();
+    let other_home = build_short_test_directory();
     write_test_config(other_home.path(), "version 1\n");
     set_config_read_permissions_for_every_user(other_home.path());
     let (_koshi_binary_directory, koshi_binary_path) = build_koshi_binary_for_every_user();
@@ -550,8 +395,8 @@ fn another_local_user_finds_nothing_while_the_switch_is_off() {
 #[cfg(unix)]
 #[test]
 fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
-    let shared_directory_base = build_test_shared_directory_base();
-    let home_directory = build_test_home_directory();
+    let shared_directory_base = build_short_test_directory();
+    let home_directory = build_short_test_directory();
     write_test_config(
         home_directory.path(),
         &build_switched_on_config(shared_directory_base.path()),
@@ -560,9 +405,8 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
-    let endpoint_file =
-        wait_for_session_endpoint(&mut session_process, &runtime_directory, session_id);
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
+    let endpoint_file = session_process.wait_for_session_endpoint(&runtime_directory, session_id);
 
     // The switch moved the socket into this user's directory under the shared
     // one, so the listing below really walks that directory.
@@ -615,15 +459,14 @@ fn this_users_own_session_is_listed_once_while_the_switch_is_on() {
 #[cfg(unix)]
 #[test]
 fn a_session_with_the_switch_off_keeps_its_socket_in_the_private_runtime_directory() {
-    let home_directory = build_test_home_directory();
+    let home_directory = build_short_test_directory();
     write_test_config(home_directory.path(), "version 1\n");
     let runtime_directory = resolve_runtime_directory_under_home(home_directory.path());
     std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
     let session_id = SessionId::new();
     let mut session_process =
-        start_session_server_under(home_directory.path(), &runtime_directory, session_id);
-    let endpoint_file =
-        wait_for_session_endpoint(&mut session_process, &runtime_directory, session_id);
+        start_session_server_under_home(home_directory.path(), &runtime_directory, session_id);
+    let endpoint_file = session_process.wait_for_session_endpoint(&runtime_directory, session_id);
 
     assert_eq!(
         Path::new(&endpoint_file.socket_address).parent(),
@@ -655,19 +498,6 @@ fn the_koshi_binary_carries_no_setuid_or_setgid_bit() {
 
 // --- Windows ---
 
-/// A fresh runtime directory to serve, under the temporary base.
-#[cfg(windows)]
-fn build_windows_test_runtime_directory() -> TempDir {
-    TempDir::new_in(std::env::temp_dir()).expect("a temporary runtime directory")
-}
-
-/// A fresh directory to stand in for `%ProgramData%`. The session server puts
-/// `koshi` inside it and advertises there.
-#[cfg(windows)]
-fn build_test_program_data_directory() -> TempDir {
-    TempDir::new_in(std::env::temp_dir()).expect("a temporary program data directory")
-}
-
 /// The machine-wide shared directory a server started with `program_data`
 /// advertises in.
 #[cfg(windows)]
@@ -675,16 +505,18 @@ fn resolve_shared_directory_under_program_data(program_data: &Path) -> PathBuf {
     program_data.join("koshi")
 }
 
-/// Start one session's server serving `runtime_directory`, with the switch forced on
-/// and `%ProgramData%` pointed at `program_data`.
+/// Start one session's server serving `runtime_directory`, with its files under
+/// `home_directory`, the switch forced on, and `%ProgramData%` pointed at
+/// `program_data`.
 #[cfg(windows)]
 fn start_shared_session_server(
+    home_directory: &Path,
     runtime_directory: &Path,
     program_data: &Path,
     session_id: SessionId,
-) -> RunningSession {
-    let child_process = start_koshi_process(
-        std::process::Command::new(env!("CARGO_BIN_EXE_koshi"))
+) -> SessionProcess {
+    let child_process = start_program_process(
+        build_koshi_command_under_home(home_directory)
             .arg("serve-session")
             .arg(session_id.to_string())
             .arg(SESSION_SERVER_NAME)
@@ -692,32 +524,34 @@ fn start_shared_session_server(
             .arg(runtime_directory)
             .arg("--allow-other-users")
             .env("ProgramData", program_data)
-            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
     );
-    RunningSession { child_process }
+    SessionProcess { child_process }
 }
 
-/// Wait for the marker naming `session_id` among the sessions other local users
-/// may reach, and hand back its path. The server writes it after the endpoint
-/// file. Fails the test once [`WAIT_DURATION`] has passed with no marker.
+/// Poll every [`POLL_INTERVAL_DURATION`] for the marker naming `session_id`
+/// among the sessions other local users may reach, and hand back its path. The
+/// server writes it after the endpoint file.
+///
+/// # Panics
+/// When no marker exists within [`WAIT_DURATION`].
 #[cfg(windows)]
 fn wait_for_session_advertisement_marker(
     shared_directory: &Path,
     session_id: SessionId,
 ) -> PathBuf {
     let marker_path = resolve_advertisement_marker_path(shared_directory, session_id);
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
         if marker_path.exists() {
             return marker_path;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "no session server advertised {session_id} in the shared directory"
         );
-        std::thread::sleep(ATTACH_POLL_INTERVAL_DURATION);
+        std::thread::sleep(POLL_INTERVAL_DURATION);
     }
 }
 
@@ -727,11 +561,9 @@ fn wait_for_session_advertisement_marker(
 fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
     let mut connection = Connection::connect(&endpoint_file.socket_address)
         .expect("the session's pipe answers a connect");
-    let hello = IpcRequest {
-        request_id: 1,
-        request_kind: IpcRequestKind::build_hello_request(endpoint_file.connection_token.clone()),
-    };
-    connection.send(&hello).expect("the server reads the Hello");
+    connection
+        .send(&build_hello_request(endpoint_file))
+        .expect("the server reads the Hello");
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the Hello");
     assert_eq!(ipc_response.request_id, Some(1));
     assert_eq!(
@@ -749,18 +581,23 @@ fn open_windows_session_connection(endpoint_file: &EndpointFile) -> Connection {
 #[cfg(windows)]
 #[test]
 fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() {
-    let runtime_directory = build_windows_test_runtime_directory();
-    let program_data = build_test_program_data_directory();
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let program_data = build_short_test_directory();
     let shared_directory = resolve_shared_directory_under_program_data(program_data.path());
     let session_id = SessionId::new();
-    let mut session_process =
-        start_shared_session_server(runtime_directory.path(), program_data.path(), session_id);
+    let mut session_process = start_shared_session_server(
+        test_home_directory.path(),
+        runtime_directory.path(),
+        program_data.path(),
+        session_id,
+    );
     let endpoint_file =
-        wait_for_session_endpoint(&mut session_process, runtime_directory.path(), session_id);
+        session_process.wait_for_session_endpoint(runtime_directory.path(), session_id);
     let marker_path = wait_for_session_advertisement_marker(&shared_directory, session_id);
 
     let mut connection = open_windows_session_connection(&endpoint_file);
-    let envelope = CommandEnvelope::from_parts(
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_external_cli(Some(session_id), None),
         Command::Quit,
@@ -768,12 +605,12 @@ fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() 
     connection
         .send(&IpcRequest {
             request_id: 2,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
         })
         .expect("the server reads the quit");
 
     assert!(
-        wait_for_session_server_exit(&mut session_process),
+        session_process.wait_for_session_server_exit(),
         "the session server outlived the quit"
     );
     assert!(!marker_path.exists(), "the marker outlived the session");
@@ -784,13 +621,18 @@ fn the_shared_marker_names_the_session_while_it_serves_and_goes_when_it_quits() 
 #[cfg(windows)]
 #[test]
 fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
-    let runtime_directory = build_windows_test_runtime_directory();
-    let program_data = build_test_program_data_directory();
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let program_data = build_short_test_directory();
     let session_id = SessionId::new();
-    let mut session_process =
-        start_shared_session_server(runtime_directory.path(), program_data.path(), session_id);
+    let mut session_process = start_shared_session_server(
+        test_home_directory.path(),
+        runtime_directory.path(),
+        program_data.path(),
+        session_id,
+    );
     let endpoint_file =
-        wait_for_session_endpoint(&mut session_process, runtime_directory.path(), session_id);
+        session_process.wait_for_session_endpoint(runtime_directory.path(), session_id);
     wait_for_session_advertisement_marker(
         &resolve_shared_directory_under_program_data(program_data.path()),
         session_id,
@@ -803,36 +645,49 @@ fn a_client_of_this_user_completes_the_hello_on_a_shared_session() {
 
 /// Turning the switch on leaves the single-user flow alone: the walk over the
 /// shared directory passes over this user's own session, which the endpoint
-/// file already names, so the session is found once and nothing is counted as
-/// unanswered.
+/// file already names, so `koshi list-sessions` lists the session once and
+/// prints nothing on its error stream.
 #[cfg(windows)]
 #[test]
 fn this_users_own_session_is_found_once_over_the_shared_directory() {
-    let runtime_directory = build_windows_test_runtime_directory();
-    let program_data = build_test_program_data_directory();
+    let test_home_directory = build_short_test_directory();
+    write_test_config(
+        test_home_directory.path(),
+        "version 1\nallow-other-users #true\n",
+    );
+    let runtime_directory = resolve_runtime_directory_under_home(test_home_directory.path());
+    std::fs::create_dir_all(&runtime_directory).expect("a runtime directory under the test home");
+    let program_data = build_short_test_directory();
     let shared_directory = resolve_shared_directory_under_program_data(program_data.path());
     let session_id = SessionId::new();
-    let mut session_process =
-        start_shared_session_server(runtime_directory.path(), program_data.path(), session_id);
-    wait_for_session_endpoint(&mut session_process, runtime_directory.path(), session_id);
+    let mut session_process = start_shared_session_server(
+        test_home_directory.path(),
+        &runtime_directory,
+        program_data.path(),
+        session_id,
+    );
+    session_process.wait_for_session_endpoint(&runtime_directory, session_id);
     wait_for_session_advertisement_marker(&shared_directory, session_id);
 
-    // The marker is in the shared directory, and the walk over it hands back
-    // nothing: this user's own session is never asked for the empty token it
-    // would refuse.
+    // The marker is in the shared directory, and the walk over it lists
+    // nothing: this user's own session is never asked for the empty token.
     assert_eq!(
-        koshi_link::ipc_client::list_foreign_sessions(&shared_directory, runtime_directory.path()),
-        Vec::new()
+        koshi_link::ipc_client::list_foreign_sessions(&shared_directory, &runtime_directory),
+        koshi_link::ipc_client::ForeignSessionListing::default()
     );
 
-    let session_discovery =
-        koshi_link::discovery::fetch_all_session_overviews(runtime_directory.path());
-    assert_eq!(session_discovery.unasked_session_count, 0);
-    let listed_session_ids: Vec<SessionId> = session_discovery
-        .sessions
-        .iter()
-        .map(|overview| overview.session.session_id)
-        .filter(|listed_session_id| *listed_session_id == session_id)
-        .collect();
-    assert_eq!(listed_session_ids, vec![session_id]);
+    let list_output = run_koshi_command(
+        build_koshi_command_under_home(test_home_directory.path())
+            .arg("list-sessions")
+            .env("ProgramData", program_data.path()),
+    );
+    assert_eq!(String::from_utf8_lossy(&list_output.stderr), "");
+    assert_eq!(
+        list_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&list_output.stdout),
+        render_single_session_listing(session_id)
+    );
 }

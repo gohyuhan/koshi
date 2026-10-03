@@ -11,11 +11,13 @@ koshi-client.workspace = true
 koshi-config.workspace = true
 koshi-core.workspace = true
 koshi-daemon.workspace = true
+koshi-host.workspace = true
 koshi-ipc.workspace = true
 koshi-layout.workspace = true
 koshi-link.workspace = true
 koshi-observability.workspace = true
 koshi-paths.workspace = true
+koshi-runtime.workspace = true
 koshi-storage.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -24,14 +26,17 @@ sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
+unicode-width.workspace = true
 ureq.workspace = true
 zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target."cfg(windows)".dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+
 [dev-dependencies]
 koshi-pty.workspace = true
-koshi-runtime.workspace = true
 koshi-test-support.workspace = true
 uuid.workspace = true

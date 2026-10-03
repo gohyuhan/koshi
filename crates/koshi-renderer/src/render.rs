@@ -59,11 +59,11 @@ use placement::draw_pane_placement_presentation;
 ///
 /// Otherwise paints in this order:
 ///
-/// 1. Blanks every cell of `viewport_area`, so a buffer reused across frames shows no
-///    stale cells.
+/// 1. Blanks every cell of `viewport_area`: a buffer reused across frames shows
+///    no stale cells.
 /// 2. Draws one bordered box per visible pane: the terminal title in the top
-///    border, and the scroll
-///    position in the bottom border when the pane is scrolled back.
+///    border, and the scroll position in the bottom border when the pane is
+///    scrolled back.
 /// 3. Draws each visible terminal pane's cells into its content rect.
 /// 4. Keeps pane cells under native images or writes the unsupported-image
 ///    text over unavailable coverage.
@@ -76,16 +76,16 @@ use placement::draw_pane_placement_presentation;
 /// 8. Draws the tabline in the first committed region, over that margin.
 /// 9. Draws the statusline in the second committed region, over that margin.
 ///
-/// `theme`, `hints`, `pending_key_sequence`, and `viewer_chrome` come from the viewer: the colors
-/// it paints koshi's chrome in, the statusline data for the mode it is in, the
-/// multi-chord sequence it has open, and the pane its pointer is over together
-/// with where its tab strip is scrolled and whether it is dialing the session
-/// again.
+/// `theme`, `keymap_hints`, `pending_key_sequence`, and `viewer_chrome` come
+/// from the viewer: the colors it paints koshi's chrome in, the statusline data
+/// for the mode it is in, the multi-chord sequence it has open, and the pane its
+/// pointer is over together with where its tab strip is scrolled and whether it
+/// is dialing the session again.
 /// The attached client passes the same [`CommittedRegions`] to this function
 /// and to [`get_cursor_position`]. For example, a left region of 20 columns on a
 /// `120x40` viewport leaves the pane rectangle at `x = 20`.
 ///
-/// `image_mode` `Placeholder` writes `terminal image unavailable` into visible
+/// `image_render_mode` `Placeholder` writes `terminal image unavailable` into visible
 /// image rectangles: a four-column image at `(12, 6)` shows `term` across its
 /// first four cells. `Native` keeps the pane cells beneath image pixels. In
 /// `Native` mode, `available_image_keys` names the image placements whose
@@ -107,10 +107,10 @@ pub fn render_frame(
     render_snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
     theme: &Theme,
-    hints: &KeymapHints,
+    keymap_hints: &KeymapHints,
     pending_key_sequence: Option<&KeySequence>,
     viewer_chrome: ViewerChrome,
-    image_mode: ImageRenderMode,
+    image_render_mode: ImageRenderMode,
     available_image_keys: Option<&[ImagePlacementKey]>,
     placement_presentation: Option<&PanePlacementPresentation>,
     placement_target: Option<&PanePlacementTarget>,
@@ -121,8 +121,8 @@ pub fn render_frame(
         return;
     }
 
-    // A per-client snapshot solves the tab that client is viewing into
-    // `session_snapshot.active_tab_snapshot`, so its id must match the client's viewed tab.
+    // `session_snapshot.active_tab_snapshot` is the tab this client views: its
+    // id equals the client's `active_tab_id`.
     debug_assert_eq!(
         render_snapshot.client_snapshot.active_tab_id,
         render_snapshot
@@ -132,9 +132,9 @@ pub fn render_frame(
         "snapshot builder must solve the client's active tab into session_snapshot.active_tab_snapshot"
     );
 
-    // Reset every cell of `viewport_area` first, so a buffer carried over from the
-    // previous frame keeps no cell in the tabline gap, the reserved statusline row,
-    // or a pane interior this frame does not paint.
+    // Reset every cell of `viewport_area` first: a buffer carried over from the
+    // previous frame keeps no stale cell in the tabline gap, the reserved
+    // statusline row, or a pane interior this frame does not paint.
     Clear.render(viewport_area, screen_buffer);
 
     // No room for any pane: the whole frame becomes the too-small overlay.
@@ -148,8 +148,8 @@ pub fn render_frame(
     }
 
     // Center the solved layout inside this client's viewport. The layout was
-    // solved for the tab's effective (smallest-client) size, so a larger client
-    // has margin: `effective_layout_rect` is that effective-sized rect centered
+    // solved for the tab's effective (smallest-client) size: a larger client
+    // has margin. `effective_layout_rect` is that effective-sized rect centered
     // in the pane area left by the committed regions, and `layout_origin` shifts each
     // effective-space layout rect into it.
     let effective_layout_rect = compute_content_rect(
@@ -175,7 +175,7 @@ pub fn render_frame(
         render_snapshot,
         committed_regions,
         viewport_area,
-        image_mode,
+        image_render_mode,
         available_image_keys,
         placement_presentation,
     );
@@ -201,8 +201,7 @@ pub fn render_frame(
     // The margin fills first; the tabline and statusline paint over it.
     draw_letterbox(viewport_area, effective_layout_rect, theme, screen_buffer);
 
-    // The same tab-row facts hit-testing reads, so the tabline drawn is the
-    // tabline classified.
+    // The tabline draws from the same tab-row facts hit-testing reads.
     let tabline_inputs = render_snapshot
         .build_frame_layout(viewer_chrome)
         .get_tabline_inputs();
@@ -213,7 +212,7 @@ pub fn render_frame(
     if let Some(statusline_rect) = find_region_area(committed_regions, 1, viewport_area) {
         draw_statusline(
             StatuslineInputs {
-                keymap_hints: hints,
+                keymap_hints,
                 pending_key_sequence,
                 is_recovery_notice_visible: render_snapshot.is_recovery_notice_visible,
             },
@@ -230,19 +229,18 @@ pub fn render_frame(
 /// Companion to [`render_frame`]: the buffer carries no cursor, so the caller
 /// reads this alongside the paint — passing the same `viewport_area` and committed
 /// regions — and places the terminal's cursor at the returned [`Position`] (or
-/// hides it on `None`). The
-/// position is the focused pane's cursor cell — its row and column within the
-/// pane's content area, shifted by the same letterbox offset `render_frame`
-/// centers the layout with and clamped to that content area's last cell — in
-/// the same absolute buffer coordinates the panes are drawn in.
+/// hides it on `None`). The position is the focused pane's cursor cell — its
+/// row and column within the pane's content area, shifted by the same
+/// letterbox offset `render_frame` centers the layout with and clamped to that
+/// content area's last cell — in the same absolute buffer coordinates the
+/// panes are drawn in.
 ///
 /// Returns `None` when the client has no focused pane; that pane has no placed
 /// slot or no content snapshot; it is not visible or has no content area
 /// (suppressed, hidden, a collapsed stack member, or a slot of two or fewer
 /// columns or rows, whose content rect holds no cells); it has no terminal grid
-/// this frame; its view is scrolled
-/// back into history (no hardware cursor is placed while scrolled); or the
-/// application has hidden its cursor.
+/// this frame; its view is scrolled back into history; or the application has
+/// hidden its cursor.
 ///
 /// A `120x40` viewport with a 20-column left region places the same pane cursor
 /// 20 columns farther right than a whole-area layout.

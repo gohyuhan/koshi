@@ -8,7 +8,7 @@
 use super::*;
 use crate::geometry::Point;
 use crate::ids::PaneId;
-use crate::key::ModFlags;
+use crate::key::BindingModifierFlags;
 use uuid::Uuid;
 
 #[test]
@@ -100,7 +100,7 @@ fn mouse_input_serde_wire_form_carries_the_kind_cell_and_modifiers() {
     let left_click = MouseInput {
         mouse_kind: MouseKind::Press(MouseButton::Left),
         position: Point { column: 10, row: 3 },
-        modifier_flags: ModFlags::CTRL,
+        modifier_flags: BindingModifierFlags::CTRL,
     };
 
     assert_eq!(
@@ -204,7 +204,7 @@ fn a_mouse_input_survives_a_serde_round_trip() {
     let mouse_input = MouseInput {
         mouse_kind: MouseKind::Drag(MouseButton::Left),
         position: Point { column: 42, row: 7 },
-        modifier_flags: ModFlags::CTRL.union(ModFlags::SHIFT),
+        modifier_flags: BindingModifierFlags::CTRL.union(BindingModifierFlags::SHIFT),
     };
 
     let mouse_input_json = serde_json::to_string(&mouse_input).expect("serialize");
@@ -250,12 +250,12 @@ fn a_left_click_input_carries_its_kind_cell_and_modifiers() {
     let left_click = MouseInput {
         mouse_kind: MouseKind::Press(MouseButton::Left),
         position: Point { column: 10, row: 3 },
-        modifier_flags: ModFlags::NONE,
+        modifier_flags: BindingModifierFlags::NONE,
     };
 
     assert_eq!(left_click.mouse_kind, MouseKind::Press(MouseButton::Left));
     assert_eq!(left_click.position, Point { column: 10, row: 3 });
-    assert_eq!(left_click.modifier_flags, ModFlags::NONE);
+    assert_eq!(left_click.modifier_flags, BindingModifierFlags::NONE);
 }
 
 #[test]

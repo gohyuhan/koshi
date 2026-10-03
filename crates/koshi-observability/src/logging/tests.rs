@@ -87,7 +87,8 @@ fn two_sessions_get_two_distinct_log_files() {
     );
 }
 
-// The file and its `logs/` parent are created on the first write, not at
+// Two disabled installs install nothing, so the install after them is the
+// first. The file and its `logs/` parent are created on the first write, not at
 // install. A second install fails. This is the only test in the binary that
 // installs the global subscriber.
 #[test]
@@ -97,13 +98,16 @@ fn initialize_tracing_at_path_creates_file_lazily_and_installs_once() {
     let log_file_path = test_directory_path.join("logs").join("koshi-log-test.log");
     let _ = std::fs::remove_dir_all(&test_directory_path);
 
-    initialize_tracing(LoggingParameters {
+    let disabled_logging_parameters = LoggingParameters {
         is_enabled: false,
         log_level: LogLevel::Error,
         log_format: LogFormat::Json,
         session_id: SessionId::new(),
-    })
-    .expect("disabled logging installs nothing");
+    };
+    initialize_tracing(disabled_logging_parameters.clone())
+        .expect("disabled logging installs nothing");
+    initialize_tracing(disabled_logging_parameters)
+        .expect("a second disabled install also installs nothing");
     initialize_tracing_at_path(&log_file_path, LogLevel::Warning, LogFormat::Json)
         .expect("first install succeeds");
 
@@ -137,26 +141,6 @@ fn initialize_tracing_at_path_creates_file_lazily_and_installs_once() {
     );
 
     let _ = std::fs::remove_dir_all(&test_directory_path);
-}
-
-// Disabled installs no subscriber: both calls succeed in any test order, and
-// no file is created for the session.
-#[test]
-fn init_tracing_disabled_writes_no_file_and_is_a_noop() {
-    let logging_parameters = LoggingParameters {
-        is_enabled: false,
-        log_level: LogLevel::Warning,
-        log_format: LogFormat::Pretty,
-        session_id: SessionId::new(),
-    };
-    let log_file_path = resolve_session_log_path(logging_parameters.session_id);
-    initialize_tracing(logging_parameters.clone()).expect("disabled logging installs nothing");
-    initialize_tracing(logging_parameters)
-        .expect("a second disabled install also installs nothing");
-    assert!(
-        !log_file_path.exists(),
-        "disabled logging must create no file"
-    );
 }
 
 #[test]

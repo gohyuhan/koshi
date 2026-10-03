@@ -7,7 +7,8 @@ use super::*;
 #[test]
 fn a_built_key_input_projects_back_to_the_chord_it_was_built_from() {
     for modifier_bits in 0..=0b1111 {
-        let modifier_flags = ModFlags::try_from(modifier_bits).expect("four modifier bits");
+        let modifier_flags =
+            BindingModifierFlags::try_from(modifier_bits).expect("four modifier bits");
         for key in [Key::Char('p'), Key::Named(NamedKey::Enter)] {
             let chord = KeyChord::from_parts(modifier_flags, key);
 
@@ -22,7 +23,7 @@ fn a_built_key_input_projects_back_to_the_chord_it_was_built_from() {
 
 #[test]
 fn a_built_key_input_reports_the_modifiers_the_chord_names() {
-    let chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('p'));
+    let chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
 
     assert_eq!(
         build_key_input_for_chord(chord).modifier_flags,

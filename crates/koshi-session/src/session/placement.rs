@@ -167,7 +167,7 @@ pub fn commit_cross_tab_placement(
             destination_tab.record_focus_mru(pane_id);
         }
     }
-    let mut events = vec![Event::LayoutChanged(LayoutChanged {
+    let mut emitted_events = vec![Event::LayoutChanged(LayoutChanged {
         tab_id: destination_tab_id,
     })];
 
@@ -181,7 +181,7 @@ pub fn commit_cross_tab_placement(
                 source_tab.record_focus_mru(pane_id);
             }
         }
-        events.push(Event::LayoutChanged(LayoutChanged {
+        emitted_events.push(Event::LayoutChanged(LayoutChanged {
             tab_id: source_tab_id,
         }));
     }
@@ -192,14 +192,14 @@ pub fn commit_cross_tab_placement(
         acting_client.update_focused_pane(destination_tab_id, source_pane_id);
     }
     if acting_previous_tab_id != destination_tab_id {
-        events.push(Event::TabFocused(TabFocused {
+        emitted_events.push(Event::TabFocused(TabFocused {
             client_id: acting_client_id,
             tab_id: destination_tab_id,
             previous_tab_id: acting_previous_tab_id,
         }));
     }
     if acting_previous_pane_id != Some(source_pane_id) {
-        events.push(Event::PaneFocused(PaneFocused {
+        emitted_events.push(Event::PaneFocused(PaneFocused {
             client_id: acting_client_id,
             tab_id: destination_tab_id,
             pane_id: source_pane_id,
@@ -216,7 +216,7 @@ pub fn commit_cross_tab_placement(
             acting_client_id,
             source_tab_id,
             &source_pane_ids_after,
-            &mut events,
+            &mut emitted_events,
         );
         clear_invalid_client_zoom(
             session,
@@ -235,7 +235,7 @@ pub fn commit_cross_tab_placement(
             client_id,
             destination_tab_id,
             &destination_pane_ids_after,
-            &mut events,
+            &mut emitted_events,
         );
         if !is_source_tab_closing {
             repair_client_tab_focus(
@@ -243,7 +243,7 @@ pub fn commit_cross_tab_placement(
                 client_id,
                 source_tab_id,
                 &source_pane_ids_after,
-                &mut events,
+                &mut emitted_events,
             );
         }
         clear_invalid_client_zoom(
@@ -258,10 +258,10 @@ pub fn commit_cross_tab_placement(
     }
 
     if is_source_tab_closing {
-        events.extend(close_and_refocus_tab(session, source_tab_id, None));
+        emitted_events.extend(close_and_refocus_tab(session, source_tab_id, None));
     }
 
-    Ok(events)
+    Ok(emitted_events)
 }
 
 fn repair_client_tab_focus(
@@ -269,7 +269,7 @@ fn repair_client_tab_focus(
     client_id: ClientId,
     tab_id: TabId,
     valid_pane_ids: &HashSet<PaneId>,
-    events: &mut Vec<Event>,
+    emitted_events: &mut Vec<Event>,
 ) {
     let should_clear_zoom = session
         .clients
@@ -294,7 +294,7 @@ fn repair_client_tab_focus(
         match next_pane_id {
             Some(next_pane_id) => {
                 client.update_focused_pane(tab_id, next_pane_id);
-                events.push(Event::PaneFocused(PaneFocused {
+                emitted_events.push(Event::PaneFocused(PaneFocused {
                     client_id,
                     tab_id,
                     pane_id: next_pane_id,

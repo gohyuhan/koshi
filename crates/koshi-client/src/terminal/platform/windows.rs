@@ -519,8 +519,8 @@ fn choose_shorter_timeout_duration(
 }
 
 fn convert_wait_timeout_to_milliseconds(timeout_duration: Duration) -> u32 {
-    let timeout_millisecond_count = timeout_duration
-        .as_millis()
-        .saturating_add(u128::from(timeout_duration.subsec_nanos() % 1_000_000 != 0));
+    let timeout_millisecond_count = timeout_duration.as_millis().saturating_add(u128::from(
+        !timeout_duration.subsec_nanos().is_multiple_of(1_000_000),
+    ));
     u32::try_from(timeout_millisecond_count.min(u128::from(INFINITE - 1))).unwrap_or(INFINITE - 1)
 }

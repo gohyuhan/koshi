@@ -1,0 +1,17 @@
+[package]
+name = "koshi-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true
+nix = { workspace = true, features = ["net"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile.workspace = true

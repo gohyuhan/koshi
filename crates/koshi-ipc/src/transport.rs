@@ -24,6 +24,10 @@
 //! thread holds to end the reading side of a connection while the thread
 //! serving it is blocked reading. The writing side is left alone.
 //!
+//! [`FrameReader::set_deadline`](crate::transport::FrameReader::set_deadline) and
+//! [`FrameWriter::set_deadline`](crate::transport::FrameWriter::set_deadline)
+//! end each read and write of a split connection by the moment they name.
+//!
 //! The frame shape is not tied to the local socket.
 //! [`build_frame_halves`](crate::transport::build_frame_halves) puts it on any other pair
 //! of byte streams, such as the two halves of a TLS stream, and
@@ -37,12 +41,16 @@ use std::net::Shutdown;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(windows)]
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+#[cfg(windows)]
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::{Listener as _, Stream as _, StreamCommon as _};
+#[cfg(unix)]
+use interprocess::local_socket::traits::{RecvHalf as _, SendHalf as _};
 use interprocess::local_socket::{self as socket, ConnectOptions, ListenerOptions};
 use interprocess::ConnectWaitMode;
 use serde::de::DeserializeOwned;
@@ -57,6 +65,8 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::IO::CancelIoEx;
 
 use crate::error::IpcError;
 
@@ -186,15 +196,28 @@ impl Connection {
     }
 
     /// Connect to the listener at `socket_address`, waiting at most [`CONNECT_WAIT_DURATION`]
-    /// for the connect to complete. No listener behind the address — a
-    /// leftover file whose process is gone, or nothing there at all — is
-    /// [`IpcError::NoListener`]; a wait that runs out is
-    /// [`IpcError::Transport`] carrying the timed-out error's words.
+    /// for the connect to complete, as [`connect_within`](Self::connect_within) does.
     pub fn connect(socket_address: &str) -> Result<Connection, IpcError> {
+        Connection::connect_within(socket_address, CONNECT_WAIT_DURATION)
+    }
+
+    /// Connect to the listener at `socket_address`, waiting at most
+    /// `connect_wait_duration` for the connect to complete. No listener behind
+    /// the address — a leftover file whose process is gone, or nothing there
+    /// at all — is [`IpcError::NoListener`]; a wait that runs out is
+    /// [`IpcError::Transport`] carrying the timed-out error's words.
+    ///
+    /// Example: a Windows pipe whose one instance holds a caller the listener
+    /// has not accepted gives a second caller [`IpcError::Transport`] after
+    /// `connect_wait_duration`.
+    pub fn connect_within(
+        socket_address: &str,
+        connect_wait_duration: Duration,
+    ) -> Result<Connection, IpcError> {
         let platform_socket_name = resolve_socket_name(socket_address).map_err(convert_io_error)?;
         let socket_stream = ConnectOptions::new()
             .name(platform_socket_name)
-            .wait_mode(ConnectWaitMode::Timeout(CONNECT_WAIT_DURATION))
+            .wait_mode(ConnectWaitMode::Timeout(connect_wait_duration))
             .connect_sync()
             .map_err(|connect_error| {
                 if is_no_listener_error(&connect_error) {
@@ -284,16 +307,20 @@ impl Connection {
     ///
     /// The connection is consumed: after this, [`send`](Self::send) and
     /// [`recv`](Self::recv) are the halves' own methods.
+    ///
+    /// Neither half starts with a deadline.
+    /// [`FrameReader::set_deadline`] and [`FrameWriter::set_deadline`] give
+    /// one.
     #[must_use]
     pub fn split(self) -> (FrameReader, FrameWriter) {
         let (reader_half, writer_half) = self.socket_stream.split();
         (
             FrameReader {
-                reader_half: Box::new(reader_half),
+                reader_half: Box::new(LocalSocketReader::from_recv_half(reader_half)),
                 is_closed: self.is_read_closed,
             },
             FrameWriter {
-                writer_half: Box::new(writer_half),
+                writer_half: Box::new(LocalSocketWriter::from_send_half(writer_half)),
             },
         )
     }
@@ -311,24 +338,383 @@ impl Connection {
 }
 
 /// A stream half that can be told when its reads and writes must give up.
-///
-/// A local socket half takes the deadline and ignores it.
 pub trait Deadlined: Send {
     /// Every read and write after this finishes by `deadline`, or blocks for as long
     /// as it takes when `deadline` is `None`.
     fn set_deadline(&mut self, deadline: Option<Instant>);
 }
 
-impl Deadlined for socket::RecvHalf {
-    /// Does nothing: a local socket read blocks for as long as it takes,
-    /// whatever the deadline says.
-    fn set_deadline(&mut self, _deadline: Option<Instant>) {}
+/// The least time left a step under a deadline starts with: 1 ms. Less time
+/// left than this counts as no time left.
+const MINIMUM_STEP_TIME_LEFT_DURATION: Duration = Duration::from_millis(1);
+
+/// The time left until `deadline`. A read or write under `deadline` runs out
+/// of time once this fails.
+///
+/// # Errors
+/// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time` when
+/// less than 1 ms is left.
+pub fn compute_time_left_until(deadline: Instant) -> io::Result<Duration> {
+    let time_left = deadline.saturating_duration_since(Instant::now());
+    if time_left < MINIMUM_STEP_TIME_LEFT_DURATION {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "this step ran out of time",
+        ));
+    }
+    Ok(time_left)
 }
 
-impl Deadlined for socket::SendHalf {
-    /// Does nothing: a local socket write blocks for as long as it takes,
-    /// whatever the deadline says.
-    fn set_deadline(&mut self, _deadline: Option<Instant>) {}
+/// The reading half of a split local socket [`Connection`]. A read under a
+/// deadline ends by that deadline; a read with no deadline blocks for as long
+/// as it takes.
+///
+/// A read that runs out of time is [`io::ErrorKind::TimedOut`] with the text
+/// `this step ran out of time`.
+struct LocalSocketReader {
+    /// Dropped before `recv_half`: its thread stops before the pipe closes.
+    #[cfg(windows)]
+    pipe_step_canceller: PipeStepCanceller,
+    /// The socket's own reading half.
+    recv_half: socket::RecvHalf,
+    /// When every read must be finished by, or `None` for no limit.
+    deadline: Option<Instant>,
+}
+
+impl LocalSocketReader {
+    /// A reader over `recv_half` with no deadline.
+    fn from_recv_half(recv_half: socket::RecvHalf) -> LocalSocketReader {
+        #[cfg(windows)]
+        let socket::RecvHalf::NamedPipe(pipe_half) = &recv_half;
+        LocalSocketReader {
+            #[cfg(windows)]
+            pipe_step_canceller: PipeStepCanceller::from_pipe_handle(PipeHandle(
+                pipe_half.as_handle().as_raw_handle(),
+            )),
+            recv_half,
+            deadline: None,
+        }
+    }
+}
+
+impl Deadlined for LocalSocketReader {
+    /// Store `deadline`. On Unix `None` also clears the socket's receive
+    /// timeout; a failure to clear it is ignored.
+    fn set_deadline(&mut self, deadline: Option<Instant>) {
+        self.deadline = deadline;
+        #[cfg(unix)]
+        if deadline.is_none() {
+            let _ = self.recv_half.set_timeout(None);
+        }
+    }
+}
+
+impl Read for LocalSocketReader {
+    /// Read from the socket. Under a deadline the read ends by it.
+    ///
+    /// On Unix each attempt first sets the socket's receive timeout to the
+    /// time left; a timed-out attempt is tried again with the new time left
+    /// until less than 1 ms is left. On Windows the read runs while
+    /// `PipeStepCanceller` watches the deadline.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time`
+    /// once the deadline is reached; otherwise the read's own failure.
+    fn read(&mut self, read_buffer: &mut [u8]) -> io::Result<usize> {
+        let Some(deadline) = self.deadline else {
+            return self.recv_half.read(read_buffer);
+        };
+        let recv_half = &self.recv_half;
+        #[cfg(unix)]
+        {
+            run_socket_step_until(
+                deadline,
+                |time_left| recv_half.set_timeout(Some(time_left)),
+                || {
+                    let mut recv_half_reference = recv_half;
+                    recv_half_reference.read(read_buffer)
+                },
+            )
+        }
+        #[cfg(windows)]
+        {
+            self.pipe_step_canceller.run_pipe_step_until(deadline, || {
+                let mut recv_half_reference = recv_half;
+                recv_half_reference.read(read_buffer)
+            })
+        }
+    }
+}
+
+/// The writing half of a split local socket [`Connection`]. A write under a
+/// deadline ends by that deadline; a write with no deadline blocks for as long
+/// as it takes.
+///
+/// A write that runs out of time is [`io::ErrorKind::TimedOut`] with the text
+/// `this step ran out of time`.
+struct LocalSocketWriter {
+    /// Dropped before `send_half`: its thread stops before the pipe closes.
+    #[cfg(windows)]
+    pipe_step_canceller: PipeStepCanceller,
+    /// The socket's own writing half.
+    send_half: socket::SendHalf,
+    /// When every write must be finished by, or `None` for no limit.
+    deadline: Option<Instant>,
+}
+
+impl LocalSocketWriter {
+    /// A writer over `send_half` with no deadline.
+    fn from_send_half(send_half: socket::SendHalf) -> LocalSocketWriter {
+        #[cfg(windows)]
+        let socket::SendHalf::NamedPipe(pipe_half) = &send_half;
+        LocalSocketWriter {
+            #[cfg(windows)]
+            pipe_step_canceller: PipeStepCanceller::from_pipe_handle(PipeHandle(
+                pipe_half.as_handle().as_raw_handle(),
+            )),
+            send_half,
+            deadline: None,
+        }
+    }
+}
+
+impl Deadlined for LocalSocketWriter {
+    /// Store `deadline`. On Unix `None` also clears the socket's send timeout;
+    /// a failure to clear it is ignored.
+    fn set_deadline(&mut self, deadline: Option<Instant>) {
+        self.deadline = deadline;
+        #[cfg(unix)]
+        if deadline.is_none() {
+            let _ = self.send_half.set_timeout(None);
+        }
+    }
+}
+
+impl Write for LocalSocketWriter {
+    /// Write to the socket. Under a deadline the write ends by it, the same
+    /// way [`LocalSocketReader`]'s read does.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time`
+    /// once the deadline is reached; otherwise the write's own failure.
+    fn write(&mut self, write_bytes: &[u8]) -> io::Result<usize> {
+        let Some(deadline) = self.deadline else {
+            return self.send_half.write(write_bytes);
+        };
+        let send_half = &self.send_half;
+        #[cfg(unix)]
+        {
+            run_socket_step_until(
+                deadline,
+                |time_left| send_half.set_timeout(Some(time_left)),
+                || {
+                    let mut send_half_reference = send_half;
+                    send_half_reference.write(write_bytes)
+                },
+            )
+        }
+        #[cfg(windows)]
+        {
+            self.pipe_step_canceller.run_pipe_step_until(deadline, || {
+                let mut send_half_reference = send_half;
+                send_half_reference.write(write_bytes)
+            })
+        }
+    }
+
+    /// Flush the socket's writing half.
+    fn flush(&mut self) -> io::Result<()> {
+        self.send_half.flush()
+    }
+}
+
+/// Run `run_step` on a Unix socket so that it ends by `deadline`.
+///
+/// Each attempt first gives `set_socket_timeout` the time left. An attempt
+/// that ends in a timeout ([`is_io_timeout`]) is made again with the new time
+/// left. A timeout the socket refuses leaves the
+/// attempt to run without it: macOS refuses it on a socket whose peer has
+/// closed, and a read there hands back what the peer sent and then the end of
+/// the stream, and a write fails at once.
+///
+/// # Errors
+/// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time` when
+/// less than 1 ms is left before an attempt; otherwise the attempt's own
+/// failure.
+#[cfg(unix)]
+fn run_socket_step_until<StepOutput>(
+    deadline: Instant,
+    set_socket_timeout: impl Fn(Duration) -> io::Result<()>,
+    mut run_step: impl FnMut() -> io::Result<StepOutput>,
+) -> io::Result<StepOutput> {
+    loop {
+        let time_left = compute_time_left_until(deadline)?;
+        let _ = set_socket_timeout(time_left);
+        match run_step() {
+            Err(step_error) if is_io_timeout(&step_error) => {}
+            step_outcome => return step_outcome,
+        }
+    }
+}
+
+/// How often [`PipeStepCanceller`]'s thread cancels a pipe's waiting reads and
+/// writes again while a step past its deadline still runs: every 10 ms.
+#[cfg(windows)]
+const PIPE_CANCEL_REPEAT_INTERVAL_DURATION: Duration = Duration::from_millis(10);
+
+/// A named pipe's handle, carried to the thread of a [`PipeStepCanceller`].
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct PipeHandle(HANDLE);
+
+// SAFETY: a pipe handle names a kernel object; any thread of the process may
+// pass it to `CancelIoEx`.
+#[cfg(windows)]
+unsafe impl Send for PipeHandle {}
+
+/// What a [`PipeStepCanceller`] and its thread share.
+#[cfg(windows)]
+#[derive(Default)]
+struct PipeStepWatch {
+    /// The deadline of the step running now, or `None` while no step under a
+    /// deadline runs.
+    running_step_deadline: Option<Instant>,
+    /// Set when the half is dropped; the thread then ends without touching the
+    /// pipe again.
+    is_half_dropped: bool,
+}
+
+/// The canceller of one named pipe half's steps: a thread that calls
+/// `CancelIoEx` on the pipe once the deadline of the step running on it
+/// passes, and again every [`PIPE_CANCEL_REPEAT_INTERVAL_DURATION`] while that
+/// step still runs.
+///
+/// Both halves of one pipe share one handle: a cancel ends every read and
+/// write waiting on the pipe at that moment, whichever half started it.
+///
+/// The thread starts with the first step under a deadline, and ends once the
+/// half is dropped.
+#[cfg(windows)]
+struct PipeStepCanceller {
+    /// The pipe the thread cancels steps on.
+    pipe_handle: PipeHandle,
+    /// The step running now and whether the half is dropped, with the signal
+    /// that wakes the thread when either changes.
+    shared_step_watch: Arc<(Mutex<PipeStepWatch>, Condvar)>,
+    /// Whether the thread runs.
+    is_thread_started: bool,
+}
+
+#[cfg(windows)]
+impl PipeStepCanceller {
+    /// A canceller for `pipe_handle`, with no thread started.
+    fn from_pipe_handle(pipe_handle: PipeHandle) -> PipeStepCanceller {
+        PipeStepCanceller {
+            pipe_handle,
+            shared_step_watch: Arc::new((Mutex::new(PipeStepWatch::default()), Condvar::new())),
+            is_thread_started: false,
+        }
+    }
+
+    /// Run `run_step` on the pipe so that it ends by `deadline`: the thread
+    /// cancels it once the deadline passes.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time`
+    /// when less than 1 ms is left before the step, or when the step fails with
+    /// less than 1 ms left; otherwise the failure of starting the thread, or the
+    /// step's own failure.
+    fn run_pipe_step_until<StepOutput>(
+        &mut self,
+        deadline: Instant,
+        run_step: impl FnOnce() -> io::Result<StepOutput>,
+    ) -> io::Result<StepOutput> {
+        compute_time_left_until(deadline)?;
+        self.start_canceller_thread()?;
+        self.set_running_step_deadline(Some(deadline));
+        let step_outcome = run_step();
+        self.set_running_step_deadline(None);
+        if step_outcome.is_err() {
+            compute_time_left_until(deadline)?;
+        }
+        step_outcome
+    }
+
+    /// Start the thread, once.
+    ///
+    /// # Errors
+    /// Returns the failure of starting the thread.
+    fn start_canceller_thread(&mut self) -> io::Result<()> {
+        if self.is_thread_started {
+            return Ok(());
+        }
+        let pipe_handle = self.pipe_handle;
+        let shared_step_watch = Arc::clone(&self.shared_step_watch);
+        std::thread::Builder::new()
+            .name("koshi-pipe-deadline".to_string())
+            .spawn(move || run_pipe_step_canceller(pipe_handle, &shared_step_watch))?;
+        self.is_thread_started = true;
+        Ok(())
+    }
+
+    /// Record `running_step_deadline` as the deadline of the step running now,
+    /// and wake the thread.
+    fn set_running_step_deadline(&self, running_step_deadline: Option<Instant>) {
+        let (step_watch, step_watch_changed) = &*self.shared_step_watch;
+        step_watch
+            .lock()
+            .expect("pipe step watch")
+            .running_step_deadline = running_step_deadline;
+        step_watch_changed.notify_one();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeStepCanceller {
+    /// Mark the half dropped and wake the thread, which ends without touching
+    /// the pipe again.
+    fn drop(&mut self) {
+        let (step_watch, step_watch_changed) = &*self.shared_step_watch;
+        step_watch.lock().expect("pipe step watch").is_half_dropped = true;
+        step_watch_changed.notify_one();
+    }
+}
+
+/// The body of a [`PipeStepCanceller`]'s thread: wait for a step under a
+/// deadline, then call `CancelIoEx` on `pipe_handle` once its deadline has
+/// passed, and again every [`PIPE_CANCEL_REPEAT_INTERVAL_DURATION`] while it
+/// still runs. Ends once the half is dropped.
+///
+/// `CancelIoEx` runs while the watch is locked, so it never runs after the
+/// half's drop has marked the watch.
+#[cfg(windows)]
+fn run_pipe_step_canceller(
+    pipe_handle: PipeHandle,
+    shared_step_watch: &(Mutex<PipeStepWatch>, Condvar),
+) {
+    let (step_watch, step_watch_changed) = shared_step_watch;
+    let mut step_watch_guard = step_watch.lock().expect("pipe step watch");
+    while !step_watch_guard.is_half_dropped {
+        let Some(running_step_deadline) = step_watch_guard.running_step_deadline else {
+            step_watch_guard = step_watch_changed
+                .wait(step_watch_guard)
+                .expect("pipe step watch");
+            continue;
+        };
+        let now = Instant::now();
+        let wait_duration = if now < running_step_deadline {
+            running_step_deadline - now
+        } else {
+            // SAFETY: the half that owns the pipe is not dropped while the
+            // watch is locked and unmarked, so the handle is open.
+            unsafe { CancelIoEx(pipe_handle.0, std::ptr::null()) };
+            PIPE_CANCEL_REPEAT_INTERVAL_DURATION
+        };
+        step_watch_guard = step_watch_changed
+            .wait_timeout(step_watch_guard, wait_duration)
+            .expect("pipe step watch")
+            .0;
+    }
 }
 
 /// The reading half of a stream, with a deadline it may be given later.
@@ -439,8 +825,8 @@ impl ReadCloser {
 /// named pipe carries no read direction to shut on its own.
 #[cfg(unix)]
 fn duplicate_unix_socket(socket_stream: &socket::Stream) -> Result<UnixStream, IpcError> {
-    let socket::Stream::UdSocket(uds) = socket_stream;
-    uds.inner().try_clone().map_err(convert_io_error)
+    let socket::Stream::UdSocket(unix_socket) = socket_stream;
+    unix_socket.inner().try_clone().map_err(convert_io_error)
 }
 
 /// The writing half of a split [`Connection`]. Reads nothing.
@@ -508,14 +894,14 @@ struct FrameBuffer {
 }
 
 impl Write for FrameBuffer {
-    fn write(&mut self, frame_bytes: &[u8]) -> io::Result<usize> {
-        let frame_byte_count = self.frame_bytes.len() - 4 + frame_bytes.len();
+    fn write(&mut self, payload_chunk_bytes: &[u8]) -> io::Result<usize> {
+        let frame_byte_count = self.frame_bytes.len() - 4 + payload_chunk_bytes.len();
         if frame_byte_count > MAX_FRAME_BYTE_COUNT as usize {
             self.overflow_byte_count = Some(frame_byte_count as u64);
             return Err(io::Error::other("frame over cap"));
         }
-        self.frame_bytes.extend_from_slice(frame_bytes);
-        Ok(frame_bytes.len())
+        self.frame_bytes.extend_from_slice(payload_chunk_bytes);
+        Ok(payload_chunk_bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -680,9 +1066,12 @@ fn is_no_listener_error(io_error: &io::Error) -> bool {
 /// [`IpcError::Disconnected`]; everything else keeps its text as
 /// [`IpcError::Transport`].
 ///
-/// [`NotConnected`](io::ErrorKind::NotConnected) is in that first set: macOS
-/// reports a read from a socket whose peer has closed as `ENOTCONN`, where
-/// Linux reports end of stream.
+/// The peer-gone kinds are [`UnexpectedEof`](io::ErrorKind::UnexpectedEof),
+/// [`BrokenPipe`](io::ErrorKind::BrokenPipe),
+/// [`ConnectionReset`](io::ErrorKind::ConnectionReset),
+/// [`ConnectionAborted`](io::ErrorKind::ConnectionAborted) and
+/// [`NotConnected`](io::ErrorKind::NotConnected) (`ENOTCONN`, `Socket is not
+/// connected`).
 fn convert_io_error(io_error: io::Error) -> IpcError {
     match io_error.kind() {
         io::ErrorKind::UnexpectedEof

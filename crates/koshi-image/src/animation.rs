@@ -6,18 +6,17 @@ use std::sync::Arc;
 
 use image::{AnimationDecoder, ImageDecoder};
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::codec::{
     build_raster_limits, decode_static_raster, guess_image_format, is_png_animated,
     is_webp_animated, map_image_error,
 };
+use crate::model::compute_decoded_image_byte_count;
 use crate::{
-    compute_rgba_byte_count, validate_image_dimensions, DecodedImage, GraphicsError,
-    GraphicsProtocol, MAX_ANIMATION_FRAME_COUNT, MAX_IMAGE_BYTE_COUNT, MAX_IMAGE_PIXEL_COUNT,
-    MAX_IMAGE_SIDE_PIXEL_COUNT,
+    compute_rgba_byte_count, DecodedImage, GraphicsError, GraphicsProtocol,
+    MAX_ANIMATION_FRAME_COUNT, MAX_IMAGE_BYTE_COUNT,
 };
 
 /// The error returned when an animation value cannot satisfy its invariants.
@@ -218,32 +217,8 @@ impl AnimationFrame {
     }
 }
 
-impl<'de> Deserialize<'de> for AnimationFrame {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct AnimationFrameFields {
-            decoded_image: Arc<DecodedImage>,
-            frame_delay: FrameDelay,
-            #[serde(default)]
-            is_gapless: bool,
-        }
-
-        let animation_frame_fields = AnimationFrameFields::deserialize(deserializer)?;
-        let mut animation_frame = Self::from_image_and_delay(
-            animation_frame_fields.decoded_image,
-            animation_frame_fields.frame_delay,
-        )
-        .map_err(de::Error::custom)?;
-        animation_frame.is_gapless = animation_frame_fields.is_gapless;
-        Ok(animation_frame)
-    }
-}
-
 /// A validated sequence of complete RGBA canvases and its loop policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecodedAnimation {
     frames: Vec<AnimationFrame>,
     loop_policy: LoopPolicy,
@@ -315,18 +290,6 @@ impl DecodedAnimation {
     }
 }
 
-impl Serialize for DecodedAnimation {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut serialized_fields = serializer.serialize_struct("DecodedAnimation", 2)?;
-        serialized_fields.serialize_field("frames", &self.frames)?;
-        serialized_fields.serialize_field("loop_policy", &self.loop_policy)?;
-        serialized_fields.end()
-    }
-}
-
 impl<'de> Deserialize<'de> for DecodedAnimation {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -385,11 +348,7 @@ impl<'de> Deserialize<'de> for BoundedAnimationFrames {
                 let mut retained_byte_count = 0usize;
                 while let Some(animation_frame) =
                     frame_sequence.next_element_seed(BoundedAnimationFrameSeed {
-                        remaining_byte_count: MAX_IMAGE_BYTE_COUNT
-                            .checked_sub(retained_byte_count)
-                            .ok_or_else(|| {
-                                de::Error::custom("animation frame bytes exceed the graphics limit")
-                            })?,
+                        remaining_byte_count: MAX_IMAGE_BYTE_COUNT - retained_byte_count,
                     })?
                 {
                     if animation_frames.len() >= MAX_ANIMATION_FRAME_COUNT {
@@ -397,16 +356,7 @@ impl<'de> Deserialize<'de> for BoundedAnimationFrames {
                             "animation frame count exceeds the graphics limit",
                         ));
                     }
-                    retained_byte_count = retained_byte_count
-                        .checked_add(animation_frame.decoded_image.rgba_bytes.len())
-                        .ok_or_else(|| {
-                            de::Error::custom("animation frame bytes exceed the graphics limit")
-                        })?;
-                    if retained_byte_count > MAX_IMAGE_BYTE_COUNT {
-                        return Err(de::Error::custom(
-                            "animation frame bytes exceed the graphics limit",
-                        ));
-                    }
+                    retained_byte_count += animation_frame.decoded_image.rgba_bytes.len();
                     animation_frames
                         .try_reserve(1)
                         .map_err(|_| de::Error::custom("animation frame allocation failed"))?;
@@ -454,10 +404,10 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
     {
         let mut decoded_image = None;
         let mut frame_delay = None;
-        let mut is_gapless = false;
+        let mut is_gapless = None;
         while let Some(field_name) = map_access.next_key::<AnimationFrameField>()? {
             match field_name {
-                AnimationFrameField::Image => {
+                AnimationFrameField::DecodedImage => {
                     if decoded_image.is_some() {
                         return Err(de::Error::duplicate_field("decoded_image"));
                     }
@@ -465,16 +415,19 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
                         maximum_byte_count: self.remaining_byte_count,
                     })?);
                 }
-                AnimationFrameField::Delay => {
+                AnimationFrameField::FrameDelay => {
                     if frame_delay.is_some() {
                         return Err(de::Error::duplicate_field("frame_delay"));
                     }
                     frame_delay = Some(map_access.next_value::<FrameDelay>()?);
                 }
-                AnimationFrameField::Gapless => {
-                    is_gapless = map_access.next_value()?;
+                AnimationFrameField::IsGapless => {
+                    if is_gapless.is_some() {
+                        return Err(de::Error::duplicate_field("is_gapless"));
+                    }
+                    is_gapless = Some(map_access.next_value::<bool>()?);
                 }
-                AnimationFrameField::Other => {
+                AnimationFrameField::Unknown => {
                     let _: de::IgnoredAny = map_access.next_value()?;
                 }
             }
@@ -482,6 +435,7 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
         let decoded_image =
             decoded_image.ok_or_else(|| de::Error::missing_field("decoded_image"))?;
         let frame_delay = frame_delay.ok_or_else(|| de::Error::missing_field("frame_delay"))?;
+        let is_gapless = is_gapless.ok_or_else(|| de::Error::missing_field("is_gapless"))?;
         let mut animation_frame = AnimationFrame::from_image_and_delay(decoded_image, frame_delay)
             .map_err(de::Error::custom)?;
         animation_frame.is_gapless = is_gapless;
@@ -490,10 +444,10 @@ impl<'de> Visitor<'de> for BoundedAnimationFrameVisitor {
 }
 
 enum AnimationFrameField {
-    Image,
-    Delay,
-    Gapless,
-    Other,
+    DecodedImage,
+    FrameDelay,
+    IsGapless,
+    Unknown,
 }
 
 impl<'de> Deserialize<'de> for AnimationFrameField {
@@ -515,10 +469,10 @@ impl<'de> Deserialize<'de> for AnimationFrameField {
                 E: de::Error,
             {
                 Ok(match field_name {
-                    "decoded_image" => AnimationFrameField::Image,
-                    "frame_delay" => AnimationFrameField::Delay,
-                    "is_gapless" => AnimationFrameField::Gapless,
-                    _ => AnimationFrameField::Other,
+                    "decoded_image" => AnimationFrameField::DecodedImage,
+                    "frame_delay" => AnimationFrameField::FrameDelay,
+                    "is_gapless" => AnimationFrameField::IsGapless,
+                    _ => AnimationFrameField::Unknown,
                 })
             }
         }
@@ -564,26 +518,27 @@ impl<'de> Visitor<'de> for BoundedDecodedImageVisitor {
         let mut rgba_bytes = None;
         while let Some(field_name) = map_access.next_key::<DecodedImageField>()? {
             match field_name {
-                DecodedImageField::Width => {
+                DecodedImageField::PixelWidth => {
                     if pixel_width.is_some() {
                         return Err(de::Error::duplicate_field("pixel_width"));
                     }
                     pixel_width = Some(map_access.next_value::<u32>()?);
                 }
-                DecodedImageField::Height => {
+                DecodedImageField::PixelHeight => {
                     if pixel_height.is_some() {
                         return Err(de::Error::duplicate_field("pixel_height"));
                     }
                     pixel_height = Some(map_access.next_value::<u32>()?);
                 }
-                DecodedImageField::Rgba => {
+                DecodedImageField::RgbaBytes => {
                     if rgba_bytes.is_some() {
                         return Err(de::Error::duplicate_field("rgba_bytes"));
                     }
                     let rgba_byte_limit = match (pixel_width, pixel_height) {
                         (Some(pixel_width), Some(pixel_height)) => {
                             let expected_rgba_byte_count =
-                                compute_expected_animation_byte_count(pixel_width, pixel_height)
+                                compute_decoded_image_byte_count(pixel_width, pixel_height)
+                                    .ok_or(AnimationError::InvalidFrameImage)
                                     .map_err(de::Error::custom)?;
                             if expected_rgba_byte_count > self.maximum_byte_count {
                                 return Err(de::Error::custom(
@@ -601,7 +556,7 @@ impl<'de> Visitor<'de> for BoundedDecodedImageVisitor {
                         ),
                     )?);
                 }
-                DecodedImageField::Other => {
+                DecodedImageField::Unknown => {
                     let _: de::IgnoredAny = map_access.next_value()?;
                 }
             }
@@ -620,10 +575,10 @@ impl<'de> Visitor<'de> for BoundedDecodedImageVisitor {
 }
 
 enum DecodedImageField {
-    Width,
-    Height,
-    Rgba,
-    Other,
+    PixelWidth,
+    PixelHeight,
+    RgbaBytes,
+    Unknown,
 }
 
 impl<'de> Deserialize<'de> for DecodedImageField {
@@ -645,44 +600,16 @@ impl<'de> Deserialize<'de> for DecodedImageField {
                 E: de::Error,
             {
                 Ok(match field_name {
-                    "pixel_width" => DecodedImageField::Width,
-                    "pixel_height" => DecodedImageField::Height,
-                    "rgba_bytes" => DecodedImageField::Rgba,
-                    _ => DecodedImageField::Other,
+                    "pixel_width" => DecodedImageField::PixelWidth,
+                    "pixel_height" => DecodedImageField::PixelHeight,
+                    "rgba_bytes" => DecodedImageField::RgbaBytes,
+                    _ => DecodedImageField::Unknown,
                 })
             }
         }
 
         deserializer.deserialize_identifier(DecodedImageFieldVisitor)
     }
-}
-
-fn compute_expected_animation_byte_count(
-    pixel_width: u32,
-    pixel_height: u32,
-) -> Result<usize, AnimationError> {
-    let pixel_width =
-        usize::try_from(pixel_width).map_err(|_| AnimationError::InvalidFrameImage)?;
-    let pixel_height =
-        usize::try_from(pixel_height).map_err(|_| AnimationError::InvalidFrameImage)?;
-    if pixel_width == 0
-        || pixel_height == 0
-        || pixel_width > MAX_IMAGE_SIDE_PIXEL_COUNT
-        || pixel_height > MAX_IMAGE_SIDE_PIXEL_COUNT
-        || pixel_width
-            .checked_mul(pixel_height)
-            .is_none_or(|pixel_count| pixel_count > MAX_IMAGE_PIXEL_COUNT)
-    {
-        return Err(AnimationError::InvalidFrameImage);
-    }
-    let expected_rgba_byte_count = pixel_width
-        .checked_mul(pixel_height)
-        .and_then(|pixel_count| pixel_count.checked_mul(4))
-        .ok_or(AnimationError::InvalidFrameImage)?;
-    if expected_rgba_byte_count > MAX_IMAGE_BYTE_COUNT {
-        return Err(AnimationError::InvalidFrameImage);
-    }
-    Ok(expected_rgba_byte_count)
 }
 
 /// A decoded static image or a bounded animation.
@@ -707,21 +634,25 @@ pub fn decode_media(
         return Err(GraphicsError::ImageTooLarge { protocol });
     }
     catch_unwind(AssertUnwindSafe(|| {
-        decode_media_inner(protocol, encoded_media_bytes)
+        decode_media_by_format(protocol, encoded_media_bytes)
     }))
     .map_err(|_| GraphicsError::DecodeFailure { protocol })?
 }
 
-fn decode_media_inner(
+fn decode_media_by_format(
     protocol: GraphicsProtocol,
     encoded_media_bytes: &[u8],
 ) -> Result<DecodedMedia, GraphicsError> {
     let image_format = guess_image_format(protocol, encoded_media_bytes)?;
     match image_format {
         image::ImageFormat::Gif => {
-            let gif_scan = scan_gif(protocol, encoded_media_bytes)?;
-            if gif_scan.is_animated {
-                decode_gif_animation(protocol, encoded_media_bytes, gif_scan.loop_policy)
+            let gif_animation_scan = scan_gif_animation(protocol, encoded_media_bytes)?;
+            if gif_animation_scan.is_animated {
+                decode_gif_animation(
+                    protocol,
+                    encoded_media_bytes,
+                    gif_animation_scan.loop_policy,
+                )
             } else {
                 decode_static_raster(protocol, encoded_media_bytes).map(DecodedMedia::Static)
             }
@@ -776,7 +707,7 @@ fn decode_apng_animation(
     let decoder = decoder
         .apng()
         .map_err(|image_error| map_image_error(protocol, image_error))?;
-    let loop_policy = loop_policy_from_image(decoder.loop_count(), protocol)?;
+    let loop_policy = resolve_loop_policy(decoder.loop_count(), protocol)?;
     collect_decoded_animation(
         protocol,
         decoder.into_frames(),
@@ -795,7 +726,7 @@ fn decode_webp_animation(
         .set_limits(build_raster_limits())
         .map_err(|image_error| map_image_error(protocol, image_error))?;
     let canvas_pixel_dimensions = decoder.dimensions();
-    let loop_policy = loop_policy_from_image(decoder.loop_count(), protocol)?;
+    let loop_policy = resolve_loop_policy(decoder.loop_count(), protocol)?;
     collect_decoded_animation(
         protocol,
         decoder.into_frames(),
@@ -804,7 +735,7 @@ fn decode_webp_animation(
     )
 }
 
-fn loop_policy_from_image(
+fn resolve_loop_policy(
     loop_count: image::metadata::LoopCount,
     protocol: GraphicsProtocol,
 ) -> Result<LoopPolicy, GraphicsError> {
@@ -844,39 +775,24 @@ fn collect_decoded_animation<'a>(
             usize::try_from(frame_width).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
         let frame_pixel_height =
             usize::try_from(frame_height).map_err(|_| GraphicsError::ImageTooLarge { protocol })?;
-        validate_image_dimensions(protocol, frame_pixel_width, frame_pixel_height)?;
         let expected_rgba_byte_count =
             compute_rgba_byte_count(protocol, frame_pixel_width, frame_pixel_height)?;
         if decoded_frame_buffer.as_raw().len() != expected_rgba_byte_count {
             return Err(GraphicsError::DecodeFailure { protocol });
         }
-        let remaining_image_byte_count = MAX_IMAGE_BYTE_COUNT
-            .checked_sub(retained_byte_count)
-            .ok_or(GraphicsError::ImageTooLarge { protocol })?;
-        if expected_rgba_byte_count > remaining_image_byte_count {
+        if expected_rgba_byte_count > MAX_IMAGE_BYTE_COUNT - retained_byte_count {
             return Err(GraphicsError::ImageTooLarge { protocol });
         }
-        let frame_delay_milliseconds = decoded_frame.delay().numer_denom_ms();
-        let frame_rgba_bytes = decoded_frame.into_buffer().into_raw();
-        if frame_rgba_bytes.len() != expected_rgba_byte_count {
-            return Err(GraphicsError::DecodeFailure { protocol });
-        }
-        retained_byte_count = retained_byte_count
-            .checked_add(frame_rgba_bytes.len())
-            .ok_or(GraphicsError::ImageTooLarge { protocol })?;
-        if retained_byte_count > MAX_IMAGE_BYTE_COUNT {
-            return Err(GraphicsError::ImageTooLarge { protocol });
-        }
+        retained_byte_count += expected_rgba_byte_count;
+        let (delay_numerator_ms, delay_denominator_ms) = decoded_frame.delay().numer_denom_ms();
         let decoded_image = DecodedImage {
             pixel_width: frame_width,
             pixel_height: frame_height,
-            rgba_bytes: frame_rgba_bytes,
+            rgba_bytes: decoded_frame.into_buffer().into_raw(),
         };
-        let frame_delay = FrameDelay::from_millisecond_ratio(
-            frame_delay_milliseconds.0,
-            frame_delay_milliseconds.1,
-        )
-        .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
+        let frame_delay =
+            FrameDelay::from_millisecond_ratio(delay_numerator_ms, delay_denominator_ms)
+                .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
         let animation_frame = AnimationFrame::from_image_and_delay(decoded_image, frame_delay)
             .map_err(|_| GraphicsError::DecodeFailure { protocol })?;
         retained_animation_frames
@@ -885,9 +801,6 @@ fn collect_decoded_animation<'a>(
         retained_animation_frames.push(animation_frame);
     }
 
-    if retained_animation_frames.is_empty() {
-        return Err(GraphicsError::DecodeFailure { protocol });
-    }
     DecodedAnimation::from_frames_and_loop_policy(retained_animation_frames, loop_policy)
         .map(DecodedMedia::Animation)
         .map_err(|animation_error| map_animation_error(protocol, animation_error))
@@ -910,10 +823,9 @@ fn map_animation_error(
 }
 
 fn validate_animation_image(decoded_image: &DecodedImage) -> Result<(), AnimationError> {
-    let expected_rgba_byte_count = compute_expected_animation_byte_count(
-        decoded_image.pixel_width,
-        decoded_image.pixel_height,
-    )?;
+    let expected_rgba_byte_count =
+        compute_decoded_image_byte_count(decoded_image.pixel_width, decoded_image.pixel_height)
+            .ok_or(AnimationError::InvalidFrameImage)?;
     if decoded_image.rgba_bytes.len() != expected_rgba_byte_count {
         return Err(AnimationError::InvalidFrameImage);
     }
@@ -932,7 +844,7 @@ enum GifAnimationScanError {
     TooManyFrames,
 }
 
-fn scan_gif(
+fn scan_gif_animation(
     protocol: GraphicsProtocol,
     encoded_gif_bytes: &[u8],
 ) -> Result<GifAnimationScan, GraphicsError> {

@@ -1,17 +1,17 @@
 //! What a session does for an attached client whose link cannot carry the
 //! events as fast as the session produces them.
 //!
-//! One session server runs on a thread of this process over a
-//! [`FakePtyBackend`], the way `in_session_cli_round_trip` runs it, and two
-//! clients attach to it:
+//! One session server runs on a thread of this process over a fake PTY
+//! backend, started by `common::in_process_session`, and two clients attach to
+//! it:
 //!
 //! 1. The throttled client. Its frames do not travel the control socket
 //!    directly. A loopback listener in this process accepts its connection,
 //!    opens its own connection to the control socket, and relays raw bytes
 //!    between the two with one
 //!    [`pump_throttled`](koshi_test_support::throttle::pump_throttled) per
-//!    direction. The direction carrying the session's events is held to a small
-//!    number of bytes per slice, so the session outruns it.
+//!    direction. The direction carrying the session's events is held to
+//!    1024 bytes per 10 ms slice, which the burst below outruns.
 //! 2. The control client, attached straight to the control socket with no
 //!    throttle, whose reader thread drains everything the session writes.
 //!
@@ -25,60 +25,48 @@
 //! submitted after that resync must arrive on the throttled connection
 //! itself.
 //!
-//! Every wait here is bounded. A queue read uses the time left until its
-//! [`Instant`] deadline, so a session that never resyncs fails this test instead
-//! of hanging it.
+//! Every wait here is bounded. A queue read waits for the time left until its
+//! [`Instant`] deadline, and a session that never resyncs fails the test at that
+//! deadline.
+
+mod common;
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusTabArgs, NewTabArgs, TabTarget,
 };
 use koshi_core::event::{Event, TabFocused};
-use koshi_core::geometry::Size;
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, TabId};
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
-};
+use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult};
 use koshi_ipc::transport::{build_frame_halves, Connection, Deadlined, FrameReader, FrameWriter};
-use koshi_pty::backend::state::PtyBackend;
-use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::runtime::pty_inbox::InboxSink;
-use koshi_runtime::server::Server;
-use koshi_test_support::fake_pty::FakePtyBackend;
-use koshi_test_support::fixtures::build_test_runtime_directory;
 use koshi_test_support::throttle::pump_throttled;
-use tempfile::TempDir;
 
-/// How long a poll waits for something the session server has to do before the
-/// test calls it a failure.
-const WAIT_DURATION: Duration = Duration::from_secs(60);
+use common::in_process_session::{
+    attach_test_client, forward_session_events, list_emitted_events, RunningSession,
+};
+use common::session_connection::{
+    build_attach_request, build_hello_request, open_session_connection,
+};
+
+/// How long a poll waits for something the session server has to do over the
+/// throttled link before the test calls it a failure: 60 seconds.
+const THROTTLED_LINK_WAIT_DURATION: Duration = Duration::from_secs(60);
 
 /// How long a poll pauses between attempts.
 const ROUND_TRIP_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(10);
-
-/// The terminal size the session starts at and every attaching client reports.
-const ATTACH_VIEWPORT_SIZE: Size = Size {
-    column_count: 80,
-    row_count: 24,
-};
 
 /// The span one slice of a relay pump covers.
 const RELAY_SLICE_DURATION: Duration = Duration::from_millis(10);
 
 /// Bytes per slice on the direction carrying the throttled client's own frames
-/// to the session. Wide enough that its handshake and its commands are not
-/// slowed at all.
+/// to the session: 64 KiB, more than its Hello, Attach and commands take.
 const TO_SESSION_BYTE_COUNT_PER_SLICE: usize = 64 * 1024;
 
 /// Bytes per slice on the direction carrying the session's events to the
@@ -90,201 +78,20 @@ const FROM_SESSION_BYTE_COUNT_PER_SLICE: usize = 1024;
 /// `PaneOutputUpdated` event.
 const LOSSY_CHUNK_COUNT: usize = 400;
 
-/// One chunk of pane output: a row of one repeated character, then a new line.
-/// A row of equal cells travels as one run, so the picture the session composes
-/// for this pane stays small and the backlog the throttled link must carry is
-/// the events, not the pictures.
+/// One chunk of pane output: a row of 78 `k` characters, then a new line. A row
+/// of equal cells travels as one run in the picture the session composes.
 const PANE_OUTPUT_CHUNK_BYTES: &[u8] =
     b"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\r\n";
 
 /// How many tab focus changes the burst submits. Each one puts one critical
-/// event on every subscriber's queue, which is several times the 1024 entries
-/// one queue holds plus everything the throttled link carries away while the
-/// burst runs.
+/// event on every subscriber's queue: several times the 1024 entries one queue
+/// holds.
 const CRITICAL_COMMAND_COUNT: usize = 6000;
-
-/// One session server running on its own thread, serving a real control socket
-/// in its own runtime directory over a fake PTY backend. Dropping it stops that
-/// thread and withdraws the socket.
-struct RunningSession {
-    /// The runtime directory the control socket and endpoint file live in.
-    runtime_directory: TempDir,
-    /// The session the server seeded and serves.
-    session_id: SessionId,
-    /// The backend that stands in for the panes' children, so a test can drive
-    /// pane output.
-    pty: Arc<FakePtyBackend>,
-    /// The runtime inbox, for the hangup that ends the serving thread.
-    inbox_sender: mpsc::Sender<RuntimeEvent>,
-    /// The serving thread, joined at drop. `Option` so the drop can take it out
-    /// of the otherwise-borrowed struct.
-    dispatcher: Option<JoinHandle<()>>,
-}
-
-impl RunningSession {
-    /// Start a session server on its own thread and wait until its socket
-    /// answers.
-    fn start_session() -> RunningSession {
-        let runtime_directory = build_test_runtime_directory();
-        let session_id = SessionId::new();
-        let (inbox_sender, inbox_receiver) = mpsc::channel();
-        let pty = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-            InboxSink::from_event_sender(inbox_sender.clone()),
-        )));
-
-        let serving_runtime_directory = runtime_directory.path().to_path_buf();
-        let serving_pty = Arc::clone(&pty);
-        let serving_sender = inbox_sender.clone();
-        let dispatcher = std::thread::spawn(move || {
-            serve_session(
-                &serving_runtime_directory,
-                session_id,
-                serving_pty,
-                inbox_receiver,
-                serving_sender,
-            );
-        });
-
-        let running_session = RunningSession {
-            runtime_directory,
-            session_id,
-            pty,
-            inbox_sender,
-            dispatcher: Some(dispatcher),
-        };
-        // The endpoint file is written after the socket binds, so a readable one
-        // means the socket is ready to answer.
-        let deadline = Instant::now() + WAIT_DURATION;
-        while EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-            running_session.runtime_directory.path(),
-            running_session.session_id,
-        ))
-        .is_err()
-        {
-            assert!(
-                Instant::now() < deadline,
-                "the session server never advertised its socket"
-            );
-            std::thread::sleep(ROUND_TRIP_POLL_INTERVAL_DURATION);
-        }
-        running_session
-    }
-
-    /// The session's own report of itself, read over the control socket by the
-    /// library call the `koshi inspect` verbs make.
-    fn fetch_session_overview(&self) -> koshi_core::discovery::SessionOverview {
-        koshi_link::ipc_client::fetch_session_overview(
-            self.runtime_directory.path(),
-            self.session_id,
-        )
-        .expect("the session server describes itself")
-    }
-}
-
-impl Drop for RunningSession {
-    fn drop(&mut self) {
-        // The serving loop stops on a `Quit`; a loop that already stopped on its
-        // own leaves a closed inbox, and the send fails harmlessly.
-        let _ = self.inbox_sender.send(RuntimeEvent::Quit);
-        if let Some(handle) = self.dispatcher.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-/// Build one session's server on `pty`, seed the session, bind its control
-/// socket in `runtime_directory`, and serve the runtime inbox until the session ends.
-fn serve_session(
-    runtime_directory: &Path,
-    session_id: SessionId,
-    pty: Arc<FakePtyBackend>,
-    inbox_receiver: mpsc::Receiver<RuntimeEvent>,
-    inbox_sender: mpsc::Sender<RuntimeEvent>,
-) {
-    let backend: Arc<dyn PtyBackend> = pty;
-    let mut session_server = Server::from_runtime_parts(backend, inbox_receiver);
-    session_server.load_startup_config(None);
-    session_server
-        .bootstrap_session(
-            session_id,
-            "quiet-lake".to_string(),
-            ATTACH_VIEWPORT_SIZE,
-            SystemTime::now(),
-            None,
-        )
-        .expect("the session is seeded");
-
-    let ipc_server = IpcServer::start(runtime_directory, session_id, inbox_sender, None)
-        .expect("the control socket binds");
-    session_server.attach_ipc_server(ipc_server);
-
-    run_session_event_loop(&mut session_server);
-    session_server.shutdown();
-}
-
-/// Serve the runtime inbox until the session ends: block until an event is due
-/// (bounded by the next render deadline), apply it and any others already
-/// queued, hand a fresh snapshot to any subscriber that lost a critical event,
-/// push every attached client its frame when a render is due, and stop once the
-/// inbox loses its last sender, a hangup arrives, a quit is applied, or no pane
-/// is left running.
-fn run_session_event_loop(session_server: &mut Server) {
-    loop {
-        let current_time = Instant::now();
-        let pending_runtime_event = match session_server.compute_next_render_wakeup(current_time) {
-            Some(timeout_duration) => {
-                match session_server
-                    .get_inbox_receiver()
-                    .recv_timeout(timeout_duration)
-                {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            None => match session_server.get_inbox_receiver().recv() {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(_) => break,
-            },
-        };
-        let mut is_quit_requested = false;
-        if let Some(runtime_event) = pending_runtime_event {
-            is_quit_requested |= session_server
-                .handle_runtime_event(runtime_event)
-                .is_break();
-        }
-        while let Ok(runtime_event) = session_server.get_inbox_receiver().try_recv() {
-            is_quit_requested |= session_server
-                .handle_runtime_event(runtime_event)
-                .is_break();
-        }
-        session_server.resync_lagged();
-        if session_server.poll_render(Instant::now()) {
-            session_server.push_frames();
-        }
-        if is_quit_requested
-            || session_server.is_quit_requested()
-            || !session_server.has_active_panes()
-        {
-            break;
-        }
-    }
-}
-
-/// The endpoint file the session server advertises: the socket address and the
-/// token a Hello presents.
-fn get_session_endpoint(session: &RunningSession) -> EndpointFile {
-    EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-        session.runtime_directory.path(),
-        session.session_id,
-    ))
-    .expect("the session server advertises its socket")
-}
 
 /// One loopback stream half, as a framed connection reads or writes it.
 ///
-/// [`Deadlined::set_deadline`] is ignored: this stream's own read timeout, set
-/// where it is opened, is what bounds a read on it.
+/// [`Deadlined::set_deadline`] does nothing. A read on it is bounded by the
+/// stream's own read timeout, when one is set.
 struct LoopbackHalf(TcpStream);
 
 impl Read for LoopbackHalf {
@@ -304,146 +111,48 @@ impl Write for LoopbackHalf {
 }
 
 impl Deadlined for LoopbackHalf {
-    fn set_deadline(&mut self, _at: Option<Instant>) {}
+    fn set_deadline(&mut self, _deadline: Option<Instant>) {}
 }
 
-/// Open a connection to the socket `endpoint_file` advertises, with its handshake
-/// already done.
-fn open_session_connection(endpoint_file: &EndpointFile) -> Connection {
-    let mut connection =
-        Connection::connect(&endpoint_file.socket_address).expect("the socket answers");
-    let hello_request = build_hello_request(endpoint_file);
-    connection
-        .send(&hello_request)
-        .expect("the server reads the Hello");
-    let ipc_response: IpcResponse = connection.recv().expect("the server answers the Hello");
-    match ipc_response.answer_result {
-        IpcResult::Hello { .. } => connection,
-        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
-    }
-}
-
-/// The opening request every connection here sends: the versions this build
-/// speaks and the secret the endpoint file carries.
-fn build_hello_request(endpoint_file: &EndpointFile) -> IpcRequest {
-    IpcRequest {
-        request_id: 1,
-        request_kind: IpcRequestKind::Hello {
-            minimum_protocol_version: MIN_PROTOCOL_VERSION,
-            maximum_protocol_version: PROTOCOL_VERSION,
-            connection_token: endpoint_file.connection_token.clone(),
-            is_remote: false,
-        },
-    }
-}
-
-/// The request that joins a session as an attached client.
-fn build_attach_request() -> IpcRequest {
-    IpcRequest {
-        request_id: 2,
-        request_kind: IpcRequestKind::Attach {
-            viewport_size: ATTACH_VIEWPORT_SIZE,
-            resume_client_id: None,
-            resume_token: None,
-            pane_area: None,
-            graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
-            cell_size: None,
-        },
-    }
-}
-
-/// A client attached over the control socket, with its event stream drained by
-/// its own thread into a queue this thread polls.
-struct AttachedClient {
-    /// The client the session minted for this connection.
-    client_id: ClientId,
-    /// The session's structure as the attach reply reported it.
-    session_structure: AttachedSessionStructureSnapshot,
-    /// Every frame the session wrote that says something other than the picture
-    /// to draw, in arrival order.
-    events: mpsc::Receiver<SessionEvent>,
-}
-
-/// Attach to `session` straight over its control socket — Hello then Attach on
-/// one connection — and hand back the client the server minted, the structure
-/// it was given, and its event stream.
-fn attach_test_client(session: &RunningSession) -> AttachedClient {
-    let mut connection = open_session_connection(&get_session_endpoint(session));
-    connection
-        .send(&build_attach_request())
-        .expect("the server reads the attach");
-    let ipc_response: IpcResponse = connection.recv().expect("the server answers the attach");
-    assert_eq!(ipc_response.request_id, Some(2));
-    let IpcResult::Attached {
-        client_id,
-        session_id,
-        session_structure,
-        ..
-    } = ipc_response.answer_result
-    else {
-        panic!(
-            "expected an attach reply, got {:?}",
-            ipc_response.answer_result
-        );
-    };
-    assert_eq!(session_id, session.session_id);
-
-    let (events_sender, events) = mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(session_event) = connection.recv::<SessionEvent>() {
-            if matches!(session_event, SessionEvent::Painted { .. }) {
-                continue;
-            }
-            if events_sender.send(session_event).is_err() {
-                break;
-            }
-        }
-    });
-
-    AttachedClient {
-        client_id,
-        session_structure,
-        events,
-    }
-}
-
-/// A relay listening on loopback: it accepts one connection, opens its own
-/// connection to `endpoint`, and copies raw bytes between the two at a bounded
-/// rate in each direction.
+/// Start a relay listening on loopback, and return the address it listens on.
 ///
-/// The direction carrying the session's events moves [`FROM_SESSION_BYTE_COUNT_PER_SLICE`] per
-/// [`RELAY_SLICE_DURATION`]; the direction carrying the client's own frames moves
-/// [`TO_SESSION_BYTE_COUNT_PER_SLICE`]. Both pumps stop at `deadline`, so no thread here outlives
-/// the test.
+/// The relay accepts one connection, opens its own connection to the socket
+/// `endpoint_file` advertises, and copies raw bytes between the two. The
+/// direction carrying the session's events moves
+/// [`FROM_SESSION_BYTE_COUNT_PER_SLICE`] per [`RELAY_SLICE_DURATION`]; the
+/// direction carrying the client's own frames moves
+/// [`TO_SESSION_BYTE_COUNT_PER_SLICE`]. Both pumps stop at `deadline`.
 fn start_throttled_relay(endpoint_file: EndpointFile, deadline: Instant) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the relay's listener");
-    let relay_socket_address = listener
+    let relay_listener = TcpListener::bind("127.0.0.1:0").expect("bind the relay's listener");
+    let relay_socket_address = relay_listener
         .local_addr()
         .expect("read the relay's bound address")
         .to_string();
     std::thread::spawn(move || {
-        let (client_side, _) = listener.accept().expect("the relay accepts one client");
-        // The pump reading this stream re-checks the deadline after each
-        // timeout, so a client that stops sending cannot hold that thread.
-        client_side
+        let (accepted_client_stream, _) = relay_listener
+            .accept()
+            .expect("the relay accepts one client");
+        // A read on this stream returns within the poll interval, and the pump
+        // checks its deadline after each one.
+        accepted_client_stream
             .set_read_timeout(Some(ROUND_TRIP_POLL_INTERVAL_DURATION))
             .expect("set the relay's read timeout");
-        let inbound = client_side
+        let client_reader_stream = accepted_client_stream
             .try_clone()
             .expect("duplicate the relay's client stream");
-        let session_side =
+        let session_connection =
             Connection::connect(&endpoint_file.socket_address).expect("the socket answers");
-        let (from_session, to_session) = session_side.split_raw();
+        let (session_reader, session_writer) = session_connection.split_raw();
         pump_throttled(
-            inbound,
-            to_session,
+            client_reader_stream,
+            session_writer,
             TO_SESSION_BYTE_COUNT_PER_SLICE,
             RELAY_SLICE_DURATION,
             deadline,
         );
         pump_throttled(
-            from_session,
-            client_side,
+            session_reader,
+            accepted_client_stream,
             FROM_SESSION_BYTE_COUNT_PER_SLICE,
             RELAY_SLICE_DURATION,
             deadline,
@@ -458,34 +167,36 @@ struct ThrottledClient {
     /// The client the session minted for this connection.
     client_id: ClientId,
     /// The half the session's frames arrive on. Nothing reads it until the test
-    /// hands it to [`drain_events_into_queue`], which is what holds this client behind
-    /// the session.
-    incoming: FrameReader,
-    /// The half this client's own frames go out on, kept open for as long as the
-    /// connection must live.
-    outgoing: FrameWriter,
+    /// hands it to [`forward_session_events`].
+    session_frame_reader: FrameReader,
+    /// The half this client's own frames go out on. The connection stays open
+    /// while this is held.
+    client_frame_writer: FrameWriter,
 }
 
-/// Connect to the relay at `address`, do the Hello and the Attach over it, and
-/// hand back the attached client with its stream unread.
+/// Connect to the relay at `relay_socket_address`, do the Hello and the Attach
+/// for `session` over it, and hand back the attached client with its stream
+/// unread.
 fn attach_client_through_relay(
     session: &RunningSession,
     relay_socket_address: &str,
 ) -> ThrottledClient {
-    let endpoint_file = get_session_endpoint(session);
+    let endpoint_file = session.load_session_endpoint();
     let client_relay_stream = TcpStream::connect(relay_socket_address).expect("the relay answers");
-    let incoming_stream = client_relay_stream
+    let client_reader_half = client_relay_stream
         .try_clone()
         .expect("duplicate the client's relay stream");
-    let (mut incoming, mut outgoing) = build_frame_halves(
-        Box::new(LoopbackHalf(incoming_stream)),
+    let (mut session_frame_reader, mut client_frame_writer) = build_frame_halves(
+        Box::new(LoopbackHalf(client_reader_half)),
         Box::new(LoopbackHalf(client_relay_stream)),
     );
 
-    outgoing
+    client_frame_writer
         .send(&build_hello_request(&endpoint_file))
         .expect("the relay carries the Hello");
-    let ipc_response: IpcResponse = incoming.recv().expect("the server answers the Hello");
+    let ipc_response: IpcResponse = session_frame_reader
+        .recv()
+        .expect("the server answers the Hello");
     let IpcResult::Hello { .. } = ipc_response.answer_result else {
         panic!(
             "the Hello was answered with {:?}",
@@ -493,10 +204,12 @@ fn attach_client_through_relay(
         );
     };
 
-    outgoing
+    client_frame_writer
         .send(&build_attach_request())
         .expect("the relay carries the attach");
-    let ipc_response: IpcResponse = incoming.recv().expect("the server answers the attach");
+    let ipc_response: IpcResponse = session_frame_reader
+        .recv()
+        .expect("the server answers the attach");
     assert_eq!(ipc_response.request_id, Some(2));
     let IpcResult::Attached {
         client_id,
@@ -513,34 +226,16 @@ fn attach_client_through_relay(
 
     ThrottledClient {
         client_id,
-        incoming,
-        outgoing,
+        session_frame_reader,
+        client_frame_writer,
     }
-}
-
-/// Start reading `incoming` on its own thread, forwarding every frame that is
-/// not the picture to draw into a queue this thread polls with a deadline.
-fn drain_events_into_queue(mut incoming: FrameReader) -> mpsc::Receiver<SessionEvent> {
-    let (events_sender, events) = mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(session_event) = incoming.recv::<SessionEvent>() {
-            if matches!(session_event, SessionEvent::Painted { .. }) {
-                continue;
-            }
-            if events_sender.send(session_event).is_err() {
-                break;
-            }
-        }
-    });
-    events
 }
 
 /// Submit `command` over `connection`, enveloped the way the CLI running inside
 /// `pane_id` envelops it, and hand back the dispatcher's result.
 ///
-/// The connection is reused across calls: the control socket serves requests on
-/// one connection until its peer hangs up, so a burst of commands costs one
-/// connection, not one each.
+/// `connection` is used as is, and stays open for the next call: the control
+/// socket serves requests on one connection until its peer hangs up.
 fn submit_session_command(
     connection: &mut Connection,
     session: &RunningSession,
@@ -549,7 +244,7 @@ fn submit_session_command(
     working_directory_path: &str,
     command: Command,
 ) -> CommandResult {
-    let envelope = CommandEnvelope::from_parts(
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_in_session_cli(
             session.session_id,
@@ -559,12 +254,12 @@ fn submit_session_command(
         ),
         command,
     );
-    let request = IpcRequest {
+    let submit_request = IpcRequest {
         request_id: 2,
-        request_kind: IpcRequestKind::SubmitCommand(Box::new(envelope)),
+        request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
     };
     connection
-        .send(&request)
+        .send(&submit_request)
         .expect("the server reads the command");
     let ipc_response: IpcResponse = connection.recv().expect("the server answers the command");
     assert_eq!(ipc_response.request_id, Some(2));
@@ -574,20 +269,10 @@ fn submit_session_command(
     }
 }
 
-/// The events an applied result carries, or the rejection that carried none.
-fn list_emitted_events(command_result: &CommandResult) -> &[Event] {
-    match command_result {
-        CommandResult::Ok { emitted_events, .. } => emitted_events,
-        unexpected_result => {
-            panic!("expected an applied command, got {unexpected_result:?}")
-        }
-    }
-}
-
 /// Attach once more over the control socket and hand back only the structure
 /// the reply carried, with the connection closed again.
 fn get_reattached_structure(session: &RunningSession) -> AttachedSessionStructureSnapshot {
-    let mut connection = open_session_connection(&get_session_endpoint(session));
+    let mut connection = open_session_connection(&session.load_session_endpoint());
     connection
         .send(&build_attach_request())
         .expect("the server reads the attach");
@@ -604,10 +289,12 @@ fn get_reattached_structure(session: &RunningSession) -> AttachedSessionStructur
     session_structure
 }
 
-/// Wait until the session reports exactly `tab_count` tabs, so the burst's last
-/// command has been applied before anything is compared.
+/// Wait until the session reports exactly `tab_count` tabs.
+///
+/// # Panics
+/// When [`THROTTLED_LINK_WAIT_DURATION`] passes first.
 fn wait_for_tab_count(session: &RunningSession, tab_count: usize) {
-    let deadline = Instant::now() + WAIT_DURATION;
+    let deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
     loop {
         let session_overview = session.fetch_session_overview();
         if session_overview.tabs.len() == tab_count {
@@ -622,7 +309,7 @@ fn wait_for_tab_count(session: &RunningSession, tab_count: usize) {
     }
 }
 
-/// `client`'s id as the session reports its attached clients, and `None` when
+/// `client_id` as the session reports its attached clients, and `None` when
 /// the session no longer holds that client.
 fn find_attached_client_id(session: &RunningSession, client_id: ClientId) -> Option<ClientId> {
     session
@@ -636,20 +323,21 @@ fn find_attached_client_id(session: &RunningSession, client_id: ClientId) -> Opt
 #[test]
 fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() {
     let session = RunningSession::start_session();
-    let session_socket_address = get_session_endpoint(&session).socket_address;
-    let root_pane_id = session.pty.list_spawned_pane_ids()[0];
+    let session_socket_address = session.load_session_endpoint().socket_address;
+    let root_pane_id = session.fake_pty_backend.list_spawned_pane_ids()[0];
 
-    // Every pump stops at this instant, so no relay thread outlives the test
-    // even if an assertion below ends it early.
-    let relay_deadline = Instant::now() + WAIT_DURATION * 3;
-    let relay = start_throttled_relay(get_session_endpoint(&session), relay_deadline);
-    let throttled = attach_client_through_relay(&session, &relay);
+    // Every pump stops at this instant, whether or not an assertion below ends
+    // the test first.
+    let relay_deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION * 3;
+    let relay_socket_address =
+        start_throttled_relay(session.load_session_endpoint(), relay_deadline);
+    let throttled_client = attach_client_through_relay(&session, &relay_socket_address);
     let control_client = attach_test_client(&session);
 
-    // A second tab, so each focus change below actually moves focus and emits
-    // the critical event that fills the throttled client's queue.
+    // A second tab: each focus change below moves focus between the two and
+    // emits one critical event.
     let first_tab_id = session.fetch_session_overview().tabs[0].tab_id;
-    let mut control_connection = open_session_connection(&get_session_endpoint(&session));
+    let mut control_connection = open_session_connection(&session.load_session_endpoint());
     let create_tab_result = submit_session_command(
         &mut control_connection,
         &session,
@@ -659,7 +347,7 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
         Command::NewTab(NewTabArgs::default()),
     );
     let second_tab_id = match list_emitted_events(&create_tab_result) {
-        [Event::TabCreated(payload), ..] => payload.tab_id,
+        [Event::TabCreated(created_tab), ..] => created_tab.tab_id,
         unexpected_events => {
             panic!("expected a tab to be created, got {unexpected_events:?}")
         }
@@ -669,16 +357,16 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     // The lossy half of the burst: pane output the bus may drop.
     for _ in 0..LOSSY_CHUNK_COUNT {
         session
-            .pty
+            .fake_pty_backend
             .push_output(root_pane_id, PANE_OUTPUT_CHUNK_BYTES.to_vec())
             .expect("the fake backend takes the pane's output");
     }
 
-    // The critical half: tab focus changes, which the bus may not drop
-    // silently. Nothing reads the throttled client's stream while this runs, so
-    // its queue fills and then overflows.
-    // The new tab is the one the control client is on, so the first `Next` wraps
-    // back to the first tab and every turn after it swaps the two.
+    // The critical half: tab focus changes, which the bus never drops
+    // silently. Nothing reads the throttled client's stream while this runs:
+    // its queue fills, then overflows. The control client is on the new tab:
+    // the first `Next` wraps back to the first tab, and every turn after it
+    // swaps the two.
     for command_index in 0..CRITICAL_COMMAND_COUNT {
         let focus_tab_result = submit_session_command(
             &mut control_connection,
@@ -709,8 +397,10 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
 
     // Only now does the throttled client start reading. Its queue holds the
     // backlog, and the resync the serve loop owes it lands after that backlog.
-    let throttled_events = drain_events_into_queue(throttled.incoming);
-    let deadline = Instant::now() + WAIT_DURATION;
+    let mut session_frame_reader = throttled_client.session_frame_reader;
+    let throttled_events =
+        forward_session_events(move || session_frame_reader.recv::<SessionEvent>());
+    let deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
     let mut received_event_count = 0;
     let dropped_event_count = loop {
         assert!(
@@ -741,8 +431,8 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     // session still holds that client: the throttled link was never dropped and
     // remade.
     assert_eq!(
-        find_attached_client_id(&session, throttled.client_id),
-        Some(throttled.client_id)
+        find_attached_client_id(&session, throttled_client.client_id),
+        Some(throttled_client.client_id)
     );
 
     // A focus change submitted after the resync must reach the throttled
@@ -761,10 +451,10 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
         }),
     );
     let focus_event = match list_emitted_events(&focus_tab_result) {
-        [Event::TabFocused(payload)] => *payload,
+        [Event::TabFocused(tab_focused)] => *tab_focused,
         unexpected_events => panic!("expected one focus change, got {unexpected_events:?}"),
     };
-    let probe_deadline = Instant::now() + WAIT_DURATION;
+    let probe_deadline = Instant::now() + THROTTLED_LINK_WAIT_DURATION;
     loop {
         assert!(
             Instant::now() < probe_deadline,
@@ -790,7 +480,7 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
 
     // The session the throttled client caught up to is the session an
     // unthrottled client sees. Both reads are fresh attaches over the control
-    // socket on the settled session, so every id in them is the same id.
+    // socket on the settled session, and every id in them matches.
     let settled_structure = get_reattached_structure(&session);
     let repeated_structure = get_reattached_structure(&session);
     assert_eq!(settled_structure, repeated_structure);
@@ -807,8 +497,8 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
     // The control client's own stream never stopped: it read the tab creation
     // the burst opened with.
     let first_control_event = control_client
-        .events
-        .recv_timeout(WAIT_DURATION)
+        .session_events
+        .recv_timeout(THROTTLED_LINK_WAIT_DURATION)
         .expect("the control client is told the session changed");
     assert_eq!(
         first_control_event,
@@ -820,5 +510,5 @@ fn a_burst_the_throttled_link_cannot_carry_desyncs_that_client_and_resyncs_it() 
 
     // Closes the throttled client's writing half. It is open through every
     // assertion above.
-    drop(throttled.outgoing);
+    drop(throttled_client.client_frame_writer);
 }

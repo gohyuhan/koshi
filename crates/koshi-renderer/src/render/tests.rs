@@ -10,8 +10,7 @@
 //!
 //! The focused pane's cursor cell is reported, clamped inside its content
 //! area, and hidden for an unfocused pane, a pane with no grid, and a hidden or
-//! app-hidden cursor. The
-//! cursor style follows the focused pane. A centered too-small overlay
+//! app-hidden cursor. The cursor style follows the focused pane. A centered too-small overlay
 //! replaces the frame when the tab has no room for any pane. A viewport larger
 //! than the tab size centers the layout and letterboxes the margin, with
 //! the cursor shifted to match. Degenerate sizes are safe, including a buffer
@@ -24,7 +23,7 @@ use std::sync::Arc;
 
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence};
 use koshi_core::mouse::MouseTracking;
 use koshi_terminal::grid::state::{Cell, Grid};
 use koshi_terminal::style::{Color as TermColor, Style as TermStyle};
@@ -157,10 +156,10 @@ fn build_core_regions(column_count: u16, row_count: u16) -> CommittedRegions {
     )
 }
 
-/// The whole-area geometry: the top row as the first region, the bottom row as
-/// the second, and the whole `column_count x row_count` viewport as the pane rectangle. A
-/// one-row viewport gets an empty second region.
-fn build_legacy_regions(column_count: u16, row_count: u16) -> CommittedRegions {
+/// The whole-viewport geometry: the top row as the first region, the bottom
+/// row as the second, and the whole `column_count x row_count` viewport as the
+/// pane rectangle. A one-row viewport gets an empty second region.
+fn build_whole_viewport_regions(column_count: u16, row_count: u16) -> CommittedRegions {
     let viewport_size = Size {
         column_count,
         row_count,
@@ -196,197 +195,17 @@ fn build_legacy_regions(column_count: u16, row_count: u16) -> CommittedRegions {
     )
 }
 
-/// Render a snapshot into a fresh `column_count x row_count` buffer.
-fn render_test_snapshot(snapshot: &RenderSnapshot, column_count: u16, row_count: u16) -> Buffer {
-    render_test_snapshot_with_theme(snapshot, &Theme::default(), column_count, row_count)
-}
-
-/// Paint `snapshot` in `theme`'s colors, for the tests that check which color
-/// a surface takes rather than where it sits.
-fn render_test_snapshot_with_theme(
-    snapshot: &RenderSnapshot,
-    theme: &Theme,
-    column_count: u16,
-    row_count: u16,
-) -> Buffer {
-    let viewport_area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: row_count,
-    };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    let regions = build_legacy_regions(column_count, row_count);
-    render_frame(
-        snapshot,
-        &regions,
-        theme,
-        &KeymapHints::default(),
-        None,
-        ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut render_buffer,
-    );
-    render_buffer
-}
-
-/// Paint `render_snapshot` with `viewer_chrome` into a fresh buffer.
-fn render_snapshot_with_viewer_chrome(
+/// Paint `render_snapshot` into a fresh buffer the size of
+/// `committed_regions`' viewport, in `theme`'s colors, with `keymap_hints` in
+/// the hint row and `viewer_chrome` as the viewer's own state. No key
+/// sequence is open, images draw as placeholders, and no placement preview
+/// shows.
+fn render_frame_to_buffer(
     render_snapshot: &RenderSnapshot,
-    viewer_chrome: ViewerChrome,
-    column_count: u16,
-    row_count: u16,
-) -> Buffer {
-    let viewport_area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: row_count,
-    };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    let committed_regions = build_legacy_regions(column_count, row_count);
-    render_frame(
-        render_snapshot,
-        &committed_regions,
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        viewer_chrome,
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut render_buffer,
-    );
-    render_buffer
-}
-
-/// Paint `snapshot` with the viewer's tab strip peeking, for the tests that
-/// check which tabs the strip shows.
-fn render_snapshot_with_peeking(
-    snapshot: &RenderSnapshot,
-    viewer_chrome: ViewerChrome,
-    column_count: u16,
-    row_count: u16,
-) -> Buffer {
-    let viewport_area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: row_count,
-    };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    let regions = build_legacy_regions(column_count, row_count);
-    render_frame(
-        snapshot,
-        &regions,
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        viewer_chrome,
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut render_buffer,
-    );
-    render_buffer
-}
-
-/// Paint `snapshot` with the viewer's pointer over `hovered_pane_id`, for the tests
-/// that check which pane's border wears the hover color.
-fn render_snapshot_with_hover(
-    snapshot: &RenderSnapshot,
-    hovered_pane_id: Option<PaneId>,
-    column_count: u16,
-    row_count: u16,
-) -> Buffer {
-    let viewport_area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: row_count,
-    };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    let regions = build_legacy_regions(column_count, row_count);
-    render_frame(
-        snapshot,
-        &regions,
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        ViewerChrome {
-            hovered_pane_id,
-            placement_handle_pane_id: None,
-            active_input_mode: None,
-            tabline_offset: None,
-            reconnecting: None,
-            ..ViewerChrome::default()
-        },
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut render_buffer,
-    );
-    render_buffer
-}
-
-/// Paint `snapshot` with `keymap_hints` in the bottom bar, for the tests that check
-/// what the hint row says.
-fn render_snapshot_with_hints(
-    snapshot: &RenderSnapshot,
-    keymap_hints: &KeymapHints,
-    column_count: u16,
-    row_count: u16,
-) -> Buffer {
-    let viewport_area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: row_count,
-    };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    let regions = build_legacy_regions(column_count, row_count);
-    render_frame(
-        snapshot,
-        &regions,
-        &Theme::default(),
-        keymap_hints,
-        None,
-        ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut render_buffer,
-    );
-    render_buffer
-}
-
-/// Paint `snapshot` over `committed_regions`' viewport with no hints.
-fn render_snapshot_with_regions(
-    snapshot: &RenderSnapshot,
     committed_regions: &CommittedRegions,
-) -> Buffer {
-    render_snapshot_with_regions_and_hints(snapshot, committed_regions, &KeymapHints::default())
-}
-
-/// Paint `snapshot` over `committed_regions`' viewport with `keymap_hints` for the second
-/// region, for the tests that check which chrome rows a region solve leaves
-/// room for.
-fn render_snapshot_with_regions_and_hints(
-    snapshot: &RenderSnapshot,
-    committed_regions: &CommittedRegions,
+    theme: &Theme,
     keymap_hints: &KeymapHints,
+    viewer_chrome: ViewerChrome,
 ) -> Buffer {
     let viewport_area = RatatuiRect {
         x: 0,
@@ -396,12 +215,12 @@ fn render_snapshot_with_regions_and_hints(
     };
     let mut render_buffer = Buffer::empty(viewport_area);
     render_frame(
-        snapshot,
+        render_snapshot,
         committed_regions,
-        &Theme::default(),
+        theme,
         keymap_hints,
         None,
-        ViewerChrome::default(),
+        viewer_chrome,
         ImageRenderMode::Placeholder,
         None,
         None,
@@ -412,11 +231,101 @@ fn render_snapshot_with_regions_and_hints(
     render_buffer
 }
 
+/// Paint `render_snapshot` into a fresh `column_count x row_count` buffer over
+/// the whole-viewport regions, in the default theme, with no hints and the
+/// default viewer chrome.
+fn render_test_snapshot(
+    render_snapshot: &RenderSnapshot,
+    column_count: u16,
+    row_count: u16,
+) -> Buffer {
+    render_snapshot_with_viewer_chrome(
+        render_snapshot,
+        ViewerChrome::default(),
+        column_count,
+        row_count,
+    )
+}
+
+/// Paint `render_snapshot` into a fresh `column_count x row_count` buffer over
+/// the whole-viewport regions, in the default theme, with no hints and
+/// `viewer_chrome` as the viewer's own state.
+fn render_snapshot_with_viewer_chrome(
+    render_snapshot: &RenderSnapshot,
+    viewer_chrome: ViewerChrome,
+    column_count: u16,
+    row_count: u16,
+) -> Buffer {
+    render_frame_to_buffer(
+        render_snapshot,
+        &build_whole_viewport_regions(column_count, row_count),
+        &Theme::default(),
+        &KeymapHints::default(),
+        viewer_chrome,
+    )
+}
+
+/// Paint `render_snapshot` over the whole-viewport regions of its client's
+/// viewport into a fresh buffer of `buffer_area`, with `viewer_chrome` and the
+/// placement preview `placement_presentation` aimed at `placement_target`.
+fn render_placement_preview(
+    render_snapshot: &RenderSnapshot,
+    placement_presentation: &PanePlacementPresentation,
+    placement_target: Option<&PanePlacementTarget>,
+    viewer_chrome: ViewerChrome,
+    buffer_area: RatatuiRect,
+) -> Buffer {
+    let viewport_area = build_viewport_area(render_snapshot);
+    let mut render_buffer = Buffer::empty(buffer_area);
+    render_frame(
+        render_snapshot,
+        &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
+        &Theme::default(),
+        &KeymapHints::default(),
+        None,
+        viewer_chrome,
+        ImageRenderMode::Placeholder,
+        None,
+        Some(placement_presentation),
+        placement_target,
+        viewport_area,
+        &mut render_buffer,
+    );
+    render_buffer
+}
+
+/// A placement message showing `full_text` when there is room and
+/// `compact_text` in a narrow area, with no second line.
+fn build_placement_message(
+    full_text: &str,
+    compact_text: &'static str,
+) -> crate::snapshot::PanePlacementMessage {
+    crate::snapshot::PanePlacementMessage {
+        full_text: full_text.to_string(),
+        compact_text,
+        detail_text: None,
+    }
+}
+
+/// The symbols of `row_index` from `column_range`, joined.
+fn format_rendered_cells(
+    render_buffer: &Buffer,
+    row_index: u16,
+    column_range: std::ops::Range<u16>,
+) -> String {
+    column_range
+        .map(|column_index| render_buffer[(column_index, row_index)].symbol())
+        .collect()
+}
+
 /// One `Ctrl + l` → `Lock` hint, the row the statusline draws when it has one.
 fn build_lock_hint_keymap() -> KeymapHints {
     KeymapHints {
         hint_bindings: Arc::new(vec![crate::snapshot::HintBinding {
-            key_sequence: KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('l'))),
+            key_sequence: KeySequence::from(KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('l'),
+            )),
             action_display_name: "Lock".to_string(),
             is_user_authored: false,
             is_pinned: false,
@@ -432,7 +341,7 @@ fn committed_core_regions_keep_the_default_frame_byte_identical() {
         column_count: 80,
         row_count: 24,
     };
-    let mut snapshot = build_render_snapshot(
+    let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
         &[(pane_id, build_cell_rect(0, 0, 80, 22), true)],
@@ -440,15 +349,24 @@ fn committed_core_regions_keep_the_default_frame_byte_identical() {
         LockMode::Normal,
         viewport_size,
     );
-    snapshot.session_snapshot.active_tab_snapshot.tab_size = Size {
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_size = Size {
         column_count: 80,
         row_count: 22,
     };
 
     let committed_regions = build_core_regions(viewport_size.column_count, viewport_size.row_count);
     assert_eq!(
-        render_test_snapshot(&snapshot, 80, 24),
-        render_snapshot_with_regions(&snapshot, &committed_regions)
+        render_test_snapshot(&render_snapshot, 80, 24),
+        render_frame_to_buffer(
+            &render_snapshot,
+            &committed_regions,
+            &Theme::default(),
+            &KeymapHints::default(),
+            ViewerChrome::default(),
+        )
     );
 }
 
@@ -463,7 +381,7 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
         column_count: 100,
         row_count: 38,
     };
-    let mut snapshot = build_render_snapshot(
+    let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
         &[(
@@ -475,8 +393,11 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
         LockMode::Normal,
         viewport_size,
     );
-    snapshot.session_snapshot.active_tab_snapshot.tab_size = tab_size;
-    snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .tab_size = tab_size;
+    render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
         grid: Arc::new(Grid::build_blank(36, 98, TermStyle::default())),
         view_row_offset: 0,
     });
@@ -502,19 +423,20 @@ fn committed_regions_keep_panes_and_cursor_inside_a_side_region() {
         3,
     );
 
-    let render_buffer = render_snapshot_with_regions(&snapshot, &committed_regions);
+    let render_buffer = render_frame_to_buffer(
+        &render_snapshot,
+        &committed_regions,
+        &Theme::default(),
+        &KeymapHints::default(),
+        ViewerChrome::default(),
+    );
     assert_eq!(render_buffer[(20, 1)].symbol(), "┌");
     assert_eq!(render_buffer[(10, 1)].symbol(), " ");
     assert_eq!(
         get_cursor_position(
-            &snapshot,
+            &render_snapshot,
             &committed_regions,
-            RatatuiRect {
-                x: 0,
-                y: 0,
-                width: viewport_size.column_count,
-                height: viewport_size.row_count,
-            },
+            build_viewport_area(&render_snapshot),
         ),
         Some(Position::new(21, 2))
     );
@@ -560,10 +482,12 @@ fn one_region_solution_paints_no_statusline() {
         },
         0,
     );
-    let render_buffer = render_snapshot_with_regions_and_hints(
+    let render_buffer = render_frame_to_buffer(
         &render_snapshot,
         &committed_regions,
+        &Theme::default(),
         &build_lock_hint_keymap(),
+        ViewerChrome::default(),
     );
 
     assert_eq!(
@@ -620,10 +544,12 @@ fn an_empty_region_solution_paints_neither_chrome_row() {
         },
         0,
     );
-    let render_buffer = render_snapshot_with_regions_and_hints(
+    let render_buffer = render_frame_to_buffer(
         &render_snapshot,
         &committed_regions,
+        &Theme::default(),
         &build_lock_hint_keymap(),
+        ViewerChrome::default(),
     );
 
     assert_eq!(format_rendered_row_text(&render_buffer, 0), " ".repeat(40));
@@ -677,7 +603,13 @@ fn a_solve_that_leaves_no_pane_rectangle_letterboxes_everything_but_the_chrome()
         },
         0,
     );
-    let render_buffer = render_snapshot_with_regions(&render_snapshot, &committed_regions);
+    let render_buffer = render_frame_to_buffer(
+        &render_snapshot,
+        &committed_regions,
+        &Theme::default(),
+        &KeymapHints::default(),
+        ViewerChrome::default(),
+    );
 
     // The pane box is drawn, and its cells wear the letterbox background.
     assert_eq!(render_buffer[(0, 1)].symbol(), "┌");
@@ -692,23 +624,23 @@ fn a_solve_that_leaves_no_pane_rectangle_letterboxes_everything_but_the_chrome()
     assert_eq!(render_buffer[(0, 7)].bg, Color::Rgb(0x00, 0x00, 0x00));
 }
 
-/// The client's viewport as an origin-`(0, 0)` render area, matching what
-/// [`render_test_snapshot`] paints into — the `viewport_area` [`cursor_position`] takes.
-fn build_viewport_area(snapshot: &RenderSnapshot) -> RatatuiRect {
+/// The client's viewport as an origin-`(0, 0)` render area: the
+/// `viewport_area` [`get_cursor_position`] takes.
+fn build_viewport_area(render_snapshot: &RenderSnapshot) -> RatatuiRect {
     RatatuiRect {
         x: 0,
         y: 0,
-        width: snapshot.client_snapshot.viewport_size.column_count,
-        height: snapshot.client_snapshot.viewport_size.row_count,
+        width: render_snapshot.client_snapshot.viewport_size.column_count,
+        height: render_snapshot.client_snapshot.viewport_size.row_count,
     }
 }
 
-/// The cursor cell [`cursor_position`] reports for `snapshot` over the
-/// whole-area geometry, in the client's own viewport.
-fn get_legacy_cursor_position(snapshot: &RenderSnapshot) -> Option<Position> {
-    let viewport_area = build_viewport_area(snapshot);
-    let committed_regions = build_legacy_regions(viewport_area.width, viewport_area.height);
-    get_cursor_position(snapshot, &committed_regions, viewport_area)
+/// The cursor cell [`get_cursor_position`] reports for `render_snapshot` over
+/// the whole-viewport regions, in the client's own viewport.
+fn get_whole_viewport_cursor_position(render_snapshot: &RenderSnapshot) -> Option<Position> {
+    let viewport_area = build_viewport_area(render_snapshot);
+    let committed_regions = build_whole_viewport_regions(viewport_area.width, viewport_area.height);
+    get_cursor_position(render_snapshot, &committed_regions, viewport_area)
 }
 
 /// The visible text of a render buffer row.
@@ -724,13 +656,13 @@ fn format_rendered_row_text(render_buffer: &Buffer, row_index: u16) -> String {
 
 #[test]
 fn renders_tabline_pane_border_and_reserved_hint_bar() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let column_count = compute_version_badge_column_count() + 31;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, column_count, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count,
@@ -765,28 +697,25 @@ fn renders_tabline_pane_border_and_reserved_hint_bar() {
 
 #[test]
 fn hint_bar_paints_the_bottom_row_from_the_hints_it_is_given() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
             row_count: 8,
         },
     );
-    let hints = KeymapHints {
-        hint_bindings: Arc::new(vec![crate::snapshot::HintBinding {
-            key_sequence: KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('l'))),
-            action_display_name: "Lock".to_string(),
-            is_user_authored: false,
-            is_pinned: false,
-        }]),
-        ..KeymapHints::default()
-    };
-    let render_buffer = render_snapshot_with_hints(&render_snapshot, &hints, 40, 8);
+    let render_buffer = render_frame_to_buffer(
+        &render_snapshot,
+        &build_whole_viewport_regions(40, 8),
+        &Theme::default(),
+        &build_lock_hint_keymap(),
+        ViewerChrome::default(),
+    );
 
     // Hint row is outside pane area: border bottom remains intact above it.
     assert_eq!(
@@ -810,16 +739,13 @@ fn two_rows_is_enough_for_both_chrome_rows() {
             row_count: 2,
         },
     );
-    let hints = KeymapHints {
-        hint_bindings: Arc::new(vec![crate::snapshot::HintBinding {
-            key_sequence: KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('l'))),
-            action_display_name: "Lock".to_string(),
-            is_user_authored: false,
-            is_pinned: false,
-        }]),
-        ..KeymapHints::default()
-    };
-    let render_buffer = render_snapshot_with_hints(&render_snapshot, &hints, 40, 2);
+    let render_buffer = render_frame_to_buffer(
+        &render_snapshot,
+        &build_whole_viewport_regions(40, 2),
+        &Theme::default(),
+        &build_lock_hint_keymap(),
+        ViewerChrome::default(),
+    );
 
     // Row 0 is the tabline, row 1 the hint row: the last height that fits both.
     assert_eq!(
@@ -834,13 +760,13 @@ fn two_rows_is_enough_for_both_chrome_rows() {
 
 #[test]
 fn tabline_lists_tabs_with_active_marker() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let column_count = compute_version_badge_column_count() + 51;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("code", true), ("logs", false)],
-        &[(pane, build_cell_rect(0, 1, column_count, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count,
@@ -852,7 +778,7 @@ fn tabline_lists_tabs_with_active_marker() {
     // The session block ` sess `, then the version badge, a gap, each padded
     // tab with one blank cell between them, blanks, and the ` BASE ` mode tag
     // on the last six cells.
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
+    let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(
@@ -861,8 +787,7 @@ fn tabline_lists_tabs_with_active_marker() {
         )
     );
 
-    // Where each tab landed, read from the same solve the paint used, so the
-    // The version badge width never has to be spelled out here.
+    // Where each tab landed, read from the same solve the paint used.
     let visible_tab_spans = solve_tabline_layout(
         render_snapshot
             .build_frame_layout(ViewerChrome::default())
@@ -870,7 +795,7 @@ fn tabline_lists_tabs_with_active_marker() {
         RatatuiRect {
             x: 0,
             y: 0,
-            width: 60,
+            width: column_count,
             height: 1,
         },
     )
@@ -900,7 +825,7 @@ fn tabline_lists_tabs_with_active_marker() {
 
 #[test]
 fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let column_count = compute_version_badge_column_count() + 31;
     let render_snapshot = build_render_snapshot(
         "sess",
@@ -911,8 +836,8 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
             ("delta", false),
             ("echo", false),
         ],
-        &[(pane, build_cell_rect(0, 1, column_count, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count,
@@ -925,65 +850,59 @@ fn tabline_scrolls_overflowing_tabs_behind_a_right_arrow() {
     // (alpha, index 0) fits from the left, so the window starts there and the
     // four tabs hidden off the right sit behind a `▶` scroll arrow. The blank
     // cell where a `◀` would sit stays blank: nothing is hidden to the left.
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
+    let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(" sess {version_badge_text}   #1  alpha      ▶ BASE ")
     );
 }
 
-/// Cells the tabline's version badge takes, measured from the left edge of the tabline
-/// actually paints. A semver version is ASCII, so counting characters counts
-/// display cells.
+/// The tabline's version badge text: `[v0.5.0] ` for version `0.5.0`.
+fn format_version_badge_text() -> String {
+    format!("[v{}] ", env!("CARGO_PKG_VERSION"))
+}
+
+/// Cells the tabline's version badge takes. A semver version is ASCII: its
+/// character count is its cell count.
 ///
-/// A test that needs room beside the version badge asks for `compute_version_badge_column_count() +
-/// <room>` rather than a fixed count: the room beside the version badge stays the same however long
-/// the version string is.
+/// A test that needs room beside the version badge asks for
+/// `compute_version_badge_column_count() + <room>`: the room beside the badge
+/// stays the same for every version string.
 fn compute_version_badge_column_count() -> u16 {
-    format!("[v{}] ", env!("CARGO_PKG_VERSION")).chars().count() as u16
+    format_version_badge_text().chars().count() as u16
 }
 
 /// The whole tabline row a session named `sess` with the single active tab
 /// `shell` paints into a `column_count`-wide row, with ` BASE ` as the mode tag.
 ///
-/// `column_count` must leave room for all of it — at least `compute_version_badge_column_count() +
-/// 24`.
+/// `column_count` is at least `compute_version_badge_column_count() + 24`.
 fn format_session_shell_tabline(column_count: u16) -> String {
     format_session_shell_tabline_with_mode_tag(column_count, " BASE ")
 }
 
 /// The whole tabline row a session named `sess` with the single active tab
-/// `shell` paints into a `column_count`-wide row: the ` sess ` block, the version
-/// version badge, one gap cell, the ` #1  shell ` ribbon, blank cells, then the mode tag
-/// right-aligned on the last mode-tag cells.
+/// `shell` paints into a `column_count`-wide row: the ` sess ` block, the
+/// version badge, one gap cell, the ` #1  shell ` ribbon, blank cells, then
+/// `mode_tag_text` right-aligned on the last cells.
 ///
-/// `mode_tag_text` is the mode block with its own padding spaces, such as ` BASE ` or
-/// ` LOCK `. `column_count` must leave room for all of it.
+/// `mode_tag_text` is the mode block with its own padding spaces, such as
+/// ` BASE ` or ` LOCK `. `column_count` leaves room for all of it.
 fn format_session_shell_tabline_with_mode_tag(column_count: u16, mode_tag_text: &str) -> String {
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
-    let blanks = column_count as usize
-        - 6
-        - version_badge_text.chars().count()
-        - 1
-        - 11
-        - mode_tag_text.chars().count();
-    [
-        " sess ".to_string(),
-        version_badge_text,
-        " ".to_string(),
-        " #1  shell ".to_string(),
-        " ".repeat(blanks),
-        mode_tag_text.to_string(),
-    ]
-    .concat()
+    let leading_text = format!(" sess {}  #1  shell ", format_version_badge_text());
+    let blank_cell_count =
+        usize::from(column_count) - leading_text.chars().count() - mode_tag_text.chars().count();
+    format!(
+        "{leading_text}{}{mode_tag_text}",
+        " ".repeat(blank_cell_count)
+    )
 }
 
-/// Overflowing tabs, offset unset: the window scrolls to reveal the active tab
-/// even when it lands deep in the tail, and both sides show a scroll arrow.
-#[test]
-fn tabline_follows_focus_into_the_overflow() {
-    let pane = PaneId::new();
-    let render_snapshot = build_render_snapshot(
+/// A session `s` with eight tabs `t0` to `t7`, `t5` active, in a viewport
+/// `compute_version_badge_column_count() + 21` cells wide and 8 rows tall.
+fn build_eight_tab_render_snapshot() -> RenderSnapshot {
+    let pane_id = PaneId::new();
+    let column_count = compute_version_badge_column_count() + 21;
+    build_render_snapshot(
         "s",
         &[
             ("t0", false),
@@ -995,19 +914,22 @@ fn tabline_follows_focus_into_the_overflow() {
             ("t6", false),
             ("t7", false),
         ],
-        &[(
-            pane,
-            build_cell_rect(0, 1, compute_version_badge_column_count() + 21, 6),
-            true,
-        )],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
-            column_count: compute_version_badge_column_count() + 21,
+            column_count,
             row_count: 8,
         },
-    );
-    let tabline = format_rendered_row_text(
+    )
+}
+
+/// Overflowing tabs, offset unset: the window scrolls to reveal the active tab
+/// even when it lands deep in the tail, and both sides show a scroll arrow.
+#[test]
+fn tabline_follows_focus_into_the_overflow() {
+    let render_snapshot = build_eight_tab_render_snapshot();
+    let tabline_text = format_rendered_row_text(
         &render_test_snapshot(
             &render_snapshot,
             compute_version_badge_column_count() + 21,
@@ -1018,9 +940,9 @@ fn tabline_follows_focus_into_the_overflow() {
 
     // Only the active tab `t5` fits, as tab six: `t0`..`t4` sit behind the `◀`
     // arrow and `t6`, `t7` behind the `▶` one.
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
+    let version_badge_text = format_version_badge_text();
     assert_eq!(
-        tabline,
+        tabline_text,
         format!(" s {version_badge_text} ◀ #6  t5  ▶ BASE ")
     );
 }
@@ -1030,68 +952,40 @@ fn tabline_follows_focus_into_the_overflow() {
 /// left arrow.
 #[test]
 fn tabline_peek_offset_ignores_the_active_tab() {
-    let pane = PaneId::new();
-    let render_snapshot = build_render_snapshot(
-        "s",
-        &[
-            ("t0", false),
-            ("t1", false),
-            ("t2", false),
-            ("t3", false),
-            ("t4", false),
-            ("t5", true),
-            ("t6", false),
-            ("t7", false),
-        ],
-        &[(
-            pane,
-            build_cell_rect(0, 1, compute_version_badge_column_count() + 21, 6),
-            true,
-        )],
-        Some(pane),
-        LockMode::Normal,
-        Size {
-            column_count: compute_version_badge_column_count() + 21,
-            row_count: 8,
-        },
-    );
-    let peeking = ViewerChrome {
-        hovered_pane_id: None,
-        placement_handle_pane_id: None,
-        active_input_mode: None,
+    let render_snapshot = build_eight_tab_render_snapshot();
+    let peeking_viewer_chrome = ViewerChrome {
         tabline_offset: Some(0),
-        reconnecting: None,
         ..ViewerChrome::default()
     };
-    let tabline = format_rendered_row_text(
-        &render_snapshot_with_peeking(
+    let tabline_text = format_rendered_row_text(
+        &render_snapshot_with_viewer_chrome(
             &render_snapshot,
-            peeking,
+            peeking_viewer_chrome,
             compute_version_badge_column_count() + 21,
             8,
         ),
         0,
     );
 
-    // The strip windows from index 0, so only `t0` shows and the active `t5`
+    // The strip windows from index 0: only `t0` shows and the active `t5`
     // stays hidden behind the `▶` arrow. The `◀` cell stays blank: nothing is
     // hidden to the left of index 0.
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
+    let version_badge_text = format_version_badge_text();
     assert_eq!(
-        tabline,
+        tabline_text,
         format!(" s {version_badge_text}   #1  t0  ▶ BASE ")
     );
 }
 
 #[test]
 fn mode_tag_reflects_lock_mode() {
-    let pane = PaneId::new();
-    let create_snapshot_for_lock_mode = |lock_mode| {
+    let pane_id = PaneId::new();
+    let build_snapshot_for_lock_mode = |lock_mode| {
         build_render_snapshot(
             "sess",
             &[("shell", true)],
-            &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-            Some(pane),
+            &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+            Some(pane_id),
             lock_mode,
             Size {
                 column_count: 40,
@@ -1101,7 +995,7 @@ fn mode_tag_reflects_lock_mode() {
     };
 
     let normal_mode_render_buffer =
-        render_test_snapshot(&create_snapshot_for_lock_mode(LockMode::Normal), 40, 8);
+        render_test_snapshot(&build_snapshot_for_lock_mode(LockMode::Normal), 40, 8);
     assert_eq!(
         format_rendered_row_text(&normal_mode_render_buffer, 0),
         format_session_shell_tabline_with_mode_tag(40, " BASE ")
@@ -1109,7 +1003,7 @@ fn mode_tag_reflects_lock_mode() {
 
     // The lock mode tag replaces the base one in the same six right-aligned cells.
     let locked_mode_render_buffer =
-        render_test_snapshot(&create_snapshot_for_lock_mode(LockMode::Locked), 40, 8);
+        render_test_snapshot(&build_snapshot_for_lock_mode(LockMode::Locked), 40, 8);
     assert_eq!(
         format_rendered_row_text(&locked_mode_render_buffer, 0),
         format_session_shell_tabline_with_mode_tag(40, " LOCK ")
@@ -1118,36 +1012,37 @@ fn mode_tag_reflects_lock_mode() {
 
 #[test]
 fn a_reconnecting_viewer_puts_the_dial_tag_in_the_tabline() {
-    // The mode block is right-aligned and takes whatever room it needs. The
-    // the reconnecting mode tag is 37 cells wide, so on a 46-cell-plus-version-badge row it
-    // leaves nothing for the tab ribbon.
-    let pane = PaneId::new();
+    // The mode block is right-aligned and takes the room it needs. The
+    // reconnecting mode tag is 37 cells wide: on a row of the version badge
+    // plus 46 cells, it leaves no room for the tab ribbon.
+    let pane_id = PaneId::new();
     let column_count = compute_version_badge_column_count() + 46;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, column_count, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, column_count, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count,
             row_count: 8,
         },
     );
-    let dialing = ViewerChrome {
-        hovered_pane_id: None,
-        placement_handle_pane_id: None,
-        active_input_mode: None,
-        tabline_offset: None,
+    let reconnecting_viewer_chrome = ViewerChrome {
         reconnecting: Some(Reconnecting {
             attempt: 3,
             retry_in_seconds: 8,
         }),
         ..ViewerChrome::default()
     };
-    let render_buffer = render_snapshot_with_peeking(&render_snapshot, dialing, column_count, 8);
+    let render_buffer = render_snapshot_with_viewer_chrome(
+        &render_snapshot,
+        reconnecting_viewer_chrome,
+        column_count,
+        8,
+    );
 
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
+    let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(" sess {version_badge_text}  RECONNECTING (attempt 3, retry in 8s) ")
@@ -1174,10 +1069,10 @@ fn focused_pane_border_is_highlighted() {
     );
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
 
-    // Focused pane_id: the theme's focus color, bold border corner.
+    // Focused pane: the theme's focus color, bold border corner.
     assert_eq!(render_buffer[(0, 1)].fg, Color::Rgb(0x00, 0xaf, 0xd7));
     assert_eq!(render_buffer[(0, 1)].modifier, Modifier::BOLD);
-    // Unfocused pane_id: dim border corner, no modifier at all.
+    // Unfocused pane: dim border corner, no modifier at all.
     assert_eq!(render_buffer[(20, 1)].fg, Color::Rgb(0x58, 0x58, 0x58));
     assert_eq!(render_buffer[(20, 1)].modifier, Modifier::empty());
 }
@@ -1223,37 +1118,23 @@ fn placement_preview_distinguishes_pane_roles_and_keeps_content_visible() {
         placement_source_pane_id: Some(source_pane_id),
         ..ViewerChrome::default()
     };
-    let viewport_area = RatatuiRect::new(0, 0, 80, 8);
-    let mut render_buffer = Buffer::empty(viewport_area);
     let theme = Theme::default();
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will insert below".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will make room below".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will insert below", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will make room below",
+            "Other pane",
+        )),
     };
 
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(80, 8),
-        &theme,
-        &KeymapHints::default(),
-        None,
-        viewer_chrome,
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
+        &placement_presentation,
         Some(&placement_target),
-        viewport_area,
-        &mut render_buffer,
+        viewer_chrome,
+        RatatuiRect::new(0, 0, 80, 8),
     );
 
     assert_eq!(render_buffer[(0, 1)].fg, theme.focused_border_color);
@@ -1268,14 +1149,14 @@ fn placement_preview_distinguishes_pane_roles_and_keeps_content_visible() {
     assert_eq!(render_buffer[(54, 4)].bg, Color::Rgb(22, 12, 33));
     assert_eq!(render_buffer[(8, 4)].fg, theme.focused_border_color);
     assert_eq!(render_buffer[(54, 4)].fg, theme.hover_border_color);
-    let source_heading = (5..34)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    let destination_heading = (44..75)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    assert_eq!(source_heading, "Moving pane will insert below");
-    assert_eq!(destination_heading, "Other pane will make room below");
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 5..34),
+        "Moving pane will insert below"
+    );
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 44..75),
+        "Other pane will make room below"
+    );
 }
 
 #[test]
@@ -1283,7 +1164,6 @@ fn whole_tab_insertion_keeps_destination_message_out_of_moving_pane() {
     let left_pane_id = PaneId::new();
     let source_pane_id = PaneId::new();
     let right_pane_id = PaneId::new();
-    let viewport_area = RatatuiRect::new(0, 0, 60, 8);
     let render_snapshot = build_render_snapshot(
         "session",
         &[("work", true)],
@@ -1307,41 +1187,28 @@ fn whole_tab_insertion_keeps_destination_message_out_of_moving_pane() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![left_pane_id, right_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other panes will make room right".to_string(),
-            compact_text: "Other panes",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other panes will make room right",
+            "Other panes",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(60, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
+        &placement_presentation,
         Some(&placement_target),
-        viewport_area,
-        &mut render_buffer,
+        ViewerChrome::default(),
+        RatatuiRect::new(0, 0, 60, 8),
     );
 
-    let source_heading = (21..39)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    let target_heading = (4..15)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    assert_eq!(source_heading, "   Moving pane    ");
-    assert_eq!(target_heading, "Other panes");
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 21..39),
+        "   Moving pane    "
+    );
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 4..15),
+        "Other panes"
+    );
 }
 
 #[test]
@@ -1349,7 +1216,6 @@ fn clipped_placement_preview_uses_a_destination_pane_inside_the_buffer() {
     let left_pane_id = PaneId::new();
     let source_pane_id = PaneId::new();
     let right_pane_id = PaneId::new();
-    let viewport_area = RatatuiRect::new(0, 0, 60, 8);
     let render_snapshot = build_render_snapshot(
         "session",
         &[("work", true)],
@@ -1368,37 +1234,24 @@ fn clipped_placement_preview_uses_a_destination_pane_inside_the_buffer() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![left_pane_id, right_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other panes will make room right".to_string(),
-            compact_text: "Other panes",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other panes will make room right",
+            "Other panes",
+        )),
     };
-    let mut render_buffer = Buffer::empty(RatatuiRect::new(0, 0, 35, 8));
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(60, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
-        viewport_area,
-        &mut render_buffer,
+        RatatuiRect::new(0, 0, 35, 8),
     );
 
-    let visible_target_heading = (2..13)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    assert_eq!(visible_target_heading, "Other panes");
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 2..13),
+        "Other panes"
+    );
 }
 
 #[test]
@@ -1423,38 +1276,22 @@ fn overlapping_swap_preview_keeps_moving_pane_role_and_message_legible() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Move".to_string(),
-            compact_text: "Move",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Move", "Move"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(80, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
-    let source_heading = (21..59)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
     assert_eq!(
-        source_heading,
+        format_rendered_cells(&render_buffer, 4, 21..59),
         format!("{}Move{}", " ".repeat(17), " ".repeat(17))
     );
     assert_eq!(render_buffer[(25, 2)].bg, Color::Rgb(0, 42, 51));
@@ -1486,41 +1323,28 @@ fn partially_overlapping_swap_keeps_both_role_messages_visible() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(80, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
-    let moving_heading = (24..35)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    let destination_heading = (54..64)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    assert_eq!(moving_heading, "Moving pane");
-    assert_eq!(destination_heading, "Other pane");
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 24..35),
+        "Moving pane"
+    );
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 54..64),
+        "Other pane"
+    );
     assert_eq!(render_buffer[(40, 2)].bg, Color::Rgb(0, 42, 51));
     assert_eq!(render_buffer[(60, 2)].bg, Color::Rgb(22, 12, 33));
 }
@@ -1549,37 +1373,24 @@ fn group_preview_uses_a_pane_wide_enough_for_its_role_message() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![narrow_target_pane_id, wide_target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other panes will make room".to_string(),
-            compact_text: "Other panes",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other panes will make room",
+            "Other panes",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(40, 22),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
-    let destination_heading = (14..25)
-        .map(|column_index| render_buffer[(column_index, 4)].symbol())
-        .collect::<String>();
-    assert_eq!(destination_heading, "Other panes");
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 14..25),
+        "Other panes"
+    );
 }
 
 #[test]
@@ -1614,31 +1425,18 @@ fn placement_preview_preserves_collapsed_source_header_title_and_position() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(14, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
     assert_eq!(
@@ -1647,9 +1445,7 @@ fn placement_preview_preserves_collapsed_source_header_title_and_position() {
     );
     assert_eq!(render_buffer[(3, 1)].bg, Color::Rgb(0, 42, 51));
     assert_eq!(
-        (2..12)
-            .map(|column_index| render_buffer[(column_index, 4)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 4, 2..12),
         "Other pane"
     );
 }
@@ -1686,31 +1482,18 @@ fn placement_preview_preserves_collapsed_destination_header_title_and_position()
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(14, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
     assert_eq!(
@@ -1719,9 +1502,7 @@ fn placement_preview_preserves_collapsed_destination_header_title_and_position()
     );
     assert_eq!(render_buffer[(3, 1)].bg, Color::Rgb(22, 12, 33));
     assert_eq!(
-        (1..12)
-            .map(|column_index| render_buffer[(column_index, 4)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 4, 1..12),
         "Moving pane"
     );
 }
@@ -1758,39 +1539,24 @@ fn placement_preview_tints_pane_body_and_header_during_source_expansion() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(28, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
     assert_eq!(render_buffer[(2, 2)].bg, Color::Rgb(0, 42, 51));
     assert_eq!(render_buffer[(3, 3)].bg, Color::Rgb(0, 42, 51));
     assert_eq!(
-        (0..14)
-            .map(|column_index| render_buffer[(column_index, 3)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 3, 0..14),
         "▸ logs   [2/3]"
     );
 }
@@ -1827,39 +1593,24 @@ fn placement_preview_preserves_destination_header_during_expansion() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(28, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
     assert_eq!(render_buffer[(2, 2)].bg, Color::Rgb(22, 12, 33));
     assert_eq!(render_buffer[(3, 3)].bg, Color::Rgb(22, 12, 33));
     assert_eq!(
-        (0..14)
-            .map(|column_index| render_buffer[(column_index, 3)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 3, 0..14),
         "▸ logs   [2/3]"
     );
 }
@@ -1896,43 +1647,26 @@ fn placement_preview_preserves_other_pane_header_under_moving_message() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(28, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
     assert_eq!(
-        (0..14)
-            .map(|column_index| render_buffer[(column_index, 3)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 3, 0..14),
         "▸ logs   [2/3]"
     );
     assert_eq!(
-        (1..12)
-            .map(|column_index| render_buffer[(column_index, 4)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 4, 1..12),
         "Moving pane"
     );
 }
@@ -1971,43 +1705,26 @@ fn placement_preview_preserves_other_pane_header_under_destination_message() {
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: vec![target_pane_id],
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
-        target_message: Some(crate::snapshot::PanePlacementMessage {
-            full_text: "Other pane will move here".to_string(),
-            compact_text: "Other pane",
-            detail_text: None,
-        }),
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
+        target_message: Some(build_placement_message(
+            "Other pane will move here",
+            "Other pane",
+        )),
     };
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(28, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut render_buffer,
     );
 
     assert_eq!(
-        (14..28)
-            .map(|column_index| render_buffer[(column_index, 3)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 3, 14..28),
         "▸ logs   [2/3]"
     );
     assert_eq!(
-        (16..26)
-            .map(|column_index| render_buffer[(column_index, 4)].symbol())
-            .collect::<String>(),
+        format_rendered_cells(&render_buffer, 4, 16..26),
         "Other pane"
     );
 }
@@ -2028,45 +1745,19 @@ fn placement_preview_preserves_border_of_a_two_row_pane() {
         },
     );
     render_snapshot.pane_snapshots[0].pane_title = Some("shell".to_string());
-    let mut ordinary_buffer = Buffer::empty(viewport_area);
-    render_frame(
-        &render_snapshot,
-        &build_legacy_regions(14, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut ordinary_buffer,
-    );
+    let ordinary_buffer = render_test_snapshot(&render_snapshot, 14, 8);
     let placement_presentation = PanePlacementPresentation {
         source_pane_id,
         target_pane_ids: Vec::new(),
-        source_message: crate::snapshot::PanePlacementMessage {
-            full_text: "Moving pane will land here".to_string(),
-            compact_text: "Moving pane",
-            detail_text: None,
-        },
+        source_message: build_placement_message("Moving pane will land here", "Moving pane"),
         target_message: None,
     };
-    let mut preview_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let preview_buffer = render_placement_preview(
         &render_snapshot,
-        &build_legacy_regions(14, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
+        &placement_presentation,
         None,
         ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        Some(&placement_presentation),
-        None,
         viewport_area,
-        &mut preview_buffer,
     );
 
     assert_eq!(
@@ -2082,12 +1773,12 @@ fn placement_preview_preserves_border_of_a_two_row_pane() {
 
 #[test]
 fn hidden_pane_draws_no_border() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), false)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), false)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -2108,12 +1799,12 @@ fn hidden_pane_draws_no_border() {
 
 #[test]
 fn scroll_indicator_shown_only_when_scrolled_back() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -2173,7 +1864,7 @@ fn each_pane_shows_its_own_scroll_position() {
             row_count: 8,
         },
     );
-    // A is scrolled 3 up of 100; B is scrolled 7 up of 50 — different views.
+    // The left pane is scrolled 3 up of 100; the right pane 7 up of 50.
     render_snapshot.pane_snapshots[0].terminal_grid_view = Some(GridView {
         grid: Arc::new(Grid::build_blank(6, 20, TermStyle::default())),
         view_row_offset: 3,
@@ -2200,12 +1891,12 @@ fn each_pane_shows_its_own_scroll_position() {
 /// A scrolled-back pane whose box is `column_count` wide, in a viewport of the same
 /// width: one tabline row, four box rows, one hint row.
 fn build_narrow_scrolled_render_snapshot(column_count: u16) -> RenderSnapshot {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "s",
         &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, column_count, 4), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, column_count, 4), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count,
@@ -2224,8 +1915,8 @@ fn build_narrow_scrolled_render_snapshot(column_count: u16) -> RenderSnapshot {
 
 #[test]
 fn a_box_too_narrow_for_the_scroll_position_shows_none_of_it() {
-    // ` 3/100 ` takes seven cells and never covers a corner glyph, so it needs
-    // a box nine cells wide. An eight-wide box keeps its bottom border whole.
+    // ` 3/100 ` takes seven cells and never covers a corner glyph: it needs a
+    // box nine cells wide. An eight-wide box keeps its bottom border whole.
     let render_buffer = render_test_snapshot(&build_narrow_scrolled_render_snapshot(8), 8, 6);
     assert_eq!(format_rendered_row_text(&render_buffer, 4), "└──────┘");
 
@@ -2238,12 +1929,12 @@ fn a_box_too_narrow_for_the_scroll_position_shows_none_of_it() {
 fn a_scrolled_pane_that_retained_nothing_shows_a_zero_total() {
     // The indicator reports the pane's own retained-line count verbatim. A pane
     // scrolled three lines up whose scrollback retained none reads ` 3/0 `.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -2270,12 +1961,12 @@ fn a_pane_with_no_grid_shows_no_scroll_position() {
     // The scroll position comes from the pane's grid view. A pane that carries
     // scrollback metadata but no grid reads as the live tail, so its bottom
     // border stays unbroken.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -2296,12 +1987,12 @@ fn a_pane_with_no_grid_shows_no_scroll_position() {
 
 #[test]
 fn reused_buffer_is_blanked_before_painting() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "s",
         &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, 20, 4), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 20, 4), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: compute_version_badge_column_count() + 15,
@@ -2309,25 +2000,19 @@ fn reused_buffer_is_blanked_before_painting() {
         },
     );
 
-    // A buffer reused across frames holds the previous frame's cells; simulate
-    // that with a full grid of stale glyphs before rendering.
-    let area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: compute_version_badge_column_count() + 15,
-        height: 6,
-    };
-    let mut render_buffer = Buffer::empty(area);
-    for row_index in 0..area.height {
-        for column_index in 0..area.width {
+    // A buffer reused across frames holds the previous frame's cells: every
+    // cell starts as a stale `X`.
+    let viewport_area = build_viewport_area(&render_snapshot);
+    let mut render_buffer = Buffer::empty(viewport_area);
+    for row_index in 0..viewport_area.height {
+        for column_index in 0..viewport_area.width {
             render_buffer[(column_index, row_index)].set_symbol("X");
         }
     }
 
-    let regions = build_legacy_regions(area.width, area.height);
     render_frame(
         &render_snapshot,
-        &regions,
+        &build_whole_viewport_regions(viewport_area.width, viewport_area.height),
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -2336,24 +2021,14 @@ fn reused_buffer_is_blanked_before_painting() {
         None,
         None,
         None,
-        area,
+        viewport_area,
         &mut render_buffer,
     );
 
-    // Tabline gap between the left tab list and the right status: blanked.
+    // Every cell matches a frame painted into a fresh buffer: no `X` is left.
     assert_eq!(
-        render_buffer[(compute_version_badge_column_count() + 3, 0)].symbol(),
-        " "
-    );
-    // A cell outside every pane box: blanked, not the stale glyph.
-    assert_eq!(
-        render_buffer[(compute_version_badge_column_count() + 13, 2)].symbol(),
-        " "
-    );
-    // Reserved hint row (bottom): every cell a space.
-    assert_eq!(
-        format_rendered_row_text(&render_buffer, 5),
-        " ".repeat(area.width as usize)
+        render_buffer,
+        render_test_snapshot(&render_snapshot, viewport_area.width, viewport_area.height)
     );
 }
 
@@ -2402,12 +2077,12 @@ fn stack_headers_render_collapsed_strips() {
     ];
     let render_buffer = render_test_snapshot(&render_snapshot, 30, 8);
 
-    // Row 1: B's strip — arrow + title on the left, [2/3] right-aligned.
+    // Row 1: the `editor` strip — arrow + title on the left, [2/3] right-aligned.
     assert_eq!(
         format_rendered_row_text(&render_buffer, 1),
         format!("▸ editor{}[2/3]", " ".repeat(17))
     );
-    // Row 2: C's strip.
+    // Row 2: the `logs` strip.
     assert_eq!(
         format_rendered_row_text(&render_buffer, 2),
         format!("▸ logs{}[3/3]", " ".repeat(19))
@@ -2449,7 +2124,15 @@ fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
     );
 
     // Hovering the focused pane changes nothing: it keeps the focus color.
-    let render_buffer = render_snapshot_with_hover(&render_snapshot, Some(focused_pane_id), 40, 8);
+    let render_buffer = render_snapshot_with_viewer_chrome(
+        &render_snapshot,
+        ViewerChrome {
+            hovered_pane_id: Some(focused_pane_id),
+            ..ViewerChrome::default()
+        },
+        40,
+        8,
+    );
     assert_eq!(
         render_buffer[(0, 1)].fg,
         Theme::default().focused_border_color,
@@ -2458,8 +2141,15 @@ fn the_hover_color_marks_an_unfocused_pane_but_never_the_focused_one() {
 
     // Hovering the unfocused pane paints its border the hover color, and the
     // focused pane is untouched.
-    let render_buffer =
-        render_snapshot_with_hover(&render_snapshot, Some(unfocused_pane_id), 40, 8);
+    let render_buffer = render_snapshot_with_viewer_chrome(
+        &render_snapshot,
+        ViewerChrome {
+            hovered_pane_id: Some(unfocused_pane_id),
+            ..ViewerChrome::default()
+        },
+        40,
+        8,
+    );
     assert_eq!(
         render_buffer[(20, 1)].fg,
         Theme::default().hover_border_color,
@@ -2490,29 +2180,16 @@ fn pane_placement_mode_keeps_focus_color_and_suppresses_hover_tint() {
             row_count: 8,
         },
     );
-    let viewport_area = RatatuiRect::new(0, 0, 40, 8);
-    let mut render_buffer = Buffer::empty(viewport_area);
-    render_frame(
+    let render_buffer = render_snapshot_with_viewer_chrome(
         &render_snapshot,
-        &build_legacy_regions(40, 8),
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
         ViewerChrome {
             hovered_pane_id: Some(hovered_pane_id),
-            placement_handle_pane_id: None,
             active_input_mode: Some(LockMode::PanePlacement),
-            tabline_offset: None,
-            reconnecting: None,
             is_pane_placement_visible: true,
             ..ViewerChrome::default()
         },
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        viewport_area,
-        &mut render_buffer,
+        40,
+        8,
     );
 
     assert_eq!(
@@ -2602,7 +2279,8 @@ fn stack_header_without_title_still_shows_arrow_and_indicator() {
             row_count: 8,
         },
     );
-    // The collapsed member carries no title (None from `build`).
+    // The collapsed member carries no title: `build_render_snapshot` sets
+    // `pane_title` to `None`.
     render_snapshot
         .session_snapshot
         .active_tab_snapshot
@@ -2674,9 +2352,9 @@ fn narrow_stack_header_indicator_does_not_bleed_left() {
 
 #[test]
 fn a_stack_header_naming_a_pane_the_frame_dropped_shows_an_empty_title() {
-    // A header can name a pane id absent from `panes` (the pane exited and was
-    // pruned between the layout solve and the snapshot build): the title falls
-    // back to empty and the strip still draws its arrow and indicator.
+    // A header can name a pane id absent from `pane_snapshots` (the pane exited
+    // between the layout solve and the snapshot build): the title is empty and
+    // the strip still draws its arrow and indicator.
     let active_pane_id = PaneId::new();
     let pruned_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -2750,19 +2428,20 @@ fn a_zero_size_stack_header_strip_draws_nothing() {
     }
 }
 
-/// A one-pane snapshot whose single visible pane shows `grid`.
+/// A one-pane snapshot whose single visible pane, boxed by `outer_rect`,
+/// shows `grid`.
 fn build_content_render_snapshot(
     grid: Grid,
-    outer: Rect,
+    outer_rect: Rect,
     is_reverse_video: bool,
     viewport_size: Size,
 ) -> RenderSnapshot {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, outer, true)],
-        Some(pane),
+        &[(pane_id, outer_rect, true)],
+        Some(pane_id),
         LockMode::Normal,
         viewport_size,
     );
@@ -2900,28 +2579,28 @@ fn several_marks_join_one_base_into_one_symbol_in_push_order() {
 #[test]
 fn every_cell_attribute_maps_to_its_own_modifier() {
     let mut grid = Grid::build_blank(4, 38, TermStyle::default());
-    let mut every = TermStyle::default();
-    every.set_bold(true);
-    every.set_faint(true);
-    every.set_italic(true);
-    every.set_underline(UnderlineStyle::Single);
-    every.set_blinking(true);
-    every.set_concealed(true);
-    every.set_strikethrough(true);
-    every.set_reverse(true);
-    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, every);
+    let mut every_attribute_style = TermStyle::default();
+    every_attribute_style.set_bold(true);
+    every_attribute_style.set_faint(true);
+    every_attribute_style.set_italic(true);
+    every_attribute_style.set_underline(UnderlineStyle::Single);
+    every_attribute_style.set_blinking(true);
+    every_attribute_style.set_concealed(true);
+    every_attribute_style.set_strikethrough(true);
+    every_attribute_style.set_reverse(true);
+    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, every_attribute_style);
 
     // A curly underline is one of the five underline styles ratatui cannot tell
     // apart; it draws as the single underline ratatui has.
-    let mut curly = TermStyle::default();
-    curly.set_underline(UnderlineStyle::Curly);
-    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, curly);
+    let mut curly_underline_style = TermStyle::default();
+    curly_underline_style.set_underline(UnderlineStyle::Curly);
+    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, curly_underline_style);
 
     // Overline and underline color have no ratatui modifier and draw nothing.
-    let mut lines = TermStyle::default();
-    lines.set_overlined(true);
-    lines.set_underline_color(Some(TermColor::Indexed(9)));
-    *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, lines);
+    let mut line_decoration_style = TermStyle::default();
+    line_decoration_style.set_overlined(true);
+    line_decoration_style.set_underline_color(Some(TermColor::Indexed(9)));
+    *grid.get_cell_mut(0, 2).unwrap() = Cell::from_character('c', 1, line_decoration_style);
 
     let render_snapshot = build_content_render_snapshot(
         grid,
@@ -2953,9 +2632,9 @@ fn every_cell_attribute_maps_to_its_own_modifier() {
 fn reverse_video_toggles_reverse_per_cell() {
     let mut grid = Grid::build_blank(4, 38, TermStyle::default());
     *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, TermStyle::default());
-    let mut reversed = TermStyle::default();
-    reversed.set_reverse(true);
-    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, reversed);
+    let mut reversed_style = TermStyle::default();
+    reversed_style.set_reverse(true);
+    *grid.get_cell_mut(0, 1).unwrap() = Cell::from_character('b', 1, reversed_style);
     let render_snapshot = build_content_render_snapshot(
         grid,
         build_cell_rect(0, 1, 40, 6),
@@ -2975,19 +2654,19 @@ fn reverse_video_toggles_reverse_per_cell() {
 
 #[test]
 fn visible_pane_without_grid_draws_no_content() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
             row_count: 8,
         },
     );
-    // `grid_view` is None (the pane has no grid): interior stays blank.
+    // `terminal_grid_view` is `None` (the pane has no grid): interior stays blank.
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
     assert_eq!(
         format_rendered_row_text(&render_buffer, 2),
@@ -2998,8 +2677,8 @@ fn visible_pane_without_grid_draws_no_content() {
 
 #[test]
 fn grid_larger_than_content_rect_clips_without_bleeding() {
-    // A grid wider and taller than the content header_rect: only the cells that fit are
-    // drawn and nothing writes onto the border or past the pane.
+    // A grid wider and taller than the content rect: only the cells that fit
+    // are drawn and nothing writes onto the border or past the pane.
     let mut grid = Grid::build_blank(20, 100, TermStyle::default());
     for column_index in 0..100u16 {
         *grid.get_cell_mut(0, column_index).unwrap() =
@@ -3067,7 +2746,7 @@ fn cursor_at_focused_pane_maps_to_content_cell() {
         shape: None,
     };
     assert_eq!(
-        get_legacy_cursor_position(&render_snapshot),
+        get_whole_viewport_cursor_position(&render_snapshot),
         Some(Position::new(6, 4))
     );
 }
@@ -3095,7 +2774,7 @@ fn cursor_past_content_rect_is_clamped_inside_it() {
         shape: None,
     };
     assert_eq!(
-        get_legacy_cursor_position(&render_snapshot),
+        get_whole_viewport_cursor_position(&render_snapshot),
         Some(Position::new(38, 5))
     );
 }
@@ -3131,9 +2810,9 @@ fn cursor_style_reports_the_focused_panes_shape_and_blink() {
 
 #[test]
 fn a_pane_that_asked_for_no_shape_leaves_the_users_own_cursor_alone() {
-    // A plain shell never sends DECSCUSR. Focusing it must NOT stamp a block
-    // over the cursor the user configured in their own terminal — it hands the
-    // cursor back to them.
+    // A plain shell never sends DECSCUSR. Focusing it reports
+    // `CursorStyle::UserDefault`: the cursor the user configured in their own
+    // terminal.
     let render_snapshot = build_content_render_snapshot(
         Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
@@ -3164,7 +2843,7 @@ fn cursor_style_is_none_without_a_focused_terminal_pane() {
             row_count: 8,
         },
     );
-    // No focused pane_id: nobody speaks for the cursor, so it is left as it is.
+    // No focused pane: no cursor style.
     let focused_pane_id = render_snapshot.client_snapshot.focused_pane_id.take();
     assert_eq!(get_cursor_style(&render_snapshot), None);
 
@@ -3186,12 +2865,12 @@ fn hidden_cursor_places_nothing() {
         },
     );
     render_snapshot.pane_snapshots[0].cursor_snapshot.is_visible = false;
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn a_scrolled_back_view_places_no_cursor() {
-    // The app's cursor is visible, but the view is scrolled into history, so the
+    // The app's cursor is visible, but the view is scrolled into history: the
     // live cursor cell is off-screen and no hardware cursor is placed.
     let mut render_snapshot = build_content_render_snapshot(
         Grid::build_blank(4, 38, TermStyle::default()),
@@ -3208,16 +2887,16 @@ fn a_scrolled_back_view_places_no_cursor() {
         .as_mut()
         .unwrap()
         .view_row_offset = 3;
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn no_focused_pane_places_no_cursor() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "s",
         &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
         None,
         LockMode::Normal,
         Size {
@@ -3225,18 +2904,18 @@ fn no_focused_pane_places_no_cursor() {
             row_count: 8,
         },
     );
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn a_focused_pane_with_no_grid_places_no_cursor() {
     // A visible focused pane with a visible cursor but no grid places no cursor.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "s",
         &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -3245,25 +2924,25 @@ fn a_focused_pane_with_no_grid_places_no_cursor() {
     );
     assert_eq!(render_snapshot.pane_snapshots[0].terminal_grid_view, None);
     assert!(render_snapshot.pane_snapshots[0].cursor_snapshot.is_visible);
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn invisible_focused_pane_places_no_cursor() {
     // Focused pane suppressed / hidden (no content rect): nowhere to place it.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "s",
         &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), false)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), false)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
             row_count: 8,
         },
     );
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
@@ -3285,33 +2964,34 @@ fn cursor_follows_focus_and_never_leaks_to_unfocused_panes() {
         },
     );
     // Both panes carry a grid and a visible cursor at their own content origin.
-    for pane in &mut render_snapshot.pane_snapshots {
-        pane.terminal_grid_view = Some(GridView {
+    for pane_snapshot in &mut render_snapshot.pane_snapshots {
+        pane_snapshot.terminal_grid_view = Some(GridView {
             grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
             view_row_offset: 0,
         });
     }
 
-    // Focused on B (content origin (21,2)): the cursor sits in B, never in A.
+    // Focused on the right pane (content origin (21,2)): the cursor sits in
+    // it, never in the left pane.
     assert_eq!(
-        get_legacy_cursor_position(&render_snapshot),
+        get_whole_viewport_cursor_position(&render_snapshot),
         Some(Position::new(21, 2))
     );
 
-    // Refocus A (content origin (1,2)): the cursor jumps to A.
+    // Refocus the left pane (content origin (1,2)): the cursor jumps there.
     render_snapshot.client_snapshot.focused_pane_id = Some(left_pane_id);
     assert_eq!(
-        get_legacy_cursor_position(&render_snapshot),
+        get_whole_viewport_cursor_position(&render_snapshot),
         Some(Position::new(1, 2))
     );
 }
 
 #[test]
 fn cursor_style_follows_focus_between_panes() {
-    // Pane A runs vim in insert mode (it asked for a blinking bar); pane B runs
-    // a plain shell (it asked for nothing). The style belongs to the outer
-    // terminal, not to a pane's cells: moving focus hands it the newly focused
-    // pane's answer, so focusing the shell drops vim's bar.
+    // The vim pane is in insert mode (it asked for a blinking bar); the shell
+    // pane asked for nothing. The style belongs to the outer terminal, not to a
+    // pane's cells: moving focus reports the newly focused pane's style, and
+    // focusing the shell drops vim's bar.
     let vim_pane_id = PaneId::new();
     let shell_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -3328,8 +3008,8 @@ fn cursor_style_follows_focus_between_panes() {
             row_count: 8,
         },
     );
-    for pane in &mut render_snapshot.pane_snapshots {
-        pane.terminal_grid_view = Some(GridView {
+    for pane_snapshot in &mut render_snapshot.pane_snapshots {
+        pane_snapshot.terminal_grid_view = Some(GridView {
             grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
             view_row_offset: 0,
         });
@@ -3355,15 +3035,16 @@ fn cursor_style_follows_focus_between_panes() {
     );
 }
 
-/// A snapshot whose active tab has no room for any pane_id: every slot suppressed
-/// and `all_suppressed` set, as the layout solver produces on a too-small tab.
+/// A snapshot whose active tab has no room for any pane: every slot suppressed
+/// and `is_every_pane_suppressed` set, as the layout solver produces on a
+/// too-small tab.
 fn build_too_small_render_snapshot(viewport_size: Size) -> RenderSnapshot {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), false)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), false)],
+        Some(pane_id),
         LockMode::Normal,
         viewport_size,
     );
@@ -3421,13 +3102,13 @@ fn too_small_overlay_replaces_tabline_and_panes() {
 
 #[test]
 fn too_small_frame_places_no_cursor() {
-    // Every pane is suppressed (no content area), so the overlay frame shows no
+    // Every pane is suppressed (no content area): the overlay frame shows no
     // hardware cursor.
     let render_snapshot = build_too_small_render_snapshot(Size {
         column_count: 60,
         row_count: 10,
     });
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
@@ -3454,8 +3135,12 @@ fn recovery_notice_returns_after_a_too_small_viewport_gains_a_statusline() {
     too_small_snapshot.is_recovery_notice_visible = true;
     let too_small_screen = render_test_snapshot(&too_small_snapshot, 100, 1);
     assert_eq!(
-        format_rendered_row_text(&too_small_screen, 0).trim(),
-        "Terminal too small — enlarge window"
+        format_rendered_row_text(&too_small_screen, 0),
+        format!(
+            "{}Terminal too small — enlarge window{}",
+            " ".repeat(32),
+            " ".repeat(33)
+        )
     );
 
     let pane_id = PaneId::new();
@@ -3473,19 +3158,22 @@ fn recovery_notice_returns_after_a_too_small_viewport_gains_a_statusline() {
     resized_snapshot.is_recovery_notice_visible = true;
     let resized_screen = render_test_snapshot(&resized_snapshot, 100, 40);
     assert_eq!(
-        format_rendered_row_text(&resized_screen, 39).trim(),
-        "Restore failed: new shell; previous panes unavailable. Input clears notice."
+        format_rendered_row_text(&resized_screen, 39),
+        format!(
+            "{:<100}",
+            "Restore failed: new shell; previous panes unavailable. Input clears notice."
+        )
     );
 }
 
 #[test]
 fn small_and_zero_size_areas_are_safe() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -3494,9 +3182,9 @@ fn small_and_zero_size_areas_are_safe() {
     );
 
     // One row tall: only the tabline, no bottom row, no panic.
-    let one_row = render_test_snapshot(&render_snapshot, 40, 1);
+    let one_row_render_buffer = render_test_snapshot(&render_snapshot, 40, 1);
     assert_eq!(
-        format_rendered_row_text(&one_row, 0),
+        format_rendered_row_text(&one_row_render_buffer, 0),
         format_session_shell_tabline(40)
     );
 
@@ -3512,31 +3200,9 @@ fn small_and_zero_size_areas_are_safe() {
     }
 
     // Zero area: nothing drawn, no panic.
-    let mut empty = Buffer::empty(RatatuiRect {
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-    });
-    let regions = build_legacy_regions(0, 0);
-    render_frame(
-        &render_snapshot,
-        &regions,
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        RatatuiRect {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        },
-        &mut empty,
+    assert_eq!(
+        render_test_snapshot(&render_snapshot, 0, 0),
+        Buffer::empty(RatatuiRect::new(0, 0, 0, 0))
     );
 }
 
@@ -3568,9 +3234,9 @@ fn build_letterbox_render_snapshot(
 
 #[test]
 fn larger_viewport_centers_layout_and_letterboxes_margin() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_letterbox_render_snapshot(
-        pane,
+        pane_id,
         Size {
             column_count: 60,
             row_count: 12,
@@ -3614,9 +3280,9 @@ fn larger_viewport_centers_layout_and_letterboxes_margin() {
 
 #[test]
 fn cursor_shifts_into_centered_content() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_letterbox_render_snapshot(
-        pane,
+        pane_id,
         Size {
             column_count: 60,
             row_count: 12,
@@ -3641,7 +3307,7 @@ fn cursor_shifts_into_centered_content() {
     // Content origin offset (10,2); pane inner origin (1,1) places to (11,3);
     // cursor row 2, col 5 lands at (16,5).
     assert_eq!(
-        get_legacy_cursor_position(&render_snapshot),
+        get_whole_viewport_cursor_position(&render_snapshot),
         Some(Position::new(16, 5))
     );
 }
@@ -3650,12 +3316,12 @@ fn cursor_shifts_into_centered_content() {
 fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
     // A pane box of two columns insets to a zero-width content rect and is
     // still marked is_visible: there is no cell inside it to put the cursor on.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(4, 5, 2, 1), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(4, 5, 2, 1), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -3680,16 +3346,16 @@ fn a_pane_whose_content_rect_holds_no_cells_places_no_cursor() {
         }
     );
 
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
-    // A resize race can hand render_frame an `area` larger than the buffer. The
-    // letterbox fill must clip to the buffer, not index out of bounds.
-    let pane = PaneId::new();
+    // A resize race can hand `render_frame` a `viewport_area` larger than the
+    // buffer. The letterbox fill clips to the buffer.
+    let pane_id = PaneId::new();
     let render_snapshot = build_letterbox_render_snapshot(
-        pane,
+        pane_id,
         Size {
             column_count: 60,
             row_count: 12,
@@ -3699,16 +3365,10 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
             row_count: 8,
         },
     );
-    let mut render_buffer = Buffer::empty(RatatuiRect {
-        x: 0,
-        y: 0,
-        width: 30,
-        height: 6,
-    });
-    let regions = build_core_regions(60, 12);
+    let mut render_buffer = Buffer::empty(RatatuiRect::new(0, 0, 30, 6));
     render_frame(
         &render_snapshot,
-        &regions,
+        &build_core_regions(60, 12),
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -3717,28 +3377,23 @@ fn letterbox_clips_to_a_buffer_smaller_than_the_area() {
         None,
         None,
         None,
-        RatatuiRect {
-            x: 0,
-            y: 0,
-            width: 60,
-            height: 12,
-        },
+        RatatuiRect::new(0, 0, 60, 12),
         &mut render_buffer,
     );
 
     // No panic, and a margin cell inside the smaller buffer still got the
-    // fill (row 0 is the tabline's, so probe the margin band below it).
+    // fill (row 0 is the tabline's: the probe is the margin band below it).
     assert_eq!(render_buffer[(0, 1)].bg, Color::Rgb(0x58, 0x58, 0x58));
 }
 
 #[test]
 fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
     // A terminal shrink between the session's last viewport report and this
-    // paint: the committed solve is for 60x12, the render area only 30x6, so
-    // the centered content rect reaches past the area's bottom and right.
-    let pane = PaneId::new();
+    // paint: the committed solve is for 60x12, the render area only 30x6. The
+    // centered content rect reaches past the area's bottom and right.
+    let pane_id = PaneId::new();
     let render_snapshot = build_letterbox_render_snapshot(
-        pane,
+        pane_id,
         Size {
             column_count: 60,
             row_count: 12,
@@ -3748,17 +3403,11 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
             row_count: 8,
         },
     );
-    let area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: 30,
-        height: 6,
-    };
-    let mut render_buffer = Buffer::empty(area);
-    let regions = build_core_regions(60, 12);
+    let viewport_area = RatatuiRect::new(0, 0, 30, 6);
+    let mut render_buffer = Buffer::empty(viewport_area);
     render_frame(
         &render_snapshot,
-        &regions,
+        &build_core_regions(60, 12),
         &Theme::default(),
         &KeymapHints::default(),
         None,
@@ -3767,12 +3416,12 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
         None,
         None,
         None,
-        area,
+        viewport_area,
         &mut render_buffer,
     );
 
-    // The content rect starts at column 10, row 2, so the band left of it
-    // carries the fill and the cells inside it do not.
+    // The content rect starts at column 10, row 2: the band left of it carries
+    // the fill and the cells inside it do not.
     assert_eq!(render_buffer[(9, 5)].bg, Color::Rgb(0x58, 0x58, 0x58));
     assert_eq!(render_buffer[(10, 5)].bg, Color::Reset);
 }
@@ -3781,7 +3430,7 @@ fn an_area_smaller_than_the_committed_regions_letterboxes_nothing_below_it() {
 fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
     // Resize race: the snapshot's layout was solved for a taller frame than the
     // current buffer. Chrome rows (stack-header strips) laid out below the buffer
-    // must be skipped, not written out of bounds.
+    // are skipped.
     let active_pane_id = PaneId::new();
     let collapsed_pane_id = PaneId::new();
     let column_count = compute_version_badge_column_count() + 16;
@@ -3815,35 +3464,14 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
         member_count: 2,
     }];
 
-    // Buffer shorter than the solved layout; area matches the buffer.
-    let area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: 5,
-    };
-    let mut render_buffer = Buffer::empty(area);
-    let regions = build_legacy_regions(column_count, 5);
-    render_frame(
-        &render_snapshot,
-        &regions,
-        &Theme::default(),
-        &KeymapHints::default(),
-        None,
-        ViewerChrome::default(),
-        ImageRenderMode::Placeholder,
-        None,
-        None,
-        None,
-        area,
-        &mut render_buffer,
-    );
+    // Buffer shorter than the solved layout; the render area matches the buffer.
+    let render_buffer = render_test_snapshot(&render_snapshot, column_count, 5);
 
     // No panic, and the strip laid out at row 8 wrote nothing: row 0 is the
-    // tabline (too narrow for the tab, so only the `▶` arrow and the mode tag),
+    // tabline (too narrow for the tab: only the `▶` arrow and the mode tag),
     // row 3 the pane box's top border, row 4 the blanked hint row, and the rest
     // blank.
-    let version_badge_text = format!("[v{}] ", env!("CARGO_PKG_VERSION"));
+    let version_badge_text = format_version_badge_text();
     assert_eq!(
         format_rendered_row_text(&render_buffer, 0),
         format!(" sess {version_badge_text}   ▶ BASE ")
@@ -3868,12 +3496,12 @@ fn chrome_below_a_shrunk_buffer_is_skipped_not_panicked() {
 
 #[test]
 fn equal_viewport_draws_no_letterbox() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -3882,8 +3510,8 @@ fn equal_viewport_draws_no_letterbox() {
     );
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
 
-    // Effective size equals the viewport_size: the layout fills the frame and no cell
-    // carries the letterbox background.
+    // Effective size equals the viewport: the layout fills the frame and no
+    // cell carries the letterbox background.
     for row_index in 0..8 {
         for column_index in 0..40 {
             assert_ne!(
@@ -3898,13 +3526,13 @@ fn equal_viewport_draws_no_letterbox() {
 #[test]
 fn an_effective_size_larger_than_the_pane_area_draws_no_letterbox() {
     // A client smaller than the size the tab was solved for: the content rect
-    // is clamped to the pane area, so it fills the frame and no margin is left.
-    let pane = PaneId::new();
+    // is clamped to the pane area. It fills the frame and no margin is left.
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -3939,9 +3567,9 @@ fn an_odd_letterbox_margin_is_one_cell_wider_right_and_below() {
     // 41x9 centered in 60x12 splits 19 spare columns and 3 spare rows unevenly:
     // the halves round down, so the left margin is 9 and the right 10, the top
     // margin 1 row and the bottom 2.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let render_snapshot = build_letterbox_render_snapshot(
-        pane,
+        pane_id,
         Size {
             column_count: 60,
             row_count: 12,
@@ -3967,29 +3595,28 @@ fn an_odd_letterbox_margin_is_one_cell_wider_right_and_below() {
     assert_eq!(render_buffer[(9, 5)].bg, Color::Reset);
 }
 
-/// A non-default palette on the snapshot recolors every chrome element the
-/// theme names; the same frame under the default theme paints none of these
-/// custom colors.
+/// A non-default palette recolors every chrome element the theme names.
 #[test]
 fn a_custom_theme_recolors_the_chrome() {
     let left_pane_id = PaneId::new();
     let right_pane_id = PaneId::new();
+    let column_count = compute_version_badge_column_count() + 31;
+    let left_pane_column_count = column_count / 2;
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true), ("logs", false)],
         &[
             (
                 left_pane_id,
-                build_cell_rect(0, 1, (compute_version_badge_column_count() + 31) / 2, 6),
+                build_cell_rect(0, 1, left_pane_column_count, 6),
                 true,
             ),
             (
                 right_pane_id,
                 build_cell_rect(
-                    (compute_version_badge_column_count() + 31) / 2,
+                    left_pane_column_count,
                     1,
-                    compute_version_badge_column_count() + 31
-                        - (compute_version_badge_column_count() + 31) / 2,
+                    column_count - left_pane_column_count,
                     6,
                 ),
                 true,
@@ -3998,19 +3625,24 @@ fn a_custom_theme_recolors_the_chrome() {
         Some(left_pane_id),
         LockMode::Normal,
         Size {
-            column_count: compute_version_badge_column_count() + 31,
+            column_count,
             row_count: 8,
         },
     );
-    let theme = Theme {
+    let custom_theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
         ramp_end: (0x00, 0x00, 0xff),
         focused_border_color: Color::Rgb(0xff, 0x88, 0x00),
         unfocused_border_color: Color::Rgb(0x11, 0x22, 0x33),
         ..Theme::default()
     };
-    let column_count = compute_version_badge_column_count() + 31;
-    let render_buffer = render_test_snapshot_with_theme(&render_snapshot, &theme, column_count, 8);
+    let render_buffer = render_frame_to_buffer(
+        &render_snapshot,
+        &build_whole_viewport_regions(column_count, 8),
+        &custom_theme,
+        &KeymapHints::default(),
+        ViewerChrome::default(),
+    );
 
     // Borders take the theme's border colors.
     assert_eq!(render_buffer[(0, 1)].fg, Color::Rgb(0xff, 0x88, 0x00));
@@ -4026,18 +3658,19 @@ fn a_custom_theme_recolors_the_chrome() {
         Color::Rgb(0x00, 0x00, 0xff)
     );
     // The first tab's ribbon sits on the custom ramp's start stop.
-    let tab_x = (0..column_count)
+    let tab_marker_column = (0..column_count)
         .find(|&column_index| render_buffer[(column_index, 0)].symbol() == "#")
         .expect("tab marker drawn");
-    assert_eq!(render_buffer[(tab_x, 0)].fg, Color::Rgb(0xff, 0x00, 0x00));
+    assert_eq!(
+        render_buffer[(tab_marker_column, 0)].fg,
+        Color::Rgb(0xff, 0x00, 0x00)
+    );
 }
 
 #[test]
 fn overlapping_panes_draw_in_layout_order_last_wins() {
-    // The layout solver normally tiles panes without overlap; this snapshot
-    // forces two visible pane rects to overlap to pin down what the renderer
-    // actually does with that input: following slots in `layout_solved` paint
-    // over earlier ones, for both the border and the pane content.
+    // Two visible pane rects overlap: each slot in `pane_slots` paints over
+    // the slots before it, for both the border and the pane content.
     let first_pane_id = PaneId::new();
     let second_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
@@ -4074,15 +3707,15 @@ fn overlapping_panes_draw_in_layout_order_last_wins() {
     });
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
 
-    // A's own corner (outside B's rect) survives untouched...
+    // The first pane's own corner (outside the second pane's rect) survives
+    // untouched...
     assert_eq!(render_buffer[(0, 1)].symbol(), "┌");
     assert_eq!(render_buffer[(0, 1)].fg, Color::Rgb(0x00, 0xaf, 0xd7));
     assert_eq!(render_buffer[(0, 1)].modifier, Modifier::BOLD);
-    // ...but B (drawn second) overwrites A's right border where they overlap
-    // (A's right border sits at x=19, inside B's top-border row): the glyph
-    // and color are B's. The BOLD modifier is untouched by B's style (a
-    // ratatui `Style` with no `add_modifier` patches, not replaces, so it
-    // does not clear a modifier a previous style already set).
+    // ...but the second pane (drawn second) overwrites the first pane's right
+    // border at x=19, inside its own top-border row: the glyph and color are
+    // the second pane's. The BOLD modifier stays: a ratatui `Style` with no
+    // `add_modifier` patches the cell and clears no modifier already set.
     assert_eq!(render_buffer[(19, 1)].symbol(), "─");
     assert_eq!(render_buffer[(19, 1)].fg, Color::Rgb(0x58, 0x58, 0x58));
     assert_eq!(render_buffer[(19, 1)].modifier, Modifier::BOLD);
@@ -4090,20 +3723,21 @@ fn overlapping_panes_draw_in_layout_order_last_wins() {
     // Content: each pane's own, non-overlapping cell keeps its own glyph...
     assert_eq!(render_buffer[(1, 2)].symbol(), "Z");
     assert_eq!(render_buffer[(33, 2)].symbol(), "W");
-    // ...but in the overlap region (screen x=16..19) B's cell wins over A's.
+    // ...but in the overlap region (screen x=16..19) the second pane's cell
+    // wins.
     assert_eq!(render_buffer[(16, 2)].symbol(), "Y");
 }
 
 #[test]
 fn pane_title_skipped_when_box_is_four_wide() {
-    // `rect.width <= 4` guards the `rect.width - 4` subtraction the title
-    // clip uses; at exactly 4 there is no room for the ` title ` padding.
-    let pane = PaneId::new();
+    // A title draws only in a box wider than 4 cells: at exactly 4 there is no
+    // room for the ` title ` padding.
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 4, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 4, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 10,
@@ -4120,14 +3754,14 @@ fn pane_title_skipped_when_box_is_four_wide() {
 
 #[test]
 fn pane_title_drawn_when_box_is_five_wide() {
-    // One cell wider crosses the `<= 4` threshold: the title's leading space
-    // takes column 2, in place of the dash.
-    let pane = PaneId::new();
+    // One cell wider: the title's leading space takes column 2, in place of the
+    // dash.
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 5, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 5, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 10,
@@ -4170,31 +3804,32 @@ fn pane_placement_mode_keeps_pane_and_stack_titles_visible() {
         member_count: 2,
     }];
 
-    let normal_buffer =
-        render_snapshot_with_viewer_chrome(&render_snapshot, ViewerChrome::default(), 60, 8);
+    let normal_buffer = render_test_snapshot(&render_snapshot, 60, 8);
     let placement_viewer_chrome = ViewerChrome {
         is_pane_placement_visible: true,
         ..ViewerChrome::default()
     };
     let placement_buffer =
         render_snapshot_with_viewer_chrome(&render_snapshot, placement_viewer_chrome, 60, 8);
-    let restored_buffer =
-        render_snapshot_with_viewer_chrome(&render_snapshot, ViewerChrome::default(), 60, 8);
 
-    let normal_pane_border_text = format_rendered_row_text(&normal_buffer, 3);
-    let normal_stack_header_text = format_rendered_row_text(&normal_buffer, 1);
-    assert!(normal_pane_border_text.contains("/work/koshi"));
-    assert!(normal_stack_header_text.contains("nvim"));
-    assert!(!normal_pane_border_text.contains(&active_pane_id.to_string()));
-    assert!(!normal_stack_header_text.contains(&collapsed_pane_id.to_string()));
-
-    let placement_pane_border_text = format_rendered_row_text(&placement_buffer, 3);
-    let placement_stack_header_text = format_rendered_row_text(&placement_buffer, 1);
-    assert!(placement_pane_border_text.contains("/work/koshi"));
-    assert!(placement_stack_header_text.contains("nvim"));
-
-    assert!(format_rendered_row_text(&restored_buffer, 3).contains("/work/koshi"));
-    assert!(format_rendered_row_text(&restored_buffer, 1).contains("nvim"));
+    let expected_pane_border_text = format!("┌─ /work/koshi {}┐{}", "─".repeat(24), " ".repeat(20));
+    let expected_stack_header_text = format!("▸ nvim{}[2/2]{}", " ".repeat(29), " ".repeat(20));
+    assert_eq!(
+        format_rendered_row_text(&normal_buffer, 3),
+        expected_pane_border_text
+    );
+    assert_eq!(
+        format_rendered_row_text(&normal_buffer, 1),
+        expected_stack_header_text
+    );
+    assert_eq!(
+        format_rendered_row_text(&placement_buffer, 3),
+        expected_pane_border_text
+    );
+    assert_eq!(
+        format_rendered_row_text(&placement_buffer, 1),
+        expected_stack_header_text
+    );
 }
 
 #[test]
@@ -4202,12 +3837,12 @@ fn a_title_wider_than_the_box_is_clipped_short_of_the_corners() {
     // A 10-wide box gives the title six cells: it starts two cells in and
     // stops four short of the box width, so ` abcdefghij ` shows as ` abcde`
     // and the two corner glyphs plus the dash before them survive.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 10, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 10, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 10,
@@ -4222,12 +3857,12 @@ fn a_title_wider_than_the_box_is_clipped_short_of_the_corners() {
 
 #[test]
 fn an_empty_pane_title_leaves_the_top_border_whole() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -4245,16 +3880,15 @@ fn an_empty_pane_title_leaves_the_top_border_whole() {
 
 #[test]
 fn orphan_pane_slot_with_no_matching_snapshot_draws_border_only() {
-    // A slot can reference a pane id absent from `panes` (e.g. the pane
-    // exited and was pruned between layout solve and snapshot build).
-    // `draw_panes` never looks up the pane for its box, so the border still
-    // draws; `draw_pane_contents` must skip content without panicking.
-    let pane = PaneId::new();
+    // A slot can name a pane id absent from `pane_snapshots` (the pane exited
+    // between the layout solve and the snapshot build): the border still
+    // draws with no title, and the content area stays blank.
+    let pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -4276,20 +3910,18 @@ fn orphan_pane_slot_with_no_matching_snapshot_draws_border_only() {
 
 #[test]
 fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
-    // The client's focused_pane id still has a PaneSnapshot in `panes` (so
-    // `find_pane` alone would not catch a missing-slot bug), but its slot was
-    // dropped from `layout_solved` this frame (a stale handle after the
-    // layout re-solved without it): the layout lookup itself finds nothing.
+    // The focused pane still has a `PaneSnapshot` in `pane_snapshots`, but its
+    // slot is gone from `pane_slots` this frame: the slot lookup finds nothing.
     let visible_pane_id = PaneId::new();
-    let orphaned = PaneId::new();
+    let orphaned_pane_id = PaneId::new();
     let mut render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
         &[
             (visible_pane_id, build_cell_rect(0, 1, 20, 6), true),
-            (orphaned, build_cell_rect(20, 1, 20, 6), true),
+            (orphaned_pane_id, build_cell_rect(20, 1, 20, 6), true),
         ],
-        Some(orphaned),
+        Some(orphaned_pane_id),
         LockMode::Normal,
         Size {
             column_count: 40,
@@ -4300,23 +3932,19 @@ fn cursor_position_with_focused_pane_absent_from_layout_returns_none() {
         .session_snapshot
         .active_tab_snapshot
         .pane_slots
-        .retain(|slot| slot.pane_id != orphaned);
-    // The orphaned pane still carries a live, visible-cursor grid, so a
-    // lookup bug that silently grabs a different slot would still produce a
-    // `Some` position (using the wrong slot's rect) rather than `None` by
-    // coincidence of some other, unrelated guard.
+        .retain(|pane_slot| pane_slot.pane_id != orphaned_pane_id);
+    // The orphaned pane carries a grid and a visible cursor.
     render_snapshot.pane_snapshots[1].terminal_grid_view = Some(GridView {
         grid: Arc::new(Grid::build_blank(4, 18, TermStyle::default())),
         view_row_offset: 0,
     });
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn a_visible_slot_with_no_content_rect_places_no_cursor() {
-    // `visible` and `inner_rect` are separate fields on the wire. A slot that
-    // says it is visible but carries no content rect has nowhere to put the
-    // cursor, so none is placed.
+    // `is_visible` and `content_rect` are separate fields. A slot that says it
+    // is visible but carries no content rect places no cursor.
     let mut render_snapshot = build_content_render_snapshot(
         Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
@@ -4339,14 +3967,13 @@ fn a_visible_slot_with_no_content_rect_places_no_cursor() {
             .is_visible
     );
     assert!(render_snapshot.pane_snapshots[0].cursor_snapshot.is_visible);
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn a_slot_whose_pane_snapshot_is_gone_places_no_cursor() {
     // The focused pane still has a visible slot with a content rect, but the
-    // frame carries no pane snapshot for it: nothing says where the cursor is,
-    // so none is placed.
+    // frame carries no pane snapshot for it: no cursor is placed.
     let mut render_snapshot = build_content_render_snapshot(
         Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
@@ -4374,13 +4001,13 @@ fn a_slot_whose_pane_snapshot_is_gone_places_no_cursor() {
             .content_rect,
         Some(build_cell_rect(1, 2, 38, 4))
     );
-    assert_eq!(get_legacy_cursor_position(&render_snapshot), None);
+    assert_eq!(get_whole_viewport_cursor_position(&render_snapshot), None);
 }
 
 #[test]
 fn cursor_style_is_none_when_the_focused_pane_has_no_snapshot() {
-    // The focused id names a pane the frame carries no content for: nothing
-    // speaks for the cursor, so the outer terminal keeps the style it has.
+    // The focused id names a pane the frame carries no content for: no cursor
+    // style.
     let mut render_snapshot = build_content_render_snapshot(
         Grid::build_blank(4, 38, TermStyle::default()),
         build_cell_rect(0, 1, 40, 6),
@@ -4396,16 +4023,15 @@ fn cursor_style_is_none_when_the_focused_pane_has_no_snapshot() {
 
 #[test]
 fn one_by_one_viewport_draws_without_panicking() {
-    // The smallest possible non-zero area: content_rect and the tabline draw
-    // must degrade gracefully rather than underflow or panic. The mode tag
-    // saturates the whole 1-cell row, leaving no room for the tab strip, so the
-    // single cell falls to the mode block's clipped leading cell — a space.
-    let pane = PaneId::new();
+    // The smallest non-zero area draws without a panic. The mode tag takes the
+    // whole 1-cell row and leaves no room for the tab strip: the single cell
+    // is the mode block's clipped leading cell, a space.
+    let pane_id = PaneId::new();
     let render_snapshot = build_render_snapshot(
         "sess",
         &[("shell", true)],
-        &[(pane, build_cell_rect(0, 1, 40, 6), true)],
-        Some(pane),
+        &[(pane_id, build_cell_rect(0, 1, 40, 6), true)],
+        Some(pane_id),
         LockMode::Normal,
         Size {
             column_count: 1,
@@ -4421,8 +4047,12 @@ fn one_by_one_viewport_draws_without_panicking() {
 // Drawing the highlight
 // ============================================================================
 
-/// `build_content_render_snapshot` with `rows` highlighted.
-fn build_highlighted_render_snapshot(grid: Grid, spans: Vec<(u16, u16, u16)>) -> RenderSnapshot {
+/// `build_content_render_snapshot` of `grid` with `row_spans` highlighted.
+/// Each span is `(row, first column, last column)`, both columns inclusive.
+fn build_highlighted_render_snapshot(
+    grid: Grid,
+    row_spans: Vec<(u16, u16, u16)>,
+) -> RenderSnapshot {
     let mut render_snapshot = build_content_render_snapshot(
         grid,
         build_cell_rect(0, 1, 40, 6),
@@ -4432,7 +4062,7 @@ fn build_highlighted_render_snapshot(grid: Grid, spans: Vec<(u16, u16, u16)>) ->
             row_count: 8,
         },
     );
-    render_snapshot.pane_snapshots[0].selection_spans = Some(SelectionSpans { row_spans: spans });
+    render_snapshot.pane_snapshots[0].selection_spans = Some(SelectionSpans { row_spans });
     render_snapshot
 }
 
@@ -4535,13 +4165,12 @@ fn only_the_highlighted_row_is_reversed() {
 
 #[test]
 fn highlighting_a_cell_that_is_already_reverse_swaps_it_back() {
-    // The highlight combines with the cell's own reverse by exclusive-or, so
-    // highlighted reverse text still reads against its surroundings rather than
-    // vanishing into them.
+    // The highlight combines with the cell's own reverse by exclusive-or: a
+    // reversed cell under the highlight draws unreversed.
     let mut grid = Grid::build_blank(4, 38, TermStyle::default());
-    let mut style = TermStyle::default();
-    style.set_reverse(true);
-    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, style);
+    let mut reversed_style = TermStyle::default();
+    reversed_style.set_reverse(true);
+    *grid.get_cell_mut(0, 0).unwrap() = Cell::from_character('a', 1, reversed_style);
     let render_snapshot = build_highlighted_render_snapshot(grid, vec![(0, 0, 0)]);
     let render_buffer = render_test_snapshot(&render_snapshot, 40, 8);
 
@@ -4597,60 +4226,13 @@ fn a_highlight_span_wider_than_the_grid_draws_only_real_cells() {
 
 #[test]
 fn mode_indicator_joins_active_mode_labels() {
-    let pane = PaneId::new();
-    let mut render_snapshot = build_render_snapshot(
-        "s",
-        &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, 20, 4), true)],
-        Some(pane),
-        LockMode::Normal,
-        Size {
-            column_count: 20,
-            row_count: 6,
-        },
-    );
-
-    // Plain mode with the mouse ungrabbed reads BASE.
+    // Plain mode with the mouse ungrabbed reads BASE; mouse-select alone reads
+    // SELECT; locked and grabbing reads both, joined by ` · `.
+    assert_eq!(build_mode_tags(LockMode::Normal, false, None), "BASE");
+    assert_eq!(build_mode_tags(LockMode::Normal, true, None), "SELECT");
     assert_eq!(
-        build_mode_tags(
-            render_snapshot.client_snapshot.lock_mode,
-            render_snapshot.client_snapshot.is_mouse_selection_enabled,
-            None,
-        ),
-        "BASE"
-    );
-
-    // Mouse-select alone reads SELECT.
-    render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
-    assert_eq!(
-        build_mode_tags(
-            render_snapshot.client_snapshot.lock_mode,
-            render_snapshot.client_snapshot.is_mouse_selection_enabled,
-            None,
-        ),
-        "SELECT"
-    );
-
-    // Locked and grabbing reads both, joined by ` · `.
-    render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
-    assert_eq!(
-        build_mode_tags(
-            render_snapshot.client_snapshot.lock_mode,
-            render_snapshot.client_snapshot.is_mouse_selection_enabled,
-            None,
-        ),
+        build_mode_tags(LockMode::Locked, true, None),
         "LOCK · SELECT"
-    );
-
-    // Locked alone reads LOCK.
-    render_snapshot.client_snapshot.is_mouse_selection_enabled = false;
-    assert_eq!(
-        build_mode_tags(
-            render_snapshot.client_snapshot.lock_mode,
-            render_snapshot.client_snapshot.is_mouse_selection_enabled,
-            None,
-        ),
-        "LOCK"
     );
 }
 
@@ -4687,51 +4269,28 @@ fn the_mode_indicator_names_every_lock_mode() {
 
 #[test]
 fn mode_indicator_puts_the_reconnecting_tag_first_and_replaces_base() {
-    let pane = PaneId::new();
-    let mut render_snapshot = build_render_snapshot(
-        "s",
-        &[("t", true)],
-        &[(pane, build_cell_rect(0, 1, 20, 4), true)],
-        Some(pane),
-        LockMode::Normal,
-        Size {
-            column_count: 20,
-            row_count: 6,
-        },
-    );
-
-    let dialing = Some(Reconnecting {
+    let reconnecting = Some(Reconnecting {
         attempt: 3,
         retry_in_seconds: 8,
     });
 
-    // A reconnecting client in plain mode reads the link mode tag, never BASE, and
-    // the mode tag carries the dial it waits for and the seconds left before it.
+    // A reconnecting client in plain mode reads the link mode tag, never BASE,
+    // and the tag carries the dial it waits for and the seconds left before it.
     assert_eq!(
-        build_mode_tags(
-            render_snapshot.client_snapshot.lock_mode,
-            render_snapshot.client_snapshot.is_mouse_selection_enabled,
-            dialing,
-        ),
+        build_mode_tags(LockMode::Normal, false, reconnecting),
         "RECONNECTING (attempt 3, retry in 8s)"
     );
 
     // Reconnecting while locked and grabbing puts the link mode tag ahead of both.
-    render_snapshot.client_snapshot.lock_mode = LockMode::Locked;
-    render_snapshot.client_snapshot.is_mouse_selection_enabled = true;
     assert_eq!(
-        build_mode_tags(
-            render_snapshot.client_snapshot.lock_mode,
-            render_snapshot.client_snapshot.is_mouse_selection_enabled,
-            dialing,
-        ),
+        build_mode_tags(LockMode::Locked, true, reconnecting),
         "RECONNECTING (attempt 3, retry in 8s) · LOCK · SELECT"
     );
 }
 
 #[test]
 fn text_width_counts_display_cells_not_bytes_or_chars() {
-    // Chrome text is placed in terminal cells, so measuring uses display
+    // Chrome text is placed in terminal cells: measuring uses display
     // width. "漢字" is 2 chars and 6 bytes but occupies 4 cells; an emoji is
     // 1 char and 4 bytes but occupies 2; a combining mark adds none.
     assert_eq!(get_text_width("漢字"), 4);
@@ -4752,12 +4311,12 @@ fn text_width_counts_display_cells_not_bytes_or_chars() {
 #[test]
 fn line_width_sums_span_display_cells_and_saturates() {
     // Spans add up in display cells, and styles never change the count.
-    let line = Line::from(vec![
+    let mixed_width_line = Line::from(vec![
         Span::styled("漢字", Style::default().fg(Color::Red)),
         Span::raw("🦀"),
         Span::raw("e\u{0301}"),
     ]);
-    assert_eq!(get_line_width(&line), 7);
+    assert_eq!(get_line_width(&mixed_width_line), 7);
     assert_eq!(get_line_width(&Line::from("")), 0);
 
     // Two spans that together pass `u16::MAX` cells are held at `u16::MAX`,

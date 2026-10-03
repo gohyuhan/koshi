@@ -7,9 +7,7 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use flate2::{Compress, Compression, FlushCompress, Status};
-use koshi_image::{
-    compute_rgba_byte_count, validate_image_dimensions, DecodedImage, GraphicsProtocol,
-};
+use koshi_image::{compute_rgba_byte_count, DecodedImage, GraphicsProtocol};
 use thiserror::Error;
 
 const KITTY_PROTOCOL: GraphicsProtocol = GraphicsProtocol::Kitty;
@@ -431,12 +429,6 @@ fn validate_decoded_image(decoded_image: &DecodedImage) -> Result<(), KittyOutpu
             image_height_pixels: decoded_image.pixel_height,
         }
     })?;
-    validate_image_dimensions(KITTY_PROTOCOL, image_width_pixels, image_height_pixels).map_err(
-        |_| KittyOutputError::InvalidImageDimensions {
-            image_width_pixels: decoded_image.pixel_width,
-            image_height_pixels: decoded_image.pixel_height,
-        },
-    )?;
     let expected_rgba_byte_count =
         compute_rgba_byte_count(KITTY_PROTOCOL, image_width_pixels, image_height_pixels).map_err(
             |_| KittyOutputError::InvalidImageDimensions {

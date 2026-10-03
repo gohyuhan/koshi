@@ -207,6 +207,24 @@ fn a_protocol_refusal_carries_the_sentence_the_peer_sent() {
 }
 
 #[test]
+fn a_version_refusal_is_protocol_version_refused_with_the_sentence_the_peer_sent() {
+    let refusal = IpcErrorPayload {
+        code: IpcErrorCode::UnsupportedVersion,
+        message: "this session speaks protocol versions 2..2; the caller speaks 3..3".to_string(),
+    };
+
+    let peer_refusal_error = build_peer_refusal_error(&refusal);
+
+    let CliError::ProtocolVersionRefused { detail } = peer_refusal_error else {
+        panic!("expected ProtocolVersionRefused, got {peer_refusal_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "this session speaks protocol versions 2..2; the caller speaks 3..3"
+    );
+}
+
+#[test]
 fn peer_text_reaches_the_message_filtered() {
     assert_eq!(
         extract_ipc_unavailable_detail(
@@ -279,15 +297,14 @@ fn a_session_hello_hands_back_the_build_the_session_named() {
 }
 
 #[test]
-fn a_session_predating_the_build_field_hands_back_an_empty_string() {
+fn a_session_hello_with_an_empty_build_version_hands_back_an_empty_string() {
     let incoming_response = build_session_response(IpcResult::Hello {
         protocol_version: 4,
         build_version: String::new(),
     });
 
     assert_eq!(
-        parse_session_hello_version(incoming_response)
-            .expect("a build with no version field still opens"),
+        parse_session_hello_version(incoming_response).expect("an empty build version still opens"),
         (4, String::new())
     );
 }

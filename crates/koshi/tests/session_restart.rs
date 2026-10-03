@@ -3,45 +3,37 @@
 //! processes, a real client is attached over its control socket, and the test
 //! asks it to restart into the binary it was started from.
 //!
-//! What only a test like this reaches: the readers being held still, a pane's
-//! terminal crossing the swap, the swap itself, and the session that comes back
-//! afterwards. None of those exist inside one process.
+//! The tests check the readers held still, a pane's terminal crossing the swap,
+//! the swap itself, and the session that comes back afterwards.
 //!
 //! Every test serves its own temporary runtime directory and its own home
-//! directory, so the session servers here never meet the one a developer is
-//! running and never read a developer's `koshi.kdl`. Both sit under a short
-//! base because a Unix socket path has an operating-system length cap that a
-//! deep temporary path would break.
+//! directory, both under a short base.
 //!
-//! Reading a frame blocks forever, so every event stream is read on a thread of
-//! its own: a session that stops answering fails the test on a deadline instead
-//! of hanging the suite. That deadline is also what proves a live child does not
-//! hold the swap up.
+//! Every event stream is read on a thread of its own. A session that sends no
+//! frame within [`WAIT_DURATION`] fails the test.
 //!
-//! Nothing here is gated to one operating system. Where the evidence itself is
-//! platform-specific — the process id that `execvp` keeps on Unix, the handover
-//! to a new process on Windows — the test branches inside the assertion.
+//! Where the evidence is platform-specific — the process id that `execvp`
+//! keeps on Unix, the handover to a new process on Windows — the test branches
+//! inside the assertion.
 //!
 //! Every process a test starts is held in a guard that ends it when the test
-//! drops it, so a failed assertion leaves nothing running.
+//! drops it.
 
-use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdout, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
-    NewPaneArgs, WriteToPaneArgs,
+    CliExitCode, Command, CommandEnvelope, CommandSource, FocusPaneArgs, FocusTarget,
+    WriteToPaneArgs,
 };
 use koshi_core::discovery::{PaneLifecycle, SessionOverview};
-use koshi_core::event::Event;
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId};
 use koshi_core::key::{Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags};
-use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_core::process::SpawnSpec;
 use koshi_ipc::endpoint::{resolve_resume_file_path, EndpointFile};
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
@@ -50,45 +42,41 @@ use koshi_ipc::protocol::{
     IpcErrorCode, IpcErrorPayload, IpcRequest, IpcRequestKind, IpcResponse, IpcResult,
     WireMouseAction,
 };
-use koshi_ipc::router::{
-    resolve_router_endpoint_path, RouterRequest, RouterRequestKind, RouterResponse, RouterResult,
-    SessionAddress,
-};
+use koshi_ipc::router::{RouterResult, SessionSelector};
 use koshi_ipc::transport::{Connection, FrameWriter};
 use koshi_layout::mode::LayoutMode;
-use tempfile::TempDir;
 
 mod common;
 
-use common::{copy_koshi_binary, start_koshi_process, terminate_process};
+#[cfg(unix)]
+use common::resolve_config_directory_under_home;
+use common::session_connection::{
+    build_pane, send_session_request, submit_session_command, wait_for_session_connection,
+};
+use common::{
+    build_koshi_command_at, build_no_such_session_result, build_shell_spawn_spec,
+    build_short_test_directory, connect_to_router, copy_koshi_binary, create_session,
+    send_attach_lookup, start_router_process, terminate_process, wait_for_session_lookup_refusal,
+    RunningProcess, SessionProcess, SESSION_SERVER_NAME, WAIT_DURATION,
+};
+use koshi_test_support::fixtures::start_program_process;
 
-/// How long a poll waits for something a started process has to do before the
-/// test calls it a failure. It is also the ceiling on a swap: a session that has
-/// not come back by then has wedged, which is the failure this suite exists to
-/// catch.
-const WAIT_DURATION: Duration = Duration::from_secs(20);
-
-/// How long a poll pauses between attempts.
+/// How long a poll in this suite pauses between attempts: 50 milliseconds.
 const RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 
-/// How long a test reads on for frames that must not arrive, before it calls
-/// their absence settled.
+/// How long a test reads on for frames that must not arrive: 750
+/// milliseconds.
 const SETTLE_DURATION: Duration = Duration::from_millis(750);
 
-/// How long a test waits after reading the restart frame before it sends the
-/// input a user typed into the window the swap leaves open. The session waits a
-/// second for its clients to leave, so this sits inside that second and well
-/// past the moment the session stops reading them on its own.
+/// How long a test waits after reading the restart frame before it sends input:
+/// 250 milliseconds, inside the one second the session waits for its clients
+/// to leave.
 const TYPED_AFTER_RESTART_FRAME_DURATION: Duration = Duration::from_millis(250);
 
 /// How long a test waits for the session server to detach a client record
-/// nobody claimed. The session server holds such a record for thirty seconds;
-/// the rest is room for the swap and for the poll that watches.
+/// nobody claimed: 75 seconds. The session server holds such a record for 30
+/// seconds.
 const RECONNECT_WAIT_DURATION: Duration = Duration::from_secs(75);
-
-/// The display name the session server is started under, standing in for the
-/// one the router generates.
-const SESSION_SERVER_NAME: &str = "workspace";
 
 /// The bytes of a resume file cut off inside its header: no build reads a
 /// header out of them.
@@ -113,136 +101,36 @@ const TALL_ATTACH_VIEWPORT_SIZE: Size = Size {
     row_count: 40,
 };
 
-/// A fresh directory, under a short base so the Unix socket path stays inside
-/// the operating system's path-length cap. Removed when the test drops it.
-fn build_short_test_directory() -> TempDir {
-    #[cfg(unix)]
-    let base_directory = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let base_directory = std::env::temp_dir();
-    tempfile::Builder::new()
-        .prefix("k")
-        .tempdir_in(base_directory)
-        .expect("a temporary directory")
-}
-
-#[cfg(all(unix, target_os = "macos"))]
-fn resolve_test_config_directory(test_home_directory: &Path) -> PathBuf {
-    test_home_directory.join("Library/Application Support/koshi")
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn resolve_test_config_directory(test_home_directory: &Path) -> PathBuf {
-    test_home_directory.join("config/koshi")
-}
-
-/// A session server the test started. Dropping it ends that server.
-struct RunningSession {
-    /// The process the test started.
-    child_process: Child,
-    /// The pipe the ready line was read from, held open for as long as the
-    /// guard lives: on Unix the image replacing this one inherits that pipe and
-    /// writes its own ready line into it.
+/// A session server the test started with its standard output piped, and the
+/// reader its ready line came from. The reader holds the pipe open for as long
+/// as this lives; on Unix the image that replaces the process inherits that
+/// pipe and writes its own ready line into it. Dropping it ends the process.
+///
+/// On Windows a restart hands over to a new process and the started one ends.
+/// On Unix the started one keeps running, under the same process id, as the
+/// new image.
+struct ReadySessionProcess {
+    session_process: SessionProcess,
     _ready_output_reader: BufReader<ChildStdout>,
 }
 
-impl RunningSession {
-    /// True once the process the test started has ended. On Windows a restart
-    /// hands over to a new process and this one ends; on Unix it keeps running,
-    /// under the same process id, as the new image.
-    fn has_session_server_exited(&mut self) -> bool {
-        self.child_process
-            .try_wait()
-            .expect("the session server's state can be read")
-            .is_some()
-    }
-}
-
-impl Drop for RunningSession {
-    fn drop(&mut self) {
-        let _ = self.child_process.kill();
-        let _ = self.child_process.wait();
-    }
-}
-
-/// A process the test did not start itself, held by its process id. Dropping it
-/// ends that process.
-///
-/// A restart is guarded with one of these: on Windows the session runs in a
-/// process the test never spawned, and on Unix it is the process the test
-/// already holds, which a second ending does nothing to.
-struct RunningProcess {
-    process_id: u32,
-}
-
-impl Drop for RunningProcess {
-    fn drop(&mut self) {
-        terminate_process(self.process_id);
-    }
-}
-
-/// A router the test started. Dropping it ends that router.
-struct RunningRouter {
-    child_process: Child,
-}
-
-impl Drop for RunningRouter {
-    fn drop(&mut self) {
-        let _ = self.child_process.kill();
-        let _ = self.child_process.wait();
-    }
-}
-
-/// The `koshi` binary at `binary_path`, set to keep its files under `test_home_directory` rather
-/// than in the developer's own directories, and stripped of the pane identity so it never reads the
-/// session a developer runs the test from.
-///
-/// Every variable the platform path resolvers read is pointed at
-/// `test_home_directory`, on every platform, so the config file this process
-/// reads is the one the test directory holds — none, which leaves every setting
-/// at its built-in default. `KOSHI_RUNTIME_DIR` names
-/// `<test_home_directory>/run`, which every caller here then
-/// overrides with its own `--runtime-dir` argument.
-fn build_koshi_command(binary_path: &Path, test_home_directory: &Path) -> std::process::Command {
-    let mut process_command = std::process::Command::new(binary_path);
-    process_command
-        .env("HOME", test_home_directory)
-        .env("USERPROFILE", test_home_directory)
-        .env("KOSHI_RUNTIME_DIR", test_home_directory.join("run"))
-        .env("XDG_CONFIG_HOME", test_home_directory.join("config"))
-        .env("XDG_DATA_HOME", test_home_directory.join("data"))
-        .env("XDG_STATE_HOME", test_home_directory.join("state"))
-        .env("APPDATA", test_home_directory.join("roaming"))
-        .env("LOCALAPPDATA", test_home_directory.join("local"))
-        // The five variables the runtime injects at pane spawn; `KOSHI` is the
-        // marker a nested koshi reads, and a test run from inside a koshi pane
-        // would hand every one of them to this child.
-        .env_remove("KOSHI")
-        .env_remove("KOSHI_SESSION_ID")
-        .env_remove("KOSHI_CLIENT_ID")
-        .env_remove("KOSHI_PANE_ID")
-        .env_remove("KOSHI_SOCKET")
-        .stdin(Stdio::null())
-        // The session server's own log reaches the test run's output, so a
-        // failure here is read beside the reason the server gave for it.
-        .stderr(Stdio::inherit());
-    // The shell a seeded pane launches, so every platform opens the same one
-    // whatever the developer's login shell is. Windows reads `COMSPEC`.
-    #[cfg(unix)]
-    process_command.env("SHELL", "/bin/sh");
-    process_command
-}
-
 /// The command that starts the binary at `binary_path` as `session_id`'s server,
-/// serving `runtime_directory`, under the identity the router would have handed
-/// it: `serve-session <session_id> workspace --runtime-dir <runtime_directory>`.
+/// serving `runtime_directory` under `test_home_directory` as
+/// [`build_koshi_command_at`] sets it, under the identity the router would have
+/// handed it: `serve-session <session_id> workspace --runtime-dir
+/// <runtime_directory>`.
+///
+/// The session server writes its error stream to the test run's own. Every
+/// seeded pane launches the shell [`build_koshi_command_at`] names: `/bin/sh`
+/// on Unix, and `COMSPEC` on Windows.
 fn build_session_server_command(
     binary_path: &Path,
     test_home_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
 ) -> std::process::Command {
-    let mut process_command = build_koshi_command(binary_path, test_home_directory);
+    let mut process_command = build_koshi_command_at(binary_path, test_home_directory);
+    process_command.stderr(Stdio::inherit());
     process_command
         .arg("serve-session")
         .arg(session_id.to_string())
@@ -260,7 +148,7 @@ fn start_session_server(
     test_home_directory: &Path,
     runtime_directory: &Path,
     session_id: SessionId,
-) -> RunningSession {
+) -> ReadySessionProcess {
     start_session_server_with_command(&mut build_session_server_command(
         binary_path,
         test_home_directory,
@@ -274,8 +162,8 @@ fn start_session_server(
 /// control socket is bound.
 fn start_session_server_with_command(
     process_command: &mut std::process::Command,
-) -> RunningSession {
-    let mut child_process = start_koshi_process(process_command.stdout(Stdio::piped()));
+) -> ReadySessionProcess {
+    let mut child_process = start_program_process(process_command.stdout(Stdio::piped()));
     let mut ready_output_reader = BufReader::new(
         child_process
             .stdout
@@ -290,147 +178,10 @@ fn start_session_server_with_command(
         ready_line.contains("\"socket_address\""),
         "the ready line named no socket: {ready_line}"
     );
-    RunningSession {
-        child_process,
+    ReadySessionProcess {
+        session_process: SessionProcess { child_process },
         _ready_output_reader: ready_output_reader,
     }
-}
-
-/// Start the `koshi` binary as the router serving `runtime_directory`.
-fn start_router_process(test_home_directory: &Path, runtime_directory: &Path) -> RunningRouter {
-    let child_process = start_koshi_process(
-        build_koshi_command(Path::new(env!("CARGO_BIN_EXE_koshi")), test_home_directory)
-            .arg("serve-router")
-            .arg("--runtime-dir")
-            .arg(runtime_directory)
-            .stdout(Stdio::null()),
-    );
-    RunningRouter { child_process }
-}
-
-/// Open a connection to `session_id`'s control socket with its handshake
-/// already done, retrying until the session answers, and hand back the endpoint
-/// file the socket was advertised in.
-fn open_session_connection(
-    runtime_directory: &Path,
-    session_id: SessionId,
-) -> (Connection, EndpointFile) {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if let Some(opened_connection) = try_open_session_connection(runtime_directory, session_id)
-        {
-            return opened_connection;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no session server answered for {session_id}"
-        );
-        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// One attempt at opening a connection: read the endpoint file, connect, and
-/// send the Hello that opens the connection.
-///
-/// `None` means the session server has yet to bind its socket and advertise the
-/// token the Hello presents; the next attempt reads the file again.
-fn try_open_session_connection(
-    runtime_directory: &Path,
-    session_id: SessionId,
-) -> Option<(Connection, EndpointFile)> {
-    let session_endpoint = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-        runtime_directory,
-        session_id,
-    ))
-    .ok()?;
-    let mut connection = Connection::connect(&session_endpoint.socket_address).ok()?;
-    let hello_request = IpcRequest {
-        request_id: 1,
-        request_kind: IpcRequestKind::build_hello_request(
-            session_endpoint.connection_token.clone(),
-        ),
-    };
-    connection.send(&hello_request).ok()?;
-    let ipc_response: IpcResponse = connection.recv().ok()?;
-    match ipc_response.answer_result {
-        IpcResult::Hello { .. } => Some((connection, session_endpoint)),
-        IpcResult::Error(_) => None,
-        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
-    }
-}
-
-/// Ask the session for `request_kind` on a connection that carries no client's event
-/// stream, and hand back its answer.
-fn send_session_request(
-    connection: &mut Connection,
-    request_id: u64,
-    request_kind: IpcRequestKind,
-) -> IpcResult {
-    let ipc_request = IpcRequest {
-        request_id,
-        request_kind,
-    };
-    connection
-        .send(&ipc_request)
-        .expect("the session reads the request");
-    let ipc_response: IpcResponse = connection.recv().expect("the session answers the request");
-    assert_eq!(ipc_response.request_id, Some(request_id));
-    ipc_response.answer_result
-}
-
-/// Submit `command` on a control connection to `session_id`, targeting
-/// `client_id`, and hand back the events it emitted. A rejected command fails
-/// the test.
-fn submit_session_command(
-    connection: &mut Connection,
-    session_id: SessionId,
-    client_id: ClientId,
-    command: Command,
-) -> Vec<Event> {
-    let envelope = CommandEnvelope::from_parts(
-        CommandId::new(),
-        CommandSource::from_external_cli(Some(session_id), Some(client_id)),
-        command,
-    );
-    match send_session_request(
-        connection,
-        7,
-        IpcRequestKind::SubmitCommand(Box::new(envelope)),
-    ) {
-        IpcResult::CommandResult(CommandResult::Ok { emitted_events, .. }) => emitted_events,
-        unexpected_result => panic!("the command was answered with {unexpected_result:?}"),
-    }
-}
-
-/// Split a new pane off the client's focused one, running `spawn_spec`, and hand
-/// back the pane the session created. `None` launches the platform shell.
-fn build_pane(
-    connection: &mut Connection,
-    session_id: SessionId,
-    client_id: ClientId,
-    spawn_spec: Option<SpawnSpec>,
-) -> PaneId {
-    let emitted_events = submit_session_command(
-        connection,
-        session_id,
-        client_id,
-        Command::NewPane(NewPaneArgs {
-            source_pane_id: None,
-            tab_id: None,
-            direction: Direction::Right,
-            should_stack: false,
-            working_directory: None,
-            spawn_spec,
-            client_id: Some(client_id),
-        }),
-    );
-    emitted_events
-        .iter()
-        .find_map(|session_event| match session_event {
-            Event::PaneCreated(created_pane) => Some(created_pane.pane_id),
-            _ => None,
-        })
-        .expect("the new pane is announced")
 }
 
 /// Type `terminal_line` into `pane_id`, ending it with the carriage return a terminal
@@ -457,7 +208,7 @@ fn send_terminal_line(
 
 /// The session's own description of itself, read over its control socket.
 fn fetch_session_overview(runtime_directory: &Path, session_id: SessionId) -> SessionOverview {
-    koshi_link::ipc_client::fetch_session_overview(runtime_directory, session_id)
+    koshi_link::discovery::fetch_session_overview(runtime_directory, None, session_id, None)
         .expect("the session server describes itself")
 }
 
@@ -492,15 +243,15 @@ fn get_seeded_pane_id(runtime_directory: &Path, session_id: SessionId) -> PaneId
 /// Wait for the endpoint file `session_id` to advertise a socket other than
 /// the one `endpoint_before_restart` names.
 ///
-/// A session server mints a fresh connection token every time it binds, so a
+/// A session server mints a fresh connection token every time it binds: a
 /// token other than `endpoint_before_restart`'s belongs to the socket the
-/// session came back on. This is the same fact an attached client watches for.
+/// session came back on. An attached client watches for the same change.
 fn wait_for_restarted_session_endpoint(
     runtime_directory: &Path,
     session_id: SessionId,
     endpoint_before_restart: &EndpointFile,
 ) -> EndpointFile {
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
         if let Ok(loaded_endpoint) = EndpointFile::load_from_path(
             &EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id),
@@ -512,19 +263,19 @@ fn wait_for_restarted_session_endpoint(
             }
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "the session advertised no new socket after its restart"
         );
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
 }
 
-/// The process ids whose parent is `parent`, in ascending order, as the
-/// operating system reports them.
+/// The process ids whose parent is `parent_process_id`, in ascending order,
+/// as the operating system reports them.
 ///
 /// Unix only: there a pane's child is the session server's own child, and
-/// `execvp` keeps it. On Windows a pane's child belongs to the process holding
-/// the panes instead.
+/// `execvp` keeps it. On Windows a pane's child belongs to the process that
+/// holds the panes.
 #[cfg(unix)]
 fn list_child_process_ids(parent_process_id: u32) -> Vec<u32> {
     let process_list_output = std::process::Command::new("ps")
@@ -547,9 +298,9 @@ fn list_child_process_ids(parent_process_id: u32) -> Vec<u32> {
     child_process_ids
 }
 
-/// One attached client's event stream, read on a thread of its own so a test
-/// never blocks forever on a frame that does not come, plus the writing half
-/// that carries this client's own requests up.
+/// One attached client's event stream, read on a thread of its own and taken
+/// with a deadline, plus the writing half that carries this client's own
+/// requests up.
 struct AttachedClientStream {
     /// The id the session minted or handed back for this client.
     client_id: ClientId,
@@ -564,21 +315,21 @@ impl AttachedClientStream {
     /// Join `session_id` as a viewing client at `viewport_size`, the way the
     /// attached client joins it: Hello, then Attach on the same connection.
     ///
-    /// `resume` names the client record to come back as after the session
-    /// replaced its own image, and is `None` on a first attach.
+    /// `resume_client_id` names the client record to come back as after the
+    /// session replaced its own image, and is `None` on a first attach.
     fn attach_test_client(
         runtime_directory: &Path,
         session_id: SessionId,
         viewport_size: Size,
-        resume: Option<ClientId>,
+        resume_client_id: Option<ClientId>,
     ) -> (AttachedClientStream, EndpointFile) {
         let (mut connection, endpoint_file) =
-            open_session_connection(runtime_directory, session_id);
+            wait_for_session_connection(runtime_directory, session_id);
         let attach_request = IpcRequest {
             request_id: 2,
             request_kind: IpcRequestKind::Attach {
                 viewport_size,
-                resume_client_id: resume,
+                resume_client_id,
                 resume_token: None,
                 pane_area: None,
                 graphics_capabilities: koshi_ipc::protocol::GraphicsCapabilities::default(),
@@ -592,7 +343,7 @@ impl AttachedClientStream {
         assert_eq!(ipc_response.request_id, Some(2));
         let IpcResult::Attached {
             client_id,
-            session_id: joined,
+            session_id: joined_session_id,
             ..
         } = ipc_response.answer_result
         else {
@@ -601,7 +352,7 @@ impl AttachedClientStream {
                 ipc_response.answer_result
             );
         };
-        assert_eq!(joined, session_id);
+        assert_eq!(joined_session_id, session_id);
 
         let (mut session_event_reader, request_writer) = connection.split();
         let (session_events_sender, session_events) = mpsc::channel();
@@ -637,10 +388,10 @@ impl AttachedClientStream {
     /// The first event `event_predicate` accepts. Fails the test once [`WAIT_DURATION`] has
     /// passed with none, naming every event kind that did arrive.
     fn receive_event_when(&self, event_predicate: impl Fn(&SessionEvent) -> bool) -> SessionEvent {
-        let deadline = Instant::now() + WAIT_DURATION;
+        let wait_deadline = Instant::now() + WAIT_DURATION;
         let mut received_event_names: Vec<&'static str> = Vec::new();
         loop {
-            let remaining_duration = deadline.saturating_duration_since(Instant::now());
+            let remaining_duration = wait_deadline.saturating_duration_since(Instant::now());
             match self.session_events.recv_timeout(remaining_duration) {
                 Ok(Ok(session_event)) => {
                     if event_predicate(&session_event) {
@@ -684,10 +435,10 @@ impl AttachedClientStream {
         &self,
         frame_predicate: impl Fn(&PaintedFrame) -> bool,
     ) -> PaintedFrame {
-        let deadline = Instant::now() + WAIT_DURATION;
+        let wait_deadline = Instant::now() + WAIT_DURATION;
         let mut last_painted_frame: Option<PaintedFrame> = None;
         loop {
-            let remaining_duration = deadline.saturating_duration_since(Instant::now());
+            let remaining_duration = wait_deadline.saturating_duration_since(Instant::now());
             match self.session_events.recv_timeout(remaining_duration) {
                 Ok(Ok(SessionEvent::Painted {
                     frame: painted_frame,
@@ -748,9 +499,10 @@ impl AttachedClientStream {
     /// Everything that arrives in the next `time_window`. A stream that ends inside
     /// it contributes the frames it delivered first.
     fn drain_session_events(&self, time_window: Duration) -> Vec<SessionEvent> {
-        let deadline = Instant::now() + time_window;
+        let settle_deadline = Instant::now() + time_window;
         let mut received_events = Vec::new();
-        while let Some(remaining_duration) = deadline.checked_duration_since(Instant::now()) {
+        while let Some(remaining_duration) = settle_deadline.checked_duration_since(Instant::now())
+        {
             match self.session_events.recv_timeout(remaining_duration) {
                 Ok(Ok(session_event)) => received_events.push(session_event),
                 Ok(Err(_)) | Err(_) => return received_events,
@@ -760,7 +512,7 @@ impl AttachedClientStream {
     }
 
     /// Send one request up this client's own connection. The streaming half
-    /// writes no response, so the answer is whatever reaches the event stream.
+    /// writes no response; the answer is whatever reaches the event stream.
     fn send_session_request(&mut self, request_id: u64, request_kind: IpcRequestKind) {
         let ipc_request = IpcRequest {
             request_id,
@@ -790,8 +542,8 @@ impl AttachedClientStream {
     /// Move this client's view of `pane_id` up into scrollback by `scroll_line_count`, and
     /// hand back the first frame painted after the session answered the round.
     ///
-    /// The session answers exactly one round per request, so waiting for that
-    /// answer is what makes the frame after it the scrolled one.
+    /// The session answers exactly one round per request, and the first frame
+    /// after that answer is the scrolled one.
     fn scroll_pane_up(&mut self, pane_id: PaneId, scroll_line_count: usize) -> PaintedFrame {
         self.send_session_request(
             11,
@@ -819,8 +571,7 @@ impl AttachedClientStream {
 /// The rows `pane_id` shows in `painted_frame`, each with its trailing blanks cut off and
 /// every blank row at the bottom dropped.
 ///
-/// A blank row between two rows of text is kept, so a gap in a pane's output is
-/// visible in what this returns.
+/// A blank row between two rows of text is kept.
 ///
 /// Empty when the frame carries no content for `pane_id`, and when the pane shows
 /// no cells. A frame painted before the pane existed carries no content for it.
@@ -888,78 +639,59 @@ fn get_retained_line_count(painted_frame: &PaintedFrame, pane_id: PaneId) -> usi
         .retained_line_count
 }
 
-/// A child that prints `count` lines reading `<prefix>-1` to `<prefix>-count`
-/// as fast as it can, and then stays alive with nothing more to say.
+/// A child that prints `line_count` lines reading `<line_prefix>-1` to
+/// `<line_prefix>-<line_count>` as fast as it can, and then stays alive and
+/// prints nothing more.
 fn build_burst_spawn_spec(line_prefix: &str, line_count: u32) -> SpawnSpec {
     #[cfg(unix)]
-    let script = format!(
+    let shell_script = format!(
         "line_number=1; while [ $line_number -le {line_count} ]; do printf '{line_prefix}-%d\\n' $line_number; line_number=$((line_number+1)); done; \
          sleep 300"
     );
-    // The loop is parenthesised, which ends its body at the closing bracket.
-    // `&` alone does not: it reads as one more command inside the body, and the
-    // wait below then runs on the first pass instead of after the last one.
+    // The parentheses end the loop body at the closing bracket, and the
+    // `ping` after `&` runs once, after the last pass.
     #[cfg(windows)]
-    let script = format!(
+    let shell_script = format!(
         "(for /L %i in (1,1,{line_count}) do @echo {line_prefix}-%i) & ping -n 301 127.0.0.1 >nul"
     );
-    build_shell_spawn_spec(&script)
+    build_shell_spawn_spec(&shell_script)
 }
 
-/// A child that prints `count` lines reading `<prefix>-1` to `<prefix>-count`
-/// with a pause between them, and then stays alive.
-///
-/// The pause is what lets a test send the restart while the child is still
-/// printing, so the output really does cross the swap.
+/// A child that prints `line_count` lines reading `<line_prefix>-1` to
+/// `<line_prefix>-<line_count>`, 0.25 seconds apart on Unix and about one
+/// second apart on Windows, and then stays alive.
 fn build_paced_spawn_spec(line_prefix: &str, line_count: u32) -> SpawnSpec {
     #[cfg(unix)]
-    let script = format!(
+    let shell_script = format!(
         "line_number=1; while [ $line_number -le {line_count} ]; do printf '{line_prefix}-%d\\n' $line_number; line_number=$((line_number+1)); \
          sleep 0.25; done; sleep 300"
     );
     #[cfg(windows)]
-    let script = format!(
+    let shell_script = format!(
         "(for /L %i in (1,1,{line_count}) do @(echo {line_prefix}-%i & ping -n 2 127.0.0.1 >nul)) & \
          ping -n 301 127.0.0.1 >nul"
     );
-    build_shell_spawn_spec(&script)
+    build_shell_spawn_spec(&shell_script)
 }
 
 /// A child that prints nothing and never exits: the case whose reader has
 /// nothing to read and whose process cannot be waited on.
 fn build_idle_spawn_spec() -> SpawnSpec {
     #[cfg(unix)]
-    let script = "sleep 300".to_string();
+    let shell_script = "sleep 300".to_string();
     #[cfg(windows)]
-    let script = "ping -n 301 127.0.0.1 >nul".to_string();
-    build_shell_spawn_spec(&script)
+    let shell_script = "ping -n 301 127.0.0.1 >nul".to_string();
+    build_shell_spawn_spec(&shell_script)
 }
 
-/// A child that waits for one key and then exits reporting success.
-fn build_key_then_exit_spawn_spec() -> SpawnSpec {
+/// A child that reads one line and then exits reporting success.
+fn build_line_then_exit_spawn_spec() -> SpawnSpec {
     #[cfg(unix)]
-    let script = "read line; exit 0".to_string();
-    // `set /p` reads a line, the way `read` does. `pause` is not the same
-    // thing: it takes a key event, which is not what a client writing bytes to
-    // a pane produces.
+    let shell_script = "read line; exit 0".to_string();
+    // `set /p` reads a line, as `read` does.
     #[cfg(windows)]
-    let script = "set /p x= & exit 0".to_string();
-    build_shell_spawn_spec(&script)
-}
-
-/// Run `script` through the platform's own command interpreter.
-fn build_shell_spawn_spec(shell_script: &str) -> SpawnSpec {
-    #[cfg(unix)]
-    let (program, shell_command_flag) = (PathBuf::from("/bin/sh"), "-c");
-    #[cfg(windows)]
-    let (program, shell_command_flag) = (PathBuf::from("cmd.exe"), "/C");
-    SpawnSpec {
-        shell_kind: ShellKind::from_program(&program),
-        program,
-        arguments: vec![shell_command_flag.to_string(), shell_script.to_string()],
-        working_directory: None,
-        environment_variables: BTreeMap::new(),
-    }
+    let shell_script = "set /p x= & exit 0".to_string();
+    build_shell_spawn_spec(&shell_script)
 }
 
 #[test]
@@ -975,7 +707,7 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
         session_id,
     );
 
-    // A short terminal, so the thirty lines each pane prints do not all fit and
+    // A short terminal: the thirty lines each pane prints do not all fit, and
     // the ones above the top land in scrollback.
     let (attached_client_stream, endpoint_before_restart) =
         AttachedClientStream::attach_test_client(
@@ -984,7 +716,8 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
             SHORT_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     let left_pane_id = build_pane(
         &mut control_connection,
@@ -1003,14 +736,14 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
         attached_client_stream.receive_painted_frame_when(|painted_frame| {
             get_pane_rows(painted_frame, left_pane_id)
                 .last()
-                .is_some_and(|row| row == "left-30")
+                .is_some_and(|row_text| row_text == "left-30")
                 && get_pane_rows(painted_frame, right_pane_id)
                     .last()
-                    .is_some_and(|row| row == "right-30")
+                    .is_some_and(|row_text| row_text == "right-30")
         });
     // The last line each child printed ends with a newline, and that newline
     // moves the view one row on. The frame above can be the one painted between
-    // the line and its newline, so this takes the last frame painted once the
+    // the line and its newline. This takes the last frame painted once the
     // children have gone quiet, and compares that against the swap.
     let settled_frame = attached_client_stream
         .receive_last_painted_frame(SETTLE_DURATION)
@@ -1025,7 +758,7 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
 
     #[cfg(unix)]
     let app_config_path = {
-        let config_directory = resolve_test_config_directory(test_home_directory.path());
+        let config_directory = resolve_config_directory_under_home(test_home_directory.path());
         std::fs::create_dir_all(&config_directory).expect("create config directory");
         let app_config_path = config_directory.join("koshi.kdl");
         std::fs::write(&app_config_path, "version 1\n").expect("write released config");
@@ -1113,10 +846,12 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
 
     #[cfg(unix)]
     {
-        // The swap replaced this process's running image, so the session serves
-        // under the process id it started with and every pane's child kept the
+        // The swap replaced this process's running image: the session serves
+        // under the process id it started with, and every pane's child kept the
         // same parent and the same process id.
-        assert!(!session_server_process.has_session_server_exited());
+        assert!(!session_server_process
+            .session_process
+            .has_session_server_exited());
         assert_eq!(
             restarted_endpoint.process_id,
             endpoint_before_restart.process_id
@@ -1131,10 +866,13 @@ fn a_restart_keeps_every_pane_its_child_its_screen_and_its_scrollback() {
         // The swap handed over to a new process, which took the panes back from
         // the process holding them — the one that outlived both session
         // servers.
-        let deadline = Instant::now() + WAIT_DURATION;
-        while !session_server_process.has_session_server_exited() {
+        let wait_deadline = Instant::now() + WAIT_DURATION;
+        while !session_server_process
+            .session_process
+            .has_session_server_exited()
+        {
             assert!(
-                Instant::now() < deadline,
+                Instant::now() < wait_deadline,
                 "the session server that handed over kept running"
             );
             std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
@@ -1159,8 +897,7 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
         session_id,
     );
 
-    // A tall terminal, so every line the child prints stays on screen and the
-    // run can be read whole.
+    // A tall terminal: every line the child prints stays on screen.
     let (attached_client_stream, endpoint_before_restart) =
         AttachedClientStream::attach_test_client(
             runtime_directory.path(),
@@ -1168,7 +905,8 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let output_pane_id = build_pane(
         &mut control_connection,
         session_id,
@@ -1176,8 +914,8 @@ fn output_written_across_the_swap_arrives_once_and_in_order() {
         Some(build_paced_spawn_spec("mark", 12)),
     );
 
-    // The restart goes out while the child is still printing, so the run has to
-    // cross the parking, the swap and the reader coming back.
+    // The restart goes out while the child is still printing: the run crosses
+    // the parking, the swap, and the reader coming back.
     attached_client_stream.receive_painted_frame_when(|painted_frame| {
         get_pane_rows(painted_frame, output_pane_id).contains(&"mark-3".to_string())
     });
@@ -1234,15 +972,16 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    // A child that ends the moment it reads one line, so the panes the session
-    // holds after the swap say whether the line reached it.
+    // A child that ends the moment it reads one line: the panes the session
+    // holds after the swap show whether the line reached it.
     let input_pane_id = build_pane(
         &mut control_connection,
         session_id,
         attached_client_stream.client_id,
-        Some(build_key_then_exit_spawn_spec()),
+        Some(build_line_then_exit_spawn_spec()),
     );
     let mut expected_pane_lifecycles = vec![
         (seeded_pane_id, PaneLifecycle::Running),
@@ -1258,15 +997,13 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
         send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
         IpcResult::Restarting
     );
-    // A client learns the session is going only when it reads this frame, so
-    // what follows is what a user types into the window the swap leaves open.
+    // A client learns the session is going only when it reads this frame.
+    // What follows is what a user types into the window the swap leaves open.
     attached_client_stream.receive_events_until_restarting();
-    // Long enough that the swap has reached the point where it stops reading
-    // its clients, and short enough to be well inside the wait it gives them.
-    // Sending the moment the frame arrives would land in the microseconds
-    // before that point and prove nothing.
+    // The sleep ends after the swap stops reading its clients, and inside the
+    // wait it gives them.
     std::thread::sleep(TYPED_AFTER_RESTART_FRAME_DURATION);
-    let envelope = CommandEnvelope::from_parts(
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(attached_client_stream.client_id),
         Command::WriteToPane(WriteToPaneArgs {
@@ -1274,11 +1011,13 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
             pane_input_bytes: b"typed\r".to_vec(),
         }),
     );
-    attached_client_stream
-        .send_request_while_connection_open(20, IpcRequestKind::SubmitCommand(Box::new(envelope)));
+    attached_client_stream.send_request_while_connection_open(
+        20,
+        IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
+    );
     // What a real client sends the moment it reads that frame. Requests arrive
-    // in the order they were queued, so the session reads the line above before
-    // it reads this, and this is what the swap waits for.
+    // in the order they were queued: the session reads the line above before
+    // it reads this, and the swap waits for this.
     attached_client_stream.send_request_while_connection_open(21, IpcRequestKind::Leaving);
     drop(control_connection);
 
@@ -1294,12 +1033,12 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
     // The line reached the child: it read the line, exited, and its pane closed
     // with it. A swap that dropped the line leaves that child waiting, and the
     // pane open, until this deadline fails the test.
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     while list_pane_lifecycles(runtime_directory.path(), session_id)
         != vec![(seeded_pane_id, PaneLifecycle::Running)]
     {
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < wait_deadline,
             "the pane the line was sent to is still open, so its child never read it"
         );
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
@@ -1308,9 +1047,9 @@ fn input_sent_after_the_clients_are_told_still_reaches_its_pane() {
 
 #[test]
 fn a_client_that_never_leaves_does_not_hold_the_swap_up() {
-    // The swap waits for every told client to say it is leaving. A client whose
-    // window froze never says it, so the wait is bounded: the session cuts the
-    // connections still open and carries itself out anyway.
+    // The swap waits a bounded time for every told client to say it is
+    // leaving. A client whose window froze never says it: the session cuts the
+    // connections still open and restarts anyway.
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
@@ -1329,7 +1068,8 @@ fn a_client_that_never_leaves_does_not_hold_the_swap_up() {
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
 
     assert_eq!(
@@ -1346,8 +1086,7 @@ fn a_client_that_never_leaves_does_not_hold_the_swap_up() {
         process_id: restarted_endpoint.process_id,
     };
 
-    // The session came back with the pane it was carrying, so the cut cost it
-    // nothing it held.
+    // The session came back with the pane it was carrying.
     assert_eq!(
         list_pane_lifecycles(runtime_directory.path(), session_id),
         vec![(seeded_pane_id, PaneLifecycle::Running)]
@@ -1383,9 +1122,10 @@ fn a_pane_a_running_session_opened_prints_what_its_child_wrote() {
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
     );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
-    // One line, then a child that stays alive, so the last row the pane shows is
-    // that line and nothing races it.
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
+    // One line, then a child that stays alive: the last row the pane shows is
+    // that line.
     let output_pane_id = build_pane(
         &mut control_connection,
         session_id,
@@ -1396,7 +1136,7 @@ fn a_pane_a_running_session_opened_prints_what_its_child_wrote() {
     let painted_frame = attached_client_stream.receive_painted_frame_when(|painted_frame| {
         get_pane_rows(painted_frame, output_pane_id)
             .last()
-            .is_some_and(|row| row == "printed-1")
+            .is_some_and(|row_text| row_text == "printed-1")
     });
     assert_eq!(
         get_pane_rows(&painted_frame, output_pane_id)
@@ -1426,10 +1166,10 @@ fn a_pane_whose_child_never_exits_does_not_hold_the_swap_up() {
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
-    // A child that cannot exit and whose reader has nothing to read: ending
-    // that reader and waiting for it would never return.
+    // A child that never exits and prints nothing for its reader to read.
     let output_pane_id = build_pane(
         &mut control_connection,
         session_id,
@@ -1444,8 +1184,8 @@ fn a_pane_whose_child_never_exits_does_not_hold_the_swap_up() {
     attached_client_stream.receive_events_until_restarting();
     drop(control_connection);
 
-    // The wait is the assertion: a swap that wedged never advertises a new
-    // socket, and this fails on the deadline instead of hanging.
+    // The wait is the assertion: a swap that never advertises a new socket
+    // fails this on the deadline.
     let restarted_endpoint = wait_for_restarted_session_endpoint(
         runtime_directory.path(),
         session_id,
@@ -1485,7 +1225,8 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
     );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let focused_pane_id = build_pane(
         &mut control_connection,
         session_id,
@@ -1493,8 +1234,8 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         Some(build_idle_spawn_spec()),
     );
 
-    // A focus and a zoom this client alone holds, both distinct from what a
-    // freshly minted client would come up with.
+    // A focus and a zoom this client alone holds, both different from what a
+    // new client starts with.
     submit_session_command(
         &mut control_connection,
         session_id,
@@ -1545,8 +1286,8 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         Some(initial_client_stream.client_id),
     );
 
-    // The record came across the swap, so the session handed it back rather
-    // than minting a fresh client.
+    // The record came across the swap: the session handed back the same
+    // client.
     assert_eq!(
         reconnected_client_stream.client_id,
         initial_client_stream.client_id
@@ -1568,9 +1309,9 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
         LayoutMode::Fullscreen { focused_pane_id }
     );
 
-    // The state file has done its work and is gone, so nothing keeps the
-    // session's screens on disk and the router stops reading the session as
-    // one that is still replacing its image.
+    // The state file is gone: no copy of the session's screens stays on disk,
+    // and the router no longer reads the session as one that is replacing its
+    // image.
     assert_eq!(
         std::fs::metadata(resolve_resume_file_path(
             runtime_directory.path(),
@@ -1585,10 +1326,9 @@ fn a_client_that_comes_back_keeps_its_id_its_focus_and_its_zoom() {
 
 #[test]
 fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_own() {
-    // Two `koshi attach` runs can come back for the same record: one that was
-    // slow to notice the restart and one already back. Handing the record to
-    // both would give two terminals one client, so the second caller gets a
-    // client of its own and the first keeps its stream.
+    // Two `koshi attach` runs come back for the same record: one that was slow
+    // to notice the restart and one already back. The second caller gets a
+    // client of its own, and the first keeps its stream.
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
@@ -1607,7 +1347,8 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let focused_pane_id = build_pane(
         &mut control_connection,
         session_id,
@@ -1677,7 +1418,7 @@ fn a_second_caller_naming_a_client_already_streaming_is_given_a_client_of_its_ow
         fetch_session_overview(runtime_directory.path(), session_id)
             .clients
             .into_iter()
-            .map(|client| client.client_id)
+            .map(|client_discovery| client_discovery.client_id)
             .collect();
     attached_client_ids.sort();
     let mut expected_attached_client_ids = vec![client_id, second_client_stream.client_id];
@@ -1720,7 +1461,8 @@ fn a_client_that_never_comes_back_is_detached_when_the_window_closes() {
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let client_id = attached_client_stream.client_id;
 
     assert_eq!(
@@ -1728,9 +1470,8 @@ fn a_client_that_never_comes_back_is_detached_when_the_window_closes() {
         IpcResult::Restarting
     );
     attached_client_stream.receive_events_until_restarting();
-    // The session server closed its end when it wrote that frame, so dropping
-    // this end leaves nothing of the connection behind. Nobody claims the
-    // record from here.
+    // The session server closed its end when it wrote that frame; dropping
+    // this end ends the connection. Nobody claims the record from here.
     drop(attached_client_stream);
     drop(control_connection);
 
@@ -1743,19 +1484,18 @@ fn a_client_that_never_comes_back_is_detached_when_the_window_closes() {
         process_id: restarted_endpoint.process_id,
     };
 
-    // The record crossed the swap, so the session holds it while it waits.
+    // The record crossed the swap, and the session holds it while it waits.
     assert_eq!(
         fetch_session_overview(runtime_directory.path(), session_id)
             .clients
             .into_iter()
-            .map(|client| client.client_id)
+            .map(|client_discovery| client_discovery.client_id)
             .collect::<Vec<_>>(),
         vec![client_id]
     );
 
-    // When the window closes the record is detached, so nothing is left holding
-    // a place for a client that never returned.
-    let deadline = Instant::now() + RECONNECT_WAIT_DURATION;
+    // When the window closes, the record is detached.
+    let reconnect_deadline = Instant::now() + RECONNECT_WAIT_DURATION;
     loop {
         let session_overview = fetch_session_overview(runtime_directory.path(), session_id);
         if session_overview.clients.is_empty() {
@@ -1763,7 +1503,7 @@ fn a_client_that_never_comes_back_is_detached_when_the_window_closes() {
             break;
         }
         assert!(
-            Instant::now() < deadline,
+            Instant::now() < reconnect_deadline,
             "the client that never came back is still attached"
         );
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
@@ -1790,7 +1530,8 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     let output_pane_id = build_pane(
         &mut control_connection,
@@ -1799,9 +1540,8 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
         Some(build_idle_spawn_spec()),
     );
 
-    // A running program can be renamed on every supported platform, and on Unix
-    // its mode can be changed under it; either one is what an update that
-    // arrived broken leaves behind.
+    // The program file is made unusable while the session runs: on Unix it
+    // loses its execute permission, and on Windows it is renamed aside.
     #[cfg(unix)]
     let refusal = {
         use std::os::unix::fs::PermissionsExt;
@@ -1824,14 +1564,16 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
     assert_eq!(
         send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
         IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
+            code: IpcErrorCode::RequestFailed,
             message: refusal,
         })
     );
 
     // Nothing was torn down for the refused restart: the session serves the
     // socket it bound, holds both panes, and its client is still streaming.
-    assert!(!session_server_process.has_session_server_exited());
+    assert!(!session_server_process
+        .session_process
+        .has_session_server_exited());
     assert_eq!(
         EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
             runtime_directory.path(),
@@ -1860,14 +1602,128 @@ fn a_restart_into_a_binary_that_cannot_run_is_refused_and_the_session_keeps_serv
     );
 }
 
+/// Replace the program at `program_path` with a shell script that answers
+/// `--version` with `koshi 9.9.9` and runs the `koshi` at `koshi_binary_path`
+/// for every other command line. The script is written beside the program and
+/// renamed over it.
+#[cfg(unix)]
+fn replace_with_other_version_koshi(program_path: &Path, koshi_binary_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let replacement_path = program_path.with_extension("next");
+    std::fs::write(
+        &replacement_path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'koshi 9.9.9'; exit 0; fi\nexec '{}' \"$@\"\n",
+            koshi_binary_path.display()
+        ),
+    )
+    .expect("the replacement program is written");
+    std::fs::set_permissions(&replacement_path, std::fs::Permissions::from_mode(0o755))
+        .expect("the replacement program runs");
+    std::fs::rename(&replacement_path, program_path).expect("the program file is replaced");
+}
+
 #[cfg(unix)]
 #[test]
-fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving() {
+fn a_session_whose_program_file_holds_another_version_restarts_on_the_next_connection() {
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let koshi_directory = build_short_test_directory();
+    let binary_path = copy_koshi_binary(test_home_directory.path());
+    let koshi_binary_path = copy_koshi_binary(koshi_directory.path());
+    let session_id = SessionId::new();
+    let mut session_server_process = start_session_server(
+        &binary_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+        session_id,
+    );
+    let (_first_connection, endpoint_before_restart) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
+    let children_before_restart = list_child_process_ids(endpoint_before_restart.process_id);
+
+    replace_with_other_version_koshi(&binary_path, &koshi_binary_path);
+    let _second_connection = Connection::connect(&endpoint_before_restart.socket_address)
+        .expect("the session takes the connection");
+
+    let restarted_endpoint = wait_for_restarted_session_endpoint(
+        runtime_directory.path(),
+        session_id,
+        &endpoint_before_restart,
+    );
+    assert!(!session_server_process
+        .session_process
+        .has_session_server_exited());
+    assert_eq!(
+        restarted_endpoint.process_id,
+        endpoint_before_restart.process_id
+    );
+    assert_eq!(
+        list_child_process_ids(restarted_endpoint.process_id),
+        children_before_restart
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_started_through_a_link_restarts_once_the_link_names_another_version() {
+    // `bin/koshi` links to `versions/0.5.0/koshi`, a copy of the koshi under
+    // test, and the session starts as `bin/koshi`. The link is then pointed at
+    // `versions/9.9.9/koshi`, which answers `--version` with `koshi 9.9.9`.
+    let test_home_directory = build_short_test_directory();
+    let runtime_directory = build_short_test_directory();
+    let install_directory = build_short_test_directory();
+    let koshi_directory = build_short_test_directory();
+    let first_version_directory = install_directory.path().join("versions/0.5.0");
+    std::fs::create_dir_all(&first_version_directory).expect("the version folder is made");
+    let first_version_path = copy_koshi_binary(&first_version_directory);
+    let koshi_binary_path = copy_koshi_binary(koshi_directory.path());
+    let link_path = install_directory.path().join("bin/koshi");
+    std::fs::create_dir_all(install_directory.path().join("bin")).expect("the link folder is made");
+    std::os::unix::fs::symlink(&first_version_path, &link_path).expect("the link is made");
+    let session_id = SessionId::new();
+    let mut session_server_process = start_session_server(
+        &link_path,
+        test_home_directory.path(),
+        runtime_directory.path(),
+        session_id,
+    );
+    let (_first_connection, endpoint_before_restart) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
+
+    let other_version_path = install_directory.path().join("versions/9.9.9/koshi");
+    std::fs::create_dir_all(install_directory.path().join("versions/9.9.9"))
+        .expect("the version folder is made");
+    replace_with_other_version_koshi(&other_version_path, &koshi_binary_path);
+    let next_link_path = install_directory.path().join("bin/koshi.next");
+    std::os::unix::fs::symlink(&other_version_path, &next_link_path).expect("the link is made");
+    std::fs::rename(&next_link_path, &link_path).expect("the link is pointed at 9.9.9");
+    let _second_connection = Connection::connect(&endpoint_before_restart.socket_address)
+        .expect("the session takes the connection");
+
+    let restarted_endpoint = wait_for_restarted_session_endpoint(
+        runtime_directory.path(),
+        session_id,
+        &endpoint_before_restart,
+    );
+    assert!(!session_server_process
+        .session_process
+        .has_session_server_exited());
+    assert_eq!(
+        restarted_endpoint.process_id,
+        endpoint_before_restart.process_id
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restart_whose_config_migration_fails_still_swaps_and_keeps_every_pane() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
     let session_id = SessionId::new();
-    let mut session_server_process = start_session_server(
+    let _session_server_process = start_session_server(
         &binary_path,
         test_home_directory.path(),
         runtime_directory.path(),
@@ -1881,7 +1737,8 @@ fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving()
             TALL_ATTACH_VIEWPORT_SIZE,
             None,
         );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     let output_pane_id = build_pane(
         &mut control_connection,
@@ -1890,7 +1747,7 @@ fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving()
         Some(build_idle_spawn_spec()),
     );
 
-    let config_directory = resolve_test_config_directory(test_home_directory.path());
+    let config_directory = resolve_config_directory_under_home(test_home_directory.path());
     std::fs::create_dir_all(&config_directory).expect("create config directory");
     let app_config_path = config_directory.join("koshi.kdl");
     std::fs::write(&app_config_path, "version 1\n").expect("write released config");
@@ -1899,28 +1756,28 @@ fn a_restart_with_config_migration_failure_keeps_the_session_and_panes_serving()
 
     assert_eq!(
         send_session_request(&mut control_connection, 3, IpcRequestKind::Restart),
-        IpcResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::MalformedRequest,
-            message: format!(
-                "the binary at {} does not say which resume formats it reads: EOF while parsing a value at line 1 column 0",
-                binary_path.display()
-            ),
-        })
+        IpcResult::Restarting
     );
+    attached_client_stream.receive_events_until_restarting();
+    drop(control_connection);
+
+    let restarted_endpoint = wait_for_restarted_session_endpoint(
+        runtime_directory.path(),
+        session_id,
+        &endpoint_before_restart,
+    );
+    let _restarted_process = RunningProcess {
+        process_id: restarted_endpoint.process_id,
+    };
     assert_eq!(
         std::fs::read_to_string(&app_config_path).expect("read unchanged config"),
         "version 1\n"
     );
-    assert!(!session_server_process.has_session_server_exited());
-    assert_eq!(
-        EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-            runtime_directory.path(),
-            session_id
-        ))
-        .expect("the session still advertises its socket")
-        .connection_token
-        .expose_secret(),
-        endpoint_before_restart.connection_token.expose_secret()
+    let (attached_client_stream, _) = AttachedClientStream::attach_test_client(
+        runtime_directory.path(),
+        session_id,
+        TALL_ATTACH_VIEWPORT_SIZE,
+        None,
     );
     let mut expected_pane_lifecycles = vec![
         (seeded_pane_id, PaneLifecycle::Running),
@@ -1959,9 +1816,10 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
     );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
-    // Two shells, so each pane can be asked for output of its own after the
-    // swap fails.
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
+    // Two shells: each pane is asked for output of its own after the swap
+    // fails.
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     let opened_pane_id = build_pane(
         &mut control_connection,
@@ -1996,7 +1854,9 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
     let _restarted_process = RunningProcess {
         process_id: restarted_endpoint.process_id,
     };
-    assert!(!session_server_process.has_session_server_exited());
+    assert!(!session_server_process
+        .session_process
+        .has_session_server_exited());
     #[cfg(unix)]
     assert_eq!(
         restarted_endpoint.process_id,
@@ -2026,7 +1886,8 @@ fn a_swap_that_cannot_write_its_state_leaves_the_session_serving_with_live_reade
 
     // The readers came back: a line typed into each pane reaches its shell and
     // that shell's answer reaches the screen.
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     send_terminal_line(
         &mut control_connection,
         session_id,
@@ -2067,19 +1928,19 @@ fn a_pane_child_that_exits_around_the_swap_is_reported_exactly_once() {
         TALL_ATTACH_VIEWPORT_SIZE,
         None,
     );
-    let (mut control_connection, _) = open_session_connection(runtime_directory.path(), session_id);
+    let (mut control_connection, _) =
+        wait_for_session_connection(runtime_directory.path(), session_id);
     let seeded_pane_id = get_seeded_pane_id(runtime_directory.path(), session_id);
     let input_pane_id = build_pane(
         &mut control_connection,
         session_id,
         initial_client_stream.client_id,
-        Some(build_key_then_exit_spawn_spec()),
+        Some(build_line_then_exit_spawn_spec()),
     );
 
-    // The line the child is waiting for. Its exit closes the pane, so the swap
-    // that follows carries a session the pane has just left. The line carries a
-    // word rather than being a bare return, so nothing rests on how a line
-    // reader treats an empty line.
+    // The line the child is waiting for. Its exit closes the pane, and the
+    // swap that follows carries a session the pane has just left. The line
+    // carries a word, not a bare return.
     send_terminal_line(
         &mut control_connection,
         session_id,
@@ -2159,10 +2020,12 @@ fn count_pane_exit_events(session_events: &[SessionEvent], pane_id: PaneId) -> u
 fn the_router_leaves_a_session_that_is_replacing_its_image_alone() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
-    let _router = start_router_process(test_home_directory.path(), runtime_directory.path());
-    let mut router = connect_to_router(runtime_directory.path());
+    let _router_process =
+        start_router_process(test_home_directory.path(), runtime_directory.path());
+    let mut router_connection = connect_to_router(runtime_directory.path());
 
-    let created_session = build_session(&mut router);
+    let created_session = create_session(&mut router_connection);
+    let created_session_selector = SessionSelector::SessionId(created_session.session_id);
     let _session_server_process = RunningProcess {
         process_id: created_session.process_id,
     };
@@ -2177,9 +2040,19 @@ fn the_router_leaves_a_session_that_is_replacing_its_image_alone() {
     .expect("the resume file is written");
     terminate_process(created_session.process_id);
 
-    // The listing probes every session it holds, and this one does not answer,
-    // so it is left out of the answer either way.
-    assert_eq!(list_session_ids(&mut router), Vec::new());
+    // Once the killed session server is gone, nothing listens at its address.
+    // The resume file marks a swap in flight: the lookup answers that the
+    // session is restarting, and the session stays listed.
+    assert_eq!(
+        wait_for_session_lookup_refusal(&mut router_connection, &created_session_selector),
+        RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::RequestFailed,
+            message: format!(
+                "session {} is running but did not answer: it is restarting",
+                created_session.session_id
+            ),
+        })
+    );
     // What the guard changes: the session's advertisement stays on the disk,
     // for the session's own new image to write over.
     assert!(EndpointFile::resolve_endpoint_file_path(
@@ -2188,14 +2061,17 @@ fn the_router_leaves_a_session_that_is_replacing_its_image_alone() {
     )
     .exists());
 
-    // With the resume file gone the same listing takes that advertisement off
+    // With the resume file gone the same lookup takes that advertisement off
     // the disk, which is exactly what the guard held back.
     std::fs::remove_file(resolve_resume_file_path(
         runtime_directory.path(),
         created_session.session_id,
     ))
     .expect("the resume file is removed");
-    assert_eq!(list_session_ids(&mut router), Vec::new());
+    assert_eq!(
+        send_attach_lookup(&mut router_connection, &created_session_selector),
+        build_no_such_session_result(created_session.session_id)
+    );
     assert!(!EndpointFile::resolve_endpoint_file_path(
         runtime_directory.path(),
         created_session.session_id
@@ -2206,8 +2082,8 @@ fn the_router_leaves_a_session_that_is_replacing_its_image_alone() {
 #[test]
 fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
     // A new image can fail after it has started. The file it was started from
-    // holds every pane's screen and scrollback, and no later run ever reads it,
-    // so a run that cannot come up must still take it off the disk.
+    // holds every pane's screen and scrollback, and a run that cannot come up
+    // still removes it from the disk.
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_short_test_directory();
     let binary_path = copy_koshi_binary(test_home_directory.path());
@@ -2242,7 +2118,7 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
         "the resume file is on the disk to start with"
     );
 
-    let mut resuming_process = start_koshi_process(
+    let mut resuming_process = start_program_process(
         build_session_server_command(
             &binary_path,
             test_home_directory.path(),
@@ -2255,8 +2131,9 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
     );
     let exit_status = wait_for_process_exit(&mut resuming_process);
 
-    assert!(
-        !exit_status.success(),
+    assert_eq!(
+        exit_status.code(),
+        Some(CliExitCode::RuntimeAction.get_exit_code()),
         "a resume run that cannot bind its socket must fail"
     );
     assert!(
@@ -2265,11 +2142,10 @@ fn a_resume_run_that_cannot_bind_its_socket_leaves_no_resume_file_behind() {
     );
 }
 
-/// Wait for `started_process` to end and hand back how it ended. A process still running
-/// when the wait runs out fails the test, and is ended so nothing is left
-/// behind.
+/// Wait for `started_process` to end and hand back how it ended. A process
+/// still running when the wait runs out is ended, and the test fails.
 fn wait_for_process_exit(started_process: &mut Child) -> std::process::ExitStatus {
-    let deadline = Instant::now() + WAIT_DURATION;
+    let wait_deadline = Instant::now() + WAIT_DURATION;
     loop {
         if let Some(exit_status) = started_process
             .try_wait()
@@ -2277,7 +2153,7 @@ fn wait_for_process_exit(started_process: &mut Child) -> std::process::ExitStatu
         {
             return exit_status;
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= wait_deadline {
             let _ = started_process.kill();
             let _ = started_process.wait();
             panic!("the process was still running after {WAIT_DURATION:?}");
@@ -2286,105 +2162,22 @@ fn wait_for_process_exit(started_process: &mut Child) -> std::process::ExitStatu
     }
 }
 
-/// Open a connection to the router serving `runtime_directory`, with its handshake
-/// already done, retrying until one answers.
-fn connect_to_router(runtime_directory: &Path) -> Connection {
-    let deadline = Instant::now() + WAIT_DURATION;
-    loop {
-        if let Some(connection) = try_connect_to_router(runtime_directory) {
-            return connection;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no router answered in {}",
-            runtime_directory.display()
-        );
-        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
-    }
-}
-
-/// One attempt at opening a router connection: read the endpoint file, connect,
-/// and send the Hello that opens the connection.
-fn try_connect_to_router(runtime_directory: &Path) -> Option<Connection> {
-    let endpoint =
-        EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory)).ok()?;
-    let mut connection = Connection::connect(&endpoint.socket_address).ok()?;
-    let hello = RouterRequest {
-        request_id: 1,
-        request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token),
-    };
-    connection.send(&hello).ok()?;
-    let router_response: RouterResponse = connection.recv().ok()?;
-    match router_response.answer_result {
-        RouterResult::Hello { .. } => Some(connection),
-        RouterResult::Error(_) => None,
-        unexpected_result => panic!("the Hello was answered with {unexpected_result:?}"),
-    }
-}
-
-/// Ask the router for a new session and hand back where it listens.
-fn build_session(connection: &mut Connection) -> SessionAddress {
-    match send_router_request(
-        connection,
-        RouterRequestKind::CreateSession {
-            profile: None,
-            working_directory: None,
-            is_other_user_access_allowed: None,
-        },
-    ) {
-        RouterResult::Created(address) => address,
-        unexpected_result => {
-            panic!("creating a session was answered with {unexpected_result:?}")
-        }
-    }
-}
-
-/// The sessions the router lists, by id.
-fn list_session_ids(connection: &mut Connection) -> Vec<SessionId> {
-    match send_router_request(connection, RouterRequestKind::ListSessions) {
-        RouterResult::Sessions(sessions) => sessions
-            .into_iter()
-            .map(|session_discovery| session_discovery.session_id)
-            .collect(),
-        unexpected_result => {
-            panic!("listing the sessions was answered with {unexpected_result:?}")
-        }
-    }
-}
-
-/// Ask the router for `request_kind` on an open connection and hand back its answer.
-fn send_router_request(
-    connection: &mut Connection,
-    request_kind: RouterRequestKind,
-) -> RouterResult {
-    let router_request = RouterRequest {
-        request_id: 2,
-        request_kind,
-    };
-    connection
-        .send(&router_request)
-        .expect("the router reads the request");
-    let router_response: RouterResponse =
-        connection.recv().expect("the router answers the request");
-    assert_eq!(router_response.request_id, Some(2));
-    router_response.answer_result
-}
-
 /// Open a pipe whose two ends close on exec, and hand back `[read end, write
 /// end]`. A test's session server writes a child's process id into the write
 /// end before its own exec.
 #[cfg(unix)]
 fn open_process_id_pipe() -> [libc::c_int; 2] {
     let mut process_id_pipe_file_descriptors: [libc::c_int; 2] = [0; 2];
-    assert_eq!(
-        unsafe { libc::pipe(process_id_pipe_file_descriptors.as_mut_ptr()) },
-        0
-    );
+    // SAFETY: `pipe` writes two descriptors into the two-element array the
+    // pointer names.
+    let pipe_answer = unsafe { libc::pipe(process_id_pipe_file_descriptors.as_mut_ptr()) };
+    assert_eq!(pipe_answer, 0);
     for pipe_file_descriptor in process_id_pipe_file_descriptors {
-        assert_eq!(
-            unsafe { libc::fcntl(pipe_file_descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
-            0
-        );
+        // SAFETY: `fcntl` with `F_SETFD` takes a descriptor and a flag, and
+        // reads no memory of this process.
+        let fcntl_answer =
+            unsafe { libc::fcntl(pipe_file_descriptor, libc::F_SETFD, libc::FD_CLOEXEC) };
+        assert_eq!(fcntl_answer, 0);
     }
     process_id_pipe_file_descriptors
 }
@@ -2397,14 +2190,17 @@ fn open_process_id_pipe() -> [libc::c_int; 2] {
 #[cfg(unix)]
 fn read_process_id_from_pipe(process_id_read_file_descriptor: libc::c_int) -> libc::pid_t {
     let mut process_id: libc::pid_t = 0;
+    // SAFETY: `read` writes at most `size_of::<pid_t>()` bytes into
+    // `process_id`, which holds exactly that many.
+    let read_byte_count = unsafe {
+        libc::read(
+            process_id_read_file_descriptor,
+            (&mut process_id as *mut libc::pid_t).cast(),
+            std::mem::size_of::<libc::pid_t>(),
+        )
+    };
     assert_eq!(
-        unsafe {
-            libc::read(
-                process_id_read_file_descriptor,
-                (&mut process_id as *mut libc::pid_t).cast(),
-                std::mem::size_of::<libc::pid_t>(),
-            )
-        },
+        read_byte_count,
         std::mem::size_of::<libc::pid_t>() as isize,
         "the child's process id arrives"
     );
@@ -2420,7 +2216,13 @@ fn read_process_id_from_pipe(process_id_read_file_descriptor: libc::c_int) -> li
 #[cfg(unix)]
 fn wait_until_process_is_reaped(process_id: libc::pid_t) {
     let reap_deadline = Instant::now() + WAIT_DURATION;
-    while unsafe { libc::kill(process_id, 0) } == 0 {
+    loop {
+        // SAFETY: `kill` with signal `0` sends no signal and reads no memory
+        // of this process.
+        let kill_answer = unsafe { libc::kill(process_id, 0) };
+        if kill_answer != 0 {
+            break;
+        }
         assert!(
             Instant::now() < reap_deadline,
             "process {process_id} was never reaped"
@@ -2515,6 +2317,8 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
     let resume_file_path = resolve_resume_file_path(runtime_directory.path(), session_id);
     std::fs::write(&resume_file_path, UNREADABLE_RESUME_FILE_BYTES)
         .expect("the cut-off resume file is placed");
+    // SAFETY: `open` reads the NUL-terminated path the C string literal
+    // holds.
     let terminal_master_file_descriptor = unsafe {
         libc::open(
             c"/dev/ptmx".as_ptr(),
@@ -2525,16 +2329,20 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
         terminal_master_file_descriptor >= 0,
         "the pseudoterminal master opens"
     );
-    assert_eq!(unsafe { libc::grantpt(terminal_master_file_descriptor) }, 0);
-    assert_eq!(
-        unsafe { libc::unlockpt(terminal_master_file_descriptor) },
-        0
-    );
+    // SAFETY: `grantpt` and `unlockpt` take a descriptor and read no memory
+    // of this process.
+    let grantpt_answer = unsafe { libc::grantpt(terminal_master_file_descriptor) };
+    assert_eq!(grantpt_answer, 0);
+    // SAFETY: as above.
+    let unlockpt_answer = unsafe { libc::unlockpt(terminal_master_file_descriptor) };
+    assert_eq!(unlockpt_answer, 0);
     let terminal_path = std::ffi::CString::new(
         koshi_pty::portable::find_terminal_master_name(terminal_master_file_descriptor)
             .expect("the master names its terminal"),
     )
     .expect("the terminal path holds no NUL byte");
+    // SAFETY: `terminal_path` is a `CString` that outlives the call, so the
+    // pointer names a NUL-terminated path.
     let terminal_follower_file_descriptor = unsafe {
         libc::open(
             terminal_path.as_ptr(),
@@ -2558,6 +2366,9 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
     // second later, and holds the master under
     // `INHERITED_TERMINAL_FILE_DESCRIPTOR`. The child's process id goes down
     // the pipe.
+    // SAFETY: the closure runs in the forked process before exec. It calls
+    // only `fork`, `close`, `usleep`, `_exit`, `write`, and `dup2`, allocates
+    // nothing, and writes only from the stack value `ended_child_process_id`.
     unsafe {
         process_command.pre_exec(move || {
             let ended_child_process_id = libc::fork();
@@ -2586,6 +2397,7 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
     }
 
     let _session_server_process = start_session_server_with_command(&mut process_command);
+    // SAFETY: `close` takes descriptors this test opened and uses no more.
     unsafe {
         libc::close(terminal_master_file_descriptor);
         libc::close(process_id_write_file_descriptor);
@@ -2595,6 +2407,7 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
     let release_deadline = Instant::now() + WAIT_DURATION;
     loop {
         let mut read_byte = [0u8; 1];
+        // SAFETY: `read` writes at most 1 byte into the 1-byte `read_byte`.
         let read_byte_count = unsafe {
             libc::read(
                 terminal_follower_file_descriptor,
@@ -2616,6 +2429,7 @@ fn a_resume_file_whose_header_does_not_read_lets_the_inherited_terminal_and_ende
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
     wait_until_process_is_reaped(ended_child_process_id);
+    // SAFETY: `close` takes descriptors this test opened and uses no more.
     unsafe {
         libc::close(terminal_follower_file_descriptor);
         libc::close(process_id_read_file_descriptor);
@@ -2646,6 +2460,10 @@ fn a_resume_file_whose_header_does_not_read_ends_and_reaps_a_child_that_ignores_
     // The session server starts as the parent of a child that leads its own
     // session, as a pane child does, ignores `SIGHUP`, as `nohup` makes it, and
     // sleeps for 30 seconds. The child's process id goes down the pipe.
+    // SAFETY: the closure runs in the forked process before exec. It calls
+    // only `fork`, `setsid`, `signal`, `sleep`, `_exit`, and `write`,
+    // allocates nothing, and writes only from the stack value
+    // `hangup_ignoring_child_process_id`.
     unsafe {
         process_command.pre_exec(move || {
             let hangup_ignoring_child_process_id = libc::fork();
@@ -2668,6 +2486,7 @@ fn a_resume_file_whose_header_does_not_read_ends_and_reaps_a_child_that_ignores_
     }
 
     let _session_server_process = start_session_server_with_command(&mut process_command);
+    // SAFETY: `close` takes a descriptor this test opened and uses no more.
     unsafe {
         libc::close(process_id_write_file_descriptor);
     }
@@ -2675,6 +2494,7 @@ fn a_resume_file_whose_header_does_not_read_ends_and_reaps_a_child_that_ignores_
         read_process_id_from_pipe(process_id_read_file_descriptor);
 
     wait_until_process_is_reaped(hangup_ignoring_child_process_id);
+    // SAFETY: `close` takes a descriptor this test opened and uses no more.
     unsafe {
         libc::close(process_id_read_file_descriptor);
     }

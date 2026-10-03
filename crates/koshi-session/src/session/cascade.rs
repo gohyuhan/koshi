@@ -74,7 +74,7 @@ pub fn remove_pane_cascade(
         .get_mut(&tab_id)
         .expect("the tab was checked above");
 
-    let mut events = vec![
+    let mut emitted_events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),
         Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
     ];
@@ -99,7 +99,7 @@ pub fn remove_pane_cascade(
             tab.update_layout(canonical_tree);
             // The layout collapsed a leaf: the tab's geometry changed. This
             // event lands ahead of every focus event.
-            events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
+            emitted_events.push(Event::LayoutChanged(LayoutChanged { tab_id }));
             Some(pane_removal.removed_pane_rect)
         }
         Err(RemoveError::LastPane { .. }) => None,
@@ -158,7 +158,7 @@ pub fn remove_pane_cascade(
                         if let Some(tab) = session.tabs.get_mut(&tab_id) {
                             tab.record_focus_mru(new_pane_id);
                         }
-                        events.push(Event::PaneFocused(PaneFocused {
+                        emitted_events.push(Event::PaneFocused(PaneFocused {
                             client_id,
                             tab_id,
                             pane_id: new_pane_id,
@@ -170,22 +170,24 @@ pub fn remove_pane_cascade(
                             resolve_terminal_too_small_cause(session, tab_id, client_id, tab_rect);
                         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
                             client.remove_focused_pane(tab_id);
-                            events.push(Event::TerminalTooSmallEntered(TerminalTooSmallEntered {
-                                client_id,
-                                viewport_size: client.get_viewport_size(),
-                                pane_area: client.get_reported_pane_area(),
-                                cause,
-                            }));
+                            emitted_events.push(Event::TerminalTooSmallEntered(
+                                TerminalTooSmallEntered {
+                                    client_id,
+                                    viewport_size: client.get_viewport_size(),
+                                    pane_area: client.get_reported_pane_area(),
+                                    cause,
+                                },
+                            ));
                         }
                     }
                 }
             }
         }
         // The tab is empty: close it.
-        None => events.extend(close_and_refocus_tab(session, tab_id, pane_exit)),
+        None => emitted_events.extend(close_and_refocus_tab(session, tab_id, pane_exit)),
     }
 
-    events
+    emitted_events
 }
 
 /// Classify why `client_id` has no visible pane area in `tab_id`.
@@ -276,11 +278,11 @@ pub fn apply_child_exit(
     pane_sizing: PaneSizing,
 ) -> Vec<Event> {
     let pane_id = pane_exit.pane_id;
-    let mut events = vec![Event::PaneProcessExited(pane_exit)];
+    let mut emitted_events = vec![Event::PaneProcessExited(pane_exit)];
     if session.panes.get_pane_record_by_id(pane_id).is_none() {
-        return events;
+        return emitted_events;
     }
-    events.extend(remove_pane_cascade(
+    emitted_events.extend(remove_pane_cascade(
         session,
         tab_id,
         pane_id,
@@ -288,7 +290,7 @@ pub fn apply_child_exit(
         pane_sizing,
         Some(pane_exit),
     ));
-    events
+    emitted_events
 }
 
 #[cfg(test)]

@@ -266,7 +266,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     fake_pty_backend
         .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         exited_pane_id,
@@ -299,7 +299,7 @@ fn child_exit_in_focused_pane_refocuses_a_survivor() {
     // The exit fact threads the code through from the backend, and is emitted
     // before the focus repair it triggers.
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
@@ -342,7 +342,7 @@ fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
     fake_pty_backend
         .trigger_child_exit(exited_pane_id, ExitStatus::Signaled(9))
         .expect("the exited pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         exited_pane_id,
@@ -355,7 +355,7 @@ fn a_signal_killed_child_reports_the_signal_and_no_exit_code() {
         .get_pane_record_by_id(exited_pane_id)
         .is_none());
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
@@ -446,7 +446,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
     fake_pty_backend
         .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         exited_pane_id,
@@ -469,7 +469,7 @@ fn child_exit_in_nonfocused_pane_leaves_focus_untouched() {
         Some(survivor_pane_id)
     );
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
@@ -560,7 +560,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     fake_pty_backend
         .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         exited_pane_id,
@@ -591,7 +591,7 @@ fn child_exit_with_no_room_to_refocus_clears_focus() {
     // the terminal as the cause: the shortage comes from the tab rect, not from
     // this client's regions or another viewer.
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
@@ -629,7 +629,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
     fake_pty_backend
         .trigger_child_exit(only_pane_id, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         only_pane_id,
@@ -646,7 +646,7 @@ fn last_pane_exit_closes_the_tab_and_quits() {
     // closing, then the quit it cascades into. The tab held one pane, so the
     // layout never changes shape and no `LayoutChanged` is emitted.
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: only_pane_id,
@@ -693,7 +693,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
     fake_pty_backend
         .trigger_child_exit(closing_pane_id, ExitStatus::ExitCode(0))
         .expect("the pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         closing_pane_id,
@@ -721,7 +721,7 @@ fn last_pane_exit_in_one_of_several_tabs_does_not_quit() {
         "the surviving tab takes the closed tab's position"
     );
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: closing_pane_id,
@@ -755,7 +755,7 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
     fake_pty_backend
         .trigger_child_exit(failed_pane_id, ExitStatus::ExitCode(1))
         .expect("the pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         failed_pane_id,
@@ -768,7 +768,7 @@ fn a_failing_last_pane_is_removed_and_the_session_quits() {
     assert_eq!(session.panes.get_pane_record_by_id(failed_pane_id), None);
     assert!(session.tabs.is_empty());
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: failed_pane_id,
@@ -814,7 +814,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
 
     // An explicit close, not a child exit: the user asks for the focused pane
     // to go while its child is still running.
-    let events = remove_pane_cascade(
+    let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
         closed_pane_id,
@@ -855,7 +855,7 @@ fn closing_the_focused_pane_removes_it_and_refocuses_a_survivor() {
 
     // The whole burst, in order. No process-exited event: no child exited.
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneClosing(PaneClosing {
                 pane_id: closed_pane_id,
@@ -904,7 +904,7 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
         ],
     );
 
-    let events = close_tab(&mut session, multi_tab_id);
+    let emitted_events = close_tab(&mut session, multi_tab_id);
 
     // Every pane the tab held leaves the registry and the tab is gone; the
     // sibling tab and its pane survive.
@@ -937,7 +937,7 @@ fn closing_a_tab_removes_every_pane_without_killing_via_pty() {
     // attached, so nothing is refocused; the sibling tab keeps the session up,
     // so nothing quits.
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneClosing(PaneClosing {
                 pane_id: first_tab_pane_id,
@@ -991,7 +991,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
     fake_pty_backend
         .trigger_child_exit(exited_pane_id, ExitStatus::ExitCode(0))
         .expect("the exited pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         exited_pane_id,
@@ -1009,7 +1009,7 @@ fn child_exit_drops_the_pane_from_focus_history() {
     // No client watched the pane, so the burst is the exit and the removal
     // alone: the history cleanup is state, never an event of its own.
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: exited_pane_id,
@@ -1059,7 +1059,7 @@ fn output_for_a_removed_pane_is_dropped() {
     fake_pty_backend
         .trigger_child_exit(removed_pane_id, ExitStatus::ExitCode(0))
         .expect("the removed pane is known to the backend");
-    let events = process_child_exit(
+    let emitted_events = process_child_exit(
         &mut session,
         &pane_delivery_recorder,
         removed_pane_id,
@@ -1071,7 +1071,7 @@ fn output_for_a_removed_pane_is_dropped() {
         .get_pane_record_by_id(removed_pane_id)
         .is_none());
     assert_events(
-        &events,
+        &emitted_events,
         &[
             Event::PaneProcessExited(PaneProcessExited {
                 pane_id: removed_pane_id,

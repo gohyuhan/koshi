@@ -13,11 +13,12 @@ use koshi_core::geometry::Size;
 use koshi_core::lock::LockMode;
 use koshi_ipc::protocol::{ConnectionToken, IpcRequest, IpcResponse, IpcResult};
 use koshi_ipc::transport::{Connection, Listener};
+use koshi_test_support::fixtures::NO_SUCH_PROCESS_ID;
 
 use super::*;
 
-/// A fresh directory to stand in for the runtime directory, under a short base so
-/// the Unix socket path stays inside the OS path-length cap.
+/// The path of a fresh runtime directory under a short base: `/tmp` on Unix,
+/// the temporary directory on Windows.
 fn build_test_runtime_directory(test_tag: &str) -> PathBuf {
     #[cfg(unix)]
     let base_directory = PathBuf::from("/tmp");
@@ -35,6 +36,7 @@ fn build_complete_discovery(session_overviews: Vec<SessionOverview>) -> Discover
     Discovered {
         sessions: session_overviews,
         unasked_session_count: 0,
+        unread_path_count: 0,
     }
 }
 
@@ -47,21 +49,39 @@ fn build_partial_discovery(
     Discovered {
         sessions: session_overviews,
         unasked_session_count,
+        unread_path_count: 0,
     }
 }
 
-/// Advertise `session_id` at `runtime_directory` with `socket_address` as its address.
+/// Advertise `session_id` at `runtime_directory` with `socket_address` as its
+/// address, written by [`NO_SUCH_PROCESS_ID`].
 fn write_endpoint_file(
     runtime_directory: &Path,
     session_id: SessionId,
     socket_address: String,
+) -> PathBuf {
+    write_endpoint_file_for_process(
+        runtime_directory,
+        session_id,
+        socket_address,
+        NO_SUCH_PROCESS_ID,
+    )
+}
+
+/// Advertise `session_id` at `runtime_directory` with `socket_address` as its
+/// address, written by `process_id`.
+fn write_endpoint_file_for_process(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    socket_address: String,
+    process_id: u32,
 ) -> PathBuf {
     let endpoint_file_path =
         EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
     EndpointFile {
         socket_address,
         connection_token: ConnectionToken::generate(),
-        process_id: std::process::id(),
+        process_id,
     }
     .write_to_path(&endpoint_file_path)
     .expect("endpoint file written");
@@ -112,8 +132,8 @@ fn send_ipc_response(connection: &mut Connection, request_id: u64, ipc_result: I
         .expect("send scripted reply");
 }
 
-/// A session overview with `tab_descriptions` (name, panes-per-tab), one client, and
-/// pane titles derived from their position, so every row is identifiable.
+/// A session overview with `tab_descriptions` (name, panes-per-tab), one
+/// client, and each pane titled by its position.
 fn build_session_overview(
     session_name: &str,
     tab_descriptions: &[(&str, usize)],
@@ -480,8 +500,7 @@ fn two_sessions_unasked_are_counted_in_the_plural() {
 
 #[test]
 fn inspecting_with_a_session_unasked_reports_the_gap_not_a_miss() {
-    // One session answered and one could not be asked: the pane may well be
-    // in the session that stayed silent, so "not found" would be a guess.
+    // One session answered and one could not be asked.
     let discovery = build_partial_discovery(
         vec![build_session_overview("quiet-lake", &[("editor", 1)])],
         1,
@@ -514,8 +533,7 @@ fn a_session_no_answering_session_matched_is_reported_as_not_running() {
 
 #[test]
 fn a_session_missed_while_one_went_unasked_reports_the_gap_not_a_miss() {
-    // The name may well belong to the session that stayed silent, so "not
-    // running" would be a guess.
+    // One session answered and one could not be asked.
     let discovery = build_partial_discovery(
         vec![build_session_overview("quiet-lake", &[("editor", 1)])],
         1,
@@ -553,8 +571,7 @@ fn a_complete_listing_reports_no_gap() {
 
 #[test]
 fn a_listing_missing_a_session_reports_the_gap() {
-    // The rows still print; the exit code is what says they are not all of
-    // them, since a script reads stdout and the exit code, not stderr.
+    // The rows print, and the exit code reports the gap.
     let discovery = build_partial_discovery(
         vec![build_session_overview("quiet-lake", &[("editor", 1)])],
         2,
@@ -587,9 +604,290 @@ fn an_unanswered_failure_over_a_complete_census_counts_zero_sessions() {
 #[test]
 fn fetching_all_from_an_empty_runtime_directory_answers_no_sessions() {
     let runtime_directory = build_test_runtime_directory("empty");
-    let discovery = fetch_all_session_overviews(&runtime_directory);
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
     assert_eq!(discovery.sessions, Vec::new());
     assert_eq!(discovery.unasked_session_count, 0);
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_endpoint_nobody_listens_behind_is_kept_and_counted_while_its_process_runs() {
+    // The endpoint file names this test process, written after it started.
+    let runtime_directory = build_test_runtime_directory("refused-live");
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
+    let endpoint_path = write_endpoint_file_for_process(
+        &runtime_directory,
+        session_id,
+        socket_address,
+        std::process::id(),
+    );
+
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
+
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 1);
+    assert_eq!(
+        fetch_session_overview(&runtime_directory, None, session_id, None)
+            .map_err(|lookup_error| lookup_error.to_string()),
+        Err(format!(
+            "IPC unavailable: process {} runs but accepts no connection",
+            std::process::id()
+        ))
+    );
+    assert!(endpoint_path.exists(), "the endpoint file is left in place");
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn an_endpoint_nobody_listens_behind_is_swept_while_its_process_runs() {
+    // On Linux and Windows a refused connect means nothing listens, whatever
+    // process the endpoint file names.
+    let runtime_directory = build_test_runtime_directory("refused-live");
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
+    let endpoint_path = write_endpoint_file_for_process(
+        &runtime_directory,
+        session_id,
+        socket_address,
+        std::process::id(),
+    );
+
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
+
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 0);
+    assert!(!endpoint_path.exists(), "the endpoint file is removed");
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+/// Run [`repeat_while_live_session_refuses`] for `session_id` in
+/// `runtime_directory` with an attempt that counts itself and gives
+/// `is_refused`. Hands back how many attempts ran, and how long they took.
+fn count_refused_attempts(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    is_refused: bool,
+) -> (usize, Duration) {
+    let mut attempt_count = 0;
+    let attempts_started_at = Instant::now();
+    repeat_while_live_session_refuses(
+        runtime_directory,
+        session_id,
+        None,
+        || {
+            attempt_count += 1;
+            is_refused
+        },
+        |is_attempt_refused| *is_attempt_refused,
+    );
+    (attempt_count, attempts_started_at.elapsed())
+}
+
+#[test]
+fn a_refused_attempt_is_made_once_while_the_endpoint_file_names_no_running_process() {
+    let gone_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("recheck-gone");
+    write_endpoint_file(
+        &runtime_directory,
+        gone_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, gone_session_id),
+    );
+
+    assert_eq!(
+        count_refused_attempts(&runtime_directory, gone_session_id, true).0,
+        1
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn an_attempt_that_is_not_refused_is_made_once() {
+    let running_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("recheck-answered");
+    write_endpoint_file_for_process(
+        &runtime_directory,
+        running_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, running_session_id),
+        std::process::id(),
+    );
+
+    assert_eq!(
+        count_refused_attempts(&runtime_directory, running_session_id, false).0,
+        1
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_refused_attempt_is_made_once_while_the_session_process_still_runs() {
+    let running_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("recheck-running");
+    write_endpoint_file_for_process(
+        &runtime_directory,
+        running_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, running_session_id),
+        std::process::id(),
+    );
+
+    assert_eq!(
+        count_refused_attempts(&runtime_directory, running_session_id, true).0,
+        1
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_attempt_is_made_again_for_1_second_while_the_session_process_runs() {
+    let running_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("recheck-window");
+    write_endpoint_file_for_process(
+        &runtime_directory,
+        running_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, running_session_id),
+        std::process::id(),
+    );
+
+    let (attempt_count, attempts_duration) =
+        count_refused_attempts(&runtime_directory, running_session_id, true);
+
+    assert!(
+        attempt_count >= 2,
+        "a live process gets the attempt again, {attempt_count} attempts ran"
+    );
+    assert!(
+        attempts_duration >= REFUSED_SESSION_RECHECK_WINDOW_DURATION,
+        "the attempts run for the whole window, they took {attempts_duration:?}"
+    );
+    assert!(
+        attempts_duration
+            < REFUSED_SESSION_RECHECK_WINDOW_DURATION
+                + REFUSED_SESSION_RECHECK_INTERVAL_DURATION * 4,
+        "no attempt starts past the window, they took {attempts_duration:?}"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_attempt_starts_again_only_before_the_answer_deadline() {
+    let running_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("recheck-deadline");
+    write_endpoint_file_for_process(
+        &runtime_directory,
+        running_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, running_session_id),
+        std::process::id(),
+    );
+    let answer_deadline = Instant::now() + Duration::from_millis(500);
+    let mut attempt_start_times: Vec<Instant> = Vec::new();
+
+    repeat_while_live_session_refuses(
+        &runtime_directory,
+        running_session_id,
+        Some(answer_deadline),
+        || attempt_start_times.push(Instant::now()),
+        |_| true,
+    );
+
+    assert!(
+        Instant::now() >= answer_deadline,
+        "the recheck runs until the answer deadline"
+    );
+    assert!(
+        attempt_start_times.len() >= 2,
+        "a live process gets the attempt again, {} attempts ran",
+        attempt_start_times.len()
+    );
+    assert_eq!(
+        attempt_start_times
+            .iter()
+            .filter(|attempt_start_time| **attempt_start_time >= answer_deadline)
+            .count(),
+        0,
+        "no attempt starts at or after the answer deadline"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_overview_ask_stops_rechecking_a_refusing_session_at_its_answer_deadline() {
+    // The endpoint file names this test process, written after it started.
+    // The last attempt is refused, or reaches its connect with less than 1 ms
+    // left and ends as timed out.
+    let runtime_directory = build_test_runtime_directory("refused-deadline");
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
+    let endpoint_path = write_endpoint_file_for_process(
+        &runtime_directory,
+        session_id,
+        socket_address,
+        std::process::id(),
+    );
+    let ask_started_at = Instant::now();
+
+    let overview_error_text = fetch_session_overview(
+        &runtime_directory,
+        None,
+        session_id,
+        Some(ask_started_at + Duration::from_millis(200)),
+    )
+    .map_err(|lookup_error| lookup_error.to_string())
+    .expect_err("a session that refuses gives no overview");
+    let ask_duration = ask_started_at.elapsed();
+
+    let live_refusal_text = format!(
+        "IPC unavailable: process {} runs but accepts no connection",
+        std::process::id()
+    );
+    let timed_out_text = CliError::SessionAnswerTimedOut.to_string();
+    assert!(
+        overview_error_text == live_refusal_text || overview_error_text == timed_out_text,
+        "unexpected failure: {overview_error_text}"
+    );
+    assert!(
+        ask_duration < REFUSED_SESSION_RECHECK_WINDOW_DURATION,
+        "the recheck ends at the answer deadline, the ask took {ask_duration:?}"
+    );
+    assert!(endpoint_path.exists(), "the endpoint file is left in place");
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_refused_attempt_stops_once_the_session_process_exits() {
+    // The child runs for 200 ms and exits; nothing waits on it until the end.
+    let exiting_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory("recheck-exit");
+    let mut exiting_child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("sleep 0.2")
+        .spawn()
+        .expect("the shell runs");
+    write_endpoint_file_for_process(
+        &runtime_directory,
+        exiting_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, exiting_session_id),
+        exiting_child.id(),
+    );
+
+    let (attempt_count, attempts_duration) =
+        count_refused_attempts(&runtime_directory, exiting_session_id, true);
+
+    assert!(attempt_count >= 2, "{attempt_count} attempts ran");
+    assert!(
+        attempts_duration < REFUSED_SESSION_RECHECK_WINDOW_DURATION,
+        "the attempts stop once the process exits, they took {attempts_duration:?}"
+    );
+    exiting_child.wait().expect("the child is reaped");
     let _ = std::fs::remove_dir_all(&runtime_directory);
 }
 
@@ -601,7 +899,7 @@ fn an_endpoint_nobody_listens_behind_is_swept() {
         koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
     let endpoint_path = write_endpoint_file(&runtime_directory, session_id, socket_address.clone());
 
-    let discovery = fetch_all_session_overviews(&runtime_directory);
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
     assert_eq!(discovery.sessions, Vec::new());
     assert_eq!(
         discovery.unasked_session_count, 0,
@@ -621,27 +919,26 @@ fn an_endpoint_nobody_listens_behind_is_swept() {
 
 #[test]
 fn a_listening_endpoint_survives_a_failed_exchange() {
-    // A session that accepts the connection and then hangs up: something IS
-    // serving there, so the endpoint stays even though the exchange gets no
-    // answer and the session contributes no rows.
+    // A session that accepts the connection and then hangs up keeps its
+    // endpoint file, and contributes no rows.
     let runtime_directory = build_test_runtime_directory("live-but-mute");
     let session_id = SessionId::new();
     let socket_address =
         koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
     let listener = Listener::bind(&socket_address).expect("listener binds");
     let endpoint_path = write_endpoint_file(&runtime_directory, session_id, socket_address.clone());
-    let serving = std::thread::spawn(move || {
+    let overview_server_thread = std::thread::spawn(move || {
         // Accepting and dropping closes the connection mid-exchange.
         let _ = listener.accept();
     });
 
-    let discovery = fetch_all_session_overviews(&runtime_directory);
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
     assert_eq!(discovery.sessions, Vec::new());
     assert_eq!(
         discovery.unasked_session_count, 1,
         "a session that is listening is unasked"
     );
-    serving
+    overview_server_thread
         .join()
         .expect("the stand-in session thread finishes");
     assert!(
@@ -658,7 +955,7 @@ fn a_live_session_is_listed_while_a_stale_endpoint_beside_it_is_swept() {
     let runtime_directory = build_test_runtime_directory("live-and-stale");
     let quiet_session_overview = build_session_overview("quiet-lake", &[("editor", 1)]);
     let quiet_session_id = quiet_session_overview.session.session_id;
-    let serving = spawn_overview_server(&runtime_directory, quiet_session_overview);
+    let overview_server_thread = spawn_overview_server(&runtime_directory, quiet_session_overview);
     let gone_session_id = SessionId::new();
     let stale_path = write_endpoint_file(
         &runtime_directory,
@@ -666,8 +963,10 @@ fn a_live_session_is_listed_while_a_stale_endpoint_beside_it_is_swept() {
         koshi_ipc::endpoint::compute_socket_address(&runtime_directory, gone_session_id),
     );
 
-    let discovery = fetch_all_session_overviews(&runtime_directory);
-    serving.join().expect("the stand-in session finishes");
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
+    overview_server_thread
+        .join()
+        .expect("the stand-in session finishes");
 
     assert_eq!(
         discovery.unasked_session_count, 0,
@@ -700,7 +999,7 @@ fn two_running_sessions_merge_into_one_listing() {
     let first_server = spawn_overview_server(&runtime_directory, quiet_session_overview);
     let second_server = spawn_overview_server(&runtime_directory, amber_session_overview);
 
-    let discovery = fetch_all_session_overviews(&runtime_directory);
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
     first_server
         .join()
         .expect("the first stand-in session finishes");
@@ -709,8 +1008,8 @@ fn two_running_sessions_merge_into_one_listing() {
         .expect("the second stand-in session finishes");
     assert!(discovery.is_complete(), "both sessions answered");
 
-    // Sorted by session name, so `amber-fox` comes before `quiet-lake`
-    // whatever order the runtime directory listed the endpoint files in.
+    // Sorted by session name: `amber-fox` comes before `quiet-lake` whatever
+    // order the runtime directory listed the endpoint files in.
     assert_eq!(
         build_session_rows(&discovery.sessions),
         vec![
@@ -746,11 +1045,14 @@ fn one_session_can_be_fetched_on_its_own() {
     let runtime_directory = build_test_runtime_directory("one-session");
     let quiet_session_overview = build_session_overview("quiet-lake", &[("editor", 1)]);
     let quiet_session_id = quiet_session_overview.session.session_id;
-    let serving = spawn_overview_server(&runtime_directory, quiet_session_overview);
+    let overview_server_thread = spawn_overview_server(&runtime_directory, quiet_session_overview);
 
     let fetched_session_overview =
-        fetch_session_overview(&runtime_directory, quiet_session_id).expect("the session answers");
-    serving.join().expect("the stand-in session finishes");
+        fetch_session_overview(&runtime_directory, None, quiet_session_id, None)
+            .expect("the session answers");
+    overview_server_thread
+        .join()
+        .expect("the stand-in session finishes");
     assert_eq!(
         fetched_session_overview.session.session_id,
         quiet_session_id
@@ -761,21 +1063,21 @@ fn one_session_can_be_fetched_on_its_own() {
 
 #[test]
 fn fetching_one_live_session_that_cannot_answer_is_not_reported_as_gone() {
-    // The endpoint accepts and hangs up: the session IS running, so the
-    // failure must stay a transport failure rather than "not running".
+    // The endpoint accepts and hangs up. The failure is a transport failure,
+    // not "not running".
     let runtime_directory = build_test_runtime_directory("one-live-but-mute");
     let session_id = SessionId::new();
     let socket_address =
         koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
     let listener = Listener::bind(&socket_address).expect("listener binds");
     let endpoint_path = write_endpoint_file(&runtime_directory, session_id, socket_address);
-    let serving = std::thread::spawn(move || {
+    let overview_server_thread = std::thread::spawn(move || {
         let _ = listener.accept();
     });
 
-    let discovery_error = fetch_session_overview(&runtime_directory, session_id)
+    let discovery_error = fetch_session_overview(&runtime_directory, None, session_id, None)
         .expect_err("the exchange cannot finish");
-    serving
+    overview_server_thread
         .join()
         .expect("the stand-in session thread finishes");
     let CliError::IpcUnavailable { detail } = discovery_error else {
@@ -793,8 +1095,8 @@ fn fetching_one_live_session_that_cannot_answer_is_not_reported_as_gone() {
 fn fetching_one_session_that_is_gone_reports_it_as_not_running() {
     let runtime_directory = build_test_runtime_directory("one-missing");
     let session_id = SessionId::new();
-    let discovery_error =
-        fetch_session_overview(&runtime_directory, session_id).expect_err("nothing advertises it");
+    let discovery_error = fetch_session_overview(&runtime_directory, None, session_id, None)
+        .expect_err("nothing advertises it");
     match discovery_error {
         CliError::SessionNotFound { session_name } => {
             assert_eq!(session_name, session_id.to_string());
@@ -802,6 +1104,327 @@ fn fetching_one_session_that_is_gone_reports_it_as_not_running() {
         other => panic!("unexpected error: {other}"),
     }
     let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+/// Write an empty resume file for `session_id` in `runtime_directory`, stamped
+/// `age_duration` old.
+fn write_aged_resume_file(runtime_directory: &Path, session_id: SessionId, age_duration: Duration) {
+    std::fs::File::create(koshi_ipc::endpoint::resolve_resume_file_path(
+        runtime_directory,
+        session_id,
+    ))
+    .expect("write the resume file")
+    .set_modified(SystemTime::now() - age_duration)
+    .expect("age the resume file");
+}
+
+#[test]
+fn a_session_replacing_its_image_is_counted_and_keeps_its_endpoint_file() {
+    // One session's resume file was written just now and its endpoint file is
+    // gone. The other's resume file is just as young and its endpoint file
+    // still names a socket nothing listens on.
+    let runtime_directory = build_test_runtime_directory("restarting");
+    let between_images_session_id = SessionId::new();
+    write_aged_resume_file(
+        &runtime_directory,
+        between_images_session_id,
+        Duration::ZERO,
+    );
+    let unbound_session_id = SessionId::new();
+    let unbound_endpoint_path = write_endpoint_file(
+        &runtime_directory,
+        unbound_session_id,
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, unbound_session_id),
+    );
+    write_aged_resume_file(&runtime_directory, unbound_session_id, Duration::ZERO);
+
+    let discovery = fetch_all_session_overviews(&runtime_directory, None);
+
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 2);
+    assert!(
+        unbound_endpoint_path.exists(),
+        "the endpoint file of a session restarting is kept"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_sweep_keeps_an_endpoint_file_rewritten_since_the_session_was_asked() {
+    let runtime_directory = build_test_runtime_directory("sweep-rewritten");
+    let session_id = SessionId::new();
+    let socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id);
+    let asked_endpoint_file = EndpointFile {
+        socket_address: socket_address.clone(),
+        connection_token: ConnectionToken::generate(),
+        process_id: NO_SUCH_PROCESS_ID,
+    };
+    let endpoint_path = write_endpoint_file(&runtime_directory, session_id, socket_address);
+
+    let sweep_result =
+        remove_stale_session_files(&runtime_directory, session_id, &asked_endpoint_file);
+
+    let Err(CliError::IpcUnavailable { detail }) = sweep_result else {
+        panic!("expected IpcUnavailable, got {sweep_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!("session {session_id} is restarting; ask again in a moment")
+    );
+    assert!(
+        endpoint_path.exists(),
+        "the rewritten endpoint file is kept"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[test]
+fn a_sweep_keeps_an_endpoint_file_it_cannot_read() {
+    let runtime_directory = build_test_runtime_directory("sweep-unreadable");
+    let session_id = SessionId::new();
+    let endpoint_path = EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id);
+    std::fs::write(&endpoint_path, b"{\"pid\":5000}").expect("write an unreadable endpoint file");
+    let asked_endpoint_file = EndpointFile {
+        socket_address: koshi_ipc::endpoint::compute_socket_address(&runtime_directory, session_id),
+        connection_token: ConnectionToken::generate(),
+        process_id: NO_SUCH_PROCESS_ID,
+    };
+
+    let sweep_result =
+        remove_stale_session_files(&runtime_directory, session_id, &asked_endpoint_file);
+
+    let Err(CliError::IpcUnavailable { detail }) = sweep_result else {
+        panic!("expected IpcUnavailable, got {sweep_result:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "endpoint file {} is unreadable: missing field `socket_address` at line 1 column 12",
+            endpoint_path.display()
+        )
+    );
+    assert!(
+        endpoint_path.exists(),
+        "the unreadable endpoint file is kept"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_sweep_after_asking_another_users_session_removes_nothing() {
+    // The asked endpoint names a socket in another user's folder, and this
+    // user holds no endpoint file of that id.
+    let runtime_directory = build_test_runtime_directory("sweep-foreign");
+    let foreign_user_directory = build_test_runtime_directory("sweep-foreign-folder");
+    let session_id = SessionId::new();
+    let foreign_socket_address =
+        koshi_ipc::endpoint::compute_socket_address(&foreign_user_directory, session_id);
+    std::fs::write(&foreign_socket_address, b"").expect("plant the foreign socket file");
+    let asked_endpoint_file = EndpointFile {
+        socket_address: foreign_socket_address.clone(),
+        connection_token: ConnectionToken::from_secret(""),
+        process_id: 0,
+    };
+
+    let sweep_result =
+        remove_stale_session_files(&runtime_directory, session_id, &asked_endpoint_file);
+
+    assert!(
+        sweep_result.is_ok(),
+        "nothing of this user's is left to remove"
+    );
+    assert!(
+        Path::new(&foreign_socket_address).exists(),
+        "the other user's socket file is kept"
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+    let _ = std::fs::remove_dir_all(&foreign_user_directory);
+}
+
+/// Plant `socket_count` sockets nothing listens on in the folder named
+/// `own_user_id + folder_offset` of `shared_sessions_base_directory`, each
+/// under a fresh id, or under `session_id` when it is given.
+#[cfg(unix)]
+fn plant_foreign_sockets(
+    shared_sessions_base_directory: &Path,
+    folder_offset: u32,
+    socket_count: usize,
+    session_id: Option<SessionId>,
+) {
+    use std::os::unix::fs::MetadataExt;
+
+    let own_user_id = std::fs::metadata(shared_sessions_base_directory)
+        .expect("read the shared directory")
+        .uid();
+    let user_directory =
+        shared_sessions_base_directory.join((own_user_id + folder_offset).to_string());
+    std::fs::create_dir_all(&user_directory).expect("create a user's folder");
+    for _ in 0..socket_count {
+        let socket_session_id = session_id.unwrap_or_default();
+        drop(
+            std::os::unix::net::UnixListener::bind(
+                user_directory.join(format!("{socket_session_id}.sock")),
+            )
+            .expect("plant a socket"),
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_census_counts_an_id_two_folders_advertise() {
+    let runtime_directory = build_test_runtime_directory("census-duplicate");
+    let shared_sessions_base_directory = build_test_runtime_directory("cd");
+    let duplicated_session_id = SessionId::new();
+    for folder_offset in [1, 2] {
+        plant_foreign_sockets(
+            &shared_sessions_base_directory,
+            folder_offset,
+            1,
+            Some(duplicated_session_id),
+        );
+    }
+
+    let discovery =
+        fetch_all_session_overviews(&runtime_directory, Some(&shared_sessions_base_directory));
+
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 1);
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_census_counts_each_session_past_the_listing_cap() {
+    // 258 sockets nothing listens on: 256 are asked and gone, 2 are counted.
+    let runtime_directory = build_test_runtime_directory("census-cap");
+    let shared_sessions_base_directory = build_test_runtime_directory("cc");
+    plant_foreign_sockets(
+        &shared_sessions_base_directory,
+        1,
+        ipc_client::MAX_SHARED_SESSION_COUNT_PER_OWNER + 2,
+        None,
+    );
+
+    let discovery =
+        fetch_all_session_overviews(&runtime_directory, Some(&shared_sessions_base_directory));
+
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 2);
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_census_counts_a_shared_directory_whose_read_fails() {
+    // A link to itself fails every read with `ELOOP`.
+    let runtime_directory = build_test_runtime_directory("census-loop");
+    let looping_shared_directory = runtime_directory.join("looping");
+    std::os::unix::fs::symlink("looping", &looping_shared_directory)
+        .expect("link the shared directory to itself");
+    let shared_read_error =
+        std::fs::read_dir(&looping_shared_directory).expect_err("a link to itself cannot be read");
+
+    let census_plan = plan_session_census(&runtime_directory, Some(&looping_shared_directory));
+    let discovery =
+        fetch_all_session_overviews(&runtime_directory, Some(&looping_shared_directory));
+
+    assert_eq!(
+        census_plan,
+        SessionCensusPlan {
+            unread_paths: vec![UnreadPath::from_read_error(
+                &looping_shared_directory,
+                &shared_read_error
+            )],
+            ..SessionCensusPlan::default()
+        }
+    );
+    assert_eq!(discovery.sessions, Vec::new());
+    assert_eq!(discovery.unasked_session_count, 0);
+    assert_eq!(discovery.unread_path_count, 1);
+    match discovery.find_incomplete_listing_error() {
+        Some(CliError::IpcUnavailable { detail }) => assert_eq!(
+            detail,
+            "this listing is incomplete (1 path could not be read)"
+        ),
+        other => panic!("expected an incomplete listing, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_runtime_directory_that_cannot_be_read_is_one_unread_path_in_the_census() {
+    // This user's listing and the shared listing both fail on the same
+    // directory: the census keeps it once.
+    use std::os::unix::fs::PermissionsExt;
+
+    let runtime_directory = build_test_runtime_directory("census-unreadable");
+    let shared_sessions_base_directory = build_test_runtime_directory("cu");
+    std::fs::set_permissions(&runtime_directory, std::fs::Permissions::from_mode(0o000))
+        .expect("make the runtime directory unreadable");
+    let Err(runtime_read_error) = std::fs::read_dir(&runtime_directory) else {
+        eprintln!(
+            "skipped `a_runtime_directory_that_cannot_be_read_is_one_unread_path_in_the_census`: \
+             this user reads through a mode-000 directory"
+        );
+        let _ =
+            std::fs::set_permissions(&runtime_directory, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::remove_dir_all(&runtime_directory);
+        let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+        return;
+    };
+
+    let census_plan =
+        plan_session_census(&runtime_directory, Some(&shared_sessions_base_directory));
+
+    let _ = std::fs::set_permissions(&runtime_directory, std::fs::Permissions::from_mode(0o700));
+    assert_eq!(
+        census_plan,
+        SessionCensusPlan {
+            unread_paths: vec![UnreadPath::from_read_error(
+                &runtime_directory,
+                &runtime_read_error
+            )],
+            ..SessionCensusPlan::default()
+        }
+    );
+    let _ = std::fs::remove_dir_all(&runtime_directory);
+    let _ = std::fs::remove_dir_all(&shared_sessions_base_directory);
+}
+
+#[test]
+fn an_unanswered_failure_names_the_paths_that_could_not_be_read() {
+    let unread_path_only = Discovered {
+        unread_path_count: 2,
+        ..Discovered::default()
+    };
+    let both_gaps = Discovered {
+        unasked_session_count: 1,
+        unread_path_count: 1,
+        ..Discovered::default()
+    };
+
+    match unread_path_only.build_unanswered_error("this listing is incomplete") {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            "this listing is incomplete (2 paths could not be read)"
+        ),
+        other => panic!("unexpected error: {other}"),
+    }
+    match both_gaps.build_unanswered_error("this listing is incomplete") {
+        CliError::IpcUnavailable { detail } => assert_eq!(
+            detail,
+            "this listing is incomplete (1 running session did not answer; 1 path could not be \
+             read)"
+        ),
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(!unread_path_only.is_complete());
 }
 
 // --- Hiding pane command arguments ------------------------------------------
@@ -936,8 +1559,8 @@ fn redacting_pane_commands_across_no_sessions_is_a_noop() {
 
 #[test]
 fn display_rows_filter_names_while_the_overview_keeps_them_raw() {
-    // A name is what targeting matches on, so the session_overview keeps exactly what
-    // the peer sent. Only the rows built for printing are filtered.
+    // The overview keeps the names exactly as the peer sent them. Only the
+    // rows built for printing are filtered.
     let mut unfiltered_session_overview =
         build_session_overview("web\u{7f}srv", &[("ta\u{202e}b", 1)]);
     unfiltered_session_overview.panes[0].pane_title = Some("ti\u{7f}tle".to_string());
@@ -988,8 +1611,7 @@ fn a_display_row_name_is_bounded() {
 
 #[test]
 fn a_session_row_filters_its_name_however_it_is_built() {
-    // Four sites build a `SessionRow`, and only the constructor filters, so a
-    // name reaches a listing or a picker filtered whichever site made it.
+    // The `SessionRow` constructor filters the name.
     let session_id = SessionId::new();
     let session_row = SessionRow::from_session(
         session_id,
@@ -1073,9 +1695,7 @@ fn filter_reported_text_filters_every_string_the_answering_session_chose() {
 
 #[test]
 fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
-    // The answering session is another process, so what it sends is not
-    // trusted. `inspect` and `debug dump-state` render these fields straight,
-    // and a filtered session_overview is what reaches them.
+    // The overview the session sent is filtered before the caller reads it.
     let runtime_directory = build_test_runtime_directory("hostile-answer");
     let mut hostile_session_overview = build_session_overview("quiet-lake", &[("editor", 1)]);
     let session_id = hostile_session_overview.session.session_id;
@@ -1083,11 +1703,15 @@ fn a_session_that_answers_with_escapes_is_filtered_before_the_caller_sees_it() {
     hostile_session_overview.tabs[0].tab_name = "edi\u{7f}tor".to_string();
     hostile_session_overview.panes[0].command_argv = Some(vec!["\u{1b}]0;pwned\u{7}".to_string()]);
     hostile_session_overview.panes[0].working_directory = Some(PathBuf::from("/tmp/\u{1b}[2J"));
-    let serving = spawn_overview_server(&runtime_directory, hostile_session_overview);
+    let overview_server_thread =
+        spawn_overview_server(&runtime_directory, hostile_session_overview);
 
     let fetched_session_overview =
-        fetch_session_overview(&runtime_directory, session_id).expect("the session answers");
-    serving.join().expect("the stand-in session finishes");
+        fetch_session_overview(&runtime_directory, None, session_id, None)
+            .expect("the session answers");
+    overview_server_thread
+        .join()
+        .expect("the stand-in session finishes");
 
     assert_eq!(
         fetched_session_overview.session.session_name,

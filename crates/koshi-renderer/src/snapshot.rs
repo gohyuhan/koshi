@@ -352,10 +352,11 @@ pub struct Reconnecting {
 /// client-side region commit. Carries no pane content and no colors.
 ///
 /// Hit-testing reads the session, client, viewer, and committed region solve
-/// from this value. The `tabline` method returns the session name, tabs, lock
-/// mode, mouse-selection state, reconnect state, and tab offset used by the
-/// tabline solve. Hit-testing and tabline solving use cell coordinates. This
-/// value has no theme; renderers apply colors when they draw cells.
+/// from this value. `FrameLayout::get_tabline_inputs` returns the session
+/// name, tabs, lock mode, mouse-selection state, reconnect state, and tab
+/// offset used by the tabline solve. Hit-testing and tabline solving use cell
+/// coordinates. This value has no theme; renderers apply colors when they draw
+/// cells.
 ///
 /// A caller that already holds a [`RenderSnapshot`] borrows one out of it with
 /// [`RenderSnapshot::build_frame_layout`], and an [`OwnedFrameLayout`] with
@@ -382,6 +383,8 @@ impl<'a> FrameLayout<'a> {
     ///
     /// A frame named `work` with tabs `shell` and `logs` yields those names and
     /// their tab state, but it does not yield a pane slot or terminal grid.
+    /// The lock mode is the viewer's `active_input_mode` when one is set, and
+    /// the client's `lock_mode` otherwise.
     #[must_use]
     pub(crate) fn get_tabline_inputs(&self) -> TablineInputs<'a> {
         TablineInputs {

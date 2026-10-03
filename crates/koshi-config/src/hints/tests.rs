@@ -8,7 +8,7 @@
 
 use super::*;
 
-use koshi_core::key::{Key, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, NamedKey};
 
 use crate::types::ModeBindings;
 
@@ -20,12 +20,12 @@ fn build_default_hint_catalog() -> KeymapHintCatalog {
 
 /// A `Ctrl`-modified character chord.
 fn build_control_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(ModFlags::CTRL, Key::Char(key_character))
+    KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char(key_character))
 }
 
 /// An `Alt`-modified character chord.
 fn build_alt_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(ModFlags::ALT, Key::Char(key_character))
+    KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char(key_character))
 }
 
 /// A binding to the core action `action_name`.
@@ -58,8 +58,8 @@ fn build_hint_catalog_with_user(
     )
 }
 
-/// The catalog for the built-in defaults under `config`, with the defaults
-/// layer built against the config's own leader.
+/// The catalog for the built-in defaults under `keybindings_config`, with the
+/// defaults layer built against that config's own leader.
 fn build_hint_catalog_with_config(keybindings_config: &KeybindingsConfig) -> KeymapHintCatalog {
     KeymapHintCatalog::from_keymap_layers_config_and_registry(
         &build_keymap_layers(None, keybindings_config.leader),
@@ -77,7 +77,10 @@ fn normal_mode_joins_defaults_to_display_names() {
 
     let new_pane_key_sequence = KeySequence::from_first_and_rest(
         build_control_chord('p'),
-        vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('n'))],
+        vec![KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('n'),
+        )],
     );
     let hint_binding = hints
         .hint_bindings
@@ -139,55 +142,55 @@ fn pane_placement_mode_hints_expose_every_rebindable_placement_action() {
     let hints = build_default_hint_catalog().build_hints_for_mode(LockMode::PanePlacement);
     let expected_hint_bindings = [
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Left)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left)),
             "Select Pane Target Left",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Down)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Down)),
             "Select Pane Target Down",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Up)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Up)),
             "Select Pane Target Up",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Right)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Right)),
             "Select Pane Target Right",
         ),
         (
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Left)),
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Left)),
             "Select Pane Insertion Left",
         ),
         (
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Down)),
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Down)),
             "Select Pane Insertion Down",
         ),
         (
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Up)),
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Up)),
             "Select Pane Insertion Up",
         ),
         (
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Right)),
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Right)),
             "Select Pane Insertion Right",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)),
             "Cycle Pane Placement Span",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Tab)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
             "Select Next Placement Tab",
         ),
         (
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)),
             "Select Previous Placement Tab",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Enter)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Enter)),
             "Confirm Pane Placement",
         ),
         (
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)),
             "Cancel Pane Placement",
         ),
     ];
@@ -284,7 +287,7 @@ fn an_unbound_sequence_matches_nothing() {
 
 #[test]
 fn the_configured_unlock_alternative_becomes_the_escape_chord() {
-    let alternative_unlock_chord = KeyChord::from_parts(ModFlags::ALT, Key::Char('u'));
+    let alternative_unlock_chord = KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('u'));
     let keybindings_config = KeybindingsConfig {
         chord_timeout_ms: 1234,
         unlock_alternative: Some(alternative_unlock_chord),
@@ -319,12 +322,12 @@ fn the_unlock_chord_is_the_reserved_one_when_the_config_names_no_alternative() {
 #[test]
 fn a_rebound_leader_moves_the_prefix_labels() {
     let keybindings_config = KeybindingsConfig {
-        leader: Leader::Mods(ModFlags::ALT),
+        leader: Leader::Modifiers(BindingModifierFlags::ALT),
         ..KeybindingsConfig::default()
     };
 
     let hints = KeymapHintCatalog::from_keymap_layers_config_and_registry(
-        &build_keymap_layers(None, Leader::Mods(ModFlags::ALT)),
+        &build_keymap_layers(None, Leader::Modifiers(BindingModifierFlags::ALT)),
         &keybindings_config,
         &ActionRegistry::new(),
     )
@@ -333,7 +336,10 @@ fn a_rebound_leader_moves_the_prefix_labels() {
     assert_eq!(
         hints
             .prefix_labels
-            .get(&KeyChord::from_parts(ModFlags::ALT, Key::Char('p')))
+            .get(&KeyChord::from_parts(
+                BindingModifierFlags::ALT,
+                Key::Char('p')
+            ))
             .map(String::as_str),
         Some("PANE")
     );
@@ -448,8 +454,8 @@ fn a_user_removal_drops_the_hint_and_matches_nothing() {
 
 #[test]
 fn a_binding_the_resolver_refuses_yields_no_hint() {
-    // `core:copy-selection` is not a registered action, so the merge drops the
-    // binding and no hint carries it.
+    // `core:copy-selection` is not a registered action. The merge drops the
+    // binding, and no hint carries it.
     let key_sequence = KeySequence::from(build_control_chord('y'));
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
@@ -477,7 +483,10 @@ fn a_sequence_that_both_fires_and_opens_a_longer_one_reports_both() {
     let opening_sequence = KeySequence::from(build_control_chord('y'));
     let longer_sequence = KeySequence::from_first_and_rest(
         build_control_chord('y'),
-        vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('a'))],
+        vec![KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('a'),
+        )],
     );
     let hint_catalog = build_hint_catalog_with_user(
         "normal",
@@ -543,7 +552,8 @@ fn a_chord_depth_cap_of_one_drops_every_multi_chord_default() {
         key_sequence_strings,
         vec!["<Tab>", "<C-g>", "<C-l>", "<C-q>", "<A-f>", "<S-Tab>"]
     );
-    // `<C-p>` opened the pane group, whose entries are all two chords long.
+    // Every pane-group entry under `<C-p>` is two chords long, and at a cap of
+    // one `<C-p>` opens nothing.
     assert_eq!(
         hint_catalog.match_sequence(
             LockMode::Normal,
@@ -555,9 +565,10 @@ fn a_chord_depth_cap_of_one_drops_every_multi_chord_default() {
 
 #[test]
 fn a_chord_leader_collapses_the_groups_and_drops_every_prefix_label() {
-    // All three groups open at the leader chord itself, so no label names one
-    // group and none is offered.
-    let space_leader_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space));
+    // All three groups open at the leader chord itself. No label names one
+    // group, and the catalog offers none.
+    let space_leader_chord =
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space));
     let hints = build_hint_catalog_with_config(&KeybindingsConfig {
         leader: Leader::Chord(space_leader_chord),
         ..KeybindingsConfig::default()
@@ -569,18 +580,21 @@ fn a_chord_leader_collapses_the_groups_and_drops_every_prefix_label() {
 
 #[test]
 fn the_chord_timeout_carries_the_configured_milliseconds_at_both_bounds() {
-    let minimum_timeout_hints = build_hint_catalog_with_config(&KeybindingsConfig {
+    let minimum_timeout_hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
         chord_timeout_ms: 0,
         ..KeybindingsConfig::default()
     });
-    assert_eq!(minimum_timeout_hints.get_chord_timeout(), Duration::ZERO);
+    assert_eq!(
+        minimum_timeout_hint_catalog.get_chord_timeout(),
+        Duration::ZERO
+    );
 
-    let maximum_timeout_hints = build_hint_catalog_with_config(&KeybindingsConfig {
+    let maximum_timeout_hint_catalog = build_hint_catalog_with_config(&KeybindingsConfig {
         chord_timeout_ms: u32::MAX,
         ..KeybindingsConfig::default()
     });
     assert_eq!(
-        maximum_timeout_hints.get_chord_timeout(),
+        maximum_timeout_hint_catalog.get_chord_timeout(),
         Duration::from_millis(4_294_967_295)
     );
 }
@@ -676,7 +690,7 @@ fn a_chord_depth_cap_of_zero_drops_every_binding_and_keeps_the_escape_chord() {
         ),
         KeyMatch::default()
     );
-    // The unlock chord resolves ahead of the keymap, so an empty keymap still
+    // The unlock chord resolves ahead of the keymap. An empty keymap still
     // reports it.
     assert_eq!(
         hint_catalog.get_unlock_chord(),
@@ -709,7 +723,10 @@ fn a_removal_of_a_key_nothing_binds_is_still_listed_as_removed() {
 fn a_locked_sequence_holding_the_unlock_chord_yields_no_hint() {
     let key_sequence = KeySequence::from_first_and_rest(
         KeybindingsConfig::RESERVED_UNLOCK,
-        vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))],
+        vec![KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('x'),
+        )],
     );
     let hint_catalog = build_hint_catalog_with_user(
         "locked",

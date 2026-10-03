@@ -3,6 +3,176 @@
 use super::*;
 use crate::resume::read_resume_body;
 
+/// Every path in `migrated_json` whose value `decoded_json` does not hold at the
+/// same path. `.name` extends a path into an object field and `[index]` into an
+/// array item; a path stops at the first value that differs.
+fn list_json_paths_lost_by_decoding(
+    migrated_json: &Value,
+    decoded_json: &Value,
+    json_path: &str,
+) -> Vec<String> {
+    match (migrated_json, decoded_json) {
+        (Value::Object(migrated_fields), Value::Object(decoded_fields)) => migrated_fields
+            .iter()
+            .flat_map(|(field_name, migrated_field)| {
+                let field_path = format!("{json_path}.{field_name}");
+                match decoded_fields.get(field_name) {
+                    Some(decoded_field) => {
+                        list_json_paths_lost_by_decoding(migrated_field, decoded_field, &field_path)
+                    }
+                    None => vec![field_path],
+                }
+            })
+            .collect(),
+        (Value::Array(migrated_items), Value::Array(decoded_items))
+            if migrated_items.len() == decoded_items.len() =>
+        {
+            migrated_items
+                .iter()
+                .zip(decoded_items)
+                .enumerate()
+                .flat_map(|(item_index, (migrated_item, decoded_item))| {
+                    list_json_paths_lost_by_decoding(
+                        migrated_item,
+                        decoded_item,
+                        &format!("{json_path}[{item_index}]"),
+                    )
+                })
+                .collect()
+        }
+        _ if migrated_json == decoded_json => Vec::new(),
+        _ => vec![json_path.to_string()],
+    }
+}
+
+#[test]
+fn every_migrated_field_of_each_released_fixture_survives_decoding() {
+    let mut lost_json_paths = Vec::new();
+    for (source_resume_format, fixture_text) in [
+        (2, include_str!("../fixtures/format_two.json")),
+        (3, include_str!("../fixtures/format_three.json")),
+    ] {
+        let fixture_fields =
+            parse_unique_json_object(fixture_text, "fixture").expect("read the fixture");
+        let body_fields =
+            parse_unique_json_object(fixture_fields["body"].get(), "body").expect("read the body");
+        let sessions = parse_unique_json_object(body_fields["sessions"].get(), "body.sessions")
+            .expect("read the sessions");
+        for (session_key, raw_session) in sessions {
+            let migrated_session_bytes =
+                migrate_previous_session_json(source_resume_format, &session_key, raw_session)
+                    .expect("migrate the session");
+            let migrated_session: Value =
+                serde_json::from_slice(&migrated_session_bytes).expect("read the migrated session");
+            let decoded_session: Session = serde_json::from_slice(&migrated_session_bytes)
+                .expect("decode the migrated session");
+            lost_json_paths.extend(list_json_paths_lost_by_decoding(
+                &migrated_session,
+                &serde_json::to_value(&decoded_session).expect("encode the decoded session"),
+                &format!("format {source_resume_format} session"),
+            ));
+        }
+        let mut ancillary_pane_fields = BTreeMap::new();
+        for field_name in ANCILLARY_PANE_FIELD_NAMES {
+            if let Some(raw_fields) = body_fields.get(field_name) {
+                ancillary_pane_fields.insert(
+                    field_name,
+                    parse_unique_json_object(raw_fields.get(), field_name)
+                        .expect("read the pane fields"),
+                );
+            }
+        }
+        let terminal_engines =
+            parse_unique_json_object(body_fields["engines"].get(), "body.engines")
+                .expect("read the terminal engines");
+        for (pane_key, raw_terminal_engine) in terminal_engines {
+            let migrated_pane_bytes = migrate_previous_pane_json(
+                source_resume_format,
+                &pane_key,
+                raw_terminal_engine,
+                &ancillary_pane_fields,
+            )
+            .expect("migrate the pane");
+            let migrated_pane: Value =
+                serde_json::from_slice(&migrated_pane_bytes).expect("read the migrated pane");
+            let decoded_pane: CarriedPaneState =
+                serde_json::from_slice(&migrated_pane_bytes).expect("decode the migrated pane");
+            lost_json_paths.extend(list_json_paths_lost_by_decoding(
+                &migrated_pane,
+                &serde_json::to_value(&decoded_pane).expect("encode the decoded pane"),
+                &format!("format {source_resume_format} pane"),
+            ));
+        }
+    }
+
+    assert_eq!(lost_json_paths, Vec::<String>::new());
+}
+
+#[test]
+fn migrate_cell_extra_preserves_placeholder_and_native_image_coordinates() {
+    let mut released_cell_extra = serde_json::json!({
+        "combining": ['\u{0301}'],
+        "image_placeholder": {
+            "image_id": 7,
+            "placement_id": 8,
+            "row": 3,
+            "column": 4,
+            "image_id_msb": 1
+        },
+        "image_fragments": [
+            {"source": 9, "row": 5, "column": 6},
+            {"source": 10, "row": 7, "column": 8}
+        ]
+    });
+
+    migrate_cell_extra(&mut released_cell_extra).expect("migrate released cell metadata");
+
+    assert_eq!(
+        released_cell_extra,
+        serde_json::json!({
+            "combining": ['\u{0301}'],
+            "image_placeholder": {
+                "image_id": 7,
+                "placement_id": 8,
+                "source_row": 3,
+                "source_column": 4,
+                "image_id_msb": 1
+            },
+            "image_fragments": [
+                {"image_source_id": 9, "source_row_index": 5, "source_column_index": 6},
+                {"image_source_id": 10, "source_row_index": 7, "source_column_index": 8}
+            ]
+        })
+    );
+    let mut migrated_cell = serde_json::to_value(koshi_terminal::grid::state::Cell::build_blank())
+        .expect("encode a blank cell");
+    migrated_cell["combining"] = released_cell_extra;
+    let decoded_cell: koshi_terminal::grid::state::Cell =
+        serde_json::from_value(migrated_cell.clone()).expect("decode the migrated cell");
+    assert_eq!(
+        serde_json::to_value(&decoded_cell).expect("encode the decoded cell"),
+        migrated_cell
+    );
+}
+
+#[test]
+fn format_three_terminal_defaults_equal_the_current_terminal_defaults() {
+    let current_terminal_fields = serde_json::to_value(
+        koshi_terminal::state::TerminalState::from_pty_size(koshi_core::process::PtySize {
+            row_count: 1,
+            column_count: 1,
+        }),
+    )
+    .expect("encode the current terminal defaults");
+
+    for (field_name, default_value) in build_format_three_terminal_defaults() {
+        assert_eq!(
+            current_terminal_fields[field_name], default_value,
+            "{field_name}"
+        );
+    }
+}
+
 #[test]
 fn resume_readers_reject_session_ids_repeated_with_different_letter_case() {
     let fixture_json: Value = serde_json::from_str(include_str!("../fixtures/format_three.json"))
@@ -220,4 +390,77 @@ fn migrate_every_previous_image_placement_error_to_its_current_shape() {
         serde_json::from_value::<koshi_terminal::graphics::ImagePlacementError>(previous_error)
             .expect("current placement error decodes");
     }
+}
+
+#[test]
+fn migrate_image_display_adds_the_relative_and_suppression_fields_it_lacks() {
+    let mut previous_display = serde_json::json!({"z_index": 2});
+
+    migrate_image_display(&mut previous_display).expect("migrate the image display");
+
+    assert_eq!(
+        previous_display,
+        serde_json::json!({
+            "z_index": 2,
+            "relative_image_id": null,
+            "relative_placement_id": null,
+            "relative_column_offset": 0,
+            "relative_row_offset": 0,
+            "response_suppression_level": 0
+        })
+    );
+}
+
+#[test]
+fn migrate_image_display_keeps_the_relative_and_suppression_values_it_has() {
+    let mut previous_display = serde_json::json!({
+        "relative_image_id": 7,
+        "relative_placement_id": 8,
+        "relative_offset_x": -3,
+        "relative_offset_y": 4,
+        "quiet": 2
+    });
+
+    migrate_image_display(&mut previous_display).expect("migrate the image display");
+
+    assert_eq!(
+        previous_display,
+        serde_json::json!({
+            "relative_image_id": 7,
+            "relative_placement_id": 8,
+            "relative_column_offset": -3,
+            "relative_row_offset": 4,
+            "response_suppression_level": 2
+        })
+    );
+}
+
+#[test]
+fn migrate_animation_marks_a_frame_without_gapless_as_not_gapless() {
+    let mut previous_animation = serde_json::json!({
+        "frames": [
+            {"image": {"width": 1, "height": 1, "rgba": [0, 0, 0, 0]}, "delay": 5},
+            {"image": {"width": 1, "height": 1, "rgba": [0, 0, 0, 0]}, "delay": 5, "gapless": true}
+        ]
+    });
+
+    migrate_animation(&mut previous_animation).expect("migrate the animation");
+
+    assert_eq!(
+        previous_animation,
+        serde_json::json!({
+            "frames": [
+                {
+                    "decoded_image": {"pixel_width": 1, "pixel_height": 1, "rgba_bytes": [0, 0, 0, 0]},
+                    "frame_delay": 5,
+                    "is_gapless": false
+                },
+                {
+                    "decoded_image": {"pixel_width": 1, "pixel_height": 1, "rgba_bytes": [0, 0, 0, 0]},
+                    "frame_delay": 5,
+                    "is_gapless": true
+                }
+            ]
+        })
+    );
 }

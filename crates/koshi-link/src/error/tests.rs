@@ -2,231 +2,125 @@
 
 use super::*;
 
-#[test]
-fn maps_each_error_class_to_its_exit_code() {
-    assert_eq!(
-        CliExitCode::from(&CliError::UnknownAction {
-            action_name: "x".into()
-        }),
-        CliExitCode::UsageOrConfig
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::InvalidArgs { detail: "x".into() }),
-        CliExitCode::UsageOrConfig
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::Config { detail: "x".into() }),
-        CliExitCode::UsageOrConfig
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }),
-        CliExitCode::UsageOrConfig
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::IpcUnavailable { detail: "x".into() }),
-        CliExitCode::IpcUnavailable
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::Runtime { detail: "x".into() }),
-        CliExitCode::RuntimeAction
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::SessionNotFound {
-            session_name: "session-x".into()
-        }),
-        CliExitCode::SessionNotFound
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::CommandRejected {
-            reason: RejectReason::Unauthorized,
-            help: None
-        }),
-        CliExitCode::RuntimeAction
-    );
+/// One of each [`CliError`] variant, with the message it renders and the exit
+/// code it maps to.
+fn list_every_error_class() -> Vec<(CliError, &'static str, i32)> {
+    vec![
+        (
+            CliError::UnknownAction {
+                action_name: "new-pane".into(),
+            },
+            "unknown action: new-pane",
+            2,
+        ),
+        (
+            CliError::InvalidArgs {
+                detail: "missing --pane".into(),
+            },
+            "invalid arguments: missing --pane",
+            2,
+        ),
+        (
+            CliError::UnboundKey {
+                key_sequence_text: "<C-t> g".into(),
+            },
+            "nothing is bound on `<C-t> g` in any mode",
+            2,
+        ),
+        (
+            CliError::InvalidKeybindingFile {
+                keybinding_file_path: "/home/user/.config/koshi/keybinding.kdl".into(),
+            },
+            "keybinding file /home/user/.config/koshi/keybinding.kdl failed validation",
+            2,
+        ),
+        (
+            CliError::Config {
+                detail: "bad key".into(),
+            },
+            "config failed: bad key",
+            2,
+        ),
+        (
+            CliError::InSessionEnv {
+                detail: "`KOSHI` is set but `KOSHI_SESSION_ID` is missing".into(),
+            },
+            "broken in-session environment: `KOSHI` is set but `KOSHI_SESSION_ID` is missing",
+            2,
+        ),
+        (
+            CliError::IpcUnavailable {
+                detail: "no koshi daemon is reachable".into(),
+            },
+            "IPC unavailable: no koshi daemon is reachable",
+            4,
+        ),
+        (
+            CliError::ProtocolVersionRefused {
+                detail: "the client speaks protocol version 4 to 4, this session speaks 5 to 5"
+                    .into(),
+            },
+            "IPC unavailable: the client speaks protocol version 4 to 4, this session speaks 5 to 5",
+            4,
+        ),
+        (
+            CliError::SessionAnswerTimedOut,
+            "IPC unavailable: the session did not answer in time",
+            4,
+        ),
+        (
+            CliError::SessionNotFound {
+                session_name: "session-x".into(),
+            },
+            "session session-x is not running",
+            3,
+        ),
+        (CliError::NoSessions, "no koshi session is running", 3),
+        (
+            CliError::CommandRejected {
+                reason: RejectReason::Unauthorized,
+                help: Some("run this command from an active Koshi client".into()),
+            },
+            "command not permitted\n  run this command from an active Koshi client",
+            1,
+        ),
+        (
+            CliError::Runtime {
+                detail: "boom".into(),
+            },
+            "boom",
+            1,
+        ),
+        (
+            CliError::Update {
+                detail: "the download stopped halfway".into(),
+            },
+            "update failed: the download stopped halfway",
+            1,
+        ),
+    ]
 }
 
 #[test]
-fn exit_codes_are_the_documented_numbers() {
-    assert_eq!(
-        CliExitCode::from(&CliError::InvalidArgs { detail: "x".into() }).get_exit_code(),
-        2
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::Config { detail: "x".into() }).get_exit_code(),
-        2
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::IpcUnavailable { detail: "x".into() }).get_exit_code(),
-        4
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::Runtime { detail: "x".into() }).get_exit_code(),
-        1
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::SessionNotFound {
-            session_name: "session-x".into()
-        })
-        .get_exit_code(),
-        3
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::CommandRejected {
-            reason: RejectReason::Unauthorized,
-            help: None
-        })
-        .get_exit_code(),
-        1
-    );
+fn every_error_class_renders_its_exact_message() {
+    for (cli_error, expected_message, _) in list_every_error_class() {
+        assert_eq!(cli_error.to_string(), expected_message);
+    }
 }
 
 #[test]
-fn a_rejected_command_renders_its_reason_and_help_line() {
-    assert_eq!(
-        CliError::CommandRejected {
-            reason: RejectReason::Unauthorized,
-            help: Some("run this command from an active Koshi client".into()),
-        }
-        .to_string(),
-        "command not permitted\n  run this command from an active Koshi client"
-    );
-    assert_eq!(
-        CliError::CommandRejected {
-            reason: RejectReason::TargetGone,
-            help: None,
-        }
-        .to_string(),
-        "target no longer exists"
-    );
-    assert_eq!(
-        CliError::SessionNotFound {
-            session_name: "session-x".into()
-        }
-        .to_string(),
-        "session session-x is not running"
-    );
-}
-
-#[test]
-fn messages_render_without_a_koshi_prefix() {
-    assert_eq!(
-        CliError::UnknownAction {
-            action_name: "new-pane".into()
-        }
-        .to_string(),
-        "unknown action: new-pane"
-    );
-    assert_eq!(
-        CliError::IpcUnavailable {
-            detail: "no koshi daemon is reachable".into()
-        }
-        .to_string(),
-        "IPC unavailable: no koshi daemon is reachable"
-    );
-    assert_eq!(
-        CliError::Runtime {
-            detail: "boom".into()
-        }
-        .to_string(),
-        "boom"
-    );
-    assert_eq!(
-        CliError::Config {
-            detail: "bad key".into()
-        }
-        .to_string(),
-        "config failed: bad key"
-    );
-}
-
-#[test]
-fn the_invalid_args_message_is_exact() {
-    assert_eq!(
-        CliError::InvalidArgs {
-            detail: "missing --pane".into()
-        }
-        .to_string(),
-        "invalid arguments: missing --pane"
-    );
-}
-
-#[test]
-fn an_unbound_key_and_a_bad_keymap_file_exit_as_usage_problems() {
-    assert_eq!(
-        CliExitCode::from(&CliError::UnboundKey {
-            sequence: "<C-t> g".into()
-        })
-        .get_exit_code(),
-        2
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::InvalidKeymapFile {
-            keymap_file_path: "keybinding.kdl".into()
-        })
-        .get_exit_code(),
-        2
-    );
-}
-
-#[test]
-fn no_running_session_exits_the_same_as_a_named_session_that_is_gone() {
-    assert_eq!(
-        CliExitCode::from(&CliError::NoSessions),
-        CliExitCode::SessionNotFound
-    );
-    assert_eq!(CliExitCode::from(&CliError::NoSessions).get_exit_code(), 3);
-}
-
-#[test]
-fn a_failed_update_exits_as_a_runtime_failure() {
-    assert_eq!(
-        CliExitCode::from(&CliError::Update {
-            detail: "the download stopped halfway".into()
-        }),
-        CliExitCode::RuntimeAction
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::Update {
-            detail: "the download stopped halfway".into()
-        })
-        .get_exit_code(),
-        1
-    );
-}
-
-#[test]
-fn the_key_keymap_no_sessions_and_update_messages_are_exact() {
-    assert_eq!(
-        CliError::UnboundKey {
-            sequence: "<C-t> g".into()
-        }
-        .to_string(),
-        "nothing is bound on `<C-t> g` in any mode"
-    );
-    assert_eq!(
-        CliError::InvalidKeymapFile {
-            keymap_file_path: "/home/u/.config/koshi/keybinding.kdl".into()
-        }
-        .to_string(),
-        "keybinding file /home/u/.config/koshi/keybinding.kdl failed validation"
-    );
-    assert_eq!(
-        CliError::NoSessions.to_string(),
-        "no koshi session is running"
-    );
-    assert_eq!(
-        CliError::Update {
-            detail: "the download stopped halfway".into()
-        }
-        .to_string(),
-        "update failed: the download stopped halfway"
-    );
+fn every_error_class_exits_with_its_documented_number() {
+    for (cli_error, _, expected_exit_code) in list_every_error_class() {
+        assert_eq!(
+            CliExitCode::from(&cli_error).get_exit_code(),
+            expected_exit_code,
+            "{cli_error}"
+        );
+    }
 }
 
 #[test]
 fn messages_render_an_empty_or_unicode_field_verbatim() {
-    // The message formats the field exactly as given, with no escaping and no
-    // substitution.
     assert_eq!(
         CliError::UnknownAction {
             action_name: String::new()
@@ -241,20 +135,12 @@ fn messages_render_an_empty_or_unicode_field_verbatim() {
         .to_string(),
         "unknown action: 日本語"
     );
-}
-
-#[test]
-fn a_broken_in_session_environment_renders_its_detail() {
     assert_eq!(
-        CliError::InSessionEnv {
-            detail: "`KOSHI` is set but `KOSHI_SESSION_ID` is missing".into()
+        CliError::Runtime {
+            detail: String::new()
         }
         .to_string(),
-        "broken in-session environment: `KOSHI` is set but `KOSHI_SESSION_ID` is missing"
-    );
-    assert_eq!(
-        CliExitCode::from(&CliError::InSessionEnv { detail: "x".into() }).get_exit_code(),
-        2
+        ""
     );
 }
 
@@ -291,67 +177,6 @@ fn an_empty_help_hint_still_renders_its_own_line() {
         }
         .to_string(),
         "command not permitted\n  "
-    );
-}
-
-#[test]
-fn every_error_class_exits_with_its_documented_number() {
-    for (cli_error, exit_code) in [
-        (
-            CliError::UnknownAction {
-                action_name: "x".into(),
-            },
-            2,
-        ),
-        (CliError::InvalidArgs { detail: "x".into() }, 2),
-        (
-            CliError::UnboundKey {
-                sequence: "<C-t> g".into(),
-            },
-            2,
-        ),
-        (
-            CliError::InvalidKeymapFile {
-                keymap_file_path: "keybinding.kdl".into(),
-            },
-            2,
-        ),
-        (CliError::Config { detail: "x".into() }, 2),
-        (CliError::InSessionEnv { detail: "x".into() }, 2),
-        (CliError::IpcUnavailable { detail: "x".into() }, 4),
-        (
-            CliError::SessionNotFound {
-                session_name: "session-x".into(),
-            },
-            3,
-        ),
-        (CliError::NoSessions, 3),
-        (
-            CliError::CommandRejected {
-                reason: RejectReason::Unauthorized,
-                help: None,
-            },
-            1,
-        ),
-        (CliError::Runtime { detail: "x".into() }, 1),
-        (CliError::Update { detail: "x".into() }, 1),
-    ] {
-        assert_eq!(
-            CliExitCode::from(&cli_error).get_exit_code(),
-            exit_code,
-            "{cli_error}"
-        );
-    }
-}
-
-#[test]
-fn a_runtime_error_with_an_empty_detail_renders_an_empty_message() {
-    assert_eq!(
-        CliError::Runtime {
-            detail: String::new()
-        }
-        .to_string(),
-        ""
     );
 }
 
