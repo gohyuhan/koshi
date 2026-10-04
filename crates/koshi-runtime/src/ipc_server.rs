@@ -21,12 +21,12 @@
 //! dispatcher and writes nothing back. The peer going away detaches the client.
 //!
 //! Passing [`OtherUsers`] to [`IpcServer::start`] moves the control socket to
-//! the machine-wide shared directory and widens it, so the other local users
-//! of this machine can reach it. The endpoint file keeps its private place and
+//! the machine-wide shared directory and widens it: the other local users of
+//! this machine can reach it. The endpoint file keeps its private place and
 //! its `0600` mode either way. Every accepted connection is gated by the user
 //! the OS reports for it: the user who started the session is always served,
 //! and another local user is served only while `allow-other-users` is on. The
-//! setting is read again for each of that user's requests, so turning it off
+//! setting is read again for each of that user's requests. Turning it off
 //! closes their connections.
 //!
 //! The decisions every koshi server makes the same way — a request kind this
@@ -49,12 +49,11 @@
 //!
 //! [`IpcServer::close_intake`] ends the connections that are left: no event a
 //! peer sends from here is handed to the dispatcher, and every connection being
-//! served has its read direction closed, so its thread ends without reading
+//! served has its read direction closed. Its thread ends without reading
 //! another request. The dispatcher calls it before it stops draining the inbox.
 //!
 //! [`IpcServer::shutdown`] stops accepting, joins the accept loop, and
-//! removes the endpoint file, the socket and any shared marker, so nothing
-//! advertises a session that is gone.
+//! removes the endpoint file, the socket and any shared marker.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -68,11 +67,13 @@ use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
     compute_socket_address, remove_advertisement_marker, remove_socket_file,
-    resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile,
+    resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile, ServerProgramFile,
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameImageChunk, PaintedFrame, MAX_FRAME_IMAGE_TRANSFER_COUNT};
+use koshi_ipc::frame::{
+    FrameImageChunk, FrameImagePlacement, PaintedFrame, MAX_FRAME_IMAGE_TRANSFER_COUNT,
+};
 use koshi_ipc::handshake::{Handshake, Peer};
 use koshi_ipc::plane::{self, RequestDisposition};
 use koshi_ipc::protocol::{
@@ -90,6 +91,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_terminal::graphics::ImageRecord;
 
+use crate::executable_watch::ExecutableWatch;
 use crate::runtime::bus::build_wire_event;
 use crate::runtime::event::{EndingNotice, RuntimeEvent, SessionEnding};
 use crate::runtime::frame::{
@@ -108,8 +110,7 @@ const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Reads the `allow-other-users` setting from the configuration again and
 /// reports whether it is on. Called for each connection from another local
-/// user and for each request that user sends, so the answer is always the
-/// current one.
+/// user and for each request that user sends.
 pub type OtherUsersSetting = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// What [`IpcServer::start`] needs to serve the other local users of this
@@ -118,7 +119,7 @@ pub type OtherUsersSetting = Arc<dyn Fn() -> bool + Send + Sync>;
 /// Only the control socket moves: it binds in this user's directory under the
 /// machine-wide shared directory, carrying mode `0666` on Unix and a security
 /// descriptor granting Authenticated Users read and write on Windows. The
-/// endpoint file stays in the private runtime directory at mode `0600`, so the
+/// endpoint file stays in the private runtime directory at mode `0600`: the
 /// token it carries stays readable only by the user who started the session.
 pub struct OtherUsers {
     /// The machine-wide directory koshi shares between local users, from
@@ -135,9 +136,8 @@ pub struct OtherUsers {
 ///
 /// A serving thread reads `is_closed` and hands its event to the dispatcher under
 /// one shared borrow of the intake, and [`close_intake`](Intake::close_intake) sets
-/// `is_closed`
-/// under the exclusive borrow. So a hand-off either finished before the close,
-/// or reads the closed intake and never happens: once
+/// `is_closed` under the exclusive borrow. A hand-off either finishes before the
+/// close, or reads the closed intake and never happens. Once
 /// [`close_intake`](Intake::close_intake) returns, no serving thread sends another event.
 #[derive(Debug, Default)]
 struct Intake {
@@ -223,7 +223,7 @@ impl Intake {
     }
 
     /// Stop events reaching the dispatcher and close the read direction of
-    /// every connection being served, so each thread ends without reading
+    /// every connection being served. Each serving thread ends without reading
     /// another request.
     fn close_intake(&self) {
         let mut intake_state = self.intake_state.write().expect("intake");
@@ -253,14 +253,25 @@ impl Drop for AttachedConnection {
 }
 
 /// One connection's entry in the [`Intake`], held by the thread serving that
-/// connection. The entry is removed when that thread ends, so the intake holds
-/// the read direction of the connections being served and no others.
+/// connection. The entry is removed when that thread ends. The intake holds the
+/// read direction of the connections being served and no others.
 struct ServedConnection {
     /// The intake this entry belongs to, and the gate the serving thread hands
     /// its events over through.
     intake: Arc<Intake>,
     /// The number this connection is filed under.
     connection_number: u64,
+}
+
+impl Drop for ServedConnection {
+    fn drop(&mut self) {
+        self.intake
+            .intake_state
+            .write()
+            .expect("intake")
+            .reader_by_connection_number
+            .remove(&self.connection_number);
+    }
 }
 
 /// The accepted client state consumed by one attached event stream.
@@ -275,17 +286,6 @@ struct AttachedStream {
     graphics_capabilities: GraphicsCapabilities,
 }
 
-impl Drop for ServedConnection {
-    fn drop(&mut self) {
-        self.intake
-            .intake_state
-            .write()
-            .expect("intake")
-            .reader_by_connection_number
-            .remove(&self.connection_number);
-    }
-}
-
 /// The serving side of one session's control socket: the bound listener's
 /// accept loop, the address it serves, and the endpoint file advertising it.
 ///
@@ -297,6 +297,10 @@ pub struct IpcServer {
     socket_address: String,
     /// The endpoint file advertising `socket_address` and the connection token.
     endpoint_path: PathBuf,
+    /// The program file naming the koshi version and program file this
+    /// session runs. `None` for a session served with no executable watch,
+    /// which writes no program file.
+    program_file_path: Option<PathBuf>,
     /// The empty marker naming this session among those other local users may
     /// reach, written on Windows where a pipe has no filesystem entry. `None`
     /// on Unix, and `None` for a session only its own user may reach.
@@ -315,15 +319,15 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    /// Bind `session`'s control socket, write the endpoint file advertising
-    /// it, and start serving.
+    /// Bind the control socket of `session_id`, write the endpoint file
+    /// advertising it, and start serving.
     ///
     /// The steps run in trust order: the runtime directory is created
     /// private (`0700`), the address is checked against the directory it sits
     /// in, any stale leftover socket is reclaimed, the listener binds, and
-    /// only then is the endpoint file written — so the advertisement never
-    /// exists without a listener behind it. A failed endpoint write unwinds
-    /// the bind and leaves nothing behind.
+    /// only then is the endpoint file written. The advertisement never exists
+    /// without a listener behind it. A failed endpoint write unwinds the bind
+    /// and leaves nothing behind.
     ///
     /// `other_users` `None` binds the socket inside `runtime_directory`, where only
     /// the user who started the session can reach it. `Some` binds it in this
@@ -333,11 +337,21 @@ impl IpcServer {
     /// where the marker naming the pipe is written as well. The endpoint file
     /// is written to the same private path at the same `0600` mode either way;
     /// only the address it carries differs.
+    ///
+    /// `executable_watch` `Some` checks the program file the session started
+    /// from on each connection the socket takes, as
+    /// [`ExecutableWatch::check_executable_file`] states. A file that now
+    /// holds another koshi version sends the dispatcher
+    /// [`RuntimeEvent::IpcRestart`], as a `Restart` request does. The session
+    /// also writes its [`ServerProgramFile`] after the endpoint file, from the
+    /// watch's path and running version, and a failed write unwinds the bind
+    /// as a failed endpoint write does.
     pub fn start(
         runtime_directory: &Path,
-        session: SessionId,
+        session_id: SessionId,
         inbox_sender: Sender<RuntimeEvent>,
         other_users: Option<OtherUsers>,
+        executable_watch: Option<Arc<ExecutableWatch>>,
     ) -> Result<IpcServer, IpcError> {
         koshi_paths::ensure_private_directory(runtime_directory).map_err(|directory_error| {
             IpcError::Transport {
@@ -349,19 +363,19 @@ impl IpcServer {
         })?;
         let (socket_address, shared_socket_marker_path) = match &other_users {
             None => {
-                let socket_address = compute_socket_address(runtime_directory, session);
+                let socket_address = compute_socket_address(runtime_directory, session_id);
                 validate_socket_address(&socket_address, runtime_directory)?;
                 (socket_address, None)
             }
             Some(other_users) => {
                 let shared_user_directory =
                     ensure_shared_directories(&other_users.shared_directory)?;
-                let socket_address = compute_socket_address(&shared_user_directory, session);
+                let socket_address = compute_socket_address(&shared_user_directory, session_id);
                 validate_shared_socket_address(&socket_address, &shared_user_directory)?;
-                // A Windows pipe has no filesystem entry, so a marker file is
-                // what names the session listening on one.
+                // On Windows, a marker file names the session listening on the
+                // pipe. A pipe has no filesystem entry.
                 let shared_socket_marker_path = cfg!(windows)
-                    .then(|| resolve_advertisement_marker_path(&shared_user_directory, session));
+                    .then(|| resolve_advertisement_marker_path(&shared_user_directory, session_id));
                 (socket_address, shared_socket_marker_path)
             }
         };
@@ -381,26 +395,36 @@ impl IpcServer {
         }
 
         let connection_token = ConnectionToken::generate();
-        let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session);
-        let endpoint = EndpointFile {
+        let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+        let endpoint_file = EndpointFile {
             socket_address: socket_address.clone(),
             connection_token: connection_token.clone(),
             process_id: std::process::id(),
         };
-        let advertised =
-            endpoint.write_to_path(&endpoint_path).and_then(
-                |()| match &shared_socket_marker_path {
-                    None => Ok(()),
-                    Some(shared_socket_marker_path) => {
-                        write_advertisement_marker(shared_socket_marker_path)
-                    }
-                },
-            );
-        if let Err(advertisement_error) = advertised {
+        let program_file_path = executable_watch.as_ref().map(|_| {
+            ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id)
+        });
+        let advertisement_result = endpoint_file
+            .write_to_path(&endpoint_path)
+            .and_then(|()| match (&executable_watch, &program_file_path) {
+                (Some(executable_watch), Some(program_file_path)) => executable_watch
+                    .build_server_program_file()
+                    .write_to_path(program_file_path),
+                _ => Ok(()),
+            })
+            .and_then(|()| match &shared_socket_marker_path {
+                None => Ok(()),
+                Some(shared_socket_marker_path) => {
+                    write_advertisement_marker(shared_socket_marker_path)
+                }
+            });
+        if let Err(advertisement_error) = advertisement_result {
             // Dropping the listener releases the address and unlinks the socket
-            // file on Unix, so a failed start leaves nothing behind. The
-            // endpoint write is atomic, so a file left at `endpoint_path` is an
-            // older run's, naming the socket removed here.
+            // file on Unix. The endpoint write is atomic: a file left at
+            // `endpoint_path` is an older run's, naming the socket removed here.
+            if let Some(program_file_path) = &program_file_path {
+                let _ = std::fs::remove_file(program_file_path);
+            }
             let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
             remove_socket_file(&socket_address);
@@ -409,7 +433,7 @@ impl IpcServer {
 
         let allow_other_users_setting = other_users.map(|other_users| other_users.is_enabled);
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let accept_flag = Arc::clone(&is_shutting_down);
+        let accept_shutdown_flag = Arc::clone(&is_shutting_down);
         let connection_intake = Arc::new(Intake::default());
         let accept_intake = Arc::clone(&connection_intake);
         let connection_token = Arc::new(RwLock::new(connection_token));
@@ -419,15 +443,17 @@ impl IpcServer {
                 &listener,
                 &accept_connection_token,
                 &inbox_sender,
-                &accept_flag,
+                &accept_shutdown_flag,
                 allow_other_users_setting.as_ref(),
                 &accept_intake,
+                executable_watch.as_ref(),
             );
         });
 
         Ok(IpcServer {
             socket_address,
             endpoint_path,
+            program_file_path,
             shared_socket_marker_path,
             is_shutting_down,
             connection_token,
@@ -438,11 +464,11 @@ impl IpcServer {
 
     /// End every connection still being served: no event a peer sends from here
     /// is handed to the dispatcher, and each connection has its read direction
-    /// closed, so the thread serving it ends without reading another request.
+    /// closed. The thread serving it ends without reading another request.
     ///
     /// A request a peer sent before this either reached the dispatcher already
-    /// or never does, so the dispatcher's next pass over the runtime inbox is
-    /// the last that can find anything a peer sent.
+    /// or never does. The dispatcher's next pass over the runtime inbox is the
+    /// last that can find anything a peer sent.
     ///
     /// A peer still holding its connection loses what it wrote and the session
     /// had not read, and sees its connection close.
@@ -458,26 +484,24 @@ impl IpcServer {
     ///
     /// The address does not change. A connection already open keeps serving:
     /// the token is checked at Hello only. An intake closed by
-    /// [`close_intake`](Self::close_intake) takes connections again, so a
-    /// caller that closed it before this serves on the same socket afterwards.
+    /// [`close_intake`](Self::close_intake) takes connections again.
     ///
     /// # Errors
     /// Returns the failure of writing the endpoint file. The fresh token is
-    /// the one this server accepts either way, so the endpoint file then
+    /// the one this server accepts either way: the endpoint file then
     /// advertises a token no connection is served under.
     pub fn rotate_token(&self) -> Result<(), IpcError> {
         let fresh_connection_token = ConnectionToken::generate();
-        // Stored before the intake takes connections again, so no connection is
-        // accepted under the token this replaces. Accepted before it is
-        // advertised.
+        // The fresh token is stored before the intake reopens and before the
+        // endpoint file advertises it.
         *self.connection_token.write().expect("connection token") = fresh_connection_token.clone();
         self.connection_intake.reopen_intake();
-        let endpoint = EndpointFile {
+        let endpoint_file = EndpointFile {
             socket_address: self.socket_address.clone(),
             connection_token: fresh_connection_token,
             process_id: std::process::id(),
         };
-        endpoint.write_to_path(&self.endpoint_path)
+        endpoint_file.write_to_path(&self.endpoint_path)
     }
 
     /// How many attached clients' connections are still being read.
@@ -498,14 +522,13 @@ impl IpcServer {
     }
 
     /// Stop serving: no further connection is accepted, the accept loop is
-    /// joined, and the endpoint file, the socket and any shared marker are
-    /// removed. Connections already being served run out on their own threads;
-    /// with the dispatcher draining, their in-flight requests end in a closed
-    /// connection rather than a mutation.
+    /// joined, and the program file, the endpoint file, the socket and any
+    /// shared marker are removed, in that order. Connections already being
+    /// served run out on their own threads; with the dispatcher draining, their
+    /// in-flight requests end in a closed connection rather than a mutation.
     ///
-    /// Dropping an `IpcServer` runs the same teardown, so a path that never
-    /// reaches an explicit shutdown — a panic unwinding the server — still
-    /// withdraws the files.
+    /// Dropping an `IpcServer` runs the same teardown, including when a panic
+    /// unwinds the server.
     pub fn shutdown(self) {
         drop(self);
     }
@@ -517,16 +540,18 @@ impl IpcServer {
         self.is_shutting_down.store(true, Ordering::SeqCst);
         if let Some(accept_thread_handle) = self.accept_thread.take() {
             // The accept loop sits blocked in `accept`. A bare connect wakes it
-            // and it reads the flag. That connection stays open across the join:
-            // on Windows a connect that drops before `accept` runs can leave
-            // nothing for `accept` to return. A failed connect — say, the
-            // process is out of file descriptors — leaves the loop blocked and
-            // skips the join; that thread ends with the process, and the files
-            // below are removed either way.
+            // and it reads the flag. That connection stays open until the join
+            // returns. A failed connect — say, the process is out of file
+            // descriptors — leaves the loop blocked and skips the join; that
+            // thread ends with the process, and the files below are removed
+            // either way.
             if let Ok(wake_connection) = Connection::connect(&self.socket_address) {
                 let _ = accept_thread_handle.join();
                 drop(wake_connection);
             }
+        }
+        if let Some(program_file_path) = &self.program_file_path {
+            let _ = std::fs::remove_file(program_file_path);
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
         if let Some(shared_socket_marker_path) = &self.shared_socket_marker_path {
@@ -558,9 +583,9 @@ fn ensure_shared_directories(shared_directory: &Path) -> Result<PathBuf, IpcErro
     })
 }
 
-/// Set the socket file at `socket_address` to mode `0666`, so every local user of this
-/// machine may connect to it. Unix only: on Windows the address is a pipe name
-/// with no filesystem entry.
+/// Set the socket file at `socket_address` to mode `0666`: every local user of
+/// this machine may connect to it. Unix only: on Windows the address is a pipe
+/// name with no filesystem entry.
 #[cfg(unix)]
 fn widen_socket(socket_address: &str) -> Result<(), IpcError> {
     use std::os::unix::fs::PermissionsExt;
@@ -574,19 +599,6 @@ fn widen_socket(socket_address: &str) -> Result<(), IpcError> {
     )
 }
 
-/// Which peer a newly accepted connection is gated as. `is_same_user` is what
-/// the OS reports about the process that connected, and `is_allow_other_users_enabled`
-/// is the setting read a moment ago.
-///
-/// Another local user arriving while the setting is off is gated as a peer the
-/// handshake refuses with `OtherUsersOff`, so no request of theirs is served.
-fn resolve_peer(is_same_user: bool, is_allow_other_users_enabled: bool) -> Peer {
-    Peer::Local {
-        is_same_user,
-        is_other_user_access_allowed: is_allow_other_users_enabled,
-    }
-}
-
 impl Drop for IpcServer {
     fn drop(&mut self) {
         self.stop_ipc_server();
@@ -594,18 +606,26 @@ impl Drop for IpcServer {
 }
 
 /// Accept connections until the shutdown flag is set, giving each its own
-/// serving thread. A failed accept pauses briefly and retries, so one
-/// refused connection cannot stop the socket answering.
+/// serving thread. A failed accept pauses for [`ACCEPT_RETRY_DELAY_DURATION`]
+/// and retries.
 ///
 /// `allow_other_users_setting` is the live read of the `allow-other-users`
-/// setting, and is `None` for a session only its own user may reach. Each connection is gated
-/// by the user the OS reports for it; a connection whose user cannot be read
-/// is closed without being served.
+/// setting, and is `None` for a session only its own user may reach. Each
+/// connection is gated as [`Peer::Local`] with the user the OS reports for it
+/// and the setting read at accept. The handshake refuses another local user
+/// arriving while the setting is off with `OtherUsersOff`. A connection whose
+/// user cannot be read is closed without being served.
 ///
 /// `connection_intake` files each connection's read direction before its thread
 /// starts, and is what that thread hands its events over through. A connection
 /// the intake does not take — it is closed, or the read direction could not be
 /// taken — is closed without being served.
+///
+/// Each connection the intake takes runs a check of `executable_watch`, and
+/// its serving thread runs
+/// [`ExecutableWatch::check_executable_file_after_refused_hello`] for each
+/// Hello refused for its protocol version. When either finds another koshi
+/// version, [`restart_into_installed_version`] asks the dispatcher to restart.
 fn run_accept_loop(
     listener: &Listener,
     connection_token: &RwLock<ConnectionToken>,
@@ -613,35 +633,44 @@ fn run_accept_loop(
     is_shutting_down: &AtomicBool,
     allow_other_users_setting: Option<&OtherUsersSetting>,
     connection_intake: &Arc<Intake>,
+    executable_watch: Option<&Arc<ExecutableWatch>>,
 ) {
     transport::accept_until_shutdown(
         listener,
         is_shutting_down,
         ACCEPT_RETRY_DELAY_DURATION,
         |connection| {
-            // The OS reports which user opened the connection, so a peer
-            // cannot claim to be another one.
+            // The OS reports which user opened the connection.
             let Ok(is_same_user) = connection.is_peer_same_user() else {
                 return;
             };
             let Some(served_connection) = connection_intake.accept_connection(&connection) else {
                 return;
             };
-            let peer = resolve_peer(
+            if let Some(executable_watch) = executable_watch {
+                executable_watch.check_executable_file(build_installed_version_restart(
+                    connection_intake,
+                    inbox_sender,
+                    executable_watch,
+                ));
+            }
+            let peer = Peer::Local {
                 is_same_user,
-                allow_other_users_setting.is_some_and(|is_enabled| is_enabled()),
-            );
-            // Another local user's connection carries the setting with it,
-            // so each of their requests is checked against it again.
+                is_other_user_access_allowed: allow_other_users_setting
+                    .is_some_and(|is_enabled| is_enabled()),
+            };
+            // Another local user's connection carries the setting. Each of
+            // their requests reads it again.
             let live_setting = if is_same_user {
                 None
             } else {
                 allow_other_users_setting.cloned()
             };
-            // Read for each connection, so a token rotated after this
-            // server started is the one the next Hello is checked against.
+            // The token is read for each connection: the next Hello is
+            // checked against the token rotated last.
             let connection_token = connection_token.read().expect("connection token").clone();
             let inbox_sender = inbox_sender.clone();
+            let executable_watch = executable_watch.cloned();
             std::thread::spawn(move || {
                 serve_connection(
                     connection,
@@ -650,6 +679,7 @@ fn run_accept_loop(
                     peer,
                     live_setting,
                     &served_connection,
+                    executable_watch.as_ref(),
                 );
             });
         },
@@ -671,7 +701,7 @@ fn run_accept_loop(
 /// a `koshi` CLI invocation.
 ///
 /// A `Restart` the dispatcher refuses is answered with
-/// [`IpcErrorCode::MalformedRequest`] carrying the sentence naming what is
+/// [`IpcErrorCode::RequestFailed`] carrying the sentence naming what is
 /// wrong, and the connection keeps serving.
 ///
 /// An answered `Attach` ends the request loop: the connection is handed to
@@ -681,8 +711,8 @@ fn run_accept_loop(
 /// `live_setting` is the live read of the `allow-other-users` setting on a
 /// connection from another local user, and `None` on one from the user who
 /// started the session. It is read once a request has arrived and before any
-/// answer goes out, so turning the setting off closes the connection with
-/// nothing written.
+/// answer goes out. Turning the setting off closes the connection with nothing
+/// written.
 ///
 /// A `Leaving` request ends the connection with no answer.
 ///
@@ -690,6 +720,12 @@ fn run_accept_loop(
 /// holds this connection's read direction through it, and the entry is removed
 /// when this function returns. An intake that closes ends the connection,
 /// whatever the request was.
+///
+/// A Hello refused for its protocol version runs
+/// [`ExecutableWatch::check_executable_file_after_refused_hello`] on
+/// `executable_watch`, which restarts the session through
+/// [`restart_into_installed_version`] when the program file holds another
+/// koshi version, and the connection keeps serving.
 fn serve_connection(
     mut connection: Connection,
     connection_token: ConnectionToken,
@@ -697,11 +733,11 @@ fn serve_connection(
     peer: Peer,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
+    executable_watch: Option<&Arc<ExecutableWatch>>,
 ) {
-    let mut gate = Handshake::from_expected_token_and_peer(connection_token, peer);
-    // The setting can change while this connection is open, so it is read
-    // again for each request. `None` is a connection from the user who started
-    // the session, whose admission cannot be withdrawn.
+    let mut handshake = Handshake::from_expected_token_and_peer(connection_token, peer);
+    // The setting is read again for each request. `None` is a connection from
+    // the user who started the session, whose admission cannot be withdrawn.
     let admission_setting = live_setting.clone();
     let is_admitted = move || match &admission_setting {
         None => true,
@@ -710,11 +746,23 @@ fn serve_connection(
     loop {
         let (request_id, request_kind) = match plane::read_next_request::<SessionPlane>(
             &mut connection,
-            &mut gate,
+            &mut handshake,
             BUILD_VERSION,
             &is_admitted,
         ) {
             RequestDisposition::Answered => continue,
+            RequestDisposition::VersionRefused => {
+                if let Some(executable_watch) = executable_watch {
+                    executable_watch.check_executable_file_after_refused_hello(
+                        build_installed_version_restart(
+                            &served_connection.intake,
+                            inbox_sender,
+                            executable_watch,
+                        ),
+                    );
+                }
+                continue;
+            }
             RequestDisposition::Stop => return,
             RequestDisposition::Dispatch {
                 request_id,
@@ -723,17 +771,17 @@ fn serve_connection(
         };
 
         let outgoing_response = match request_kind {
-            // Answered before dispatch, so it never reaches this match.
             IpcRequestKind::Hello { .. } => {
                 unreachable!("Hello is answered by the connection thread before dispatch")
             }
-            IpcRequestKind::SubmitCommand(envelope) => {
-                let envelope = Box::new(stamp_cli_command_source(*envelope));
+            IpcRequestKind::SubmitCommand(command_envelope) => {
+                let stamped_command_envelope =
+                    Box::new(stamp_cli_command_source(*command_envelope));
                 let dispatch_response = request_dispatcher_response(
                     &served_connection.intake,
                     inbox_sender,
                     |response_sender| RuntimeEvent::Ipc {
-                        envelope,
+                        command_envelope: stamped_command_envelope,
                         response_sender,
                     },
                 );
@@ -763,19 +811,18 @@ fn serve_connection(
                         pane_area,
                         cell_size,
                         attached_at: SystemTime::now(),
-                        is_remote: gate.is_remote_caller(),
+                        is_remote: handshake.is_remote_caller(),
                         response_sender,
                     },
                 );
                 // No running session, or no dispatcher left to mint the
-                // client: the process is past its last session, so the
-                // socket is as good as gone.
+                // client: the connection closes with no answer.
                 let Some(Some(accepted_client)) = dispatch_response else {
                     return;
                 };
                 // Counted before the answer is written and dropped once the
-                // stream below ends, so a caller that reads its `Attached`
-                // frame never sees this connection uncounted.
+                // stream below ends. A caller that reads its `Attached` frame
+                // finds this connection counted.
                 let _attached_connection_guard =
                     served_connection.intake.record_attached_connection();
                 let attached_response = IpcResponse {
@@ -818,7 +865,7 @@ fn serve_connection(
             // A keyboard event, a resize, a paste and a mouse round belong on
             // an attached client's connection, which the `Attach` arm above
             // hands to `stream_events`. On this control path they name no
-            // client, so they close the connection.
+            // client and close the connection.
             IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
@@ -831,14 +878,13 @@ fn serve_connection(
                     inbox_sender,
                     |response_sender| RuntimeEvent::IpcDiscovery { response_sender },
                 );
-                // No running session: the process is past its last session, so
-                // the socket is as good as gone.
-                let Some(Some(overview)) = dispatch_response else {
+                // No running session: the connection closes with no answer.
+                let Some(Some(session_overview)) = dispatch_response else {
                     return;
                 };
                 IpcResponse {
                     request_id,
-                    answer_result: IpcResult::Overview(overview),
+                    answer_result: IpcResult::Overview(session_overview),
                 }
             }
             IpcRequestKind::Layout { tab_id } => {
@@ -850,8 +896,7 @@ fn serve_connection(
                         response_sender,
                     },
                 );
-                // No running session: the process is past its last session, so
-                // the socket is as good as gone.
+                // No running session: the connection closes with no answer.
                 let Some(Some(session_layout)) = dispatch_response else {
                     return;
                 };
@@ -875,17 +920,17 @@ fn serve_connection(
                         request_id,
                         answer_result: IpcResult::Restarting,
                     },
-                    // The dispatcher named what is wrong; nothing was torn
-                    // down, so the connection keeps serving.
-                    Some(Err(restart_error_message)) => IpcResponse {
+                    // The dispatcher named what is wrong. Nothing was torn
+                    // down, and the connection keeps serving.
+                    Some(Err(restart_refusal)) => IpcResponse {
                         request_id,
                         answer_result: IpcResult::Error(IpcErrorPayload {
-                            code: IpcErrorCode::MalformedRequest,
-                            message: restart_error_message,
+                            code: IpcErrorCode::RequestFailed,
+                            message: restart_refusal.to_string(),
                         }),
                     },
-                    // No dispatcher left to swap anything: the process is
-                    // tearing down, so the socket is as good as gone.
+                    // No dispatcher left: the connection closes with no
+                    // answer.
                     None => return,
                 }
             }
@@ -921,14 +966,13 @@ fn serve_connection(
 /// way. Nothing is written back for either: this half writes no frames.
 ///
 /// A `SubmitCommand` on this connection has its source stamped by
-/// [`stamp_client_command_source`], so it is attributed to `client_id` and to no other
-/// client.
+/// [`stamp_client_command_source`]: it is attributed to `client_id` and to no
+/// other client.
 ///
 /// Either half ending detaches the client, which removes its record and drops
 /// its subscription; the closed queue, or the terminal `Quit` or `Restarting`
-/// frame, then ends the writing thread. Both notify, so a write that fails
-/// while the reading half is still reading is cleaned up too — a detach for a
-/// client already gone changes nothing.
+/// frame, then ends the writing thread. Both halves hand over a detach when
+/// they end. A detach for a client already gone changes nothing.
 ///
 /// A detach the server starts closes the client's queue: the writing thread
 /// writes what is already queued, then [`SessionEvent::Detached`] as its last
@@ -958,11 +1002,11 @@ fn serve_connection(
 /// returns.
 ///
 /// `served_connection` is this connection's entry in the [`Intake`]: the intake holds this
-/// connection's read direction through it. The client's record stays as it is,
-/// so the image swap that cut the connection carries it across.
+/// connection's read direction through it. The client's record stays as it is:
+/// the image swap that cut the connection carries it across.
 fn stream_events(
     connection: Connection,
-    stream: AttachedStream,
+    attached_stream: AttachedStream,
     inbox_sender: &Sender<RuntimeEvent>,
     live_setting: Option<OtherUsersSetting>,
     served_connection: &ServedConnection,
@@ -972,9 +1016,9 @@ fn stream_events(
         deliveries,
         ending_notice,
         graphics_capabilities,
-    } = stream;
-    let (mut reader, mut writer) = connection.split();
-    let writer_inbox = inbox_sender.clone();
+    } = attached_stream;
+    let (mut frame_reader, mut frame_writer) = connection.split();
+    let writer_inbox_sender = inbox_sender.clone();
     let writer_intake = Arc::clone(&served_connection.intake);
     ending_notice.record_writer_started();
     std::thread::spawn(move || {
@@ -982,14 +1026,14 @@ fn stream_events(
         loop {
             // The session is ending. This client is told at once and whatever
             // is still queued for it goes unwritten. A queue the server already
-            // closed detached this client before the session ended, so its own
+            // closed detached this client before the session ended: its own
             // goodbye is what it reads.
-            if let Some(ending) = ending_notice.get_session_ending() {
+            if let Some(session_ending) = ending_notice.get_session_ending() {
                 let terminal_event = loop {
                     match deliveries.try_recv() {
                         Ok(_) => {}
                         Err(mpsc::TryRecvError::Empty) => {
-                            break match ending {
+                            break match session_ending {
                                 SessionEnding::Quit => SessionEvent::Quit,
                                 SessionEnding::Restarting => SessionEvent::Restarting,
                             }
@@ -997,32 +1041,32 @@ fn stream_events(
                         Err(mpsc::TryRecvError::Disconnected) => break SessionEvent::Detached,
                     }
                 };
-                let _ = writer.send(&terminal_event);
+                let _ = frame_writer.send(&terminal_event);
                 break;
             }
             let Ok(delivery) = deliveries.recv() else {
                 // The queue closed, which the server does when it detaches this
-                // client. `recv` hands back everything queued before the close,
-                // so the goodbye follows the events that preceded it.
-                let _ = writer.send(&SessionEvent::Detached);
+                // client. `recv` hands back everything queued before the close:
+                // the goodbye follows the events that preceded it.
+                let _ = frame_writer.send(&SessionEvent::Detached);
                 break;
             };
             let has_write_failed = match &delivery {
-                Delivery::Frame(snapshot) => send_painted_frame(
-                    &mut writer,
+                Delivery::Frame(render_snapshot) => send_painted_frame(
+                    &mut frame_writer,
                     &mut image_cache,
-                    snapshot,
+                    render_snapshot,
                     graphics_capabilities,
                     client_id,
                 ),
                 Delivery::PanePlacementSnapshot {
                     request_id,
-                    snapshot,
+                    snapshot: placement_snapshot,
                 } => send_placement_snapshot(
-                    &mut writer,
+                    &mut frame_writer,
                     &mut image_cache,
                     *request_id,
-                    snapshot,
+                    placement_snapshot,
                     graphics_capabilities,
                     client_id,
                 ),
@@ -1039,7 +1083,7 @@ fn stream_events(
             }
             let session_event = build_wire_event(&delivery);
             if let Some(session_event) = session_event {
-                let has_write_failed = match writer.send(&session_event) {
+                let has_write_failed = match frame_writer.send(&session_event) {
                     Ok(()) => false,
                     Err(IpcError::FrameTooLarge {
                         frame_byte_count,
@@ -1066,7 +1110,7 @@ fn stream_events(
             }
         }
         writer_intake.hand_over_event(
-            &writer_inbox,
+            &writer_inbox_sender,
             RuntimeEvent::ClientDetached {
                 client_id,
                 detached_at: SystemTime::now(),
@@ -1077,11 +1121,10 @@ fn stream_events(
     });
 
     loop {
-        let incoming_request_result = reader.recv::<IncomingRequest>();
-        // The setting can change while this client is attached. It is read
-        // again after each read on this connection, whether or not the frame
-        // decoded. A client whose access was withdrawn reads no further frame
-        // of this session.
+        let incoming_request_result = frame_reader.recv::<IncomingRequest>();
+        // The setting is read again after each read on this connection,
+        // whether or not the frame decoded. A client whose access was
+        // withdrawn reads no further frame of this session.
         if live_setting
             .as_ref()
             .is_some_and(|is_enabled| !is_enabled())
@@ -1105,9 +1148,8 @@ fn stream_events(
         };
         let request_kind = match incoming_request.request_kind {
             MaybeKnown::Known(request_kind) => request_kind,
-            // A kind this build does not have comes from a newer koshi. This
-            // connection carries the client's typing, so the one request is
-            // dropped and the client keeps its stream.
+            // A kind this build does not have comes from a newer koshi. The
+            // one request is dropped and the client keeps its stream.
             MaybeKnown::Unknown { variant_name } => {
                 tracing::debug!(%client_id, %variant_name, "request kind this build does not have");
                 continue;
@@ -1141,13 +1183,16 @@ fn stream_events(
                 request_id: incoming_request.request_id,
                 mouse_actions,
             },
-            IpcRequestKind::SubmitCommand(envelope) => {
+            IpcRequestKind::SubmitCommand(command_envelope) => {
                 // The result is answered by the next painted frame. The reply
                 // channel's receiving end drops here, and the dispatcher's send
                 // into it fails.
                 let (response_sender, _) = mpsc::channel();
                 RuntimeEvent::Ipc {
-                    envelope: Box::new(stamp_client_command_source(*envelope, client_id)),
+                    command_envelope: Box::new(stamp_client_command_source(
+                        *command_envelope,
+                        client_id,
+                    )),
                     response_sender,
                 }
             }
@@ -1217,7 +1262,7 @@ impl ConnectionImageCache {
 
     /// Assign stable content identities and list records this connection has not received.
     fn prepare_image_frame(&mut self, render_snapshot: &RenderSnapshot) -> PreparedImageFrame {
-        let image_placements = render_snapshot
+        let image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> = render_snapshot
             .pane_snapshots
             .iter()
             .flat_map(|pane_snapshot| {
@@ -1232,19 +1277,14 @@ impl ConnectionImageCache {
                         )
                     },
                 )
-            });
-        let image_placements: Vec<((PaneId, u64), &ImagePlacementSnapshot)> =
-            image_placements.collect();
+            })
+            .collect();
         let (should_reset_image_cache, image_uploads) =
             self.prepare_image_records(image_placements);
 
         let painted_frame =
             build_wire_frame_with_content_ids(render_snapshot, |pane_id, image_placement| {
-                self.cached_image_by_pane_and_placement_id
-                    .get(&(pane_id, image_placement.get_placement_id()))
-                    .map_or(image_placement.get_image_content_id(), |cached_image| {
-                        cached_image.image_content_id
-                    })
+                self.find_image_content_id(pane_id, image_placement)
             });
         PreparedImageFrame {
             should_reset_image_cache,
@@ -1381,13 +1421,7 @@ impl ConnectionImageCache {
         let placement_snapshot =
             crate::runtime::frame::build_wire_placement_snapshot_with_content_ids(
                 placement_snapshot,
-                |pane_id, image_placement| {
-                    self.cached_image_by_pane_and_placement_id
-                        .get(&(pane_id, image_placement.get_placement_id()))
-                        .map_or(image_placement.get_image_content_id(), |cached_image| {
-                            cached_image.image_content_id
-                        })
-                },
+                |pane_id, image_placement| self.find_image_content_id(pane_id, image_placement),
             );
         PreparedPlacementSnapshot {
             should_reset_image_cache,
@@ -1396,7 +1430,23 @@ impl ConnectionImageCache {
         }
     }
 
-    /// Forget all connection-local image identities after a recoverable write failure.
+    /// The connection-local content identity cached for `image_placement` in
+    /// `pane_id`, or the placement's own content identity when this connection
+    /// caches none for it.
+    fn find_image_content_id(
+        &self,
+        pane_id: PaneId,
+        image_placement: &ImagePlacementSnapshot,
+    ) -> u64 {
+        self.cached_image_by_pane_and_placement_id
+            .get(&(pane_id, image_placement.get_placement_id()))
+            .map_or(image_placement.get_image_content_id(), |cached_image| {
+                cached_image.image_content_id
+            })
+    }
+
+    /// Forget every connection-local image identity, start identities at 1
+    /// again, and mark the next frame to reset the client's image records.
     fn clear_image_cache(&mut self) {
         self.cached_image_by_pane_and_placement_id.clear();
         self.next_image_content_id = 1;
@@ -1439,18 +1489,27 @@ fn is_same_image_record(
 }
 
 /// Send one painted frame and each new image record after it.
+///
+/// A client whose terminal has no native image protocol receives every image
+/// placement through [`hide_image_records`], and no image record.
+///
+/// Returns `true` when the connection is no longer usable.
 fn send_painted_frame(
-    writer: &mut FrameWriter,
+    frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
     render_snapshot: &RenderSnapshot,
     graphics_capabilities: GraphicsCapabilities,
     client_id: ClientId,
 ) -> bool {
     if !graphics_capabilities.has_native_image_protocol() {
+        let mut painted_frame = build_wire_frame(render_snapshot);
+        for pane_snapshot in &mut painted_frame.pane_snapshots {
+            hide_image_records(&mut pane_snapshot.image_placement_snapshots);
+        }
         let painted_frame_event = SessionEvent::Painted {
-            frame: Box::new(build_wire_frame(render_snapshot)),
+            frame: Box::new(painted_frame),
         };
-        return match writer.send(&painted_frame_event) {
+        return match frame_writer.send(&painted_frame_event) {
             Ok(()) => false,
             Err(write_error) => {
                 report_image_send_error(image_cache, client_id, write_error, "the painted frame")
@@ -1459,7 +1518,7 @@ fn send_painted_frame(
     }
     let prepared_image_frame = image_cache.prepare_image_frame(render_snapshot);
     if prepared_image_frame.should_reset_image_cache {
-        if let Err(write_error) = writer.send(&SessionEvent::ImageCacheReset) {
+        if let Err(write_error) = frame_writer.send(&SessionEvent::ImageCacheReset) {
             return report_image_send_error(
                 image_cache,
                 client_id,
@@ -1472,7 +1531,7 @@ fn send_painted_frame(
         frame: Box::new(prepared_image_frame.painted_frame),
     };
     send_image_uploads(
-        writer,
+        frame_writer,
         image_cache,
         client_id,
         &painted_frame_event,
@@ -1482,8 +1541,13 @@ fn send_painted_frame(
 }
 
 /// Send one placement preview and each new image record after it.
+///
+/// A client whose terminal has no native image protocol receives every image
+/// placement through [`hide_image_records`], and no image record.
+///
+/// Returns `true` when the connection is no longer usable.
 fn send_placement_snapshot(
-    writer: &mut FrameWriter,
+    frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
     request_id: u64,
     placement_snapshot: &PlacementSnapshot,
@@ -1491,13 +1555,13 @@ fn send_placement_snapshot(
     client_id: ClientId,
 ) -> bool {
     if !graphics_capabilities.has_native_image_protocol() {
-        let mut wire_snapshot = build_wire_placement_snapshot(placement_snapshot);
-        hide_placement_image_records(&mut wire_snapshot);
+        let mut wire_placement_snapshot = build_wire_placement_snapshot(placement_snapshot);
+        hide_placement_image_records(&mut wire_placement_snapshot);
         let placement_snapshot_event = SessionEvent::PanePlacementSnapshot {
             request_id,
-            snapshot: Box::new(wire_snapshot),
+            snapshot: Box::new(wire_placement_snapshot),
         };
-        return match writer.send(&placement_snapshot_event) {
+        return match frame_writer.send(&placement_snapshot_event) {
             Ok(()) => false,
             Err(write_error) => report_image_send_error(
                 image_cache,
@@ -1509,7 +1573,7 @@ fn send_placement_snapshot(
     }
     let prepared_placement_snapshot = image_cache.prepare_placement_snapshot(placement_snapshot);
     if prepared_placement_snapshot.should_reset_image_cache {
-        if let Err(write_error) = writer.send(&SessionEvent::ImageCacheReset) {
+        if let Err(write_error) = frame_writer.send(&SessionEvent::ImageCacheReset) {
             return report_image_send_error(
                 image_cache,
                 client_id,
@@ -1523,7 +1587,7 @@ fn send_placement_snapshot(
         snapshot: Box::new(prepared_placement_snapshot.placement_snapshot),
     };
     send_image_uploads(
-        writer,
+        frame_writer,
         image_cache,
         client_id,
         &placement_snapshot_event,
@@ -1542,19 +1606,19 @@ fn send_placement_snapshot(
 /// <leading_event_part>` or `an image transfer chunk after <leading_event_part>`.
 /// Returns `true` when the connection is no longer usable.
 fn send_image_uploads(
-    writer: &mut FrameWriter,
+    frame_writer: &mut FrameWriter,
     image_cache: &mut ConnectionImageCache,
     client_id: ClientId,
     leading_event: &SessionEvent,
     leading_event_part: &str,
     image_uploads: Vec<(u64, Arc<ImageRecord>)>,
 ) -> bool {
-    if let Err(write_error) = writer.send(leading_event) {
+    if let Err(write_error) = frame_writer.send(leading_event) {
         return report_image_send_error(image_cache, client_id, write_error, leading_event_part);
     }
     for (upload_index, (image_content_id, image_record)) in image_uploads.into_iter().enumerate() {
         if upload_index != 0 && upload_index % MAX_FRAME_IMAGE_TRANSFER_COUNT == 0 {
-            if let Err(write_error) = writer.send(leading_event) {
+            if let Err(write_error) = frame_writer.send(leading_event) {
                 return report_image_send_error(
                     image_cache,
                     client_id,
@@ -1566,7 +1630,7 @@ fn send_image_uploads(
         let image_transfer_start_event = SessionEvent::ImageContentStart {
             image_transfer: build_wire_image_transfer(image_content_id, &image_record),
         };
-        if let Err(write_error) = writer.send(&image_transfer_start_event) {
+        if let Err(write_error) = frame_writer.send(&image_transfer_start_event) {
             return report_image_send_error(
                 image_cache,
                 client_id,
@@ -1585,7 +1649,7 @@ fn send_image_uploads(
                     chunk_bytes: chunk_bytes.to_vec(),
                 },
             };
-            if let Err(write_error) = writer.send(&image_transfer_chunk_event) {
+            if let Err(write_error) = frame_writer.send(&image_transfer_chunk_event) {
                 return report_image_send_error(
                     image_cache,
                     client_id,
@@ -1598,6 +1662,8 @@ fn send_image_uploads(
     false
 }
 
+/// Run [`hide_image_records`] on every pane of the source tab and of the
+/// destination tab, when there is one, in `placement_snapshot`.
 fn hide_placement_image_records(
     placement_snapshot: &mut koshi_ipc::placement::PanePlacementSnapshot,
 ) {
@@ -1609,15 +1675,24 @@ fn hide_placement_image_records(
     .flatten()
     {
         for pane_snapshot in &mut placement_tab_snapshot.pane_snapshots {
-            for image_placement in &mut pane_snapshot.image_placement_snapshots {
-                image_placement.image_record = None;
-                image_placement.is_available = false;
-            }
+            hide_image_records(&mut pane_snapshot.image_placement_snapshots);
         }
     }
 }
 
-/// Report one image-stream write failure and say whether the connection stays usable.
+/// Clear `image_record` and set `is_available` to `false` on every placement in
+/// `image_placements`. A client paints such a placement as the
+/// `terminal image unavailable` placeholder and waits for no image content.
+fn hide_image_records(image_placements: &mut [FrameImagePlacement]) {
+    for image_placement in image_placements {
+        image_placement.image_record = None;
+        image_placement.is_available = false;
+    }
+}
+
+/// Log one image-stream write failure. A frame over the cap clears
+/// `image_cache` and returns `false`: the connection stays usable. Any other
+/// failure returns `true`: the connection is no longer usable.
 fn report_image_send_error(
     image_cache: &mut ConnectionImageCache,
     client_id: ClientId,
@@ -1651,8 +1726,8 @@ fn report_image_send_error(
     }
 }
 
-/// Rebuild `envelope` with the source a control connection carries, over
-/// whatever source its sender wrote.
+/// Rebuild `command_envelope` with the source a control connection carries,
+/// over whatever source its sender wrote.
 ///
 /// A control connection carries a `koshi` CLI invocation. Its two sources,
 /// [`CommandSource::InSessionCli`] and [`CommandSource::ExternalCli`], are kept
@@ -1668,42 +1743,104 @@ fn report_image_send_error(
 /// `ExternalCli { session_id: None, target_client_id: None }` carrying
 /// `Command::ToggleMouseSelect`. The dispatcher's CLI-admission check refuses
 /// it: the CLI has no mouse-select verb.
-fn stamp_cli_command_source(envelope: CommandEnvelope) -> CommandEnvelope {
-    let command_source = match envelope.command_source {
+fn stamp_cli_command_source(command_envelope: CommandEnvelope) -> CommandEnvelope {
+    let command_source = match command_envelope.command_source {
         command_source @ (CommandSource::InSessionCli { .. }
         | CommandSource::ExternalCli { .. }) => command_source,
         CommandSource::KeyBinding { .. } | CommandSource::Mouse { .. } => {
             CommandSource::from_external_cli(None, None)
         }
     };
-    CommandEnvelope::from_parts(envelope.command_id, command_source, envelope.command)
+    CommandEnvelope::from_parts(
+        command_envelope.command_id,
+        command_source,
+        command_envelope.command,
+    )
 }
 
-/// Rebuild `envelope` with [`CommandSource::KeyBinding`] naming `client_id`,
-/// over whatever source its sender wrote.
+/// Rebuild `command_envelope` with [`CommandSource::KeyBinding`] naming
+/// `client_id`, over whatever source its sender wrote.
 ///
 /// `client_id` is the client this connection attached as. A command this
 /// connection sends is attributed to that client and to no other.
 ///
 /// The envelope's `client_id` is re-derived from the stamped source; the two
 /// always agree.
-fn stamp_client_command_source(envelope: CommandEnvelope, client_id: ClientId) -> CommandEnvelope {
+fn stamp_client_command_source(
+    command_envelope: CommandEnvelope,
+    client_id: ClientId,
+) -> CommandEnvelope {
     CommandEnvelope::from_parts(
-        envelope.command_id,
+        command_envelope.command_id,
         CommandSource::from_key_binding(client_id),
-        envelope.command,
+        command_envelope.command,
     )
+}
+
+/// What a check of `executable_watch` runs once the program file prints another
+/// koshi version: [`restart_into_installed_version`] with that version, through
+/// `connection_intake` and `inbox_sender`.
+fn build_installed_version_restart(
+    connection_intake: &Arc<Intake>,
+    inbox_sender: &Sender<RuntimeEvent>,
+    executable_watch: &Arc<ExecutableWatch>,
+) -> impl FnOnce(String) + Send + 'static {
+    let restart_intake = Arc::clone(connection_intake);
+    let restart_inbox_sender = inbox_sender.clone();
+    let restart_executable_watch = Arc::clone(executable_watch);
+    move |installed_version| {
+        restart_into_installed_version(
+            &restart_intake,
+            &restart_inbox_sender,
+            &restart_executable_watch,
+            &installed_version,
+        );
+    }
+}
+
+/// Ask the dispatcher to restart this session into its program file, which
+/// now holds koshi `installed_version`, through [`RuntimeEvent::IpcRestart`],
+/// and log the verdict: an accepted restart at info level, a refused one at
+/// warning level with the sentence it was refused with. A refusal that
+/// [`RestartRefusal::can_end_without_file_change`](crate::server::RestartRefusal::can_end_without_file_change)
+/// calls [`ExecutableWatch::schedule_restart_retry`] on `executable_watch`. A closed
+/// intake sends nothing.
+fn restart_into_installed_version(
+    connection_intake: &Intake,
+    inbox_sender: &Sender<RuntimeEvent>,
+    executable_watch: &ExecutableWatch,
+    installed_version: &str,
+) {
+    match request_dispatcher_response(connection_intake, inbox_sender, |response_sender| {
+        RuntimeEvent::IpcRestart { response_sender }
+    }) {
+        Some(Ok(())) => tracing::info!(
+            installed_version,
+            "the program file holds another koshi version; the session restarts into it"
+        ),
+        Some(Err(restart_refusal)) => {
+            tracing::warn!(
+                installed_version,
+                %restart_refusal,
+                "the program file holds another koshi version, and the session cannot restart into it"
+            );
+            if restart_refusal.can_end_without_file_change() {
+                executable_watch.schedule_restart_retry();
+            }
+        }
+        None => {}
+    }
 }
 
 /// Hand one request to the dispatcher thread and wait for its answer: build
 /// the inbox event around a fresh reply channel, hand it over the intake, and
-/// block on the reply. `None` means no answer is coming — the intake is closed,
-/// or the dispatcher is gone — so the caller closes its connection without one.
-fn request_dispatcher_response<T>(
+/// block on the reply. `None` means no answer is coming: the intake is closed,
+/// or the dispatcher is gone.
+fn request_dispatcher_response<DispatcherResponse>(
     connection_intake: &Intake,
     inbox_sender: &Sender<RuntimeEvent>,
-    build_runtime_event: impl FnOnce(mpsc::Sender<T>) -> RuntimeEvent,
-) -> Option<T> {
+    build_runtime_event: impl FnOnce(mpsc::Sender<DispatcherResponse>) -> RuntimeEvent,
+) -> Option<DispatcherResponse> {
     let (response_sender, response_receiver) = mpsc::channel();
     if !connection_intake.hand_over_event(inbox_sender, build_runtime_event(response_sender)) {
         return None;

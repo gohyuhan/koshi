@@ -5,18 +5,14 @@ use super::*;
 
 const ANY_MOTION_TRACKING: MouseTracking = MouseTracking::AnyMotion;
 
-fn build_press_mouse_kind(mouse_button: MouseButton) -> MouseKind {
-    MouseKind::Press(mouse_button)
-}
-
 // --- SGR encoding: `CSI < button_code ; column ; row M/m` ------------------
 
 #[test]
-fn sgr_left_press_and_release() {
+fn sgr_left_press_ends_in_upper_m_and_its_release_in_lower_m() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -27,7 +23,7 @@ fn sgr_left_press_and_release() {
     assert_eq!(
         encode_mouse(
             MouseKind::Release(MouseButton::Left),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -39,11 +35,11 @@ fn sgr_left_press_and_release() {
 }
 
 #[test]
-fn sgr_button_numbers() {
+fn sgr_press_reports_left_0_middle_1_right_2() {
     let encode_mouse_button = |mouse_button| {
         encode_mouse(
-            build_press_mouse_kind(mouse_button),
-            ModFlags::NONE,
+            MouseKind::Press(mouse_button),
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -60,7 +56,7 @@ fn sgr_button_numbers() {
 fn sgr_modifier_bits_add_shift_alt_ctrl() {
     let encode_mouse_with_modifiers = |modifier_flags| {
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
+            MouseKind::Press(MouseButton::Left),
             modifier_flags,
             1,
             1,
@@ -70,21 +66,24 @@ fn sgr_modifier_bits_add_shift_alt_ctrl() {
         .unwrap()
     };
     assert_eq!(
-        encode_mouse_with_modifiers(ModFlags::SHIFT),
+        encode_mouse_with_modifiers(BindingModifierFlags::SHIFT),
         b"\x1b[<4;1;1M"
     );
-    assert_eq!(encode_mouse_with_modifiers(ModFlags::ALT), b"\x1b[<8;1;1M");
     assert_eq!(
-        encode_mouse_with_modifiers(ModFlags::CTRL),
+        encode_mouse_with_modifiers(BindingModifierFlags::ALT),
+        b"\x1b[<8;1;1M"
+    );
+    assert_eq!(
+        encode_mouse_with_modifiers(BindingModifierFlags::CTRL),
         b"\x1b[<16;1;1M"
     );
     assert_eq!(
-        encode_mouse_with_modifiers(ModFlags::CTRL.union(ModFlags::SHIFT)),
+        encode_mouse_with_modifiers(BindingModifierFlags::CTRL.union(BindingModifierFlags::SHIFT)),
         b"\x1b[<20;1;1M",
         "modifier bits sum"
     );
     assert_eq!(
-        encode_mouse_with_modifiers(ModFlags::SUPER),
+        encode_mouse_with_modifiers(BindingModifierFlags::SUPER),
         b"\x1b[<0;1;1M",
         "super has no protocol bit"
     );
@@ -95,7 +94,7 @@ fn sgr_drag_and_motion_set_the_motion_bit() {
     assert_eq!(
         encode_mouse(
             MouseKind::Drag(MouseButton::Left),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             2,
             3,
             ANY_MOTION_TRACKING,
@@ -107,7 +106,7 @@ fn sgr_drag_and_motion_set_the_motion_bit() {
     assert_eq!(
         encode_mouse(
             MouseKind::Motion,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             5,
             6,
             ANY_MOTION_TRACKING,
@@ -119,11 +118,11 @@ fn sgr_drag_and_motion_set_the_motion_bit() {
 }
 
 #[test]
-fn sgr_wheel_directions() {
+fn sgr_wheel_reports_up_64_down_65_left_66_right_67() {
     let encode_scroll_direction = |scroll_direction| {
         encode_mouse(
             MouseKind::Scroll(scroll_direction),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -154,7 +153,7 @@ fn sgr_release_keeps_its_button_and_its_modifiers() {
     assert_eq!(
         encode_mouse(
             MouseKind::Release(MouseButton::Right),
-            ModFlags::ALT,
+            BindingModifierFlags::ALT,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -166,7 +165,7 @@ fn sgr_release_keeps_its_button_and_its_modifiers() {
     assert_eq!(
         encode_mouse(
             MouseKind::Release(MouseButton::Middle),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -180,8 +179,10 @@ fn sgr_release_keeps_its_button_and_its_modifiers() {
 fn sgr_all_three_modifiers_sum_to_twenty_eight() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::SHIFT.union(ModFlags::ALT).union(ModFlags::CTRL),
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::SHIFT
+                .union(BindingModifierFlags::ALT)
+                .union(BindingModifierFlags::CTRL),
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -195,8 +196,8 @@ fn sgr_all_three_modifiers_sum_to_twenty_eight() {
 fn sgr_writes_large_cells_in_decimal_without_a_cap() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             300,
             400,
             ANY_MOTION_TRACKING,
@@ -206,8 +207,8 @@ fn sgr_writes_large_cells_in_decimal_without_a_cap() {
     );
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             u16::MAX,
             u16::MAX,
             ANY_MOTION_TRACKING,
@@ -220,11 +221,11 @@ fn sgr_writes_large_cells_in_decimal_without_a_cap() {
 // --- Legacy / UTF-8 / urxvt encodings --------------------------------------
 
 #[test]
-fn legacy_press_and_release_bytes() {
+fn legacy_press_reports_its_button_and_its_release_reports_3() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -236,7 +237,7 @@ fn legacy_press_and_release_bytes() {
     assert_eq!(
         encode_mouse(
             MouseKind::Release(MouseButton::Left),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -250,8 +251,8 @@ fn legacy_press_and_release_bytes() {
 #[test]
 fn legacy_caps_a_cell_past_the_byte_limit() {
     let mouse_report_bytes = encode_mouse(
-        build_press_mouse_kind(MouseButton::Left),
-        ModFlags::NONE,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
         300,
         1,
         ANY_MOTION_TRACKING,
@@ -269,8 +270,8 @@ fn legacy_caps_a_cell_past_the_byte_limit() {
 fn legacy_saturates_at_the_last_cell_a_byte_holds_and_one_past_it() {
     let encode_mouse_at_column_index = |column_index| {
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             column_index,
             1,
             ANY_MOTION_TRACKING,
@@ -278,8 +279,8 @@ fn legacy_saturates_at_the_last_cell_a_byte_holds_and_one_past_it() {
         )
         .unwrap()
     };
-    // Column 223 + 32 is exactly 255; column 224 would be 256, which stays 255
-    // rather than wrapping to 0.
+    // Column 223 + 32 is exactly 255; column 224 + 32 is 256 and saturates at
+    // 255.
     assert_eq!(
         encode_mouse_at_column_index(223),
         vec![0x1b, b'[', b'M', 32, 255, 33]
@@ -294,8 +295,8 @@ fn legacy_saturates_at_the_last_cell_a_byte_holds_and_one_past_it() {
 fn legacy_caps_the_row_byte_the_same_way_as_the_column() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             1,
             300,
             ANY_MOTION_TRACKING,
@@ -309,8 +310,8 @@ fn legacy_caps_the_row_byte_the_same_way_as_the_column() {
 fn legacy_writes_a_zero_cell_as_bare_offsets() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             0,
             0,
             ANY_MOTION_TRACKING,
@@ -325,7 +326,7 @@ fn legacy_release_of_every_button_reports_three() {
     let encode_mouse_release = |mouse_button| {
         encode_mouse(
             MouseKind::Release(mouse_button),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -349,7 +350,7 @@ fn legacy_drag_and_wheel_add_their_bits_to_the_modifiers() {
     assert_eq!(
         encode_mouse(
             MouseKind::Drag(MouseButton::Middle),
-            ModFlags::SHIFT,
+            BindingModifierFlags::SHIFT,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -361,7 +362,7 @@ fn legacy_drag_and_wheel_add_their_bits_to_the_modifiers() {
     assert_eq!(
         encode_mouse(
             MouseKind::Scroll(ScrollDirection::Down),
-            ModFlags::CTRL,
+            BindingModifierFlags::CTRL,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -373,11 +374,11 @@ fn legacy_drag_and_wheel_add_their_bits_to_the_modifiers() {
 
 #[test]
 fn a_coordinate_near_u16_max_saturates_without_overflowing() {
-    // `column + 32` must not overflow u16 before the byte cap: the legacy byte
-    // saturates and the UTF-8 form does not panic.
+    // `column_number + 32` is summed in `u32`: the legacy byte saturates at 255
+    // and the UTF-8 form writes a four-byte sequence.
     let legacy_mouse_report_bytes = encode_mouse(
-        build_press_mouse_kind(MouseButton::Left),
-        ModFlags::NONE,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
         u16::MAX,
         1,
         MouseTracking::Normal,
@@ -393,8 +394,8 @@ fn a_coordinate_near_u16_max_saturates_without_overflowing() {
     // 65535 + 32 = 65567 = U+1001F, a four-byte UTF-8 sequence.
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             u16::MAX,
             1,
             MouseTracking::Normal,
@@ -409,8 +410,8 @@ fn a_coordinate_near_u16_max_saturates_without_overflowing() {
 fn utf8_switches_from_one_byte_to_two_at_cell_ninety_six() {
     let encode_mouse_at_column_index = |column_index| {
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             column_index,
             1,
             ANY_MOTION_TRACKING,
@@ -433,8 +434,8 @@ fn utf8_switches_from_one_byte_to_two_at_cell_ninety_six() {
 fn utf8_writes_a_cell_that_lands_on_a_surrogate_as_a_question_mark() {
     let encode_mouse_at_column_index = |column_index| {
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             column_index,
             1,
             ANY_MOTION_TRACKING,
@@ -470,7 +471,9 @@ fn utf8_button_byte_with_every_bit_set_stays_one_byte() {
     assert_eq!(
         encode_mouse(
             MouseKind::Scroll(ScrollDirection::Right),
-            ModFlags::SHIFT.union(ModFlags::ALT).union(ModFlags::CTRL),
+            BindingModifierFlags::SHIFT
+                .union(BindingModifierFlags::ALT)
+                .union(BindingModifierFlags::CTRL),
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -484,8 +487,8 @@ fn utf8_button_byte_with_every_bit_set_stays_one_byte() {
 fn utf8_encodes_a_high_cell_as_two_bytes() {
     // Column 300 -> code point 332 -> U+014C, two UTF-8 bytes 0xC5 0x8C.
     let mouse_report_bytes = encode_mouse(
-        build_press_mouse_kind(MouseButton::Left),
-        ModFlags::NONE,
+        MouseKind::Press(MouseButton::Left),
+        BindingModifierFlags::NONE,
         300,
         1,
         ANY_MOTION_TRACKING,
@@ -499,11 +502,11 @@ fn utf8_encodes_a_high_cell_as_two_bytes() {
 }
 
 #[test]
-fn urxvt_press_and_release() {
+fn urxvt_press_and_release_offset_the_button_code_by_32() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -515,7 +518,7 @@ fn urxvt_press_and_release() {
     assert_eq!(
         encode_mouse(
             MouseKind::Release(MouseButton::Left),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -532,7 +535,7 @@ fn urxvt_drag_motion_and_wheel_offset_the_whole_button_code() {
     assert_eq!(
         encode_mouse(
             MouseKind::Drag(MouseButton::Left),
-            ModFlags::SHIFT,
+            BindingModifierFlags::SHIFT,
             2,
             3,
             ANY_MOTION_TRACKING,
@@ -544,7 +547,7 @@ fn urxvt_drag_motion_and_wheel_offset_the_whole_button_code() {
     assert_eq!(
         encode_mouse(
             MouseKind::Motion,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -556,7 +559,7 @@ fn urxvt_drag_motion_and_wheel_offset_the_whole_button_code() {
     assert_eq!(
         encode_mouse(
             MouseKind::Scroll(ScrollDirection::Up),
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             ANY_MOTION_TRACKING,
@@ -570,8 +573,8 @@ fn urxvt_drag_motion_and_wheel_offset_the_whole_button_code() {
 fn urxvt_writes_a_large_cell_in_decimal_without_a_cap() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::NONE,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::NONE,
             300,
             u16::MAX,
             ANY_MOTION_TRACKING,
@@ -586,7 +589,7 @@ fn urxvt_writes_a_large_cell_in_decimal_without_a_cap() {
 #[test]
 fn off_reports_nothing() {
     for mouse_kind in [
-        build_press_mouse_kind(MouseButton::Left),
+        MouseKind::Press(MouseButton::Left),
         MouseKind::Release(MouseButton::Left),
         MouseKind::Drag(MouseButton::Left),
         MouseKind::Motion,
@@ -595,7 +598,7 @@ fn off_reports_nothing() {
         assert_eq!(
             encode_mouse(
                 mouse_kind,
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 1,
                 1,
                 MouseTracking::Off,
@@ -612,7 +615,7 @@ fn x10_reports_only_presses() {
     let encode_x10_mouse_event = |mouse_kind| {
         encode_mouse(
             mouse_kind,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             MouseTracking::X10,
@@ -620,13 +623,13 @@ fn x10_reports_only_presses() {
         )
     };
     assert_eq!(
-        encode_x10_mouse_event(build_press_mouse_kind(MouseButton::Left)),
+        encode_x10_mouse_event(MouseKind::Press(MouseButton::Left)),
         Some(b"\x1b[<0;1;1M".to_vec())
     );
     assert_eq!(
         encode_x10_mouse_event(MouseKind::Scroll(ScrollDirection::Up)),
         None,
-        "X10 predates the wheel"
+        "X10 does not report the wheel"
     );
     assert_eq!(
         encode_x10_mouse_event(MouseKind::Release(MouseButton::Left)),
@@ -643,8 +646,8 @@ fn x10_reports_only_presses() {
 fn x10_drops_modifier_bits_under_sgr_encoding_too() {
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Right),
-            ModFlags::SHIFT.union(ModFlags::CTRL),
+            MouseKind::Press(MouseButton::Right),
+            BindingModifierFlags::SHIFT.union(BindingModifierFlags::CTRL),
             4,
             5,
             MouseTracking::X10,
@@ -659,21 +662,21 @@ fn x10_omits_modifier_bits_that_higher_modes_carry() {
     // X10 (?9) reports only the button: a Ctrl+left press stays button 0.
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::CTRL,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::CTRL,
             1,
             1,
             MouseTracking::X10,
             MouseEncoding::Default,
         ),
         Some(vec![0x1b, b'[', b'M', 32, 33, 33]),
-        "X10 drops the ctrl bit; Cb stays 0"
+        "X10 drops the ctrl bit; the button code stays 0"
     );
     // Normal tracking keeps the modifier bit for the same click.
     assert_eq!(
         encode_mouse(
-            build_press_mouse_kind(MouseButton::Left),
-            ModFlags::CTRL,
+            MouseKind::Press(MouseButton::Left),
+            BindingModifierFlags::CTRL,
             1,
             1,
             MouseTracking::Normal,
@@ -689,7 +692,7 @@ fn normal_adds_releases_but_not_motion() {
     let encode_normal_tracking_mouse_event = |mouse_kind| {
         encode_mouse(
             mouse_kind,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             MouseTracking::Normal,
@@ -697,7 +700,7 @@ fn normal_adds_releases_but_not_motion() {
         )
     };
     assert_eq!(
-        encode_normal_tracking_mouse_event(build_press_mouse_kind(MouseButton::Left)),
+        encode_normal_tracking_mouse_event(MouseKind::Press(MouseButton::Left)),
         Some(b"\x1b[<0;1;1M".to_vec())
     );
     assert_eq!(
@@ -721,7 +724,7 @@ fn button_motion_adds_drag_but_not_bare_motion() {
     let encode_button_motion_mouse_event = |mouse_kind| {
         encode_mouse(
             mouse_kind,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             MouseTracking::ButtonMotion,
@@ -740,7 +743,7 @@ fn any_motion_reports_bare_motion() {
     assert_eq!(
         encode_mouse(
             MouseKind::Motion,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             1,
             1,
             MouseTracking::AnyMotion,

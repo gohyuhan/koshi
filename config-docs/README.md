@@ -23,7 +23,8 @@ their own subdirectories.
 | macOS | `~/Library/Application Support/koshi` |
 | Windows | `%APPDATA%\koshi\config` |
 
-Koshi has no config-path override. Linux still follows `XDG_CONFIG_HOME`.
+Koshi has no config-path override. Linux still follows `XDG_CONFIG_HOME`, and
+Windows follows an absolute `APPDATA`.
 
 So a full config directory looks like:
 
@@ -56,18 +57,28 @@ version 2
 Missing versions, bad KDL, bad values, unknown keys, and unsupported versions
 fail the check. Errors from all files are reported together.
 
-An updated session server or router runs config migration before it reads the
-files. `koshi config migrate` runs the same migration on request. It validates
-every file before writing. It applies each registered version step in order
-and validates after each step. Invalid input or a missing step stops migration
-before any file is written. A migration error stops a new session server or
-router before it loads config. A running session checks migration before its
-restart and keeps its current build if the check fails.
+A session server, a router, and `koshi resume-support` run config migration
+before they read the files. `koshi config migrate` runs the same migration on
+request. It applies each registered version step in order. A file that cannot
+be read, bad KDL, an unusable version, a missing step, or a step that adds a
+schema problem stops migration before any file is written. Before it writes,
+migration takes the lock file `.migration.lock` in the config directory. A
+start with every file already current takes no lock. A lock file that cannot
+be opened or locked also stops migration before any file is written. A
+session server, a router, or
+`koshi resume-support` whose migration fails prints the error on standard
+error and carries on with the files as they are; the next start migrates them
+again. A session server also writes the error to its log at warn level when
+`koshi.kdl` turns logging on. A running session asks the installed build which
+resume formats it reads before its restart; that question runs the migration,
+and the session restarts whether or not the migration succeeds.
 
-Current schema version is `2`. Valid version `1` files migrate to version `2`.
-Valid version `2` files are reported as current and stay unchanged. For
-example, `version 1` in `koshi.kdl` becomes `version 2` when the updated
-server starts. Migration does not repair invalid config.
+Current schema version is `2`. Version `1` files migrate to version `2`.
+Version `2` files are reported as current and stay unchanged. For example,
+`version 1` in `koshi.kdl` becomes `version 2` when the updated server starts.
+Migration does not repair bad fields: an unknown key or a bad value stays in
+the migrated file, the server skips it, and `koshi config check` still
+rejects it.
 
 Changed files use atomic replacement, one file at a time. Config symlinks stay;
 their regular-file targets change. A write error lists earlier completed files

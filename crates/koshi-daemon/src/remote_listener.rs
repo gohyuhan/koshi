@@ -11,28 +11,32 @@
 //! reaches, which sessions a scope reaches, and where one named session
 //! listens. Carrying a connection's traffic never reaches the dispatcher.
 //!
-//! An admitted secret registers the connection with the router, and it stays registered until this
-//! listener reports it ended. A revoke shuts a registered connection's socket, attached or not. The
-//! router holds at most
+//! An admitted secret registers the connection with the router, and it stays
+//! registered until this listener reports it ended. A revoke shuts a
+//! registered connection's socket, attached or not. The router holds at most
 //! [`MAX_LIVE_REMOTE_CONNECTION_COUNT`](crate::router::MAX_LIVE_REMOTE_CONNECTION_COUNT)
 //! registrations and refuses the connections that arrive over that count.
 //!
 //! The TLS handshake, the frame the caller opens with, and the refusal naming
-//! both version ranges finish inside `ADMISSION_WINDOW_DURATION`, counted from the
-//! moment the connection's thread starts. Each single read and write inside
+//! both version ranges finish inside `ADMISSION_WINDOW_DURATION`, counted from
+//! the moment the connection's thread starts. Each single read and write inside
 //! them is given the time left on that deadline when it starts. Every other
-//! refusal replaces that deadline with `REFUSAL_WINDOW_DURATION`. After the Welcome both
-//! halves lose their deadline.
+//! refusal replaces that deadline with `REFUSAL_WINDOW_DURATION`. After the
+//! Welcome both halves lose their deadline.
 //!
-//! Every refusal is
-//! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) and closes the
-//! connection. A wrong secret, a revoked secret, a session that does not exist,
-//! a session the secret holds no grant for, and a session another local user
-//! started produce the same bytes and the same work: no caller-supplied name
+//! Every refusal closes the connection. An admitted caller whose attach
+//! arrives while the router is about to restart into a new build is refused
+//! with [`ROUTER_RESTARTING_MESSAGE`], whatever its selector names. Every
+//! other refusal but the one naming both version ranges is
+//! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED). A wrong secret,
+//! a revoked secret, a session that does not exist, a session the secret holds
+//! no grant for, and a session another local user started produce the same
+//! bytes and the same work: no caller-supplied name
 //! reaches a socket connect, a wait, or a file until the admitted scope has
-//! been proven to cover it. Order is `admit_remote_token` →
-//! `resolve_session_selector` → `is_allowed_for_session` →
-//! `is_session_started_by_this_router` → open.
+//! been proven to cover it. Order is `admit_remote_token` → the wait for every
+//! unlisted session of this user's to describe itself, whatever the selector
+//! names → `resolve_session_selector`, which must name a session of this
+//! user's → `is_allowed_for_session` → open.
 //!
 //! This listener carries the three remote frames and then one session server's
 //! own bytes. No path from it reaches the router's control plane, so
@@ -43,7 +47,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -57,26 +61,27 @@ use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
     compute_agreed_protocol_version, ConnectionToken, IpcRequest, IpcRequestKind,
 };
-use koshi_ipc::remote_state::CertFile;
+use koshi_ipc::remote_state::CertificateFile;
 use koshi_ipc::remote_tokens::TokenScope;
 use koshi_ipc::remote_wire::{
     format_version_refusal, RemoteClientFrame, RemoteServerFrame, RemoteSessionRow,
     MIN_REMOTE_PROTOCOL_VERSION, REMOTE_HELLO_MAX_BYTE_COUNT, REMOTE_PROTOCOL_VERSION,
     REMOTE_REFUSED,
 };
-use koshi_ipc::router::SessionSelector;
+use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
 use koshi_ipc::tls::{self, TlsReader, TlsWriter};
 use koshi_ipc::transport::{
     Connection, Deadlined, RawReader, RawWriter, ReadCloser, MAX_FRAME_BYTE_COUNT,
 };
+use koshi_runtime::executable_watch::ExecutableWatch;
 
-use crate::router::RouterEvent;
+use crate::router::{check_router_executable_file, RouterEvent};
 
 /// How long the connection's thread spends on the TLS handshake, on reading
 /// the frame the caller opens with, and on writing every refusal it answers
-/// before admission, counted from the moment that thread starts. A caller that
-/// is not admitted holds its thread and its admission place for no longer than
-/// this.
+/// before admission, counted from the moment that thread starts: 10 s. A
+/// caller that is not admitted holds its thread and its admission place for no
+/// longer than this.
 const ADMISSION_WINDOW_DURATION: Duration = Duration::from_secs(10);
 
 /// How long one address's connection attempts are counted over.
@@ -127,8 +132,8 @@ pub(crate) enum AdmissionAsk {
         /// Where the answer goes. `None` refuses the connection.
         response_sender: Sender<Option<RemoteConnectionAdmission>>,
     },
-    /// The sessions an admitted scope reaches.
-    Rows {
+    /// List the sessions an admitted scope reaches.
+    ListRows {
         /// How far the admitting grant reaches.
         scope: TokenScope,
         /// Where the answer goes.
@@ -143,17 +148,32 @@ pub(crate) enum AdmissionAsk {
         remote_connection_id: u64,
         /// The session the caller named.
         session_selector: SessionSelector,
-        /// Where the answer goes. `None` refuses the attach.
-        response_sender: Sender<Option<PathBuf>>,
+        /// Where the answer goes: the endpoint file of the session to attach
+        /// to, or why the attach is refused.
+        response_sender: Sender<Result<PathBuf, LocateRefusal>>,
     },
-    /// One admitted connection has ended. It leaves the router's list.
-    Ended {
+    /// Remove one admitted connection that has ended from the router's list.
+    RemoveConnection {
         /// The number that connection was registered under.
         remote_connection_id: u64,
     },
 }
 
+/// Why the dispatcher refused a remote attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocateRefusal {
+    /// The connection was dropped by a revoke, the selector names no session
+    /// of this user's, or the scope does not cover that session. The caller
+    /// gets [`REMOTE_REFUSED`].
+    NotReached,
+    /// The router has decided to restart into a new build and attaches
+    /// nothing until it has. The caller gets
+    /// [`ROUTER_RESTARTING_MESSAGE`].
+    RouterRestarting,
+}
+
 /// What a presented secret reached.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RemoteConnectionAdmission {
     /// How far the grant behind that secret reaches.
     pub scope: TokenScope,
@@ -166,54 +186,72 @@ pub(crate) struct RemoteConnectionAdmission {
 ///
 /// Dropping this without calling [`BoundRemoteListener::start_serving`] gives the port back.
 pub(crate) struct BoundRemoteListener {
-    /// Sends the accept loop what it needs to start. Dropping this without
-    /// sending ends the waiting thread, which gives the port back.
-    dispatcher_sender: Sender<Sender<RouterEvent>>,
+    /// Sends the accept loop what it needs to start: the sender of the
+    /// router's dispatcher and the router's watch of its program file.
+    /// Dropping this without sending ends the waiting thread, which gives the
+    /// port back.
+    dispatcher_sender: Sender<(Sender<RouterEvent>, Arc<ExecutableWatch>)>,
 }
 
-/// Take the TLS port at `remote_listen_address`, presenting `certificate_file`, without serving on
-/// it yet.
+/// Take the TLS port at `remote_listen_address`, presenting
+/// `certificate_file`, without serving on it yet.
 ///
-/// Builds the TLS configuration, binds `remote_listen_address`, and starts the accept thread.
-/// That thread holds the port and accepts nobody until [`BoundRemoteListener::start_serving`] sends it
-/// somewhere to put its questions, or until the sender is dropped, which ends it
-/// and releases the port.
+/// Builds the TLS configuration, binds `remote_listen_address`, and starts the
+/// accept thread. That thread holds the port and accepts nobody until
+/// [`BoundRemoteListener::start_serving`] sends it the dispatcher's events
+/// sender. Dropping the [`BoundRemoteListener`] first ends the thread and
+/// releases the port.
 ///
 /// # Errors
 /// The certificate that could not be turned into a TLS configuration, or the
 /// address that could not be bound.
 pub(crate) fn bind_remote_listener(
-    remote_listen_address: String,
-    certificate_file: &CertFile,
+    remote_listen_address: SocketAddr,
+    certificate_file: &CertificateFile,
 ) -> io::Result<BoundRemoteListener> {
     let tls_config = Arc::new(build_remote_server_tls_config(certificate_file)?);
-    let listener = TcpListener::bind(&remote_listen_address)?;
-    let (dispatcher_sender, dispatcher_receiver) = mpsc::channel::<Sender<RouterEvent>>();
+    let listener = TcpListener::bind(remote_listen_address)?;
+    let (dispatcher_sender, dispatcher_receiver) =
+        mpsc::channel::<(Sender<RouterEvent>, Arc<ExecutableWatch>)>();
     std::thread::Builder::new()
         .name("koshi-remote-accept".to_string())
         .spawn(move || {
-            let Ok(dispatcher_events_sender) = dispatcher_receiver.recv() else {
+            let Ok((dispatcher_events_sender, executable_watch)) = dispatcher_receiver.recv()
+            else {
                 return;
             };
-            run_remote_accept_loop(&listener, &tls_config, &dispatcher_events_sender);
+            run_remote_accept_loop(
+                &listener,
+                &tls_config,
+                &dispatcher_events_sender,
+                &executable_watch,
+            );
         })?;
     Ok(BoundRemoteListener { dispatcher_sender })
 }
 
 impl BoundRemoteListener {
-    /// Start serving on this port. The thread [`bind_remote_listener`] started begins accepting
-    /// connections and gives each its own thread; `dispatcher_events_sender` carries those
-    /// threads' questions to the router's dispatcher.
+    /// Start serving on this port. The thread [`bind_remote_listener`] started
+    /// begins accepting connections and gives each its own thread;
+    /// `dispatcher_events_sender` carries those threads' questions to the
+    /// router's dispatcher, and each connection served runs a check of
+    /// `executable_watch`, as [`check_router_executable_file`] states.
     ///
     /// Cannot fail.
-    pub(crate) fn start_serving(self, dispatcher_events_sender: Sender<RouterEvent>) {
-        let _ = self.dispatcher_sender.send(dispatcher_events_sender);
+    pub(crate) fn start_serving(
+        self,
+        dispatcher_events_sender: Sender<RouterEvent>,
+        executable_watch: Arc<ExecutableWatch>,
+    ) {
+        let _ = self
+            .dispatcher_sender
+            .send((dispatcher_events_sender, executable_watch));
     }
 }
 
 /// The TLS configuration this machine serves with: `certificate_file`'s
 /// certificate and private key, and no client certificate asked for.
-fn build_remote_server_tls_config(certificate_file: &CertFile) -> io::Result<ServerConfig> {
+fn build_remote_server_tls_config(certificate_file: &CertificateFile) -> io::Result<ServerConfig> {
     let certificate_chain = vec![CertificateDer::from(certificate_file.cert_der.clone())];
     let private_key =
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certificate_file.key_der.clone()));
@@ -239,9 +277,9 @@ impl WarningRateLimiter {
         }
     }
 
-    /// Whether to write the line at `current_time`. True when no line has been written,
-    /// and when the last one was written [`LOG_WINDOW_DURATION`] or longer ago. Writing
-    /// is the caller's; this only answers.
+    /// Whether to write the line at `current_time`. True when no line has been
+    /// written, and when the last one was written [`LOG_WINDOW_DURATION`] or
+    /// longer ago. The caller writes the line; this only answers.
     ///
     /// Example — with [`LOG_WINDOW_DURATION`] at 60 seconds, ten thousand calls spread
     /// over five minutes answer true five times.
@@ -257,14 +295,17 @@ impl WarningRateLimiter {
 }
 
 /// Accept connections and give each its own thread, dropping the ones from an
-/// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside [`RATE_WINDOW_DURATION`]
-/// and the ones that arrive while [`MAX_ADMISSION_COUNT`] connections are already
-/// waiting to present a secret. A failed accept is reported at most once inside
+/// address that has opened more than [`MAX_ATTEMPT_COUNT`] inside
+/// [`RATE_WINDOW_DURATION`] and the ones that arrive while
+/// [`MAX_ADMISSION_COUNT`] connections are already waiting to present a
+/// secret. A failed accept is reported at most once inside
 /// [`LOG_WINDOW_DURATION`], waits [`ACCEPT_RETRY_DELAY_DURATION`], and retries.
+/// Each connection given a thread runs a check of `executable_watch` first.
 fn run_remote_accept_loop(
     listener: &TcpListener,
     tls_config: &Arc<ServerConfig>,
     dispatcher_events_sender: &Sender<RouterEvent>,
+    executable_watch: &Arc<ExecutableWatch>,
 ) {
     let mut peer_address_rate_table = PeerAddressRateTable::new();
     let admission_count = Arc::new(AtomicUsize::new(0));
@@ -313,6 +354,7 @@ fn run_remote_accept_loop(
             drop(tcp_stream);
             continue;
         };
+        check_router_executable_file(executable_watch, dispatcher_events_sender);
         let tls_config = Arc::clone(tls_config);
         let dispatcher_events_sender = dispatcher_events_sender.clone();
         let _ = std::thread::Builder::new()
@@ -362,6 +404,7 @@ impl Drop for AdmissionSlot {
 }
 
 /// What the rate table says to do with one connection attempt.
+#[derive(Debug, PartialEq, Eq)]
 enum PeerAddressAttemptDecision {
     /// Serve it: this address is inside its limit.
     Serve,
@@ -383,9 +426,9 @@ struct PeerAddressRateWindow {
 
 /// How many connections each address has opened lately.
 ///
-/// Bounded at [`MAX_RATE_TABLE_ENTRY_COUNT`]. Every check first drops the addresses whose
-/// window has passed; a check that still finds the table full drops the address
-/// whose window opened first.
+/// Bounded at [`MAX_RATE_TABLE_ENTRY_COUNT`]. Every check first drops the
+/// addresses whose window has passed; a check that still finds the table full
+/// drops the address whose window opened first.
 struct PeerAddressRateTable {
     /// One window per address.
     window_by_peer_ip_address: HashMap<IpAddr, PeerAddressRateWindow>,
@@ -399,11 +442,12 @@ impl PeerAddressRateTable {
         }
     }
 
-    /// Count one connection from `peer_ip_address` at `current_time` and say what to do with it.
+    /// Count one connection from `peer_ip_address` at `current_time` and say
+    /// what to do with it.
     ///
     /// An address is logged once per window, on the attempt that crosses
-    /// [`MAX_ATTEMPT_COUNT`]. Every subsequent attempt in that window is dropped in
-    /// silence.
+    /// [`MAX_ATTEMPT_COUNT`]. Every attempt after it in that window is dropped
+    /// in silence.
     ///
     /// Example — with [`MAX_ATTEMPT_COUNT`] at 10, attempts 1 to 10 from one
     /// address are [`PeerAddressAttemptDecision::Serve`], attempt 11 is
@@ -458,6 +502,7 @@ impl PeerAddressRateTable {
 }
 
 /// What the frame a caller sends turned out to be.
+#[derive(Debug, PartialEq, Eq)]
 enum RemoteClientFrameRead {
     /// A readable frame.
     Frame(RemoteClientFrame),
@@ -472,17 +517,17 @@ enum RemoteClientFrameRead {
 /// the sessions that secret reaches or a bridge to one of them.
 ///
 /// The TLS handshake and the frame the caller opens with finish inside
-/// [`ADMISSION_WINDOW_DURATION`], counted from the moment this thread starts. A refusal
-/// written by [`send_refusal`] gets [`REFUSAL_WINDOW_DURATION`] instead. Once the caller is
-/// admitted both halves and the socket lose their deadlines and block for as
-/// long as it takes.
+/// [`ADMISSION_WINDOW_DURATION`], counted from the moment this thread starts. A
+/// refusal written by [`send_refusal`] gets [`REFUSAL_WINDOW_DURATION`]
+/// instead. Once the caller is admitted both halves and the socket lose their
+/// deadlines and block for as long as it takes.
 ///
 /// Admission registers the connection with the router, attached or not. The
 /// registration is dropped when the connection finishes, whichever step it
 /// finished at.
 ///
-/// `admission_slot` holds this connection's place in the admission window and is
-/// dropped the moment the secret is admitted.
+/// `admission_slot` holds this connection's place in the admission window and
+/// is dropped the moment the secret is admitted.
 ///
 /// On Unix the thread blocks SIGPIPE on its own signal mask; a write to a peer
 /// that hung up returns an error whatever the process-wide disposition is.
@@ -535,8 +580,8 @@ fn serve_remote_connection(
         RemoteClientFrameRead::Closed => return,
     };
 
-    // The version is settled before the secret is looked at. This refusal names
-    // both ranges instead of carrying REMOTE_REFUSED.
+    // The version is checked before the secret. The version refusal names both
+    // version ranges.
     let Some(agreed_remote_protocol_version) = compute_agreed_protocol_version(
         minimum_remote_version,
         maximum_remote_version,
@@ -604,11 +649,9 @@ fn serve_remote_connection(
 /// often as it asks, attach to one when it asks for that, and report the
 /// connection ended when no bridge took it over.
 ///
-/// `session_protocol_versions` is the session protocol range the client named in its opening
-/// frame. Nothing here reads it: it is carried to
-/// [`bridge_remote_connection_to_session`], which puts it in the session-plane Hello it sends
-/// for this client, so the client and the session server settle a version
-/// between themselves.
+/// `session_protocol_versions` is the session protocol range the client named
+/// in its opening frame. [`bridge_remote_connection_to_session`] puts it in the
+/// session-plane Hello it sends for this client.
 fn serve_admitted_remote_connection(
     mut reader: TlsReader,
     mut writer: TlsWriter,
@@ -667,7 +710,7 @@ fn process_admitted_remote_frames(
                 let admitted_token_scope = admitted_connection.scope.clone();
                 let remote_session_rows =
                     ask_router_dispatcher(dispatcher_events_sender, |response_sender| {
-                        AdmissionAsk::Rows {
+                        AdmissionAsk::ListRows {
                             scope: admitted_token_scope,
                             response_sender,
                         }
@@ -686,7 +729,7 @@ fn process_admitted_remote_frames(
             RemoteClientFrame::Attach { session_selector } => {
                 let admitted_token_scope = admitted_connection.scope.clone();
                 let remote_connection_id = admitted_connection.remote_connection_id;
-                let located_session_endpoint_path =
+                let locate_answer =
                     ask_router_dispatcher(dispatcher_events_sender, |response_sender| {
                         AdmissionAsk::Locate {
                             scope: admitted_token_scope,
@@ -695,11 +738,21 @@ fn process_admitted_remote_frames(
                             response_sender,
                         }
                     })?;
-                let Some(session_endpoint_path) = located_session_endpoint_path else {
-                    send_refusal(writer);
-                    return None;
+                return match locate_answer {
+                    Ok(session_endpoint_path) => Some(session_endpoint_path),
+                    Err(LocateRefusal::NotReached) => {
+                        send_refusal(writer);
+                        None
+                    }
+                    Err(LocateRefusal::RouterRestarting) => {
+                        send_refusal_message(
+                            writer,
+                            ROUTER_RESTARTING_MESSAGE,
+                            Instant::now() + REFUSAL_WINDOW_DURATION,
+                        );
+                        None
+                    }
                 };
-                return Some(session_endpoint_path);
             }
             RemoteClientFrame::Hello { .. } => {
                 send_refusal(writer);
@@ -710,10 +763,11 @@ fn process_admitted_remote_frames(
 }
 
 /// The Hello the router sends a session server for a caller this listener
-/// accepted: `connection_token` from that session's endpoint file, the caller's own
-/// version range in `session_protocol_versions` as `(minimum, maximum)`, and `remote` set.
+/// accepted: `connection_token` from that session's endpoint file, the
+/// caller's own version range in `session_protocol_versions` as
+/// `(minimum, maximum)`, and `is_remote` set to `true`.
 ///
-/// This is the only place `remote` is set.
+/// This is the only place `is_remote` is set.
 fn build_bridged_hello(
     connection_token: ConnectionToken,
     session_protocol_versions: (u32, u32),
@@ -730,8 +784,9 @@ fn build_bridged_hello(
     }
 }
 
-/// Open the local connection to the session advertised at `session_endpoint_path` and
-/// send it the Hello carrying that session's endpoint token and `session_protocol_versions`.
+/// Open the local connection to the session advertised at
+/// `session_endpoint_path` and send it the Hello carrying that session's
+/// endpoint token and `session_protocol_versions`.
 ///
 /// Hands back the connection's two raw halves and the handle that closes its
 /// read direction.
@@ -767,8 +822,8 @@ fn open_local_session_bridge(
 /// Two threads carry the two directions. Whichever ends first shuts the TCP
 /// socket in both directions, ending the thread reading the TLS stream at once,
 /// and closes the local connection's read direction. On Unix that ends the
-/// thread reading the session at once. A Windows named pipe carries no read
-/// direction to shut, so there that thread ends at the session server's next
+/// thread reading the session at once. A Windows named pipe has no read
+/// direction to shut: on Windows that thread ends at the session server's next
 /// message or when it hangs up.
 ///
 /// The connection is reported ended once, by whichever direction finishes
@@ -847,19 +902,20 @@ fn report_remote_connection_ended(
     dispatcher_events_sender: &Sender<RouterEvent>,
     remote_connection_id: u64,
 ) {
-    let _ = dispatcher_events_sender.send(RouterEvent::Admission(AdmissionAsk::Ended {
+    let _ = dispatcher_events_sender.send(RouterEvent::Admission(AdmissionAsk::RemoveConnection {
         remote_connection_id,
     }));
 }
 
-/// Reports one bridged connection ended. The first [`RemoteConnectionEndReport::report_once`] sends;
-/// every subsequent one does nothing.
+/// Reports one bridged connection ended. The first
+/// [`RemoteConnectionEndReport::report_once`] sends; every call after it
+/// does nothing.
 struct RemoteConnectionEndReport {
     /// Where the report goes.
     dispatcher_events_sender: Sender<RouterEvent>,
     /// The number the connection is registered under.
     remote_connection_id: u64,
-    /// Set by the first report. Every subsequent one does nothing.
+    /// Set by the first report. Every report after it does nothing.
     has_reported: std::sync::atomic::AtomicBool,
 }
 
@@ -903,14 +959,24 @@ fn ask_router_dispatcher<Response>(
 
 /// Write one [`REMOTE_REFUSED`] frame, giving the write until `refusal_deadline`.
 ///
-/// A write that fails is dropped, and so is one whose `refusal_deadline` has already
-/// passed.
+/// A write that fails is dropped, and so is one whose `refusal_deadline` has
+/// already passed.
 fn send_refusal_with_deadline(writer: &mut (impl Write + Deadlined), refusal_deadline: Instant) {
+    send_refusal_message(writer, REMOTE_REFUSED, refusal_deadline);
+}
+
+/// Write one [`RemoteServerFrame::Refused`] frame carrying `refusal_message`,
+/// giving the write until `refusal_deadline`.
+fn send_refusal_message(
+    writer: &mut (impl Write + Deadlined),
+    refusal_message: &str,
+    refusal_deadline: Instant,
+) {
     writer.set_deadline(Some(refusal_deadline));
     let _ = send_remote_frame(
         writer,
         &RemoteServerFrame::Refused {
-            message: REMOTE_REFUSED.to_string(),
+            message: refusal_message.to_string(),
         },
     );
 }
@@ -920,19 +986,20 @@ fn send_refusal_with_deadline(writer: &mut (impl Write + Deadlined), refusal_dea
 ///
 /// For a caller that is already admitted, whose halves carry no deadline. A
 /// caller still inside the admission window is refused with
-/// [`send_refusal_with_deadline`],
-/// which cannot hold a thread past that window.
+/// [`send_refusal_with_deadline`], which ends the write at that window's end.
 fn send_refusal(writer: &mut (impl Write + Deadlined)) {
     send_refusal_with_deadline(writer, Instant::now() + REFUSAL_WINDOW_DURATION);
 }
 
 /// Read one frame: a 4-byte big-endian length, then that many bytes of JSON.
 ///
-/// The length is checked against `maximum_frame_byte_count` before the payload buffer is allocated.
-/// Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before admission and [`MAX_FRAME_BYTE_COUNT`] after
-/// it. A length over `maximum_frame_byte_count` is [`RemoteClientFrameRead::Closed`] and reads no payload.
-fn read_client_frame<R: Read>(
-    reader: &mut R,
+/// The length is checked against `maximum_frame_byte_count` before the payload
+/// buffer is allocated. Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before
+/// admission and [`MAX_FRAME_BYTE_COUNT`] after it. A length over
+/// `maximum_frame_byte_count` is [`RemoteClientFrameRead::Closed`] and reads no
+/// payload.
+fn read_client_frame<Reader: Read>(
+    reader: &mut Reader,
     maximum_frame_byte_count: u32,
 ) -> RemoteClientFrameRead {
     let mut length_bytes = [0u8; 4];
@@ -960,8 +1027,8 @@ fn read_client_frame<R: Read>(
 /// # Errors
 /// The JSON encoder's own failure, `the answer is larger than a frame can
 /// carry` for a payload past `u32::MAX` bytes, and whatever the writer reports.
-fn send_remote_frame<W: Write>(
-    writer: &mut W,
+fn send_remote_frame<Writer: Write>(
+    writer: &mut Writer,
     remote_server_frame: &RemoteServerFrame,
 ) -> io::Result<()> {
     let payload_bytes = serde_json::to_vec(remote_server_frame)?;

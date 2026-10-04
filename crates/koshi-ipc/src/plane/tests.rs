@@ -455,7 +455,7 @@ fn a_hello_naming_a_version_range_this_build_does_not_share_is_refused_here() {
         );
         assert_eq!(
             server_thread.join().expect("server ends"),
-            vec![RequestDisposition::Answered, RequestDisposition::Stop]
+            vec![RequestDisposition::VersionRefused, RequestDisposition::Stop]
         );
     });
 }

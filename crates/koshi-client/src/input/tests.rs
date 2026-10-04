@@ -24,13 +24,12 @@ fn build_test_client() -> Client {
     crate::tests::build_test_client_with_event_sender().0
 }
 
-fn build_key_chord(modifier_flags: ModFlags, key_character: char) -> KeyChord {
+fn build_key_chord(modifier_flags: BindingModifierFlags, key_character: char) -> KeyChord {
     KeyChord::from_parts(modifier_flags, Key::Char(key_character))
 }
 
-/// A resolved keymap holding exactly `bindings` in `mode`, each sequence
-/// paired with the core action of that name. Nothing else is bound, so a case
-/// the shipped table does not hold can be set up.
+/// A resolved keymap holding exactly `key_bindings` in `mode_name`, each
+/// sequence paired with the core action of that name. Nothing else is bound.
 fn build_keymap_for_mode(
     mode_name: &str,
     key_bindings: &[(KeySequence, &str)],
@@ -78,8 +77,11 @@ fn build_keymap_for_modes(
 fn an_unbound_key_passes_through_in_normal_mode() {
     let mut client = build_test_client();
     assert_eq!(
-        client.resolve_key(build_key_chord(ModFlags::NONE, 'a'), Instant::now()),
-        KeyOutcome::PassThrough(build_key_chord(ModFlags::NONE, 'a'))
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::NONE, 'a'),
+            Instant::now()
+        ),
+        KeyOutcome::PassThrough(build_key_chord(BindingModifierFlags::NONE, 'a'))
     );
 }
 
@@ -89,14 +91,17 @@ fn a_prefix_chord_opens_a_sequence_and_types_nothing() {
     // holds the keyboard rather than reaching the pane.
     let mut client = build_test_client();
     assert_eq!(
-        client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), Instant::now()),
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::CTRL, 'p'),
+            Instant::now()
+        ),
         KeyOutcome::Pending
     );
     assert_eq!(
         client
             .get_pending_key_sequence()
             .map(|pending_key_sequence| pending_key_sequence.list_chords().to_vec()),
-        Some(vec![build_key_chord(ModFlags::CTRL, 'p')])
+        Some(vec![build_key_chord(BindingModifierFlags::CTRL, 'p')])
     );
 }
 
@@ -104,9 +109,15 @@ fn a_prefix_chord_opens_a_sequence_and_types_nothing() {
 fn completing_a_sequence_fires_its_binding_and_closes_it() {
     let mut client = build_test_client();
     let current_instant = Instant::now();
-    client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), current_instant);
+    client.resolve_key(
+        build_key_chord(BindingModifierFlags::CTRL, 'p'),
+        current_instant,
+    );
 
-    let key_outcome = client.resolve_key(build_key_chord(ModFlags::NONE, 'n'), current_instant);
+    let key_outcome = client.resolve_key(
+        build_key_chord(BindingModifierFlags::NONE, 'n'),
+        current_instant,
+    );
     let KeyOutcome::Fire(bound_action) = key_outcome else {
         panic!("`<C-p> n` fires new-pane, got {key_outcome:?}");
     };
@@ -123,14 +134,19 @@ fn completing_a_sequence_fires_its_binding_and_closes_it() {
 
 #[test]
 fn a_key_that_continues_nothing_is_swallowed_and_the_sequence_stands() {
-    // The viewer is inside a koshi context: a key that context cannot use goes
-    // nowhere rather than surprising the program underneath.
+    // `z` continues nothing after `<C-p>`.
     let mut client = build_test_client();
     let current_instant = Instant::now();
-    client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), current_instant);
+    client.resolve_key(
+        build_key_chord(BindingModifierFlags::CTRL, 'p'),
+        current_instant,
+    );
 
     assert_eq!(
-        client.resolve_key(build_key_chord(ModFlags::NONE, 'z'), current_instant,),
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::NONE, 'z'),
+            current_instant,
+        ),
         KeyOutcome::Pending,
         "not PassThrough — the pane must not see it"
     );
@@ -138,7 +154,7 @@ fn a_key_that_continues_nothing_is_swallowed_and_the_sequence_stands() {
         client
             .get_pending_key_sequence()
             .map(|pending_key_sequence| pending_key_sequence.list_chords().to_vec()),
-        Some(vec![build_key_chord(ModFlags::CTRL, 'p')]),
+        Some(vec![build_key_chord(BindingModifierFlags::CTRL, 'p')]),
         "the sequence is unchanged"
     );
 }
@@ -147,7 +163,10 @@ fn a_key_that_continues_nothing_is_swallowed_and_the_sequence_stands() {
 fn escape_leaves_an_open_sequence_without_typing_it() {
     let mut client = build_test_client();
     let current_instant = Instant::now();
-    client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), current_instant);
+    client.resolve_key(
+        build_key_chord(BindingModifierFlags::CTRL, 'p'),
+        current_instant,
+    );
 
     assert_eq!(
         client.resolve_key(ESCAPE_KEY_CHORD, current_instant),
@@ -165,12 +184,12 @@ fn the_unlock_chord_escapes_locked_mode_ahead_of_the_keymap() {
     let mut client = build_test_client();
     client.set_lock_mode(LockMode::Locked);
 
-    let outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("the reserved unlock always fires, got {outcome:?}");
+    let key_outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("the reserved unlock always fires, got {key_outcome:?}");
     };
     assert_eq!(
-        bound.action_reference,
+        bound_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("valid name")
     );
 }
@@ -199,13 +218,13 @@ fn the_unlock_chord_escapes_even_when_the_keymap_lost_its_unlock_binding() {
         &ActionRegistry::new(),
     );
 
-    let outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
+    let key_outcome = client.resolve_key(KeybindingsConfig::RESERVED_UNLOCK, Instant::now());
 
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("the reserved unlock always fires, got {outcome:?}");
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("the reserved unlock always fires, got {key_outcome:?}");
     };
     assert_eq!(
-        bound.action_reference,
+        bound_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("valid name")
     );
 }
@@ -299,7 +318,7 @@ fn submitted_placement_consumes_placement_keys_and_keeps_its_command() {
             })
         ))
     );
-    let submitted_mode = client.placement_state.placement_mode.clone();
+    let submitted_placement_mode = client.placement_state.placement_mode.clone();
 
     for placement_action in [
         ClientActionKind::SelectNextPlacementTab,
@@ -311,7 +330,10 @@ fn submitted_placement_consumes_placement_keys_and_keeps_its_command() {
             client.apply_client_action(placement_action),
             PlacementInputAction::Consumed
         );
-        assert_eq!(client.placement_state.placement_mode, submitted_mode);
+        assert_eq!(
+            client.placement_state.placement_mode,
+            submitted_placement_mode
+        );
     }
     assert_eq!(client.get_placement_target(), Some(placement_target));
 }
@@ -455,12 +477,14 @@ fn a_new_frame_owner_cancels_an_unconfirmed_placement() {
 
 #[test]
 fn locked_mode_still_passes_keys_it_does_not_bind() {
-    // Locked mode is pass-through: that is the whole point of it.
     let mut client = build_test_client();
     client.set_lock_mode(LockMode::Locked);
     assert_eq!(
-        client.resolve_key(build_key_chord(ModFlags::NONE, 'a'), Instant::now()),
-        KeyOutcome::PassThrough(build_key_chord(ModFlags::NONE, 'a'))
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::NONE, 'a'),
+            Instant::now()
+        ),
+        KeyOutcome::PassThrough(build_key_chord(BindingModifierFlags::NONE, 'a'))
     );
 }
 
@@ -983,13 +1007,13 @@ fn locked_mode_opens_pane_placement_without_changing_the_base_mode() {
 
     assert_eq!(
         client.resolve_key(
-            KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
             Instant::now(),
         ),
         KeyOutcome::Pending
     );
     let KeyOutcome::Fire(bound_action) = client.resolve_key(
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('m')),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('m')),
         Instant::now(),
     ) else {
         panic!("the locked pane placement opener must fire");
@@ -999,15 +1023,14 @@ fn locked_mode_opens_pane_placement_without_changing_the_base_mode() {
         ActionReference::from_core_action_name("begin-pane-placement").expect("valid action name")
     );
 
-    assert!(matches!(
+    assert_eq!(
         client.apply_client_action(ClientActionKind::BeginPanePlacement),
         PlacementInputAction::ReadPlacement {
             pane_id_to_focus: None,
-            source_pane_id: actual_source_pane_id,
-            destination_tab_id: actual_destination_tab_id,
-        } if actual_source_pane_id == source_pane_id
-            && actual_destination_tab_id == source_tab_id
-    ));
+            source_pane_id,
+            destination_tab_id: source_tab_id,
+        }
+    );
     assert_eq!(client.get_lock_mode(), LockMode::Locked);
     assert_eq!(client.get_active_input_mode(), LockMode::PanePlacement);
 }
@@ -1017,7 +1040,10 @@ fn a_modal_mode_owns_the_keyboard_and_discards_what_it_does_not_bind() {
     let mut client = build_test_client();
     client.set_lock_mode(LockMode::Resize);
     assert_eq!(
-        client.resolve_key(build_key_chord(ModFlags::NONE, 'a'), Instant::now()),
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::NONE, 'a'),
+            Instant::now()
+        ),
         KeyOutcome::Discard,
         "a modal layer never leaks a key to the pane"
     );
@@ -1025,13 +1051,18 @@ fn a_modal_mode_owns_the_keyboard_and_discards_what_it_does_not_bind() {
 
 #[test]
 fn changing_mode_drops_an_open_sequence() {
-    // Held chords were typed at koshi; a mode change is not a request to type
-    // them at the pane.
+    // A mode change drops the held chords.
     let mut client = build_test_client();
-    client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), Instant::now());
+    client.resolve_key(
+        build_key_chord(BindingModifierFlags::CTRL, 'p'),
+        Instant::now(),
+    );
     assert_eq!(
         client.get_pending_key_sequence(),
-        Some(&KeySequence::from(build_key_chord(ModFlags::CTRL, 'p')))
+        Some(&KeySequence::from(build_key_chord(
+            BindingModifierFlags::CTRL,
+            'p'
+        )))
     );
 
     client.set_lock_mode(LockMode::Locked);
@@ -1044,7 +1075,10 @@ fn a_prefix_only_sequence_never_wakes_the_loop() {
     // nothing on its own waits for its next chord indefinitely.
     let mut client = build_test_client();
     let current_instant = Instant::now();
-    client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), current_instant);
+    client.resolve_key(
+        build_key_chord(BindingModifierFlags::CTRL, 'p'),
+        current_instant,
+    );
 
     assert_eq!(client.compute_next_key_wakeup(current_instant), None);
     assert_eq!(client.expire_key_sequence(current_instant), None);
@@ -1063,12 +1097,15 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
     // alone focuses left again, with no second `<C-p>`.
     let mut client = build_test_client();
     let current_instant = Instant::now();
-    let left_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Left));
+    let left_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left));
     let focus_left_action =
         ActionReference::from_core_action_name("focus-pane-left").expect("valid name");
 
     assert_eq!(
-        client.resolve_key(build_key_chord(ModFlags::CTRL, 'p'), current_instant,),
+        client.resolve_key(
+            build_key_chord(BindingModifierFlags::CTRL, 'p'),
+            current_instant,
+        ),
         KeyOutcome::Pending
     );
 
@@ -1081,7 +1118,7 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
         client
             .get_pending_key_sequence()
             .map(|pending_key_sequence| pending_key_sequence.list_chords().to_vec()),
-        Some(vec![build_key_chord(ModFlags::CTRL, 'p')]),
+        Some(vec![build_key_chord(BindingModifierFlags::CTRL, 'p')]),
         "the prefix alone is held again, not the whole sequence"
     );
     assert_eq!(
@@ -1100,8 +1137,8 @@ fn a_continuous_binding_re_opens_its_prefix_so_the_last_chord_repeats() {
 #[test]
 fn placement_submode_takes_priority_over_a_normal_arrow_binding() {
     let mut client = build_test_client();
-    let leader_chord = build_key_chord(ModFlags::CTRL, 'p');
-    let right_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Right));
+    let leader_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    let right_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Right));
     client.keymap_catalog = build_keymap_for_mode(
         "normal",
         &[(
@@ -1165,17 +1202,19 @@ fn a_one_chord_binding_of_a_continuous_action_opens_no_prefix() {
     // Only a multi-chord sequence has a prefix to re-open. `<C-y>` on its own
     // fires `core:focus-pane-left` and leaves the keyboard to the user.
     let mut client = build_test_client();
-    let ctrl_y = build_key_chord(ModFlags::CTRL, 'y');
-    client.keymap_catalog =
-        build_keymap_for_mode("normal", &[(KeySequence::from(ctrl_y), "focus-pane-left")]);
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    client.keymap_catalog = build_keymap_for_mode(
+        "normal",
+        &[(KeySequence::from(ctrl_y_chord), "focus-pane-left")],
+    );
 
-    let outcome = client.resolve_key(ctrl_y, Instant::now());
+    let key_outcome = client.resolve_key(ctrl_y_chord, Instant::now());
 
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("`<C-y>` fires focus-pane-left, got {outcome:?}");
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("`<C-y>` fires focus-pane-left, got {key_outcome:?}");
     };
     assert_eq!(
-        bound.action_reference,
+        bound_action.action_reference,
         ActionReference::from_core_action_name("focus-pane-left").expect("valid name")
     );
     assert_eq!(client.get_pending_key_sequence(), None);
@@ -1183,46 +1222,48 @@ fn a_one_chord_binding_of_a_continuous_action_opens_no_prefix() {
 
 #[test]
 fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
-    // `<C-y>` binds `core:quit` and also opens `<C-y> a`. The viewer cannot
-    // know which the user meant until the deadline passes, and then the
-    // complete binding is the answer.
+    // `<C-y>` binds `core:quit` and also opens `<C-y> a`. At the deadline the
+    // complete binding fires.
     let mut client = build_test_client();
-    let ctrl_y = build_key_chord(ModFlags::CTRL, 'y');
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
     client.keymap_catalog = build_keymap_for_mode(
         "normal",
         &[
-            (KeySequence::from(ctrl_y), "quit"),
+            (KeySequence::from(ctrl_y_chord), "quit"),
             (
                 KeySequence::from_first_and_rest(
-                    ctrl_y,
-                    vec![build_key_chord(ModFlags::NONE, 'a')],
+                    ctrl_y_chord,
+                    vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
                 ),
                 "new-tab",
             ),
         ],
     );
-    let timeout = client.keymap_catalog.get_chord_timeout();
-    let now = Instant::now();
+    let chord_timeout = client.keymap_catalog.get_chord_timeout();
+    let current_instant = Instant::now();
 
-    assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
     assert_eq!(
-        client.compute_next_key_wakeup(now),
-        Some(timeout),
+        client.resolve_key(ctrl_y_chord, current_instant),
+        KeyOutcome::Pending
+    );
+    assert_eq!(
+        client.compute_next_key_wakeup(current_instant),
+        Some(chord_timeout),
         "the ambiguity arms a deadline one chord timeout out"
     );
     assert_eq!(
-        client.expire_key_sequence(now),
+        client.expire_key_sequence(current_instant),
         None,
         "nothing fires before the deadline"
     );
 
-    let due = now + timeout;
-    let bound = client
-        .expire_key_sequence(due)
+    let deadline_instant = current_instant + chord_timeout;
+    let bound_action = client
+        .expire_key_sequence(deadline_instant)
         .expect("the deadline fires the complete binding");
 
     assert_eq!(
-        bound.action_reference,
+        bound_action.action_reference,
         ActionReference::from_core_action_name("quit").expect("valid name")
     );
     assert_eq!(
@@ -1231,7 +1272,7 @@ fn a_sequence_that_is_both_a_binding_and_a_prefix_fires_on_its_deadline() {
         "the sequence is spent"
     );
     assert_eq!(
-        client.compute_next_key_wakeup(due),
+        client.compute_next_key_wakeup(deadline_instant),
         None,
         "and it wakes the loop no more"
     );
@@ -1262,14 +1303,14 @@ fn setting_the_mode_the_viewer_is_already_in_leaves_an_open_sequence_alone() {
     // The drop happens on a change of mode, so a report naming the mode the
     // viewer is already in leaves the chords it is holding where they are.
     let mut client = build_test_client();
-    let prefix = build_key_chord(ModFlags::CTRL, 'p');
-    client.resolve_key(prefix, Instant::now());
+    let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
+    client.resolve_key(prefix_chord, Instant::now());
 
     client.set_lock_mode(LockMode::Normal);
 
     assert_eq!(
         client.get_pending_key_sequence(),
-        Some(&KeySequence::from(prefix))
+        Some(&KeySequence::from(prefix_chord))
     );
 }
 
@@ -1279,25 +1320,31 @@ fn the_unlock_chord_takes_a_sequence_open_in_locked_mode_with_it() {
     // can arrive with chords already held. It is resolved before the sequence
     // buffer, and the held chords go with it.
     let mut client = build_test_client();
-    let prefix = build_key_chord(ModFlags::CTRL, 'p');
+    let prefix_chord = build_key_chord(BindingModifierFlags::CTRL, 'p');
     client.keymap_catalog = build_keymap_for_mode(
         "locked",
         &[(
-            KeySequence::from_first_and_rest(prefix, vec![build_key_chord(ModFlags::NONE, 'n')]),
+            KeySequence::from_first_and_rest(
+                prefix_chord,
+                vec![build_key_chord(BindingModifierFlags::NONE, 'n')],
+            ),
             "new-pane",
         )],
     );
     client.set_lock_mode(LockMode::Locked);
-    let now = Instant::now();
-    assert_eq!(client.resolve_key(prefix, now), KeyOutcome::Pending);
+    let current_instant = Instant::now();
+    assert_eq!(
+        client.resolve_key(prefix_chord, current_instant),
+        KeyOutcome::Pending
+    );
 
-    let outcome = client.resolve_key(client.keymap_catalog.get_unlock_chord(), now);
+    let key_outcome = client.resolve_key(client.keymap_catalog.get_unlock_chord(), current_instant);
 
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("the reserved unlock always fires, got {outcome:?}");
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("the reserved unlock always fires, got {key_outcome:?}");
     };
     assert_eq!(
-        bound.action_reference,
+        bound_action.action_reference,
         ActionReference::from_core_action_name("unlock").expect("valid name")
     );
     assert_eq!(
@@ -1310,26 +1357,29 @@ fn the_unlock_chord_takes_a_sequence_open_in_locked_mode_with_it() {
 #[test]
 fn a_deadline_already_past_asks_the_loop_to_wake_at_once() {
     let mut client = build_test_client();
-    let ctrl_y = build_key_chord(ModFlags::CTRL, 'y');
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
     client.keymap_catalog = build_keymap_for_mode(
         "normal",
         &[
-            (KeySequence::from(ctrl_y), "quit"),
+            (KeySequence::from(ctrl_y_chord), "quit"),
             (
                 KeySequence::from_first_and_rest(
-                    ctrl_y,
-                    vec![build_key_chord(ModFlags::NONE, 'a')],
+                    ctrl_y_chord,
+                    vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
                 ),
                 "new-tab",
             ),
         ],
     );
-    let timeout = client.keymap_catalog.get_chord_timeout();
-    let now = Instant::now();
-    assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
+    let chord_timeout = client.keymap_catalog.get_chord_timeout();
+    let current_instant = Instant::now();
+    assert_eq!(
+        client.resolve_key(ctrl_y_chord, current_instant),
+        KeyOutcome::Pending
+    );
 
     assert_eq!(
-        client.compute_next_key_wakeup(now + timeout + Duration::from_secs(1)),
+        client.compute_next_key_wakeup(current_instant + chord_timeout + Duration::from_secs(1)),
         Some(Duration::ZERO),
         "a deadline already behind the clock asks for no further wait"
     );
@@ -1337,31 +1387,36 @@ fn a_deadline_already_past_asks_the_loop_to_wake_at_once() {
 
 #[test]
 fn a_keymap_that_retired_the_binding_drops_the_waiting_sequence_instead_of_firing() {
-    // The deadline was armed because the sequence was itself a complete
-    // binding. A keymap the user reloaded can retire it while it waits, and
-    // then the held chords resolve to nothing.
+    // A reloaded keymap retires the binding while the sequence waits. The held
+    // chords resolve to nothing.
     let mut client = build_test_client();
-    let ctrl_y = build_key_chord(ModFlags::CTRL, 'y');
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
     client.keymap_catalog = build_keymap_for_mode(
         "normal",
         &[
-            (KeySequence::from(ctrl_y), "quit"),
+            (KeySequence::from(ctrl_y_chord), "quit"),
             (
                 KeySequence::from_first_and_rest(
-                    ctrl_y,
-                    vec![build_key_chord(ModFlags::NONE, 'a')],
+                    ctrl_y_chord,
+                    vec![build_key_chord(BindingModifierFlags::NONE, 'a')],
                 ),
                 "new-tab",
             ),
         ],
     );
-    let timeout = client.keymap_catalog.get_chord_timeout();
-    let now = Instant::now();
-    assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
+    let chord_timeout = client.keymap_catalog.get_chord_timeout();
+    let current_instant = Instant::now();
+    assert_eq!(
+        client.resolve_key(ctrl_y_chord, current_instant),
+        KeyOutcome::Pending
+    );
 
     client.keymap_catalog = build_keymap_for_mode("normal", &[]);
 
-    assert_eq!(client.expire_key_sequence(now + timeout), None);
+    assert_eq!(
+        client.expire_key_sequence(current_instant + chord_timeout),
+        None
+    );
     assert_eq!(
         client.get_pending_key_sequence(),
         None,
@@ -1372,42 +1427,45 @@ fn a_keymap_that_retired_the_binding_drops_the_waiting_sequence_instead_of_firin
 #[test]
 fn a_three_chord_binding_fires_only_on_its_third_chord() {
     let mut client = build_test_client();
-    let ctrl_y = build_key_chord(ModFlags::CTRL, 'y');
-    let first_following_chord = build_key_chord(ModFlags::NONE, 'a');
-    let second_following_chord = build_key_chord(ModFlags::NONE, 'b');
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let first_following_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    let second_following_chord = build_key_chord(BindingModifierFlags::NONE, 'b');
     client.keymap_catalog = build_keymap_for_mode(
         "normal",
         &[(
             KeySequence::from_first_and_rest(
-                ctrl_y,
+                ctrl_y_chord,
                 vec![first_following_chord, second_following_chord],
             ),
             "quit",
         )],
     );
-    let now = Instant::now();
+    let current_instant = Instant::now();
 
-    assert_eq!(client.resolve_key(ctrl_y, now), KeyOutcome::Pending);
     assert_eq!(
-        client.resolve_key(first_following_chord, now),
+        client.resolve_key(ctrl_y_chord, current_instant),
+        KeyOutcome::Pending
+    );
+    assert_eq!(
+        client.resolve_key(first_following_chord, current_instant),
         KeyOutcome::Pending
     );
     assert_eq!(
         client.get_pending_key_sequence(),
         Some(&KeySequence::from_first_and_rest(
-            ctrl_y,
+            ctrl_y_chord,
             vec![first_following_chord],
         )),
         "both chords are held, in the order they were typed"
     );
 
-    let outcome = client.resolve_key(second_following_chord, now);
+    let key_outcome = client.resolve_key(second_following_chord, current_instant);
 
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("`<C-y> a b` fires quit, got {outcome:?}");
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("`<C-y> a b` fires quit, got {key_outcome:?}");
     };
     assert_eq!(
-        bound.action_reference,
+        bound_action.action_reference,
         ActionReference::from_core_action_name("quit").expect("valid name")
     );
     assert_eq!(client.get_pending_key_sequence(), None);
@@ -1418,44 +1476,45 @@ fn a_continuous_three_chord_binding_re_opens_its_two_chord_prefix() {
     // The prefix that comes back is everything but the last chord, so the last
     // chord alone repeats the action.
     let mut client = build_test_client();
-    let ctrl_y = build_key_chord(ModFlags::CTRL, 'y');
-    let first_following_chord = build_key_chord(ModFlags::NONE, 'a');
-    let second_following_chord = build_key_chord(ModFlags::NONE, 'b');
-    let focus_left = ActionReference::from_core_action_name("focus-pane-left").expect("valid name");
+    let ctrl_y_chord = build_key_chord(BindingModifierFlags::CTRL, 'y');
+    let first_following_chord = build_key_chord(BindingModifierFlags::NONE, 'a');
+    let second_following_chord = build_key_chord(BindingModifierFlags::NONE, 'b');
+    let focus_left_action =
+        ActionReference::from_core_action_name("focus-pane-left").expect("valid name");
     client.keymap_catalog = build_keymap_for_mode(
         "normal",
         &[(
             KeySequence::from_first_and_rest(
-                ctrl_y,
+                ctrl_y_chord,
                 vec![first_following_chord, second_following_chord],
             ),
             "focus-pane-left",
         )],
     );
-    let now = Instant::now();
-    client.resolve_key(ctrl_y, now);
-    client.resolve_key(first_following_chord, now);
+    let current_instant = Instant::now();
+    client.resolve_key(ctrl_y_chord, current_instant);
+    client.resolve_key(first_following_chord, current_instant);
 
-    let outcome = client.resolve_key(second_following_chord, now);
+    let key_outcome = client.resolve_key(second_following_chord, current_instant);
 
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("`<C-y> a b` fires focus-pane-left, got {outcome:?}");
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("`<C-y> a b` fires focus-pane-left, got {key_outcome:?}");
     };
-    assert_eq!(bound.action_reference, focus_left);
+    assert_eq!(bound_action.action_reference, focus_left_action);
     assert_eq!(
         client.get_pending_key_sequence(),
         Some(&KeySequence::from_first_and_rest(
-            ctrl_y,
+            ctrl_y_chord,
             vec![first_following_chord],
         )),
         "the two-chord prefix is held again, not the whole sequence"
     );
-    assert_eq!(client.compute_next_key_wakeup(now), None);
+    assert_eq!(client.compute_next_key_wakeup(current_instant), None);
 
-    let outcome = client.resolve_key(second_following_chord, now);
+    let key_outcome = client.resolve_key(second_following_chord, current_instant);
 
-    let KeyOutcome::Fire(bound) = outcome else {
-        panic!("the bare `b` fires focus-pane-left again, got {outcome:?}");
+    let KeyOutcome::Fire(bound_action) = key_outcome else {
+        panic!("the bare `b` fires focus-pane-left again, got {key_outcome:?}");
     };
-    assert_eq!(bound.action_reference, focus_left);
+    assert_eq!(bound_action.action_reference, focus_left_action);
 }

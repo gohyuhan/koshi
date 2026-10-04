@@ -21,7 +21,7 @@ fn build_mouse_input(
     mouse_kind: MouseKind,
     column: u16,
     row: u16,
-    modifier_flags: ModFlags,
+    modifier_flags: BindingModifierFlags,
 ) -> Option<MouseInput> {
     Some(MouseInput {
         mouse_kind,
@@ -34,7 +34,12 @@ fn build_mouse_input(
 fn press_release_and_drag_carry_their_button() {
     assert_eq!(
         decode_mouse_bytes(b"\x1b[<0;11;4M"),
-        build_mouse_input(MouseKind::Press(MouseButton::Left), 10, 3, ModFlags::NONE)
+        build_mouse_input(
+            MouseKind::Press(MouseButton::Left),
+            10,
+            3,
+            BindingModifierFlags::NONE
+        )
     );
     assert_eq!(
         decode_mouse_bytes(b"\x1b[<1;11;4m"),
@@ -42,12 +47,17 @@ fn press_release_and_drag_carry_their_button() {
             MouseKind::Release(MouseButton::Middle),
             10,
             3,
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
         )
     );
     assert_eq!(
         decode_mouse_bytes(b"\x1b[<34;11;4M"),
-        build_mouse_input(MouseKind::Drag(MouseButton::Right), 10, 3, ModFlags::NONE)
+        build_mouse_input(
+            MouseKind::Drag(MouseButton::Right),
+            10,
+            3,
+            BindingModifierFlags::NONE
+        )
     );
 }
 
@@ -128,25 +138,27 @@ fn sgr_modifiers_map_individually_and_together() {
         decode_mouse_bytes(b"\x1b[<4;2;2M")
             .expect("shift")
             .modifier_flags,
-        ModFlags::SHIFT
+        BindingModifierFlags::SHIFT
     );
     assert_eq!(
         decode_mouse_bytes(b"\x1b[<8;2;2M")
             .expect("alt")
             .modifier_flags,
-        ModFlags::ALT
+        BindingModifierFlags::ALT
     );
     assert_eq!(
         decode_mouse_bytes(b"\x1b[<16;2;2M")
             .expect("control")
             .modifier_flags,
-        ModFlags::CTRL
+        BindingModifierFlags::CTRL
     );
     assert_eq!(
         decode_mouse_bytes(b"\x1b[<28;2;2M")
             .expect("all")
             .modifier_flags,
-        ModFlags::SHIFT.union(ModFlags::ALT).union(ModFlags::CTRL)
+        BindingModifierFlags::SHIFT
+            .union(BindingModifierFlags::ALT)
+            .union(BindingModifierFlags::CTRL)
     );
 }
 
@@ -157,7 +169,10 @@ fn scroll_keeps_modifiers_and_position() {
         scroll_mouse_input.mouse_kind,
         MouseKind::Scroll(ScrollDirection::Up)
     );
-    assert_eq!(scroll_mouse_input.modifier_flags, ModFlags::CTRL);
+    assert_eq!(
+        scroll_mouse_input.modifier_flags,
+        BindingModifierFlags::CTRL
+    );
     assert_eq!(scroll_mouse_input.position, Point { column: 4, row: 2 });
 }
 
@@ -175,7 +190,7 @@ fn host_super_and_meta_map_to_super_while_hyper_is_dropped() {
         MouseInput {
             mouse_kind: MouseKind::Motion,
             position: Point { column: 7, row: 9 },
-            modifier_flags: ModFlags::SHIFT | ModFlags::SUPER,
+            modifier_flags: BindingModifierFlags::SHIFT | BindingModifierFlags::SUPER,
         }
     );
 }

@@ -19,7 +19,7 @@ use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget};
 use koshi_core::event::{InputModeChanged, MouseSelectChanged, SubscriberLagged};
 use koshi_core::geometry::{Direction, Rect, Size, SplitDirection};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::MouseAnswer;
 use koshi_ipc::frame::FrameSlot;
@@ -47,11 +47,10 @@ pub(crate) const TEST_VIEWPORT_SIZE: Size = Size {
     row_count: 24,
 };
 
-/// A viewer on the built-in defaults, and the sender of its subscription.
+/// A client on the built-in defaults, and the sender of its subscription.
 ///
-/// Every test module in this crate builds its clients from here. An attached
-/// client's frames arrive over its connection instead, so a test standing in
-/// for one drops the sender.
+/// Every test module in this crate builds its clients from here. A test that
+/// stands in for an attached client drops the sender.
 pub(crate) fn build_test_client_with_event_sender() -> (Client, mpsc::SyncSender<Delivery>) {
     let (delivery_sender, delivery_receiver) = mpsc::sync_channel(8);
     let client = Client::from_client_id_and_viewport_size(
@@ -73,14 +72,14 @@ pub(crate) fn build_test_placement_snapshot(
     client_placement_revision: u64,
 ) -> PanePlacementSnapshot {
     let destination_pane_id = PaneId::new();
-    let pane_slot = |pane_id| FrameSlot {
+    let build_frame_slot = |pane_id| FrameSlot {
         pane_id,
         outer_rect: Rect::from_size_at_origin(TEST_VIEWPORT_SIZE),
         content_rect: Some(Rect::from_size_at_origin(TEST_VIEWPORT_SIZE)),
         is_visible: true,
         is_suppressed: false,
     };
-    let pane_snapshot = |pane_id| PanePlacementPaneSnapshot {
+    let build_placement_pane_snapshot = |pane_id| PanePlacementPaneSnapshot {
         pane_id,
         terminal_window: None,
         image_placement_snapshots: Vec::new(),
@@ -96,25 +95,25 @@ pub(crate) fn build_test_placement_snapshot(
             tab_id: source_tab_id,
             tab_name: "source".to_string(),
             layout_tree: LayoutNode::Pane(source_pane_id),
-            pane_slots: vec![pane_slot(source_pane_id)],
+            pane_slots: vec![build_frame_slot(source_pane_id)],
             tab_size: TEST_VIEWPORT_SIZE,
             stack_headers: Vec::new(),
             layout_mode: LayoutMode::Tiled,
             is_every_pane_suppressed: false,
             gap_cell_count: 0,
-            pane_snapshots: vec![pane_snapshot(source_pane_id)],
+            pane_snapshots: vec![build_placement_pane_snapshot(source_pane_id)],
         },
         destination_tab_snapshot: Some(PanePlacementTabSnapshot {
             tab_id: destination_tab_id,
             tab_name: "destination".to_string(),
             layout_tree: LayoutNode::Pane(destination_pane_id),
-            pane_slots: vec![pane_slot(destination_pane_id)],
+            pane_slots: vec![build_frame_slot(destination_pane_id)],
             tab_size: TEST_VIEWPORT_SIZE,
             stack_headers: Vec::new(),
             layout_mode: LayoutMode::Tiled,
             is_every_pane_suppressed: false,
             gap_cell_count: 0,
-            pane_snapshots: vec![pane_snapshot(destination_pane_id)],
+            pane_snapshots: vec![build_placement_pane_snapshot(destination_pane_id)],
         }),
         client_snapshot: PanePlacementClientSnapshot {
             client_id,
@@ -208,8 +207,8 @@ fn placement_read_accepts_only_the_current_session_and_request() {
         0,
         0,
     );
-    assert!(client.accept_placement_snapshot(1, placement_snapshot, Instant::now()));
-    assert!(client.get_placement_snapshot().is_some());
+    assert!(client.accept_placement_snapshot(1, placement_snapshot.clone(), Instant::now()));
+    assert_eq!(client.get_placement_snapshot(), Some(&placement_snapshot));
     assert!(client.begin_placement_read(2, source_pane_id, destination_tab_id, request_started_at,));
 }
 
@@ -399,7 +398,7 @@ fn placement_read_rejects_a_snapshot_that_arrives_after_its_deadline() {
     );
     let expired_at = request_started_at
         .checked_add(PLACEMENT_READ_TIMEOUT_DURATION)
-        .and_then(|deadline| deadline.checked_add(Duration::from_nanos(1)))
+        .and_then(|read_deadline| read_deadline.checked_add(Duration::from_nanos(1)))
         .expect("test deadline should be representable");
 
     assert!(!client.accept_placement_snapshot(1, placement_snapshot, expired_at));
@@ -424,7 +423,7 @@ fn placement_read_rejects_a_refusal_that_arrives_after_its_deadline() {
     ));
     let expired_at = request_started_at
         .checked_add(PLACEMENT_READ_TIMEOUT_DURATION)
-        .and_then(|deadline| deadline.checked_add(Duration::from_nanos(1)))
+        .and_then(|read_deadline| read_deadline.checked_add(Duration::from_nanos(1)))
         .expect("test deadline should be representable");
 
     assert!(!client.accept_placement_refusal(1, IpcErrorCode::ResourceLimit, expired_at,));
@@ -536,12 +535,15 @@ fn clearing_unconfirmed_placement_read_discards_the_selected_target() {
 
     client.clear_placement_read();
 
-    assert!(client.get_placement_target().is_none());
-    assert!(client
-        .placement_state
-        .placement_mode
-        .as_ref()
-        .is_some_and(|placement_mode| placement_mode.pending_placement_command.is_none()));
+    assert_eq!(client.get_placement_target(), None);
+    assert_eq!(
+        client
+            .placement_state
+            .placement_mode
+            .as_ref()
+            .map(|placement_mode| placement_mode.pending_placement_command),
+        Some(None)
+    );
 }
 
 #[test]
@@ -551,54 +553,56 @@ fn clearing_placement_read_keeps_a_submitted_target_pending() {
     let source_tab_id = TabId::new();
     let destination_pane_id = PaneId::new();
     let destination_tab_id = TabId::new();
+    let command_id = CommandId::new();
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(destination_pane_id),
+        direction: Direction::Right,
+    };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id,
         source_tab_id,
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
-            destination_tab_id,
-            anchor: PanePlacementAnchor::Pane(destination_pane_id),
-            direction: Direction::Right,
-        }),
-        pending_placement_command: Some(build_pending_placement_command(CommandId::new())),
+        placement_target: Some(placement_target.clone()),
+        pending_placement_command: Some(build_pending_placement_command(command_id)),
     });
 
     client.clear_placement_read();
 
-    assert!(client.get_placement_target().is_some());
-    assert!(client
-        .placement_state
-        .placement_mode
-        .as_ref()
-        .is_some_and(|placement_mode| placement_mode.pending_placement_command.is_some()));
+    assert_eq!(client.get_placement_target(), Some(placement_target));
+    assert_eq!(
+        client.get_pending_placement_command(),
+        Some(build_pending_placement_command(command_id))
+    );
 }
 
 #[test]
 fn an_unchanged_revision_frame_keeps_a_submitted_placement_target_pending() {
     let (mut client, _) = build_test_client_with_event_sender();
     let destination_tab_id = TabId::new();
+    let command_id = CommandId::new();
+    let placement_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(PaneId::new()),
+        direction: Direction::Right,
+    };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
-            destination_tab_id,
-            anchor: PanePlacementAnchor::Pane(PaneId::new()),
-            direction: Direction::Right,
-        }),
-        pending_placement_command: Some(build_pending_placement_command(CommandId::new())),
+        placement_target: Some(placement_target.clone()),
+        pending_placement_command: Some(build_pending_placement_command(command_id)),
     });
 
     client.set_placement_revisions(0, 0);
 
-    assert!(client.get_placement_target().is_some());
-    assert!(client
-        .placement_state
-        .placement_mode
-        .as_ref()
-        .is_some_and(|placement_mode| placement_mode.pending_placement_command.is_some()));
+    assert_eq!(client.get_placement_target(), Some(placement_target));
+    assert_eq!(
+        client.get_pending_placement_command(),
+        Some(build_pending_placement_command(command_id))
+    );
 }
 
 #[test]
@@ -621,12 +625,15 @@ fn a_committed_placement_frame_clears_the_submitted_placement_target() {
 
     client.set_placement_revisions(1, 0);
 
-    assert!(client.get_placement_target().is_none());
-    assert!(client
-        .placement_state
-        .placement_mode
-        .as_ref()
-        .is_some_and(|placement_mode| placement_mode.pending_placement_command.is_none()));
+    assert_eq!(client.get_placement_target(), None);
+    assert_eq!(
+        client
+            .placement_state
+            .placement_mode
+            .as_ref()
+            .map(|placement_mode| placement_mode.pending_placement_command),
+        Some(None)
+    );
 }
 
 #[test]
@@ -948,31 +955,35 @@ fn reconnect_clears_unconfirmed_target_and_reconciles_confirmation() {
         pending_placement_command: None,
     });
     client.prepare_placement_reconciliation();
-    assert!(client.get_placement_target().is_none());
+    assert_eq!(client.get_placement_target(), None);
 
+    let command_id = CommandId::new();
+    let submitted_placement_target = PanePlacementTarget::Split {
+        destination_tab_id,
+        anchor: PanePlacementAnchor::Pane(PaneId::new()),
+        direction: Direction::Right,
+    };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id,
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Split {
-            destination_tab_id,
-            anchor: PanePlacementAnchor::Pane(PaneId::new()),
-            direction: Direction::Right,
-        }),
-        pending_placement_command: Some(build_pending_placement_command(CommandId::new())),
+        placement_target: Some(submitted_placement_target.clone()),
+        pending_placement_command: Some(build_pending_placement_command(command_id)),
     });
     client.prepare_placement_reconciliation();
-    assert!(client.get_placement_target().is_some());
-    assert!(client
-        .placement_state
-        .placement_mode
-        .as_ref()
-        .is_some_and(|placement_mode| placement_mode.pending_placement_command.is_some()));
+    assert_eq!(
+        client.get_placement_target(),
+        Some(submitted_placement_target)
+    );
+    assert_eq!(
+        client.get_pending_placement_command(),
+        Some(build_pending_placement_command(command_id))
+    );
 
     client.set_frame_view(TabId::new(), None, Vec::new());
 
-    assert!(client.get_placement_target().is_none());
+    assert_eq!(client.get_placement_target(), None);
     assert!(!client.is_placement_confirmation_pending());
     assert!(client.is_placement_mode_active());
     assert_eq!(
@@ -1011,7 +1022,7 @@ fn build_client_with_submitted_placement(
     client.placement_state.placement_mode_lifetime = placement_mode_lifetime;
     client.pending_key_sequence = Some(PendingKeySequence {
         sequence: KeySequence::from_first_and_rest(
-            KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+            KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
             Vec::new(),
         ),
         ambiguity_deadline: None,
@@ -1331,14 +1342,15 @@ fn rejected_mouse_placement_returns_to_the_base_mode() {
 fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
     let (mut client, _) = build_test_client_with_event_sender();
     let current_command_id = CommandId::new();
+    let submitted_placement_target = PanePlacementTarget::Swap {
+        target_pane_id: PaneId::new(),
+    };
     client.placement_state.placement_mode = Some(PlacementMode {
         source_pane_id: PaneId::new(),
         source_tab_id: TabId::new(),
         destination_tab_id: TabId::new(),
         placement_direction: Direction::Right,
-        placement_target: Some(PanePlacementTarget::Swap {
-            target_pane_id: PaneId::new(),
-        }),
+        placement_target: Some(submitted_placement_target.clone()),
         pending_placement_command: Some(build_pending_placement_command(CommandId::new())),
     });
     client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilCancelled;
@@ -1346,11 +1358,14 @@ fn a_stale_placement_rejection_does_not_clear_a_new_confirmation() {
 
     assert!(!client.reject_placement_command(CommandId::new()));
     assert!(client.is_placement_confirmation_pending());
-    assert!(client.get_placement_target().is_some());
+    assert_eq!(
+        client.get_placement_target(),
+        Some(submitted_placement_target)
+    );
 }
 
-/// A viewer that read a theme file painting the focused border `color`.
-fn with_focused_border(color: RgbColor) -> (Client, mpsc::SyncSender<Delivery>) {
+/// A client that read a theme file painting the focused border `color`.
+fn build_client_with_focused_border(color: RgbColor) -> (Client, mpsc::SyncSender<Delivery>) {
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     client.load_startup_config(None, Some(build_focused_border_theme(color)), None);
     (client, delivery_sender)
@@ -1402,26 +1417,30 @@ fn build_render_snapshot(
     })
 }
 
-/// The frame the session sends a viewer whose queue overflowed, reporting
+/// The frame the session sends a client whose queue overflowed, reporting
 /// `client_id` in `lock_mode` with mouse-selection mode
 /// `is_mouse_selection_enabled`, after
 /// `dropped_count` events it will never see.
-fn resync(
+fn build_resync_delivery(
     client_id: ClientId,
     lock_mode: LockMode,
     is_mouse_selection_enabled: bool,
     dropped_count: u64,
 ) -> Delivery {
-    resync_from(
+    build_resync_delivery_from_snapshot(
         build_render_snapshot(client_id, lock_mode, is_mouse_selection_enabled),
         dropped_count,
     )
 }
 
-/// The same, resuming from `snapshot`, whose active tab the caller reads.
-fn resync_from(snapshot: Box<RenderSnapshot>, dropped_count: u64) -> Delivery {
+/// A resync delivery that resumes from `render_snapshot` after `dropped_count`
+/// dropped events.
+fn build_resync_delivery_from_snapshot(
+    render_snapshot: Box<RenderSnapshot>,
+    dropped_count: u64,
+) -> Delivery {
     Delivery::Snapshot {
-        render_snapshot: snapshot,
+        render_snapshot,
         lag_report: SubscriberLagged {
             subscriber_id: SubscriberId::new(),
             dropped_event_count: dropped_count,
@@ -1444,7 +1463,10 @@ fn build_focused_border_theme(color: RgbColor) -> PartialThemeConfig {
 fn build_ctrl_y_keybindings() -> PartialKeybindingsConfig {
     let mut bound_action_by_key_sequence = BTreeMap::new();
     bound_action_by_key_sequence.insert(
-        KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y'))),
+        KeySequence::from(KeyChord::from_parts(
+            BindingModifierFlags::CTRL,
+            Key::Char('y'),
+        )),
         BoundAction {
             action_reference: ActionReference::from_core_action_name("new-tab")
                 .expect("valid core action name"),
@@ -1512,7 +1534,8 @@ fn the_core_pane_area_reserves_the_two_chrome_rows() {
 
 #[test]
 fn a_theme_file_recolors_the_chrome_the_next_frame_paints_with() {
-    let (client, _delivery_sender) = with_focused_border(RgbColor::from_channels(1, 2, 3));
+    let (client, _delivery_sender) =
+        build_client_with_focused_border(RgbColor::from_channels(1, 2, 3));
     assert_eq!(
         client.get_theme().focused_border_color,
         ratatui::style::Color::Rgb(1, 2, 3)
@@ -1556,9 +1579,9 @@ fn a_default_config_client_paints_the_stock_colors() {
 
 #[test]
 fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
-    // `koshi.kdl` carries sections both halves read. The viewer must fold its
-    // own out of the same file, or a configured split direction and wheel
-    // behavior would silently never apply.
+    // `koshi.kdl` carries sections both halves read. The client folds its own
+    // sections out of the same file: split direction `Down`, `7` scroll lines,
+    // and wheel `Ignore`.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
     assert_eq!(
         client.get_client_config().layout.new_pane_direction,
@@ -1574,7 +1597,7 @@ fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
             mouse: Some(koshi_config::layer::PartialMouseConfig {
                 can_resize_pane_border: None,
                 scroll_line_count: Some(7),
-                wheel: Some(WheelScroll::Ignore),
+                wheel_scroll: Some(WheelScroll::Ignore),
             }),
             ..PartialKoshiConfig::default()
         }),
@@ -1587,13 +1610,15 @@ fn koshi_kdls_viewer_owned_sections_reach_the_viewers_settings() {
         Direction::Down
     );
     assert_eq!(client.get_client_config().mouse.scroll_line_count, 7);
-    assert_eq!(client.get_client_config().mouse.wheel, WheelScroll::Ignore);
+    assert_eq!(
+        client.get_client_config().mouse.wheel_scroll,
+        WheelScroll::Ignore
+    );
 }
 
 #[test]
 fn the_last_load_wins_when_settings_are_read_twice() {
-    // The colors a frame paints with must track the newest settings, not the
-    // first ones seen.
+    // The colors a frame paints with come from the newest settings.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
 
     client.load_startup_config(
@@ -1615,22 +1640,24 @@ fn the_last_load_wins_when_settings_are_read_twice() {
 
 #[test]
 fn loading_no_files_at_all_leaves_the_built_in_settings() {
-    // A run with no config files resolves to the same settings a fresh viewer
-    // holds — the palette is recomputed, not accumulated.
+    // A run with no config files resolves to the same settings a fresh client
+    // holds. The palette is recomputed, not accumulated.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
     let original_theme = *client.get_theme();
 
-    let report = client.load_startup_config(None, None, None);
+    let keymap_conflict_report = client.load_startup_config(None, None, None);
 
-    assert_eq!(report, None, "no keybinding file means no report");
+    assert_eq!(
+        keymap_conflict_report, None,
+        "no keybinding file means no report"
+    );
     assert_eq!(*client.get_theme(), original_theme);
     assert_eq!(*client.get_client_config(), ClientConfig::default());
 }
 
 #[test]
 fn extreme_palette_values_survive_the_round_trip() {
-    // The palette's endpoints are plain bytes; black and white must map
-    // through unchanged rather than being clamped or shifted.
+    // Black and white map through the palette unchanged.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
 
     client.load_startup_config(
@@ -1663,38 +1690,45 @@ fn extreme_palette_values_survive_the_round_trip() {
 #[test]
 fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let ctrl_y = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y')));
+    let ctrl_y_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('y'),
+    ));
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         None,
         "nothing is bound to `<C-y>` out of the box"
     );
-    // `<C-p>` opens the shipped pane group, so the viewer is mid-sequence.
+    // `<C-p>` opens the shipped pane group, and the client holds an open
+    // sequence.
     client.resolve_key(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
         std::time::Instant::now(),
     );
     assert_eq!(
         client.get_pending_key_sequence(),
         Some(&KeySequence::from(KeyChord::from_parts(
-            ModFlags::CTRL,
+            BindingModifierFlags::CTRL,
             Key::Char('p')
         )))
     );
 
-    let report = client.load_startup_config(None, None, Some(build_ctrl_y_keybindings()));
+    let keymap_conflict_report =
+        client.load_startup_config(None, None, Some(build_ctrl_y_keybindings()));
 
     assert_eq!(
-        report.expect("a keybinding file was given").get_verdict(),
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Apply
     );
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         Some(BoundAction {
             action_reference: ActionReference::from_core_action_name("new-tab")
@@ -1711,12 +1745,18 @@ fn an_applied_keybinding_file_swaps_the_keymap_and_drops_an_open_sequence() {
 #[test]
 fn a_keybinding_file_can_move_the_leader_the_defaults_hang_off() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let ctrl_p = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')));
-    let alt_p = KeySequence::from(KeyChord::from_parts(ModFlags::ALT, Key::Char('p')));
+    let ctrl_p_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('p'),
+    ));
+    let alt_p_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::ALT,
+        Key::Char('p'),
+    ));
     assert!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_p)
+            .match_sequence(LockMode::Normal, &ctrl_p_sequence)
             .has_longer_key_sequence
     );
 
@@ -1724,7 +1764,7 @@ fn a_keybinding_file_can_move_the_leader_the_defaults_hang_off() {
         None,
         None,
         Some(PartialKeybindingsConfig {
-            leader: Some(Leader::Mods(ModFlags::ALT)),
+            leader: Some(Leader::Modifiers(BindingModifierFlags::ALT)),
             ..PartialKeybindingsConfig::default()
         }),
     );
@@ -1732,26 +1772,28 @@ fn a_keybinding_file_can_move_the_leader_the_defaults_hang_off() {
     assert!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &alt_p)
+            .match_sequence(LockMode::Normal, &alt_p_sequence)
             .has_longer_key_sequence
     );
     assert!(
         !client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_p)
+            .match_sequence(LockMode::Normal, &ctrl_p_sequence)
             .has_longer_key_sequence
     );
 }
 
 #[test]
 fn a_refused_keybinding_file_leaves_both_the_keymap_and_the_settings_on_the_built_ins() {
-    // `maximum_chord_depth` 0 would stop every binding from resolving, the
-    // locked-mode unlock included, so the whole file is refused. The folded
-    // settings must keep describing the keymap actually in use.
+    // A file with `maximum_chord_depth` 0 is refused whole. The client keeps
+    // the built-in keymap and the built-in keybinding settings.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let ctrl_p = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')));
+    let ctrl_p_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('p'),
+    ));
 
-    let report = client.load_startup_config(
+    let keymap_conflict_report = client.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
@@ -1761,7 +1803,9 @@ fn a_refused_keybinding_file_leaves_both_the_keymap_and_the_settings_on_the_buil
     );
 
     assert_eq!(
-        report.expect("a keybinding file was given").get_verdict(),
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Reject
     );
     assert_eq!(
@@ -1772,7 +1816,7 @@ fn a_refused_keybinding_file_leaves_both_the_keymap_and_the_settings_on_the_buil
     assert!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_p)
+            .match_sequence(LockMode::Normal, &ctrl_p_sequence)
             .has_longer_key_sequence,
         "the shipped two-chord defaults still open under `<C-p>`"
     );
@@ -1780,12 +1824,10 @@ fn a_refused_keybinding_file_leaves_both_the_keymap_and_the_settings_on_the_buil
 
 #[test]
 fn a_refused_keybinding_file_leaves_an_open_sequence_alone() {
-    // Only a keymap that actually swapped retires the bindings the held chords
-    // reach for. A refusal changes no binding, so the sequence being typed
-    // still means what it meant and stays open.
+    // A refused file changes no binding. The open `<C-p>` sequence stays open.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
     client.resolve_key(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
         std::time::Instant::now(),
     );
 
@@ -1801,17 +1843,22 @@ fn a_refused_keybinding_file_leaves_an_open_sequence_alone() {
     assert_eq!(
         client
             .get_pending_key_sequence()
-            .map(|sequence| sequence.list_chords().to_vec()),
-        Some(vec![KeyChord::from_parts(ModFlags::CTRL, Key::Char('p'))])
+            .map(|pending_key_sequence| pending_key_sequence.list_chords().to_vec()),
+        Some(vec![KeyChord::from_parts(
+            BindingModifierFlags::CTRL,
+            Key::Char('p')
+        )])
     );
 }
 
 #[test]
 fn a_good_keybinding_file_still_applies_after_a_refused_one() {
-    // A refusal must leave the viewer usable, not wedged: the next file it
-    // reads applies normally.
+    // After a refused file, the next file the client reads applies.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let ctrl_y = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y')));
+    let ctrl_y_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('y'),
+    ));
 
     client.load_startup_config(
         None,
@@ -1821,16 +1868,19 @@ fn a_good_keybinding_file_still_applies_after_a_refused_one() {
             ..PartialKeybindingsConfig::default()
         }),
     );
-    let report = client.load_startup_config(None, None, Some(build_ctrl_y_keybindings()));
+    let keymap_conflict_report =
+        client.load_startup_config(None, None, Some(build_ctrl_y_keybindings()));
 
     assert_eq!(
-        report.expect("a keybinding file was given").get_verdict(),
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Apply
     );
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         Some(BoundAction {
             action_reference: ActionReference::from_core_action_name("new-tab")
@@ -1841,8 +1891,8 @@ fn a_good_keybinding_file_still_applies_after_a_refused_one() {
 
 #[test]
 fn a_keybinding_file_cannot_smuggle_colors_in_through_koshi_kdl() {
-    // `koshi.kdl`'s theme section is dropped, so with no theme file present the
-    // viewer paints the built-in palette rather than the app file's colors.
+    // The client drops the theme section of `koshi.kdl`. With no theme file,
+    // the client paints the built-in palette.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
 
     client.load_startup_config(
@@ -1870,7 +1920,7 @@ fn a_keybinding_file_cannot_smuggle_colors_in_through_koshi_kdl() {
 #[test]
 fn a_keybinding_file_without_a_pane_placement_cancel_binding_is_refused() {
     let escape_sequence = KeySequence::from(KeyChord::from_parts(
-        ModFlags::NONE,
+        BindingModifierFlags::NONE,
         Key::Named(NamedKey::Esc),
     ));
     let mut mode_bindings_by_name = BTreeMap::new();
@@ -1883,7 +1933,7 @@ fn a_keybinding_file_without_a_pane_placement_cancel_binding_is_refused() {
     );
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
 
-    let report = client.load_startup_config(
+    let keymap_conflict_report = client.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
@@ -1892,7 +1942,7 @@ fn a_keybinding_file_without_a_pane_placement_cancel_binding_is_refused() {
         }),
     );
 
-    let conflict_report = report.expect("a keybinding file was given");
+    let conflict_report = keymap_conflict_report.expect("a keybinding file was given");
     assert_eq!(
         conflict_report.diagnostics,
         vec![koshi_config::conflict::ConflictDiagnostic::PanePlacementCancelBindingMissing]
@@ -1912,13 +1962,13 @@ fn a_keybinding_file_without_a_pane_placement_cancel_binding_is_refused() {
 
 #[test]
 fn a_refused_keybinding_file_keeps_the_reserved_unlock_firing() {
-    // Binding the reserved unlock chord in locked mode is fatal: the file is
-    // refused whole and the guaranteed escape stays live.
+    // A file that binds the reserved unlock chord in locked mode is refused
+    // whole. The unlock chord keeps its `unlock` action.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let unlock_key = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
+    let unlock_sequence = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     let mut bound_action_by_key_sequence = BTreeMap::new();
     bound_action_by_key_sequence.insert(
-        unlock_key.clone(),
+        unlock_sequence.clone(),
         BoundAction {
             action_reference: ActionReference::from_core_action_name("new-tab")
                 .expect("valid core action name"),
@@ -1933,7 +1983,7 @@ fn a_refused_keybinding_file_keeps_the_reserved_unlock_firing() {
         },
     );
 
-    let report = client.load_startup_config(
+    let keymap_conflict_report = client.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
@@ -1943,13 +1993,15 @@ fn a_refused_keybinding_file_keeps_the_reserved_unlock_firing() {
     );
 
     assert_eq!(
-        report.expect("a keybinding file was given").get_verdict(),
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Reject
     );
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Locked, &unlock_key)
+            .match_sequence(LockMode::Locked, &unlock_sequence)
             .exact_bound_action,
         Some(BoundAction {
             action_reference: ActionReference::from_core_action_name("unlock")
@@ -1960,8 +2012,8 @@ fn a_refused_keybinding_file_keeps_the_reserved_unlock_firing() {
 
 #[test]
 fn a_refused_keybinding_file_still_applies_the_theme_beside_it() {
-    // The three files are read in one call; one being refused must not take
-    // the others down with it.
+    // The three files are read in one call. A refused keybinding file leaves
+    // the theme file applied.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
 
     client.load_startup_config(
@@ -1982,13 +2034,16 @@ fn a_refused_keybinding_file_still_applies_the_theme_beside_it() {
 #[test]
 fn a_second_keybinding_file_fully_replaces_the_firsts_bindings() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let ctrl_y = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y')));
+    let ctrl_y_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('y'),
+    ));
 
     client.load_startup_config(None, None, Some(build_ctrl_y_keybindings()));
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         Some(BoundAction {
             action_reference: ActionReference::from_core_action_name("new-tab")
@@ -2001,7 +2056,7 @@ fn a_second_keybinding_file_fully_replaces_the_firsts_bindings() {
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         None,
         "the first file's binding must not survive the second"
@@ -2010,16 +2065,19 @@ fn a_second_keybinding_file_fully_replaces_the_firsts_bindings() {
 
 #[test]
 fn a_second_startup_load_with_no_keybinding_file_resets_the_keymap_to_the_built_ins() {
-    // An absent `keybinding.kdl` means its defaults stand, so a binding an
+    // With no `keybinding.kdl`, the built-in keymap applies, and a binding an
     // earlier load installed stops resolving.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let ctrl_y = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('y')));
+    let ctrl_y_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('y'),
+    ));
 
     client.load_startup_config(None, None, Some(build_ctrl_y_keybindings()));
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         Some(BoundAction {
             action_reference: ActionReference::from_core_action_name("new-tab")
@@ -2027,13 +2085,16 @@ fn a_second_startup_load_with_no_keybinding_file_resets_the_keymap_to_the_built_
         })
     );
 
-    let report = client.load_startup_config(None, None, None);
+    let keymap_conflict_report = client.load_startup_config(None, None, None);
 
-    assert_eq!(report, None, "no keybinding file means no report");
+    assert_eq!(
+        keymap_conflict_report, None,
+        "no keybinding file means no report"
+    );
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &ctrl_y)
+            .match_sequence(LockMode::Normal, &ctrl_y_sequence)
             .exact_bound_action,
         None,
         "the earlier file's binding must not outlive it"
@@ -2045,8 +2106,11 @@ fn a_second_startup_load_with_no_keybinding_file_resets_the_keymap_to_the_built_
 fn a_low_chord_depth_drops_every_binding_longer_than_it() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
     let long_key_sequence = KeySequence::from_first_and_rest(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('y')),
-        vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('x'))],
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('y')),
+        vec![KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('x'),
+        )],
     );
     let mut bound_action_by_key_sequence = BTreeMap::new();
     bound_action_by_key_sequence.insert(
@@ -2065,7 +2129,7 @@ fn a_low_chord_depth_drops_every_binding_longer_than_it() {
         },
     );
 
-    let report = client.load_startup_config(
+    let keymap_conflict_report = client.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
@@ -2077,11 +2141,13 @@ fn a_low_chord_depth_drops_every_binding_longer_than_it() {
 
     // Depth 1 applies — with a warning naming the unreachable binding.
     assert_eq!(
-        report.expect("a keybinding file was given").get_verdict(),
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Apply
     );
-    // The overlong binding is transparent: no exact match, and its first chord
-    // is not a live prefix, so it falls through to the pane.
+    // The overlong binding has no exact match, and its first chord is not a
+    // prefix: the key reaches the pane.
     assert_eq!(
         client
             .keymap_catalog
@@ -2092,7 +2158,10 @@ fn a_low_chord_depth_drops_every_binding_longer_than_it() {
     assert_eq!(
         client.keymap_catalog.match_sequence(
             LockMode::Normal,
-            &KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')))
+            &KeySequence::from(KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('p')
+            ))
         ),
         KeyMatch::default()
     );
@@ -2115,7 +2184,10 @@ fn a_low_chord_depth_drops_every_binding_longer_than_it() {
 #[test]
 fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let quit = KeySequence::from(KeyChord::from_parts(ModFlags::CTRL, Key::Char('q')));
+    let ctrl_q_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::CTRL,
+        Key::Char('q'),
+    ));
     let quit_action = BoundAction {
         action_reference: ActionReference::from_core_action_name("quit")
             .expect("valid core action name"),
@@ -2123,20 +2195,20 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &quit)
+            .match_sequence(LockMode::Normal, &ctrl_q_sequence)
             .exact_bound_action,
         Some(quit_action.clone())
     );
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Locked, &quit)
+            .match_sequence(LockMode::Locked, &ctrl_q_sequence)
             .exact_bound_action,
         Some(quit_action.clone())
     );
 
     let mut removed_key_sequences = BTreeSet::new();
-    removed_key_sequences.insert(quit.clone());
+    removed_key_sequences.insert(ctrl_q_sequence.clone());
     let mut mode_bindings_by_name = BTreeMap::new();
     mode_bindings_by_name.insert(
         ModeName::from_text("normal"),
@@ -2145,7 +2217,7 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
             removed_key_sequences,
         },
     );
-    let report = client.load_startup_config(
+    let keymap_conflict_report = client.load_startup_config(
         None,
         None,
         Some(PartialKeybindingsConfig {
@@ -2155,25 +2227,27 @@ fn a_keybinding_file_removes_a_default_binding_only_in_the_mode_that_declares_it
     );
 
     assert_eq!(
-        report.expect("a keybinding file was given").get_verdict(),
+        keymap_conflict_report
+            .expect("a keybinding file was given")
+            .get_verdict(),
         KeymapVerdict::Apply
     );
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Normal, &quit),
+            .match_sequence(LockMode::Normal, &ctrl_q_sequence),
         KeyMatch::default()
     );
     assert!(client
         .build_frame_hints(client.get_lock_mode(), false)
         .removed_key_sequences
-        .contains(&quit));
+        .contains(&ctrl_q_sequence));
     // Locked mode's own quit binding is untouched: removal is scoped to the
     // mode that declares it.
     assert_eq!(
         client
             .keymap_catalog
-            .match_sequence(LockMode::Locked, &quit)
+            .match_sequence(LockMode::Locked, &ctrl_q_sequence)
             .exact_bound_action,
         Some(quit_action)
     );
@@ -2265,8 +2339,8 @@ fn frame_hints_follow_the_viewers_own_mode() {
 
 #[test]
 fn a_mouse_select_report_for_this_viewer_flips_its_own_copy() {
-    // The viewer routes a mouse press against its own copy of the mode, so the
-    // session's report is what has to move it — both ways.
+    // The client routes a mouse press against its own copy of the mode. The
+    // session's `MouseSelectChanged` report moves that copy both ways.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     assert!(
         !client.is_mouse_selection_enabled(),
@@ -2304,8 +2378,8 @@ fn a_mouse_select_report_for_this_viewer_flips_its_own_copy() {
 
 #[test]
 fn a_mouse_select_report_for_another_viewer_is_ignored() {
-    // Mouse select is client-scoped: two viewers of one session hold their own,
-    // and a subscription carries every client's events.
+    // Mouse select is client-scoped: two clients of one session hold their
+    // own, and a subscription carries every client's events.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
 
     delivery_sender
@@ -2326,8 +2400,8 @@ fn a_mouse_select_report_for_another_viewer_is_ignored() {
 
 #[test]
 fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
-    // The viewer decides what a key means against its own copy of the mode, so
-    // `koshi lock --client` reaches it as this report and nothing else.
+    // The client decides what a key means against its own copy of the mode.
+    // `koshi lock --client` reaches the client as an `InputModeChanged` report.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     assert_eq!(client.get_lock_mode(), LockMode::Normal);
 
@@ -2353,7 +2427,8 @@ fn a_lock_report_for_this_viewer_moves_its_own_mode_both_ways() {
 #[test]
 fn a_lock_report_for_another_viewer_is_ignored() {
     // The input mode is client-scoped, and a subscription carries every
-    // client's events. Locking one viewer must not lock the terminal beside it.
+    // client's events. A report for another client leaves this client's mode
+    // alone.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
 
     delivery_sender
@@ -2373,8 +2448,8 @@ fn a_lock_report_for_another_viewer_is_ignored() {
 
 #[test]
 fn setting_mouse_select_moves_the_viewers_copy_both_ways() {
-    // An attached viewer reads the mode off the frame its own connection
-    // carries, so the setter is the only thing that moves its copy.
+    // An attached client reads the mode off the frame its own connection
+    // carries. The setter moves its copy.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
 
     client.set_mouse_selection_enabled(true);
@@ -2392,8 +2467,8 @@ fn setting_mouse_select_moves_the_viewers_copy_both_ways() {
 
 #[test]
 fn a_resync_frame_replaces_the_viewers_stale_lock_and_mouse_select() {
-    // The reports that moved these two are exactly what a lagging subscriber
-    // misses, so the frame's copies are the only ones left that are current.
+    // A resync frame replaces the client's lock mode and mouse-select mode with
+    // the frame's values.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     client.set_lock_mode(LockMode::Locked);
     delivery_sender
@@ -2409,7 +2484,12 @@ fn a_resync_frame_replaces_the_viewers_stale_lock_and_mouse_select() {
     assert!(client.is_mouse_selection_enabled());
 
     delivery_sender
-        .send(resync(client.get_client_id(), LockMode::Normal, false, 7))
+        .send(build_resync_delivery(
+            client.get_client_id(),
+            LockMode::Normal,
+            false,
+            7,
+        ))
         .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 1, "the frame was seen");
@@ -2420,7 +2500,7 @@ fn a_resync_frame_replaces_the_viewers_stale_lock_and_mouse_select() {
 #[test]
 fn a_painted_frame_is_counted_and_moves_nothing_in_the_viewer() {
     // A frame composed for a client in another process rides the same queue.
-    // This viewer paints from its own build, so it takes nothing from it.
+    // The client counts it and changes nothing.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     client.set_lock_mode(LockMode::Locked);
     let client_id = client.get_client_id();
@@ -2489,7 +2569,6 @@ fn a_session_switch_is_counted_and_moves_nothing_in_the_viewer() {
 
 #[test]
 fn an_empty_queue_leaves_the_viewer_exactly_as_it_was() {
-    // The pump calls this every pass, so the common case is nothing waiting.
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
     client.set_lock_mode(LockMode::Locked);
 
@@ -2503,11 +2582,16 @@ fn an_empty_queue_leaves_the_viewer_exactly_as_it_was() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "a frame names the client its subscriber views")]
 fn a_frame_naming_another_viewer_trips_the_debug_assertion() {
-    // The session builds each frame for the client its subscriber views, so a
-    // frame naming anyone else means the subscription was recorded wrong.
+    // The session builds each frame for the client its subscriber views. A
+    // frame naming another client trips the debug assertion.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     delivery_sender
-        .send(resync(ClientId::new(), LockMode::Locked, true, 1))
+        .send(build_resync_delivery(
+            ClientId::new(),
+            LockMode::Locked,
+            true,
+            1,
+        ))
         .expect("the viewer's queue has room");
 
     let _ = client.apply_events();
@@ -2515,14 +2599,23 @@ fn a_frame_naming_another_viewer_trips_the_debug_assertion() {
 
 #[test]
 fn the_newer_of_two_queued_resync_frames_wins() {
-    // A resync blocked by a full queue is retried with a newer frame, so two
-    // frames can sit in one drain; the last one is the current state.
+    // Two resync frames can sit in one drain. The last one applies.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     delivery_sender
-        .send(resync(client.get_client_id(), LockMode::Locked, true, 2))
+        .send(build_resync_delivery(
+            client.get_client_id(),
+            LockMode::Locked,
+            true,
+            2,
+        ))
         .expect("the viewer's queue has room");
     delivery_sender
-        .send(resync(client.get_client_id(), LockMode::Normal, false, 5))
+        .send(build_resync_delivery(
+            client.get_client_id(),
+            LockMode::Normal,
+            false,
+            5,
+        ))
         .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 2, "both frames were seen");
@@ -2532,12 +2625,17 @@ fn the_newer_of_two_queued_resync_frames_wins() {
 
 #[test]
 fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
-    // Both ride one queue in order, so the frame is the state the events that
-    // follow it move from. The frame turns mouse-select on and locks the
-    // viewer; the event behind it unlocks, and only the lock moves.
+    // The frame and the event apply in queue order. The frame turns
+    // mouse-select on and locks the client. The event behind it unlocks, and
+    // only the lock moves.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     delivery_sender
-        .send(resync(client.get_client_id(), LockMode::Locked, true, 3))
+        .send(build_resync_delivery(
+            client.get_client_id(),
+            LockMode::Locked,
+            true,
+            3,
+        ))
         .expect("the viewer's queue has room");
     delivery_sender
         .send(Delivery::Event(Event::InputModeChanged(InputModeChanged {
@@ -2556,7 +2654,7 @@ fn an_event_queued_after_a_resync_frame_applies_on_top_of_it() {
 
 #[test]
 fn a_resync_frame_throws_away_a_tab_strip_peek_made_on_another_tab() {
-    // The viewer learns a tab switch from the frames it sees, and a resync
+    // The client learns a tab switch from the frames it sees, and a resync
     // frame is one of them.
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
     let peeked_tab_id = TabId::new();
@@ -2565,7 +2663,7 @@ fn a_resync_frame_throws_away_a_tab_strip_peek_made_on_another_tab() {
         first_visible_tab_index: 3,
     });
     delivery_sender
-        .send(resync_from(
+        .send(build_resync_delivery_from_snapshot(
             build_render_snapshot(client.get_client_id(), LockMode::Normal, false),
             4,
         ))
@@ -2584,14 +2682,14 @@ fn a_resync_frame_throws_away_a_tab_strip_peek_made_on_another_tab() {
 #[test]
 fn a_resync_frame_keeps_a_tab_strip_peek_made_on_the_tab_it_names() {
     let (mut client, delivery_sender) = build_test_client_with_event_sender();
-    let snapshot = build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
-    let active_tab_id = snapshot.client_snapshot.active_tab_id;
+    let render_snapshot = build_render_snapshot(client.get_client_id(), LockMode::Normal, false);
+    let active_tab_id = render_snapshot.client_snapshot.active_tab_id;
     client.tabline_peek = Some(TablinePeek {
         active_tab_id,
         first_visible_tab_index: 3,
     });
     delivery_sender
-        .send(resync_from(snapshot, 4))
+        .send(build_resync_delivery_from_snapshot(render_snapshot, 4))
         .expect("the viewer's queue has room");
 
     assert_eq!(client.apply_events(), 1);
@@ -2619,14 +2717,14 @@ fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
         "a joined viewer is linked"
     );
 
-    let dialing = Reconnecting {
+    let reconnecting_state = Reconnecting {
         attempt: 1,
         retry_in_seconds: 5,
     };
-    client.set_reconnecting(Some(dialing));
+    client.set_reconnecting(Some(reconnecting_state));
     assert_eq!(
         client.build_viewer_chrome(active_tab_id).reconnecting,
-        Some(dialing)
+        Some(reconnecting_state)
     );
 
     client.set_reconnecting(None);
@@ -2636,12 +2734,12 @@ fn dialing_again_shows_on_the_chrome_the_viewer_paints_and_comes_back_off() {
 #[test]
 fn taking_a_new_client_id_moves_the_id_the_viewers_commands_carry() {
     let (mut client, _delivery_sender) = build_test_client_with_event_sender();
-    let minted = ClientId::new();
-    assert_ne!(client.get_client_id(), minted);
+    let new_client_id = ClientId::new();
+    assert_ne!(client.get_client_id(), new_client_id);
 
-    client.set_client_id(minted);
+    client.set_client_id(new_client_id);
 
-    assert_eq!(client.get_client_id(), minted);
+    assert_eq!(client.get_client_id(), new_client_id);
 }
 
 #[test]

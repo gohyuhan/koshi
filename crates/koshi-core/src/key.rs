@@ -9,7 +9,7 @@
 //! # Canonical form
 //!
 //! A printable letter is stored **lowercase**, with its case carried by
-//! [`ModFlags::SHIFT`]: `<A-H>` and `<A-S-h>` are the same chord. `SHIFT` is
+//! [`BindingModifierFlags::SHIFT`]: `<A-H>` and `<A-S-h>` are the same chord. `SHIFT` is
 //! never set alongside a non-letter character — the shifted character stands
 //! for itself (`!`, not shift-plus-`1`). A named key carries `SHIFT` like any
 //! other modifier: `<S-Tab>` is Shift+Tab. The input layer normalizes inbound
@@ -30,28 +30,28 @@ use std::time::Instant;
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 #[serde(try_from = "u8")]
-pub struct ModFlags(u8);
+pub struct BindingModifierFlags(u8);
 
 /// Every bit the four modifiers occupy; the rest name nothing.
-const MOD_FLAG_BITS: u8 = 0b0000_1111;
+const BINDING_MODIFIER_BITS: u8 = 0b0000_1111;
 
-impl TryFrom<u8> for ModFlags {
+impl TryFrom<u8> for BindingModifierFlags {
     type Error = String;
 
     /// Accepts a bit pattern drawn only from the four modifier bits: Control,
     /// Alt, Shift and Super.
     fn try_from(modifier_bits: u8) -> Result<Self, Self::Error> {
-        if modifier_bits & !MOD_FLAG_BITS == 0 {
+        if modifier_bits & !BINDING_MODIFIER_BITS == 0 {
             Ok(Self(modifier_bits))
         } else {
             Err(format!(
-                "modifier bits {modifier_bits:#010b} name no modifier; the modifiers are {MOD_FLAG_BITS:#010b}"
+                "modifier bits {modifier_bits:#010b} name no modifier; the modifiers are {BINDING_MODIFIER_BITS:#010b}"
             ))
         }
     }
 }
 
-impl ModFlags {
+impl BindingModifierFlags {
     /// No modifiers held.
     pub const NONE: Self = Self(0);
     /// The Control key.
@@ -89,7 +89,7 @@ impl ModFlags {
     }
 }
 
-impl std::ops::BitOr for ModFlags {
+impl std::ops::BitOr for BindingModifierFlags {
     type Output = Self;
 
     fn bitor(self, right_modifier_flags: Self) -> Self {
@@ -97,7 +97,7 @@ impl std::ops::BitOr for ModFlags {
     }
 }
 
-impl fmt::Display for ModFlags {
+impl fmt::Display for BindingModifierFlags {
     /// Writes the modifier prefix run in canonical `C-A-S-D-` order, empty when
     /// no modifier is held.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,15 +120,16 @@ impl fmt::Display for ModFlags {
 /// The modifiers that make a chord something ordinary typing cannot produce.
 /// Shift is absent: Shift plus a key is still typing — it gives the key's
 /// capital or shifted variant.
-const NON_TYPING_MODIFIER_FLAGS: ModFlags =
-    ModFlags(ModFlags::CTRL.0 | ModFlags::ALT.0 | ModFlags::SUPER.0);
+const NON_TYPING_MODIFIER_FLAGS: BindingModifierFlags = BindingModifierFlags(
+    BindingModifierFlags::CTRL.0 | BindingModifierFlags::ALT.0 | BindingModifierFlags::SUPER.0,
+);
 
-impl ModFlags {
+impl BindingModifierFlags {
     /// True when plain typing can produce a key held with exactly these
     /// modifiers: none of Control, Alt, or Super is held. Shift alone still
     /// types — it gives the key's capital or shifted variant.
     #[must_use]
-    pub const fn is_typing(self) -> bool {
+    pub const fn is_typeable(self) -> bool {
         !self.has_shared_modifier(NON_TYPING_MODIFIER_FLAGS)
     }
 }
@@ -217,7 +218,7 @@ impl fmt::Display for NamedKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Key {
     /// A printable character, lowercase when it has a single-character
-    /// lowercase mapping; the capital is carried by [`ModFlags::SHIFT`].
+    /// lowercase mapping; the capital is carried by [`BindingModifierFlags::SHIFT`].
     Char(char),
     /// A key with a name rather than a character.
     Named(NamedKey),
@@ -252,8 +253,8 @@ pub fn fold_uppercase_character(character: char) -> (char, bool) {
     if !character.is_uppercase() {
         return (character, false);
     }
-    // `to_lowercase()` yields one or more chars; `(Some(l), None)` is exactly
-    // one.
+    // `to_lowercase()` yields one or more characters; the pattern below
+    // matches exactly one.
     let mut lowercase_characters = character.to_lowercase();
     let (Some(lowercase_character), None) =
         (lowercase_characters.next(), lowercase_characters.next())
@@ -275,7 +276,7 @@ pub fn fold_uppercase_character(character: char) -> (char, bool) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct KeyChord {
     /// The modifier keys held down.
-    pub modifier_flags: ModFlags,
+    pub modifier_flags: BindingModifierFlags,
     /// The key pressed.
     pub key: Key,
 }
@@ -284,7 +285,7 @@ impl KeyChord {
     /// Builds a chord from its parts. Callers are responsible for the canonical
     /// form described in the module documentation; the config crate's chord
     /// parser produces it.
-    pub const fn from_parts(modifier_flags: ModFlags, key: Key) -> Self {
+    pub const fn from_parts(modifier_flags: BindingModifierFlags, key: Key) -> Self {
         Self {
             modifier_flags,
             key,
@@ -295,7 +296,7 @@ impl KeyChord {
     /// Control, Alt, or Super is held. Characters, Enter, arrows, editing
     /// keys, and function keys all count, with or without Shift.
     pub fn is_typeable(&self) -> bool {
-        self.modifier_flags.is_typing()
+        self.modifier_flags.is_typeable()
     }
 }
 
@@ -385,7 +386,7 @@ pub struct PendingKeySequence {
 ///
 /// This is the stored bitmap: it keeps every modifier the Kitty keyboard
 /// protocol names, including the two lock states a pane encoding leaves out.
-/// [`ModFlags`] is the narrower projection a keybinding matches on.
+/// [`BindingModifierFlags`] is the narrower projection a keybinding matches on.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -452,40 +453,41 @@ impl KeyModifierFlags {
     /// the same fold the chord parser applies. Hyper, Caps Lock and Num Lock
     /// name no binding modifier and are dropped.
     ///
-    /// `CTRL | META | CAPS_LOCK` becomes `ModFlags::CTRL | ModFlags::SUPER`.
+    /// `CTRL | META | CAPS_LOCK` becomes `BindingModifierFlags::CTRL | BindingModifierFlags::SUPER`.
     #[must_use]
-    pub const fn to_binding_modifiers(self) -> ModFlags {
+    pub const fn to_binding_modifiers(self) -> BindingModifierFlags {
         let mut binding_bits = 0;
         if self.has_all_modifiers(Self::CTRL) {
-            binding_bits |= ModFlags::CTRL.0;
+            binding_bits |= BindingModifierFlags::CTRL.0;
         }
         if self.has_all_modifiers(Self::ALT) {
-            binding_bits |= ModFlags::ALT.0;
+            binding_bits |= BindingModifierFlags::ALT.0;
         }
         if self.has_all_modifiers(Self::SHIFT) {
-            binding_bits |= ModFlags::SHIFT.0;
+            binding_bits |= BindingModifierFlags::SHIFT.0;
         }
         if self.has_all_modifiers(Self::SUPER) || self.has_all_modifiers(Self::META) {
-            binding_bits |= ModFlags::SUPER.0;
+            binding_bits |= BindingModifierFlags::SUPER.0;
         }
-        ModFlags(binding_bits)
+        BindingModifierFlags(binding_bits)
     }
 }
 
 /// What a pane's program receives for a key that legacy encoding cannot tell
 /// apart from another key.
 ///
-/// The pane's own Kitty keyboard flags decide every byte in both modes. This
-/// setting only adds bytes for a pane that pushed no flag.
+/// The pane's Kitty keyboard flags select the detail it receives. `Always`
+/// also distinguishes keys whose legacy bytes another key shares, including
+/// when the pane pushes flags that leave those keys on legacy bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExtendedKeysMode {
     /// The pane's flags decide alone. A pane that pushed no flag reads the
     /// legacy bytes: Shift+Enter reads `\r`, and Ctrl+i reads `0x09`.
     #[default]
     OnRequest,
-    /// A pane that pushed no flag reads the `CSI u` form for every key whose
-    /// legacy bytes another key also owns: Shift+Enter reads `CSI 13 ; 2 u`,
-    /// and Ctrl+i reads `CSI 105 ; 5 u`. Tab still reads `0x09`.
+    /// A pane reads the `CSI u` form for every key whose legacy bytes another
+    /// key also owns: Shift+Enter reads `CSI 13 ; 2 u`, and Ctrl+i reads
+    /// `CSI 105 ; 5 u`. Tab still reads `0x09` when no flag requests its report.
     Always,
 }
 
@@ -581,9 +583,10 @@ impl KeyInput {
     /// Lock held projects to `<C-S-a>`.
     ///
     /// With Shift held on a character key, a reported [`KeyInput::shifted_key`]
-    /// replaces the key and consumes the Shift: key `'1'` with shifted key
-    /// `'!'` projects to `!`, and key `'a'` with shifted key `'A'` projects to
-    /// `<S-a>`.
+    /// that differs from the key replaces the key and consumes the Shift: key
+    /// `'1'` with shifted key `'!'` projects to `!`, and key `'a'` with shifted
+    /// key `'A'` projects to `<S-a>`. A shifted key equal to the key changes
+    /// nothing: key `' '` with shifted key `' '` projects to `<S-Space>`.
     #[must_use]
     pub fn to_binding_chord(&self) -> Option<KeyChord> {
         if self.key_event_kind == KeyEventKind::Release {
@@ -593,19 +596,22 @@ impl KeyInput {
             return None;
         };
         let binding_modifier_flags = self.modifier_flags.to_binding_modifiers();
-        let is_shift_held = binding_modifier_flags.has_all_modifiers(ModFlags::SHIFT);
+        let is_shift_held = binding_modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT);
         let binding_modifier_flags_without_shift =
-            ModFlags(binding_modifier_flags.0 & !ModFlags::SHIFT.0);
-        // A reported shifted character stands for the key itself: Shift plus
-        // `1` reports `!`, and `!` is the character a binding names.
-        if let (true, Key::Char(_), Some(shifted_character)) =
+            BindingModifierFlags(binding_modifier_flags.0 & !BindingModifierFlags::SHIFT.0);
+        // A reported shifted character that differs from the key stands for
+        // the key itself: Shift plus `1` reports `!`, and `!` is the character
+        // a binding names.
+        if let (true, Key::Char(key_character), Some(shifted_character)) =
             (is_shift_held, binding_key, self.shifted_key)
         {
-            return Some(build_canonical_chord(
-                Key::Char(shifted_character),
-                binding_modifier_flags_without_shift,
-                false,
-            ));
+            if shifted_character != key_character {
+                return Some(build_canonical_chord(
+                    Key::Char(shifted_character),
+                    binding_modifier_flags_without_shift,
+                    false,
+                ));
+            }
         }
         Some(build_canonical_chord(
             binding_key,
@@ -620,11 +626,12 @@ impl KeyInput {
 /// `' '` becomes [`NamedKey::Space`]. A named key takes `is_shift_held` as a
 /// modifier. A capital that [`fold_uppercase_character`] folds becomes
 /// lowercase plus Shift; a lowercase letter takes `is_shift_held`; any other
-/// character drops it, because a shifted `1` arrives as `!`.
+/// character drops it: `1` with Shift held gives `1`, and `!` with Shift held
+/// gives `!`.
 #[must_use]
 fn build_canonical_chord(
     reported_key: Key,
-    modifier_flags: ModFlags,
+    modifier_flags: BindingModifierFlags,
     is_shift_held: bool,
 ) -> KeyChord {
     let (canonical_key, is_shift_active) = match reported_key {
@@ -638,7 +645,7 @@ fn build_canonical_chord(
         }
     };
     let modifier_flags = if is_shift_active {
-        modifier_flags.union(ModFlags::SHIFT)
+        modifier_flags.union(BindingModifierFlags::SHIFT)
     } else {
         modifier_flags
     };

@@ -465,10 +465,10 @@ impl Server {
     fn commit_events(
         event_bus: &mut EventBus,
         command_id: CommandId,
-        events: Vec<Event>,
+        emitted_events: Vec<Event>,
     ) -> CommandResult {
         let mut scope = TransactionScope::new();
-        for event in events {
+        for event in emitted_events {
             scope.emit(event);
         }
         scope.commit(command_id, event_bus)
@@ -628,8 +628,8 @@ impl Server {
             };
         };
 
-        let events = self.handle_client_detach(client_id);
-        Self::commit_events(&mut self.event_bus, command_id, events)
+        let emitted_events = self.handle_client_detach(client_id);
+        Self::commit_events(&mut self.event_bus, command_id, emitted_events)
     }
 
     /// Handle [`Command::Detach`]: remove the resolved client from the session
@@ -649,8 +649,12 @@ impl Server {
         let client_id =
             Self::resolve_target_client(command_args.client_id, command_source, session)?;
 
-        let events = self.handle_client_detach(client_id);
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+        let emitted_events = self.handle_client_detach(client_id);
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
     }
 
     /// Handle [`Command::SwitchSession`]: move one client out of this session
@@ -718,11 +722,15 @@ impl Server {
             .map(|client| client.get_client_id())
             .collect();
 
-        let mut events = Vec::new();
+        let mut emitted_events = Vec::new();
         for client_id in clients {
-            events.extend(self.handle_client_detach(client_id));
+            emitted_events.extend(self.handle_client_detach(client_id));
         }
-        Ok(Self::commit_events(&mut self.event_bus, command_id, events))
+        Ok(Self::commit_events(
+            &mut self.event_bus,
+            command_id,
+            emitted_events,
+        ))
     }
 
     /// The session's only attached client, or a rejection saying why — none
@@ -889,7 +897,7 @@ impl Server {
         backend: &dyn PtyBackend,
         session_id: SessionId,
         tab_id: TabId,
-        events: &mut Vec<Event>,
+        emitted_events: &mut Vec<Event>,
     ) {
         let Some(session) = self.session_by_id.get(&session_id) else {
             return;
@@ -908,7 +916,7 @@ impl Server {
         };
         let rects =
             Self::compute_tab_content_rects(session, tab_id, tab_size, self.get_pane_sizing());
-        self.reflow_changed(backend, rects, None, events);
+        self.reflow_changed(backend, rects, None, emitted_events);
     }
 
     /// Resize the live PTYs in `content_rects` whose size actually changed, routing the

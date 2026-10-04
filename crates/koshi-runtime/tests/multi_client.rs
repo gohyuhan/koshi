@@ -5,55 +5,38 @@
 //! which pane cell a mouse press names for the client that sent it, what a
 //! client moving to another session leaves behind here, and when the last
 //! client moving away closes the session it left.
-//!
-//! Each test runs the shape the per-session server process runs in: a headless
-//! session seeded with no client, its inbox drained and its frames pushed on
-//! the thread that owns the server, and the socket answered by the real accept
-//! loop. The exchange with the socket runs on its own thread, since the caller
-//! and the dispatcher must both be live for a request to be answered.
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+mod common;
 
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use common::{
+    count_attached_clients, get_last_painted_frame, open_session_connection,
+    read_session_frames_to_detached, read_session_frames_until, serve_test_session,
+    start_test_session, submit_test_command, wait_for_client_count, TEST_WAIT_TIMEOUT_DURATION,
+};
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::command::{
-    Command, CommandEnvelope, CommandResult, CommandSource, DetachArgs, FocusTabArgs, LockModeArgs,
-    NewTabArgs, SwitchSessionArgs, TabTarget,
+    Command, DetachArgs, FocusTabArgs, LockModeArgs, NewTabArgs, SwitchSessionArgs, TabTarget,
 };
-use koshi_core::discovery::SessionOverview;
 use koshi_core::event::{Event, InputModeChanged, PtyResized};
 use koshi_core::geometry::{PaneArea, Point, Rect, Size};
-use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
-use koshi_core::key::ModFlags;
+use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
+use koshi_core::key::BindingModifierFlags;
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, MouseTracking};
 use koshi_core::process::PtySize;
 use koshi_ipc::attach::AttachedSessionStructureSnapshot;
-use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::event::SessionEvent;
-use koshi_ipc::frame::{FrameSlot, PaintedFrame};
-use koshi_ipc::protocol::{
-    IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION,
-};
+use koshi_ipc::frame::FrameSlot;
+use koshi_ipc::protocol::{IpcRequest, IpcRequestKind, IpcResponse, IpcResult, WireMouseAction};
 use koshi_ipc::transport::Connection;
-use koshi_pty::backend::state::PtyBackend;
-use koshi_runtime::ipc_server::IpcServer;
-use koshi_runtime::runtime::event::RuntimeEvent;
-use koshi_runtime::runtime::pty_inbox::InboxSink;
 use koshi_runtime::server::Server;
 use koshi_test_support::fake_pty::FakePtyBackend;
 
-/// The terminal size the seeded session sizes its root pane against, before any
-/// client attaches.
-const TEST_VIEWPORT_SIZE: Size = Size {
-    column_count: 80,
-    row_count: 24,
-};
-
-/// The PTY size [`TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
+/// The PTY size [`common::TEST_VIEWPORT_SIZE`] gives the seeded session's single pane: one
 /// tabline row and one hint row off the terminal, then a 1-cell pane border.
 const SEEDED_PTY_SIZE: PtySize = PtySize {
     column_count: 78,
@@ -83,161 +66,6 @@ const SHORT_VIEWPORT_SIZE: Size = Size {
     column_count: 100,
     row_count: 24,
 };
-
-/// The display name the seeded session carries.
-const TEST_SESSION_NAME: &str = "workspace";
-
-/// How long a test waits on work it cannot make happen itself — a detach the
-/// serving thread has yet to notice, an event frame in flight — before failing.
-const TEST_WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
-
-/// Sends [`RuntimeEvent::Quit`] when the exchange thread ends, on the way out
-/// of a failed assertion as well as a clean return.
-struct StopDispatcher(Sender<RuntimeEvent>);
-
-impl Drop for StopDispatcher {
-    fn drop(&mut self) {
-        let _ = self.0.send(RuntimeEvent::Quit);
-    }
-}
-
-/// Seed a headless session under a fake PTY backend, serve its control socket
-/// from a directory named for `session_label`, and run `run_exchange` against that socket
-/// while this thread drains the runtime inbox and pushes each attached
-/// client its frames.
-///
-/// Returns the server and the fake backend once the exchange is done, so a
-/// test can read the session state and the PTY sizes the exchange left behind,
-/// plus whatever the exchange itself produced. `run_exchange` receives the runtime
-/// directory and the session id, the two facts it needs to find and open the
-/// socket, and the fake backend.
-///
-/// It hands back the connections it wants left open alongside its own value:
-/// a connection dropped while the dispatcher is still draining detaches its
-/// client, so a test reading the registry keeps its connections here until the
-/// dispatcher has stopped.
-fn serve_test_session<T: Send + 'static>(
-    session_label: &str,
-    run_exchange: impl FnOnce(PathBuf, SessionId, Arc<FakePtyBackend>) -> (Vec<Connection>, T)
-        + Send
-        + 'static,
-) -> (Server, Arc<FakePtyBackend>, T) {
-    // A short base keeps the Unix socket path inside the OS path-length cap.
-    #[cfg(unix)]
-    let socket_path_base = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let socket_path_base = std::env::temp_dir();
-    let runtime_directory = socket_path_base.join(format!(
-        "koshi-multi-client-{}-{session_label}",
-        std::process::id()
-    ));
-
-    let session_id = SessionId::new();
-    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
-    let fake_pty_backend = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(runtime_event_sender.clone()),
-    )));
-    let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
-    server
-        .bootstrap_session(
-            session_id,
-            TEST_SESSION_NAME.to_string(),
-            TEST_VIEWPORT_SIZE,
-            SystemTime::UNIX_EPOCH,
-            None,
-        )
-        .expect("seed the session");
-    let ipc_server = IpcServer::start(
-        &runtime_directory,
-        session_id,
-        runtime_event_sender.clone(),
-        None,
-    )
-    .expect("start serving");
-
-    let exchange_runtime_directory = runtime_directory.clone();
-    let exchange_fake_pty_backend = fake_pty_backend.clone();
-    let exchange_thread = std::thread::spawn(move || {
-        let _stop = StopDispatcher(runtime_event_sender);
-        run_exchange(
-            exchange_runtime_directory,
-            session_id,
-            exchange_fake_pty_backend,
-        )
-    });
-
-    // The per-session server's own loop: block until an event is due, bounded
-    // by the next render deadline, apply it, hand a fresh snapshot to any
-    // subscriber that lost a critical event, then push every attached client
-    // its frame when a render is due.
-    loop {
-        let current_time = Instant::now();
-        let runtime_event = match server.compute_next_render_wakeup(current_time) {
-            Some(render_wakeup_timeout) => {
-                match server
-                    .get_inbox_receiver()
-                    .recv_timeout(render_wakeup_timeout)
-                {
-                    Ok(runtime_event) => Some(runtime_event),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            None => match server.get_inbox_receiver().recv() {
-                Ok(runtime_event) => Some(runtime_event),
-                Err(_) => break,
-            },
-        };
-        if let Some(runtime_event) = runtime_event {
-            if server.handle_runtime_event(runtime_event).is_break() {
-                break;
-            }
-        }
-        server.resync_lagged();
-        if server.poll_render(Instant::now()) {
-            server.push_frames();
-        }
-    }
-
-    let (open_connections, exchange_result) =
-        exchange_thread.join().expect("the exchange finished");
-    drop(open_connections);
-    ipc_server.shutdown();
-    let _ = std::fs::remove_dir_all(&runtime_directory);
-    (server, fake_pty_backend, exchange_result)
-}
-
-/// Connect to the socket the endpoint file advertises and walk the Hello, so
-/// the returned connection is open for every other request kind.
-fn open_session_connection(runtime_directory: &Path, session_id: SessionId) -> Connection {
-    let endpoint_file = EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
-        runtime_directory,
-        session_id,
-    ))
-    .expect("endpoint file readable");
-    let mut ipc_connection = Connection::connect(&endpoint_file.socket_address).expect("connect");
-    ipc_connection
-        .send(&IpcRequest {
-            request_id: 1,
-            request_kind: IpcRequestKind::Hello {
-                minimum_protocol_version: MIN_PROTOCOL_VERSION,
-                maximum_protocol_version: PROTOCOL_VERSION,
-                connection_token: endpoint_file.connection_token,
-                is_remote: false,
-            },
-        })
-        .expect("send hello");
-    let hello_response: IpcResponse = ipc_connection.recv().expect("hello reply");
-    assert_eq!(
-        hello_response.answer_result,
-        IpcResult::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            build_version: env!("CARGO_PKG_VERSION").to_string(),
-        }
-    );
-    ipc_connection
-}
 
 /// Attach on `ipc_connection` reporting `viewport_size` and no pane area, and return
 /// what the reply carried. The IPC connection carries only the client's event
@@ -296,143 +124,13 @@ fn attach_test_client_with_pane_area(
     (client_id, session_id, session_structure, pane_area)
 }
 
-/// What the session reports about itself over `ipc_connection`.
-fn get_session_overview(ipc_connection: &mut Connection, request_id: u64) -> SessionOverview {
-    ipc_connection
-        .send(&IpcRequest {
-            request_id,
-            request_kind: IpcRequestKind::Discovery,
-        })
-        .expect("send discovery");
-    let discovery_response: IpcResponse = ipc_connection.recv().expect("discovery reply");
-    let IpcResult::Overview(session_overview) = discovery_response.answer_result else {
-        panic!(
-            "expected an overview, got {:?}",
-            discovery_response.answer_result
-        );
-    };
-    session_overview
-}
-
-/// How many clients the session reports over `ipc_connection`.
-fn get_attached_client_count(ipc_connection: &mut Connection, request_id: u64) -> usize {
-    get_session_overview(ipc_connection, request_id)
-        .clients
-        .len()
-}
-
-/// Ask over `ipc_connection` until the session reports `expected_client_count` clients, numbering
-/// the requests from `request_id`. Panics once [`TEST_WAIT_TIMEOUT_DURATION`] has passed.
-fn wait_for_client_count(
-    ipc_connection: &mut Connection,
-    expected_client_count: usize,
-    request_id: u64,
-) {
-    let deadline = Instant::now() + TEST_WAIT_TIMEOUT_DURATION;
-    let mut request_id = request_id;
-    loop {
-        let observed_client_count = get_attached_client_count(ipc_connection, request_id);
-        if observed_client_count == expected_client_count {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the session reports {observed_client_count} attached clients, not {expected_client_count}",
-        );
-        request_id += 1;
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Submit a command over `ipc_connection` and return the events it emitted.
-/// Panics unless the session applied it.
-fn submit_test_command(
-    ipc_connection: &mut Connection,
-    session_id: SessionId,
-    command: Command,
-    request_id: u64,
-) -> Vec<Event> {
-    let command_envelope = CommandEnvelope::from_parts(
-        CommandId::new(),
-        CommandSource::ExternalCli {
-            session_id: Some(session_id),
-            target_client_id: None,
-        },
-        command,
-    );
-    ipc_connection
-        .send(&IpcRequest {
-            request_id,
-            request_kind: IpcRequestKind::SubmitCommand(Box::new(command_envelope)),
-        })
-        .expect("send command");
-    let command_response: IpcResponse = ipc_connection.recv().expect("command reply");
-    let IpcResult::CommandResult(CommandResult::Ok {
-        command_id: _,
-        emitted_events,
-    }) = command_response.answer_result
-    else {
-        panic!(
-            "expected the command to apply, got {:?}",
-            command_response.answer_result
-        );
-    };
-    emitted_events
-}
-
-/// Read `ipc_connection`'s event stream until `accepts_session_event` accepts an event, on a thread
-/// this one can give up waiting on. Returns every frame read, the accepted one
-/// last, and the IPC connection so it stays open. Panics once [`TEST_WAIT_TIMEOUT_DURATION`] has
-/// passed with no accepted frame.
-fn read_session_frames_until(
-    mut ipc_connection: Connection,
-    accepts_session_event: impl Fn(&SessionEvent) -> bool + Send + 'static,
-) -> (Connection, Vec<SessionEvent>) {
-    let (done_sender, done_receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut session_events = Vec::new();
-        loop {
-            let session_event: SessionEvent = ipc_connection.recv().expect("an event frame");
-            let is_target_session_event = accepts_session_event(&session_event);
-            session_events.push(session_event);
-            if is_target_session_event {
-                break;
-            }
-        }
-        let _ = done_sender.send((ipc_connection, session_events));
-    });
-    done_receiver
-        .recv_timeout(TEST_WAIT_TIMEOUT_DURATION)
-        .expect("the awaited frame reaches the viewer")
-}
-
-/// [`read_session_frames_until`] stopping at the goodbye frame.
-fn read_session_frames_to_goodbye(ipc_connection: Connection) -> (Connection, Vec<SessionEvent>) {
-    read_session_frames_until(ipc_connection, |session_event| {
-        *session_event == SessionEvent::Detached
-    })
-}
-
-/// The painted frame `session_events` ends with. Panics unless the last frame read is
-/// a painted one.
-fn get_last_painted_frame(session_events: &[SessionEvent]) -> &PaintedFrame {
-    match session_events.last() {
-        Some(SessionEvent::Painted {
-            frame: painted_frame,
-        }) => painted_frame,
-        other_session_event => {
-            panic!("expected the run to end with a painted frame, got {other_session_event:?}")
-        }
-    }
-}
-
 /// The tab and the pane the [`Command::NewTab`] in `emitted_events` created. Panics
 /// unless `emitted_events` holds an [`Event::PaneCreated`].
 fn get_created_tab_and_pane_ids(emitted_events: &[Event]) -> (TabId, PaneId) {
     emitted_events
         .iter()
-        .find_map(|event| match event {
-            Event::PaneCreated(payload) => Some((payload.tab_id, payload.pane_id)),
+        .find_map(|emitted_event| match emitted_event {
+            Event::PaneCreated(pane_created) => Some((pane_created.tab_id, pane_created.pane_id)),
             _ => None,
         })
         .expect("the new tab reports its tab and its root pane")
@@ -444,7 +142,7 @@ fn two_clients_on_one_tab_size_the_pty_to_the_per_axis_minimum() {
         "per-axis-minimum",
         |runtime_directory, session_id, _fake_pty_backend| {
             // The large client alone: the tab is its own pane region, 100 columns by
-            // 38 rows, and the pane's PTY is that minus its 1-cell border.
+            // 38 rows, and the pane's PTY is that region minus its 1-cell border.
             let mut large_client_connection =
                 open_session_connection(&runtime_directory, session_id);
             let (_, _, session_structure) = attach_test_client_with_viewport_size(
@@ -454,8 +152,8 @@ fn two_clients_on_one_tab_size_the_pty_to_the_per_axis_minimum() {
             );
             let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
-            // The small client joins the same tab. It is narrower and shorter, so
-            // it takes both axes and the pane's PTY shrinks on both.
+            // The small client joins the same tab. It is narrower and shorter: it
+            // takes both axes, and the pane's PTY shrinks on both.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
             attach_test_client_with_viewport_size(
@@ -465,7 +163,7 @@ fn two_clients_on_one_tab_size_the_pty_to_the_per_axis_minimum() {
             );
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
-            assert_eq!(get_attached_client_count(&mut caller_connection, 3), 2);
+            assert_eq!(count_attached_clients(&mut caller_connection, 3), 2);
 
             (
                 vec![
@@ -540,8 +238,8 @@ fn a_client_reporting_a_pane_area_sizes_the_pty_to_that_area() {
     );
 }
 
-/// A client with no room to draw a pane contributes no size, so the tab keeps
-/// the size its other viewer gives it.
+/// A client with no room to draw a pane contributes no size. The tab keeps the
+/// size its other viewer gives it.
 #[test]
 fn a_starving_client_does_not_shrink_the_tab() {
     let (_server, fake_pty_backend, pane_id) = serve_test_session(
@@ -597,7 +295,7 @@ fn a_starving_client_does_not_shrink_the_tab() {
     );
 }
 
-/// The starving client attaches first, so the tab has no viewer that sizes it
+/// The starving client attaches first, and the tab has no viewer that sizes it
 /// while the served loop renders. Nothing panics, that client's frames carry
 /// every pane suppressed, and the seeded size stands until a sized client
 /// arrives.
@@ -622,7 +320,7 @@ fn a_starving_client_attaching_first_leaves_the_seeded_size_until_a_sized_client
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             wait_for_client_count(&mut caller_connection, 1, 3);
 
-            // The tab has no viewer that sizes it, so it solves at 0x0 and the
+            // The tab has no viewer that sizes it: it solves at 0x0, and the
             // starving client's own frames carry its pane suppressed.
             let (starving_client_connection, session_events) =
                 read_session_frames_until(starving_client_connection, |session_event| {
@@ -734,9 +432,9 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
             );
             let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
-            // The short client joins the same tab. It is wider but shorter, so the
+            // The short client joins the same tab. It is wider but shorter: the
             // columns stay pinned by the narrow client and the rows drop to this
-            // one's: each axis takes its minimum from a different client.
+            // one's. Each axis takes its minimum from a different client.
             let mut short_client_connection =
                 open_session_connection(&runtime_directory, session_id);
             let (short_client_id, _, _) = attach_test_client_with_viewport_size(
@@ -746,10 +444,10 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
             );
 
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
-            assert_eq!(get_attached_client_count(&mut caller_connection, 3), 2);
+            assert_eq!(count_attached_clients(&mut caller_connection, 3), 2);
 
-            // The short client leaves. The narrow one is the only viewer left, so
-            // the rows grow back to its own region while the columns never move.
+            // The short client leaves. The narrow one is the only viewer left:
+            // the rows grow back to its own region and the columns never move.
             let emitted_events = submit_test_command(
                 &mut caller_connection,
                 session_id,
@@ -770,7 +468,7 @@ fn each_axis_takes_its_minimum_from_a_different_client_and_grows_back_when_that_
             );
 
             let (short_client_connection, session_events) =
-                read_session_frames_to_goodbye(short_client_connection);
+                read_session_frames_to_detached(short_client_connection);
             assert_eq!(session_events.last(), Some(&SessionEvent::Detached));
             wait_for_client_count(&mut caller_connection, 1, 5);
 
@@ -841,8 +539,8 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
             );
             let (second_tab_id, second_pane_id) = get_created_tab_and_pane_ids(&emitted_events);
 
-            // Send the large client back, so it is the first tab's only viewer
-            // again and the second tab has none.
+            // Send the large client back. It is the first tab's only viewer again,
+            // and the second tab has none.
             submit_test_command(
                 &mut caller_connection,
                 session_id,
@@ -854,8 +552,8 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
             );
 
             // The small client attaches. A fresh attach lands on the
-            // lowest-indexed tab, which is the first one, so the two clients
-            // share it and the small one takes both axes.
+            // lowest-indexed tab, which is the first one. The two clients share
+            // it, and the small one takes both axes.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
             let (small_client_id, _, _) = attach_test_client_with_viewport_size(
@@ -863,7 +561,7 @@ fn a_client_viewing_another_tab_never_constrains_this_tabs_size() {
                 2,
                 SMALL_VIEWPORT_SIZE,
             );
-            assert_eq!(get_attached_client_count(&mut caller_connection, 5), 2);
+            assert_eq!(count_attached_clients(&mut caller_connection, 5), 2);
 
             // The small client switches to the second tab. The first tab is the
             // large client's alone again; the second tab is the small client's.
@@ -955,8 +653,8 @@ fn the_larger_client_sees_the_tab_letterboxed_at_the_shared_size() {
             let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
             let tab_id = session_structure.tabs[0].tab_id;
 
-            // The small client joins the same tab, which invalidates the layout, so
-            // the large client is sent a fresh frame at the size the two now share.
+            // The small client joins the same tab and invalidates the layout. The
+            // large client is sent a fresh frame at the size the two now share.
             let mut small_client_connection =
                 open_session_connection(&runtime_directory, session_id);
             attach_test_client_with_viewport_size(
@@ -1053,8 +751,8 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
                 SMALL_VIEWPORT_SIZE,
             );
 
-            // Lock the large client. Lock mode belongs to one client, so the command
-            // reports a single change and it names that client alone.
+            // Lock the large client. Lock mode belongs to one client: the command
+            // reports a single change that names that client alone.
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             let emitted_events = submit_test_command(
                 &mut caller_connection,
@@ -1074,8 +772,8 @@ fn locking_one_client_leaves_the_other_clients_lock_state_unchanged() {
             );
 
             // Lock the small client. Setting the mode a client already holds emits
-            // nothing, so this event is what proves the small client was still
-            // unlocked while the large one was locked.
+            // nothing. This event shows the small client was still unlocked while
+            // the large one was locked.
             let emitted_events = submit_test_command(
                 &mut caller_connection,
                 session_id,
@@ -1177,8 +875,8 @@ fn setting_the_lock_mode_a_client_already_holds_emits_nothing() {
 
 /// Turn normal mouse tracking with SGR encoding on in `pane_id`, the way the
 /// program running there does, and read `ipc_connection`'s stream until a painted
-/// frame shows the pane asking for reports — the point from which a forwarded
-/// event is written to it.
+/// frame shows the pane asking for reports. From that frame on, a forwarded
+/// event is written to the pane.
 fn wait_for_mouse_tracking(
     fake_pty_backend: &FakePtyBackend,
     pane_id: PaneId,
@@ -1217,7 +915,7 @@ fn send_mouse_press(
                 mouse_input: MouseInput {
                     mouse_kind: MouseKind::Press(MouseButton::Left),
                     position: screen_point,
-                    modifier_flags: ModFlags::NONE,
+                    modifier_flags: BindingModifierFlags::NONE,
                 },
             }]),
         })
@@ -1239,7 +937,7 @@ fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
     // share is 80 by 28: the small client's 80x30 terminal holds it at (0, 1),
     // putting the pane's content at (1, 2), and the large client's 100x40
     // terminal centers it at (10, 6), putting the pane's content at (11, 7).
-    // So this cell is the pane's column 11, row 6 for the small client, and the
+    // This cell is the pane's column 11, row 6 for the small client, and the
     // pane's column 1, row 1 for the large one.
     const SHARED_PANE_CELL_POSITION: Point = Point { column: 11, row: 7 };
 
@@ -1304,8 +1002,8 @@ fn a_mouse_click_is_answered_against_the_clicking_clients_own_view() {
     );
 
     // Three reports, in the order the rounds ran. The same terminal cell names
-    // a different pane cell for each client, because each round is placed in
-    // the view of the client that sent it.
+    // a different pane cell for each client: each round is placed in the view
+    // of the client that sent it.
     assert_eq!(
         fake_pty_backend
             .list_pane_write_bytes(pane_id)
@@ -1333,8 +1031,9 @@ fn a_mouse_press_before_the_pane_asks_for_reports_writes_nothing() {
             );
             let pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
-            // The tab's only viewer, so its content starts at column 1, row 2 of
-            // its own terminal: one tabline row, then the pane's 1-cell border.
+            // The client is the tab's only viewer. The pane's content starts at
+            // column 1, row 2 of its terminal: one tabline row, then the pane's
+            // 1-cell border.
             let client_connection =
                 send_mouse_press(client_connection, pane_id, Point { column: 1, row: 2 }, 3);
 
@@ -1366,17 +1065,17 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
         row_count: 38,
     };
 
-    // One process serves one session, so the session moved to is a second
-    // server of its own, seeded and served on its own thread. The mover reads
-    // the session's id off the first channel; the second tells the joining side
-    // that the client has left the session it was in.
+    // One process serves one session. The session moved to is a second server,
+    // seeded and served on its own thread. The moving side reads that session's
+    // id off the first channel. The second channel tells the joining side that
+    // the client has left the session it was in.
     let (target_session_id_sender, target_session_id_receiver) = mpsc::channel();
     let (source_client_left_sender, source_client_left_receiver) = mpsc::channel();
 
     let target_session_thread = std::thread::spawn(move || {
         let (
             target_server,
-            target_fake_backend,
+            target_fake_pty_backend,
             (target_session_id, target_client_id, target_pane_id),
         ) = serve_test_session(
             "switch-target",
@@ -1428,7 +1127,7 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
         // Two resizes: the size the seeded session gave the pane, and the
         // joining client's own region once it attached.
         assert_eq!(
-            target_fake_backend
+            target_fake_pty_backend
                 .list_pane_sizes(target_pane_id)
                 .expect("the pane was spawned"),
             vec![
@@ -1448,39 +1147,46 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                 .recv_timeout(TEST_WAIT_TIMEOUT_DURATION)
                 .expect("the other session is serving");
 
-            let mut wide_connection = open_session_connection(&runtime_directory, session_id);
-            let (_, _, session_structure) =
-                attach_test_client_with_viewport_size(&mut wide_connection, 2, LARGE_VIEWPORT_SIZE);
+            let mut large_client_connection =
+                open_session_connection(&runtime_directory, session_id);
+            let (_, _, session_structure) = attach_test_client_with_viewport_size(
+                &mut large_client_connection,
+                2,
+                LARGE_VIEWPORT_SIZE,
+            );
             let source_pane_id = session_structure.tabs[0].layout.list_leaf_pane_ids()[0];
 
-            let mut narrow_connection = open_session_connection(&runtime_directory, session_id);
-            let (narrow_client_id, _, _) = attach_test_client_with_viewport_size(
-                &mut narrow_connection,
+            let mut small_client_connection =
+                open_session_connection(&runtime_directory, session_id);
+            let (small_client_id, _, _) = attach_test_client_with_viewport_size(
+                &mut small_client_connection,
                 2,
                 SMALL_VIEWPORT_SIZE,
             );
 
-            // Read the large client's stream past the shared size, so the frame read
-            // after the move is one the move caused.
-            let (wide_connection, _) =
-                read_session_frames_until(wide_connection, |session_event| match session_event {
-                    SessionEvent::Painted {
-                        frame: painted_frame,
-                    } => {
-                        painted_frame.session_snapshot.active_tab_snapshot.tab_size
-                            == SHARED_PANE_VIEWPORT_SIZE
+            // Read the large client's stream past the shared size. The next frame
+            // read after the move is one the move caused.
+            let (large_client_connection, _) =
+                read_session_frames_until(large_client_connection, |session_event| {
+                    match session_event {
+                        SessionEvent::Painted {
+                            frame: painted_frame,
+                        } => {
+                            painted_frame.session_snapshot.active_tab_snapshot.tab_size
+                                == SHARED_PANE_VIEWPORT_SIZE
+                        }
+                        _ => false,
                     }
-                    _ => false,
                 });
 
             // The move itself. It puts the other session on the moved client's own
-            // queue and changes nothing here, so it emits nothing.
+            // queue, changes nothing here, and emits nothing.
             let mut caller_connection = open_session_connection(&runtime_directory, session_id);
             let emitted_events = submit_test_command(
                 &mut caller_connection,
                 session_id,
                 Command::SwitchSession(SwitchSessionArgs {
-                    client_id: Some(narrow_client_id),
+                    client_id: Some(small_client_id),
                     session_id: destination_session_id,
                 }),
                 3,
@@ -1488,8 +1194,8 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
             assert_eq!(emitted_events, Vec::<Event>::new());
 
             // The moved client is told where to go on its event stream.
-            let (narrow_connection, switch_session_events) =
-                read_session_frames_until(narrow_connection, |session_event| {
+            let (small_client_connection, switch_session_events) =
+                read_session_frames_until(small_client_connection, |session_event| {
                     matches!(session_event, SessionEvent::SwitchTo { .. })
                 });
             assert_eq!(
@@ -1499,27 +1205,29 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                 }),
             );
 
-            // The client leaves by closing its connection, which is what a real one
-            // does once it has read where to go.
-            drop(narrow_connection);
+            // The client leaves by closing its connection, the same as a real
+            // client does once it has read where to go.
+            drop(small_client_connection);
             source_client_left_sender
                 .send(())
                 .expect("the other session is waiting");
 
             // The tab grows back to the client that stayed, over one pane inside a
             // 1-cell border: this session keeps serving that client.
-            let (wide_connection, wide_session_events) =
-                read_session_frames_until(wide_connection, |session_event| match session_event {
-                    SessionEvent::Painted {
-                        frame: painted_frame,
-                    } => {
-                        painted_frame.session_snapshot.active_tab_snapshot.tab_size
-                            == SINGLE_CLIENT_PANE_VIEWPORT_SIZE
+            let (large_client_connection, large_client_session_events) =
+                read_session_frames_until(large_client_connection, |session_event| {
+                    match session_event {
+                        SessionEvent::Painted {
+                            frame: painted_frame,
+                        } => {
+                            painted_frame.session_snapshot.active_tab_snapshot.tab_size
+                                == SINGLE_CLIENT_PANE_VIEWPORT_SIZE
+                        }
+                        _ => false,
                     }
-                    _ => false,
                 });
             assert_eq!(
-                get_last_painted_frame(&wide_session_events)
+                get_last_painted_frame(&large_client_session_events)
                     .session_snapshot
                     .active_tab_snapshot
                     .pane_slots,
@@ -1541,7 +1249,10 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
                 }],
             );
 
-            (vec![caller_connection, wide_connection], source_pane_id)
+            (
+                vec![caller_connection, large_client_connection],
+                source_pane_id,
+            )
         },
     );
 
@@ -1580,68 +1291,33 @@ fn switching_session_detaches_the_client_here_and_lets_it_join_the_other_session
 const QUIT_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 
 /// How long [`run_server_until_quit`] runs before it stops waiting for the quit
-/// request. The exchange is over in milliseconds, so a session that never asks
-/// to close waits this out.
+/// request. A session that never asks to close runs this long.
 const QUIT_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
-/// [`serve_test_session`] with `auto-close-session` set to
-/// `should_auto_close_session`, run under a loop
-/// modelled on the per-session server binary's, minus the wait for clients
-/// carried across an image swap, which no server here has: the quit request is
-/// read after every event, and the inbox's own quit hangup is applied like any
-/// other event. The serving thread queues a dropped connection's detach, and
-/// the exchange thread queues the hangup, so the loop keeps reading until the
-/// quit request is set or [`QUIT_TIMEOUT_DURATION`] has passed.
+/// Run `run_exchange` against a session from [`start_test_session`] with
+/// `auto-close-session` set to `should_auto_close_session`. The loop reads the
+/// quit request after every event and applies the inbox's quit hangup like any
+/// other event. It stops when the quit request is set or
+/// [`QUIT_TIMEOUT_DURATION`] has passed.
 ///
-/// Returns the server once the quit request is set, or once [`QUIT_TIMEOUT_DURATION`]
-/// has passed, so a test can read whether the session asked to close.
+/// Returns the server, so a test can read whether the session asked to close.
 fn run_server_until_quit(
     session_label: &str,
     should_auto_close_session: bool,
     run_exchange: impl FnOnce(PathBuf, SessionId) -> Vec<Connection> + Send + 'static,
 ) -> Server {
-    // A short base keeps the Unix socket path inside the OS path-length cap.
-    #[cfg(unix)]
-    let socket_path_base = PathBuf::from("/tmp");
-    #[cfg(windows)]
-    let socket_path_base = std::env::temp_dir();
-    let runtime_directory = socket_path_base.join(format!(
-        "koshi-multi-client-{}-{session_label}",
-        std::process::id()
-    ));
-
-    let session_id = SessionId::new();
-    let (runtime_event_sender, runtime_event_receiver) = mpsc::channel();
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(runtime_event_sender.clone()),
-    )));
-    let mut server = Server::from_runtime_parts(pty_backend, runtime_event_receiver);
-    server.load_startup_config(Some(PartialKoshiConfig {
+    let startup_config = PartialKoshiConfig {
         should_auto_close_session: Some(should_auto_close_session),
         ..PartialKoshiConfig::default()
-    }));
-    server
-        .bootstrap_session(
-            session_id,
-            TEST_SESSION_NAME.to_string(),
-            TEST_VIEWPORT_SIZE,
-            SystemTime::UNIX_EPOCH,
-            None,
-        )
-        .expect("seed the session");
-    let ipc_server = IpcServer::start(
-        &runtime_directory,
-        session_id,
-        runtime_event_sender.clone(),
-        None,
-    )
-    .expect("start serving");
-
-    let exchange_runtime_directory = runtime_directory.clone();
-    let exchange_thread = std::thread::spawn(move || {
-        let _stop = StopDispatcher(runtime_event_sender);
-        run_exchange(exchange_runtime_directory, session_id)
-    });
+    };
+    let mut served_test_session = start_test_session(
+        session_label,
+        Some(startup_config),
+        move |runtime_directory, session_id, _fake_pty_backend| {
+            (run_exchange(runtime_directory, session_id), ())
+        },
+    );
+    let server = &mut served_test_session.server;
 
     let deadline = Instant::now() + QUIT_TIMEOUT_DURATION;
     while !server.is_quit_requested() && Instant::now() < deadline {
@@ -1657,10 +1333,7 @@ fn run_server_until_quit(
         }
     }
 
-    let open_connections = exchange_thread.join().expect("the exchange finished");
-    drop(open_connections);
-    ipc_server.shutdown();
-    let _ = std::fs::remove_dir_all(&runtime_directory);
+    let (server, _, ()) = served_test_session.finish();
     server
 }
 
@@ -1705,8 +1378,8 @@ fn move_the_only_client_away(runtime_directory: PathBuf, session_id: SessionId) 
 
 #[test]
 fn switching_the_last_client_away_closes_the_session_only_with_auto_close_on() {
-    // The moved client was the only one attached, so its leaving empties the
-    // session and `auto-close-session` asks the process to quit.
+    // The moved client was the only one attached. Its leaving empties the
+    // session, and `auto-close-session` asks the process to quit.
     let auto_close_server =
         run_server_until_quit("switch-auto-close-on", true, move_the_only_client_away);
     assert!(

@@ -92,8 +92,10 @@ jobs:
         with:
           rustflags: ""
 
-      - name: Check
-        run: cargo check --workspace --all-targets --locked
+      # Lints every target on each runner, including the code that only one
+      # operating system compiles.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       # --no-fail-fast: run every crate's tests even after one fails, so a
       # cross-OS run reports all failures in a single pass, not one per push.

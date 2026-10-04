@@ -34,7 +34,7 @@ fn set_terminal_cell(
 }
 
 fn build_image_record(
-    display: ImageDisplay,
+    image_display: ImageDisplay,
     image_anchor: (u16, u16),
     column_count: u32,
     row_count: u32,
@@ -49,7 +49,7 @@ fn build_image_record(
         .into(),
         animation: None,
         action: ImageAction::Display,
-        display,
+        display: image_display,
         anchor: image_anchor,
     }
 }
@@ -394,7 +394,7 @@ fn independent_static_records_keep_distinct_content_identities() {
         pixel_height: 1,
         rgba_bytes: vec![255, 0, 0, 255],
     });
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         requested_width: Some(ImageDimension::Cells(1)),
         requested_height: Some(ImageDimension::Cells(1)),
         should_move_cursor: false,
@@ -405,7 +405,7 @@ fn independent_static_records_keep_distinct_content_identities() {
         image: Arc::clone(&shared_image),
         animation: None,
         action: ImageAction::Display,
-        display: display.clone(),
+        display: image_display.clone(),
         anchor: (0, 0),
     };
     let second_image_record = ImageRecord {
@@ -447,7 +447,7 @@ fn serialized_content_table_is_deduplicated_and_rebuilds_the_same_state() {
         pixel_height: 1,
         rgba_bytes: vec![255, 0, 0, 255],
     });
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         requested_width: Some(ImageDimension::Cells(1)),
         requested_height: Some(ImageDimension::Cells(1)),
         should_move_cursor: false,
@@ -458,7 +458,7 @@ fn serialized_content_table_is_deduplicated_and_rebuilds_the_same_state() {
         image: Arc::clone(&shared_image),
         animation: None,
         action: ImageAction::Display,
-        display: display.clone(),
+        display: image_display.clone(),
         anchor: (0, 0),
     };
     let second_image_record = ImageRecord {
@@ -734,7 +734,7 @@ fn kitty_transmit_and_display_replaces_all_old_placements_after_validation() {
         column_count: 8,
         row_count: 8,
     });
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         image_id: Some(7),
         placement_id: Some(3),
         requested_column_count: Some(1),
@@ -743,11 +743,11 @@ fn kitty_transmit_and_display_replaces_all_old_placements_after_validation() {
         ..ImageDisplay::default()
     };
     terminal_state
-        .apply_image_record(&build_image_record(display.clone(), (0, 0), 1, 1))
+        .apply_image_record(&build_image_record(image_display.clone(), (0, 0), 1, 1))
         .expect("the primary image fits");
     terminal_state.active_screen = Screen::Alternate;
     terminal_state
-        .apply_image_record(&build_image_record(display, (1, 1), 1, 1))
+        .apply_image_record(&build_image_record(image_display, (1, 1), 1, 1))
         .expect("the alternate image fits");
 
     let mut retransmit = build_image_record(
@@ -841,7 +841,7 @@ fn zero_kitty_image_id_does_not_create_a_placement_identity() {
         column_count: 8,
         row_count: 8,
     });
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         image_id: Some(0),
         placement_id: Some(3),
         requested_column_count: Some(1),
@@ -850,10 +850,10 @@ fn zero_kitty_image_id_does_not_create_a_placement_identity() {
         ..ImageDisplay::default()
     };
     terminal_state
-        .apply_image_record(&build_image_record(display.clone(), (0, 0), 1, 1))
+        .apply_image_record(&build_image_record(image_display.clone(), (0, 0), 1, 1))
         .expect("the first anonymous image fits");
     terminal_state
-        .apply_image_record(&build_image_record(display, (1, 1), 1, 1))
+        .apply_image_record(&build_image_record(image_display, (1, 1), 1, 1))
         .expect("the second anonymous image fits");
 
     assert_eq!(terminal_state.list_image_placements().len(), 2);
@@ -974,18 +974,18 @@ fn image_placement_storage_limit_leaves_state_unchanged() {
         column_count: 8,
         row_count: 8,
     });
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         requested_column_count: Some(1),
         requested_row_count: Some(1),
         should_move_cursor: false,
         ..ImageDisplay::default()
     };
-    let full_size_image_record = build_image_record(display.clone(), (0, 0), 16_384, 1_024);
+    let full_size_image_record = build_image_record(image_display.clone(), (0, 0), 16_384, 1_024);
     terminal_state
         .apply_image_record(&full_size_image_record)
         .expect("the image fits the byte limit");
     let state_before_storage_limit = terminal_state.clone();
-    let extra_image_record = build_image_record(display, (0, 0), 1, 1);
+    let extra_image_record = build_image_record(image_display, (0, 0), 1, 1);
 
     assert_eq!(
         terminal_state.apply_image_record(&extra_image_record),
@@ -1158,7 +1158,7 @@ fn kitty_transmit_removes_matching_images_from_both_screens() {
         column_count: 8,
         row_count: 8,
     });
-    let display = ImageDisplay {
+    let image_display = ImageDisplay {
         image_id: Some(7),
         placement_id: Some(3),
         requested_column_count: Some(1),
@@ -1166,14 +1166,14 @@ fn kitty_transmit_removes_matching_images_from_both_screens() {
         should_move_cursor: false,
         ..ImageDisplay::default()
     };
-    let primary_image_record = build_image_record(display.clone(), (0, 0), 1, 1);
+    let primary_image_record = build_image_record(image_display.clone(), (0, 0), 1, 1);
     terminal_state
         .apply_image_record(&primary_image_record)
         .expect("the primary image fits");
 
     terminal_state.active_screen = Screen::Alternate;
     terminal_state
-        .apply_image_record(&build_image_record(display, (1, 1), 1, 1))
+        .apply_image_record(&build_image_record(image_display, (1, 1), 1, 1))
         .expect("the alternate image fits");
     let transmit = ImageRecord {
         protocol: GraphicsProtocol::Kitty,

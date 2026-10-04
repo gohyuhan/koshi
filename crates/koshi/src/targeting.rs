@@ -76,6 +76,23 @@ pub fn resolve_command_route(
     command: &CliCommand,
     in_session_context: Option<&InSessionContext>,
 ) -> Result<Route, CliError> {
+    resolve_command_route_in_runtime_directory(
+        &ipc_client::resolve_runtime_directory()?,
+        ipc_client::resolve_shared_sessions_base_directory().as_deref(),
+        command,
+        in_session_context,
+    )
+}
+
+/// [`resolve_command_route`] against an explicit runtime directory, with
+/// `shared_sessions_base_directory` naming where other users' sessions are
+/// looked up.
+fn resolve_command_route_in_runtime_directory(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    command: &CliCommand,
+    in_session_context: Option<&InSessionContext>,
+) -> Result<Route, CliError> {
     // The in-session route carries no target client. A command whose client
     // rides on its source never takes that route — not even back to this
     // pane's own session.
@@ -98,9 +115,13 @@ pub fn resolve_command_route(
         if is_staying_home {
             let target_tab_id = match command.get_target_tab_reference() {
                 Some(tab_reference @ TabReference::TabName(_)) => {
+                    // The pane's own session advertises in this user's runtime
+                    // directory.
                     let session_overview = discovery::fetch_session_overview(
-                        &ipc_client::resolve_runtime_directory()?,
+                        runtime_directory,
+                        None,
                         in_session_context.session_id,
+                        None,
                     )?;
                     Some(resolve_target_tab(&session_overview, tab_reference)?)
                 }
@@ -117,12 +138,19 @@ pub fn resolve_command_route(
     // session is asked. Anything else needs the whole picture — a name, an
     // owner lookup, or the count rule — so every advertised session is
     // probed; one nobody answers is skipped and its leftovers swept.
-    let runtime_directory = ipc_client::resolve_runtime_directory()?;
     let discovered_sessions = match command.get_target_session_reference() {
-        Some(SessionReference::SessionId(session_id)) => Discovered::from_overview(
-            discovery::fetch_session_overview(&runtime_directory, *session_id)?,
+        Some(SessionReference::SessionId(session_id)) => {
+            Discovered::from_overview(discovery::fetch_session_overview(
+                runtime_directory,
+                shared_sessions_base_directory,
+                *session_id,
+                None,
+            )?)
+        }
+        _ => discovery::fetch_all_session_overviews(
+            runtime_directory,
+            shared_sessions_base_directory,
         ),
-        _ => discovery::fetch_all_session_overviews(&runtime_directory),
     };
 
     let (target_session_id, resolved_targets) =
@@ -591,17 +619,33 @@ fn resolve_target_tab(
 /// session alone, a name is looked up over a full census and scopes to the
 /// one session it matches, and an absent flag scopes to every session that
 /// answered.
+///
+/// The census covers the sessions `runtime_directory` advertises and those
+/// `shared_sessions_base_directory` advertises for the other local users; `None` covers
+/// this user's alone.
 pub fn resolve_session_scope(
     runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
     session_reference: Option<&SessionReference>,
 ) -> Result<Discovered, CliError> {
     match session_reference {
-        None => Ok(discovery::fetch_all_session_overviews(runtime_directory)),
+        None => Ok(discovery::fetch_all_session_overviews(
+            runtime_directory,
+            shared_sessions_base_directory,
+        )),
         Some(SessionReference::SessionId(session_id)) => Ok(Discovered::from_overview(
-            discovery::fetch_session_overview(runtime_directory, *session_id)?,
+            discovery::fetch_session_overview(
+                runtime_directory,
+                shared_sessions_base_directory,
+                *session_id,
+                None,
+            )?,
         )),
         Some(session_reference) => {
-            let discovered_sessions = discovery::fetch_all_session_overviews(runtime_directory);
+            let discovered_sessions = discovery::fetch_all_session_overviews(
+                runtime_directory,
+                shared_sessions_base_directory,
+            );
             let selected_session_overview = select_target_session(
                 Some(session_reference),
                 None,

@@ -2,11 +2,11 @@
 //! this machine presents to remote clients, and the record that the operator
 //! switched remote access on.
 //!
-//! [`CertFile`](crate::remote_state::CertFile) holds a certificate koshi
+//! [`CertificateFile`](crate::remote_state::CertificateFile) holds a certificate koshi
 //! generated itself, with its private key. There is no operator-supplied
 //! certificate.
 //!
-//! [`EnabledFile`](crate::remote_state::EnabledFile) records that the operator
+//! [`RemoteAccessRecord`](crate::remote_state::RemoteAccessRecord) records that the operator
 //! answered yes to opening the port. A listen address in `koshi.kdl` sets the
 //! address and does not open the port. The port opens the first time the
 //! operator answers yes, and on every start after that. The router is the only
@@ -33,14 +33,16 @@ use crate::error::{IpcError, RemoteFile};
 ///
 /// The value and the rule it follows live in
 /// [`koshi_core::compat::REMOTE_CERTIFICATE_FORMAT`].
-pub const CERT_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_CERTIFICATE_FORMAT.maximum_version;
+pub const CERTIFICATE_FILE_FORMAT: u32 =
+    koshi_core::compat::REMOTE_CERTIFICATE_FORMAT.maximum_version;
 
-/// The format number this build writes into the enabled file, and the only
+/// The format number this build writes into the remote access record, and the only
 /// one it reads back.
 ///
 /// The value and the rule it follows live in
-/// [`koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT`].
-pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORMAT.maximum_version;
+/// [`koshi_core::compat::REMOTE_ACCESS_RECORD_FORMAT`].
+pub const REMOTE_ACCESS_RECORD_FILE_FORMAT: u32 =
+    koshi_core::compat::REMOTE_ACCESS_RECORD_FORMAT.maximum_version;
 
 /// The certificate this machine presents to remote clients, and its private
 /// key.
@@ -49,7 +51,7 @@ pub const ENABLED_FILE_FORMAT: u32 = koshi_core::compat::REMOTE_ACCESS_MARK_FORM
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CertFile {
+pub struct CertificateFile {
     /// The format number of the file these bytes came from or go to.
     pub file_format: u32,
     /// The certificate, in DER form: the bytes a client fingerprints.
@@ -58,7 +60,7 @@ pub struct CertFile {
     pub key_der: Vec<u8>,
 }
 
-impl CertFile {
+impl CertificateFile {
     /// Where the certificate file lives: `remote/cert` under `data_directory`.
     ///
     /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
@@ -71,12 +73,12 @@ impl CertFile {
     ///
     /// A path with no file, a file that cannot be read, bytes that are not a
     /// readable certificate file, and a format number that is not
-    /// [`CERT_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
-    pub fn load_from_path(certificate_file_path: &Path) -> Result<CertFile, IpcError> {
-        let certificate_file: CertFile =
+    /// [`CERTIFICATE_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
+    pub fn load_from_path(certificate_file_path: &Path) -> Result<CertificateFile, IpcError> {
+        let certificate_file: CertificateFile =
             load_remote_file(RemoteFile::Certificate, certificate_file_path)?;
         if let Some(format_error) =
-            find_format_mismatch(certificate_file.file_format, CERT_FILE_FORMAT)
+            find_format_mismatch(certificate_file.file_format, CERTIFICATE_FILE_FORMAT)
         {
             return Err(build_unreadable_remote_file_error(
                 RemoteFile::Certificate,
@@ -102,56 +104,66 @@ impl CertFile {
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EnabledFile {
+pub struct RemoteAccessRecord {
     /// The format number of the file this record came from or goes to.
     pub file_format: u32,
     /// When the operator answered yes.
     pub enabled_at: SystemTime,
 }
 
-impl EnabledFile {
-    /// Where the enabled file lives: `remote/enabled` under `data_directory`.
+impl RemoteAccessRecord {
+    /// Where the remote access record lives: `remote/enabled` under `data_directory`.
     ///
     /// Callers resolve `data_directory` through `koshi_paths::resolve_data_directory()`.
     #[must_use]
-    pub fn resolve_enabled_file_path(data_directory: &Path) -> PathBuf {
+    pub fn resolve_remote_access_record_path(data_directory: &Path) -> PathBuf {
         data_directory.join("remote").join("enabled")
     }
 
-    /// Read the enabled file at `enabled_file_path`.
+    /// Read the remote access record at `remote_access_record_path`.
     ///
     /// A path with no file, a file that cannot be read, bytes that are not a
-    /// readable enabled file, and a format number that is not
-    /// [`ENABLED_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
-    pub fn load_from_path(enabled_file_path: &Path) -> Result<EnabledFile, IpcError> {
-        let enabled_file: EnabledFile =
-            load_remote_file(RemoteFile::RemoteAccessMark, enabled_file_path)?;
-        if let Some(format_error) =
-            find_format_mismatch(enabled_file.file_format, ENABLED_FILE_FORMAT)
-        {
+    /// readable remote access record, and a format number that is not
+    /// [`REMOTE_ACCESS_RECORD_FILE_FORMAT`] are all [`IpcError::RemoteFileUnreadable`].
+    pub fn load_from_path(
+        remote_access_record_path: &Path,
+    ) -> Result<RemoteAccessRecord, IpcError> {
+        let remote_access_record: RemoteAccessRecord =
+            load_remote_file(RemoteFile::RemoteAccessRecord, remote_access_record_path)?;
+        if let Some(format_error) = find_format_mismatch(
+            remote_access_record.file_format,
+            REMOTE_ACCESS_RECORD_FILE_FORMAT,
+        ) {
             return Err(build_unreadable_remote_file_error(
-                RemoteFile::RemoteAccessMark,
-                enabled_file_path,
+                RemoteFile::RemoteAccessRecord,
+                remote_access_record_path,
                 format_error,
             ));
         }
-        Ok(enabled_file)
+        Ok(remote_access_record)
     }
 
-    /// Write this enabled file at `enabled_file_path`, replacing whatever is there.
+    /// Write this remote access record at `remote_access_record_path`, replacing whatever is there.
     ///
     /// # Errors
     /// [`IpcError::RemoteFileWrite`] naming what failed.
-    pub fn write_to_path(&self, enabled_file_path: &Path) -> Result<(), IpcError> {
-        write_remote_file(RemoteFile::RemoteAccessMark, enabled_file_path, self)
+    pub fn write_to_path(&self, remote_access_record_path: &Path) -> Result<(), IpcError> {
+        write_remote_file(
+            RemoteFile::RemoteAccessRecord,
+            remote_access_record_path,
+            self,
+        )
     }
 }
 
 /// Whether the operator has switched remote access on for the koshi data
-/// directory at `data_directory`: whether the enabled file reads.
+/// directory at `data_directory`: whether the remote access record reads.
 #[must_use]
-pub fn is_remote_enabled(data_directory: &Path) -> bool {
-    EnabledFile::load_from_path(&EnabledFile::resolve_enabled_file_path(data_directory)).is_ok()
+pub fn is_remote_access_enabled(data_directory: &Path) -> bool {
+    RemoteAccessRecord::load_from_path(&RemoteAccessRecord::resolve_remote_access_record_path(
+        data_directory,
+    ))
+    .is_ok()
 }
 
 /// The reason `found_format` is not `expected_format`, the format number this

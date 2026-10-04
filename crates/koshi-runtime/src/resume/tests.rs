@@ -12,13 +12,15 @@ use std::path::Path;
 use std::sync::{mpsc, Arc};
 use std::time::SystemTime;
 
+use crate::runtime::event::RuntimeEvent;
 use crate::runtime::pty_inbox::InboxSink;
+use crate::server::Server;
 use koshi_config::layer::{PartialKoshiConfig, PartialScrollbackConfig};
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
     GridPosition, NewPaneArgs, NewTabArgs, Selection, SelectionKind,
 };
-use koshi_core::geometry::{Direction, Size};
+use koshi_core::geometry::{Direction, PixelCellSize, Size};
 use koshi_core::ids::{ClientId, CommandId, TabId};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
 use koshi_observability::logging::recent_events;
@@ -96,6 +98,151 @@ fn migrate_format_two_restores_tabs_clients_selection_and_screens() {
 }
 
 #[test]
+fn migrate_format_three_without_image_fields_restores_running_panes() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("parse format-three fixture");
+    for terminal_state in fixture_json["body"]["engines"]
+        .as_object_mut()
+        .expect("released terminal engines")
+        .values_mut()
+    {
+        terminal_state
+            .as_object_mut()
+            .expect("released terminal state")
+            .retain(|field_name, _| {
+                matches!(
+                    field_name.as_str(),
+                    "primary"
+                        | "alternate"
+                        | "active"
+                        | "primary_cursor"
+                        | "alternate_cursor"
+                        | "primary_render"
+                        | "alternate_render"
+                        | "modes"
+                        | "tab_stops"
+                        | "title"
+                        | "reported_cwd"
+                        | "shell_integration_state"
+                        | "shell_integration_facts"
+                        | "scrollback"
+                        | "primary_scroll_region"
+                        | "alternate_scroll_region"
+                        | "cluster"
+                        | "cluster_base"
+                        | "replies"
+                )
+            });
+    }
+    fixture_json["body"]
+        .as_object_mut()
+        .expect("released resume body")
+        .retain(|field_name, _| {
+            matches!(
+                field_name.as_str(),
+                "sessions" | "engines" | "undecoded" | "quit"
+            )
+        });
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode format-three fixture");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    assert_eq!(resume_header.resume_format, 3);
+    assert_eq!(resume_header.carried_panes.len(), 4);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let first_pane_id = resume_header.carried_panes[0].pane_id;
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+    assert_eq!(
+        resumed_server.session_by_id[&resume_header.session_id]
+            .panes
+            .count_pane_records(),
+        4
+    );
+    assert_eq!(
+        get_joined_screen_text(
+            resumed_server.terminal_engine_by_pane_id[&first_pane_id].get_terminal_state()
+        ),
+        "pane 0 outputred"
+    );
+}
+
+#[test]
+fn migrate_format_one_and_two_restores_clients_reported_directory_and_saved_cursor() {
+    for released_resume_format in [1, 2] {
+        let mut released_fixture: serde_json::Value =
+            serde_json::from_slice(include_bytes!("fixtures/format_two.json"))
+                .expect("parse released resume fixture");
+        released_fixture["header"]["format"] = serde_json::json!(released_resume_format);
+        let pane_key = released_fixture["header"]["panes"][0]["pane_id"]
+            .as_str()
+            .expect("first carried pane id")
+            .to_string();
+        let pane_id: PaneId = serde_json::from_value(serde_json::Value::String(pane_key.clone()))
+            .expect("released pane id");
+        let released_terminal_state = released_fixture["body"]["engines"]
+            .get_mut(&pane_key)
+            .expect("first released terminal state");
+        released_terminal_state["reported_cwd"] =
+            serde_json::json!({"host": null, "path": "/workspace"});
+        let saved_render = released_terminal_state["primary_render"].clone();
+        released_terminal_state["primary_cursor"]["saved"] = serde_json::json!({
+            "row": 0,
+            "col": 1,
+            "pending_wrap": false,
+            "render": saved_render
+        });
+        if released_resume_format == 1 {
+            let released_session = released_fixture["body"]["sessions"]
+                .as_object_mut()
+                .expect("released sessions")
+                .values_mut()
+                .next()
+                .expect("released session");
+            for released_client in released_session["clients"]["records"]
+                .as_object_mut()
+                .expect("released clients")
+                .values_mut()
+            {
+                released_client["tier"] = serde_json::json!("Admin");
+            }
+        }
+        let fixture_bytes =
+            serde_json::to_vec(&released_fixture).expect("encode released resume fixture");
+
+        let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+        assert_eq!(resume_header.resume_format, released_resume_format);
+        assert_eq!(resume_body.session_by_id.len(), 1);
+        assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+        let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+        assert_eq!(
+            resumed_server.session_by_id[&resume_header.session_id]
+                .clients
+                .count_clients(),
+            2
+        );
+        assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+        let terminal_state =
+            resumed_server.terminal_engine_by_pane_id[&pane_id].get_terminal_state();
+        assert_eq!(get_joined_screen_text(terminal_state), "pane 0 output");
+        assert_eq!(
+            terminal_state
+                .get_current_working_directory()
+                .expect("reported working directory")
+                .get_working_directory_path(),
+            Path::new("/workspace")
+        );
+        let terminal_json =
+            serde_json::to_value(terminal_state).expect("serialize restored terminal");
+        assert_eq!(terminal_json["primary_cursor"]["saved"]["column"], 1);
+        assert_eq!(
+            terminal_json["primary_cursor"]["saved"]["is_wrap_pending"],
+            false
+        );
+    }
+}
+
+#[test]
 fn migrate_format_three_restores_image_and_open_parser_sequences() {
     let (resume_header, resume_body) =
         read_released_resume_fixture(include_bytes!("fixtures/format_three.json"));
@@ -112,16 +259,70 @@ fn migrate_format_three_restores_image_and_open_parser_sequences() {
         terminal_json["image_contents"][0]["decoded_image"]["rgba_bytes"],
         serde_json::json!([255, 0, 0, 255])
     );
+    let migrated_image_record = serde_json::json!({
+        "protocol": "Kitty",
+        "action": "TransmitAndDisplay",
+        "display": {
+            "requested_width": null,
+            "requested_height": null,
+            "is_aspect_ratio_preserved": true,
+            "sixel_background": null,
+            "image_id": null,
+            "image_number": null,
+            "placement_id": null,
+            "usage_hints": 0,
+            "is_unicode_placeholder": false,
+            "z_index": 0,
+            "relative_image_id": null,
+            "relative_placement_id": null,
+            "relative_column_offset": 0,
+            "relative_row_offset": 0,
+            "requested_column_count": 1,
+            "requested_row_count": 1,
+            "source_pixel_offset_x": null,
+            "source_pixel_offset_y": null,
+            "cell_pixel_offset_x": null,
+            "cell_pixel_offset_y": null,
+            "should_move_cursor": false,
+            "response_suppression_level": 0
+        },
+        "anchor": [1, 7]
+    });
     assert_eq!(
-        terminal_json["primary_image_placements"]
-            .as_array()
-            .map(Vec::len),
-        Some(1)
+        terminal_json["primary_image_placements"],
+        serde_json::json!([{
+            "image_placement_id": 1,
+            "image_record": migrated_image_record,
+            "image_content_id": 1,
+            "anchor": [1, 7],
+            "column_count": 1,
+            "row_count": 1,
+            "plan": {
+                "geometry": {
+                    "full_size": {"column_count": 1, "row_count": 1},
+                    "cell_offset": {"column": 0, "row": 0}
+                },
+                "source_rect": [0, 0, 1, 1],
+                "target_size": [1, 1],
+                "canvas_size": [1, 1],
+                "pixel_offset": [0, 0],
+                "needs_raster": true
+            }
+        }])
     );
-    assert_eq!(first_pane_state.graphics_events.len(), 1);
+    let mut migrated_event_record = migrated_image_record.clone();
+    migrated_event_record["image"] = serde_json::json!({
+        "pixel_width": 1,
+        "pixel_height": 1,
+        "rgba_bytes": [255, 0, 0, 255]
+    });
+    assert_eq!(
+        serde_json::to_value(&first_pane_state.graphics_events).expect("encode graphics events"),
+        serde_json::json!([{"Ok": migrated_event_record}])
+    );
     assert_eq!(
         resume_body.carried_pane_state_by_pane_id[&second_pane_id].undecoded_bytes,
-        b"\x1b]7;file://host/Users/yuhan/Proj"
+        b"\x1b]7;file://host/home/user/Proj"
     );
     assert_eq!(
         resume_body.carried_pane_state_by_pane_id[&third_pane_id]
@@ -139,6 +340,118 @@ fn migrate_format_three_restores_image_and_open_parser_sequences() {
         2
     );
     assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+/// Parses `fixtures/format_three.json` and returns it with the key and the
+/// pane id of its first terminal engine.
+fn parse_format_three_fixture_with_first_pane() -> (serde_json::Value, String, PaneId) {
+    let fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
+            .expect("parse released resume fixture");
+    let first_pane_key = fixture_json["body"]["engines"]
+        .as_object()
+        .expect("released terminal engines")
+        .keys()
+        .next()
+        .expect("released pane")
+        .clone();
+    let first_pane_id: PaneId =
+        serde_json::from_value(serde_json::Value::String(first_pane_key.clone()))
+            .expect("released pane id");
+    (fixture_json, first_pane_key, first_pane_id)
+}
+
+#[test]
+fn migrate_format_three_restores_reported_directory_and_screen() {
+    let (mut fixture_json, first_pane_key, pane_id) = parse_format_three_fixture_with_first_pane();
+    let released_terminal_state = &mut fixture_json["body"]["engines"][&first_pane_key];
+    released_terminal_state["reported_cwd"] = serde_json::json!({
+        "host": null,
+        "path": "/workspace"
+    });
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode released resume fixture");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let terminal_state = resumed_server.terminal_engine_by_pane_id[&pane_id].get_terminal_state();
+    assert_eq!(get_joined_screen_text(terminal_state), "pane 0 outputred");
+    assert_eq!(
+        terminal_state
+            .get_current_working_directory()
+            .expect("reported working directory")
+            .get_working_directory_path(),
+        Path::new("/workspace")
+    );
+}
+
+#[test]
+fn migrate_format_three_restores_saved_cursor_and_screen() {
+    let (mut fixture_json, first_pane_key, pane_id) = parse_format_three_fixture_with_first_pane();
+    let released_terminal_state = &mut fixture_json["body"]["engines"][&first_pane_key];
+    let mut saved_render = released_terminal_state["primary_render"].clone();
+    saved_render["style"]["fg"] = serde_json::json!({"Indexed": 9});
+    released_terminal_state["primary_cursor"]["saved"] = serde_json::json!({
+        "row": 0,
+        "col": 1,
+        "pending_wrap": false,
+        "render": saved_render
+    });
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode released resume fixture");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let terminal_state = resumed_server.terminal_engine_by_pane_id[&pane_id].get_terminal_state();
+    assert_eq!(get_joined_screen_text(terminal_state), "pane 0 outputred");
+    let terminal_json = serde_json::to_value(terminal_state).expect("serialize restored terminal");
+    assert_eq!(terminal_json["primary_cursor"]["saved"]["column"], 1);
+    assert_eq!(
+        terminal_json["primary_cursor"]["saved"]["is_wrap_pending"],
+        false
+    );
+    assert_eq!(
+        terminal_json["primary_cursor"]["saved"]["render"]["style"]["foreground_color"],
+        serde_json::json!({"Indexed": 9})
+    );
+}
+
+#[test]
+fn migrate_format_three_restores_client_and_pane_pixel_cell_size() {
+    let (mut fixture_json, first_pane_key, pane_id) = parse_format_three_fixture_with_first_pane();
+    let released_terminal_state = &mut fixture_json["body"]["engines"][&first_pane_key];
+    released_terminal_state["cell_size"] = serde_json::json!({"width": 10, "height": 20});
+    let released_sessions = fixture_json["body"]["sessions"]
+        .as_object_mut()
+        .expect("released sessions");
+    let released_session = released_sessions
+        .values_mut()
+        .next()
+        .expect("released session");
+    let released_clients = released_session["clients"]["records"]
+        .as_object_mut()
+        .expect("released clients");
+    let (client_key, released_client) =
+        released_clients.iter_mut().next().expect("released client");
+    let client_key = client_key.clone();
+    released_client["cell_size"] = serde_json::json!({"width": 10, "height": 20});
+    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode released resume fixture");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let terminal_state = resumed_server.terminal_engine_by_pane_id[&pane_id].get_terminal_state();
+    assert_eq!(
+        terminal_state.get_cell_size(),
+        PixelCellSize::from_pixel_dimensions(10, 20)
+    );
+    let session_json =
+        serde_json::to_value(&resumed_server.session_by_id[&resume_header.session_id])
+            .expect("serialize restored session");
+    assert_eq!(
+        session_json["clients"]["client_by_id"][&client_key]["cell_size"],
+        serde_json::json!({"pixel_width": 10, "pixel_height": 20})
+    );
 }
 
 #[test]
@@ -374,12 +687,12 @@ fn migrate_format_three_preserves_reported_and_starving_pane_areas() {
     let clients = session["clients"]["records"]
         .as_object_mut()
         .expect("saved clients");
-    let mut client_ids: Vec<String> = clients.keys().cloned().collect();
-    client_ids.sort();
-    assert_eq!(client_ids.len(), 2);
-    clients[&client_ids[0]]["pane_area"] =
+    let mut client_keys: Vec<String> = clients.keys().cloned().collect();
+    client_keys.sort();
+    assert_eq!(client_keys.len(), 2);
+    clients[&client_keys[0]]["pane_area"] =
         serde_json::json!({"Reported": {"cols": 78, "rows": 20}});
-    clients[&client_ids[1]]["pane_area"] = serde_json::json!("Starving");
+    clients[&client_keys[1]]["pane_area"] = serde_json::json!("Starving");
 
     let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved clients");
     let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
@@ -387,70 +700,59 @@ fn migrate_format_three_preserves_reported_and_starving_pane_areas() {
         .expect("serialize restored session");
     let restored_clients = &session_json["clients"]["client_by_id"];
     assert_eq!(
-        restored_clients[&client_ids[0]]["pane_area"],
+        restored_clients[&client_keys[0]]["pane_area"],
         serde_json::json!({"Reported": {"column_count": 78, "row_count": 20}})
     );
     assert_eq!(
-        restored_clients[&client_ids[1]]["pane_area"],
+        restored_clients[&client_keys[1]]["pane_area"],
         serde_json::json!("Starving")
     );
 }
 
 #[test]
 fn migrate_format_three_preserves_sixel_source_and_palette() {
-    let mut fixture_json: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
-            .expect("format three fixture is JSON");
-    let engines = fixture_json["body"]["engines"]
-        .as_object_mut()
-        .expect("saved terminal engines");
-    let engine = engines.values_mut().next().expect("saved terminal engine");
-    let mut palette = engine["sixel_palette"].clone();
-    palette[2] = serde_json::json!([255, 0, 0]);
-    engine["sixel_palette"] = palette.clone();
-    engine["image_contents"][0]["sixel"] = serde_json::json!({
+    let (mut fixture_json, first_pane_key, first_pane_id) =
+        parse_format_three_fixture_with_first_pane();
+    let released_terminal_state = &mut fixture_json["body"]["engines"][&first_pane_key];
+    let mut sixel_palette = released_terminal_state["sixel_palette"].clone();
+    sixel_palette[2] = serde_json::json!([255, 0, 0]);
+    released_terminal_state["sixel_palette"] = sixel_palette.clone();
+    released_terminal_state["image_contents"][0]["sixel"] = serde_json::json!({
         "indexed": {"width": 1, "height": 1, "indices": [2],
                     "aspect_vertical": 1, "aspect_horizontal": 1},
-        "palette": palette,
+        "palette": sixel_palette,
         "shared_palette": false
     });
-
     let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved Sixel image");
+
     let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
-    let image_contents = resume_body
-        .carried_pane_state_by_pane_id
-        .values()
-        .map(|pane_state| {
-            serde_json::to_value(&pane_state.terminal_state).expect("serialize terminal")
-        })
-        .find(|terminal_json| {
-            !terminal_json["image_contents"]
-                .as_array()
-                .expect("contents")
-                .is_empty()
-        })
-        .expect("terminal with Sixel content");
-    let sixel = &image_contents["image_contents"][0]["sixel"];
-    assert_eq!(
-        sixel["indexed_image"]["pixel_register_indices"],
-        serde_json::json!([2])
-    );
-    assert_eq!(sixel["indexed_image"]["width_pixels"], 1);
-    assert_eq!(sixel["indexed_image"]["height_pixels"], 1);
-    assert_eq!(sixel["sixel_palette"][2], serde_json::json!([255, 0, 0]));
+
     assert_eq!(resume_header.resume_format, 3);
+    let terminal_json = serde_json::to_value(
+        &resume_body.carried_pane_state_by_pane_id[&first_pane_id].terminal_state,
+    )
+    .expect("serialize the migrated terminal");
+    assert_eq!(
+        terminal_json["image_contents"][0]["sixel"],
+        serde_json::json!({
+            "indexed_image": {
+                "width_pixels": 1,
+                "height_pixels": 1,
+                "pixel_register_indices": [2],
+                "pixel_aspect_vertical": 1,
+                "pixel_aspect_horizontal": 1
+            },
+            "sixel_palette": sixel_palette,
+            "is_shared_palette": false
+        })
+    );
 }
 
 #[test]
 fn migrate_format_three_preserves_retained_animation_frames() {
-    let mut fixture_json: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
-            .expect("format three fixture is JSON");
-    let engines = fixture_json["body"]["engines"]
-        .as_object_mut()
-        .expect("saved terminal engines");
-    let engine = engines.values_mut().next().expect("saved terminal engine");
-    engine["image_contents"][0]["animation"] = serde_json::json!({
+    let (mut fixture_json, first_pane_key, first_pane_id) =
+        parse_format_three_fixture_with_first_pane();
+    fixture_json["body"]["engines"][&first_pane_key]["image_contents"][0]["animation"] = serde_json::json!({
         "frames": [{
             "image": {"width": 1, "height": 1, "rgba": [255, 0, 0, 255]},
             "delay": {"numerator_ms": 100, "denominator_ms": 1},
@@ -458,98 +760,51 @@ fn migrate_format_three_preserves_retained_animation_frames() {
         }],
         "loop_policy": "Infinite"
     });
-
     let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode saved animation");
+
     let (_resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
-    let terminal_json = resume_body
-        .carried_pane_state_by_pane_id
-        .values()
-        .map(|pane_state| {
-            serde_json::to_value(&pane_state.terminal_state).expect("serialize terminal")
-        })
-        .find(|terminal_json| {
-            !terminal_json["image_contents"]
-                .as_array()
-                .expect("contents")
-                .is_empty()
-        })
-        .expect("terminal with animation");
-    let animation = &terminal_json["image_contents"][0]["animation"];
+
+    let terminal_json = serde_json::to_value(
+        &resume_body.carried_pane_state_by_pane_id[&first_pane_id].terminal_state,
+    )
+    .expect("serialize the migrated terminal");
     assert_eq!(
-        animation["frames"][0]["decoded_image"]["rgba_bytes"],
-        serde_json::json!([255, 0, 0, 255])
+        terminal_json["image_contents"][0]["animation"],
+        serde_json::json!({
+            "frames": [{
+                "decoded_image": {"pixel_width": 1, "pixel_height": 1, "rgba_bytes": [255, 0, 0, 255]},
+                "frame_delay": {"numerator_ms": 100, "denominator_ms": 1},
+                "is_gapless": false
+            }],
+            "loop_policy": "Infinite"
+        })
     );
-    assert_eq!(
-        animation["frames"][0]["frame_delay"],
-        serde_json::json!({"numerator_ms": 100, "denominator_ms": 1})
-    );
-    assert_eq!(animation["frames"][0]["is_gapless"], false);
-    assert_eq!(animation["loop_policy"], "Infinite");
 }
 
-#[test]
-fn migrate_format_one_applies_every_adjacent_resume_step() {
-    let mut fixture_json: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/format_two.json"))
-            .expect("format two fixture is JSON");
-    fixture_json["header"]["format"] = serde_json::json!(1);
-    let sessions = fixture_json["body"]["sessions"]
-        .as_object_mut()
-        .expect("sessions");
-    for session in sessions.values_mut() {
-        let clients = session["clients"]["records"]
-            .as_object_mut()
-            .expect("clients");
-        for client in clients.values_mut() {
-            client["tier"] = serde_json::json!("Admin");
-        }
-    }
-    let fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode format one fixture");
-    let (resume_header, resume_body) = read_released_resume_fixture(&fixture_bytes);
-    assert_eq!(resume_header.resume_format, 1);
-    assert_eq!(resume_body.session_by_id.len(), 1);
-    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
-    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
-    assert_eq!(
-        resumed_server.session_by_id[&resume_header.session_id]
-            .clients
-            .count_clients(),
-        2
-    );
-    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
-}
-use crate::runtime::event::RuntimeEvent;
-use crate::server::Server;
-
-/// The viewport of the client the session is bootstrapped with.
-const TEST_VIEWPORT_SIZE: Size = Size {
+/// The viewport of the first client, 80×24. The session is bootstrapped with
+/// this client.
+const FIRST_CLIENT_VIEWPORT_SIZE: Size = Size {
     column_count: 80,
     row_count: 24,
 };
 
-/// The viewport of the second client, sized apart from [`TEST_VIEWPORT_SIZE`] so the two
-/// clients are told apart by what they hold.
-const SECOND_VIEWPORT_SIZE: Size = Size {
+/// The viewport of the second client, 100×30.
+const SECOND_CLIENT_VIEWPORT_SIZE: Size = Size {
     column_count: 100,
     row_count: 30,
 };
 
-/// The pieces a test drives a carried server through: the server itself, the
-/// session it serves, its two clients, and its two tabs.
-struct Populated {
+/// A server built by [`build_populated_server`], with the ids of the session
+/// it serves, its two clients, and its two tabs.
+struct PopulatedServer {
     server: Server,
-    /// Kept alive so the runtime inbox never loses its last sender.
+    /// A sender of the server's runtime inbox, held for the life of the test.
     _inbox_sender: mpsc::Sender<RuntimeEvent>,
     session_id: SessionId,
-    first_client: ClientId,
-    second_client: ClientId,
-    first_tab: TabId,
-    second_tab: TabId,
-}
-
-/// Return the top row of a screen as text; a blank cell reads as a space.
-fn get_first_terminal_row(terminal_state: &TerminalState) -> String {
-    get_terminal_row(terminal_state, 0)
+    first_client_id: ClientId,
+    second_client_id: ClientId,
+    first_tab_id: TabId,
+    second_tab_id: TabId,
 }
 
 /// Return row `row_index` of a screen as text; a blank cell reads as a space.
@@ -599,7 +854,7 @@ fn build_blank_carried_pane_state_json() -> serde_json::Value {
 
 /// The sentence decoding `pane_state_json` as a [`CarriedPaneState`] fails
 /// with, up to the position it names. Panics when the state reads.
-fn read_pane_state_error(pane_state_json: &serde_json::Value) -> String {
+fn format_pane_state_parse_error(pane_state_json: &serde_json::Value) -> String {
     let parse_error = serde_json::from_str::<CarriedPaneState>(&pane_state_json.to_string())
         .expect_err("the pane state is refused");
     parse_error
@@ -621,18 +876,20 @@ fn build_raw_resume_body(pane_states_text: &str) -> Box<serde_json::value::RawVa
 
 /// Run `command` as a keybinding of `client_id`, and panic unless it was applied.
 fn apply_keybinding_command(server: &mut Server, client_id: ClientId, command: Command) {
-    let envelope = CommandEnvelope::from_parts(
+    let command_envelope = CommandEnvelope::from_parts(
         CommandId::new(),
         CommandSource::from_key_binding(client_id),
         command,
     );
-    let command_id = envelope.command_id;
-    match server.submit_command(envelope) {
+    let command_id = command_envelope.command_id;
+    match server.submit_command(command_envelope) {
         CommandResult::Ok {
-            command_id: applied,
+            command_id: applied_command_id,
             ..
-        } => assert_eq!(applied, command_id),
-        other => panic!("the command must be applied, got {other:?}"),
+        } => assert_eq!(applied_command_id, command_id),
+        unexpected_command_result => {
+            panic!("the command must be applied, got {unexpected_command_result:?}")
+        }
     }
 }
 
@@ -640,7 +897,7 @@ fn apply_keybinding_command(server: &mut Server, client_id: ClientId, command: C
 /// split twice so its tree nests a split inside a split — two clients on
 /// different tabs with their own focus, zoom, scroll offset and selection, and
 /// output fed into every pane's engine.
-fn build_populated_server() -> Populated {
+fn build_populated_server() -> PopulatedServer {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender.clone()),
@@ -648,26 +905,26 @@ fn build_populated_server() -> Populated {
     let mut server = Server::from_runtime_parts(pty_backend, inbox_receiver);
 
     let session_id = SessionId::new();
-    let first_client = server
+    let first_client_id = server
         .bootstrap_local_named(
             session_id,
             "carried".to_string(),
-            TEST_VIEWPORT_SIZE,
+            FIRST_CLIENT_VIEWPORT_SIZE,
             SystemTime::UNIX_EPOCH,
         )
         .expect("bootstrap the session");
-    let first_tab = *server.session_by_id[&session_id]
+    let first_tab_id = *server.session_by_id[&session_id]
         .tabs
         .keys()
         .next()
         .expect("the bootstrapped tab");
 
     // Two splits on the first tab: rightward, then downward inside the pane the
-    // first split created, so the tree holds a split inside a split.
+    // first split created. The tree holds a split inside a split.
     for direction in [Direction::Right, Direction::Down] {
         apply_keybinding_command(
             &mut server,
-            first_client,
+            first_client_id,
             Command::NewPane(NewPaneArgs {
                 source_pane_id: None,
                 tab_id: None,
@@ -684,37 +941,37 @@ fn build_populated_server() -> Populated {
     // its fourth pane.
     apply_keybinding_command(
         &mut server,
-        first_client,
+        first_client_id,
         Command::NewTab(NewTabArgs::default()),
     );
-    let second_tab = *server.session_by_id[&session_id]
+    let second_tab_id = *server.session_by_id[&session_id]
         .tabs
         .keys()
-        .find(|&&tab| tab != first_tab)
+        .find(|&&tab_id| tab_id != first_tab_id)
         .expect("the created tab");
 
-    // A second client, left on the first tab, so the two clients hold different
-    // active tabs.
-    let second_client = ClientId::new();
+    // A second client on the first tab. The two clients hold different active
+    // tabs.
+    let second_client_id = ClientId::new();
     server.handle_client_attach(
         session_id,
-        second_client,
-        SECOND_VIEWPORT_SIZE,
+        second_client_id,
+        SECOND_CLIENT_VIEWPORT_SIZE,
         None,
-        first_tab,
+        first_tab_id,
         None,
         SystemTime::UNIX_EPOCH,
         false,
     );
 
-    let panes = list_tab_pane_ids(&server, session_id, first_tab);
-    // The second client focuses the last pane of the first tab, so the two
-    // clients hold different focus as well as different tabs.
+    let first_tab_pane_ids = list_tab_pane_ids(&server, session_id, first_tab_id);
+    // The second client focuses the last pane of the first tab. The two clients
+    // hold different focus and different tabs.
     apply_keybinding_command(
         &mut server,
-        second_client,
+        second_client_id,
         Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Pane(panes[2]),
+            focus_target: FocusTarget::Pane(first_tab_pane_ids[2]),
             client_id: None,
         }),
     );
@@ -722,20 +979,20 @@ fn build_populated_server() -> Populated {
         .session_by_id
         .get_mut(&session_id)
         .expect("the session");
-    let first_client_state = session
+    let first_client = session
         .clients
-        .get_client_mut_by_id(first_client)
+        .get_client_mut_by_id(first_client_id)
         .expect("the first client");
-    first_client_state.zoom_pane(first_tab, panes[0]);
-    first_client_state.set_scroll_offset(panes[1], 7);
-    let second_client_state = session
+    first_client.zoom_pane(first_tab_id, first_tab_pane_ids[0]);
+    first_client.set_scroll_offset(first_tab_pane_ids[1], 7);
+    let second_client = session
         .clients
-        .get_client_mut_by_id(second_client)
+        .get_client_mut_by_id(second_client_id)
         .expect("the second client");
-    second_client_state.zoom_pane(first_tab, panes[2]);
-    second_client_state.set_scroll_offset(panes[0], 12);
-    second_client_state.set_selection(
-        panes[1],
+    second_client.zoom_pane(first_tab_id, first_tab_pane_ids[2]);
+    second_client.set_scroll_offset(first_tab_pane_ids[0], 12);
+    second_client.set_selection(
+        first_tab_pane_ids[1],
         Selection {
             selection_kind: SelectionKind::Word,
             anchor: GridPosition {
@@ -749,8 +1006,7 @@ fn build_populated_server() -> Populated {
         },
     );
 
-    // Distinct output per pane, so a screen that came back under the wrong pane
-    // is caught.
+    // Pane `n` in tab order then layout order is fed `pane n output`.
     for (pane_index, pane_id) in list_session_pane_ids(&server, session_id)
         .into_iter()
         .enumerate()
@@ -758,20 +1014,75 @@ fn build_populated_server() -> Populated {
         server.handle_pty_output(pane_id, format!("pane {pane_index} output").as_bytes());
     }
 
-    Populated {
+    PopulatedServer {
         server,
         _inbox_sender: inbox_sender,
         session_id,
-        first_client,
-        second_client,
-        first_tab,
-        second_tab,
+        first_client_id,
+        second_client_id,
+        first_tab_id,
+        second_tab_id,
     }
 }
 
-/// Return the pane ids of `tab`, in layout order.
-fn list_tab_pane_ids(server: &Server, session_id: SessionId, tab: TabId) -> Vec<PaneId> {
-    server.session_by_id[&session_id].tabs[&tab]
+/// Builds [`build_populated_server`], carries its session out over the
+/// panes [`build_carried_pty_panes`] reports, and returns the drained server,
+/// those carried PTY panes, and the header and body the carry produced.
+fn carry_out_populated_server() -> (
+    PopulatedServer,
+    Vec<CarriedPtyPane>,
+    ResumeHeader,
+    ResumeBody,
+) {
+    let mut populated_server = build_populated_server();
+    let carried_pty_panes =
+        build_carried_pty_panes(&populated_server.server, populated_server.session_id);
+    let (resume_header, resume_body) = populated_server
+        .server
+        .carry_out(&carried_pty_panes)
+        .expect("a session to carry");
+    (
+        populated_server,
+        carried_pty_panes,
+        resume_header,
+        resume_body,
+    )
+}
+
+/// Reads the JSON of the resume file at `resume_file_path`, applies
+/// `update_file_json` to it, and writes the result back to the same path.
+fn update_resume_file_json(
+    resume_file_path: &Path,
+    update_file_json: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut resume_file_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(resume_file_path).expect("read the resume file"))
+            .expect("the resume file is JSON");
+    update_file_json(&mut resume_file_json);
+    std::fs::write(
+        resume_file_path,
+        serde_json::to_vec(&resume_file_json).expect("encode the resume file"),
+    )
+    .expect("rewrite the resume file");
+}
+
+/// Builds a carried pane with process id `4242`, a 78×20 size, descriptor `9`
+/// on `/dev/pts/9`, and `exit_status`.
+fn build_test_carried_pane(exit_status: Option<ExitStatus>) -> CarriedPane {
+    CarriedPane {
+        pane_id: PaneId::new(),
+        process_id: 4242,
+        row_count: 20,
+        column_count: 78,
+        terminal_fd: Some(9),
+        terminal_name: Some("/dev/pts/9".to_string()),
+        exit_status,
+    }
+}
+
+/// Return the pane ids of `tab_id`, in layout order.
+fn list_tab_pane_ids(server: &Server, session_id: SessionId, tab_id: TabId) -> Vec<PaneId> {
+    server.session_by_id[&session_id].tabs[&tab_id]
         .get_layout_tree()
         .list_leaf_pane_ids()
 }
@@ -827,43 +1138,45 @@ fn build_resume_body_with_quit(carried_quit: Option<CarriedQuit>) -> ResumeBody 
     }
 }
 
-/// Build a resumed server from `body`, driving every pane the header names at
-/// the size that header carries.
+/// Build a resumed server from `resume_body`, driving every pane
+/// `resume_header` names at the size it carries, with no startup config and no
+/// received exit.
 fn build_resumed_server(
-    header: &ResumeHeader,
-    body: ResumeBody,
+    resume_header: &ResumeHeader,
+    resume_body: ResumeBody,
 ) -> (Server, mpsc::Sender<RuntimeEvent>) {
-    build_resumed_server_with_exit_statuses(header, body, HashMap::new())
+    build_resumed_server_with_config_and_exit_statuses(
+        resume_header,
+        resume_body,
+        None,
+        HashMap::new(),
+    )
 }
 
-/// Build a resumed server with the exits received during the supervisor link.
-fn build_resumed_server_with_exit_statuses(
-    header: &ResumeHeader,
-    body: ResumeBody,
+/// Build a resumed server from `resume_body`, driving every pane
+/// `resume_header` names at the size it carries. `startup_app_config` is the
+/// config the server starts with. `exit_status_by_pane_id` holds the exits
+/// received before the resume.
+fn build_resumed_server_with_config_and_exit_statuses(
+    resume_header: &ResumeHeader,
+    resume_body: ResumeBody,
+    startup_app_config: Option<PartialKoshiConfig>,
     exit_status_by_pane_id: HashMap<PaneId, ExitStatus>,
 ) -> (Server, mpsc::Sender<RuntimeEvent>) {
     let (inbox_sender, inbox_receiver) = mpsc::channel();
     let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
         InboxSink::from_event_sender(inbox_sender.clone()),
     )));
-    let pty_size_by_pane_id: HashMap<PaneId, PtySize> = header
+    let pty_size_by_pane_id: HashMap<PaneId, PtySize> = resume_header
         .carried_panes
         .iter()
-        .map(|pane| {
-            (
-                pane.pane_id,
-                PtySize {
-                    column_count: pane.column_count,
-                    row_count: pane.row_count,
-                },
-            )
-        })
+        .map(|carried_pane| (carried_pane.pane_id, carried_pane.get_pty_size()))
         .collect();
     let server = Server::resume(
         pty_backend,
         inbox_receiver,
-        None,
-        body,
+        startup_app_config,
+        resume_body,
         pty_size_by_pane_id,
         exit_status_by_pane_id,
     );
@@ -874,33 +1187,45 @@ fn build_resumed_server_with_exit_statuses(
 fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let expected_tabs = populated.server.session_by_id[&session_id].tabs.clone();
-    let expected_records = populated.server.session_by_id[&session_id].panes.clone();
-    let expected_sizes = populated.server.pty_size_by_pane_id.clone();
+    let mut populated_server = build_populated_server();
+    let session_id = populated_server.session_id;
+    let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
+    let expected_tabs = populated_server.server.session_by_id[&session_id]
+        .tabs
+        .clone();
+    let expected_pane_registry = populated_server.server.session_by_id[&session_id]
+        .panes
+        .clone();
+    let expected_pty_size_by_pane_id = populated_server.server.pty_size_by_pane_id.clone();
 
-    let (header, body) = populated
+    let (resume_header, resume_body) = populated_server
         .server
-        .carry_out(&panes)
+        .carry_out(&carried_pty_panes)
         .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
     let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
     let read_body =
         read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
-    let (resumed, _inbox_sender) = build_resumed_server(&read_header, read_body);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&read_header, read_body);
 
-    assert_eq!(read_header, header, "the header must read back unchanged");
+    assert_eq!(
+        read_header, resume_header,
+        "the header must read back unchanged"
+    );
     assert_eq!(read_header.session_id, session_id);
     assert_eq!(read_header.session_name, "carried");
-    assert_eq!(resumed.session_by_id.len(), 1, "one session must come back");
-    let session = &resumed.session_by_id[&session_id];
+    assert_eq!(
+        resumed_server.session_by_id.len(),
+        1,
+        "one session must come back"
+    );
+    let session = &resumed_server.session_by_id[&session_id];
     assert_eq!(session.session_name, "carried");
     assert_eq!(session.tabs, expected_tabs, "every tab and its layout tree");
     assert_eq!(
-        session.panes, expected_records,
+        session.panes, expected_pane_registry,
         "every pane carried by the header"
     );
     assert_eq!(
@@ -911,52 +1236,58 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
 
     let resumed_first_client = session
         .clients
-        .get_client_by_id(populated.first_client)
+        .get_client_by_id(populated_server.first_client_id)
         .expect("the first client");
-    let first_tab_panes = expected_tabs[&populated.first_tab]
+    let first_tab_pane_ids = expected_tabs[&populated_server.first_tab_id]
         .get_layout_tree()
         .list_leaf_pane_ids();
     assert_eq!(
         resumed_first_client.get_active_tab_id(),
-        populated.second_tab
-    );
-    assert_eq!(resumed_first_client.get_viewport_size(), TEST_VIEWPORT_SIZE);
-    assert_eq!(
-        resumed_first_client.get_zoomed_pane_id(populated.first_tab),
-        Some(first_tab_panes[0])
+        populated_server.second_tab_id
     );
     assert_eq!(
-        resumed_first_client.get_scroll_offset(first_tab_panes[1]),
+        resumed_first_client.get_viewport_size(),
+        FIRST_CLIENT_VIEWPORT_SIZE
+    );
+    assert_eq!(
+        resumed_first_client.get_zoomed_pane_id(populated_server.first_tab_id),
+        Some(first_tab_pane_ids[0])
+    );
+    assert_eq!(
+        resumed_first_client.get_scroll_offset(first_tab_pane_ids[1]),
         7
     );
-    assert_eq!(resumed_first_client.get_selection(first_tab_panes[1]), None);
+    assert_eq!(
+        resumed_first_client.get_selection(first_tab_pane_ids[1]),
+        None
+    );
 
     let resumed_second_client = session
         .clients
-        .get_client_by_id(populated.second_client)
+        .get_client_by_id(populated_server.second_client_id)
         .expect("the second client");
     assert_eq!(
         resumed_second_client.get_active_tab_id(),
-        populated.first_tab
+        populated_server.first_tab_id
     );
     assert_eq!(
         resumed_second_client.get_viewport_size(),
-        SECOND_VIEWPORT_SIZE
+        SECOND_CLIENT_VIEWPORT_SIZE
     );
     assert_eq!(
-        resumed_second_client.get_focused_pane_id(populated.first_tab),
-        Some(first_tab_panes[2])
+        resumed_second_client.get_focused_pane_id(populated_server.first_tab_id),
+        Some(first_tab_pane_ids[2])
     );
     assert_eq!(
-        resumed_second_client.get_zoomed_pane_id(populated.first_tab),
-        Some(first_tab_panes[2])
+        resumed_second_client.get_zoomed_pane_id(populated_server.first_tab_id),
+        Some(first_tab_pane_ids[2])
     );
     assert_eq!(
-        resumed_second_client.get_scroll_offset(first_tab_panes[0]),
+        resumed_second_client.get_scroll_offset(first_tab_pane_ids[0]),
         12
     );
     assert_eq!(
-        resumed_second_client.get_selection(first_tab_panes[1]),
+        resumed_second_client.get_selection(first_tab_pane_ids[1]),
         Some(Selection {
             selection_kind: SelectionKind::Word,
             anchor: GridPosition {
@@ -971,78 +1302,77 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     );
 
     assert_eq!(
-        body.carried_pane_state_by_pane_id.len(),
+        resume_body.carried_pane_state_by_pane_id.len(),
         4,
         "four panes must have a screen"
     );
-    for (pane_id, carried_pane_state) in &body.carried_pane_state_by_pane_id {
+    for (pane_id, carried_pane_state) in &resume_body.carried_pane_state_by_pane_id {
         assert_eq!(
-            resumed.terminal_engine_by_pane_id[pane_id].get_terminal_state(),
+            resumed_server.terminal_engine_by_pane_id[pane_id].get_terminal_state(),
             &carried_pane_state.terminal_state,
             "pane {pane_id} must come back with the screen it went out with"
         );
     }
-    // Every pane was fed its own text, so a screen that came back under the
-    // wrong pane reads the wrong line here.
-    for (pane_index, pane) in panes.iter().enumerate() {
+    for (pane_index, carried_pty_pane) in carried_pty_panes.iter().enumerate() {
         assert_eq!(
-            get_first_terminal_row(
-                resumed.terminal_engine_by_pane_id[&pane.pane_id].get_terminal_state(),
+            get_terminal_row(
+                resumed_server.terminal_engine_by_pane_id[&carried_pty_pane.pane_id]
+                    .get_terminal_state(),
+                0
             )
             .trim_end(),
             format!("pane {pane_index} output")
         );
     }
     assert_eq!(
-        resumed.pty_size_by_pane_id, expected_sizes,
+        resumed_server.pty_size_by_pane_id, expected_pty_size_by_pane_id,
         "every pane's size"
     );
-    let mut resumed_live_pane_ids: Vec<PaneId> = resumed.live_pane_ids.iter().copied().collect();
-    resumed_live_pane_ids.sort();
-    let mut carried_ids: Vec<PaneId> = panes.iter().map(|pane| pane.pane_id).collect();
-    carried_ids.sort();
     assert_eq!(
-        resumed_live_pane_ids, carried_ids,
+        resumed_server.live_pane_ids,
+        list_carried_pty_pane_ids(&carried_pty_panes),
         "every carried pane must come back live"
     );
 }
 
+/// Return the pane id of every pane in `carried_pty_panes`.
+fn list_carried_pty_pane_ids(carried_pty_panes: &[CarriedPtyPane]) -> HashSet<PaneId> {
+    carried_pty_panes
+        .iter()
+        .map(|carried_pty_pane| carried_pty_pane.pane_id)
+        .collect()
+}
+
 #[test]
 fn carrying_the_state_out_leaves_the_server_holding_nothing() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-
-    let (_header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
+    let (populated_server, _carried_pty_panes, _resume_header, resume_body) =
+        carry_out_populated_server();
 
     assert_eq!(
-        populated.server.terminal_engine_by_pane_id.len(),
+        populated_server.server.terminal_engine_by_pane_id.len(),
         0,
         "every engine must have moved out"
     );
     assert_eq!(
-        populated.server.session_by_id.len(),
+        populated_server.server.session_by_id.len(),
         0,
         "every session must have moved out"
     );
     assert_eq!(
-        body.carried_pane_state_by_pane_id.len(),
+        resume_body.carried_pane_state_by_pane_id.len(),
         4,
         "every engine must be in the body"
     );
     assert_eq!(
-        body.session_by_id.len(),
+        resume_body.session_by_id.len(),
         1,
         "the session must be in the body"
     );
-    for (pane_id, carried_pane_state) in &body.carried_pane_state_by_pane_id {
+    for (pane_id, carried_pane_state) in &resume_body.carried_pane_state_by_pane_id {
         assert_eq!(
             carried_pane_state.undecoded_bytes,
             Vec::<u8>::new(),
-            "pane {pane_id}'s parser was not mid-sequence, so it holds nothing"
+            "pane {pane_id}'s parser was not mid-sequence and holds nothing"
         );
     }
 }
@@ -1051,22 +1381,22 @@ fn carrying_the_state_out_leaves_the_server_holding_nothing() {
 fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let pane = list_session_pane_ids(&populated.server, session_id)[0];
-    let panes = build_carried_pty_panes(&populated.server, session_id);
+    let mut populated_server = build_populated_server();
+    let session_id = populated_server.session_id;
+    let reporting_pane_id = list_session_pane_ids(&populated_server.server, session_id)[0];
+    let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
 
-    // The shell reports /Users/yuhan/Projects/koshi through OSC 7, and the last
+    // The shell reports /home/user/Projects/koshi through OSC 7, and the last
     // chunk before the swap ends after `/Proj`.
-    populated
+    populated_server
         .server
-        .handle_pty_output(pane, b"\x1b]7;file://host/Users/yuhan/Proj");
+        .handle_pty_output(reporting_pane_id, b"\x1b]7;file://host/home/user/Proj");
 
-    let (header, body) = populated
+    let (resume_header, resume_body) = populated_server
         .server
-        .carry_out(&panes)
+        .carry_out(&carried_pty_panes)
         .expect("a session to carry");
-    let undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>> = body
+    let undecoded_bytes_by_pane_id: HashMap<PaneId, Vec<u8>> = resume_body
         .carried_pane_state_by_pane_id
         .iter()
         .filter(|(_, carried_pane_state)| !carried_pane_state.undecoded_bytes.is_empty())
@@ -1074,39 +1404,46 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
         .collect();
     assert_eq!(
         undecoded_bytes_by_pane_id,
-        HashMap::from([(pane, b"\x1b]7;file://host/Users/yuhan/Proj".to_vec())]),
+        HashMap::from([(
+            reporting_pane_id,
+            b"\x1b]7;file://host/home/user/Proj".to_vec()
+        )]),
         "only the pane mid-report holds bytes, and it holds all of them"
     );
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
     let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
     let read_body =
         read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
-    let (mut resumed, _inbox_sender) = build_resumed_server(&read_header, read_body);
+    let (mut resumed_server, _inbox_sender) = build_resumed_server(&read_header, read_body);
 
     assert_eq!(
-        resumed.terminal_engine_by_pane_id[&pane]
+        resumed_server.terminal_engine_by_pane_id[&reporting_pane_id]
             .get_terminal_state()
             .get_current_working_directory(),
         None,
         "a report with no terminator sets no directory"
     );
-    let initial_terminal_row =
-        get_first_terminal_row(resumed.terminal_engine_by_pane_id[&pane].get_terminal_state());
+    let initial_terminal_row = get_terminal_row(
+        resumed_server.terminal_engine_by_pane_id[&reporting_pane_id].get_terminal_state(),
+        0,
+    );
 
-    resumed.handle_pty_output(pane, b"ects/koshi\x07");
+    resumed_server.handle_pty_output(reporting_pane_id, b"ects/koshi\x07");
 
-    let terminal_state = resumed.terminal_engine_by_pane_id[&pane].get_terminal_state();
+    let terminal_state =
+        resumed_server.terminal_engine_by_pane_id[&reporting_pane_id].get_terminal_state();
     let reported_working_directory = terminal_state
         .get_current_working_directory()
         .expect("the report finished");
     assert_eq!(reported_working_directory.get_host(), Some("host"));
     assert_eq!(
         reported_working_directory.get_working_directory_path(),
-        Path::new("/Users/yuhan/Projects/koshi")
+        Path::new("/home/user/Projects/koshi")
     );
     assert_eq!(
-        get_first_terminal_row(terminal_state),
+        get_terminal_row(terminal_state, 0),
         initial_terminal_row,
         "the rest of the report joined the sequence instead of printing"
     );
@@ -1114,14 +1451,9 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
 
 #[test]
 fn a_body_missing_any_field_the_writer_emits_is_refused() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (_, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    let body_json = serde_json::to_value(&body).expect("the body encodes");
+    let (_populated_server, _carried_pty_panes, _resume_header, resume_body) =
+        carry_out_populated_server();
+    let body_json = serde_json::to_value(&resume_body).expect("the body encodes");
 
     for field_name in ["session_by_id", "carried_pane_state_by_pane_id"] {
         let mut incomplete_body_json = body_json.clone();
@@ -1130,49 +1462,53 @@ fn a_body_missing_any_field_the_writer_emits_is_refused() {
             .expect("the body is a map")
             .remove(field_name)
             .expect("the writer emits every field");
-        let raw_resume_body =
-            serde_json::value::RawValue::from_string(incomplete_body_json.to_string())
-                .expect("the body is json");
+        let incomplete_body_text = incomplete_body_json.to_string();
+        let incomplete_body_column_count = incomplete_body_text.len();
+        let raw_resume_body = serde_json::value::RawValue::from_string(incomplete_body_text)
+            .expect("the body is json");
 
         match read_resume_body(RESUME_FORMAT, &raw_resume_body) {
             Err(StorageError::Corrupt { detail }) => assert_eq!(
-                detail.split(" at line ").next(),
-                Some(format!("resume body is unreadable: missing field `{field_name}`").as_str())
+                detail,
+                format!(
+                    "resume body is unreadable: missing field `{field_name}` at line 1 column {incomplete_body_column_count}"
+                )
             ),
-            other => panic!("expected a body without {field_name} to be corrupt, got {other:?}"),
+            unexpected_read_result => panic!(
+                "expected a body without {field_name} to be corrupt, got {unexpected_read_result:?}"
+            ),
         }
     }
 }
 
 #[test]
 fn the_header_names_every_pane_with_the_size_the_server_holds_for_it() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let sizes = populated.server.pty_size_by_pane_id.clone();
+    let mut populated_server = build_populated_server();
+    let carried_pty_panes =
+        build_carried_pty_panes(&populated_server.server, populated_server.session_id);
+    let held_pty_size_by_pane_id = populated_server.server.pty_size_by_pane_id.clone();
 
-    let (header, _body) = populated
+    let (resume_header, _resume_body) = populated_server
         .server
-        .carry_out(&panes)
+        .carry_out(&carried_pty_panes)
         .expect("a session to carry");
 
-    assert_eq!(header.resume_format, RESUME_FORMAT);
+    assert_eq!(resume_header.resume_format, RESUME_FORMAT);
     assert_eq!(
-        header.carried_panes.len(),
+        resume_header.carried_panes.len(),
         4,
         "one carried pane per live pane"
     );
-    for (pane_index, carried_pane) in header.carried_panes.iter().enumerate() {
-        assert_eq!(carried_pane.pane_id, panes[pane_index].pane_id);
+    for (pane_index, carried_pane) in resume_header.carried_panes.iter().enumerate() {
+        assert_eq!(carried_pane.pane_id, carried_pty_panes[pane_index].pane_id);
         assert_eq!(carried_pane.process_id, 5000 + pane_index as u32);
         #[cfg(unix)]
         assert_eq!(carried_pane.terminal_fd, Some(20 + pane_index as i32));
         #[cfg(windows)]
         assert_eq!(carried_pane.terminal_fd, None);
-        let held = sizes[&carried_pane.pane_id];
         assert_eq!(
-            (carried_pane.column_count, carried_pane.row_count),
-            (held.column_count, held.row_count),
+            carried_pane.get_pty_size(),
+            held_pty_size_by_pane_id[&carried_pane.pane_id],
             "the header carries the size the server holds, not the backend's"
         );
     }
@@ -1180,22 +1516,25 @@ fn the_header_names_every_pane_with_the_size_the_server_holds_for_it() {
 
 #[test]
 fn a_pane_the_server_holds_no_size_for_takes_the_size_the_backend_reports() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let forgotten = panes[2].pane_id;
-    populated.server.pty_size_by_pane_id.remove(&forgotten);
-
-    let (header, _body) = populated
+    let mut populated_server = build_populated_server();
+    let carried_pty_panes =
+        build_carried_pty_panes(&populated_server.server, populated_server.session_id);
+    let unsized_pane_id = carried_pty_panes[2].pane_id;
+    populated_server
         .server
-        .carry_out(&panes)
+        .pty_size_by_pane_id
+        .remove(&unsized_pane_id);
+
+    let (resume_header, _resume_body) = populated_server
+        .server
+        .carry_out(&carried_pty_panes)
         .expect("a session to carry");
 
-    let carried_pane = header
+    let carried_pane = resume_header
         .carried_panes
         .iter()
-        .find(|carried_pane| carried_pane.pane_id == forgotten)
-        .expect("the pane the server forgot");
+        .find(|carried_pane| carried_pane.pane_id == unsized_pane_id)
+        .expect("the pane the server holds no size for");
     assert_eq!((carried_pane.column_count, carried_pane.row_count), (1, 1));
 }
 
@@ -1203,37 +1542,21 @@ fn a_pane_the_server_holds_no_size_for_takes_the_size_the_backend_reports() {
 fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
-
-    // Only the body is broken; the header on disk is untouched.
-    let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
-            .expect("valid json");
-    on_disk["raw_body"] = serde_json::json!({ "session_by_id": "not-a-map" });
-    std::fs::write(
-        &resume_file_path,
-        serde_json::to_vec(&on_disk).expect("encode"),
-    )
-    .expect("rewrite the file");
+    let (_populated_server, _carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    update_resume_file_json(&resume_file_path, |resume_file_json| {
+        resume_file_json["raw_body"] = serde_json::json!({ "session_by_id": "not-a-map" });
+    });
 
     let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
-    assert_eq!(read_header, header, "the header survives a broken body");
-    assert_eq!(read_header.carried_panes.len(), 4);
-    for (pane_index, carried_pane) in read_header.carried_panes.iter().enumerate() {
-        assert_eq!(carried_pane.process_id, 5000 + pane_index as u32);
-        #[cfg(unix)]
-        assert_eq!(carried_pane.terminal_fd, Some(20 + pane_index as i32));
-        #[cfg(windows)]
-        assert_eq!(carried_pane.terminal_fd, None);
-    }
+
+    assert_eq!(
+        read_header, resume_header,
+        "the header survives a broken body"
+    );
     match read_resume_body(read_header.resume_format, &raw_body) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
@@ -1241,24 +1564,26 @@ fn an_unreadable_body_still_leaves_every_pane_descriptor_and_process_id() {
                 "resume body is unreadable: invalid type: string \"not-a-map\", expected a map at line 1 column 28"
             );
         }
-        other => panic!("expected a corrupt body, got {other:?}"),
+        unexpected_read_result => panic!("expected a corrupt body, got {unexpected_read_result:?}"),
     }
 }
 
 #[test]
 fn a_body_format_this_build_does_not_know_is_refused_by_both_numbers() {
-    let too_new = RESUME_FORMAT + 1;
+    let newer_resume_format = RESUME_FORMAT + 1;
 
-    match read_resume_body(too_new, serde_json::value::RawValue::NULL) {
+    match read_resume_body(newer_resume_format, serde_json::value::RawValue::NULL) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
                 format!(
-                    "resume body format {too_new} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
+                    "resume body format {newer_resume_format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
                 )
             );
         }
-        other => panic!("expected a refused format, got {other:?}"),
+        unexpected_read_result => {
+            panic!("expected a refused format, got {unexpected_read_result:?}")
+        }
     }
 }
 
@@ -1275,7 +1600,7 @@ fn a_pane_state_missing_any_required_field_the_writer_emits_does_not_read() {
             .expect("the writer emits every field");
 
         assert_eq!(
-            read_pane_state_error(&incomplete_pane_state_json),
+            format_pane_state_parse_error(&incomplete_pane_state_json),
             format!("missing field `{field_name}`")
         );
     }
@@ -1283,15 +1608,16 @@ fn a_pane_state_missing_any_required_field_the_writer_emits_does_not_read() {
 
 #[test]
 fn a_pane_state_with_graphics_transport_deeper_than_the_wrapper_limit_does_not_read() {
-    let mut nested = serde_json::json!({ "carry_bytes": [] });
+    let mut nested_graphics_transport = serde_json::json!({ "carry_bytes": [] });
     for _ in 0..9 {
-        nested = serde_json::json!({ "screen_inner_transport": nested });
+        nested_graphics_transport =
+            serde_json::json!({ "screen_inner_transport": nested_graphics_transport });
     }
     let mut pane_state_json = build_blank_carried_pane_state_json();
-    pane_state_json["graphics_transport"] = nested;
+    pane_state_json["graphics_transport"] = nested_graphics_transport;
 
     assert_eq!(
-        read_pane_state_error(&pane_state_json),
+        format_pane_state_parse_error(&pane_state_json),
         "graphics wrapper nesting exceeds the supported limit"
     );
 }
@@ -1303,46 +1629,48 @@ fn a_pane_state_with_graphics_transport_carrying_too_many_bytes_does_not_read() 
         serde_json::json!({ "carry_bytes": vec![0u8; 64 * 1024 + 1] });
 
     assert_eq!(
-        read_pane_state_error(&pane_state_json),
+        format_pane_state_parse_error(&pane_state_json),
         "graphics carry exceeds 65536 bytes"
     );
 }
 
 #[test]
 fn a_pane_state_with_queued_image_bytes_that_do_not_match_dimensions_does_not_read() {
-    let mut event = build_queued_image_event_json();
-    event["Ok"]["image"]["rgba_bytes"] = serde_json::json!([255, 0, 0]);
+    let mut image_event_json = build_queued_image_event_json();
+    image_event_json["Ok"]["image"]["rgba_bytes"] = serde_json::json!([255, 0, 0]);
     let mut pane_state_json = build_blank_carried_pane_state_json();
-    pane_state_json["graphics_events"] = serde_json::json!([event]);
+    pane_state_json["graphics_events"] = serde_json::json!([image_event_json]);
 
     assert_eq!(
-        read_pane_state_error(&pane_state_json),
+        format_pane_state_parse_error(&pane_state_json),
         "decoded image RGBA length does not match its dimensions"
     );
 }
 
 #[test]
 fn a_pane_state_with_graphics_error_text_over_the_control_limit_does_not_read() {
-    let event: GraphicsEvent = Err(koshi_terminal::graphics::GraphicsError::UnsupportedAction {
-        protocol: GraphicsProtocol::Kitty,
-        action: String::new(),
-    });
-    let mut event = serde_json::to_value(event).expect("the graphics error is json");
-    event["Err"]["UnsupportedAction"]["action"] = serde_json::Value::String(
+    let error_event: GraphicsEvent =
+        Err(koshi_terminal::graphics::GraphicsError::UnsupportedAction {
+            protocol: GraphicsProtocol::Kitty,
+            action: String::new(),
+        });
+    let mut error_event_json =
+        serde_json::to_value(error_event).expect("the graphics error is json");
+    error_event_json["Err"]["UnsupportedAction"]["action"] = serde_json::Value::String(
         "x".repeat(koshi_terminal::graphics::MAX_GRAPHICS_CONTROL_BYTE_COUNT + 1),
     );
     let mut pane_state_json = build_blank_carried_pane_state_json();
-    pane_state_json["graphics_events"] = serde_json::json!([event]);
+    pane_state_json["graphics_events"] = serde_json::json!([error_event_json]);
 
     assert_eq!(
-        read_pane_state_error(&pane_state_json),
+        format_pane_state_parse_error(&pane_state_json),
         "graphics error text exceeds 8192 bytes"
     );
 }
 
 /// One queued one-pixel red Kitty image, as JSON.
 fn build_queued_image_event_json() -> serde_json::Value {
-    let event: GraphicsEvent = Ok(ImageRecord {
+    let image_event: GraphicsEvent = Ok(ImageRecord {
         protocol: GraphicsProtocol::Kitty,
         image: (DecodedImage {
             pixel_width: 1,
@@ -1355,7 +1683,7 @@ fn build_queued_image_event_json() -> serde_json::Value {
         display: ImageDisplay::default(),
         anchor: (0, 0),
     });
-    serde_json::to_value(event).expect("the image event is json")
+    serde_json::to_value(image_event).expect("the image event is json")
 }
 
 #[test]
@@ -1368,35 +1696,40 @@ fn a_pane_state_with_a_graphics_event_list_over_the_engine_limit_does_not_read()
     ]);
 
     assert_eq!(
-        read_pane_state_error(&pane_state_json),
+        format_pane_state_parse_error(&pane_state_json),
         "graphics event count exceeds 64"
     );
 }
 
 #[test]
 fn a_pane_state_reads_the_queue_full_report_after_queued_events() {
-    let pane = PaneId::new();
-    let mut events =
+    let pane_id = PaneId::new();
+    let mut graphics_event_jsons =
         vec![build_queued_image_event_json(); koshi_terminal::engine::MAX_GRAPHICS_EVENT_COUNT];
-    events.push(serde_json::json!({
+    graphics_event_jsons.push(serde_json::json!({
         "Err": {
             "QueueFull": { "dropped_event_count": 2 }
         }
     }));
+    assert_eq!(
+        graphics_event_jsons.len(),
+        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH_COUNT
+    );
     let mut pane_state_json = build_blank_carried_pane_state_json();
-    pane_state_json["graphics_events"] = serde_json::json!(events);
+    pane_state_json["graphics_events"] = serde_json::json!(graphics_event_jsons);
     let raw_resume_body = build_raw_resume_body(
-        &serde_json::json!({ pane.get_uuid().to_string(): pane_state_json }).to_string(),
+        &serde_json::json!({ pane_id.get_uuid().to_string(): pane_state_json }).to_string(),
     );
 
     let parsed_resume_body =
         read_resume_body(RESUME_FORMAT, &raw_resume_body).expect("the valid queue batch reads");
 
     assert_eq!(
-        parsed_resume_body.carried_pane_state_by_pane_id[&pane]
-            .graphics_events
-            .len(),
-        koshi_terminal::engine::MAX_GRAPHICS_EVENT_BATCH_COUNT
+        serde_json::to_value(
+            &parsed_resume_body.carried_pane_state_by_pane_id[&pane_id].graphics_events
+        )
+        .expect("encode the graphics events"),
+        serde_json::json!(graphics_event_jsons)
     );
 }
 
@@ -1434,9 +1767,9 @@ fn a_body_leaves_out_a_pane_key_named_twice_and_a_key_naming_no_pane() {
     let readable_pane_id = PaneId::new();
     let pane_state_text = build_blank_carried_pane_state_json().to_string();
     let raw_resume_body = build_raw_resume_body(&format!(
-        r#"{{"{repeated}":{pane_state_text},"not-a-pane-id":{pane_state_text},"{repeated}":{pane_state_text},"{readable}":{pane_state_text},"{repeated}":{pane_state_text}}}"#,
-        repeated = repeated_pane_id.get_uuid(),
-        readable = readable_pane_id.get_uuid(),
+        r#"{{"{repeated_pane_uuid}":{pane_state_text},"not-a-pane-id":{pane_state_text},"{repeated_pane_uuid}":{pane_state_text},"{readable_pane_uuid}":{pane_state_text},"{repeated_pane_uuid}":{pane_state_text}}}"#,
+        repeated_pane_uuid = repeated_pane_id.get_uuid(),
+        readable_pane_uuid = readable_pane_id.get_uuid(),
     ));
 
     let parsed_resume_body =
@@ -1456,127 +1789,69 @@ fn a_body_leaves_out_a_pane_key_named_twice_and_a_key_naming_no_pane() {
 fn a_header_naming_an_unknown_format_still_reads_back_whole() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let session_id = SessionId::new();
-    let header = ResumeHeader {
+    let resume_header = ResumeHeader {
         resume_format: RESUME_FORMAT + 1,
-        session_id,
+        session_id: SessionId::new(),
         session_name: "from-a-newer-build".to_string(),
-        carried_panes: vec![CarriedPane {
-            pane_id: PaneId::new(),
-            process_id: 4242,
-            row_count: 20,
-            column_count: 78,
-            terminal_fd: Some(9),
-            terminal_name: Some("/dev/ttys009".to_string()),
-            exit_status: None,
-        }],
+        carried_panes: vec![build_test_carried_pane(None)],
     };
-    let resume_body = ResumeBody {
-        session_by_id: HashMap::new(),
-        carried_pane_state_by_pane_id: HashMap::new(),
-        carried_quit: None,
-    };
-    write_resume_file(&resume_file_path, &header, &resume_body).expect("write the resume file");
-
-    let (read, _raw_body) = read_resume_header(&resume_file_path).expect("read the header back");
-
-    assert_eq!(read, header, "any build reads the header of any other");
-}
-
-#[test]
-fn a_header_written_without_a_terminal_name_reads_back_with_none() {
-    // A build that records no terminal name writes a pane carried pane without that
-    // field. This build must still read that carried pane, and read the pane back
-    // with no name rather than refusing the whole header.
-    let resume_test_directory = TempDir::new().expect("create temp dir");
-    let resume_file_path = resume_test_directory.path().join("session.resume");
-    let session_id = SessionId::new();
-    let pane_id = PaneId::new();
-    let written = serde_json::json!({
-        "header": {
-            "resume_format": RESUME_FORMAT,
-            "session_id": session_id,
-            "session_name": "from-a-build-without-the-name",
-            "carried_panes": [{
-                "pane_id": pane_id,
-                "process_id": 4242,
-                "row_count": 20,
-                "column_count": 78,
-                "terminal_fd": 9,
-            }],
-        },
-        "raw_body": {
-            "session_by_id": {},
-            "carried_pane_state_by_pane_id": {}
-        },
-    });
-    std::fs::write(
+    write_resume_file(
         &resume_file_path,
-        serde_json::to_vec(&written).expect("encode"),
+        &resume_header,
+        &build_resume_body_with_quit(None),
     )
     .expect("write the resume file");
 
-    let (read, _raw_body) = read_resume_header(&resume_file_path).expect("read the header back");
+    let (read_header, _raw_body) =
+        read_resume_header(&resume_file_path).expect("read the header back");
 
     assert_eq!(
-        read,
-        ResumeHeader {
-            resume_format: RESUME_FORMAT,
-            session_id,
-            session_name: "from-a-build-without-the-name".to_string(),
-            carried_panes: vec![CarriedPane {
-                pane_id,
-                process_id: 4242,
-                row_count: 20,
-                column_count: 78,
-                terminal_fd: Some(9),
-                terminal_name: None,
-                exit_status: None,
-            }],
-        }
+        read_header, resume_header,
+        "any build reads the header of any other"
     );
 }
 
 #[test]
 fn a_resumed_server_starts_with_no_socket_and_no_shutdown_pending() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
+    let (_populated_server, _carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
 
-    let (resumed, _inbox_sender) = build_resumed_server(&header, body);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
 
-    assert!(!resumed.is_quit_requested, "no quit is pending");
+    assert!(!resumed_server.is_quit_requested, "no quit is pending");
     assert!(
-        !resumed.should_shutdown_immediately,
+        !resumed_server.should_shutdown_immediately,
         "no zero-grace quit is pending"
     );
     assert!(
-        resumed.get_ipc_server().is_none(),
+        resumed_server.get_ipc_server().is_none(),
         "the control socket is bound after the swap, not carried through it"
     );
-    assert_eq!(resumed.subscriptions.len(), 0, "no subscriber is carried");
+    assert_eq!(
+        resumed_server.subscriptions.len(),
+        0,
+        "no subscriber is carried"
+    );
 }
 
 #[test]
 fn reading_a_resume_file_that_is_not_there_is_an_io_failure() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("missing.resume");
+    let missing_file_error =
+        std::fs::read(&resume_file_path).expect_err("the resume file is not there");
 
     match read_resume_header(&resume_file_path) {
-        Err(StorageError::Io { detail }) => {
-            assert!(
-                detail.starts_with(&format!(
-                    "read resume state at {}: ",
-                    resume_file_path.display()
-                )),
-                "the failure must name the resume_file_path, got {detail}"
-            );
+        Err(StorageError::Io { detail }) => assert_eq!(
+            detail,
+            format!(
+                "read resume state at {}: {missing_file_error}",
+                resume_file_path.display()
+            )
+        ),
+        unexpected_read_result => {
+            panic!("expected an io failure, got {unexpected_read_result:?}")
         }
-        other => panic!("expected an io failure, got {other:?}"),
     }
 }
 
@@ -1596,168 +1871,161 @@ fn reading_bytes_that_are_not_a_resume_file_is_a_corrupt_failure() {
                 )
             );
         }
-        other => panic!("expected a corrupt failure, got {other:?}"),
+        unexpected_read_result => {
+            panic!("expected a corrupt failure, got {unexpected_read_result:?}")
+        }
     }
 }
 
 #[test]
 fn a_body_format_below_the_oldest_this_build_reads_is_refused_by_both_numbers() {
-    // The floor is checked as well as the ceiling: a build whose oldest format
-    // has moved up must refuse a file written before that move rather than
-    // read it as the shape it no longer has.
-    let too_old = RESUME_FORMAT_MIN - 1;
+    // A format one below `RESUME_FORMAT_MIN` is refused with the same message
+    // as a format above `RESUME_FORMAT`.
+    let below_minimum_resume_format = RESUME_FORMAT_MIN - 1;
 
-    match read_resume_body(too_old, serde_json::value::RawValue::NULL) {
+    match read_resume_body(
+        below_minimum_resume_format,
+        serde_json::value::RawValue::NULL,
+    ) {
         Err(StorageError::Corrupt { detail }) => {
             assert_eq!(
                 detail,
                 format!(
-                    "resume body format {too_old} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
+                    "resume body format {below_minimum_resume_format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
                 )
             );
         }
-        other => panic!("expected a refused format, got {other:?}"),
+        unexpected_read_result => {
+            panic!("expected a refused format, got {unexpected_read_result:?}")
+        }
     }
 }
 
 #[test]
 fn a_resume_file_whose_bytes_stop_part_way_is_a_corrupt_failure_naming_the_path() {
-    // A whole resume file lands at once, so a file cut short is disk damage
-    // rather than a half-finished write. The header is inside the same JSON
-    // document as the body, so bytes that stop part way cost the reader both.
+    // The header and the body are one JSON document. A file cut in half fails
+    // whole, with a corrupt error that names the path.
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
-
-    let whole = std::fs::read(&resume_file_path).expect("read the file back");
-    let cut = whole.len() / 2;
-    assert!(cut > 0, "the file must have bytes to cut");
-    std::fs::write(&resume_file_path, &whole[..cut]).expect("rewrite the file cut short");
+    let (_populated_server, _carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    let resume_file_bytes = std::fs::read(&resume_file_path).expect("read the file back");
+    let cut_resume_file_bytes = &resume_file_bytes[..resume_file_bytes.len() / 2];
+    std::fs::write(&resume_file_path, cut_resume_file_bytes).expect("rewrite the file cut short");
+    let Err(cut_file_parse_error) =
+        serde_json::from_slice::<PreviousResumeFile>(cut_resume_file_bytes)
+    else {
+        panic!("a file cut in half must not parse");
+    };
 
     match read_resume_header(&resume_file_path) {
-        Err(StorageError::Corrupt { detail }) => {
-            assert!(
-                detail.starts_with(&format!(
-                    "resume state at {} is unreadable: ",
-                    resume_file_path.display()
-                )),
-                "the failure must name the resume_file_path, got {detail}"
-            );
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail,
+            format!(
+                "resume state at {} is unreadable: {cut_file_parse_error}",
+                resume_file_path.display()
+            )
+        ),
+        unexpected_read_result => {
+            panic!("expected a corrupt failure, got {unexpected_read_result:?}")
         }
-        other => panic!("expected a corrupt failure, got {other:?}"),
     }
 }
 
 #[test]
-fn a_body_missing_one_of_its_two_halves_is_corrupt_while_the_header_still_reads() {
-    // The body is one JSON object with two named halves. A body holding only
-    // the sessions is readable JSON, so nothing before the decode catches it —
-    // the decode itself must, and it must cost the caller no pane carried pane.
+fn a_body_missing_its_pane_states_is_corrupt_while_the_header_still_reads() {
+    // A body without `carried_pane_state_by_pane_id` is valid JSON and fails
+    // the decode. The header and its carried panes still read.
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    let (_populated_server, _carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    update_resume_file_json(&resume_file_path, |resume_file_json| {
+        resume_file_json["raw_body"]
+            .as_object_mut()
+            .expect("a body object")
+            .remove("carried_pane_state_by_pane_id");
+    });
 
-    let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
-            .expect("valid json");
-    on_disk["raw_body"]
-        .as_object_mut()
-        .expect("a body object")
-        .remove("carried_pane_state_by_pane_id");
-    std::fs::write(
-        &resume_file_path,
-        serde_json::to_vec(&on_disk).expect("encode"),
-    )
-    .expect("rewrite the file");
-
-    let (read_back, raw_body) =
+    let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
-    assert_eq!(read_back, header, "the header survives a half body");
-    assert_eq!(read_back.carried_panes.len(), 4, "with every pane it named");
 
-    match read_resume_body(read_back.resume_format, &raw_body) {
-        Err(StorageError::Corrupt { detail }) => {
-            assert_eq!(
-                detail,
-                "resume body is unreadable: missing field `carried_pane_state_by_pane_id` at line 1 column \
-                 "
-                .to_string()
-                    + &raw_body.get().len().to_string(),
-                "the failure must name the half that is missing"
-            );
-        }
-        other => panic!("expected a corrupt body, got {other:?}"),
+    assert_eq!(
+        read_header, resume_header,
+        "the header survives a body without pane states"
+    );
+    match read_resume_body(read_header.resume_format, &raw_body) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail,
+            format!(
+                "resume body is unreadable: missing field `carried_pane_state_by_pane_id` at line 1 column {}",
+                raw_body.get().len()
+            )
+        ),
+        unexpected_read_result => panic!("expected a corrupt body, got {unexpected_read_result:?}"),
     }
 }
 
 #[test]
 fn a_session_holding_no_pane_carries_out_and_reads_back_with_no_pane() {
-    // The swap runs whatever the session holds. A header naming no pane must
-    // round-trip as an empty list rather than as an absent field, so the image
-    // that reads it takes nothing back and waits for nothing.
+    // A header naming no pane reads back with an empty `carried_panes` list.
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("empty.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
+    let mut populated_server = build_populated_server();
+    let session_id = populated_server.session_id;
 
-    let (header, body) = populated.server.carry_out(&[]).expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
-    let (read_back, raw_body) =
+    let (resume_header, resume_body) = populated_server
+        .server
+        .carry_out(&[])
+        .expect("a session to carry");
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
     let read_body =
-        read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
     assert_eq!(
-        read_back.carried_panes,
+        read_header.carried_panes,
         Vec::new(),
         "no pane crosses the swap"
     );
-    assert_eq!(read_back.resume_format, RESUME_FORMAT);
-    assert_eq!(read_back.session_id, session_id);
-    assert_eq!(read_back.session_name, "carried");
+    assert_eq!(read_header.resume_format, RESUME_FORMAT);
+    assert_eq!(read_header.session_id, session_id);
+    assert_eq!(read_header.session_name, "carried");
     assert_eq!(
         read_body.carried_pane_state_by_pane_id.len(),
         4,
-        "the screens still cross, since the header names what the backend holds"
+        "every screen is carried"
     );
 
-    let (resumed, _inbox_sender) = build_resumed_server(&read_back, read_body);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&read_header, read_body);
     assert_eq!(
-        resumed.live_pane_ids.len(),
+        resumed_server.live_pane_ids.len(),
         0,
         "and no pane comes back live"
     );
     assert_eq!(
-        resumed.pty_size_by_pane_id.len(),
+        resumed_server.pty_size_by_pane_id.len(),
         0,
         "and no size comes back"
     );
     assert_eq!(
-        resumed.terminal_engine_by_pane_id.len(),
+        resumed_server.terminal_engine_by_pane_id.len(),
         0,
         "and no screen comes back"
     );
     assert_eq!(
-        resumed.session_by_id.len(),
+        resumed_server.session_by_id.len(),
         1,
         "the session itself still does"
     );
     assert_eq!(
-        resumed.session_by_id[&session_id]
+        resumed_server.session_by_id[&session_id]
             .panes
             .count_pane_records(),
         0,
@@ -1767,15 +2035,13 @@ fn a_session_holding_no_pane_carries_out_and_reads_back_with_no_pane() {
 
 #[test]
 fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
-    // Nothing in the file caps how many panes it names. Each carried pane must keep
-    // its own descriptor, process id and size, and keep the order the backend
-    // reported, so the image that reads it takes back the right terminal for
-    // each pane.
+    // The header names all 64 panes, in the order the backend reported them,
+    // each with its own descriptor, process id and size.
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("many.resume");
-    let mut populated = build_populated_server();
+    let mut populated_server = build_populated_server();
 
-    let many: Vec<CarriedPtyPane> = (0..64)
+    let carried_pty_panes: Vec<CarriedPtyPane> = (0..64)
         .map(|pane_index| CarriedPtyPane {
             pane_id: PaneId::new(),
             #[cfg(unix)]
@@ -1789,22 +2055,23 @@ fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
         })
         .collect();
 
-    let (header, body) = populated
+    let (resume_header, resume_body) = populated_server
         .server
-        .carry_out(&many)
+        .carry_out(&carried_pty_panes)
         .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
-    let (read_back, _raw_body) =
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    let (read_header, _raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
 
     assert_eq!(
-        read_back.carried_panes.len(),
+        read_header.carried_panes.len(),
         64,
         "every pane must have a carried pane"
     );
-    for (pane_index, carried_pane) in read_back.carried_panes.iter().enumerate() {
+    for (pane_index, carried_pane) in read_header.carried_panes.iter().enumerate() {
         assert_eq!(
-            carried_pane.pane_id, many[pane_index].pane_id,
+            carried_pane.pane_id, carried_pty_panes[pane_index].pane_id,
             "carried pane {pane_index}"
         );
         assert_eq!(
@@ -1820,8 +2087,8 @@ fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
         );
         #[cfg(windows)]
         assert_eq!(carried_pane.terminal_fd, None, "carried pane {pane_index}");
-        // None of these panes is one the server holds a size for, so each takes
-        // the size the backend reported.
+        // The server holds no size for these panes. Each takes the size the
+        // backend reported.
         assert_eq!(
             (carried_pane.column_count, carried_pane.row_count),
             (40 + pane_index as u16, 10 + pane_index as u16),
@@ -1832,70 +2099,72 @@ fn a_session_holding_many_panes_carries_every_one_of_them_in_order() {
 
 #[test]
 fn a_screen_for_a_pane_no_session_holds_and_nothing_drives_is_dropped() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
+    let mut populated_server = build_populated_server();
+    let carried_pty_panes =
+        build_carried_pty_panes(&populated_server.server, populated_server.session_id);
     let unlisted_pane_id = PaneId::new();
-    populated.server.terminal_engine_by_pane_id.insert(
+    populated_server.server.terminal_engine_by_pane_id.insert(
         unlisted_pane_id,
         koshi_terminal::engine::TerminalEngine::from_pty_size(PtySize {
             column_count: 80,
             row_count: 24,
         }),
     );
-    let (header, body) = populated
+    let (resume_header, resume_body) = populated_server
         .server
-        .carry_out(&panes)
+        .carry_out(&carried_pty_panes)
         .expect("a session to carry");
-    assert!(body
+    assert!(resume_body
         .carried_pane_state_by_pane_id
         .contains_key(&unlisted_pane_id));
-    let mut named_by_the_header: Vec<PaneId> = header
+    let header_pane_ids: HashSet<PaneId> = resume_header
         .carried_panes
         .iter()
-        .map(|pane| pane.pane_id)
+        .map(|carried_pane| carried_pane.pane_id)
         .collect();
-    named_by_the_header.sort();
 
-    let (resumed, _inbox_sender) = build_resumed_server(&header, body);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
 
-    let mut screens: Vec<PaneId> = resumed.terminal_engine_by_pane_id.keys().copied().collect();
-    screens.sort();
     assert_eq!(
-        screens, named_by_the_header,
+        resumed_server
+            .terminal_engine_by_pane_id
+            .keys()
+            .copied()
+            .collect::<HashSet<PaneId>>(),
+        header_pane_ids,
         "only the driven panes keep a screen"
     );
-    let mut driven: Vec<PaneId> = resumed.live_pane_ids.iter().copied().collect();
-    driven.sort();
-    assert_eq!(driven, named_by_the_header);
-    let mut sized: Vec<PaneId> = resumed.pty_size_by_pane_id.keys().copied().collect();
-    sized.sort();
-    assert_eq!(sized, named_by_the_header);
+    assert_eq!(resumed_server.live_pane_ids, header_pane_ids);
+    assert_eq!(
+        resumed_server
+            .pty_size_by_pane_id
+            .keys()
+            .copied()
+            .collect::<HashSet<PaneId>>(),
+        header_pane_ids
+    );
 }
 
 #[test]
 fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_showing_the_notice() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, mut body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    let blank_pane_id = panes[1].pane_id;
-    body.carried_pane_state_by_pane_id.remove(&blank_pane_id);
+    let (populated_server, carried_pty_panes, resume_header, mut resume_body) =
+        carry_out_populated_server();
+    let blank_pane_id = carried_pty_panes[1].pane_id;
+    resume_body
+        .carried_pane_state_by_pane_id
+        .remove(&blank_pane_id);
 
-    let (resumed, _inbox_sender) = build_resumed_server(&header, body);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
 
     assert_eq!(
         get_joined_screen_text(
-            resumed.terminal_engine_by_pane_id[&blank_pane_id].get_terminal_state()
+            resumed_server.terminal_engine_by_pane_id[&blank_pane_id].get_terminal_state()
         ),
         "[koshi] This pane's screen could not be restored after the restart. The program in it is still running."
     );
-    let blank_pane_pty_size = header.carried_panes[1].get_pty_size();
+    let blank_pane_pty_size = resume_header.carried_panes[1].get_pty_size();
     assert_eq!(
-        resumed.terminal_engine_by_pane_id[&blank_pane_id]
+        resumed_server.terminal_engine_by_pane_id[&blank_pane_id]
             .get_terminal_state()
             .get_active_grid()
             .get_grid_dimensions(),
@@ -1904,25 +2173,27 @@ fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_showing_the_notice()
             blank_pane_pty_size.column_count
         )
     );
-    let mut resumed_live_pane_ids: Vec<PaneId> = resumed.live_pane_ids.iter().copied().collect();
-    resumed_live_pane_ids.sort();
-    let mut carried_ids: Vec<PaneId> = panes.iter().map(|pane| pane.pane_id).collect();
-    carried_ids.sort();
-    assert_eq!(resumed_live_pane_ids, carried_ids, "every pane stays live");
     assert_eq!(
-        resumed.session_by_id[&session_id]
+        resumed_server.live_pane_ids,
+        list_carried_pty_pane_ids(&carried_pty_panes),
+        "every pane stays live"
+    );
+    assert_eq!(
+        resumed_server.session_by_id[&populated_server.session_id]
             .panes
             .count_pane_records(),
         4,
         "every pane keeps its place in the layout"
     );
-    for (pane_index, pane) in panes.iter().enumerate() {
-        if pane.pane_id == blank_pane_id {
+    for (pane_index, carried_pty_pane) in carried_pty_panes.iter().enumerate() {
+        if carried_pty_pane.pane_id == blank_pane_id {
             continue;
         }
         assert_eq!(
-            get_first_terminal_row(
-                resumed.terminal_engine_by_pane_id[&pane.pane_id].get_terminal_state(),
+            get_terminal_row(
+                resumed_server.terminal_engine_by_pane_id[&carried_pty_pane.pane_id]
+                    .get_terminal_state(),
+                0
             )
             .trim_end(),
             format!("pane {pane_index} output"),
@@ -1933,24 +2204,12 @@ fn a_driven_pane_whose_screen_did_not_read_comes_back_blank_showing_the_notice()
 
 #[test]
 fn a_blank_screen_after_a_restart_keeps_the_scrollback_limit_the_startup_config_names() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, mut body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    let blank_pane_id = panes[1].pane_id;
-    body.carried_pane_state_by_pane_id.remove(&blank_pane_id);
-    let (inbox_sender, inbox_receiver) = mpsc::channel();
-    let pty_backend: Arc<dyn PtyBackend> = Arc::new(FakePtyBackend::with_pty_sink(Arc::new(
-        InboxSink::from_event_sender(inbox_sender),
-    )));
-    let pty_size_by_pane_id: HashMap<PaneId, PtySize> = header
-        .carried_panes
-        .iter()
-        .map(|carried_pane| (carried_pane.pane_id, carried_pane.get_pty_size()))
-        .collect();
+    let (_populated_server, carried_pty_panes, resume_header, mut resume_body) =
+        carry_out_populated_server();
+    let blank_pane_id = carried_pty_panes[1].pane_id;
+    resume_body
+        .carried_pane_state_by_pane_id
+        .remove(&blank_pane_id);
     let startup_app_config = PartialKoshiConfig {
         scrollback: Some(PartialScrollbackConfig {
             maximum_line_count: Some(3),
@@ -1960,21 +2219,19 @@ fn a_blank_screen_after_a_restart_keeps_the_scrollback_limit_the_startup_config_
         ..PartialKoshiConfig::default()
     };
 
-    let mut resumed = Server::resume(
-        pty_backend,
-        inbox_receiver,
+    let (mut resumed_server, _inbox_sender) = build_resumed_server_with_config_and_exit_statuses(
+        &resume_header,
+        resume_body,
         Some(startup_app_config),
-        body,
-        pty_size_by_pane_id,
         HashMap::new(),
     );
     let scrolled_output_bytes: Vec<u8> = (0..60)
         .flat_map(|line_index| format!("line {line_index}\r\n").into_bytes())
         .collect();
-    resumed.handle_pty_output(blank_pane_id, &scrolled_output_bytes);
+    resumed_server.handle_pty_output(blank_pane_id, &scrolled_output_bytes);
 
     assert_eq!(
-        resumed.terminal_engine_by_pane_id[&blank_pane_id]
+        resumed_server.terminal_engine_by_pane_id[&blank_pane_id]
             .get_terminal_state()
             .get_scrollback()
             .get_retained_line_count(),
@@ -2003,7 +2260,7 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
         .expect("spawn");
     let pty_backend: Arc<dyn PtyBackend> = fake_pty_backend.clone();
 
-    let resumed = Server::resume(
+    let resumed_server = Server::resume(
         pty_backend,
         inbox_receiver,
         None,
@@ -2018,38 +2275,43 @@ fn a_driven_pane_no_session_holds_has_its_child_ended_and_is_not_recorded() {
             .expect("the pane was spawned"),
         vec![KillPolicy::Tree]
     );
-    assert!(resumed.live_pane_ids.is_empty());
-    assert!(resumed.pty_size_by_pane_id.is_empty());
-    assert!(resumed.terminal_engine_by_pane_id.is_empty());
+    assert!(resumed_server.live_pane_ids.is_empty());
+    assert!(resumed_server.pty_size_by_pane_id.is_empty());
+    assert!(resumed_server.terminal_engine_by_pane_id.is_empty());
 }
 
 #[test]
 fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    let undriven_pane_id = panes[2].pane_id;
+    let (populated_server, carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
+    let undriven_pane_id = carried_pty_panes[2].pane_id;
     let driven_header = ResumeHeader {
-        carried_panes: header
+        carried_panes: resume_header
             .carried_panes
             .iter()
             .filter(|carried_pane| carried_pane.pane_id != undriven_pane_id)
             .cloned()
             .collect(),
-        ..header.clone()
+        ..resume_header.clone()
+    };
+    let count_undriven_pane_exit_events = || {
+        recent_events::list_recent_events()
+            .iter()
+            .filter(|event_record| {
+                event_record.pane_id == Some(undriven_pane_id)
+                    && event_record.event_name == "PaneProcessExited"
+            })
+            .count()
     };
 
-    let (mut resumed, _inbox_sender) = build_resumed_server_with_exit_statuses(
+    let (mut resumed_server, _inbox_sender) = build_resumed_server_with_config_and_exit_statuses(
         &driven_header,
-        body,
+        resume_body,
+        None,
         HashMap::from([(undriven_pane_id, ExitStatus::ExitCode(7))]),
     );
 
-    let session = &resumed.session_by_id[&session_id];
+    let session = &resumed_server.session_by_id[&populated_server.session_id];
     assert_eq!(
         session.panes.get_pane_record_by_id(undriven_pane_id),
         None,
@@ -2062,100 +2324,84 @@ fn a_pane_a_session_holds_that_nothing_drives_closes_and_the_others_stay() {
             .all(|tab| !tab.get_layout_tree().has_pane(undriven_pane_id)),
         "and every layout"
     );
-    assert!(!resumed.live_pane_ids.contains(&undriven_pane_id));
-    assert!(!resumed
+    assert!(!resumed_server
         .terminal_engine_by_pane_id
         .contains_key(&undriven_pane_id));
-    let mut resumed_live_pane_ids: Vec<PaneId> = resumed.live_pane_ids.iter().copied().collect();
-    resumed_live_pane_ids.sort();
-    let mut driven_pane_ids: Vec<PaneId> = driven_header
-        .carried_panes
-        .iter()
-        .map(|carried_pane| carried_pane.pane_id)
-        .collect();
-    driven_pane_ids.sort();
     assert_eq!(
-        resumed_live_pane_ids, driven_pane_ids,
+        resumed_server.live_pane_ids,
+        driven_header
+            .carried_panes
+            .iter()
+            .map(|carried_pane| carried_pane.pane_id)
+            .collect::<HashSet<PaneId>>(),
         "the other panes stay"
     );
     assert_eq!(
-        recent_events::list_recent_events()
-            .iter()
-            .filter(|event_record| {
-                event_record.pane_id == Some(undriven_pane_id)
-                    && event_record.event_name == "PaneProcessExited"
-            })
-            .count(),
+        count_undriven_pane_exit_events(),
         1,
         "the carried exit is published once"
     );
-    let _ = resumed.handle_runtime_event(RuntimeEvent::ChildExit {
+    let _ = resumed_server.handle_runtime_event(RuntimeEvent::ChildExit {
         pane_id: undriven_pane_id,
         exit_status: ExitStatus::ExitCode(7),
     });
     assert_eq!(
-        recent_events::list_recent_events()
-            .iter()
-            .filter(|event_record| {
-                event_record.pane_id == Some(undriven_pane_id)
-                    && event_record.event_name == "PaneProcessExited"
-            })
-            .count(),
+        count_undriven_pane_exit_events(),
         1,
         "the queued copy of the exit does not publish again"
     );
 }
 
 #[test]
-fn a_body_whose_two_halves_are_swapped_is_corrupt_before_any_pane_is_touched() {
-    // The header is what every build reads, whatever the body says. Bytes whose
-    // header half is not a header at all name no pane, so the read fails and no
-    // descriptor and no process id reaches the caller.
+fn a_file_whose_header_and_body_are_swapped_is_corrupt_before_any_pane_is_touched() {
+    // A header part that holds the body names no pane. The read fails and
+    // returns no descriptor and no process id.
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("swapped.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
-    let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
-            .expect("valid json");
-    let swapped = serde_json::json!({
-        "header": on_disk["raw_body"].take(),
-        "raw_body": on_disk["header"].take(),
+    let (_populated_server, _carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    update_resume_file_json(&resume_file_path, |resume_file_json| {
+        let body_json = resume_file_json["raw_body"].take();
+        let header_json = resume_file_json["header"].take();
+        *resume_file_json = serde_json::json!({
+            "header": body_json,
+            "raw_body": header_json,
+        });
     });
-    std::fs::write(
-        &resume_file_path,
-        serde_json::to_vec(&swapped).expect("encode"),
-    )
-    .expect("rewrite the file");
+    let swapped_file_bytes = std::fs::read(&resume_file_path).expect("read the swapped file");
+    let Err(swapped_file_parse_error) =
+        serde_json::from_slice::<PreviousResumeFile>(&swapped_file_bytes)
+    else {
+        panic!("a swapped file must not parse");
+    };
 
     match read_resume_header(&resume_file_path) {
-        // The position the decoder names counts bytes into a file whose size
-        // follows the carried screens, so the sentence is read up to it.
         Err(StorageError::Corrupt { detail }) => assert_eq!(
-            detail.split(" at line ").next(),
-            Some(
-                format!(
-                    "resume state at {} is unreadable: unknown field `carried_pane_state_by_pane_id`, expected one of `format`, `session_id`, `session_name`, `panes`",
-                    resume_file_path.display()
-                )
-                .as_str()
+            detail,
+            format!(
+                "resume state at {} is unreadable: {swapped_file_parse_error}",
+                resume_file_path.display()
             )
         ),
-        other => panic!("expected a corrupt header, got {other:?}"),
+        unexpected_read_result => {
+            panic!("expected a corrupt header, got {unexpected_read_result:?}")
+        }
     }
+    assert_eq!(
+        swapped_file_parse_error
+            .to_string()
+            .split(" at line ")
+            .next(),
+        Some("unknown field `carried_pane_state_by_pane_id`, expected one of `format`, `session_id`, `session_name`, `panes`")
+    );
 }
 
 #[test]
 fn a_carried_session_with_its_client_comes_back_whole() {
-    // The body carries every attached client: a carried pane written by this build
-    // reads back with the identity it went out with, wherever it connected
-    // from.
+    // A client written by this build reads back with the identity it went out
+    // with, from a local and from a remote origin.
     for (origin, written_origin) in [
         (ClientOrigin::Local, "Local"),
         (ClientOrigin::Remote, "Remote"),
@@ -2175,34 +2421,29 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             client_id,
             session_id,
             SystemTime::UNIX_EPOCH,
-            TEST_VIEWPORT_SIZE,
+            FIRST_CLIENT_VIEWPORT_SIZE,
             None,
             tab_id,
             origin,
             "C-swift-otter".to_string(),
             3,
         ));
-        let header = ResumeHeader {
-            resume_format: RESUME_FORMAT,
-            session_id,
-            session_name: "carried".to_string(),
-            carried_panes: Vec::new(),
-        };
+        let resume_header = build_resume_header(session_id, Vec::new());
         let resume_body = ResumeBody {
             session_by_id: HashMap::from([(session_id, session)]),
-            carried_pane_state_by_pane_id: HashMap::new(),
-            carried_quit: None,
+            ..build_resume_body_with_quit(None)
         };
-        write_resume_file(&resume_file_path, &header, &resume_body).expect("write the resume file");
+        write_resume_file(&resume_file_path, &resume_header, &resume_body)
+            .expect("write the resume file");
 
-        let (read_back, raw_body) =
+        let (read_header, raw_body) =
             read_resume_header(&resume_file_path).expect("read the header back");
 
-        // Format 4 writes the origin and no authority key. The header's format
-        // number and the client carried pane's shape move together.
-        let encoded_json: serde_json::Value =
+        // Format 4 writes the origin and no authority key, and the header
+        // names format 4.
+        let body_json: serde_json::Value =
             serde_json::from_str(raw_body.get()).expect("the body is json");
-        let client_record_json = &encoded_json["session_by_id"][session_id.get_uuid().to_string()]
+        let client_record_json = &body_json["session_by_id"][session_id.get_uuid().to_string()]
             ["clients"]["client_by_id"][client_id.get_uuid().to_string()];
         assert_eq!(
             client_record_json["origin"],
@@ -2215,53 +2456,30 @@ fn a_carried_session_with_its_client_comes_back_whole() {
         );
 
         let read_body =
-            read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
+            read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
-        assert_eq!(read_back.resume_format, RESUME_FORMAT);
+        assert_eq!(read_header.resume_format, RESUME_FORMAT);
         assert_eq!(RESUME_FORMAT, 4);
         let resumed_session = &read_body.session_by_id[&session_id];
         assert_eq!(resumed_session.session_id, session_id);
-        let client = resumed_session
+        let resumed_client = resumed_session
             .clients
             .get_client_by_id(client_id)
             .expect("the carried client");
-        assert_eq!(client.get_client_id(), client_id);
-        assert_eq!(client.get_origin(), origin);
-        assert_eq!(client.get_label(), "C-swift-otter");
-        assert_eq!(client.get_color_index(), 3);
-        assert_eq!(client.get_active_tab_id(), tab_id);
+        assert_eq!(resumed_client.get_client_id(), client_id);
+        assert_eq!(resumed_client.get_origin(), origin);
+        assert_eq!(resumed_client.get_label(), "C-swift-otter");
+        assert_eq!(resumed_client.get_color_index(), 3);
+        assert_eq!(resumed_client.get_active_tab_id(), tab_id);
     }
 }
 
 #[test]
-fn a_resume_format_before_current_baseline_is_rejected() {
-    let retired_resume_format = RESUME_FORMAT_MIN - 1;
-
-    match read_resume_body(retired_resume_format, serde_json::value::RawValue::NULL) {
-        Err(StorageError::Corrupt { detail }) => assert_eq!(
-            detail,
-            format!(
-                "resume body format {retired_resume_format} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads"
-            )
-        ),
-        other => panic!("expected a retired format to be refused, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_carried_pane_reports_the_size_its_rows_and_cols_name() {
-    let pane = CarriedPane {
-        pane_id: PaneId::new(),
-        process_id: 4242,
-        row_count: 20,
-        column_count: 78,
-        terminal_fd: Some(9),
-        terminal_name: Some("/dev/ttys009".to_string()),
-        exit_status: None,
-    };
+fn a_carried_pane_reports_the_size_its_row_and_column_counts_name() {
+    let carried_pane = build_test_carried_pane(None);
 
     assert_eq!(
-        pane.get_pty_size(),
+        carried_pane.get_pty_size(),
         PtySize {
             row_count: 20,
             column_count: 78
@@ -2274,14 +2492,15 @@ fn an_applied_quit_crosses_the_file_with_the_kind_it_was_asked_for() {
     for quit_kind in [CarriedQuit::Graceful, CarriedQuit::Immediate] {
         let resume_test_directory = TempDir::new().expect("create temp dir");
         let resume_file_path = resume_test_directory.path().join("quit.resume");
-        let header = build_resume_header(SessionId::new(), Vec::new());
+        let resume_header = build_resume_header(SessionId::new(), Vec::new());
         let resume_body = build_resume_body_with_quit(Some(quit_kind));
-        write_resume_file(&resume_file_path, &header, &resume_body).expect("write the resume file");
+        write_resume_file(&resume_file_path, &resume_header, &resume_body)
+            .expect("write the resume file");
 
-        let (read_back, raw_body) =
+        let (read_header, raw_body) =
             read_resume_header(&resume_file_path).expect("read the header back");
         let read_body =
-            read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
+            read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
         assert_eq!(read_body.carried_quit, Some(quit_kind));
     }
@@ -2291,33 +2510,21 @@ fn an_applied_quit_crosses_the_file_with_the_kind_it_was_asked_for() {
 fn a_body_written_without_a_quit_reads_back_with_none() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
-    let mut populated = build_populated_server();
-    let session_id = populated.session_id;
-    let panes = build_carried_pty_panes(&populated.server, session_id);
-    let (header, body) = populated
-        .server
-        .carry_out(&panes)
-        .expect("a session to carry");
-    write_resume_file(&resume_file_path, &header, &body).expect("write the resume file");
+    let (_populated_server, _carried_pty_panes, resume_header, resume_body) =
+        carry_out_populated_server();
+    write_resume_file(&resume_file_path, &resume_header, &resume_body)
+        .expect("write the resume file");
+    update_resume_file_json(&resume_file_path, |resume_file_json| {
+        resume_file_json["raw_body"]
+            .as_object_mut()
+            .expect("the body is a map")
+            .remove("carried_quit");
+    });
 
-    // The body with its quit key taken out of the JSON.
-    let mut on_disk: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&resume_file_path).expect("read the file"))
-            .expect("valid json");
-    on_disk["raw_body"]
-        .as_object_mut()
-        .expect("the body is a map")
-        .remove("carried_quit");
-    std::fs::write(
-        &resume_file_path,
-        serde_json::to_vec(&on_disk).expect("encode"),
-    )
-    .expect("rewrite the file");
-
-    let (read_back, raw_body) =
+    let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
     let read_body =
-        read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
     assert_eq!(read_body.carried_quit, None);
     assert_eq!(
@@ -2331,48 +2538,29 @@ fn a_body_written_without_a_quit_reads_back_with_none() {
 fn a_pane_whose_child_was_reaped_carries_that_exit_status_across_the_file() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("reaped.resume");
-    let header = build_resume_header(
+    let resume_header = build_resume_header(
         SessionId::new(),
         vec![
+            build_test_carried_pane(Some(ExitStatus::ExitCode(3))),
             CarriedPane {
-                pane_id: PaneId::new(),
-                process_id: 4242,
-                row_count: 20,
-                column_count: 78,
-                terminal_fd: Some(9),
-                terminal_name: Some("/dev/ttys009".to_string()),
-                exit_status: Some(ExitStatus::ExitCode(3)),
-            },
-            CarriedPane {
-                pane_id: PaneId::new(),
                 process_id: 4243,
-                row_count: 20,
-                column_count: 78,
                 terminal_fd: Some(10),
-                terminal_name: Some("/dev/ttys010".to_string()),
-                exit_status: Some(ExitStatus::Signaled(9)),
+                terminal_name: Some("/dev/pts/10".to_string()),
+                ..build_test_carried_pane(Some(ExitStatus::Signaled(9)))
             },
         ],
     );
     write_resume_file(
         &resume_file_path,
-        &header,
+        &resume_header,
         &build_resume_body_with_quit(None),
     )
     .expect("write the resume file");
 
-    let (read_back, _raw_body) =
+    let (read_header, _raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
 
-    assert_eq!(read_back, header);
-    assert_eq!(
-        read_back
-            .carried_panes
-            .iter()
-            .map(|pane| pane.exit_status)
-            .collect::<Vec<Option<ExitStatus>>>(),
-        vec![Some(ExitStatus::ExitCode(3)), Some(ExitStatus::Signaled(9))]
-    );
+    assert_eq!(read_header, resume_header);
 }
 
 #[test]
@@ -2380,31 +2568,20 @@ fn writing_a_resume_file_replaces_the_bytes_already_there() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let resume_file_path = resume_test_directory.path().join("session.resume");
     std::fs::write(&resume_file_path, b"the bytes of an older write").expect("write the old file");
-    let header = build_resume_header(
-        SessionId::new(),
-        vec![CarriedPane {
-            pane_id: PaneId::new(),
-            process_id: 4242,
-            row_count: 20,
-            column_count: 78,
-            terminal_fd: Some(9),
-            terminal_name: Some("/dev/ttys009".to_string()),
-            exit_status: None,
-        }],
-    );
+    let resume_header = build_resume_header(SessionId::new(), vec![build_test_carried_pane(None)]);
 
     write_resume_file(
         &resume_file_path,
-        &header,
+        &resume_header,
         &build_resume_body_with_quit(None),
     )
     .expect("write the resume file");
 
-    let (read_back, raw_body) =
+    let (read_header, raw_body) =
         read_resume_header(&resume_file_path).expect("read the header back");
-    assert_eq!(read_back, header);
+    assert_eq!(read_header, resume_header);
     let read_body =
-        read_resume_body(read_back.resume_format, &raw_body).expect("read the body back");
+        read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
     assert_eq!(read_body.session_by_id.len(), 0);
     assert_eq!(read_body.carried_pane_state_by_pane_id.len(), 0);
 }
@@ -2414,11 +2591,11 @@ fn writing_into_a_directory_that_is_not_there_is_an_io_failure_naming_it() {
     let resume_test_directory = TempDir::new().expect("create temp dir");
     let missing_parent_directory = resume_test_directory.path().join("gone");
     let resume_file_path = missing_parent_directory.join("session.resume");
-    let header = build_resume_header(SessionId::new(), Vec::new());
+    let resume_header = build_resume_header(SessionId::new(), Vec::new());
 
     match write_resume_file(
         &resume_file_path,
-        &header,
+        &resume_header,
         &build_resume_body_with_quit(None),
     ) {
         Err(StorageError::Io { detail }) => assert!(
@@ -2428,7 +2605,9 @@ fn writing_into_a_directory_that_is_not_there_is_an_io_failure_naming_it() {
             )),
             "the failure must name the directory, got {detail}"
         ),
-        other => panic!("expected an io failure, got {other:?}"),
+        unexpected_write_result => {
+            panic!("expected an io failure, got {unexpected_write_result:?}")
+        }
     }
     assert!(
         !missing_parent_directory.exists(),

@@ -12,7 +12,7 @@
 
 use crate::host::{Modifiers, MouseButton as HostButton, MouseEvent, MouseEventKind};
 use koshi_core::geometry::Point;
-use koshi_core::key::ModFlags;
+use koshi_core::key::BindingModifierFlags;
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 
 /// Decode one host mouse event into its canonical [`MouseInput`].
@@ -61,10 +61,10 @@ fn decode_button(button: HostButton) -> MouseButton {
 /// The modifiers held during the event: Control, Alt and Super from
 /// [`crate::keyboard::decode_modifiers`], plus Shift. Meta counts as Super; Hyper
 /// is dropped.
-fn decode_modifiers(host_modifiers: Modifiers) -> ModFlags {
+fn decode_modifiers(host_modifiers: Modifiers) -> BindingModifierFlags {
     let modifier_flags = crate::keyboard::decode_modifiers(host_modifiers);
     if host_modifiers.has_all_modifiers(Modifiers::SHIFT) {
-        modifier_flags.union(ModFlags::SHIFT)
+        modifier_flags.union(BindingModifierFlags::SHIFT)
     } else {
         modifier_flags
     }

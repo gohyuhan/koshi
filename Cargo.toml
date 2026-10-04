@@ -15,6 +15,7 @@ koshi-client = { path = "crates/koshi-client" }
 koshi-config = { path = "crates/koshi-config" }
 koshi-core = { path = "crates/koshi-core" }
 koshi-daemon = { path = "crates/koshi-daemon" }
+koshi-host = { path = "crates/koshi-host" }
 koshi-image = { path = "crates/koshi-image" }
 koshi-input = { path = "crates/koshi-input" }
 koshi-ipc = { path = "crates/koshi-ipc" }
@@ -86,8 +87,7 @@ uuid = { version = "1.24.0", features = ["serde", "v7"] }
 vte = { version = "0.15.0", default-features = false }
 widestring = "1.2.1"
 windows-sys = "0.61.2"
-# koshi only reads a deflate-compressed release zip, so drop zip's default
-# codec backends (bzip2, ppmd, lzma, zstd, xz) — that also removes their
-# non-permissive transitive licenses. `deflate-flate2` reuses the flate2
-# already pulled for tar.gz.
+# zip reads deflate-compressed archives only: its default codec backends
+# (bzip2, ppmd, lzma, zstd, xz) are off, and `deflate-flate2` decodes through
+# the flate2 crate that the tar.gz reader uses.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }

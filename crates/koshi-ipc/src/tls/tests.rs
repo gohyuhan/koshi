@@ -5,8 +5,9 @@
 //! deadline a handshake, an opening exchange, a read and a write finish
 //! inside, against a peer that answers nothing and against one that sends a
 //! byte at a time, how a read ends when the peer closes the stream, cuts it
-//! or sends bytes that do not decrypt, how much of one write is taken, and
-//! the socket timeouts a deadline sets and takes away.
+//! or sends bytes that do not decrypt, how much of one write is taken, both
+//! ends writing at once over a slow link, and the socket timeouts a deadline
+//! sets and takes away.
 //!
 //! The loopback tests bind `127.0.0.1:0`, so the operating system picks a free
 //! port and two runs of the suite never meet on one address.
@@ -26,35 +27,33 @@ use crate::remote_wire::{
 };
 use crate::transport::{build_frame_halves, Deadlined};
 
-/// How long a loopback handshake and the frames after it have to finish. Well
-/// past what a loopback stream needs, so a slow machine does not fail the run.
+/// How long a loopback handshake and the frames after it have to finish: 10
+/// seconds.
 const LOOPBACK_TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 
-/// The timeout the deadline tests give a dial.
+/// The timeout the deadline tests give a dial: 300 ms.
 const SHORT_TIMEOUT_DURATION: Duration = Duration::from_millis(300);
 
-/// How far past its timeout a dial may still return, so a busy machine that
-/// takes a moment to schedule the returning thread does not fail the run. The
-/// bound is what the test proves: the dial returns, rather than waiting on a
-/// server that never answers.
+/// How far past its timeout a dial in the deadline tests may still return: 3
+/// seconds. A dial that returns after that fails its test.
 const DEADLINE_SLACK_DURATION: Duration = Duration::from_secs(3);
 
-/// The timeout the opening-exchange tests give a dial: room for a loopback
-/// handshake on a busy machine, and far less than the send_test_drip_bytes and the pause that
-/// follow it.
+/// The timeout the opening-exchange tests give a dial: 1 second, longer than
+/// a loopback handshake takes and shorter than the byte-by-byte send and the
+/// pause that follow it.
 const OPENING_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
 
-/// How long a server waits before the frame it sends after the answer. Past
-/// [`OPENING_TIMEOUT_DURATION`], so a read still holding the dial's deadline would fail.
+/// How long a server waits before the frame it sends after the answer: 1.5
+/// seconds, past [`OPENING_TIMEOUT_DURATION`].
 const PAUSE_AFTER_OPENING_RESPONSE_DURATION: Duration = Duration::from_millis(1500);
 
-/// How long the send_test_drip_bytes tests leave between the bytes they send.
+/// How long [`send_test_drip_bytes`] waits between the bytes it sends.
 const DRIP_INTERVAL_DURATION: Duration = Duration::from_millis(50);
 
-/// How many bytes the send_test_drip_bytes tests send. At one byte every [`DRIP_INTERVAL_DURATION`]
-/// the send_test_drip_bytes lasts far longer than [`SHORT_TIMEOUT_DURATION`] or
-/// [`OPENING_TIMEOUT_DURATION`] with [`DEADLINE_SLACK_DURATION`] on top, so a peer that stretched
-/// its deadline by dripping would fail these tests.
+/// How many bytes [`send_test_drip_bytes`] sends after the header: 200. At one
+/// byte every [`DRIP_INTERVAL_DURATION`] the send lasts 10 seconds, longer than
+/// [`SHORT_TIMEOUT_DURATION`] or [`OPENING_TIMEOUT_DURATION`] plus
+/// [`DEADLINE_SLACK_DURATION`].
 const DRIP_BYTE_COUNT: usize = 200;
 
 /// The header of a TLS record of `tls_record_type`, the version, and a payload of 256
@@ -511,7 +510,7 @@ fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
     let mut frame_length_bytes = [0u8; 4];
     let read_error = reader
         .read_exact(&mut frame_length_bytes)
-        .expect_err("a send_test_drip_bytes never fills a frame");
+        .expect_err("bytes sent one at a time never fill a frame");
     let read_elapsed_duration = read_started_at.elapsed();
 
     assert!(
@@ -523,7 +522,7 @@ fn a_peer_that_drips_after_the_handshake_ends_a_read_at_the_readers_deadline() {
         "the read returned {read_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} deadline, \
          though the peer kept it fed with a byte every {DRIP_INTERVAL_DURATION:?}"
     );
-    // Both halves hold the socket, so both go before the send_test_drip_bytes sees it close.
+    // Both halves hold the socket, so both go before the byte-by-byte sender sees it close.
     drop(reader);
     drop(writer);
     let _ = server_thread.join();
@@ -623,7 +622,7 @@ fn a_server_that_drips_its_answer_ends_the_opening_exchange_at_the_deadline() {
         OPENING_TIMEOUT_DURATION,
         None,
     )
-    .expect_err("a send_test_drip_bytes never fills the answer");
+    .expect_err("bytes sent one at a time never fill the answer");
     let exchange_elapsed_duration = exchange_started_at.elapsed();
 
     let IpcError::Transport { error_detail } = ipc_error else {
@@ -1406,6 +1405,129 @@ fn a_write_to_a_peer_that_does_not_read_ends_at_the_writers_deadline() {
         "the write returned {write_elapsed_duration:?} after it started, inside its {SHORT_TIMEOUT_DURATION:?} deadline"
     );
     server_thread.join().expect("the server thread finished");
+}
+
+/// How many bytes each end writes in the two-way test: far past what the
+/// socket buffers between the two ends hold, so each writer blocks on a full
+/// socket while the other end writes too.
+const TWO_WAY_BYTE_COUNT: usize = 8 * 1024 * 1024;
+
+/// The most bytes the slow link carries in one step.
+const SLOW_LINK_CHUNK_BYTE_COUNT: usize = 4096;
+
+/// How long the slow link waits after each step.
+const SLOW_LINK_PAUSE_DURATION: Duration = Duration::from_millis(1);
+
+/// `TWO_WAY_BYTE_COUNT` bytes counting `0` to `250` over and over.
+fn build_two_way_bytes() -> Vec<u8> {
+    (0..TWO_WAY_BYTE_COUNT)
+        .map(|byte_index| (byte_index % 251) as u8)
+        .collect()
+}
+
+/// Copy the bytes `source_socket` receives onto `destination_socket`, at most
+/// [`SLOW_LINK_CHUNK_BYTE_COUNT`] bytes per step with a
+/// [`SLOW_LINK_PAUSE_DURATION`] pause after each step. Stops at the end of
+/// `source_socket`'s stream or at the first failure, then shuts the writing
+/// direction of `destination_socket`.
+fn carry_bytes_slowly(mut source_socket: TcpStream, mut destination_socket: TcpStream) {
+    let mut carried_chunk = [0u8; SLOW_LINK_CHUNK_BYTE_COUNT];
+    loop {
+        let carried_byte_count = match source_socket.read(&mut carried_chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(carried_byte_count) => carried_byte_count,
+        };
+        if destination_socket
+            .write_all(&carried_chunk[..carried_byte_count])
+            .is_err()
+        {
+            break;
+        }
+        std::thread::sleep(SLOW_LINK_PAUSE_DURATION);
+    }
+    let _ = destination_socket.shutdown(std::net::Shutdown::Write);
+}
+
+/// Listen on a loopback port and join the one connection that arrives to
+/// `server_address` through [`carry_bytes_slowly`], one thread per direction.
+/// Returns the address to dial.
+fn start_slow_link_to(server_address: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let slow_link_address = listener.local_addr().expect("read the bound address");
+    let server_address = server_address.to_string();
+    std::thread::spawn(move || {
+        let (dialled_socket, _) = listener.accept().expect("accept the client");
+        let server_socket = TcpStream::connect(&server_address).expect("connect to the server");
+        let dialled_socket_copy = dialled_socket.try_clone().expect("clone the client socket");
+        let server_socket_copy = server_socket.try_clone().expect("clone the server socket");
+        std::thread::spawn(move || carry_bytes_slowly(dialled_socket_copy, server_socket_copy));
+        carry_bytes_slowly(server_socket, dialled_socket);
+    });
+    slow_link_address.to_string()
+}
+
+#[test]
+fn both_ends_writing_more_than_a_slow_link_holds_at_once_deliver_every_byte_both_ways() {
+    let (server_config, _certificate_der_bytes) = build_fresh_server_config();
+    let (server_address, server_thread) =
+        serve_after_tls_handshake(server_config, |tls_connection, socket| {
+            split_tls_stream(tls_connection, socket).expect("split the loopback stream")
+        });
+    let slow_link_address = start_slow_link_to(&server_address);
+    let (mut client_reader, mut client_writer, _presented_certificate_fingerprint) =
+        connect_tls_stream(&slow_link_address, None, LOOPBACK_TIMEOUT_DURATION)
+            .expect("the dial opens");
+    let (mut server_reader, mut server_writer) =
+        server_thread.join().expect("the server thread finished");
+    client_reader.set_deadline(None);
+    client_writer.set_deadline(None);
+    server_reader.set_deadline(None);
+    server_writer.set_deadline(None);
+    let (finished_half_sender, finished_half_receiver) =
+        std::sync::mpsc::channel::<(&'static str, bool)>();
+
+    for (half_name, mut writer) in [
+        ("client writer", client_writer),
+        ("server writer", server_writer),
+    ] {
+        let finished_half_sender = finished_half_sender.clone();
+        std::thread::spawn(move || {
+            let is_written = writer.write_all(&build_two_way_bytes()).is_ok();
+            let _ = finished_half_sender.send((half_name, is_written));
+            writer
+        });
+    }
+    for (half_name, mut reader) in [
+        ("client reader", client_reader),
+        ("server reader", server_reader),
+    ] {
+        let finished_half_sender = finished_half_sender.clone();
+        std::thread::spawn(move || {
+            let mut received_bytes = vec![0u8; TWO_WAY_BYTE_COUNT];
+            let is_read = reader.read_exact(&mut received_bytes).is_ok()
+                && received_bytes == build_two_way_bytes();
+            let _ = finished_half_sender.send((half_name, is_read));
+            reader
+        });
+    }
+
+    let mut finished_halves: Vec<(&'static str, bool)> = (0..4)
+        .map(|_| {
+            finished_half_receiver
+                .recv_timeout(LOOPBACK_TIMEOUT_DURATION * 3)
+                .expect("every half finishes: no end waits on the other forever")
+        })
+        .collect();
+    finished_halves.sort_unstable();
+    assert_eq!(
+        finished_halves,
+        vec![
+            ("client reader", true),
+            ("client writer", true),
+            ("server reader", true),
+            ("server writer", true),
+        ]
+    );
 }
 
 #[test]

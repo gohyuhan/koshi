@@ -539,7 +539,8 @@ fn animation_serde_round_trip_and_validation_are_bounded() {
         "Animation": {
             "frames": [{
                 "decoded_image": {"pixel_width": 1, "pixel_height": 1, "rgba_bytes": [255, 0, 0, 255]},
-                "frame_delay": {"numerator_ms": 1, "denominator_ms": 0}
+                "frame_delay": {"numerator_ms": 1, "denominator_ms": 0},
+                "is_gapless": false
             }],
             "loop_policy": "Infinite"
         }
@@ -548,6 +549,36 @@ fn animation_serde_round_trip_and_validation_are_bounded() {
     assert_eq!(
         zero_delay_denominator_error.to_string(),
         "animation delay denominator must be nonzero"
+    );
+}
+
+#[test]
+fn an_animation_frame_without_is_gapless_is_refused() {
+    let missing_gapless_error = serde_json::from_value::<DecodedMedia>(serde_json::json!({
+        "Animation": {
+            "frames": [{
+                "decoded_image": {"pixel_width": 1, "pixel_height": 1, "rgba_bytes": [255, 0, 0, 255]},
+                "frame_delay": {"numerator_ms": 7, "denominator_ms": 10}
+            }],
+            "loop_policy": "Infinite"
+        }
+    }))
+    .expect_err("a frame without `is_gapless` is refused");
+    assert_eq!(
+        missing_gapless_error.to_string(),
+        "missing field `is_gapless`"
+    );
+}
+
+#[test]
+fn an_animation_frame_with_two_is_gapless_fields_is_refused() {
+    let duplicate_gapless_error = serde_json::from_str::<DecodedMedia>(
+        r#"{"Animation":{"frames":[{"decoded_image":{"pixel_width":1,"pixel_height":1,"rgba_bytes":[255,0,0,255]},"frame_delay":{"numerator_ms":7,"denominator_ms":10},"is_gapless":false,"is_gapless":true}],"loop_policy":"Infinite"}}"#,
+    )
+    .expect_err("a frame with two `is_gapless` fields is refused");
+    assert_eq!(
+        duplicate_gapless_error.to_string(),
+        "duplicate field `is_gapless` at line 1 column 187"
     );
 }
 

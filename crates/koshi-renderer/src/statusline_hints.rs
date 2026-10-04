@@ -1,5 +1,5 @@
-//! The statusline: the bottom keybinding row, with Zellij-style modifier
-//! groups and action ribbons.
+//! The statusline: the bottom keybinding row, with modifier groups and action
+//! ribbons.
 //!
 //! Idle view groups every top-level hint under one human modifier header such
 //! as `Ctrl +` or `Alt +`; keys with the same action label fold into one ribbon.
@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect as RatatuiRect;
 use ratatui::style::{Color, Modifier, Style};
@@ -37,7 +37,8 @@ const RECOVERY_NOTICE: &str =
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
 /// 1. Blanks the row, then fills it with the theme's bar background.
-/// 2. Draws the session recovery notice across the row and stops when visible.
+/// 2. When `is_recovery_notice_visible`, draws the session recovery notice
+///    across the row and stops.
 /// 3. Draws the ` keys! ` marker at the right edge when the user
 ///    keymap was reverted. The marker holds its edge, and every hint below
 ///    stops short of it.
@@ -264,7 +265,7 @@ struct ChordSummary {
 
 #[derive(Debug, PartialEq, Eq)]
 struct ModifierGroup {
-    modifier_flags: ModFlags,
+    modifier_flags: BindingModifierFlags,
     action_ribbons: Vec<ActionRibbon>,
 }
 
@@ -408,7 +409,7 @@ fn find_prefix_label(keymap_hints: &KeymapHints, opening_chord: KeyChord) -> Opt
 }
 
 /// The text a prefix chord shows: its shipped label, or a `+N` marker counting
-/// the `binding_count` bindings under it.
+/// the `deeper_binding_count` bindings under it.
 ///
 /// The shipped label comes from `keymap_hints.prefix_labels`. The `+N` marker
 /// stands when that map has no entry for `opening_chord`, when
@@ -418,7 +419,7 @@ fn format_prefix_label(
     keymap_hints: &KeymapHints,
     pending_chords: &[KeyChord],
     opening_chord: KeyChord,
-    binding_count: usize,
+    deeper_binding_count: usize,
     has_user_binding: bool,
 ) -> String {
     if !has_user_binding
@@ -428,7 +429,7 @@ fn format_prefix_label(
             return prefix_label.clone();
         }
     }
-    format!("+{binding_count}")
+    format!("+{deeper_binding_count}")
 }
 
 fn has_removed_binding_under_prefix(
@@ -439,8 +440,8 @@ fn has_removed_binding_under_prefix(
     keymap_hints
         .removed_key_sequences
         .iter()
-        .any(|removed_sequence| {
-            let removed_chords = removed_sequence.list_chords();
+        .any(|removed_key_sequence| {
+            let removed_chords = removed_key_sequence.list_chords();
             removed_chords.len() > pending_chords.len()
                 && &removed_chords[..pending_chords.len()] == pending_chords
                 && removed_chords[pending_chords.len()] == opening_chord
@@ -449,24 +450,24 @@ fn has_removed_binding_under_prefix(
 
 /// The accent ribbon for one already-pressed chord of the pending sequence.
 fn build_chord_ribbon(theme: &Theme, chord: KeyChord, prefix_label: Option<&str>) -> Line<'static> {
-    let mut spans = Vec::new();
+    let mut ribbon_spans = Vec::new();
     if !chord.modifier_flags.is_empty() {
-        spans.push(Span::styled(
+        ribbon_spans.push(Span::styled(
             format!(" {} + ", format_modifier_names(chord.modifier_flags)),
             compute_breadcrumb_text_style(theme),
         ));
     }
-    spans.push(Span::styled(
+    ribbon_spans.push(Span::styled(
         format!(" {} ", format_key_name(chord.key)),
         compute_breadcrumb_key_style(theme),
     ));
     if let Some(prefix_label) = prefix_label {
-        spans.push(Span::styled(
+        ribbon_spans.push(Span::styled(
             format!(" {prefix_label} "),
             compute_breadcrumb_key_style(theme),
         ));
     }
-    Line::from(spans)
+    Line::from(ribbon_spans)
 }
 
 fn build_action_ribbon(
@@ -485,18 +486,18 @@ fn build_action_ribbon(
     ])
 }
 
-fn format_modifier_names(modifier_flags: ModFlags) -> String {
+fn format_modifier_names(modifier_flags: BindingModifierFlags) -> String {
     let mut modifier_names = Vec::new();
-    if modifier_flags.has_all_modifiers(ModFlags::CTRL) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::CTRL) {
         modifier_names.push("Ctrl");
     }
-    if modifier_flags.has_all_modifiers(ModFlags::ALT) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::ALT) {
         modifier_names.push("Alt");
     }
-    if modifier_flags.has_all_modifiers(ModFlags::SHIFT) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT) {
         modifier_names.push("Shift");
     }
-    if modifier_flags.has_all_modifiers(ModFlags::SUPER) {
+    if modifier_flags.has_all_modifiers(BindingModifierFlags::SUPER) {
         modifier_names.push("Super");
     }
     modifier_names.join("+")
@@ -517,14 +518,18 @@ fn format_key_name(key: Key) -> String {
     }
 }
 
-fn compute_modifier_sort_rank(modifier_flags: ModFlags) -> u16 {
-    match modifier_flags.get_bits() {
-        1 => 0, // Ctrl
-        2 => 1, // Alt
-        5 => 2, // Ctrl+Shift
-        4 => 3, // Shift
-        8 => 4, // Super
-        modifier_bits => 5 + u16::from(modifier_bits),
+/// Orders modifier groups: `Ctrl`, `Alt`, `Ctrl+Shift`, `Shift`, `Super`,
+/// then every other set by its bit pattern.
+fn compute_modifier_sort_rank(modifier_flags: BindingModifierFlags) -> u16 {
+    const CTRL_SHIFT: BindingModifierFlags =
+        BindingModifierFlags::CTRL.union(BindingModifierFlags::SHIFT);
+    match modifier_flags {
+        BindingModifierFlags::CTRL => 0,
+        BindingModifierFlags::ALT => 1,
+        CTRL_SHIFT => 2,
+        BindingModifierFlags::SHIFT => 3,
+        BindingModifierFlags::SUPER => 4,
+        _ => 5 + u16::from(modifier_flags.get_bits()),
     }
 }
 

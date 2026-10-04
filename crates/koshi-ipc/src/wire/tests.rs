@@ -1080,7 +1080,6 @@ fn sample_router_kinds() -> Vec<RouterRequestKind> {
         RouterRequestKind::AttachLookup {
             session_selector: crate::router::SessionSelector::SessionName("quiet-lake".to_string()),
         },
-        RouterRequestKind::ListSessions,
         RouterRequestKind::Restart,
         RouterRequestKind::GrantToken {
             identity: String::new(),
@@ -1112,7 +1111,6 @@ fn sample_router_results() -> Vec<RouterResult> {
         },
         RouterResult::Created(session_address.clone()),
         RouterResult::Found(session_address),
-        RouterResult::Sessions(Vec::new()),
         RouterResult::Restarting,
         RouterResult::Granted {
             connection_token: ConnectionToken::from_secret("t"),
@@ -1125,10 +1123,10 @@ fn sample_router_results() -> Vec<RouterResult> {
             is_remote_access_enabled: false,
             is_listening: false,
             certificate_fingerprint: None,
-            remote_connection_count: Some(0),
+            remote_connection_count: 0,
         },
         RouterResult::RemoteEnabled {
-            remote_listen_address: String::new(),
+            remote_listen_address: std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
             certificate_fingerprint: String::new(),
         },
         RouterResult::Error(crate::protocol::IpcErrorPayload {

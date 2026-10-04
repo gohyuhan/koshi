@@ -1,7 +1,7 @@
-//! Tests for the statusline: idle grouping (leaf build_keymap_hints, labeled
-//! default prefix groups, `+N` fallbacks once a user build_hint_binding or removal touches
-//! a group), the pending_key_sequence-sequence face (breadcrumb plus continuations, nested
-//! groups), pinned-first ordering, whole-item truncation, the right-aligned
+//! Tests for the statusline: idle grouping (leaf hints, labeled default prefix
+//! groups, `+N` counts once a user binding or a removal touches a group), the
+//! open-sequence view (breadcrumb plus continuations, nested groups),
+//! pinned-first ordering, whole-item truncation, the right-aligned
 //! keymap-revert marker, the blanked row for a mode with nothing to hint, and
 //! the cells outside the given area that the bar leaves untouched.
 
@@ -10,19 +10,19 @@ use super::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use koshi_core::key::{Key, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{BindingModifierFlags, Key, KeySequence, NamedKey};
 use ratatui::buffer::Cell;
 
 use crate::snapshot::HintBinding;
 
 /// A `Ctrl`-modified character chord.
 fn build_ctrl_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(ModFlags::CTRL, Key::Char(key_character))
+    KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char(key_character))
 }
 
 /// An unmodified character chord.
 fn build_plain_chord(key_character: char) -> KeyChord {
-    KeyChord::from_parts(ModFlags::NONE, Key::Char(key_character))
+    KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char(key_character))
 }
 
 /// A sequence from chords in press order.
@@ -65,9 +65,10 @@ fn build_keymap_hints(
     }
 }
 
-/// Draw the bar into a fresh one-row buffer of `column_count` cells.
+/// Draw the bar into a fresh one-row buffer of `column_count` cells, with no
+/// open sequence.
 fn render_statusline(keymap_hints: &KeymapHints, column_count: u16) -> Buffer {
-    render_statusline_with_theme(keymap_hints, &Theme::default(), column_count)
+    render_statusline_row(keymap_hints, &Theme::default(), None, column_count)
 }
 
 /// Paint `keymap_hints` into `render_buffer` over `render_area`, in `theme`'s colors.
@@ -126,11 +127,12 @@ fn recovery_notice_replaces_other_statusline_content_at_full_and_narrow_widths()
     }
 }
 
-/// Draw in `theme`'s colors with an open sequence.
-fn render_pending_statusline_with_theme(
+/// Draw the bar into a fresh one-row buffer of `column_count` cells, in
+/// `theme`'s colors. `pending_key_sequence` is `None` when no sequence is open.
+fn render_statusline_row(
     keymap_hints: &KeymapHints,
     theme: &Theme,
-    pending_key_sequence: &KeySequence,
+    pending_key_sequence: Option<&KeySequence>,
     column_count: u16,
 ) -> Buffer {
     let render_area = RatatuiRect {
@@ -143,43 +145,26 @@ fn render_pending_statusline_with_theme(
     paint_statusline(
         keymap_hints,
         theme,
-        Some(pending_key_sequence),
+        pending_key_sequence,
         render_area,
         &mut render_buffer,
     );
     render_buffer
 }
 
-/// Draw with an open sequence, which the viewer owns and hands to the bar.
+/// Draw the bar into a fresh one-row buffer of `column_count` cells, with
+/// `pending_key_sequence` open.
 fn render_pending_statusline(
     keymap_hints: &KeymapHints,
     pending_key_sequence: &KeySequence,
     column_count: u16,
 ) -> Buffer {
-    render_pending_statusline_with_theme(
+    render_statusline_row(
         keymap_hints,
         &Theme::default(),
-        pending_key_sequence,
+        Some(pending_key_sequence),
         column_count,
     )
-}
-
-/// Paint the statusline in `theme`'s colors, for the tests that check which
-/// color a piece of the bar takes.
-fn render_statusline_with_theme(
-    keymap_hints: &KeymapHints,
-    theme: &Theme,
-    column_count: u16,
-) -> Buffer {
-    let render_area = RatatuiRect {
-        x: 0,
-        y: 0,
-        width: column_count,
-        height: 1,
-    };
-    let mut render_buffer = Buffer::empty(render_area);
-    paint_statusline(keymap_hints, theme, None, render_area, &mut render_buffer);
-    render_buffer
 }
 
 /// The buffer's single row as a string, trailing spaces trimmed.
@@ -252,20 +237,20 @@ fn modifier_key_and_action_ribbons_use_the_group_ramp_stop() {
     // One modifier group → the ramp's purple end everywhere in it: the
     // header as text color, the key block as background, the label block as
     // the dimmed background.
-    let purple = Color::Rgb(0xd0, 0xa5, 0xff);
-    let purple_dim = Color::Rgb(0x72, 0x5a, 0x8c);
-    assert_eq!(render_buffer[(1, 0)].fg, purple);
+    let ramp_start_color = Color::Rgb(0xd0, 0xa5, 0xff);
+    let dimmed_ramp_start_color = Color::Rgb(0x72, 0x5a, 0x8c);
+    assert_eq!(render_buffer[(1, 0)].fg, ramp_start_color);
     assert!(render_buffer[(1, 0)].modifier.contains(Modifier::BOLD));
-    assert_eq!(render_buffer[(9, 0)].bg, purple);
+    assert_eq!(render_buffer[(9, 0)].bg, ramp_start_color);
     assert_eq!(render_buffer[(9, 0)].fg, Color::Rgb(0x12, 0x09, 0x1f));
-    assert_eq!(render_buffer[(12, 0)].bg, purple_dim);
+    assert_eq!(render_buffer[(12, 0)].bg, dimmed_ramp_start_color);
     assert_eq!(render_buffer[(12, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
 }
 
 #[test]
 fn every_cell_of_the_hint_row_is_painted_the_same_way() {
     let render_buffer = render_statusline(&build_pane_keymap_hints(false), 30);
-    let header = Style::default()
+    let header_style = Style::default()
         .fg(Color::Rgb(0xd0, 0xa5, 0xff))
         .bg(Color::Rgb(0x00, 0x00, 0x00))
         .add_modifier(Modifier::BOLD);
@@ -278,7 +263,7 @@ fn every_cell_of_the_hint_row_is_painted_the_same_way() {
         .bg(Color::Rgb(0x72, 0x5a, 0x8c));
     let fill_style = Style::default().bg(Color::Rgb(0x00, 0x00, 0x00));
     let expected_hint_cells: Vec<Cell> = [
-        build_painted_cells(" Ctrl + ", header),
+        build_painted_cells(" Ctrl + ", header_style),
         build_painted_cells(" l ", key_style),
         build_painted_cells(" Lock ", label_style),
         build_painted_cells(" p ", key_style),
@@ -298,11 +283,11 @@ fn every_cell_of_the_hint_row_is_painted_the_same_way() {
 
 #[test]
 fn human_modifier_groups_fold_same_action_keys() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[KeyChord::from_parts(
-                    ModFlags::CTRL,
+                    BindingModifierFlags::CTRL,
                     Key::Named(NamedKey::Left),
                 )]),
                 "Focus Pane",
@@ -311,7 +296,7 @@ fn human_modifier_groups_fold_same_action_keys() {
             ),
             build_hint_binding(
                 build_key_sequence(&[KeyChord::from_parts(
-                    ModFlags::CTRL,
+                    BindingModifierFlags::CTRL,
                     Key::Named(NamedKey::Down),
                 )]),
                 "Focus Pane",
@@ -319,13 +304,19 @@ fn human_modifier_groups_fold_same_action_keys() {
                 false,
             ),
             build_hint_binding(
-                build_key_sequence(&[KeyChord::from_parts(ModFlags::ALT, Key::Char('h'))]),
+                build_key_sequence(&[KeyChord::from_parts(
+                    BindingModifierFlags::ALT,
+                    Key::Char('h'),
+                )]),
                 "Focus Pane",
                 false,
                 false,
             ),
             build_hint_binding(
-                build_key_sequence(&[KeyChord::from_parts(ModFlags::ALT, Key::Char('j'))]),
+                build_key_sequence(&[KeyChord::from_parts(
+                    BindingModifierFlags::ALT,
+                    Key::Char('j'),
+                )]),
                 "Focus Pane",
                 false,
                 false,
@@ -335,7 +326,6 @@ fn human_modifier_groups_fold_same_action_keys() {
         Vec::new(),
         false,
     );
-    let keymap_hints = keymap;
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  ←↓  Focus Pane  Alt +  hj  Focus Pane"
@@ -344,9 +334,9 @@ fn human_modifier_groups_fold_same_action_keys() {
 
 #[test]
 fn bare_key_wears_the_header_style_not_a_key_block() {
-    let shift_tab = KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab));
-    let bare_tab = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Tab));
-    let keymap = build_keymap_hints(
+    let shift_tab = KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab));
+    let bare_tab = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab));
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('l')]),
@@ -366,7 +356,6 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
         Vec::new(),
         false,
     );
-    let keymap_hints = keymap;
     let render_buffer = render_statusline(&keymap_hints, 80);
     assert_eq!(
         format_rendered_row(&render_buffer),
@@ -387,62 +376,68 @@ fn bare_key_wears_the_header_style_not_a_key_block() {
 
 #[test]
 fn arrow_keys_sort_left_down_up_right_ahead_of_other_keys() {
-    let arrow = |named| {
+    let build_arrow_hint_binding = |arrow_key| {
         build_hint_binding(
-            build_key_sequence(&[KeyChord::from_parts(ModFlags::CTRL, Key::Named(named))]),
+            build_key_sequence(&[KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Named(arrow_key),
+            )]),
             "Focus Pane",
             false,
             false,
         )
     };
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
-            arrow(NamedKey::Right),
+            build_arrow_hint_binding(NamedKey::Right),
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('z')]),
                 "Focus Pane",
                 false,
                 false,
             ),
-            arrow(NamedKey::Up),
-            arrow(NamedKey::Left),
-            arrow(NamedKey::Down),
+            build_arrow_hint_binding(NamedKey::Up),
+            build_arrow_hint_binding(NamedKey::Left),
+            build_arrow_hint_binding(NamedKey::Down),
         ],
         &[],
         Vec::new(),
         false,
     );
-    // One action, so all five keys fold into one ribbon: the four arrows read
-    // in screen order, then every other key.
+    // One action: all five keys fold into one ribbon, the four arrows in
+    // screen order, then every other key.
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 80)),
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  ←↓↑→z  Focus Pane"
     );
 }
 
 #[test]
 fn named_keys_read_as_their_own_names() {
-    let create_named_hint_binding = |key, action_label: &str| {
+    let build_named_hint_binding = |named_key, action_label: &str| {
         build_hint_binding(
-            build_key_sequence(&[KeyChord::from_parts(ModFlags::NONE, Key::Named(key))]),
+            build_key_sequence(&[KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Named(named_key),
+            )]),
             action_label,
             false,
             false,
         )
     };
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
-            create_named_hint_binding(NamedKey::Enter, "Accept"),
-            create_named_hint_binding(NamedKey::Esc, "Cancel"),
-            create_named_hint_binding(NamedKey::Space, "Pick"),
-            create_named_hint_binding(NamedKey::Backspace, "Undo"),
+            build_named_hint_binding(NamedKey::Enter, "Accept"),
+            build_named_hint_binding(NamedKey::Esc, "Cancel"),
+            build_named_hint_binding(NamedKey::Space, "Pick"),
+            build_named_hint_binding(NamedKey::Backspace, "Undo"),
         ],
         &[],
         Vec::new(),
         false,
     );
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 80)),
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " BACKSPACE  Undo  ENTER  Accept  ESC  Cancel  SPACE  Pick"
     );
 }
@@ -458,7 +453,7 @@ fn user_entry_under_prefix_swaps_label_for_count() {
 
 #[test]
 fn removal_under_prefix_swaps_label_for_count() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![build_hint_binding(
             build_key_sequence(&[build_ctrl_chord('p'), build_plain_chord('n')]),
             "New Pane",
@@ -472,7 +467,6 @@ fn removal_under_prefix_swaps_label_for_count() {
         ])],
         false,
     );
-    let keymap_hints = keymap;
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  p  +1"
@@ -481,7 +475,7 @@ fn removal_under_prefix_swaps_label_for_count() {
 
 #[test]
 fn unlabeled_group_shows_count() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('t'), build_plain_chord('n')]),
@@ -500,7 +494,6 @@ fn unlabeled_group_shows_count() {
         Vec::new(),
         false,
     );
-    let keymap_hints = keymap;
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  t  +2"
@@ -523,9 +516,8 @@ fn pending_prefix_shows_breadcrumb_and_continuations() {
 
 #[test]
 fn pending_prefix_with_no_continuations_shows_bare_breadcrumb_and_no_groups() {
-    // The user pressed a chord that isn't a prefix of anything bound: no
-    // matching entries mean no label and no continuation groups — just the
-    // breadcrumb and arrow, with no panic on the now-empty group list.
+    // A pressed chord that opens nothing bound shows no label and no
+    // continuation groups: only the breadcrumb and the arrow.
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('z')]);
     let keymap_hints = build_pane_keymap_hints(false);
     assert_eq!(
@@ -554,7 +546,7 @@ fn customized_pending_prefix_uses_count_not_shipped_label() {
 
 #[test]
 fn pending_prefix_without_label_shows_derived_count() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![build_hint_binding(
             build_key_sequence(&[build_ctrl_chord('t'), build_plain_chord('n')]),
             "New Tab",
@@ -566,7 +558,6 @@ fn pending_prefix_without_label_shows_derived_count() {
         false,
     );
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('t')]);
-    let keymap_hints = keymap;
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
             &keymap_hints,
@@ -579,7 +570,7 @@ fn pending_prefix_without_label_shows_derived_count() {
 
 #[test]
 fn nested_group_inside_pending_shows_count() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[
@@ -607,16 +598,19 @@ fn nested_group_inside_pending_shows_count() {
         false,
     );
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
-    let bar = keymap;
     assert_eq!(
-        format_rendered_row(&render_pending_statusline(&bar, &pending_key_sequence, 80)),
+        format_rendered_row(&render_pending_statusline(
+            &keymap_hints,
+            &pending_key_sequence,
+            80
+        )),
         " Ctrl +  p  PANE  ▶  n  +2"
     );
 }
 
 #[test]
 fn chord_bound_and_extended_shows_action_with_count() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('p')]),
@@ -635,7 +629,6 @@ fn chord_bound_and_extended_shows_action_with_count() {
         Vec::new(),
         false,
     );
-    let keymap_hints = keymap;
     assert_eq!(
         format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  p  Pane Menu +1"
@@ -644,7 +637,7 @@ fn chord_bound_and_extended_shows_action_with_count() {
 
 #[test]
 fn pinned_hint_sorts_first_and_survives_truncation() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('a')]),
@@ -663,15 +656,14 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
         Vec::new(),
         false,
     );
-    let bar = keymap;
-    // Wide: pinned first despite `<C-a>` sorting lower.
+    // Wide: pinned first, ahead of `<C-a>`.
     assert_eq!(
-        format_rendered_row(&render_statusline(&bar, 80)),
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  g  Unlock  a  Aardvark"
     );
     // Narrow: only the pinned hint fits; the dropped one leaves a `…`.
     assert_eq!(
-        format_rendered_row(&render_statusline(&bar, 19)),
+        format_rendered_row(&render_statusline(&keymap_hints, 19)),
         " Ctrl +  g  Unlock…"
     );
 }
@@ -679,8 +671,8 @@ fn pinned_hint_sorts_first_and_survives_truncation() {
 #[test]
 fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
     // Pinned puts a hint first inside its own group; the groups themselves
-    // still read in modifier order, so `Ctrl` leads the pinned `Alt` hint.
-    let keymap = build_keymap_hints(
+    // still read in modifier order: `Ctrl` leads the pinned `Alt` hint.
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('l')]),
@@ -689,7 +681,10 @@ fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
                 false,
             ),
             build_hint_binding(
-                build_key_sequence(&[KeyChord::from_parts(ModFlags::ALT, Key::Char('u'))]),
+                build_key_sequence(&[KeyChord::from_parts(
+                    BindingModifierFlags::ALT,
+                    Key::Char('u'),
+                )]),
                 "Unlock",
                 false,
                 true,
@@ -700,16 +695,16 @@ fn a_pinned_hint_does_not_pull_its_modifier_group_ahead() {
         false,
     );
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 80)),
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  l  Lock  Alt +  u  Unlock"
     );
 }
 
 #[test]
 fn a_pinned_and_an_unpinned_hint_with_one_label_stay_two_ribbons() {
-    // Folding keys into one ribbon needs the same label *and* the same pinned
-    // flag, so these two keep their own blocks with the pinned one first.
-    let keymap = build_keymap_hints(
+    // Keys fold into one ribbon only with the same label and the same pinned
+    // flag: these two keep their own blocks, the pinned one first.
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('w')]),
@@ -729,7 +724,7 @@ fn a_pinned_and_an_unpinned_hint_with_one_label_stay_two_ribbons() {
         false,
     );
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 80)),
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Ctrl +  s  Save  w  Save"
     );
 }
@@ -751,7 +746,7 @@ fn truncation_drops_whole_trailing_hints() {
 
 #[test]
 fn a_group_header_is_never_painted_without_its_first_ribbon() {
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('l')]),
@@ -760,7 +755,10 @@ fn a_group_header_is_never_painted_without_its_first_ribbon() {
                 false,
             ),
             build_hint_binding(
-                build_key_sequence(&[KeyChord::from_parts(ModFlags::ALT, Key::Char('u'))]),
+                build_key_sequence(&[KeyChord::from_parts(
+                    BindingModifierFlags::ALT,
+                    Key::Char('u'),
+                )]),
                 "Unlock",
                 false,
                 false,
@@ -772,13 +770,13 @@ fn a_group_header_is_never_painted_without_its_first_ribbon() {
     );
     // The `Ctrl` group is 17 cells, the `Alt` group's ` Alt + ` header plus its
     // first ribbon is 18 more. One cell short of both, the header is skipped
-    // whole rather than build_painted_cells over an empty group.
+    // whole and the `…` takes its place.
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 34)),
+        format_rendered_row(&render_statusline(&keymap_hints, 34)),
         " Ctrl +  l  Lock …"
     );
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 35)),
+        format_rendered_row(&render_statusline(&keymap_hints, 35)),
         " Ctrl +  l  Lock  Alt +  u  Unlock"
     );
 }
@@ -823,8 +821,8 @@ fn an_overflow_marker_with_no_cell_left_takes_the_last_one() {
 #[test]
 fn the_overflow_marker_is_bold_dim_ramp_text_on_the_bar_background() {
     let render_buffer = render_statusline(&build_pane_keymap_hints(false), 25);
-    // Column 17 is the first cell past the ` Ctrl +  l  Lock ` group, so the
-    // `…` there lands on bar background rather than on a ribbon.
+    // Column 17 is the first cell past the ` Ctrl +  l  Lock ` group: the `…`
+    // there sits on the bar background.
     assert_eq!(render_buffer[(17, 0)].symbol(), "…");
     assert_eq!(render_buffer[(17, 0)].fg, Color::Rgb(0xf0, 0xec, 0xfa));
     assert_eq!(render_buffer[(17, 0)].bg, Color::Rgb(0x00, 0x00, 0x00));
@@ -833,11 +831,11 @@ fn the_overflow_marker_is_bold_dim_ramp_text_on_the_bar_background() {
 
 #[test]
 fn the_revert_marker_is_bold_white_on_red() {
-    let keymap = KeymapHints {
+    let keymap_hints = KeymapHints {
         is_reverted_to_defaults: true,
         ..build_pane_keymap_hints(false)
     };
-    let render_buffer = render_statusline(&keymap, 30);
+    let render_buffer = render_statusline(&keymap_hints, 30);
     assert_eq!(render_buffer[(24, 0)].symbol(), "k");
     assert_eq!(render_buffer[(24, 0)].fg, Color::White);
     assert_eq!(render_buffer[(24, 0)].bg, Color::Red);
@@ -846,28 +844,31 @@ fn the_revert_marker_is_bold_white_on_red() {
 
 #[test]
 fn a_named_key_with_no_symbol_reads_as_its_chord_spelling() {
-    let create_named_hint_binding = |key, action_label: &str| {
+    let build_named_hint_binding = |named_key, action_label: &str| {
         build_hint_binding(
-            build_key_sequence(&[KeyChord::from_parts(ModFlags::NONE, Key::Named(key))]),
+            build_key_sequence(&[KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Named(named_key),
+            )]),
             action_label,
             false,
             false,
         )
     };
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
-            create_named_hint_binding(NamedKey::Home, "Top"),
-            create_named_hint_binding(NamedKey::End, "Bottom"),
-            create_named_hint_binding(NamedKey::PageUp, "Page Up"),
-            create_named_hint_binding(NamedKey::Delete, "Delete"),
-            create_named_hint_binding(NamedKey::F(1), "Help"),
+            build_named_hint_binding(NamedKey::Home, "Top"),
+            build_named_hint_binding(NamedKey::End, "Bottom"),
+            build_named_hint_binding(NamedKey::PageUp, "Page Up"),
+            build_named_hint_binding(NamedKey::Delete, "Delete"),
+            build_named_hint_binding(NamedKey::F(1), "Help"),
         ],
         &[],
         Vec::new(),
         false,
     );
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 80)),
+        format_rendered_row(&render_statusline(&keymap_hints, 80)),
         " Del  Delete  End  Bottom  F1  Help  Home  Top  PageUp  Page Up"
     );
 }
@@ -943,10 +944,11 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
     ];
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
 
-    let untouched = build_keymap_hints(create_hint_bindings(), prefix_labels, Vec::new(), false);
+    let keymap_hints_without_removal =
+        build_keymap_hints(create_hint_bindings(), prefix_labels, Vec::new(), false);
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
-            &untouched,
+            &keymap_hints_without_removal,
             &pending_key_sequence,
             80
         )),
@@ -954,8 +956,8 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
     );
 
     // `<C-p> n b` was removed. The removal sits under `<C-p>` and under
-    // `<C-p> n`, so both prefix labels give way to their build_hint_binding counts.
-    let with_removal = build_keymap_hints(
+    // `<C-p> n`: both prefix labels give way to their binding counts.
+    let keymap_hints_with_removal = build_keymap_hints(
         create_hint_bindings(),
         prefix_labels,
         vec![build_key_sequence(&[
@@ -967,7 +969,7 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
     );
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
-            &with_removal,
+            &keymap_hints_with_removal,
             &pending_key_sequence,
             80
         )),
@@ -977,11 +979,10 @@ fn a_removal_under_a_pending_prefix_swaps_every_label_it_touches_for_a_count() {
 
 #[test]
 fn revert_marker_holds_right_edge_and_hints_stop_short() {
-    let keymap = KeymapHints {
+    let keymap_hints = KeymapHints {
         is_reverted_to_defaults: true,
         ..build_pane_keymap_hints(false)
     };
-    let keymap_hints = keymap;
     let render_buffer = render_statusline(&keymap_hints, 30);
     let rendered_row_text = format_rendered_row(&render_buffer);
     assert_eq!(rendered_row_text, " Ctrl +  l  Lock …      keys!");
@@ -991,7 +992,7 @@ fn revert_marker_holds_right_edge_and_hints_stop_short() {
 
 #[test]
 fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
-    let create_modifier_hint_binding = |modifier_flags, key_character: char, action_label: &str| {
+    let build_modifier_hint_binding = |modifier_flags, key_character: char, action_label: &str| {
         build_hint_binding(
             build_key_sequence(&[KeyChord::from_parts(
                 modifier_flags,
@@ -1003,22 +1004,30 @@ fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
         )
     };
     // Fed in reverse of the order they must come out in.
-    let keymap = build_keymap_hints(
+    let keymap_hints = build_keymap_hints(
         vec![
-            create_modifier_hint_binding(ModFlags::CTRL | ModFlags::ALT, 'f', "CtrlAlt"),
-            create_modifier_hint_binding(ModFlags::NONE, 'g', "Bare"),
-            create_modifier_hint_binding(ModFlags::SUPER, 'a', "Super"),
-            create_modifier_hint_binding(ModFlags::SHIFT, 'b', "Shift"),
-            create_modifier_hint_binding(ModFlags::CTRL | ModFlags::SHIFT, 'c', "CtrlShift"),
-            create_modifier_hint_binding(ModFlags::ALT, 'd', "Alt"),
-            create_modifier_hint_binding(ModFlags::CTRL, 'e', "Ctrl"),
+            build_modifier_hint_binding(
+                BindingModifierFlags::CTRL | BindingModifierFlags::ALT,
+                'f',
+                "CtrlAlt",
+            ),
+            build_modifier_hint_binding(BindingModifierFlags::NONE, 'g', "Bare"),
+            build_modifier_hint_binding(BindingModifierFlags::SUPER, 'a', "Super"),
+            build_modifier_hint_binding(BindingModifierFlags::SHIFT, 'b', "Shift"),
+            build_modifier_hint_binding(
+                BindingModifierFlags::CTRL | BindingModifierFlags::SHIFT,
+                'c',
+                "CtrlShift",
+            ),
+            build_modifier_hint_binding(BindingModifierFlags::ALT, 'd', "Alt"),
+            build_modifier_hint_binding(BindingModifierFlags::CTRL, 'e', "Ctrl"),
         ],
         &[],
         Vec::new(),
         false,
     );
     assert_eq!(
-        format_rendered_row(&render_statusline(&keymap, 200)),
+        format_rendered_row(&render_statusline(&keymap_hints, 200)),
         concat!(
             " Ctrl +  e  Ctrl  Alt +  d  Alt  Ctrl+Shift +  c  CtrlShift ",
             " Shift +  b  Shift  Super +  a  Super  g  Bare  Ctrl+Alt +  f  CtrlAlt"
@@ -1028,10 +1037,10 @@ fn modifier_groups_read_ctrl_alt_ctrl_shift_shift_super_then_the_rest() {
 
 #[test]
 fn only_the_opening_chord_of_a_pending_sequence_shows_a_prefix_label() {
-    // `n` is a labeled top-level prefix in its own right, but here it is the
-    // second chord of the open sequence, so its `NESTED` label stays off the
-    // breadcrumb — only the chord that opened the sequence is labeled.
-    let keymap = build_keymap_hints(
+    // `n` is a labeled top-level prefix in its own right. As the second chord
+    // of the open sequence, its `NESTED` label stays off the breadcrumb: only
+    // the chord that opened the sequence is labeled.
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[
@@ -1060,7 +1069,7 @@ fn only_the_opening_chord_of_a_pending_sequence_shows_a_prefix_label() {
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p'), build_plain_chord('n')]);
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
-            &keymap,
+            &keymap_hints,
             &pending_key_sequence,
             80
         )),
@@ -1070,9 +1079,9 @@ fn only_the_opening_chord_of_a_pending_sequence_shows_a_prefix_label() {
 
 #[test]
 fn a_pending_sequence_that_is_itself_bound_lists_only_its_continuations() {
-    // `<C-p>` runs an action of its own and also opens deeper bindings. Once it is
-    // pending_key_sequence, its own build_hint_binding is behind the viewer, so only `n` is listed.
-    let keymap = build_keymap_hints(
+    // `<C-p>` runs an action of its own and also opens deeper bindings. With
+    // `<C-p>` pending, only its continuation `n` is listed.
+    let keymap_hints = build_keymap_hints(
         vec![
             build_hint_binding(
                 build_key_sequence(&[build_ctrl_chord('p')]),
@@ -1094,7 +1103,7 @@ fn a_pending_sequence_that_is_itself_bound_lists_only_its_continuations() {
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
     assert_eq!(
         format_rendered_row(&render_pending_statusline(
-            &keymap,
+            &keymap_hints,
             &pending_key_sequence,
             80
         )),
@@ -1130,11 +1139,11 @@ fn a_row_too_narrow_for_the_breadcrumb_shows_only_the_overflow_marker() {
 fn the_revert_marker_and_the_overflow_marker_share_the_narrowest_row_that_fits_both() {
     // ` keys! ` is 7 cells; at 8 the marker takes the right edge and the `…`
     // for every dropped hint takes the one cell left of it.
-    let keymap = KeymapHints {
+    let keymap_hints = KeymapHints {
         is_reverted_to_defaults: true,
         ..build_pane_keymap_hints(false)
     };
-    let render_buffer = render_statusline(&keymap, 8);
+    let render_buffer = render_statusline(&keymap_hints, 8);
     assert_eq!(format_rendered_row(&render_buffer), "… keys!");
     assert_eq!(render_buffer[(0, 0)].symbol(), "…");
     assert_eq!(render_buffer[(7, 0)].symbol(), " ");
@@ -1176,7 +1185,7 @@ fn empty_mode_blanks_the_row() {
         height: 1,
     };
     let mut render_buffer = Buffer::empty(render_area);
-    // Pre-fill the row: the bar owns it, so stale cells must be cleared.
+    // Pre-fill the row with stale cells.
     render_buffer.set_string(0, 0, "X".repeat(20), Style::default());
     paint_statusline(
         &keymap_hints,
@@ -1186,8 +1195,7 @@ fn empty_mode_blanks_the_row() {
         &mut render_buffer,
     );
     assert_eq!(format_rendered_row(&render_buffer), "");
-    // Blank of text, but not of color: the row still carries the bar
-    // background, so an empty mode reads as a bar rather than a hole.
+    // Blank of text, but every cell still carries the bar background.
     for column_index in 0..20 {
         assert_eq!(
             render_buffer[(column_index, 0)].bg,
@@ -1222,27 +1230,28 @@ fn zero_size_area_draws_nothing() {
     assert_eq!(format_rendered_row(&render_buffer), "");
 }
 
-/// A non-default palette recolors the bar: the pending_key_sequence breadcrumb takes the
-/// theme's accent pair and a group's key block sits on the custom ramp.
+/// A non-default palette recolors the bar: the open-sequence breadcrumb takes
+/// the theme's accent pair and a group's key block sits on the custom ramp.
 #[test]
 fn a_custom_theme_recolors_the_bar() {
     let pending_key_sequence = build_key_sequence(&[build_ctrl_chord('p')]);
     let keymap_hints = build_pane_keymap_hints(false);
-    let render_theme = Theme {
+    let custom_theme = Theme {
         ramp_start: (0xff, 0x00, 0x00),
         ramp_end: (0x00, 0x00, 0xff),
         accent_color: Color::Rgb(0x00, 0xff, 0x00),
         accent_block_text_color: Color::Rgb(0x01, 0x02, 0x03),
         ..Theme::default()
     };
-    let render_buffer = render_pending_statusline_with_theme(
+    let render_buffer = render_statusline_row(
         &keymap_hints,
-        &render_theme,
-        &pending_key_sequence,
+        &custom_theme,
+        Some(&pending_key_sequence),
         80,
     );
-    // Row: " Ctrl +  p  PANE  ▶  n  New Pane …". The breadcrumb's `Ctrl +`
-    // is accent text; its key block is on-accent text on the accent.
+    // Row: " Ctrl +  p  PANE  ▶  n  New Pane  x  Close Pane". The
+    // breadcrumb's `Ctrl +` is accent text; its key block is on-accent text on
+    // the accent.
     assert_eq!(render_buffer[(1, 0)].fg, Color::Rgb(0x00, 0xff, 0x00));
     assert_eq!(render_buffer[(9, 0)].fg, Color::Rgb(0x01, 0x02, 0x03));
     assert_eq!(render_buffer[(9, 0)].bg, Color::Rgb(0x00, 0xff, 0x00));
@@ -1297,8 +1306,8 @@ fn the_overflow_marker_never_paints_left_of_the_area() {
 
 #[test]
 fn a_hint_wider_than_the_cell_counter_is_dropped_behind_the_overflow_marker() {
-    // A ribbon of 65 536 cells reads as 65 535, which never fits, instead of
-    // wrapping to 0 and painting nothing where the marker belongs.
+    // A ribbon of 65 536 cells reads as 65 535 cells, which never fits: the
+    // row is only the `…`.
     let oversized_action_label = "L".repeat(65_536 - 5);
     let keymap_hints = build_keymap_hints(
         vec![

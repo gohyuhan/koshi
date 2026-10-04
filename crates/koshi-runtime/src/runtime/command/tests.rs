@@ -12948,10 +12948,10 @@ fn child_exit_close_on_exit_removes_the_pane_and_reaps_it() {
     let new_pane_id = find_other_pane_id(&runtime, session_id, root_pane_id);
 
     // The split pane's `CloseOnExit` child dies.
-    let events = runtime.handle_child_exit(new_pane_id, ExitStatus::ExitCode(0));
+    let emitted_events = runtime.handle_child_exit(new_pane_id, ExitStatus::ExitCode(0));
 
     // The exit is reported first, carrying the pane and its code.
-    match events.first() {
+    match emitted_events.first() {
         Some(Event::PaneProcessExited(exited)) => {
             assert_eq!(exited.pane_id, new_pane_id);
             assert_eq!(exited.exit_code, Some(0));
@@ -13025,10 +13025,10 @@ fn child_exit_advances_the_session_revision_when_one_client_revision_is_saturate
         .expect("client A exists")
         .get_placement_revision();
 
-    let events = runtime.handle_child_exit(exiting_pane_id, ExitStatus::ExitCode(0));
+    let emitted_events = runtime.handle_child_exit(exiting_pane_id, ExitStatus::ExitCode(0));
 
     assert!(matches!(
-        events.first(),
+        emitted_events.first(),
         Some(Event::PaneProcessExited(PaneProcessExited {
             pane_id,
             exit_code: Some(0),
@@ -13075,7 +13075,7 @@ fn client_attach_registers_a_client_when_the_session_revision_is_saturated() {
     );
 
     let joining_client_id = ClientId::new();
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         joining_client_id,
         viewport_size,
@@ -13086,7 +13086,7 @@ fn client_attach_registers_a_client_when_the_session_revision_is_saturated() {
         false,
     );
 
-    assert!(events.iter().any(|event| {
+    assert!(emitted_events.iter().any(|event| {
         matches!(
             event,
             Event::PaneFocused(PaneFocused {
@@ -13153,7 +13153,7 @@ fn child_exit_of_the_last_pane_closes_the_tab_and_quits() {
     let session_id = session.session_id;
     runtime.session_by_id.insert(session_id, session);
 
-    let events = runtime.handle_child_exit(root_pane_id, ExitStatus::ExitCode(0));
+    let emitted_events = runtime.handle_child_exit(root_pane_id, ExitStatus::ExitCode(0));
 
     // Removing the last pane closes the tab, and closing the last tab quits.
     assert!(runtime.session_by_id[&session_id]
@@ -13162,7 +13162,7 @@ fn child_exit_of_the_last_pane_closes_the_tab_and_quits() {
         .is_none());
     assert!(runtime.session_by_id[&session_id].tabs.is_empty());
     assert_eq!(
-        list_event_names(&events),
+        list_event_names(&emitted_events),
         [
             "PaneProcessExited",
             "PaneClosing",
@@ -13194,7 +13194,7 @@ fn child_exit_empties_a_tab_and_moves_the_viewer_to_a_sibling() {
 
     // The sole pane of tab A exits: tab A closes, but tab B survives, so the
     // session does not quit and the viewer moves to tab B (which reflows).
-    let events = runtime.handle_child_exit(pane_id_a, ExitStatus::ExitCode(0));
+    let emitted_events = runtime.handle_child_exit(pane_id_a, ExitStatus::ExitCode(0));
 
     assert!(runtime.session_by_id[&session_id]
         .panes
@@ -13207,7 +13207,7 @@ fn child_exit_empties_a_tab_and_moves_the_viewer_to_a_sibling() {
         .tabs
         .contains_key(&tab_id_b));
     assert_eq!(
-        list_event_names(&events),
+        list_event_names(&emitted_events),
         [
             "PaneProcessExited",
             "PaneClosing",
@@ -13240,9 +13240,9 @@ fn child_exit_of_an_unknown_pane_is_dropped() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
 
     // No session owns the pane (closed while its exit waited in the inbox).
-    let events = runtime.handle_child_exit(PaneId::new(), ExitStatus::ExitCode(0));
+    let emitted_events = runtime.handle_child_exit(PaneId::new(), ExitStatus::ExitCode(0));
 
-    assert!(events.is_empty());
+    assert!(emitted_events.is_empty());
 }
 
 // The root pane exits with a code, then the last pane is killed by a signal:
@@ -13349,7 +13349,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     // A smaller second client attaches to the same tab: the tab size drops
     // to the per-axis minimum, so the live pane's PTY reflows down.
     let joining_client_id = ClientId::new();
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         joining_client_id,
         small_viewport_size,
@@ -13380,7 +13380,7 @@ fn client_attach_reflows_the_shared_tab_to_the_smaller_effective_size() {
     // The joining client had focused nothing here, so it lands on the tab's
     // pane before the reflow it caused.
     assert_eq!(
-        events,
+        emitted_events,
         vec![
             Event::PaneFocused(PaneFocused {
                 client_id: joining_client_id,
@@ -13509,7 +13509,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
         .expect("bootstrap");
     let (_session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
 
-    let events = runtime.handle_client_resize(client, resized_viewport_size, None, None);
+    let emitted_events = runtime.handle_client_resize(client, resized_viewport_size, None, None);
     let expected_pty_size = compute_root_pane_pty_size(
         pane_id,
         compute_default_pane_area_size(resized_viewport_size),
@@ -13535,7 +13535,7 @@ fn client_resize_updates_full_viewport_and_reflows_middle_pane_region() {
         expected_pty_size
     );
     assert_eq!(
-        events,
+        emitted_events,
         vec![Event::PtyResized(PtyResized {
             pane_id,
             pty_size: expected_pty_size,
@@ -13566,7 +13566,7 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
     // The larger client cannot lower the per-axis minimum, so the tab size
     // stays 40x24: no reflow, no resize event.
     let joining_client_id = ClientId::new();
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         joining_client_id,
         large_viewport_size,
@@ -13579,7 +13579,7 @@ fn client_attach_of_a_larger_client_leaves_the_tab_size_unchanged() {
 
     // No reflow, but the joining client still lands on the tab's pane.
     assert_eq!(
-        events,
+        emitted_events,
         vec![Event::PaneFocused(PaneFocused {
             client_id: joining_client_id,
             tab_id,
@@ -13623,7 +13623,7 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
     );
 
     let client_id = ClientId::new();
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         client_id,
         viewport_size,
@@ -13645,7 +13645,7 @@ fn attaching_to_a_session_seeded_with_no_client_lands_on_the_tabs_first_pane() {
         Some(pane_id)
     );
     assert_eq!(
-        events,
+        emitted_events,
         vec![Event::PaneFocused(PaneFocused {
             client_id,
             tab_id,
@@ -13691,7 +13691,7 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
         .update_focused_pane(tab_id, newly_focused_pane_id);
 
     // Re-attaching does not drag focus back to the tab's first pane.
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         client_id,
         viewport_size,
@@ -13713,10 +13713,10 @@ fn reattaching_keeps_the_pane_the_client_already_focused() {
     );
     assert_ne!(newly_focused_pane_id, pane_id);
     assert!(
-        !events
+        !emitted_events
             .iter()
             .any(|event| matches!(event, Event::PaneFocused(_))),
-        "no focus change is announced, got {events:?}"
+        "no focus change is announced, got {emitted_events:?}"
     );
 }
 
@@ -13755,7 +13755,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
 
     // The smaller client leaves: only the 80x24 viewer remains, so the tab grows
     // back and the pane's PTY reflows up.
-    let events = runtime.handle_client_detach(small_client_id);
+    let emitted_events = runtime.handle_client_detach(small_client_id);
 
     let expected_pty_size = compute_root_pane_pty_size(
         pane_id,
@@ -13775,7 +13775,7 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
         expected_pty_size
     );
     assert_eq!(
-        events,
+        emitted_events,
         vec![Event::PtyResized(PtyResized {
             pane_id,
             pty_size: expected_pty_size,
@@ -13801,9 +13801,9 @@ fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
 
     // The only viewer leaves: the tab has no viewport, so its PTY keeps its size
     // and no resize event is produced. The pane itself stays alive.
-    let events = runtime.handle_client_detach(client);
+    let emitted_events = runtime.handle_client_detach(client);
 
-    assert!(events.is_empty());
+    assert!(emitted_events.is_empty());
     assert_eq!(
         fake_pty_backend.list_pane_sizes(pane_id).unwrap().len(),
         resize_count_before_last_detach
@@ -14225,7 +14225,7 @@ fn quit_from_a_client_that_already_left_is_refused() {
 #[test]
 fn client_attach_to_an_unknown_session_is_dropped() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         SessionId::new(),
         ClientId::new(),
         Size {
@@ -14238,14 +14238,14 @@ fn client_attach_to_an_unknown_session_is_dropped() {
         SystemTime::now(),
         false,
     );
-    assert!(events.is_empty());
+    assert!(emitted_events.is_empty());
 }
 
 #[test]
 fn client_detach_of_an_unknown_client_is_dropped() {
     let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
-    let events = runtime.handle_client_detach(ClientId::new());
-    assert!(events.is_empty());
+    let emitted_events = runtime.handle_client_detach(ClientId::new());
+    assert!(emitted_events.is_empty());
 }
 
 #[test]
@@ -14267,7 +14267,7 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
     // The named tab is not one this session holds: the client is not attached
     // and nothing reflows.
     let stranger_client_id = ClientId::new();
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         stranger_client_id,
         viewport_size,
@@ -14278,7 +14278,7 @@ fn client_attach_to_an_unknown_tab_is_dropped() {
         false,
     );
 
-    assert!(events.is_empty());
+    assert!(emitted_events.is_empty());
     assert!(runtime.session_by_id[&session_id]
         .clients
         .get_client_by_id(stranger_client_id)
@@ -14361,7 +14361,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
 
     // C re-attaches onto `tab_2`: it leaves `tab_1`, where only the 80x24 client
     // B remains, so `pane_1` grows back — the tab the client left is reflowed.
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id,
         client_c,
         large_viewport_size,
@@ -14398,7 +14398,7 @@ fn client_reattach_onto_a_different_tab_reflows_the_tab_it_left() {
         .copied()
         .expect("the created tab holds one pane");
     assert_eq!(
-        events,
+        emitted_events,
         vec![
             Event::PaneFocused(PaneFocused {
                 client_id: client_c,
@@ -14700,7 +14700,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
         .len();
 
     // Move `client` from session 1 into session 2 at a smaller viewport.
-    let events = runtime.handle_client_attach(
+    let emitted_events = runtime.handle_client_attach(
         session_id_2,
         client,
         small_viewport_size,
@@ -14747,7 +14747,7 @@ fn cross_session_attach_detaches_the_client_from_its_old_session() {
     // The client had focused nothing in session 2, so it lands on that tab's
     // pane before the reflow its smaller viewport caused.
     assert_eq!(
-        events,
+        emitted_events,
         vec![
             Event::PaneFocused(PaneFocused {
                 client_id: client,
@@ -16789,7 +16789,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let events = runtime.subscribe(client);
+    let emitted_events = runtime.subscribe(client);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -16824,7 +16824,7 @@ fn detaching_the_last_client_leaves_the_session_running_with_no_clients() {
         Some(pane_id)
     );
     assert!(runtime.live_pane_ids.contains(&pane_id));
-    drop(events);
+    drop(emitted_events);
 }
 
 #[test]
@@ -17002,7 +17002,7 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let events = runtime.subscribe(only_client_id);
+    let emitted_events = runtime.subscribe(only_client_id);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), None),
@@ -17039,7 +17039,7 @@ fn detach_with_a_sole_attached_client_and_none_named_takes_that_client() {
         Some(pane_id)
     );
     assert!(runtime.live_pane_ids.contains(&pane_id));
-    drop(events);
+    drop(emitted_events);
 }
 
 #[test]
@@ -17140,7 +17140,7 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let events = runtime.subscribe(client);
+    let emitted_events = runtime.subscribe(client);
     let target_session_id = SessionId::new();
 
     let command_envelope = build_command_envelope(
@@ -17165,7 +17165,7 @@ fn a_switch_puts_the_session_to_join_on_the_clients_queue() {
         }
     );
 
-    let session_switch_targets: Vec<SessionId> = events
+    let session_switch_targets: Vec<SessionId> = emitted_events
         .try_iter()
         .filter_map(|delivery| match delivery {
             Delivery::SwitchTo(session_id) => Some(session_id),
@@ -17189,7 +17189,7 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
         )
         .expect("bootstrap the genesis client");
     let (session_id, _tab_id, pane_id) = get_only_session_slot(&runtime);
-    let events = runtime.subscribe(client);
+    let emitted_events = runtime.subscribe(client);
 
     let command_envelope = build_command_envelope(
         CommandSource::from_in_session_cli(
@@ -17214,7 +17214,7 @@ fn a_switch_into_the_session_the_client_is_already_in_is_refused() {
         }
     );
     assert!(
-        !events
+        !emitted_events
             .try_iter()
             .any(|delivery| matches!(delivery, Delivery::SwitchTo(_))),
         "a refused switch queues no move"
@@ -17771,7 +17771,7 @@ fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
         column_count: 60,
         row_count: 20,
     };
-    let events = runtime.handle_client_resize(
+    let emitted_events = runtime.handle_client_resize(
         client,
         viewport_size,
         Some(PaneArea::Reported(reported_pane_size)),
@@ -17791,7 +17791,7 @@ fn a_resize_reporting_a_smaller_pane_area_resizes_each_pane_once() {
             .expect("the pane is solved")
     };
     assert_eq!(
-        events,
+        emitted_events,
         vec![
             Event::PtyResized(PtyResized {
                 pane_id: first_pane_id,
@@ -17848,7 +17848,7 @@ fn a_resize_reporting_a_zero_pane_area_resizes_no_pty() {
         .list_pane_sizes(second_pane_id)
         .expect("resizes");
 
-    let events = runtime.handle_client_resize(
+    let emitted_events = runtime.handle_client_resize(
         client,
         viewport_size,
         Some(PaneArea::Reported(Size {
@@ -17858,7 +17858,7 @@ fn a_resize_reporting_a_zero_pane_area_resizes_no_pty() {
         None,
     );
 
-    assert_eq!(events, Vec::new());
+    assert_eq!(emitted_events, Vec::new());
     assert_eq!(runtime.pty_size_by_pane_id, pty_sizes_before);
     assert_eq!(
         fake_pty_backend
@@ -17908,7 +17908,7 @@ fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
         column_count: 60,
         row_count: 20,
     };
-    let events = runtime.handle_client_resize(
+    let emitted_events = runtime.handle_client_resize(
         client,
         viewport_size,
         Some(PaneArea::Reported(reported_pane_size)),
@@ -17928,7 +17928,7 @@ fn a_client_reporting_a_size_after_starving_resizes_each_pane_again() {
             .expect("the pane is solved")
     };
     assert_eq!(
-        events,
+        emitted_events,
         vec![
             Event::PtyResized(PtyResized {
                 pane_id: first_pane_id,
@@ -18018,10 +18018,10 @@ fn a_resize_reporting_starving_leaves_the_tab_sizes_unchanged() {
     let pane_sizes_before_starving_resize =
         fake_pty_backend.list_pane_sizes(pane_id).expect("resizes");
 
-    let events =
+    let emitted_events =
         runtime.handle_client_resize(client, viewport_size, Some(PaneArea::Starving), None);
 
-    assert_eq!(events, Vec::new());
+    assert_eq!(emitted_events, Vec::new());
     assert_eq!(
         fake_pty_backend.list_pane_sizes(pane_id).expect("resizes"),
         pane_sizes_before_starving_resize

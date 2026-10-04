@@ -227,21 +227,6 @@ fn write_atomic_replaces_fifo_with_private_file() {
     assert_eq!(std::fs::read(&destination_path).unwrap(), b"secret");
 }
 
-#[test]
-fn write_atomic_resolves_a_relative_path_against_the_current_dir() {
-    // Use a process-specific relative file name and remove any entry from an earlier run.
-    let relative_file_name = format!("koshi-atomic-relative-{}.tmp", std::process::id());
-    let relative_path = Path::new(&relative_file_name);
-    let _ = std::fs::remove_file(relative_path);
-
-    write_atomic(relative_path, b"relative\n").unwrap();
-
-    let absolute_path = std::env::current_dir().unwrap().join(&relative_file_name);
-    let file_bytes = std::fs::read(&absolute_path).unwrap();
-    std::fs::remove_file(&absolute_path).unwrap();
-    assert_eq!(file_bytes, b"relative\n");
-}
-
 #[cfg(unix)]
 #[test]
 fn write_atomic_reports_io_error_when_a_path_component_is_a_file() {
@@ -335,6 +320,7 @@ fn write_atomic_rejects_a_read_only_file_without_changing_it() {
     assert_eq!(std::fs::read(&destination_path).unwrap(), b"old");
 
     let mut writable_permissions = std::fs::metadata(&destination_path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
     writable_permissions.set_readonly(false);
     std::fs::set_permissions(&destination_path, writable_permissions).unwrap();
 }

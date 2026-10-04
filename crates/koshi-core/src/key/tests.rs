@@ -7,50 +7,65 @@ use super::*;
 
 #[test]
 fn no_modifier_flags_are_empty_and_each_modifier_has_a_distinct_bit() {
-    assert!(ModFlags::NONE.is_empty());
-    assert_eq!(ModFlags::NONE.get_bits(), 0);
-    assert_eq!(ModFlags::CTRL.get_bits(), 1);
-    assert_eq!(ModFlags::ALT.get_bits(), 2);
-    assert_eq!(ModFlags::SHIFT.get_bits(), 4);
-    assert_eq!(ModFlags::SUPER.get_bits(), 8);
-    assert!(!ModFlags::CTRL.is_empty());
+    assert!(BindingModifierFlags::NONE.is_empty());
+    assert_eq!(BindingModifierFlags::NONE.get_bits(), 0);
+    assert_eq!(BindingModifierFlags::CTRL.get_bits(), 1);
+    assert_eq!(BindingModifierFlags::ALT.get_bits(), 2);
+    assert_eq!(BindingModifierFlags::SHIFT.get_bits(), 4);
+    assert_eq!(BindingModifierFlags::SUPER.get_bits(), 8);
+    assert!(!BindingModifierFlags::CTRL.is_empty());
 }
 
 #[test]
 fn modifier_flag_union_keeps_both_bits() {
-    let combined_modifier_flags = ModFlags::CTRL.union(ModFlags::SHIFT);
+    let combined_modifier_flags = BindingModifierFlags::CTRL.union(BindingModifierFlags::SHIFT);
     assert_eq!(combined_modifier_flags.get_bits(), 5);
-    assert_eq!(combined_modifier_flags, ModFlags::CTRL | ModFlags::SHIFT);
+    assert_eq!(
+        combined_modifier_flags,
+        BindingModifierFlags::CTRL | BindingModifierFlags::SHIFT
+    );
 }
 
 #[test]
 fn modifier_flag_queries_check_subset_and_overlap() {
-    let control_and_shift_modifier_flags = ModFlags::CTRL | ModFlags::SHIFT;
+    let control_and_shift_modifier_flags = BindingModifierFlags::CTRL | BindingModifierFlags::SHIFT;
 
-    assert!(control_and_shift_modifier_flags.has_all_modifiers(ModFlags::CTRL));
-    assert!(control_and_shift_modifier_flags.has_all_modifiers(ModFlags::SHIFT));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(BindingModifierFlags::CTRL));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(BindingModifierFlags::SHIFT));
     assert!(control_and_shift_modifier_flags.has_all_modifiers(control_and_shift_modifier_flags));
-    assert!(control_and_shift_modifier_flags.has_all_modifiers(ModFlags::NONE));
-    assert!(!control_and_shift_modifier_flags.has_all_modifiers(ModFlags::ALT));
-    assert!(!control_and_shift_modifier_flags.has_all_modifiers(ModFlags::CTRL | ModFlags::ALT));
+    assert!(control_and_shift_modifier_flags.has_all_modifiers(BindingModifierFlags::NONE));
+    assert!(!control_and_shift_modifier_flags.has_all_modifiers(BindingModifierFlags::ALT));
+    assert!(!control_and_shift_modifier_flags
+        .has_all_modifiers(BindingModifierFlags::CTRL | BindingModifierFlags::ALT));
 
-    assert!(control_and_shift_modifier_flags.has_shared_modifier(ModFlags::CTRL));
-    assert!(control_and_shift_modifier_flags.has_shared_modifier(ModFlags::CTRL | ModFlags::ALT));
-    assert!(!control_and_shift_modifier_flags.has_shared_modifier(ModFlags::ALT));
-    assert!(!control_and_shift_modifier_flags.has_shared_modifier(ModFlags::NONE));
+    assert!(control_and_shift_modifier_flags.has_shared_modifier(BindingModifierFlags::CTRL));
+    assert!(control_and_shift_modifier_flags
+        .has_shared_modifier(BindingModifierFlags::CTRL | BindingModifierFlags::ALT));
+    assert!(!control_and_shift_modifier_flags.has_shared_modifier(BindingModifierFlags::ALT));
+    assert!(!control_and_shift_modifier_flags.has_shared_modifier(BindingModifierFlags::NONE));
 }
 
 #[test]
-fn mod_flags_display_uses_canonical_order() {
-    assert_eq!(ModFlags::NONE.to_string(), "");
-    assert_eq!(ModFlags::CTRL.to_string(), "C-");
-    assert_eq!(ModFlags::ALT.to_string(), "A-");
-    assert_eq!(ModFlags::SHIFT.to_string(), "S-");
-    assert_eq!(ModFlags::SUPER.to_string(), "D-");
-    assert_eq!((ModFlags::SHIFT | ModFlags::CTRL).to_string(), "C-S-");
-    assert_eq!((ModFlags::SUPER | ModFlags::ALT).to_string(), "A-D-");
+fn binding_modifier_flags_display_uses_canonical_order() {
+    assert_eq!(BindingModifierFlags::NONE.to_string(), "");
+    assert_eq!(BindingModifierFlags::CTRL.to_string(), "C-");
+    assert_eq!(BindingModifierFlags::ALT.to_string(), "A-");
+    assert_eq!(BindingModifierFlags::SHIFT.to_string(), "S-");
+    assert_eq!(BindingModifierFlags::SUPER.to_string(), "D-");
     assert_eq!(
-        (ModFlags::SUPER | ModFlags::SHIFT | ModFlags::ALT | ModFlags::CTRL).to_string(),
+        (BindingModifierFlags::SHIFT | BindingModifierFlags::CTRL).to_string(),
+        "C-S-"
+    );
+    assert_eq!(
+        (BindingModifierFlags::SUPER | BindingModifierFlags::ALT).to_string(),
+        "A-D-"
+    );
+    assert_eq!(
+        (BindingModifierFlags::SUPER
+            | BindingModifierFlags::SHIFT
+            | BindingModifierFlags::ALT
+            | BindingModifierFlags::CTRL)
+            .to_string(),
         "C-A-S-D-"
     );
 }
@@ -86,23 +101,23 @@ fn key_display_forwards_to_the_character_or_the_name() {
 #[test]
 fn unmodified_character_chords_render_bare() {
     assert_eq!(
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('n')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')).to_string(),
         "n"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('-')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('-')).to_string(),
         "-"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('>')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('>')).to_string(),
         ">"
     );
 }
 
 #[test]
-fn a_bare_open_bracket_is_still_bracketed_so_it_can_be_read_back() {
+fn a_bare_open_bracket_renders_bracketed() {
     assert_eq!(
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('<')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('<')).to_string(),
         "<<>"
     );
 }
@@ -110,99 +125,151 @@ fn a_bare_open_bracket_is_still_bracketed_so_it_can_be_read_back() {
 #[test]
 fn modified_and_named_chords_render_bracketed() {
     assert_eq!(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')).to_string(),
         "<C-p>"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::ALT | ModFlags::SHIFT, Key::Char('n')).to_string(),
+        KeyChord::from_parts(
+            BindingModifierFlags::ALT | BindingModifierFlags::SHIFT,
+            Key::Char('n')
+        )
+        .to_string(),
         "<A-S-n>"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::SUPER, Key::Char('x')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::SUPER, Key::Char('x')).to_string(),
         "<D-x>"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space)).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)).to_string(),
         "<Space>"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab)).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)).to_string(),
         "<S-Tab>"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('-')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('-')).to_string(),
         "<C-->"
     );
     assert_eq!(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('<')).to_string(),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('<')).to_string(),
         "<C-<>"
     );
 }
 
 #[test]
 fn characters_are_typeable_whatever_their_case() {
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Char('n')).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('a')).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Char('!')).is_typeable());
+    assert!(KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')).is_typeable());
+    assert!(KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('a')).is_typeable());
+    assert!(KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('!')).is_typeable());
 }
 
 #[test]
 fn every_unmodified_key_a_pane_reads_is_typeable() {
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Tab)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Enter)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Backspace)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Esc)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Left)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Up)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Home)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::End)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Delete)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Insert)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::PageUp)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::PageDown)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::F(5))).is_typeable());
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Enter)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Backspace))
+            .is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Esc)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Left)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Up)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Home)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::End)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Delete))
+            .is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Insert))
+            .is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::PageUp))
+            .is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::PageDown))
+            .is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::F(5))).is_typeable()
+    );
 }
 
 #[test]
 fn shift_keeps_a_chord_typeable() {
-    assert!(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('a')).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab)).is_typeable());
-    assert!(KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Left)).is_typeable());
+    assert!(KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('a')).is_typeable());
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)).is_typeable()
+    );
+    assert!(
+        KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Left)).is_typeable()
+    );
 }
 
 #[test]
 fn control_alt_and_super_make_a_chord_untypeable() {
-    assert!(!KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')).is_typeable());
-    assert!(!KeyChord::from_parts(ModFlags::ALT, Key::Char('n')).is_typeable());
-    assert!(!KeyChord::from_parts(ModFlags::SUPER, Key::Char('x')).is_typeable());
-    assert!(!KeyChord::from_parts(ModFlags::CTRL, Key::Named(NamedKey::Space)).is_typeable());
-    assert!(!KeyChord::from_parts(ModFlags::CTRL, Key::Named(NamedKey::Left)).is_typeable());
-    assert!(!KeyChord::from_parts(ModFlags::ALT, Key::Named(NamedKey::F(5))).is_typeable());
-    assert!(!KeyChord::from_parts(ModFlags::ALT | ModFlags::SHIFT, Key::Char('h')).is_typeable());
+    assert!(!KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')).is_typeable());
+    assert!(!KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('n')).is_typeable());
+    assert!(!KeyChord::from_parts(BindingModifierFlags::SUPER, Key::Char('x')).is_typeable());
+    assert!(
+        !KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Named(NamedKey::Space))
+            .is_typeable()
+    );
+    assert!(
+        !KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Named(NamedKey::Left)).is_typeable()
+    );
+    assert!(
+        !KeyChord::from_parts(BindingModifierFlags::ALT, Key::Named(NamedKey::F(5))).is_typeable()
+    );
+    assert!(!KeyChord::from_parts(
+        BindingModifierFlags::ALT | BindingModifierFlags::SHIFT,
+        Key::Char('h')
+    )
+    .is_typeable());
 }
 
 #[test]
 fn key_sequence_exposes_chords_in_press_order() {
-    let first_chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('p'));
-    let second_chord = KeyChord::from_parts(ModFlags::NONE, Key::Char('n'));
+    let first_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p'));
+    let second_chord = KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n'));
     let key_sequence = KeySequence::from_first_and_rest(first_chord, vec![second_chord]);
     assert_eq!(key_sequence.list_chords(), &[first_chord, second_chord]);
 }
 
 #[test]
 fn key_sequence_from_a_single_chord_holds_that_chord() {
-    let chord = KeyChord::from_parts(ModFlags::ALT, Key::Char('t'));
-    assert_eq!(KeySequence::from(chord).list_chords(), &[chord]);
+    let key_chord = KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('t'));
+    assert_eq!(KeySequence::from(key_chord).list_chords(), &[key_chord]);
 }
 
 #[test]
 fn key_sequence_displays_chords_space_separated() {
     let key_sequence = KeySequence::from_first_and_rest(
-        KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')),
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('p')),
         vec![
-            KeyChord::from_parts(ModFlags::NONE, Key::Char('n')),
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Enter)),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Enter)),
         ],
     );
     assert_eq!(key_sequence.to_string(), "<C-p> n <CR>");
@@ -210,12 +277,15 @@ fn key_sequence_displays_chords_space_separated() {
 
 #[test]
 fn key_sequence_display_of_one_chord_is_that_chord() {
-    let key_sequence = KeySequence::from(KeyChord::from_parts(ModFlags::NONE, Key::Char('g')));
+    let key_sequence = KeySequence::from(KeyChord::from_parts(
+        BindingModifierFlags::NONE,
+        Key::Char('g'),
+    ));
     assert_eq!(key_sequence.to_string(), "g");
 }
 
 #[test]
-fn fold_uppercase_folds_single_char_lowercase_letters_only() {
+fn fold_uppercase_folds_an_uppercase_letter_with_a_one_character_lowercase() {
     // ASCII and non-ASCII uppercase letters fold to lowercase plus Shift.
     assert_eq!(fold_uppercase_character('A'), ('a', true));
     assert_eq!(fold_uppercase_character('É'), ('é', true));
@@ -236,24 +306,21 @@ fn fold_uppercase_folds_uppercase_letters_outside_latin_script() {
     assert_eq!(fold_uppercase_character('Σ'), ('σ', true));
     // Roman numeral four is an uppercase letter whose lowercase form is a
     // single different character, not a case variant of a Latin letter. It
-    // uppercases back to itself, so it folds.
+    // uppercases back to itself: it folds.
     assert_eq!(fold_uppercase_character('Ⅳ'), ('ⅳ', true));
 }
 
 #[test]
 fn fold_uppercase_refuses_a_fold_it_could_not_undo() {
-    // Capital sharp S (`ẞ`) lowercases to the single-char `ß` — but `ß`
-    // uppercases to the two-char `"SS"`, so `Shift + ß` cannot rebuild `ẞ`.
-    // A chord is all the input layer keeps of a key press: if it folded here,
-    // an unbound `ẞ` would reach the pane as `ß` and silently change the user's
-    // text. So the fold only happens when the capital comes back.
+    // Capital sharp S (`ẞ`) lowercases to the one-character `ß`, and `ß`
+    // uppercases to the two-character `"SS"`. The capital does not come back
+    // from its lowercase: `ẞ` stays unfolded, with no Shift bit.
     assert_eq!(fold_uppercase_character('ẞ'), ('ẞ', false));
 }
 
 #[test]
 fn fold_uppercase_at_the_top_of_the_char_range_is_a_no_op() {
-    // `char::MAX` is unassigned, so it is not uppercase and stands as-is —
-    // exercises the boundary of the full `char` domain the function accepts.
+    // `char::MAX` is unassigned: it is not uppercase and stands as it is.
     assert_eq!(fold_uppercase_character(char::MAX), (char::MAX, false));
 }
 
@@ -265,15 +332,21 @@ fn named_key_f_key_number_boundaries_display_exactly() {
 
 #[test]
 fn a_chord_survives_a_serde_round_trip() {
-    for chord in [
-        KeyChord::from_parts(ModFlags::NONE, Key::Char('a')),
-        KeyChord::from_parts(ModFlags::CTRL | ModFlags::SHIFT, Key::Char('a')),
-        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::F(12))),
-        KeyChord::from_parts(ModFlags::ALT | ModFlags::SUPER, Key::Named(NamedKey::Enter)),
+    for key_chord in [
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('a')),
+        KeyChord::from_parts(
+            BindingModifierFlags::CTRL | BindingModifierFlags::SHIFT,
+            Key::Char('a'),
+        ),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::F(12))),
+        KeyChord::from_parts(
+            BindingModifierFlags::ALT | BindingModifierFlags::SUPER,
+            Key::Named(NamedKey::Enter),
+        ),
     ] {
-        let chord_json = serde_json::to_string(&chord).expect("serialize");
+        let chord_json = serde_json::to_string(&key_chord).expect("serialize");
         let decoded_chord: KeyChord = serde_json::from_str(&chord_json).expect("deserialize");
-        assert_eq!(decoded_chord, chord);
+        assert_eq!(decoded_chord, key_chord);
     }
 }
 
@@ -296,7 +369,10 @@ fn decoding_refuses_a_modifier_bit_that_names_no_modifier() {
     assert_eq!(
         all_modifier_chord,
         KeyChord::from_parts(
-            ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT | ModFlags::SUPER,
+            BindingModifierFlags::CTRL
+                | BindingModifierFlags::ALT
+                | BindingModifierFlags::SHIFT
+                | BindingModifierFlags::SUPER,
             Key::Char('q')
         )
     );
@@ -327,7 +403,10 @@ fn decoding_refuses_a_function_key_number_no_terminal_names() {
             serde_json::from_str(&chord_json).expect("a real function key");
         assert_eq!(
             decoded_chord,
-            KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::F(function_key_number)))
+            KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Named(NamedKey::F(function_key_number))
+            )
         );
     }
 }
@@ -335,8 +414,11 @@ fn decoding_refuses_a_function_key_number_no_terminal_names() {
 #[test]
 fn the_chord_wire_form_is_the_field_names_the_modifier_bits_and_the_variant_name() {
     assert_eq!(
-        serde_json::to_string(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('q')))
-            .expect("serialize"),
+        serde_json::to_string(&KeyChord::from_parts(
+            BindingModifierFlags::CTRL,
+            Key::Char('q')
+        ))
+        .expect("serialize"),
         r#"{"modifier_flags":1,"key":{"Char":"q"}}"#
     );
 }
@@ -344,11 +426,14 @@ fn the_chord_wire_form_is_the_field_names_the_modifier_bits_and_the_variant_name
 #[test]
 fn every_combination_of_non_typing_modifiers_makes_a_chord_untypeable() {
     let non_typing_modifier_combinations = [
-        ModFlags::CTRL | ModFlags::ALT,
-        ModFlags::CTRL | ModFlags::SUPER,
-        ModFlags::ALT | ModFlags::SUPER,
-        ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER,
-        ModFlags::CTRL | ModFlags::ALT | ModFlags::SUPER | ModFlags::SHIFT,
+        BindingModifierFlags::CTRL | BindingModifierFlags::ALT,
+        BindingModifierFlags::CTRL | BindingModifierFlags::SUPER,
+        BindingModifierFlags::ALT | BindingModifierFlags::SUPER,
+        BindingModifierFlags::CTRL | BindingModifierFlags::ALT | BindingModifierFlags::SUPER,
+        BindingModifierFlags::CTRL
+            | BindingModifierFlags::ALT
+            | BindingModifierFlags::SUPER
+            | BindingModifierFlags::SHIFT,
     ];
     for modifier_flags in non_typing_modifier_combinations {
         assert!(
@@ -359,36 +444,42 @@ fn every_combination_of_non_typing_modifiers_makes_a_chord_untypeable() {
 }
 
 #[test]
-fn mod_flags_default_is_none() {
-    assert_eq!(ModFlags::default(), ModFlags::NONE);
+fn binding_modifier_flags_default_is_none() {
+    assert_eq!(BindingModifierFlags::default(), BindingModifierFlags::NONE);
 }
 
 #[test]
 fn try_from_accepts_the_four_modifier_bits_and_refuses_every_other() {
-    assert_eq!(ModFlags::try_from(0), Ok(ModFlags::NONE));
     assert_eq!(
-        ModFlags::try_from(15),
-        Ok(ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT | ModFlags::SUPER)
+        BindingModifierFlags::try_from(0),
+        Ok(BindingModifierFlags::NONE)
     );
     assert_eq!(
-        ModFlags::try_from(16),
+        BindingModifierFlags::try_from(15),
+        Ok(BindingModifierFlags::CTRL
+            | BindingModifierFlags::ALT
+            | BindingModifierFlags::SHIFT
+            | BindingModifierFlags::SUPER)
+    );
+    assert_eq!(
+        BindingModifierFlags::try_from(16),
         Err("modifier bits 0b00010000 name no modifier; the modifiers are 0b00001111".to_string())
     );
     assert_eq!(
-        ModFlags::try_from(255),
+        BindingModifierFlags::try_from(255),
         Err("modifier bits 0b11111111 name no modifier; the modifiers are 0b00001111".to_string())
     );
 }
 
 #[test]
-fn mod_flags_serde_wire_form_is_the_bit_number() {
-    let control_and_super_modifier_flags = ModFlags::CTRL | ModFlags::SUPER;
+fn binding_modifier_flags_serde_wire_form_is_the_bit_number() {
+    let control_and_super_modifier_flags = BindingModifierFlags::CTRL | BindingModifierFlags::SUPER;
     assert_eq!(
         serde_json::to_string(&control_and_super_modifier_flags).expect("serialize"),
         "9"
     );
     assert_eq!(
-        serde_json::from_str::<ModFlags>("9").expect("deserialize"),
+        serde_json::from_str::<BindingModifierFlags>("9").expect("deserialize"),
         control_and_super_modifier_flags
     );
 }
@@ -396,7 +487,7 @@ fn mod_flags_serde_wire_form_is_the_bit_number() {
 #[test]
 fn decoding_refuses_a_negative_modifier_number() {
     let modifier_parse_error =
-        serde_json::from_str::<ModFlags>("-1").expect_err("a u8 is never negative");
+        serde_json::from_str::<BindingModifierFlags>("-1").expect_err("a u8 is never negative");
     assert_eq!(
         modifier_parse_error.to_string(),
         "invalid value: integer `-1`, expected u8 at line 1 column 2"
@@ -407,7 +498,7 @@ fn decoding_refuses_a_negative_modifier_number() {
 fn the_named_key_wire_form_is_the_variant_name_with_the_function_key_number() {
     assert_eq!(
         serde_json::to_string(&KeyChord::from_parts(
-            ModFlags::NONE,
+            BindingModifierFlags::NONE,
             Key::Named(NamedKey::Space)
         ))
         .expect("serialize"),
@@ -415,7 +506,7 @@ fn the_named_key_wire_form_is_the_variant_name_with_the_function_key_number() {
     );
     assert_eq!(
         serde_json::to_string(&KeyChord::from_parts(
-            ModFlags::SHIFT,
+            BindingModifierFlags::SHIFT,
             Key::Named(NamedKey::F(12))
         ))
         .expect("serialize"),
@@ -425,10 +516,10 @@ fn the_named_key_wire_form_is_the_variant_name_with_the_function_key_number() {
 
 #[test]
 fn key_sequence_with_no_rest_holds_only_the_first_chord() {
-    let chord = KeyChord::from_parts(ModFlags::CTRL, Key::Char('x'));
+    let key_chord = KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char('x'));
     assert_eq!(
-        KeySequence::from_first_and_rest(chord, Vec::new()).list_chords(),
-        &[chord]
+        KeySequence::from_first_and_rest(key_chord, Vec::new()).list_chords(),
+        &[key_chord]
     );
 }
 
@@ -509,15 +600,15 @@ fn the_stored_bitmap_keeps_all_eight_bits() {
 fn the_binding_projection_keeps_four_modifiers_and_folds_meta_onto_super() {
     assert_eq!(
         KeyModifierFlags::CTRL.to_binding_modifiers(),
-        ModFlags::CTRL
+        BindingModifierFlags::CTRL
     );
     assert_eq!(
         KeyModifierFlags::META.to_binding_modifiers(),
-        ModFlags::SUPER
+        BindingModifierFlags::SUPER
     );
     assert_eq!(
         KeyModifierFlags::SUPER.to_binding_modifiers(),
-        ModFlags::SUPER
+        BindingModifierFlags::SUPER
     );
     // Hyper, Caps Lock and Num Lock name no binding modifier.
     assert_eq!(
@@ -525,11 +616,14 @@ fn the_binding_projection_keeps_four_modifiers_and_folds_meta_onto_super() {
             .union(KeyModifierFlags::CAPS_LOCK)
             .union(KeyModifierFlags::NUM_LOCK)
             .to_binding_modifiers(),
-        ModFlags::NONE
+        BindingModifierFlags::NONE
     );
     assert_eq!(
         KeyModifierFlags::from_bits(0b1111_1111).to_binding_modifiers(),
-        ModFlags::CTRL | ModFlags::ALT | ModFlags::SHIFT | ModFlags::SUPER
+        BindingModifierFlags::CTRL
+            | BindingModifierFlags::ALT
+            | BindingModifierFlags::SHIFT
+            | BindingModifierFlags::SUPER
     );
 }
 
@@ -547,10 +641,13 @@ fn caps_lock_and_num_lock_survive_beside_a_binding_modifier() {
     assert!(key_input
         .modifier_flags
         .has_all_modifiers(KeyModifierFlags::NUM_LOCK));
-    // The pane encoding has no place for either, so the chord holds Control alone.
+    // The binding chord holds Control alone.
     assert_eq!(
         key_input.to_binding_chord(),
-        Some(KeyChord::from_parts(ModFlags::CTRL, Key::Char('a')))
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::CTRL,
+            Key::Char('a')
+        ))
     );
 }
 
@@ -560,7 +657,10 @@ fn a_release_projects_to_no_chord_and_a_repeat_projects_like_a_press() {
     let pressed_chord = key_input.to_binding_chord();
     assert_eq!(
         pressed_chord,
-        Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('a')))
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('a')
+        ))
     );
 
     key_input.key_event_kind = KeyEventKind::Repeat;
@@ -583,7 +683,10 @@ fn a_shifted_alternative_replaces_the_key_and_consumes_the_shift() {
     };
     assert_eq!(
         shifted_digit.to_binding_chord(),
-        Some(KeyChord::from_parts(ModFlags::NONE, Key::Char('!')))
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('!')
+        ))
     );
     // The stored event still holds both halves.
     assert_eq!(shifted_digit.key, KeyIdentity::Key(Key::Char('1')));
@@ -597,7 +700,54 @@ fn a_shifted_alternative_replaces_the_key_and_consumes_the_shift() {
     };
     assert_eq!(
         shifted_letter.to_binding_chord(),
-        Some(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('a')))
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::SHIFT,
+            Key::Char('a')
+        ))
+    );
+}
+
+#[test]
+fn a_shifted_alternative_equal_to_the_key_keeps_the_shift() {
+    // `CSI 32:32;2u` reports Space as the shifted key of Shift plus Space.
+    let shifted_space = KeyInput {
+        shifted_key: Some(' '),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char(' '))
+    };
+    assert_eq!(
+        shifted_space.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::SHIFT,
+            Key::Named(NamedKey::Space)
+        ))
+    );
+
+    let shifted_letter = KeyInput {
+        shifted_key: Some('a'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char('a'))
+    };
+    assert_eq!(
+        shifted_letter.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::SHIFT,
+            Key::Char('a')
+        ))
+    );
+
+    // A digit drops Shift whether or not a shifted key is reported.
+    let shifted_digit = KeyInput {
+        shifted_key: Some('1'),
+        modifier_flags: KeyModifierFlags::SHIFT,
+        ..build_key_press(Key::Char('1'))
+    };
+    assert_eq!(
+        shifted_digit.to_binding_chord(),
+        Some(KeyChord::from_parts(
+            BindingModifierFlags::NONE,
+            Key::Char('1')
+        ))
     );
 }
 
@@ -611,7 +761,7 @@ fn a_shifted_alternative_never_replaces_a_named_key() {
     assert_eq!(
         shifted_tab.to_binding_chord(),
         Some(KeyChord::from_parts(
-            ModFlags::SHIFT,
+            BindingModifierFlags::SHIFT,
             Key::Named(NamedKey::Tab)
         ))
     );
@@ -660,14 +810,14 @@ fn the_space_bar_and_a_capital_reach_their_canonical_chords() {
     assert_eq!(
         build_key_input(Key::Char(' '), KeyModifierFlags::CTRL).to_binding_chord(),
         Some(KeyChord::from_parts(
-            ModFlags::CTRL,
+            BindingModifierFlags::CTRL,
             Key::Named(NamedKey::Space)
         ))
     );
     assert_eq!(
         build_key_input(Key::Char('A'), KeyModifierFlags::ALT).to_binding_chord(),
         Some(KeyChord::from_parts(
-            ModFlags::ALT | ModFlags::SHIFT,
+            BindingModifierFlags::ALT | BindingModifierFlags::SHIFT,
             Key::Char('a')
         ))
     );

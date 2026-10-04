@@ -34,7 +34,7 @@ impl Server {
         let affected_client_ids =
             list_clients_affected_by_tabs(session, &[active_tab_id], Some(client_id));
         if let Some(client) = session.clients.get_client_mut_by_id(client_id) {
-            client.replace_cell_size(Some(cell_size));
+            client.update_cell_size(Some(cell_size));
         }
         if has_cell_size_changed {
             advance_session_placement_revision(session);
@@ -419,7 +419,7 @@ impl Server {
             client.update_viewport_size(viewport_size);
             client.update_pane_area(pane_area);
             client.update_active_tab_id(active_tab_id);
-            client.replace_cell_size(cell_size);
+            client.update_cell_size(cell_size);
             client.update_origin(client_origin);
             Some(previous_tab_id)
         } else {
@@ -450,7 +450,7 @@ impl Server {
                 label,
                 color,
             );
-            client.replace_cell_size(cell_size);
+            client.update_cell_size(cell_size);
             // A profile carrying `lock` hands its starting mode to the first
             // client that attaches, and the flag is spent there.
             if session.take_start_lock() {
@@ -566,7 +566,7 @@ impl Server {
         };
         client.update_viewport_size(viewport_size);
         client.update_pane_area(pane_area);
-        client.replace_cell_size(cell_size);
+        client.update_cell_size(cell_size);
         if has_view_changed {
             advance_session_placement_revision(session);
             advance_client_placement_revisions(session, &affected_client_ids);

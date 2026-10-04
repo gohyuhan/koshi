@@ -9,7 +9,9 @@ use koshi_core::command::{
     NewPaneArgs, NewTabArgs, ResizePaneArgs, TabTarget,
 };
 use koshi_core::geometry::Direction;
-use koshi_core::key::{Key, KeyChord, KeySequence, ModFlags, NamedKey};
+use koshi_core::key::{
+    BindingModifierFlags, ExtendedKeysMode, Key, KeyChord, KeySequence, NamedKey,
+};
 use koshi_core::log::{LogFormat, LogLevel};
 use koshi_core::registry::ActionRegistry;
 use koshi_core::resolve::{resolve_action, DispatchPlan, ResolveError};
@@ -17,7 +19,7 @@ use koshi_core::resolve::{resolve_action, DispatchPlan, ResolveError};
 use crate::error::ColorParseError;
 use crate::key::{parse_chord, Leader};
 
-/// The argless `core:<name>` binding the default table stores.
+/// The binding of `core:<action_name>` with no arguments.
 fn build_bound_action(action_name: &str) -> BoundAction {
     BoundAction {
         action_reference: ActionReference::from_core_action_name(action_name)
@@ -46,7 +48,7 @@ fn default_server_and_client_configs_match_expected_settings() {
 
     assert!(!server_config.should_allow_beta_features);
     assert!(!server_config.should_allow_other_users);
-    assert_eq!(server_config.remote_listen, None);
+    assert_eq!(server_config.remote_listen_address, None);
     assert_eq!(server_config.shared_sessions_directory, None);
     assert!(!server_config.should_auto_close_session);
     assert!(client_config.supports_image_protocols);
@@ -59,7 +61,7 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert_eq!(client_config.keybindings.maximum_chord_depth, 4);
     assert_eq!(
         client_config.keybindings.leader,
-        Leader::Mods(ModFlags::CTRL)
+        Leader::Modifiers(BindingModifierFlags::CTRL)
     );
     assert_eq!(client_config.keybindings.unlock_alternative, None);
     assert_eq!(
@@ -79,13 +81,20 @@ fn default_server_and_client_configs_match_expected_settings() {
 
     assert!(client_config.mouse.can_resize_pane_border);
     assert_eq!(client_config.mouse.scroll_line_count, 3);
-    assert_eq!(client_config.mouse.wheel, WheelScroll::ScrollScrollback);
+    assert_eq!(
+        client_config.mouse.wheel_scroll,
+        WheelScroll::ScrollScrollback
+    );
 
     assert!(client_config.copy.should_trim_trailing_whitespace);
 
     assert_eq!(server_config.terminal.term, "xterm-256color");
     assert_eq!(server_config.terminal.colorterm, "truecolor");
     assert_eq!(server_config.terminal.default_shell, None);
+    assert_eq!(
+        server_config.terminal.extended_keys_mode,
+        ExtendedKeysMode::OnRequest
+    );
 
     assert_eq!(client_config.theme.theme_name, "default");
     assert_eq!(client_config.theme.colors, ColorPalette::default());
@@ -98,7 +107,7 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert_eq!(server_config.logging, LoggingConfig::default());
     assert_eq!(client_config.logging, LoggingConfig::default());
     assert!(!server_config.logging.is_enabled);
-    assert_eq!(server_config.logging.level, LogLevel::Warning);
+    assert_eq!(server_config.logging.log_level, LogLevel::Warning);
     assert_eq!(server_config.logging.log_format, LogFormat::Pretty);
     assert!(!client_config.logging.is_enabled);
 }
@@ -216,8 +225,8 @@ fn from_hex_rejects_non_hex_digit() {
 
 #[test]
 fn from_hex_rejects_a_non_hex_character_in_six_character_multibyte_text() {
-    // "12345é" is exactly six characters (the é is multi-byte), so the
-    // documented length rule passes and the non-hex `é` is the real fault.
+    // "12345é" is six characters, and `é` is two bytes. The length check
+    // passes, and the digit check refuses `é`.
     assert_eq!(
         RgbColor::from_hex("12345\u{e9}"),
         Err(ColorParseError::BadDigit {
@@ -228,8 +237,7 @@ fn from_hex_rejects_a_non_hex_character_in_six_character_multibyte_text() {
 
 #[test]
 fn from_hex_counts_color_text_characters_instead_of_bytes() {
-    // "café" is four characters (five bytes); the reported length matches
-    // what the user typed, not the byte count.
+    // "café" is four characters and five bytes: the reported length is 4.
     assert_eq!(
         RgbColor::from_hex("caf\u{e9}"),
         Err(ColorParseError::BadLength { character_count: 4 })
@@ -260,8 +268,8 @@ fn from_str_reports_the_same_errors_as_from_hex() {
 
 #[test]
 fn from_hex_keeps_surrounding_whitespace_in_color_text() {
-    // Nothing is trimmed. A leading space keeps the `#` off the front, so the
-    // whole eight-character run is measured.
+    // Nothing is trimmed. With a leading space, the `#` is not at the front:
+    // all eight characters are measured.
     assert_eq!(
         RgbColor::from_hex(" #ffffff"),
         Err(ColorParseError::BadLength { character_count: 8 })
@@ -313,14 +321,14 @@ fn from_hex_parses_the_channel_boundaries() {
 
 #[test]
 fn from_hex_rejects_a_named_color_word_by_its_length() {
-    // A CSS-style name is not hex; "red" is three characters, so it fails the
-    // length rule first, never reaching the digit check.
+    // A CSS-style name is not hex. "red" is three characters: the length
+    // check refuses it before the digit check.
     assert_eq!(
         RgbColor::from_hex("red"),
         Err(ColorParseError::BadLength { character_count: 3 })
     );
-    // "orange" is six characters, so it passes the length rule and fails on
-    // the first non-hex digit instead.
+    // "orange" is six characters: it passes the length check and fails the
+    // digit check.
     assert_eq!(
         RgbColor::from_hex("orange"),
         Err(ColorParseError::BadDigit {
@@ -336,8 +344,8 @@ fn from_hex_counts_a_lone_hash_as_empty_color_text() {
         RgbColor::from_hex("#"),
         Err(ColorParseError::BadLength { character_count: 0 })
     );
-    // Only the leading `#` is stripped: a trailing `#` stays as content, so
-    // the value is six characters with one non-hex digit.
+    // Only the leading `#` is stripped. A trailing `#` stays as content: the
+    // value is six characters with one non-hex digit.
     assert_eq!(
         RgbColor::from_hex("#12345#"),
         Err(ColorParseError::BadDigit {
@@ -354,8 +362,8 @@ fn mode_name_text_roundtrips() {
 
 #[test]
 fn mode_names_compare_by_exact_text() {
-    // The map key is the raw string, so case and surrounding space both count:
-    // a `mode "Normal"` block is a different mode from `mode "normal"`.
+    // The map key is the raw string. Case and surrounding space both count: a
+    // `mode "Normal"` block is a different mode from `mode "normal"`.
     assert_eq!(
         ModeName::from_text("normal"),
         ModeName::from_text(String::from("normal"))
@@ -367,15 +375,15 @@ fn mode_names_compare_by_exact_text() {
     );
     assert_eq!(ModeName::from_text("").get_name(), "");
 
-    // Ordering is the string ordering, which is what fixes the mode order in
-    // every `BTreeMap<ModeName, _>`.
+    // Ordering is the string ordering: `locked` sorts before `normal` in every
+    // `BTreeMap<ModeName, _>`.
     assert!(ModeName::from_text("locked") < ModeName::from_text("normal"));
 }
 
 #[test]
 fn mode_name_maps_answer_string_lookups() {
-    // `ModeName` borrows as `str`, so a `BTreeMap<ModeName, _>` answers a
-    // `&str` key exactly as it answers the owned key.
+    // `ModeName` borrows as `str`: a `BTreeMap<ModeName, _>` answers a `&str`
+    // key exactly as it answers the owned key.
     let integer_by_mode_name = BTreeMap::from([
         (ModeName::from_text("locked"), 1),
         (ModeName::from_text("normal"), 2),
@@ -411,8 +419,8 @@ fn an_empty_mode_binds_and_removes_nothing() {
 
 #[test]
 fn the_default_theme_is_named_default() {
-    assert_eq!(DEFAULT_THEME, "default");
-    assert_eq!(ThemeConfig::default().theme_name, DEFAULT_THEME);
+    assert_eq!(DEFAULT_THEME_NAME, "default");
+    assert_eq!(ThemeConfig::default().theme_name, DEFAULT_THEME_NAME);
 }
 
 #[test]
@@ -430,7 +438,7 @@ fn each_default_mode_binds_every_action_to_one_key() {
         let mut action_references: Vec<String> = mode_bindings
             .bound_action_by_key_sequence
             .values()
-            .map(|binding| binding.action_reference.to_string())
+            .map(|bound_action| bound_action.action_reference.to_string())
             .collect();
         let bound_key_count = action_references.len();
         action_references.sort();
@@ -446,35 +454,43 @@ fn each_default_mode_binds_every_action_to_one_key() {
 #[test]
 fn wheel_scroll_and_leader_defaults_match_expected_variants() {
     assert_eq!(WheelScroll::default(), WheelScroll::ScrollScrollback);
-    assert_eq!(Leader::default(), Leader::Mods(ModFlags::CTRL));
+    assert_eq!(
+        Leader::default(),
+        Leader::Modifiers(BindingModifierFlags::CTRL)
+    );
 }
 
 #[test]
 fn a_shift_modifier_leader_moves_every_leader_binding() {
-    // `parse_leader("S-")` yields this leader, and merging Shift onto the
-    // lowercase letters the defaults use is legal, so the whole table builds:
-    // `<leader>q` becomes `<S-q>`, `<leader>p n` becomes `<S-p> n`.
-    let mode_bindings_by_name = build_default_mode_bindings(Leader::Mods(ModFlags::SHIFT));
+    // `parse_leader("S-")` yields this leader. Shift merges onto the lowercase
+    // letters the defaults use, and the whole table builds: `<leader>q`
+    // becomes `<S-q>`, and `<leader>p n` becomes `<S-p> n`.
+    let mode_bindings_by_name =
+        build_default_mode_bindings(Leader::Modifiers(BindingModifierFlags::SHIFT));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
     assert_eq!(normal_mode_bindings.bound_action_by_key_sequence.len(), 24);
     assert_eq!(
-        normal_mode_bindings.bound_action_by_key_sequence
-            [&KeySequence::from(KeyChord::from_parts(ModFlags::SHIFT, Key::Char('q')))],
+        normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('q'))
+        )],
         build_bound_action("quit")
     );
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Char('p')),
-            vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('n'))],
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Char('p')),
+            vec![KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Char('n')
+            )],
         )],
         build_bound_action("new-pane")
     );
-    // `<S-Tab>` is written literally, so it stays put and does not collide
-    // with the moved `<leader>t` prefix.
+    // `<S-Tab>` is written literally: it stays `<S-Tab>`, apart from the
+    // moved `<S-t>` prefix.
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from(
-            KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab))
+            KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab))
         )],
         build_bound_action("previous-tab")
     );
@@ -482,18 +498,19 @@ fn a_shift_modifier_leader_moves_every_leader_binding() {
 
 #[test]
 fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
-    let space_leader_key_chord = KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space));
+    let space_leader_key_chord =
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space));
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(space_leader_key_chord));
     let locked_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("locked")];
     let build_sequence_after_leader = |key| {
         KeySequence::from_first_and_rest(
             space_leader_key_chord,
-            vec![KeyChord::from_parts(ModFlags::NONE, key)],
+            vec![KeyChord::from_parts(BindingModifierFlags::NONE, key)],
         )
     };
 
     assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 4);
-    // The reserved unlock is written literally, so it stays `<C-l>`.
+    // The reserved unlock is written literally: it stays `<C-l>`.
     assert_eq!(
         locked_mode_bindings.bound_action_by_key_sequence
             [&KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK)],
@@ -513,8 +530,8 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
         locked_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
             space_leader_key_chord,
             vec![
-                KeyChord::from_parts(ModFlags::NONE, Key::Char('p')),
-                KeyChord::from_parts(ModFlags::NONE, Key::Char('m')),
+                KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('p')),
+                KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('m')),
             ],
         )],
         build_bound_action("begin-pane-placement")
@@ -524,9 +541,9 @@ fn a_chord_leader_prefixes_the_locked_bindings_and_leaves_the_unlock_chord() {
 #[test]
 fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     // `<A-f>` is the fullscreen binding and, here, the leader as well. The
-    // one-chord sequence and the sequences it opens are separate map keys, so
-    // the table still holds all 24 normal-mode bindings.
-    let fullscreen_key_chord = KeyChord::from_parts(ModFlags::ALT, Key::Char('f'));
+    // one-chord sequence and the sequences it opens are separate map keys:
+    // the table holds all 24 normal-mode bindings.
+    let fullscreen_key_chord = KeyChord::from_parts(BindingModifierFlags::ALT, Key::Char('f'));
     let mode_bindings_by_name = build_default_mode_bindings(Leader::Chord(fullscreen_key_chord));
     let normal_mode_bindings = &mode_bindings_by_name[&ModeName::from_text("normal")];
 
@@ -538,15 +555,18 @@ fn a_leader_chord_that_is_also_a_binding_keeps_both() {
     assert_eq!(
         normal_mode_bindings.bound_action_by_key_sequence[&KeySequence::from_first_and_rest(
             fullscreen_key_chord,
-            vec![KeyChord::from_parts(ModFlags::NONE, Key::Char('q'))]
+            vec![KeyChord::from_parts(
+                BindingModifierFlags::NONE,
+                Key::Char('q')
+            )]
         )],
         build_bound_action("quit")
     );
 }
 
 /// The `layout.new-pane-direction` the resolving client holds while the default
-/// binding table below is checked. `Up`, not the stock `Right`, so the
-/// `new-pane` row shows that resolution reads the client's own direction.
+/// binding table below is checked: `Up`. The stock default is `Right`, and the
+/// `new-pane` rows resolve to `Up`.
 const CLIENT_SPLIT_DIRECTION: Direction = Direction::Up;
 
 /// One expected default binding: where it lives, what it binds, and the exact
@@ -893,16 +913,16 @@ fn default_keybinding_table_matches_expected_actions_and_dispatches() {
     assert_eq!(default_binding_count, expected_binding_rows.len());
 
     for expected_binding in expected_binding_rows {
-        // Space-separated single chords; each token parses on its own (the
-        // multi-chord grammar itself belongs to the sequence parser).
-        let mut chord_tokens = expected_binding
+        // `key_sequence_text` is space-separated chords. Each chord parses on
+        // its own.
+        let mut parsed_chords = expected_binding
             .key_sequence_text
             .split(' ')
-            .map(|token| parse_chord(token).expect("default chord text parses"));
-        let first_chord = chord_tokens
+            .map(|chord_text| parse_chord(chord_text).expect("default chord text parses"));
+        let first_chord = parsed_chords
             .next()
             .expect("expected chord text is non-empty");
-        let key_sequence = KeySequence::from_first_and_rest(first_chord, chord_tokens.collect());
+        let key_sequence = KeySequence::from_first_and_rest(first_chord, parsed_chords.collect());
         let bound_action = client_config
             .keybindings
             .mode_bindings_by_name
@@ -953,14 +973,15 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
     let client_config = ClientConfig::default();
     // On unix terminals without the kitty keyboard protocol these four Ctrl
     // chords arrive as the Tab, Enter, Esc, and Backspace control bytes.
-    let ambiguous_control_chords = ['i', 'm', '[', 'h']
-        .map(|character| KeyChord::from_parts(ModFlags::CTRL, Key::Char(character)));
+    let ambiguous_control_chords = ['i', 'm', '[', 'h'].map(|key_character| {
+        KeyChord::from_parts(BindingModifierFlags::CTRL, Key::Char(key_character))
+    });
     // The one exception to the non-typeable-opening rule: tab switching is the
     // bare Tab / Shift+Tab pair, and a shell sees a literal Tab only while the
     // client is locked.
     let tab_switch_chords = [
-        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Tab)),
-        KeyChord::from_parts(ModFlags::SHIFT, Key::Named(NamedKey::Tab)),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Tab)),
+        KeyChord::from_parts(BindingModifierFlags::SHIFT, Key::Named(NamedKey::Tab)),
     ];
     for (mode_name, mode_bindings) in &client_config.keybindings.mode_bindings_by_name {
         if mode_name.get_name() == "pane-placement" {
@@ -974,10 +995,10 @@ fn default_keybindings_use_non_typeable_openers_and_avoid_ambiguous_ctrl_chords(
                 !opening_chord.is_typeable() || tab_switch_chords.contains(opening_chord),
                 "default {opening_chord} in {mode_name:?} opens with a typeable chord"
             );
-            for chord in key_sequence.list_chords() {
+            for key_chord in key_sequence.list_chords() {
                 assert!(
-                    !ambiguous_control_chords.contains(chord),
-                    "default {chord} in {mode_name:?} is ambiguous without the kitty protocol"
+                    !ambiguous_control_chords.contains(key_chord),
+                    "default {key_chord} in {mode_name:?} is ambiguous without the kitty protocol"
                 );
             }
         }
@@ -995,9 +1016,7 @@ fn reserved_unlock_is_the_locked_mode_binding() {
 
     let locked_mode_bindings =
         &client_config.keybindings.mode_bindings_by_name[&ModeName::from_text("locked")];
-    // The reserved unlock — the same chord normal mode locks with, so one
-    // key flips both ways — plus the pane placement opener, quit, and mouse-select
-    // chords.
+    // The reserved unlock, the pane placement opener, quit, and mouse-select.
     assert_eq!(locked_mode_bindings.bound_action_by_key_sequence.len(), 4);
     let reserved_unlock_bound_action = locked_mode_bindings
         .bound_action_by_key_sequence
@@ -1015,33 +1034,41 @@ fn prefix_labels_name_exactly_the_default_prefix_chords() {
     assert_eq!(default_prefix_labels.len(), 3);
     assert_eq!(
         default_prefix_labels
-            .get(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('p')))
+            .get(&KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('p')
+            ))
             .map(String::as_str),
         Some("PANE")
     );
     assert_eq!(
         default_prefix_labels
-            .get(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('s')))
+            .get(&KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('s')
+            ))
             .map(String::as_str),
         Some("RESIZE")
     );
     assert_eq!(
         default_prefix_labels
-            .get(&KeyChord::from_parts(ModFlags::CTRL, Key::Char('t')))
+            .get(&KeyChord::from_parts(
+                BindingModifierFlags::CTRL,
+                Key::Char('t')
+            ))
             .map(String::as_str),
         Some("TAB")
     );
 
     // Every labeled chord opens at least one multi-chord default sequence,
-    // and every multi-chord default sequence's opening chord is labeled —
-    // the label table and the binding table stay in lockstep.
+    // and every multi-chord default sequence's opening chord is labeled.
     let normal_mode_bindings =
         &build_default_mode_bindings(Leader::default())[&ModeName::from_text("normal")];
-    let opening_chords: std::collections::BTreeSet<KeyChord> = normal_mode_bindings
+    let opening_chords: BTreeSet<KeyChord> = normal_mode_bindings
         .bound_action_by_key_sequence
         .keys()
-        .filter(|sequence| sequence.list_chords().len() > 1)
-        .map(|sequence| sequence.list_chords()[0])
+        .filter(|key_sequence| key_sequence.list_chords().len() > 1)
+        .map(|key_sequence| key_sequence.list_chords()[0])
         .collect();
     assert_eq!(
         opening_chords,
@@ -1066,7 +1093,7 @@ fn default_bindings_follow_the_leader() {
         KeySequence::from_first_and_rest(
             KeyChord::from_parts(modifier_flags, Key::Char(prefix_character)),
             vec![KeyChord::from_parts(
-                ModFlags::NONE,
+                BindingModifierFlags::NONE,
                 Key::Char(key_character),
             )],
         )
@@ -1075,40 +1102,45 @@ fn default_bindings_follow_the_leader() {
     // Default leader (the Ctrl modifier run): `<leader>p n` is `<C-p> n`.
     let control_leader_bindings = build_normal_mode_bindings(Leader::default());
     assert_eq!(
-        control_leader_bindings[&build_two_key_sequence(ModFlags::CTRL, 'p', 'n')],
+        control_leader_bindings[&build_two_key_sequence(BindingModifierFlags::CTRL, 'p', 'n')],
         build_bound_action("new-pane")
     );
     assert_eq!(
-        control_leader_bindings[&build_single_key_sequence(ModFlags::CTRL, 'g')],
+        control_leader_bindings[&build_single_key_sequence(BindingModifierFlags::CTRL, 'g')],
         build_bound_action("mouse-select")
     );
 
     // Rebind the leader to Alt: the same defaults become `<A-p> n` / `<A-g>`,
     // and the Ctrl forms are gone.
-    let alternate_leader_bindings = build_normal_mode_bindings(Leader::Mods(ModFlags::ALT));
+    let alternate_leader_bindings =
+        build_normal_mode_bindings(Leader::Modifiers(BindingModifierFlags::ALT));
     assert_eq!(
-        alternate_leader_bindings[&build_two_key_sequence(ModFlags::ALT, 'p', 'n')],
+        alternate_leader_bindings[&build_two_key_sequence(BindingModifierFlags::ALT, 'p', 'n')],
         build_bound_action("new-pane")
     );
     assert_eq!(
-        alternate_leader_bindings[&build_single_key_sequence(ModFlags::ALT, 'g')],
+        alternate_leader_bindings[&build_single_key_sequence(BindingModifierFlags::ALT, 'g')],
         build_bound_action("mouse-select")
     );
     assert_eq!(
-        alternate_leader_bindings.get(&build_two_key_sequence(ModFlags::CTRL, 'p', 'n')),
+        alternate_leader_bindings.get(&build_two_key_sequence(
+            BindingModifierFlags::CTRL,
+            'p',
+            'n'
+        )),
         None
     );
 
     // A chord leader (Space) makes the leader a prefix: `<Space> p n`.
     let space_leader_bindings = build_normal_mode_bindings(Leader::Chord(KeyChord::from_parts(
-        ModFlags::NONE,
+        BindingModifierFlags::NONE,
         Key::Named(NamedKey::Space),
     )));
     let space_leader_pane_creation_sequence = KeySequence::from_first_and_rest(
-        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space)),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)),
         vec![
-            KeyChord::from_parts(ModFlags::NONE, Key::Char('p')),
-            KeyChord::from_parts(ModFlags::NONE, Key::Char('n')),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('p')),
+            KeyChord::from_parts(BindingModifierFlags::NONE, Key::Char('n')),
         ],
     );
     assert_eq!(
@@ -1118,7 +1150,7 @@ fn default_bindings_follow_the_leader() {
 
     // Explicit bindings never move: `<A-f>` and the reserved `<C-l>` are the
     // same under every leader.
-    let fullscreen_key_sequence = build_single_key_sequence(ModFlags::ALT, 'f');
+    let fullscreen_key_sequence = build_single_key_sequence(BindingModifierFlags::ALT, 'f');
     let reserved_unlock_key_sequence = KeySequence::from(KeybindingsConfig::RESERVED_UNLOCK);
     for mode_bindings in [
         &control_leader_bindings,
@@ -1140,32 +1172,34 @@ fn default_bindings_follow_the_leader() {
 
 #[test]
 fn a_chord_leader_drops_the_ambiguous_prefix_labels() {
-    // A chord leader opens every leader binding with the leader chord, so
-    // `<leader>p`, `<leader>s`, and `<leader>t` share an opening — no single
-    // group label fits, and the hint bar shows the derived `+N` instead.
+    // A chord leader opens every leader binding with the leader chord:
+    // `<leader>p`, `<leader>s`, and `<leader>t` share one opening chord, and
+    // the label map is empty.
     let space_leader_prefix_labels = build_default_prefix_labels(Leader::Chord(
-        KeyChord::from_parts(ModFlags::NONE, Key::Named(NamedKey::Space)),
+        KeyChord::from_parts(BindingModifierFlags::NONE, Key::Named(NamedKey::Space)),
     ));
     assert!(space_leader_prefix_labels.is_empty());
 
     // A modifier-run leader keeps `<leader>p`, `<leader>s`, and `<leader>t` at
-    // distinct openings, so all three labels stand, moved onto Alt.
-    let alt_leader_prefix_labels = build_default_prefix_labels(Leader::Mods(ModFlags::ALT));
-    let get_alt_prefix_label = |character| {
+    // distinct opening chords: all three labels stand, on Alt.
+    let alt_leader_prefix_labels =
+        build_default_prefix_labels(Leader::Modifiers(BindingModifierFlags::ALT));
+    let find_alt_prefix_label = |key_character| {
         alt_leader_prefix_labels
-            .get(&KeyChord::from_parts(ModFlags::ALT, Key::Char(character)))
+            .get(&KeyChord::from_parts(
+                BindingModifierFlags::ALT,
+                Key::Char(key_character),
+            ))
             .map(String::as_str)
     };
     assert_eq!(alt_leader_prefix_labels.len(), 3);
-    assert_eq!(get_alt_prefix_label('p'), Some("PANE"));
-    assert_eq!(get_alt_prefix_label('s'), Some("RESIZE"));
-    assert_eq!(get_alt_prefix_label('t'), Some("TAB"));
+    assert_eq!(find_alt_prefix_label('p'), Some("PANE"));
+    assert_eq!(find_alt_prefix_label('s'), Some("RESIZE"));
+    assert_eq!(find_alt_prefix_label('t'), Some("TAB"));
 }
 
 #[test]
 fn this_build_writes_config_schema_version_two() {
-    // `SCHEMA_VERSION` reads `koshi_core::compat::CONFIG_SCHEMA.maximum_version`, one
-    // crate away. This pins the version number every config file this build
-    // writes carries.
+    // Every config file this build writes carries schema version 2.
     assert_eq!(SCHEMA_VERSION, 2);
 }

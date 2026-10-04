@@ -10,12 +10,15 @@ fs4.workspace = true
 koshi-beta.workspace = true
 koshi-config.workspace = true
 koshi-core.workspace = true
+koshi-host.workspace = true
 koshi-ipc.workspace = true
 koshi-layout.workspace = true
 koshi-observability.workspace = true
 koshi-paths.workspace = true
 koshi-runtime.workspace = true
+semver.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
@@ -23,3 +26,6 @@ uuid.workspace = true
 [dev-dependencies]
 koshi-test-support.workspace = true
 tempfile.workspace = true
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true

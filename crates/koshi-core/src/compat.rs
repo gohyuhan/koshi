@@ -6,20 +6,21 @@
 //!
 //! # The cadence rule
 //!
-//! `maximum_version` moves in the same commit as the change that requires it. Three
-//! changes require it:
+//! `maximum_version` moves in the same commit as the change that requires it.
+//! Three changes require it:
 //!
 //! - An existing field changes its type.
 //! - An existing field changes its meaning.
 //! - A field is added that one side must not send until it knows the other
 //!   reads it.
 //!
-//! Adding or removing a field that both sides still decode leaves `maximum_version` where
-//! it is.
+//! Adding or removing a field that both sides still decode leaves
+//! `maximum_version` where it is.
 //!
-//! The first such change after a release sets `maximum_version` to `released_version + 1`. `maximum_version`
-//! then holds until the next release, however many further changes land: one
-//! release cycle moves a surface one step at most.
+//! The first such change after a release sets `maximum_version` to
+//! `released_version + 1`. `maximum_version` then holds until the next
+//! release, however many further changes land: one release cycle moves a
+//! surface one step at most.
 //!
 //! [`Surface::find_version_problem`] checks this rule, and a test runs the whole
 //! table through it.
@@ -83,6 +84,11 @@ pub struct Surface {
 /// - Painted image placements name connection-local content identities. Their
 ///   RGBA records travel in bounded image-content events and remain cached
 ///   across unchanged frames. Version 2 had no terminal-image wire shape.
+///
+/// A restart request the session reads and refuses is answered with the
+/// `RequestFailed` code and a sentence naming what stopped the restart. A
+/// `v0.5.0-pr.1` session, which also speaks 4, and a `v0.4.0` session answer
+/// it with the `MalformedRequest` code and the same kind of sentence.
 pub const SESSION_PROTOCOL: Surface = Surface {
     surface_name: "session protocol",
     minimum_version: 4,
@@ -94,6 +100,11 @@ pub const SESSION_PROTOCOL: Surface = Surface {
 /// socket.
 ///
 /// `v0.4.0` speaks 2. `v0.5.0` speaks 3. The floor is 3.
+///
+/// A request the router reads and refuses, other than one naming a session it
+/// does not have, is answered with the `RequestFailed` code. A `v0.5.0-pr.1`
+/// router, which also speaks 3, and a `v0.4.0` router answer it with the
+/// `MalformedRequest` code.
 pub const CONTROL_PROTOCOL: Surface = Surface {
     surface_name: "control plane",
     minimum_version: 3,
@@ -123,14 +134,14 @@ pub const TOKEN_STORE_FORMAT: Surface = Surface {
     released_version: Some(1),
 };
 
-/// The remote doorway: what a client on another machine and this machine's TLS
-/// listener speak before any session is reached.
+/// The remote protocol: what a client on another machine and this machine's
+/// TLS listener speak before any session is reached.
 ///
 /// `v0.4.0` speaks 1. `v0.5.0` speaks 2. The floor is 2. Its two ends are
-/// different machines. The session protocol the two ends settle after the door
-/// opens is a separate surface, [`SESSION_PROTOCOL`].
+/// different machines. The session protocol the two ends settle after the
+/// Welcome is a separate surface, [`SESSION_PROTOCOL`].
 pub const REMOTE_PROTOCOL: Surface = Surface {
-    surface_name: "remote doorway",
+    surface_name: "remote protocol",
     minimum_version: 2,
     maximum_version: 2,
     released_version: Some(1),
@@ -165,7 +176,7 @@ pub const REMOTE_CERTIFICATE_FORMAT: Surface = Surface {
 ///
 /// `v0.4.0` writes 1. `v0.5.0` writes 2. Format 1 is converted when the
 /// replacement router starts.
-pub const REMOTE_ACCESS_MARK_FORMAT: Surface = Surface {
+pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
     surface_name: "remote access record format",
     minimum_version: 1,
     maximum_version: 2,
@@ -190,13 +201,42 @@ pub const RESUME_FORMAT: Surface = Surface {
 
 /// The config schema: the shape of the files under the config directory.
 ///
-/// `v0.4.0` writes 1. `v0.5.0` writes 2. Version 1 is migrated when the
-/// replacement router starts.
+/// `v0.4.0` writes 1. `v0.5.0` writes 2. `koshi resume-support`,
+/// `koshi serve-session`, and `koshi serve-router` migrate version 1 files to
+/// version 2 before they read config.
 pub const CONFIG_SCHEMA: Surface = Surface {
     surface_name: "config schema",
     minimum_version: 1,
     maximum_version: 2,
     released_version: Some(1),
+};
+
+/// The endpoint file: the file each running server writes in the runtime
+/// directory to name its control socket, its connection token and its process.
+///
+/// Format 1 is every endpoint file with no `file_format` field: `v0.4.0` writes
+/// `{socket, token, pid}`, and `v0.5.0-pr.1` writes
+/// `{socket_address, connection_token, process_id}`. `v0.5.0` writes 2, the
+/// second shape with `"file_format": 2`. A reader converts a format 1 file in
+/// memory and leaves it on disk: the server that wrote it rewrites it in
+/// format 2 when it restarts into this build.
+pub const ENDPOINT_FILE_FORMAT: Surface = Surface {
+    surface_name: "endpoint file format",
+    minimum_version: 1,
+    maximum_version: 2,
+    released_version: Some(1),
+};
+
+/// The program file: the file each running server writes beside its endpoint
+/// file to name the koshi version it runs and the program file it restarts
+/// into.
+///
+/// `v0.5.0` writes 1.
+pub const PROGRAM_FILE_FORMAT: Surface = Surface {
+    surface_name: "program file format",
+    minimum_version: 1,
+    maximum_version: 1,
+    released_version: None,
 };
 
 /// Every versioned surface this build carries. A surface absent from this list
@@ -209,9 +249,11 @@ pub const SURFACES: &[Surface] = &[
     REMOTE_PROTOCOL,
     SAVED_SERVER_FORMAT,
     REMOTE_CERTIFICATE_FORMAT,
-    REMOTE_ACCESS_MARK_FORMAT,
+    REMOTE_ACCESS_RECORD_FORMAT,
     RESUME_FORMAT,
     CONFIG_SCHEMA,
+    ENDPOINT_FILE_FORMAT,
+    PROGRAM_FILE_FORMAT,
 ];
 
 impl Surface {
@@ -221,15 +263,17 @@ impl Surface {
     /// Three checks, in this order. Each names this surface's
     /// [`surface_name`](Self::surface_name).
     ///
-    /// 1. `minimum_version` exceeds `maximum_version`: `"the control plane accepts 4 at the lowest and
-    ///    3 at the highest, which is no version at all"`.
-    /// 2. `maximum_version` is below `released_version`: `"the control plane speaks 1, which is
-    ///    below the 2 the last release spoke"`.
-    /// 3. `maximum_version` is more than one above `released_version`: `"the control plane speaks
-    ///    4, which is more than one step above the 2 the last release spoke"`.
+    /// 1. `minimum_version` exceeds `maximum_version`: `"the control plane
+    ///    accepts 4 at the lowest and 3 at the highest, which is no version at
+    ///    all"`.
+    /// 2. `maximum_version` is below `released_version`: `"the control plane
+    ///    speaks 1, which is below the 2 the last release spoke"`.
+    /// 3. `maximum_version` is more than one above `released_version`: `"the
+    ///    control plane speaks 4, which is more than one step above the 2 the
+    ///    last release spoke"`.
     ///
-    /// The first failing check is the one reported. A surface whose `released_version`
-    /// is `None` runs check 1 only.
+    /// The first failing check is the one reported. A surface whose
+    /// `released_version` is `None` runs check 1 only.
     #[must_use]
     pub fn find_version_problem(&self) -> Option<String> {
         if self.minimum_version > self.maximum_version {

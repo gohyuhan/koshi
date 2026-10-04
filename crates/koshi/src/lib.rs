@@ -42,6 +42,10 @@ pub mod output;
 /// Process-level session commands that work without an attached pane.
 pub mod session_control;
 
+/// Ending one session for `kill-session`: `Quit` first, then the operating
+/// system for a session process that keeps running.
+pub mod session_end;
+
 /// The `koshi remote` commands: list, forget and re-secret the servers this
 /// machine has saved.
 pub mod remote_cmd;
@@ -54,7 +58,9 @@ pub mod share;
 /// `--session`/`--tab`/`--pane`/`--client` targets, and the count rule.
 pub mod targeting;
 
-/// Self-update: check GitHub for a newer koshi release and install it.
+/// `koshi update` and `koshi restart-servers`: install a newer koshi release
+/// the way this koshi was installed, and restart the running servers into the
+/// koshi program on disk.
 pub mod updater;
 
 /// Which koshi build is running: this program, and each koshi server.

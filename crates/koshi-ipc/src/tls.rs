@@ -35,14 +35,10 @@ use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureSch
 use sha2::{Digest, Sha256};
 
 use crate::error::IpcError;
-use crate::transport::is_io_timeout;
+use crate::transport::{compute_time_left_until, is_io_timeout};
 
 /// How many raw bytes [`TlsReader`] takes off the socket in one read.
 const TLS_READ_BUFFER_BYTE_COUNT: usize = 16 * 1024;
-
-/// The least a socket timeout is set to: 1 ms. Less time left than this
-/// counts as no time left.
-const MINIMUM_SOCKET_TIMEOUT_DURATION: Duration = Duration::from_millis(1);
 
 /// Set both of `socket`'s timeouts to the time left until `deadline`. `None`
 /// returns at once and leaves the timeouts as they are.
@@ -52,19 +48,12 @@ const MINIMUM_SOCKET_TIMEOUT_DURATION: Duration = Duration::from_millis(1);
 ///
 /// # Errors
 /// [`io::ErrorKind::TimedOut`] with the text `this step ran out of time` when
-/// less than [`MINIMUM_SOCKET_TIMEOUT_DURATION`] is left; otherwise the failure of setting a
-/// socket timeout.
+/// less than 1 ms is left; otherwise the failure of setting a socket timeout.
 fn set_socket_timeouts_until(socket: &TcpStream, deadline: Option<Instant>) -> io::Result<()> {
     let Some(deadline) = deadline else {
         return Ok(());
     };
-    let remaining_timeout_duration = deadline.saturating_duration_since(Instant::now());
-    if remaining_timeout_duration < MINIMUM_SOCKET_TIMEOUT_DURATION {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "this step ran out of time",
-        ));
-    }
+    let remaining_timeout_duration = compute_time_left_until(deadline)?;
     socket.set_read_timeout(Some(remaining_timeout_duration))?;
     socket.set_write_timeout(Some(remaining_timeout_duration))?;
     Ok(())
@@ -84,31 +73,17 @@ fn decrypt_pending_tls_records(tls_connection: &mut rustls::Connection) -> io::R
         })
 }
 
-/// Put every encrypted byte `tls_connection` has queued on `socket`. Each socket write is
-/// given the time left until `deadline`; `None` lets it block for as long as
-/// it takes.
-///
-/// # Errors
-/// [`io::ErrorKind::TimedOut`] when no time is left before a write; otherwise
-/// the socket write's own failure, which is the socket's timeout error when
-/// the deadline passes during the write.
-fn send_pending_tls_records(
-    tls_connection: &mut rustls::Connection,
-    socket: &mut TcpStream,
-    deadline: Option<Instant>,
-) -> io::Result<()> {
-    while tls_connection.wants_write() {
-        set_socket_timeouts_until(socket, deadline)?;
-        tls_connection.write_tls(socket)?;
-    }
-    Ok(())
-}
-
 /// Split a TLS stream into its reading and its writing half.
 ///
-/// Each half gets its own handle on the same socket; one half blocking on
-/// the socket does not stop the other. Both halves share one
-/// [`rustls::Connection`] behind a mutex.
+/// Each half gets its own handle on the same socket. Both halves share one
+/// [`rustls::Connection`] behind a mutex, and neither half holds the mutex
+/// during a socket call: one half blocking on the socket does not stop the
+/// other.
+///
+/// Only the writing half puts bytes on the socket. The records the reading
+/// half's decryption queues, such as the answer to a TLS 1.3 key update, go
+/// out at the start of the writing half's next write, ahead of its own
+/// plaintext.
 ///
 /// A half with a deadline sets both timeouts on its own handle before each of
 /// its socket calls. A half with no deadline sets nothing and runs under the
@@ -145,6 +120,7 @@ pub fn split_tls_stream(
             tls_connection: shared_connection,
             socket,
             deadline: None,
+            unsent_encrypted_bytes: Vec::new(),
         },
     ))
 }
@@ -219,11 +195,14 @@ impl Read for TlsReader {
     /// on every read after it, and bytes that do not decrypt are
     /// [`io::ErrorKind::InvalidData`].
     ///
-    /// With a deadline set, each socket read and write is given the time left
-    /// until that deadline. No time left before a socket call ends the read
-    /// with [`io::ErrorKind::TimedOut`]; the deadline passing during a socket
-    /// call ends it with the socket's own timeout error, which
-    /// [`is_io_timeout`] recognises on every platform.
+    /// With a deadline set, each socket read is given the time left until that
+    /// deadline. No time left before a socket read ends the read with
+    /// [`io::ErrorKind::TimedOut`]; the deadline passing during a socket read
+    /// ends it with the socket's own timeout error, which [`is_io_timeout`]
+    /// recognises on every platform.
+    ///
+    /// The read writes nothing to the socket. The mutex is held while bytes are
+    /// handed to the decryption state, never during the socket read.
     fn read(&mut self, plaintext_buffer: &mut [u8]) -> io::Result<usize> {
         loop {
             {
@@ -244,7 +223,6 @@ impl Read for TlsReader {
                 self.encrypted_bytes_consumed +=
                     tls_connection.read_tls(&mut unprocessed_encrypted_bytes)?;
                 decrypt_pending_tls_records(&mut tls_connection)?;
-                send_pending_tls_records(&mut tls_connection, &mut self.socket, self.deadline)?;
                 continue;
             }
             set_socket_timeouts_until(&self.socket, self.deadline)?;
@@ -275,6 +253,9 @@ pub struct TlsWriter {
     /// When every write this half has left must be finished by, or `None` to
     /// block for as long as it takes.
     deadline: Option<Instant>,
+    /// Encrypted bytes taken out of `tls_connection` and not yet on the socket.
+    /// Empty except after a socket write that failed or ran out of time.
+    unsent_encrypted_bytes: Vec<u8>,
 }
 
 impl TlsWriter {
@@ -294,9 +275,17 @@ impl Write for TlsWriter {
     /// how many bytes it took: at most 64 KiB per call, the send buffer limit
     /// rustls applies to one plaintext write. `write_all` delivers the rest.
     ///
-    /// Encrypted bytes a write that ran out of time did not put on the socket
-    /// stay queued. The next write drains that queue before it offers its own
-    /// plaintext, so a full queue does not make that write take `0` bytes.
+    /// Steps, in order:
+    ///
+    /// 1. Put on the socket the encrypted bytes an earlier write left unsent.
+    /// 2. Under the mutex, hand the plaintext to rustls and take every record
+    ///    it has queued: records the reading half queued first, then this
+    ///    plaintext's.
+    /// 3. Put those records on the socket, outside the mutex.
+    ///
+    /// Encrypted bytes a socket write did not take stay in this half for step 1
+    /// of the next write. The plaintext a failed write handed to rustls stays
+    /// taken: its records go out on the next write.
     ///
     /// With a deadline set, each socket write is given the time left until
     /// that deadline. No time left before a socket write ends the call with
@@ -304,18 +293,44 @@ impl Write for TlsWriter {
     /// with the socket's own timeout error, which [`is_io_timeout`] recognises
     /// on every platform.
     fn write(&mut self, plaintext_bytes: &[u8]) -> io::Result<usize> {
-        let mut tls_connection = self.tls_connection.lock().expect("tls connection");
-        // Encrypted bytes an earlier write left queued go out first. They fill
-        // the same 64 KiB rustls takes one plaintext write into.
-        send_pending_tls_records(&mut tls_connection, &mut self.socket, self.deadline)?;
-        let written_plaintext_byte_count = tls_connection.writer().write(plaintext_bytes)?;
-        send_pending_tls_records(&mut tls_connection, &mut self.socket, self.deadline)?;
+        self.send_unsent_encrypted_bytes()?;
+        let written_plaintext_byte_count = {
+            let mut tls_connection = self.tls_connection.lock().expect("tls connection");
+            let written_plaintext_byte_count = tls_connection.writer().write(plaintext_bytes)?;
+            while tls_connection.wants_write() {
+                tls_connection.write_tls(&mut self.unsent_encrypted_bytes)?;
+            }
+            written_plaintext_byte_count
+        };
+        self.send_unsent_encrypted_bytes()?;
         Ok(written_plaintext_byte_count)
     }
 
     /// Does nothing: [`write`](Self::write) already put every encrypted byte
     /// on the socket.
     fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TlsWriter {
+    /// Put `unsent_encrypted_bytes` on the socket, front first, and remove each
+    /// byte the socket takes. Each socket write is given the time left until
+    /// `deadline`; `None` lets it block for as long as it takes.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::TimedOut`] when no time is left before a write,
+    /// [`io::ErrorKind::WriteZero`] when the socket takes no byte, and
+    /// otherwise the socket write's own failure. The bytes not taken stay.
+    fn send_unsent_encrypted_bytes(&mut self) -> io::Result<()> {
+        while !self.unsent_encrypted_bytes.is_empty() {
+            set_socket_timeouts_until(&self.socket, self.deadline)?;
+            let sent_byte_count = self.socket.write(&self.unsent_encrypted_bytes)?;
+            if sent_byte_count == 0 {
+                return Err(io::Error::from(io::ErrorKind::WriteZero));
+            }
+            self.unsent_encrypted_bytes.drain(..sent_byte_count);
+        }
         Ok(())
     }
 }
@@ -380,7 +395,7 @@ pub fn run_tls_handshake(
     socket: &mut TcpStream,
     deadline: Instant,
 ) -> io::Result<()> {
-    let mut bounded = BoundedSocket { socket, deadline };
+    let mut bounded_socket = BoundedSocket { socket, deadline };
     while tls_connection.is_handshaking() {
         if Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -388,7 +403,7 @@ pub fn run_tls_handshake(
                 "the TLS handshake did not finish in time",
             ));
         }
-        match tls_connection.complete_io(&mut bounded) {
+        match tls_connection.complete_io(&mut bounded_socket) {
             Ok(_) => {}
             // A socket timeout: the loop goes back to the deadline check.
             Err(handshake_error) if is_io_timeout(&handshake_error) => {}
@@ -610,16 +625,17 @@ pub fn connect_tls_stream(
         .with_no_client_auth();
     // The stream is named by the IP address it reached. An IP address sends
     // no server name.
-    let server_name =
-        ServerName::try_from(resolved_server_address.ip().to_string()).map_err(|io_error| {
+    let server_name = ServerName::try_from(resolved_server_address.ip().to_string()).map_err(
+        |server_name_error| {
             build_transport_error(format!(
-                "{server_address} is not a usable server name: {io_error}"
+                "{server_address} is not a usable server name: {server_name_error}"
             ))
-        })?;
+        },
+    )?;
     let tls_client =
-        ClientConnection::new(Arc::new(client_config), server_name).map_err(|io_error| {
+        ClientConnection::new(Arc::new(client_config), server_name).map_err(|tls_start_error| {
             build_transport_error(format!(
-                "the TLS stream to {server_address} could not start: {io_error}"
+                "the TLS stream to {server_address} could not start: {tls_start_error}"
             ))
         })?;
     let mut tls_connection = rustls::Connection::Client(tls_client);

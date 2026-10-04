@@ -60,8 +60,7 @@ const CLIENT_NOTIFICATION_TIMEOUT_DURATION: Duration = Duration::from_secs(1);
 const CLIENT_NOTIFICATION_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
 
 /// What a restart request must be able to promise before the session accepts
-/// it. `Err` carries the sentence the caller is refused with, naming what is
-/// wrong.
+/// it. `Err` carries the [`RestartRefusal`] the caller is refused with.
 ///
 /// Installed by the session server, which holds the path of the binary a swap
 /// would run and the concrete PTY backend the pane records come from. It builds
@@ -69,7 +68,55 @@ const CLIENT_NOTIFICATION_POLL_INTERVAL_DURATION: Duration = Duration::from_mill
 /// every pane's writer to settle, and a run of the new binary to read which
 /// resume formats it takes back. A process with no check installed refuses every
 /// restart.
-pub type RestartCheck = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+pub type RestartCheck = Arc<dyn Fn() -> Result<(), RestartRefusal> + Send + Sync>;
+
+/// Why a session refused to restart into its program file.
+///
+/// Its `Display` is the sentence the caller is refused with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartRefusal {
+    /// The program file cannot become the next image as it is: it cannot be
+    /// read or run, it gave no readable `resume-support` answer, or it does
+    /// not read the resume file this build writes.
+    UnfitProgramFile {
+        /// The sentence naming what is wrong, such as `the binary at
+        /// /usr/local/bin/koshi is not executable`.
+        refusal_reason: String,
+    },
+    /// A pane cannot cross the swap now: its terminal exposes no descriptor,
+    /// or a program in it keeps the pane's writer from settling.
+    PaneNotReady {
+        /// The sentence naming the pane and what holds it.
+        refusal_reason: String,
+    },
+    /// This process has no restart check installed: it cannot replace its own
+    /// image.
+    ImageReplacementUnsupported,
+}
+
+impl RestartRefusal {
+    /// Whether this refusal can end while the program file stays the same:
+    /// `true` for [`PaneNotReady`](Self::PaneNotReady), which ends once the
+    /// pane closes or its writer settles, and `false` for every other variant.
+    #[must_use]
+    pub fn can_end_without_file_change(&self) -> bool {
+        matches!(self, RestartRefusal::PaneNotReady { .. })
+    }
+}
+
+impl std::fmt::Display for RestartRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestartRefusal::UnfitProgramFile { refusal_reason }
+            | RestartRefusal::PaneNotReady { refusal_reason } => {
+                formatter.write_str(refusal_reason)
+            }
+            RestartRefusal::ImageReplacementUnsupported => {
+                formatter.write_str("this koshi cannot replace its own image, so it cannot restart")
+            }
+        }
+    }
+}
 
 /// Whether the binary at `executable_path` is one this machine could run: its metadata can
 /// be read, and on Unix it carries an execute bit.
@@ -842,14 +889,12 @@ impl Server {
     /// refused one changes nothing at all and the session keeps serving.
     ///
     /// # Errors
-    /// Returns the sentence the caller is refused with: whatever the installed
-    /// check named, or that this process cannot replace its own image when no
-    /// check is installed.
-    pub(crate) fn handle_ipc_restart(&mut self) -> Result<(), String> {
+    /// Returns the refusal the installed check gave, or
+    /// [`RestartRefusal::ImageReplacementUnsupported`] when no check is
+    /// installed.
+    pub(crate) fn handle_ipc_restart(&mut self) -> Result<(), RestartRefusal> {
         let Some(check) = self.restart_check.clone() else {
-            return Err(
-                "this koshi cannot replace its own image, so it cannot restart".to_string(),
-            );
+            return Err(RestartRefusal::ImageReplacementUnsupported);
         };
         check()?;
         self.is_restart_requested = true;
