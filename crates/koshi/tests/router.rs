@@ -506,14 +506,15 @@ fn a_restart_keeps_the_sessions_and_the_router_serving() {
 /// A session server whose endpoint file is gone when the router restarts, as
 /// a session server that is ending removes it before it exits, is not listed
 /// by the restarted router. The restarted router still reaps it once it
-/// exits: no zombie stays behind.
+/// exits: no zombie stays behind. The router still runs after the reap, so no
+/// other process reaped the session server.
 #[cfg(unix)]
 #[test]
 fn a_session_server_the_restarted_router_does_not_list_is_reaped_once_it_exits() {
     let test_home_directory = build_short_test_directory();
     let runtime_directory = build_test_runtime_directory();
     let binary_path = copy_koshi_binary(runtime_directory.path());
-    let _router_process = start_router_from_binary(
+    let mut router_process = start_router_from_binary(
         &binary_path,
         test_home_directory.path(),
         runtime_directory.path(),
@@ -560,6 +561,10 @@ fn a_session_server_the_restarted_router_does_not_list_is_reaped_once_it_exits()
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ESRCH),
         "the session server is gone, not merely unreachable"
+    );
+    assert!(
+        !router_process.has_router_exited(),
+        "the restarted router still runs, so it reaped the session server"
     );
 }
 

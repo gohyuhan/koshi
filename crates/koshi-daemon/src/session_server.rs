@@ -1137,7 +1137,8 @@ fn take_panes_back(
 /// 1. Every open descriptor above standard error that names a pseudoterminal
 ///    master is closed, which hangs up the program running in that terminal.
 /// 2. Every child [`list_child_process_ids`] names is ended by
-///    [`end_carried_child`].
+///    [`end_carried_child`]. A listing that fails is logged, and no child is
+///    ended.
 /// 3. Every child ended there is reaped once it has exited, by
 ///    [`reap_ended_children`].
 ///
@@ -1168,10 +1169,19 @@ fn release_panes_without_header(
         );
         drop(unsafe { OwnedFd::from_raw_fd(open_file_descriptor) });
     }
-    let ended_process_ids: Vec<libc::pid_t> = list_child_process_ids()
-        .into_iter()
-        .filter_map(end_carried_child)
-        .collect();
+    let ended_process_ids: Vec<libc::pid_t> = match list_child_process_ids() {
+        Ok(child_process_ids) => child_process_ids
+            .into_iter()
+            .filter_map(end_carried_child)
+            .collect(),
+        Err(child_process_list_error) => {
+            tracing::warn!(
+                %child_process_list_error,
+                "child processes from the previous image could not be listed"
+            );
+            Vec::new()
+        }
+    };
     reap_ended_children(ended_process_ids);
 }
 

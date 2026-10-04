@@ -6073,7 +6073,7 @@ fn a_session_described_with_an_inherited_process_reports_its_exit() {
         .recv_timeout(LOOP_END_TIMEOUT_DURATION)
         .expect("the exit is reported");
     match &exit_event {
-        RouterEvent::InheritedChildExited { process_id } => {
+        RouterEvent::ChildProcessReaped { process_id } => {
             assert_eq!(*process_id, session_process_id)
         }
         _ => panic!("the adopting thread reported something other than the exit"),
@@ -6218,7 +6218,8 @@ fn reaping_unwaited_children_drops_each_exited_child_and_keeps_each_running_one(
     let mut unwaited_child_process_ids =
         BTreeSet::from([0, exited_child.id(), running_child.id(), parent_process_id]);
 
-    reap_unwaited_children(&mut unwaited_child_process_ids);
+    reap_unwaited_children(&mut unwaited_child_process_ids)
+        .expect("unwaited children can be reaped");
 
     assert_eq!(
         unwaited_child_process_ids,
@@ -6236,72 +6237,158 @@ fn reaping_unwaited_children_drops_each_exited_child_and_keeps_each_running_one(
     terminate_child_process(&mut running_child);
 }
 
-/// The dispatcher wakes for its liveness check while a child no thread waits
-/// on is left, even with every listed session watched, and reaps that child
-/// once it has exited.
+/// An empty list ends the loop at its idle window while a child that no
+/// thread waits on still runs: a child process keeps no loop running. The
+/// child stays in the set.
 #[cfg(unix)]
 #[test]
-fn the_dispatcher_reaps_an_unwaited_child_while_every_session_is_watched() {
-    let unwaited_process_id = spawn_short_lived_child().id();
-    let unwaited_unix_process_id =
-        libc::pid_t::try_from(unwaited_process_id).expect("a child id fits a pid");
+fn a_running_unwaited_child_does_not_keep_an_empty_loop_past_the_idle_window() {
+    let mut running_child = spawn_running_child("sleep 30");
+    let running_process_id = running_child.id();
     let runtime_directory = build_test_runtime_directory();
-    let mut watched_registry = build_session_registry(&[(SessionId::new(), "S-quiet-lake")]);
-    for session_record in watched_registry.values_mut() {
-        session_record.has_exit_watcher = true;
-    }
-    let mut router_sessions = RouterSessions::from_session_registry(watched_registry);
+    let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
     router_sessions
         .unwaited_child_process_ids
-        .insert(unwaited_process_id);
+        .insert(running_process_id);
     let (router_events_sender, router_events_receiver) = mpsc::channel();
-    let test_router_events_sender = router_events_sender.clone();
-    let held_runtime_directory = runtime_directory.path().to_path_buf();
-    let loop_thread = std::thread::spawn(move || {
-        let router_exit = run_dispatch_loop(
-            &held_runtime_directory,
-            None,
-            &build_test_executable_watch(),
-            None,
-            &router_events_sender,
-            &router_events_receiver,
-            TEST_IDLE_EXIT_DURATION,
-            TEST_LIVENESS_CHECK_INTERVAL_DURATION,
-            &mut router_sessions,
-            &mut build_no_remote_state(),
-        );
-        (router_exit, router_sessions.unwaited_child_process_ids)
-    });
 
-    // `kill` with signal `0` answers `0` for a running child and for a zombie,
-    // and `ESRCH` once the child is reaped. It reaps nothing itself.
-    let reap_deadline = Instant::now() + LOOP_END_TIMEOUT_DURATION;
-    let is_child_reaped = loop {
-        let is_child_reaped = unsafe { libc::kill(unwaited_unix_process_id, 0) } == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-        if is_child_reaped || Instant::now() >= reap_deadline {
-            break is_child_reaped;
-        }
-        std::thread::sleep(TEST_LIVENESS_CHECK_INTERVAL_DURATION);
-    };
-    test_router_events_sender
-        .send(RouterEvent::RestartDue)
-        .expect("the loop still runs");
-    let (router_exit, unwaited_child_process_ids) =
-        loop_thread.join().expect("the loop ends without a panic");
+    let router_exit = run_dispatch_loop(
+        runtime_directory.path(),
+        None,
+        &build_test_executable_watch(),
+        None,
+        &router_events_sender,
+        &router_events_receiver,
+        TEST_IDLE_EXIT_DURATION,
+        TEST_LIVENESS_CHECK_INTERVAL_DURATION,
+        &mut router_sessions,
+        &mut build_no_remote_state(),
+    );
+    let remaining_unwaited_child_process_ids = router_sessions.unwaited_child_process_ids.clone();
+    terminate_child_process(&mut running_child);
 
-    assert!(is_child_reaped, "the dispatcher reaped the child");
     assert_eq!(
-        (router_exit, unwaited_child_process_ids),
-        (RouterExit::Restart, BTreeSet::new())
+        (router_exit, remaining_unwaited_child_process_ids),
+        (RouterExit::Idle, BTreeSet::from([running_process_id])),
+        "the empty loop ends idle and the running child stays in the set"
     );
 }
 
-/// The router hands its place over on Windows by starting the new binary with
-/// this argument, the one [`crate::cli`] parses into `wait_for_lock`. The two
-/// creation flags the handover carries are checked beside them, in
+/// An empty list ends the loop at its idle window while an adopted child of
+/// an earlier image still runs: the thread that waits on that child keeps no
+/// loop running. The child stays in the set.
+#[cfg(unix)]
+#[test]
+fn a_running_inherited_child_does_not_keep_an_empty_loop_past_the_idle_window() {
+    let mut running_child = spawn_running_child("sleep 30");
+    let running_process_id = running_child.id();
+    let runtime_directory = build_test_runtime_directory();
+    let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
+    let (router_events_sender, router_events_receiver) = mpsc::channel();
+    adopt_inherited_children(
+        vec![running_process_id],
+        &mut router_sessions,
+        &router_events_sender,
+    );
+
+    let router_exit = run_dispatch_loop(
+        runtime_directory.path(),
+        None,
+        &build_test_executable_watch(),
+        None,
+        &router_events_sender,
+        &router_events_receiver,
+        TEST_IDLE_EXIT_DURATION,
+        TEST_LIVENESS_CHECK_INTERVAL_DURATION,
+        &mut router_sessions,
+        &mut build_no_remote_state(),
+    );
+    let remaining_inherited_child_process_ids = router_sessions.inherited_child_process_ids.clone();
+    running_child.kill().expect("the running child is ended");
+    let exit_event = router_events_receiver
+        .recv_timeout(LOOP_END_TIMEOUT_DURATION)
+        .expect("the waiting thread reports the exit");
+
+    assert_eq!(
+        (router_exit, remaining_inherited_child_process_ids),
+        (RouterExit::Idle, BTreeSet::from([running_process_id])),
+        "the empty loop ends idle and the running child stays adopted"
+    );
+    match exit_event {
+        RouterEvent::ChildProcessReaped { process_id } => {
+            assert_eq!(process_id, running_process_id)
+        }
+        _ => panic!("the waiting thread reported something other than the exit"),
+    }
+    assert_eq!(
+        running_child
+            .try_wait()
+            .err()
+            .map(|wait_error| wait_error.raw_os_error()),
+        Some(Some(libc::ECHILD)),
+        "the waiting thread reaped the child"
+    );
+}
+
+/// A liveness round reaps an exited child that no thread waits on while a
+/// session is listed. The round reaps before it probes, so the child is reaped
+/// before the probe drops the gone session and the loop ends idle.
+#[cfg(unix)]
+#[test]
+fn a_liveness_round_reaps_an_exited_unwaited_child_while_a_session_is_listed() {
+    let mut exited_child = spawn_short_lived_child();
+    wait_until_child_has_exited(exited_child.id());
+    let exited_process_id = exited_child.id();
+    let gone_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory();
+    let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::from([(
+        gone_session_id,
+        build_unwatched_session_record(compute_socket_address(
+            runtime_directory.path(),
+            gone_session_id,
+        )),
+    )]));
+    router_sessions
+        .unwaited_child_process_ids
+        .insert(exited_process_id);
+    let (router_events_sender, router_events_receiver) = mpsc::channel();
+
+    let router_exit = run_dispatch_loop(
+        runtime_directory.path(),
+        None,
+        &build_test_executable_watch(),
+        None,
+        &router_events_sender,
+        &router_events_receiver,
+        TEST_IDLE_EXIT_DURATION,
+        TEST_LIVENESS_CHECK_INTERVAL_DURATION,
+        &mut router_sessions,
+        &mut build_no_remote_state(),
+    );
+
+    assert_eq!(
+        (
+            router_exit,
+            router_sessions.session_registry.clone(),
+            router_sessions.unwaited_child_process_ids.clone()
+        ),
+        (RouterExit::Idle, SessionRegistry::new(), BTreeSet::new()),
+        "the round reaped the child, and the probe dropped the gone session"
+    );
+    assert_eq!(
+        exited_child
+            .try_wait()
+            .err()
+            .map(|wait_error| wait_error.raw_os_error()),
+        Some(Some(libc::ECHILD)),
+        "the liveness round collected the exited child"
+    );
+}
+
+/// The router hands its place over by starting the new binary with this
+/// argument, the one [`crate::cli`] parses into `wait_for_lock`. On Windows the
+/// two creation flags the handover carries are checked beside them, in
 /// [`crate::process`].
-#[cfg(windows)]
 #[test]
 fn the_handover_carries_the_argument_that_waits() {
     assert_eq!(WAIT_FOR_LOCK_FLAG, "--wait-for-lock");

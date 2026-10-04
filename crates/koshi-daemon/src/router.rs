@@ -205,7 +205,6 @@ const PROFILE_FLAG: &str = "--profile";
 
 /// The flag this router passes to the router it starts, telling that one to
 /// wait for the router lock rather than yield to the router holding it.
-#[cfg(windows)]
 const WAIT_FOR_LOCK_FLAG: &str = "--wait-for-lock";
 
 /// The Win32 `CREATE_NO_WINDOW` creation flag: the started process gets a
@@ -229,9 +228,10 @@ struct SessionRecord {
     /// not own.
     process_id: u32,
     /// Whether the exit of the session server's process still reaches the
-    /// dispatcher as [`RouterEvent::ChildExited`]: a thread waits on the
-    /// process, or the exit is already reported. The dispatcher sets it to
-    /// `false` when it takes that report. A session with none is probed every
+    /// dispatcher: a thread waits on the process and reports its exit as
+    /// [`RouterEvent::ChildExited`] or, on Unix,
+    /// `RouterEvent::ChildProcessReaped`. The dispatcher sets it to `false`
+    /// when it takes that report. A session with none is probed every
     /// [`SESSION_LIVENESS_CHECK_INTERVAL_DURATION`].
     has_exit_watcher: bool,
 }
@@ -270,7 +270,7 @@ struct RouterSessions {
     is_restart_pending: bool,
     /// The children an earlier image of this process started that a thread of
     /// this image waits on, from [`adopt_inherited_children`] until their
-    /// [`RouterEvent::InheritedChildExited`] arrives.
+    /// [`RouterEvent::ChildProcessReaped`] arrives.
     #[cfg(unix)]
     inherited_child_process_ids: BTreeSet<u32>,
     /// The children of this process that no thread waits on, because the
@@ -624,10 +624,9 @@ pub(crate) enum RouterEvent {
     },
     /// A session server that is a child of this process has exited.
     ChildExited(SessionId),
-    /// A child that an earlier image of this process started has exited, and
-    /// the thread [`adopt_inherited_children`] started for it has reaped it.
+    /// A child process has exited and the router has reaped it.
     #[cfg(unix)]
-    InheritedChildExited {
+    ChildProcessReaped {
         /// The process id of the child.
         process_id: u32,
     },
@@ -743,7 +742,37 @@ enum RouterExit {
     /// A [`RouterEvent::RestartDue`] arrived and no request waits. The router
     /// restarts into its program file.
     Restart,
+    /// A `waitpid` on a child that no thread of this process waits on failed.
+    /// [`run_router`] returns the error.
+    #[cfg(unix)]
+    ChildReaperFailed(ChildReapError),
 }
+
+/// A `waitpid` on the child `process_id` failed with an error other than
+/// `EINTR` or `ECHILD`.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+struct ChildReapError {
+    /// The process id of the child the `waitpid` named.
+    process_id: u32,
+    /// The `errno` value the `waitpid` set.
+    wait_error_code: i32,
+}
+
+#[cfg(unix)]
+impl fmt::Display for ChildReapError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "child process {} could not be reaped: {}",
+            self.process_id,
+            std::io::Error::from_raw_os_error(self.wait_error_code)
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for ChildReapError {}
 
 /// Run the router until no session is left.
 ///
@@ -766,6 +795,20 @@ enum RouterExit {
 /// [`ExecutableWatch::schedule_restart_retry`], and resumes the dispatcher
 /// with everything the router holds untouched. The router removes its program
 /// file and its endpoint file when it ends.
+///
+/// On Unix, once the lock is held and before anything is bound, every child
+/// process of this one is listed and adopted: a thread waits on each one and
+/// reaps it once it exits. After a restart in place, those are the processes
+/// the previous image started. A router started with `should_wait_for_lock`
+/// lists none: the router it takes over from started it. A listing that fails
+/// starts the next router with `--wait-for-lock`, and this call returns
+/// `Ok(())` having bound nothing. The children of this process then pass to
+/// init, which reaps each one. If the next router cannot start, this router
+/// serves and adopts no child: a child it could not list stays unreaped until
+/// this router ends.
+///
+/// A child process the dispatcher cannot reap ends the router with that error,
+/// after the cleanup every other end runs.
 ///
 /// `config_directory` holds the `koshi.kdl` the router reads: at the start for
 /// `remote-listen` and the shared directory, on every attach lookup for the
@@ -800,6 +843,30 @@ pub fn run_router(
     if !take_router_lock(&lock_file, should_wait_for_lock)? {
         return Ok(());
     }
+    #[cfg(unix)]
+    let inherited_child_process_ids = if should_wait_for_lock {
+        Vec::new()
+    } else {
+        match process::list_child_process_ids() {
+            Ok(child_process_ids) => child_process_ids,
+            Err(child_process_list_error) => {
+                tracing::warn!(
+                    %child_process_list_error,
+                    "the children of this process could not be listed; the next router takes over"
+                );
+                match hand_over_router_to_next_process(&executable_path, runtime_directory) {
+                    Ok(()) => return Ok(()),
+                    Err(handover_error) => {
+                        tracing::error!(
+                            %handover_error,
+                            "the next router could not start; this router serves, and each child it could not list stays unreaped until it ends"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    };
 
     if let Some(data_directory) = data_directory.as_deref() {
         for migration_error in migrate_remote_listener_files(data_directory) {
@@ -845,7 +912,7 @@ pub fn run_router(
     );
     #[cfg(unix)]
     adopt_inherited_children(
-        process::list_child_process_ids(),
+        inherited_child_process_ids,
         &mut router_sessions,
         &router_events_sender,
     );
@@ -883,7 +950,7 @@ pub fn run_router(
     };
     open_remote_listener(&mut remote_state, &executable_watch, &router_events_sender);
 
-    loop {
+    let router_end: Result<(), Box<dyn std::error::Error>> = loop {
         match run_dispatch_loop(
             runtime_directory,
             config_directory,
@@ -896,7 +963,9 @@ pub fn run_router(
             &mut router_sessions,
             &mut remote_state,
         ) {
-            RouterExit::Idle => break,
+            RouterExit::Idle => break Ok(()),
+            #[cfg(unix)]
+            RouterExit::ChildReaperFailed(child_reap_error) => break Err(child_reap_error.into()),
             RouterExit::Restart => {
                 #[cfg(unix)]
                 {
@@ -920,12 +989,12 @@ pub fn run_router(
                 // The new router waits for the lock this one drops last; a
                 // spawn that failed leaves this router serving.
                 if hand_over_router_to_next_process(&executable_path, runtime_directory).is_ok() {
-                    break;
+                    break Ok(());
                 }
                 executable_watch.schedule_restart_retry();
             }
         }
-    }
+    };
 
     is_shutting_down.store(true, Ordering::SeqCst);
     // The accept loop sits blocked in `accept`. A bare connection wakes it,
@@ -944,7 +1013,7 @@ pub fn run_router(
     std::thread::sleep(DRAIN_GRACE_DURATION);
 
     drop(lock_file);
-    Ok(())
+    router_end
 }
 
 /// Take the router lock. `true` means this process holds it, and `false` that
@@ -1099,9 +1168,8 @@ fn restart_by_exec(executable_path: &Path, runtime_directory: &Path) -> std::io:
 /// Start the binary at `executable_path` as a new router over the same runtime directory,
 /// waiting for the lock this router still holds.
 ///
-/// The new router is detached with a process group of its own and no console,
-/// and its input and output go nowhere. An error means nothing was started.
-#[cfg(windows)]
+/// The new router is detached as [`process::configure_detached_process`] sets
+/// it. An error means nothing was started.
 fn hand_over_router_to_next_process(
     executable_path: &Path,
     runtime_directory: &Path,
@@ -1291,17 +1359,25 @@ fn ask_dispatcher(
 
 /// Serve events until the router ends, leaving the session list as it stood.
 ///
-/// Each turn of the loop first starts a probe of every session no thread
-/// watches, once `liveness_check_interval` has passed since the last round,
-/// and then answers every waiting request that can be answered. It then waits
-/// for the next event:
+/// Each turn of the loop first runs a liveness round once
+/// `liveness_check_interval` has passed since the last one: on Unix it reaps
+/// every exited child in [`RouterSessions::unwaited_child_process_ids`]
+/// through [`reap_unwaited_children`], and then it starts a probe of every
+/// session no thread watches. It then answers every waiting request that can
+/// be answered, and waits for the next event:
 ///
 /// - While no session is listed and no request waits, it waits
 ///   `idle_timeout`. A window that passes ends the loop with
-///   [`RouterExit::Idle`].
-/// - Otherwise it waits until the next probe round, the next moment a waiting
-///   request stops waiting for a description, or the next deadline, whichever
-///   comes first. With none of those due, it waits for the next event.
+///   [`RouterExit::Idle`]. A child process holds no session and keeps no loop
+///   running.
+/// - Otherwise it waits until the next liveness round, the next moment a
+///   waiting request stops waiting for a description, or the next deadline,
+///   whichever comes first. The next liveness round counts while a session no
+///   thread watches is listed, or while a child waits in
+///   [`RouterSessions::unwaited_child_process_ids`]. With none of those due, it
+///   waits for the next event.
+///
+/// A reap that fails ends the loop with [`RouterExit::ChildReaperFailed`].
 ///
 /// Each event goes through [`serve_router_event`]. Once
 /// [`RouterSessions::is_restart_pending`] holds and no request waits, the loop
@@ -1331,7 +1407,12 @@ fn run_dispatch_loop(
     loop {
         if Instant::now() >= next_liveness_check_at {
             #[cfg(unix)]
-            reap_unwaited_children(&mut router_sessions.unwaited_child_process_ids);
+            if let Err(child_reap_error) =
+                reap_unwaited_children(&mut router_sessions.unwaited_child_process_ids)
+            {
+                tracing::error!(%child_reap_error, "the router ends");
+                return RouterExit::ChildReaperFailed(child_reap_error);
+            }
             start_unwatched_session_probes(
                 runtime_directory,
                 router_sessions,
@@ -1445,7 +1526,7 @@ fn serve_router_event(
             }
         }
         #[cfg(unix)]
-        RouterEvent::InheritedChildExited { process_id } => {
+        RouterEvent::ChildProcessReaped { process_id } => {
             router_sessions
                 .inherited_child_process_ids
                 .remove(&process_id);
@@ -4061,7 +4142,7 @@ fn start_session_reaper_thread(
 
 /// Wait on every child in `child_process_ids`, each on a thread of its own
 /// that reaps the child once it has exited and then sends
-/// [`RouterEvent::InheritedChildExited`] with its process id.
+/// [`RouterEvent::ChildProcessReaped`] with its process id.
 ///
 /// `child_process_ids` are the children an earlier image of this process
 /// started, as [`process::list_child_process_ids`] lists them before this
@@ -4090,7 +4171,7 @@ fn adopt_inherited_children(
             .name("koshi-router-inherited-child".to_string())
             .spawn(move || {
                 process::wait_for_child_exit(unix_process_id);
-                let _ = exit_events_sender.send(RouterEvent::InheritedChildExited {
+                let _ = exit_events_sender.send(RouterEvent::ChildProcessReaped {
                     process_id: child_process_id,
                 });
             });
@@ -4114,25 +4195,59 @@ fn adopt_inherited_children(
     }
 }
 
-/// Reap every child in `unwaited_child_process_ids` that has exited, through
-/// `waitpid` with `WNOHANG`, and drop it from the set. A child that still runs
-/// stays in the set. An id that names no child of this process is dropped.
+/// Reap every exited child in `unwaited_child_process_ids` through `waitpid`
+/// with `WNOHANG`. A child that still runs stays in the set. A child that is
+/// reaped, an id that names no child of this process (`ECHILD`), and an id
+/// that [`convert_to_unix_process_id`] gives `None` for leave the set. A
+/// `waitpid` that a signal interrupts is made again.
+///
+/// # Errors
+/// A [`ChildReapError`] for the first `waitpid` that fails with any other
+/// error. That child, and every child not yet checked, stay in the set.
 ///
 /// Before → after: `{5000, 5001}`, where `5000` has exited and `5001` runs →
 /// `5000` is reaped, and the set is `{5001}`.
 #[cfg(unix)]
-fn reap_unwaited_children(unwaited_child_process_ids: &mut BTreeSet<u32>) {
+fn reap_unwaited_children(
+    unwaited_child_process_ids: &mut BTreeSet<u32>,
+) -> Result<(), ChildReapError> {
+    let mut child_reap_error = None;
     unwaited_child_process_ids.retain(|child_process_id| {
+        if child_reap_error.is_some() {
+            return true;
+        }
         let Some(unix_process_id) = convert_to_unix_process_id(*child_process_id) else {
             return false;
         };
-        let mut process_wait_status = 0;
-        // SAFETY: `waitpid` writes only to `process_wait_status`, which lives
-        // for the call. `WNOHANG` returns at once.
-        let waited_process_id =
-            unsafe { libc::waitpid(unix_process_id, &mut process_wait_status, libc::WNOHANG) };
-        waited_process_id == 0
+        loop {
+            let mut process_wait_status = 0;
+            // SAFETY: `waitpid` writes only to `process_wait_status`, which
+            // lives for the call. `WNOHANG` returns at once.
+            let waited_process_id =
+                unsafe { libc::waitpid(unix_process_id, &mut process_wait_status, libc::WNOHANG) };
+            if waited_process_id == 0 {
+                return true;
+            }
+            if waited_process_id > 0 {
+                return false;
+            }
+            let wait_error_code = std::io::Error::last_os_error()
+                .raw_os_error()
+                .expect("an error from `last_os_error` carries its OS error code");
+            match wait_error_code {
+                libc::EINTR => continue,
+                libc::ECHILD => return false,
+                _ => {
+                    child_reap_error = Some(ChildReapError {
+                        process_id: *child_process_id,
+                        wait_error_code,
+                    });
+                    return true;
+                }
+            }
+        }
     });
+    child_reap_error.map_or(Ok(()), Err)
 }
 
 /// Read the one ready line a session server prints. End of stream or a line

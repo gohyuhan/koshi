@@ -6,8 +6,8 @@
 
 /// Wait for a child process to exit, and leave the exit uncollected.
 ///
-/// [`child_exit::wait_until_child_has_exited`] blocks until the child has
-/// exited and leaves it a zombie for the code under test to reap.
+/// [`child_exit::wait_until_child_has_exited`] waits up to ten seconds for the
+/// child to exit and leaves it a zombie for the code under test to reap.
 #[cfg(unix)]
 pub mod child_exit;
 

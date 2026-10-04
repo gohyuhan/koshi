@@ -47,10 +47,10 @@ fn the_detach_flags_carry_their_win32_values() {
 
 /// How many running children the child-listing test starts: more than the 64
 /// ids the first read on macOS makes room for.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const LISTED_RUNNING_CHILD_COUNT: usize = 65;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn listing_the_child_processes_names_every_child_running_or_exited() {
     let mut running_children: Vec<std::process::Child> = (0..LISTED_RUNNING_CHILD_COUNT)
@@ -66,7 +66,7 @@ fn listing_the_child_processes_names_every_child_running_or_exited() {
         .expect("start a child that exits");
     wait_until_child_has_exited(exited_child.id());
 
-    let child_process_ids = list_child_process_ids();
+    let child_process_ids = list_child_process_ids().expect("child processes can be listed");
 
     let unlisted_running_child_process_ids: Vec<u32> = running_children
         .iter()
@@ -88,6 +88,17 @@ fn listing_the_child_processes_names_every_child_running_or_exited() {
         ),
         (Vec::new(), true, false),
         "every child is listed, and the process that started this one is not"
+    );
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[test]
+fn listing_child_processes_reports_unsupported_platforms() {
+    assert_eq!(
+        list_child_process_ids()
+            .expect_err("this platform has no child-listing implementation")
+            .kind(),
+        std::io::ErrorKind::Unsupported
     );
 }
 
