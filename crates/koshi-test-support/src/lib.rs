@@ -1,8 +1,15 @@
 //! Shared test utilities for the workspace.
 //!
 //! The crate provides event-sequence assertions, an in-memory PTY
-//! (pseudo-terminal) backend, layout checks, a rate-bounded byte pump, and a
-//! runtime-directory fixture.
+//! (pseudo-terminal) backend, layout checks, a rate-bounded byte pump, a
+//! runtime-directory fixture, and on Unix a wait for a child process to exit.
+
+/// Wait for a child process to exit, and leave the exit uncollected.
+///
+/// [`child_exit::wait_until_child_has_exited`] blocks until the child has
+/// exited and leaves it a zombie for the code under test to reap.
+#[cfg(unix)]
+pub mod child_exit;
 
 /// Assert ordered event sequences.
 ///

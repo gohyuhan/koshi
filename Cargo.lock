@@ -1396,6 +1396,7 @@ dependencies = [
  "koshi-core",
  "koshi-ipc",
  "koshi-pty",
+ "libc",
  "tempfile",
 ]
 

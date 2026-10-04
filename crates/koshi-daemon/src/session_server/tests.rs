@@ -26,6 +26,8 @@ use koshi_runtime::runtime::event::AttachAccepted;
 #[cfg(unix)]
 use koshi_runtime::runtime::event::SessionEnding;
 use koshi_runtime::runtime::pty_inbox::InboxSink;
+#[cfg(unix)]
+use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fake_pty::FakePtyBackend;
 #[cfg(unix)]
 use koshi_test_support::fixtures::{
@@ -1498,7 +1500,7 @@ const NO_SUCH_PROCESS: u32 = 2_147_483_646;
 #[cfg(unix)]
 const NEVER_OPENED_TERMINAL_FILE_DESCRIPTOR: i32 = 1_000_000;
 
-/// How long a test waits for a child of this process to exit, or to be reaped.
+/// How long a test waits for a child of this process to be reaped.
 #[cfg(unix)]
 const CHILD_WAIT_DURATION: Duration = Duration::from_secs(10);
 
@@ -1543,40 +1545,6 @@ fn wait_until_child_is_reaped(child_process_id: u32) {
         Some(libc::ESRCH),
         "child {child_process_id} is gone, not merely unreachable"
     );
-}
-
-/// Wait until `child_process_id` has exited, and leave it unreaped: a `waitid`
-/// with `WNOWAIT` names it once it has exited, and collects nothing.
-///
-/// # Panics
-/// Panics when [`CHILD_WAIT_DURATION`] runs out first, and when
-/// `child_process_id` names no child of this process.
-#[cfg(unix)]
-fn wait_until_child_has_exited(child_process_id: u32) {
-    let exit_deadline = Instant::now() + CHILD_WAIT_DURATION;
-    loop {
-        let mut child_signal_information: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let waitid_return_code = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child_process_id,
-                &mut child_signal_information,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        assert_eq!(
-            waitid_return_code, 0,
-            "child {child_process_id} is still this process's to wait for"
-        );
-        if u32::try_from(unsafe { child_signal_information.si_pid() }) == Ok(child_process_id) {
-            return;
-        }
-        assert!(
-            Instant::now() < exit_deadline,
-            "child {child_process_id} never exited"
-        );
-        std::thread::sleep(CHILD_POLL_INTERVAL_DURATION);
-    }
 }
 
 #[test]
@@ -1783,50 +1751,6 @@ fn ending_a_carried_child_signals_only_a_running_child_of_this_process() {
         (libc::WIFSIGNALED(wait_status), libc::WTERMSIG(wait_status)),
         (true, libc::SIGKILL),
         "the running child's group was ended with SIGKILL"
-    );
-}
-
-/// How many running children the child-listing test starts: more than the 64
-/// ids the first read on macOS makes room for.
-#[cfg(unix)]
-const LISTED_RUNNING_CHILD_COUNT: usize = 65;
-
-#[cfg(unix)]
-#[test]
-fn listing_the_child_processes_names_every_child_running_or_exited() {
-    let running_child_process_ids: Vec<u32> = (0..LISTED_RUNNING_CHILD_COUNT)
-        .map(|_| start_group_leading_child("sleep", &["100"]))
-        .collect();
-    let exited_child_process_id = start_group_leading_child("true", &[]);
-    wait_until_child_has_exited(exited_child_process_id);
-
-    let child_process_ids = list_child_process_ids();
-
-    let unlisted_running_child_process_ids: Vec<u32> = running_child_process_ids
-        .iter()
-        .copied()
-        .filter(|running_child_process_id| !child_process_ids.contains(running_child_process_id))
-        .collect();
-    let is_exited_child_listed = child_process_ids.contains(&exited_child_process_id);
-    let is_parent_listed = child_process_ids.contains(&std::os::unix::process::parent_id());
-    assert_eq!(end_carried_child(exited_child_process_id), None);
-    for running_child_process_id in running_child_process_ids {
-        let ended_child_process_id =
-            end_carried_child(running_child_process_id).expect("the running child is ended");
-        let mut wait_status: libc::c_int = 0;
-        assert_eq!(
-            unsafe { libc::waitpid(ended_child_process_id, &mut wait_status, 0) },
-            ended_child_process_id
-        );
-    }
-    assert_eq!(
-        (
-            unlisted_running_child_process_ids,
-            is_exited_child_listed,
-            is_parent_listed
-        ),
-        (Vec::new(), true, false),
-        "every child is listed, and the process that started this one is not"
     );
 }
 
