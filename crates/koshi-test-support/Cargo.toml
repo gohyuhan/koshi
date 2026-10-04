@@ -9,3 +9,6 @@ koshi-core.workspace = true
 koshi-ipc.workspace = true
 koshi-pty.workspace = true
 tempfile.workspace = true
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true

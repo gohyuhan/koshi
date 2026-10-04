@@ -84,6 +84,8 @@ use koshi_link::error::CliError;
 use koshi_link::router_client::RUNTIME_DIRECTORY_FLAG;
 
 #[cfg(unix)]
+use crate::process::{list_child_process_ids, wait_for_child_exit};
+#[cfg(unix)]
 use koshi_pty::kill::PtyChildKillControl;
 #[cfg(unix)]
 use koshi_pty::portable::{find_terminal_master_name, set_terminal_cloexec, PortablePtyBackend};
@@ -161,11 +163,6 @@ const CLIENTS_LEFT_WAIT_DURATION: Duration = Duration::from_secs(1);
 /// How long the wait for the told clients pauses between passes over the
 /// runtime inbox.
 const CLIENTS_LEFT_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(2);
-
-/// How many process ids the first read of this process's children makes room
-/// for. A read that fills that room is made again with twice the room.
-#[cfg(target_os = "macos")]
-const FIRST_CHILD_PROCESS_ID_BUFFER_COUNT: usize = 64;
 
 /// The directory listing every descriptor this process holds open, one entry
 /// per descriptor number.
@@ -1140,7 +1137,8 @@ fn take_panes_back(
 /// 1. Every open descriptor above standard error that names a pseudoterminal
 ///    master is closed, which hangs up the program running in that terminal.
 /// 2. Every child [`list_child_process_ids`] names is ended by
-///    [`end_carried_child`].
+///    [`end_carried_child`]. A listing that fails is logged, and no child is
+///    ended.
 /// 3. Every child ended there is reaped once it has exited, by
 ///    [`reap_ended_children`].
 ///
@@ -1171,90 +1169,20 @@ fn release_panes_without_header(
         );
         drop(unsafe { OwnedFd::from_raw_fd(open_file_descriptor) });
     }
-    let ended_process_ids: Vec<libc::pid_t> = list_child_process_ids()
-        .into_iter()
-        .filter_map(end_carried_child)
-        .collect();
-    reap_ended_children(ended_process_ids);
-}
-
-/// Every child process of this one, running or exited and not yet reaped: each
-/// process under `/proc` whose `stat` line names this process as its parent. A
-/// `/proc` that cannot be read gives an empty list.
-///
-/// The `stat` line holds the process id, the command name between `(` and the
-/// last `)`, the state, and then the parent's process id. Before → after:
-/// `4821 (sleep 30) S 4700 …` → `4821` is listed when this process is `4700`.
-#[cfg(target_os = "linux")]
-fn list_child_process_ids() -> Vec<u32> {
-    let this_process_id = std::process::id();
-    let Ok(process_entries) = std::fs::read_dir("/proc") else {
-        tracing::warn!("the child processes could not be listed; none is ended");
-        return Vec::new();
-    };
-    process_entries
-        .filter_map(Result::ok)
-        .filter_map(|process_entry| process_entry.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|process_id| {
-            let Ok(process_stat_line) = std::fs::read_to_string(format!("/proc/{process_id}/stat"))
-            else {
-                return false;
-            };
-            let Some((_, fields_after_command_name)) = process_stat_line.rsplit_once(')') else {
-                return false;
-            };
-            let parent_process_id = fields_after_command_name
-                .split_whitespace()
-                .nth(1)
-                .and_then(|parent_process_id_text| parent_process_id_text.parse::<u32>().ok());
-            parent_process_id == Some(this_process_id)
-        })
-        .collect()
-}
-
-/// Every child process of this one, running or exited and not yet reaped, as
-/// `proc_listchildpids` names them. A read that fills its buffer is made again
-/// with twice the room. A read the OS refuses gives an empty list.
-#[cfg(target_os = "macos")]
-fn list_child_process_ids() -> Vec<u32> {
-    let this_process_id = unsafe { libc::getpid() };
-    let mut child_process_ids: Vec<libc::pid_t> = vec![0; FIRST_CHILD_PROCESS_ID_BUFFER_COUNT];
-    loop {
-        let Ok(buffer_byte_count) =
-            libc::c_int::try_from(std::mem::size_of_val(child_process_ids.as_slice()))
-        else {
-            tracing::warn!("the child processes could not be listed; none is ended");
-            return Vec::new();
-        };
-        // SAFETY: the pointer and the byte count describe `child_process_ids`,
-        // which the kernel fills with process ids.
-        let listed_child_count = unsafe {
-            libc::proc_listchildpids(
-                this_process_id,
-                child_process_ids.as_mut_ptr().cast(),
-                buffer_byte_count,
-            )
-        };
-        let Ok(listed_child_count) = usize::try_from(listed_child_count) else {
-            tracing::warn!("the child processes could not be listed; none is ended");
-            return Vec::new();
-        };
-        if listed_child_count < child_process_ids.len() {
-            return child_process_ids[..listed_child_count]
-                .iter()
-                .filter_map(|child_process_id| u32::try_from(*child_process_id).ok())
-                .collect();
+    let ended_process_ids: Vec<libc::pid_t> = match list_child_process_ids() {
+        Ok(child_process_ids) => child_process_ids
+            .into_iter()
+            .filter_map(end_carried_child)
+            .collect(),
+        Err(child_process_list_error) => {
+            tracing::warn!(
+                %child_process_list_error,
+                "child processes from the previous image could not be listed"
+            );
+            Vec::new()
         }
-        child_process_ids.resize(child_process_ids.len() * 2, 0);
-    }
-}
-
-/// Every child process of this one. On this platform the list is always
-/// empty.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn list_child_process_ids() -> Vec<u32> {
-    tracing::warn!("the child processes cannot be listed on this platform; none is ended");
-    Vec::new()
+    };
+    reap_ended_children(ended_process_ids);
 }
 
 /// Every descriptor number this process holds open, read from
@@ -1295,17 +1223,7 @@ fn reap_ended_children(ended_process_ids: Vec<libc::pid_t>) {
         .name("koshi-inherited-child-reaper".to_string())
         .spawn(move || {
             for ended_process_id in ended_process_ids {
-                loop {
-                    let mut wait_status: libc::c_int = 0;
-                    let waited_process_id =
-                        unsafe { libc::waitpid(ended_process_id, &mut wait_status, 0) };
-                    let is_wait_interrupted = waited_process_id < 0
-                        && std::io::Error::last_os_error().kind()
-                            == std::io::ErrorKind::Interrupted;
-                    if !is_wait_interrupted {
-                        break;
-                    }
-                }
+                wait_for_child_exit(ended_process_id);
             }
         });
     if let Err(thread_spawn_error) = reaper_spawn_result {
