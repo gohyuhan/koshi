@@ -2,6 +2,16 @@
 
 Notable user-facing changes are recorded here.
 
+## v0.5.0
+
+- Pane placement mode moves tiled or stacked panes by keyboard or mouse. It previews the affected panes and supports swaps and insertions within or across tabs.
+- The kitty keyboard protocol preserves complete key events from the outer terminal through the session to pane programs. `extended-keys` controls whether panes receive enhanced key sequences on request or always.
+- Terminal programs can set horizontal margins and origin mode.
+- Clients that meet the session protocol reconnect to their sessions after an update.
+- `koshi update` verifies the release checksum before it installs an archive.
+- Updates migrate saved sessions, config files, remote access records, saved servers, certificates, and runtime files while preserving panes, programs, and scrollback.
+- Config schema 1 migrates to schema 2. Remote stores migrate from format 1 to format 2.
+
 ## v0.4.0
 
 - Programs in a pane can draw images. Koshi decodes Sixel, Kitty graphics protocol, and iTerm2 inline images, keeps each image at its cell placement through scrolling, scrollback, resizing, and screen switches, and paints it in every attached terminal that can show images. A terminal that cannot show images sees `terminal image unavailable` in the cells the image covers.

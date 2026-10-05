@@ -66,9 +66,11 @@ same machine or another one, and the panes are where you left them.
 - 🗂️ **Stacked panes** — place several panes in one slot and switch the expanded pane.
 - 🔍 **Fullscreen pane** — fill the tab with one pane and restore the prior layout.
 - 📐 **Resize** — move borders by keyboard or drag them with the mouse.
+- ↔️ **Pane placement** — move tiled and stacked panes with keyboard or mouse, preview affected panes, and swap or insert panes within or across tabs.
 - ↔️ **Pane gaps** — `pane { gap N }` leaves blank cells between split panes; every attached terminal sees the same gaps.
 - 📑 **Tabs** — create, close, move, and switch tabs.
 - ⌨️ **Multi-key shortcuts** — use key sequences, a configurable leader, hints, and conflict checks.
+- 🎹 **Complete keyboard events** — preserve key presses, repeats, releases, text, and modifiers from the outer terminal to pane programs through the kitty keyboard protocol.
 - 🔒 **Lock mode** — send keys directly to the active program.
 - 🖱️ **Mouse support** — focus panes, resize borders, scroll, and select text; `Shift`+drag selects even while a program owns the mouse.
 - 📋 **Clipboard copy** — copy mouse selections through OSC 52, including remote sessions.
@@ -510,10 +512,10 @@ so a session still on the old build shows beside the ones that moved.
 the koshi program on disk, and installs nothing. Use it after koshi is installed
 another way, such as by a package manager.
 
-Sessions started by koshi 0.3.0, 0.4.0, or 0.5.0-pr.1 support this live
-handoff. An update from 0.1.0 or 0.2.0 replaces the installed binary while
-existing sessions keep running their older build. End those sessions and start
-new ones to use the installed build.
+Sessions started by koshi 0.3.0, 0.4.0, 0.5.0-pr.1, 0.5.0-pr.2, or 0.5.0
+support this live handoff. An update from 0.1.0 or 0.2.0 replaces the
+installed binary while existing sessions keep running their older build. End
+those sessions and start new ones to use the installed build.
 
 A client attached while the update runs comes back to its session by itself. If
 the restarted session does not speak that client's protocol version, the client

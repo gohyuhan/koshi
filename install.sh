@@ -46,7 +46,7 @@ esac
 write_installation_message "Detected OS: ${operating_system_slug}, Architecture: ${architecture_slug}"
 
 # Version to install (bump before each release)
-release_version="v0.4.0"
+release_version="v0.5.0"
 
 write_installation_message "Installing koshi version: ${release_version}"
 

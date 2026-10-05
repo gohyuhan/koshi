@@ -3,7 +3,7 @@
 $ErrorActionPreference = "Stop"
 
 # Release version to install
-$release_version = "v0.4.0"
+$release_version = "v0.5.0"
 
 Write-Host "Installing koshi version: $release_version" -ForegroundColor Cyan
 
