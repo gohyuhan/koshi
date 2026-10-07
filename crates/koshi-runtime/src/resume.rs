@@ -9,18 +9,18 @@
 //! The reader converts headers written by older builds into this shape before
 //! it reads the body.
 //!
-//! The **body** ([`ResumeBody`]) carries the fields that type names. Its shape
-//! does change, so
-//! [`ResumeHeader::resume_format`] numbers it: [`RESUME_FORMAT`] is what this build
-//! writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and [`read_resume_body`] refuses
-//! anything outside that range. This build writes format 4 and converts formats
-//! 1 through 3 through adjacent migration steps before it restores the body.
+//! The **body** ([`ResumeBody`]) carries the fields that type names.
+//! [`ResumeHeader::resume_format`] numbers its shape: [`RESUME_FORMAT`] is what
+//! this build writes, [`RESUME_FORMAT_MIN`] the oldest it reads, and
+//! [`read_resume_body`] refuses anything outside that range. This build writes
+//! format 5 and converts formats 1 through 4 through adjacent migration steps
+//! before it restores the body.
 //!
 //! Each pane's screen is one [`CarriedPaneState`]. An unreadable pane state is
 //! left out while other panes keep their screens and the session keeps its layout.
 //!
 //! Example: a server holding two panes writes
-//! `{"header":{"resume_format":4,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":5000,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
+//! `{"header":{"resume_format":5,"session_id":…,"session_name":"quiet-lake","carried_panes":[{"pane_id":…,"process_id":5000,"row_count":20,"column_count":78,"terminal_fd":9,"terminal_name":"/dev/ttys009","exit_status":null},…]},"raw_body":{…}}`.
 //! The next image reads the header, checks that descriptor 9 is still the master of `/dev/ttys009`,
 //! takes it and process 5000 back as that pane, then reads the body and puts the pane's screen
 //! back under it.
@@ -44,15 +44,17 @@ use serde_json::value::RawValue;
 
 mod migration;
 
-/// The resume-file format this build writes.
-///
-/// The value and the rule it follows live in
-/// [`koshi_core::compat::RESUME_FORMAT`]. Named by its full
-/// path here, since this constant carries the same name.
+/// The resume-file format this build writes: the `maximum_version` of
+/// [`koshi_core::compat::RESUME_FORMAT`], which also states the rule the value
+/// follows.
 pub const RESUME_FORMAT: u32 = koshi_core::compat::RESUME_FORMAT.maximum_version;
 
 /// The oldest resume-file format this build reads.
 pub const RESUME_FORMAT_MIN: u32 = koshi_core::compat::RESUME_FORMAT.minimum_version;
+
+/// The oldest resume-file format whose header has the [`ResumeHeader`] shape.
+/// Formats 1 through 3 use the previous header shape.
+const OLDEST_FORMAT_WITH_CURRENT_HEADER: u32 = 4;
 
 /// The line a pane shows when the session came back but that pane's screen
 /// did not: the program in it keeps running on a blank screen.
@@ -280,7 +282,7 @@ struct EncodedPaneStates {
     refused_pane_keys: Vec<String>,
 }
 
-/// The same two halves as [`ResumeFile`], borrowed for the write so no pane's
+/// The same two halves as [`ResumeFile`], borrowed for the write: no pane's
 /// grid or scrollback is copied on its way to the disk.
 #[derive(Debug, Serialize)]
 struct ResumeFileReference<'a> {
@@ -323,7 +325,8 @@ pub fn write_resume_file(
 ///
 /// # Errors
 /// Returns [`StorageError::Io`] when the file cannot be read, and
-/// [`StorageError::Corrupt`] when its bytes are not a resume file.
+/// [`StorageError::Corrupt`] when its bytes are not a resume file or when a
+/// header in the previous shape names a format outside 1 through 3.
 pub fn read_resume_header(
     resume_file_path: &Path,
 ) -> Result<(ResumeHeader, Box<RawValue>), StorageError> {
@@ -344,11 +347,15 @@ pub fn read_resume_header(
                 resume_file_path.display()
             ),
         })?;
-    if !(RESUME_FORMAT_MIN..RESUME_FORMAT).contains(&previous_resume_file.header.format) {
+    if !(RESUME_FORMAT_MIN..OLDEST_FORMAT_WITH_CURRENT_HEADER)
+        .contains(&previous_resume_file.header.format)
+    {
         return Err(StorageError::Corrupt {
             detail: format!(
-                "resume format {} is outside the {} to {} range this build reads",
-                previous_resume_file.header.format, RESUME_FORMAT_MIN, RESUME_FORMAT
+                "resume format {} is outside the {} to {} range of the previous header shape",
+                previous_resume_file.header.format,
+                RESUME_FORMAT_MIN,
+                OLDEST_FORMAT_WITH_CURRENT_HEADER - 1
             ),
         });
     }
@@ -385,7 +392,7 @@ pub fn read_resume_header(
 /// appears twice or cannot be read is logged and left out. Other panes keep
 /// their screens and the session keeps its layout.
 ///
-/// Example: a format 4 body carries panes `A` and `B`, where `B`'s screen
+/// Example: a format 5 body carries panes `A` and `B`, where `B`'s screen
 /// holds a Kitty placement no upload holds. The returned body carries `A`
 /// alone, and a warning names `B`.
 ///

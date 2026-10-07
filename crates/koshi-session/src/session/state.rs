@@ -1,12 +1,12 @@
 //! Session state model: the aggregate root a server process owns for each
 //! running session.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use koshi_core::{
-    constant::MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
-    geometry::{PixelCellSize, Size},
+    constant::{MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT},
+    geometry::{FloatingPaneSize, PixelCellSize, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
 };
 use koshi_layout::tree::LayoutNode;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     client::{Client, ClientRegistry},
-    error::{InvalidTransition, SessionConsistencyError},
+    error::{FloatingSetError, InvalidTransition, SessionConsistencyError},
     session::lifecycle::{SessionLifecycle, SessionLifecycleEvent},
 };
 
@@ -120,8 +120,65 @@ impl Tab {
     }
 }
 
-/// One running session: the aggregate root owning the tabs, the pane
-/// registry, and the attached-client registry.
+/// One floating pane: the pane, the size it asks for, and the size it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingMember {
+    /// The pane: a record in [`Session::panes`] that no tab's layout holds as
+    /// a leaf.
+    pub pane_id: PaneId,
+    /// The size the pane asks for, per axis.
+    pub desired_size: FloatingPaneSize,
+    /// The size in cells that the pane holds.
+    pub solved_size: Size,
+}
+
+/// The floating panes of one session, in creation order: a new member is
+/// appended, and a removal keeps the order of the rest.
+///
+/// [`FloatingSet::add_member`] holds each pane once and at most
+/// [`MAX_FLOATING_PANES_PER_SESSION`] members.
+/// [`Session::remove_floating_member`] removes a member and every client's
+/// view of it.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingSet {
+    members: Vec<FloatingMember>,
+}
+
+impl FloatingSet {
+    /// Every member, in creation order.
+    #[must_use]
+    pub fn list_members(&self) -> &[FloatingMember] {
+        &self.members
+    }
+
+    /// Append `floating_member` as the newest member.
+    ///
+    /// # Errors
+    ///
+    /// [`FloatingSetError::DuplicatePane`] when the set already holds
+    /// `floating_member.pane_id`, else [`FloatingSetError::TooManyPanes`] when
+    /// the set holds [`MAX_FLOATING_PANES_PER_SESSION`] members or more. The set
+    /// does not change on an error.
+    pub fn add_member(&mut self, floating_member: FloatingMember) -> Result<(), FloatingSetError> {
+        if self
+            .members
+            .iter()
+            .any(|member| member.pane_id == floating_member.pane_id)
+        {
+            return Err(FloatingSetError::DuplicatePane {
+                pane_id: floating_member.pane_id,
+            });
+        }
+        if self.members.len() >= MAX_FLOATING_PANES_PER_SESSION {
+            return Err(FloatingSetError::TooManyPanes);
+        }
+        self.members.push(floating_member);
+        Ok(())
+    }
+}
+
+/// One running session: the aggregate root owning the tabs, the floating
+/// panes, the pane registry, and the attached-client registry.
 ///
 /// Anything one client may see differently from another — focus, viewport,
 /// input mode — lives on that client's entry in [`ClientRegistry`], never as a
@@ -141,8 +198,11 @@ pub struct Session {
     /// lives on each tab as its display index, and reordering tabs moves no map
     /// entry.
     pub tabs: BTreeMap<TabId, Tab>,
-    /// Runtime metadata for every pane in every tab; layout trees hold
-    /// only the ids.
+    /// The session's floating panes, in creation order. Each attached client
+    /// holds its own view of each one.
+    pub floating_set: FloatingSet,
+    /// Runtime metadata for every pane in every tab and every floating pane.
+    /// Layout trees and the floating set name each pane by its id.
     pub panes: PaneRegistry,
     /// The clients currently attached.
     pub clients: ClientRegistry,
@@ -181,6 +241,7 @@ impl Session {
             session_name,
             created_at,
             tabs: BTreeMap::new(),
+            floating_set: FloatingSet::default(),
             panes: PaneRegistry::new(),
             clients: client_registry,
             should_start_locked: false,
@@ -304,6 +365,24 @@ impl Session {
             .and_then(Client::get_cell_size)
     }
 
+    /// Remove `pane_id` from the floating set, keeping the order of the other
+    /// members, and from every attached client's floating view: its stored
+    /// view, its floating focus order entry, and a floating focus on it.
+    /// Returns the removed member, or `None`, changing nothing, when `pane_id`
+    /// is not floating.
+    pub fn remove_floating_member(&mut self, pane_id: PaneId) -> Option<FloatingMember> {
+        let member_index = self
+            .floating_set
+            .members
+            .iter()
+            .position(|floating_member| floating_member.pane_id == pane_id)?;
+        let floating_member = self.floating_set.members.remove(member_index);
+        for client in self.clients.list_attached_clients_mut() {
+            client.remove_floating_pane_view(pane_id);
+        }
+        Some(floating_member)
+    }
+
     /// Request shutdown: move a `Starting`, `Running` or `Detaching` session to
     /// `Stopping`. State is retained: stopping destroys no tabs, panes or
     /// clients.
@@ -323,19 +402,27 @@ impl Session {
     /// Check every cross-store invariant and return *all* violations in one
     /// pass, or `Ok(())` when the session is internally consistent.
     ///
-    /// Checks each tab's map key, lifecycle and bar index; every layout leaf
-    /// against the pane registry and every registry record against the layout
-    /// trees; and each attached client's session id, active tab, focus and
-    /// zoom. See [`SessionConsistencyError`] for the individual checks. The
-    /// returned violations arrive in a fixed order: the checks run in the order
-    /// listed above, and each one walks its own subjects by id or by bar index.
-    /// One session always reports the same list.
+    /// The checks run in this order:
+    ///
+    /// 1. Each tab's map key, then each of its layout leaves against the pane
+    ///    registry, tab by tab.
+    /// 2. Each bar index that two tabs claim.
+    /// 3. Each pane that two layouts hold.
+    /// 4. The number of floating members against
+    ///    [`MAX_FLOATING_PANES_PER_SESSION`], then each floating member against
+    ///    the pane registry, the other members and the layouts.
+    /// 5. Each registry record against the layouts and the floating members.
+    /// 6. Each attached client's session id, active tab, focus, zoom, floating
+    ///    views, floating focus order and floating focus.
+    ///
+    /// See [`SessionConsistencyError`] for the individual checks. Each check
+    /// walks its subjects by id, by bar index, or in floating focus order: one
+    /// session reports the same list on every call.
     pub fn validate_session_consistency(&self) -> Result<(), Vec<SessionConsistencyError>> {
         let mut consistency_violations = vec![];
-        // Pane id -> the tabs whose layout holds it as a leaf. Built once here,
-        // then read to check the leaf/registry relationship in both
-        // directions. Sorted: two violations from one walk come out in the
-        // same order.
+        // Pane id -> the tabs whose layout holds it as a leaf, in pane id
+        // order. Built once here, then read to check the leaf/registry
+        // relationship in both directions.
         let mut tab_ids_by_pane_id: BTreeMap<PaneId, Vec<TabId>> = BTreeMap::new();
         // Bar position -> how many tabs claim it.
         let mut tab_count_by_index: BTreeMap<usize, usize> = BTreeMap::new();
@@ -383,7 +470,7 @@ impl Session {
             }
         }
 
-        // A pane belongs to exactly one tab at one position.
+        // A pane is a layout leaf at most once across all tabs.
         for (pane_id, tab_ids) in &tab_ids_by_pane_id {
             if tab_ids.len() > 1 {
                 consistency_violations.push(SessionConsistencyError::PaneInMultipleLayouts {
@@ -393,14 +480,57 @@ impl Session {
             }
         }
 
-        // Every live or `Exited` record must be a leaf somewhere; a `Removed`
-        // record must not linger in the registry at all.
+        // The floating set holds at most `MAX_FLOATING_PANES_PER_SESSION`
+        // entries.
+        let floating_member_count = self.floating_set.list_members().len();
+        if floating_member_count > MAX_FLOATING_PANES_PER_SESSION {
+            consistency_violations.push(SessionConsistencyError::TooManyFloatingPanes {
+                member_count: floating_member_count,
+            });
+        }
+
+        // Pane id -> how many times the floating set lists it.
+        let mut floating_member_count_by_pane_id: BTreeMap<PaneId, usize> = BTreeMap::new();
+        for floating_member in self.floating_set.list_members() {
+            *floating_member_count_by_pane_id
+                .entry(floating_member.pane_id)
+                .or_insert(0) += 1;
+        }
+
+        // A floating member is a registry pane that is not `Removed`, listed
+        // once, and a leaf of no layout.
+        for (&pane_id, &member_count) in &floating_member_count_by_pane_id {
+            match self.panes.get_pane_record_by_id(pane_id) {
+                None => consistency_violations
+                    .push(SessionConsistencyError::FloatingPaneNotInRegistry { pane_id }),
+                Some(pane_record) if *pane_record.get_lifecycle() == PaneLifecycle::Removed => {
+                    consistency_violations
+                        .push(SessionConsistencyError::RemovedPaneInFloatingSet { pane_id });
+                }
+                Some(_) => {}
+            }
+            if member_count > 1 {
+                consistency_violations
+                    .push(SessionConsistencyError::DuplicateFloatingPane { pane_id });
+            }
+            if let Some(tab_ids) = tab_ids_by_pane_id.get(&pane_id) {
+                consistency_violations.push(SessionConsistencyError::FloatingPaneInLayout {
+                    pane_id,
+                    tab_ids: tab_ids.clone(),
+                });
+            }
+        }
+
+        // Every live or `Exited` record must be a leaf somewhere or a floating
+        // member; a `Removed` record must not linger in the registry at all.
         for pane_record in self.panes.list_pane_records() {
             if *pane_record.get_lifecycle() == PaneLifecycle::Removed {
                 consistency_violations.push(SessionConsistencyError::LingeringRemovedRecord {
                     pane_id: pane_record.get_pane_id(),
                 });
-            } else if !tab_ids_by_pane_id.contains_key(&pane_record.get_pane_id()) {
+            } else if !tab_ids_by_pane_id.contains_key(&pane_record.get_pane_id())
+                && !floating_member_count_by_pane_id.contains_key(&pane_record.get_pane_id())
+            {
                 consistency_violations.push(SessionConsistencyError::OrphanedPaneRecord {
                     pane_id: pane_record.get_pane_id(),
                     pane_lifecycle: *pane_record.get_lifecycle(),
@@ -430,7 +560,11 @@ impl Session {
 
             // Each remembered focus must point at a real pane that is a leaf of
             // the tab it was focused in.
-            for (&tab_id, &focused_pane_id) in client.list_focused_pane_ids() {
+            for (&tab_id, &focused_pane_id) in client
+                .list_focused_pane_ids()
+                .iter()
+                .collect::<BTreeMap<_, _>>()
+            {
                 if self.panes.get_pane_record_by_id(focused_pane_id).is_none() {
                     consistency_violations.push(SessionConsistencyError::FocusPaneNotInRegistry {
                         client_id: client.get_client_id(),
@@ -458,7 +592,11 @@ impl Session {
             // The pane a client is zoomed on must have a registry record and be
             // a leaf of the tab it is zoomed in. Removing a pane drops every
             // zoom on it.
-            for (&tab_id, &zoomed_pane_id) in client.list_zoomed_pane_ids() {
+            for (&tab_id, &zoomed_pane_id) in client
+                .list_zoomed_pane_ids()
+                .iter()
+                .collect::<BTreeMap<_, _>>()
+            {
                 let is_live_leaf = self.panes.get_pane_record_by_id(zoomed_pane_id).is_some()
                     && self
                         .tabs
@@ -470,6 +608,76 @@ impl Session {
                         tab_id,
                         pane_id: zoomed_pane_id,
                     });
+                }
+            }
+
+            // Each stored floating view must name a floating member.
+            for &viewed_pane_id in client
+                .list_floating_pane_views()
+                .keys()
+                .collect::<BTreeSet<_>>()
+            {
+                if !floating_member_count_by_pane_id.contains_key(&viewed_pane_id) {
+                    consistency_violations.push(
+                        SessionConsistencyError::FloatingViewTargetMissing {
+                            client_id: client.get_client_id(),
+                            pane_id: viewed_pane_id,
+                        },
+                    );
+                }
+            }
+
+            // Each floating focus order entry must name a floating member, once.
+            let mut listed_pane_ids: BTreeSet<PaneId> = BTreeSet::new();
+            for &ordered_pane_id in client.list_floating_pane_focus_order() {
+                if !floating_member_count_by_pane_id.contains_key(&ordered_pane_id) {
+                    consistency_violations.push(
+                        SessionConsistencyError::FloatingFocusOrderTargetMissing {
+                            client_id: client.get_client_id(),
+                            pane_id: ordered_pane_id,
+                        },
+                    );
+                }
+                if !listed_pane_ids.insert(ordered_pane_id) {
+                    consistency_violations.push(
+                        SessionConsistencyError::DuplicateFloatingFocusOrderEntry {
+                            client_id: client.get_client_id(),
+                            pane_id: ordered_pane_id,
+                        },
+                    );
+                }
+            }
+
+            // The floating focus must name a floating member that is last in
+            // the floating focus order and that this client has not minimized.
+            if let Some(focused_floating_pane_id) = client.get_focused_floating_pane_id() {
+                if !floating_member_count_by_pane_id.contains_key(&focused_floating_pane_id) {
+                    consistency_violations.push(
+                        SessionConsistencyError::FocusedFloatingPaneMissing {
+                            client_id: client.get_client_id(),
+                            pane_id: focused_floating_pane_id,
+                        },
+                    );
+                }
+                if client.list_floating_pane_focus_order().last() != Some(&focused_floating_pane_id)
+                {
+                    consistency_violations.push(
+                        SessionConsistencyError::FocusedFloatingPaneNotOnTop {
+                            client_id: client.get_client_id(),
+                            pane_id: focused_floating_pane_id,
+                        },
+                    );
+                }
+                if client
+                    .get_floating_pane_view(focused_floating_pane_id)
+                    .is_minimized
+                {
+                    consistency_violations.push(
+                        SessionConsistencyError::FocusedFloatingPaneMinimized {
+                            client_id: client.get_client_id(),
+                            pane_id: focused_floating_pane_id,
+                        },
+                    );
                 }
             }
         }

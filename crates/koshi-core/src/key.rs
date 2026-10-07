@@ -35,18 +35,43 @@ pub struct BindingModifierFlags(u8);
 /// Every bit the four modifiers occupy; the rest name nothing.
 const BINDING_MODIFIER_BITS: u8 = 0b0000_1111;
 
+/// The bit pattern [`BindingModifierFlags::try_from`] refused: it sets a bit
+/// outside the four modifier bits.
+///
+/// Displays as `modifier bits 0b00010000 name no modifier; the modifiers are
+/// 0b00001111`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindingModifierFlagsError {
+    /// The refused bit pattern.
+    pub modifier_bits: u8,
+}
+
+impl fmt::Display for BindingModifierFlagsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "modifier bits {:#010b} name no modifier; the modifiers are {BINDING_MODIFIER_BITS:#010b}",
+            self.modifier_bits
+        )
+    }
+}
+
+impl std::error::Error for BindingModifierFlagsError {}
+
 impl TryFrom<u8> for BindingModifierFlags {
-    type Error = String;
+    type Error = BindingModifierFlagsError;
 
     /// Accepts a bit pattern drawn only from the four modifier bits: Control,
     /// Alt, Shift and Super.
+    ///
+    /// # Errors
+    /// Returns [`BindingModifierFlagsError`] when `modifier_bits` sets any bit
+    /// outside `0b00001111`.
     fn try_from(modifier_bits: u8) -> Result<Self, Self::Error> {
         if modifier_bits & !BINDING_MODIFIER_BITS == 0 {
             Ok(Self(modifier_bits))
         } else {
-            Err(format!(
-                "modifier bits {modifier_bits:#010b} name no modifier; the modifiers are {BINDING_MODIFIER_BITS:#010b}"
-            ))
+            Err(BindingModifierFlagsError { modifier_bits })
         }
     }
 }

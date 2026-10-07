@@ -1,9 +1,9 @@
 //! Attached clients: the identity and per-client view state of one session.
 //!
-//! A session accepts several clients at once. Focus, viewport and input modes
-//! live on each client; the session holds only this registry. Each client also
-//! carries what the server set at attach: its origin, its generated label and
-//! its color.
+//! A session accepts several clients at once. Focus, viewport, input modes and
+//! the view of each floating pane live on each client; the session holds only
+//! this registry. Each client also carries what the server set at attach: its
+//! origin, its generated label and its color.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -13,7 +13,7 @@ use std::{
 pub use koshi_core::client::ClientOrigin;
 use koshi_core::{
     command::Selection,
-    geometry::{PaneArea, PixelCellSize, Size},
+    geometry::{PaneArea, PixelCellSize, Point, Size},
     ids::{ClientId, PaneId, SessionId, TabId},
     lock::LockMode,
 };
@@ -29,6 +29,24 @@ pub const fn compute_default_pane_area_size(viewport_size: Size) -> Size {
         column_count: viewport_size.column_count,
         row_count: viewport_size.row_count.saturating_sub(2),
     }
+}
+
+/// One client's view of one floating pane: its placement, and whether this
+/// client pinned or minimized it.
+///
+/// A client that stores no view of a floating pane reads this type's
+/// `Default`: no placement, not pinned, not minimized.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FloatingPaneView {
+    /// The top-left cell of the pane's outer rectangle, counted from this
+    /// client's pane-area origin. `None` when this client set no placement.
+    pub placement: Option<Point>,
+    /// Whether this client pinned the pane.
+    /// [`Client::set_floating_pane_placement`] refuses a pinned pane.
+    pub is_pinned: bool,
+    /// Whether this client minimized the pane.
+    /// [`Client::focus_floating_pane`] refuses a minimized pane.
+    pub is_minimized: bool,
 }
 
 /// One attached client: a single terminal connected to a session, holding the
@@ -93,6 +111,18 @@ pub struct Client {
     zoomed_pane_id_by_tab_id: HashMap<TabId, PaneId>,
     /// Generation of this client's committed geometry and view.
     placement_revision: u64,
+    /// This client's view of each floating pane, keyed by pane id. The map
+    /// holds only views that differ from [`FloatingPaneView::default`]: a pane
+    /// with no entry reads as no placement, not pinned and not minimized.
+    floating_pane_view_by_pane_id: HashMap<PaneId, FloatingPaneView>,
+    /// The floating panes this client focused or restored, least recently
+    /// first. Focusing or restoring a pane moves it to the end.
+    floating_pane_focus_order: Vec<PaneId>,
+    /// The floating pane that holds this client's focus, or `None` when no
+    /// floating pane does. A set value is the last entry of
+    /// `floating_pane_focus_order` and names a pane this client has not
+    /// minimized.
+    focused_floating_pane_id: Option<PaneId>,
 }
 
 impl Client {
@@ -134,6 +164,9 @@ impl Client {
             selection_by_pane_id: HashMap::new(),
             zoomed_pane_id_by_tab_id: HashMap::new(),
             placement_revision: 0,
+            floating_pane_view_by_pane_id: HashMap::new(),
+            floating_pane_focus_order: Vec::new(),
+            focused_floating_pane_id: None,
         }
     }
 
@@ -441,6 +474,131 @@ impl Client {
     /// Set where this client's current connection came from.
     pub fn update_origin(&mut self, origin: ClientOrigin) {
         self.origin = origin;
+    }
+
+    /// This client's view of `pane_id`: the stored view, or
+    /// [`FloatingPaneView::default`] when this client stores none.
+    #[must_use]
+    pub fn get_floating_pane_view(&self, pane_id: PaneId) -> FloatingPaneView {
+        self.floating_pane_view_by_pane_id
+            .get(&pane_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Every floating pane view this client stores, keyed by pane id. Each one
+    /// differs from [`FloatingPaneView::default`].
+    pub(crate) fn list_floating_pane_views(&self) -> &HashMap<PaneId, FloatingPaneView> {
+        &self.floating_pane_view_by_pane_id
+    }
+
+    /// The floating panes this client focused or restored, least recently
+    /// first.
+    #[must_use]
+    pub fn list_floating_pane_focus_order(&self) -> &[PaneId] {
+        &self.floating_pane_focus_order
+    }
+
+    /// The floating pane that holds this client's focus, or `None` when no
+    /// floating pane does.
+    #[must_use]
+    pub fn get_focused_floating_pane_id(&self) -> Option<PaneId> {
+        self.focused_floating_pane_id
+    }
+
+    /// Focus `pane_id` for this client and move it to the end of the floating
+    /// focus order, appending it when absent. `[a, b, c]` focusing `b` →
+    /// `[a, c, b]`. Does not check that `pane_id` is a floating pane.
+    ///
+    /// Returns `false`, changing nothing, when this client minimized `pane_id`.
+    #[must_use]
+    pub fn focus_floating_pane(&mut self, pane_id: PaneId) -> bool {
+        if self.get_floating_pane_view(pane_id).is_minimized {
+            return false;
+        }
+        self.raise_and_focus_floating_pane(pane_id);
+        true
+    }
+
+    /// Minimize `pane_id` for this client. The pane keeps its place in the
+    /// floating focus order. A floating focus on `pane_id` clears. Does not
+    /// check that `pane_id` is a floating pane.
+    pub fn minimize_floating_pane(&mut self, pane_id: PaneId) {
+        let mut floating_pane_view = self.get_floating_pane_view(pane_id);
+        floating_pane_view.is_minimized = true;
+        self.set_floating_pane_view(pane_id, floating_pane_view);
+        if self.focused_floating_pane_id == Some(pane_id) {
+            self.focused_floating_pane_id = None;
+        }
+    }
+
+    /// Restore `pane_id` for this client: clear its minimized state, focus it
+    /// and move it to the end of the floating focus order. A pane this client
+    /// never focused is appended. Does not check that `pane_id` is a floating
+    /// pane.
+    pub fn restore_floating_pane(&mut self, pane_id: PaneId) {
+        let mut floating_pane_view = self.get_floating_pane_view(pane_id);
+        floating_pane_view.is_minimized = false;
+        self.set_floating_pane_view(pane_id, floating_pane_view);
+        self.raise_and_focus_floating_pane(pane_id);
+    }
+
+    /// Set whether this client pins `pane_id`. A pinned pane refuses
+    /// [`set_floating_pane_placement`](Self::set_floating_pane_placement). The
+    /// focus and the floating focus order stay as they are. Does not check that
+    /// `pane_id` is a floating pane.
+    pub fn set_floating_pane_pinned(&mut self, pane_id: PaneId, is_pinned: bool) {
+        let mut floating_pane_view = self.get_floating_pane_view(pane_id);
+        floating_pane_view.is_pinned = is_pinned;
+        self.set_floating_pane_view(pane_id, floating_pane_view);
+    }
+
+    /// Store `placement` as this client's placement of `pane_id`: the top-left
+    /// cell of the pane's outer rectangle, counted from this client's pane-area
+    /// origin. Does not check that `pane_id` is a floating pane.
+    ///
+    /// Returns `false`, changing nothing, when this client pinned `pane_id`.
+    #[must_use]
+    pub fn set_floating_pane_placement(&mut self, pane_id: PaneId, placement: Point) -> bool {
+        let mut floating_pane_view = self.get_floating_pane_view(pane_id);
+        if floating_pane_view.is_pinned {
+            return false;
+        }
+        floating_pane_view.placement = Some(placement);
+        self.set_floating_pane_view(pane_id, floating_pane_view);
+        true
+    }
+
+    /// Drop `pane_id` from this client's floating view: its stored view, its
+    /// floating focus order entry, and the floating focus when it names
+    /// `pane_id`.
+    pub(crate) fn remove_floating_pane_view(&mut self, pane_id: PaneId) {
+        self.floating_pane_view_by_pane_id.remove(&pane_id);
+        self.floating_pane_focus_order
+            .retain(|&ordered_pane_id| ordered_pane_id != pane_id);
+        if self.focused_floating_pane_id == Some(pane_id) {
+            self.focused_floating_pane_id = None;
+        }
+    }
+
+    /// Move `pane_id` to the end of the floating focus order, appending it when
+    /// absent, and focus it.
+    fn raise_and_focus_floating_pane(&mut self, pane_id: PaneId) {
+        self.floating_pane_focus_order
+            .retain(|&ordered_pane_id| ordered_pane_id != pane_id);
+        self.floating_pane_focus_order.push(pane_id);
+        self.focused_floating_pane_id = Some(pane_id);
+    }
+
+    /// Store `floating_pane_view` as this client's view of `pane_id`, or drop
+    /// the stored view when `floating_pane_view` is the default.
+    fn set_floating_pane_view(&mut self, pane_id: PaneId, floating_pane_view: FloatingPaneView) {
+        if floating_pane_view == FloatingPaneView::default() {
+            self.floating_pane_view_by_pane_id.remove(&pane_id);
+        } else {
+            self.floating_pane_view_by_pane_id
+                .insert(pane_id, floating_pane_view);
+        }
     }
 }
 

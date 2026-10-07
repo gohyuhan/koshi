@@ -482,9 +482,8 @@ impl Server {
             .session_by_id
             .get_mut(&session_id)
             .expect("session located above");
-        // The pane is in the registry but no tab's layout holds it — a
-        // registry↔layout desync (`OrphanedPaneRecord`) no valid state produces.
-        // Drop the exit: a data desync must not crash the runtime.
+        // No tab's layout holds the pane: the pane is a floating member, or its
+        // record is an `OrphanedPaneRecord`. The exit is dropped.
         let Ok(tab_id) = Self::resolve_tab_id_for_pane(session, pane_id) else {
             return Vec::new();
         };

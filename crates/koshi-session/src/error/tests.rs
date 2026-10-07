@@ -1,11 +1,13 @@
 //! Tests for the session domain errors: their `Display` wording and their
 //! equality.
 //!
-//! The `Display` of an id-bearing variant embeds a random UUID, so those tests
-//! pin the exact wording against the same ids interpolated the same way — this
-//! locks the message template and the field order (the ids differ, so a swapped
-//! field would change the string and fail), while [`SessionConsistencyError::DuplicateTabIndex`]
-//! carries no id and is checked against a fixed literal.
+//! The `Display` of an id-bearing variant embeds a random UUID. Each test of
+//! such a variant builds the expected message from the same ids, interpolated
+//! the same way, and gives every id field a different id: a message with two
+//! fields swapped fails. [`SessionConsistencyError::DuplicateTabIndex`],
+//! [`SessionConsistencyError::TooManyFloatingPanes`] and
+//! [`FloatingSetError::TooManyPanes`] carry no id and are checked against a fixed
+//! literal.
 
 use std::time::SystemTime;
 
@@ -37,58 +39,57 @@ fn duplicate_tab_index_display_names_the_index() {
 
 #[test]
 fn pane_not_in_registry_display_names_the_tab_and_pane() {
-    let tab = TabId::new();
-    let pane = PaneId::new();
-    let consistency_error = SessionConsistencyError::PaneNotInRegistry {
-        tab_id: tab,
-        pane_id: pane,
-    };
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let consistency_error = SessionConsistencyError::PaneNotInRegistry { tab_id, pane_id };
     assert_eq!(
         consistency_error.to_string(),
-        format!("tab {tab:?} layout references pane {pane:?} with no registry record")
+        format!("tab {tab_id:?} layout references pane {pane_id:?} with no registry record")
     );
 }
 
 #[test]
 fn orphaned_pane_record_display_names_the_pane_and_lifecycle() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let consistency_error = SessionConsistencyError::OrphanedPaneRecord {
-        pane_id: pane,
+        pane_id,
         pane_lifecycle: PaneLifecycle::Running,
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("pane {pane:?} is Running but absent from every layout")
+        format!(
+            "pane {pane_id:?} is Running but absent from every layout and from the floating panes"
+        )
     );
 }
 
 #[test]
 fn focus_pane_not_in_registry_display_names_client_pane_and_tab() {
-    let client = ClientId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let consistency_error = SessionConsistencyError::FocusPaneNotInRegistry {
-        client_id: client,
-        tab_id: tab,
-        pane_id: pane,
+        client_id,
+        tab_id,
+        pane_id,
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client:?} focuses pane {pane:?} (tab {tab:?}) with no registry record")
+        format!("client {client_id:?} focuses pane {pane_id:?} (tab {tab_id:?}) with no registry record")
     );
 }
 
 #[test]
 fn pane_in_multiple_layouts_display_lists_every_tab() {
-    let pane = PaneId::new();
-    let tabs = vec![TabId::new(), TabId::new()];
+    let pane_id = PaneId::new();
+    let tab_ids = vec![TabId::new(), TabId::new()];
     let consistency_error = SessionConsistencyError::PaneInMultipleLayouts {
-        pane_id: pane,
-        tab_ids: tabs.clone(),
+        pane_id,
+        tab_ids: tab_ids.clone(),
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("pane {pane:?} appears as a layout leaf in tabs {tabs:?}")
+        format!("pane {pane_id:?} appears as a layout leaf in tabs {tab_ids:?}")
     );
 }
 
@@ -96,28 +97,28 @@ fn pane_in_multiple_layouts_display_lists_every_tab() {
 fn pane_in_multiple_layouts_display_of_one_tab_twice_repeats_that_tab() {
     // The same tab twice is how one tree holding a pane at two positions is
     // reported: the list carries one entry per leaf, not one per tab.
-    let pane = PaneId::new();
-    let tab = TabId::new();
+    let pane_id = PaneId::new();
+    let tab_id = TabId::new();
     let consistency_error = SessionConsistencyError::PaneInMultipleLayouts {
-        pane_id: pane,
-        tab_ids: vec![tab, tab],
+        pane_id,
+        tab_ids: vec![tab_id, tab_id],
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("pane {pane:?} appears as a layout leaf in tabs [{tab:?}, {tab:?}]")
+        format!("pane {pane_id:?} appears as a layout leaf in tabs [{tab_id:?}, {tab_id:?}]")
     );
 }
 
 #[test]
 fn pane_in_multiple_layouts_display_of_an_empty_tab_list_shows_empty_brackets() {
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let consistency_error = SessionConsistencyError::PaneInMultipleLayouts {
-        pane_id: pane,
+        pane_id,
         tab_ids: Vec::new(),
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("pane {pane:?} appears as a layout leaf in tabs []")
+        format!("pane {pane_id:?} appears as a layout leaf in tabs []")
     );
 }
 
@@ -156,15 +157,12 @@ fn duplicate_tab_index_display_names_the_largest_index() {
 
 #[test]
 fn removed_pane_in_layout_display_names_the_tab_and_pane() {
-    let tab = TabId::new();
-    let pane = PaneId::new();
-    let consistency_error = SessionConsistencyError::RemovedPaneInLayout {
-        tab_id: tab,
-        pane_id: pane,
-    };
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
+    let consistency_error = SessionConsistencyError::RemovedPaneInLayout { tab_id, pane_id };
     assert_eq!(
         consistency_error.to_string(),
-        format!("tab {tab:?} layout still holds removed pane {pane:?}")
+        format!("tab {tab_id:?} layout still holds removed pane {pane_id:?}")
     );
 }
 
@@ -172,10 +170,10 @@ fn removed_pane_in_layout_display_names_the_tab_and_pane() {
 fn orphaned_pane_record_display_carries_the_exit_code_and_time() {
     // The struct variant renders its own fields, so the exit code is part of
     // the message.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let exited_at = SystemTime::UNIX_EPOCH;
     let consistency_error = SessionConsistencyError::OrphanedPaneRecord {
-        pane_id: pane,
+        pane_id,
         pane_lifecycle: PaneLifecycle::Exited {
             exit_code: Some(2),
             exited_at,
@@ -184,78 +182,76 @@ fn orphaned_pane_record_display_carries_the_exit_code_and_time() {
     assert_eq!(
         consistency_error.to_string(),
         format!(
-            "pane {pane:?} is Exited {{ exit_code: Some(2), exited_at: {exited_at:?} }} but absent from every layout"
+            "pane {pane_id:?} is Exited {{ exit_code: Some(2), exited_at: {exited_at:?} }} but absent from every layout and from the floating panes"
         )
     );
 }
 
 #[test]
 fn focus_tab_missing_display_names_the_client_and_tab() {
-    let client = ClientId::new();
-    let tab = TabId::new();
-    let consistency_error = SessionConsistencyError::FocusTabMissing {
-        client_id: client,
-        tab_id: tab,
-    };
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let consistency_error = SessionConsistencyError::FocusTabMissing { client_id, tab_id };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client:?} remembers focus in tab {tab:?} that is not in the session")
+        format!(
+            "client {client_id:?} remembers focus in tab {tab_id:?} that is not in the session"
+        )
     );
 }
 
 #[test]
 fn focus_target_missing_display_names_client_pane_and_tab() {
-    let client = ClientId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let consistency_error = SessionConsistencyError::FocusTargetMissing {
-        client_id: client,
-        tab_id: tab,
-        pane_id: pane,
+        client_id,
+        tab_id,
+        pane_id,
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client:?} focuses pane {pane:?} absent from tab {tab:?} layout")
+        format!("client {client_id:?} focuses pane {pane_id:?} absent from tab {tab_id:?} layout")
     );
 }
 
 #[test]
 fn zoom_target_missing_display_names_client_pane_and_tab() {
-    let client = ClientId::new();
-    let tab = TabId::new();
-    let pane = PaneId::new();
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let pane_id = PaneId::new();
     let consistency_error = SessionConsistencyError::ZoomTargetMissing {
-        client_id: client,
-        tab_id: tab,
-        pane_id: pane,
+        client_id,
+        tab_id,
+        pane_id,
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client:?} is zoomed on pane {pane:?}, not a live leaf of tab {tab:?}")
+        format!(
+            "client {client_id:?} is zoomed on pane {pane_id:?}, not a live leaf of tab {tab_id:?}"
+        )
     );
 }
 
 #[test]
 fn active_tab_missing_display_names_the_client_and_tab() {
-    let client = ClientId::new();
-    let tab = TabId::new();
-    let consistency_error = SessionConsistencyError::ActiveTabMissing {
-        client_id: client,
-        tab_id: tab,
-    };
+    let client_id = ClientId::new();
+    let tab_id = TabId::new();
+    let consistency_error = SessionConsistencyError::ActiveTabMissing { client_id, tab_id };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client:?} active tab {tab:?} is not in the session")
+        format!("client {client_id:?} active tab {tab_id:?} is not in the session")
     );
 }
 
 #[test]
 fn lingering_removed_record_display_names_the_pane() {
-    let pane = PaneId::new();
-    let consistency_error = SessionConsistencyError::LingeringRemovedRecord { pane_id: pane };
+    let pane_id = PaneId::new();
+    let consistency_error = SessionConsistencyError::LingeringRemovedRecord { pane_id };
     assert_eq!(
         consistency_error.to_string(),
-        format!("removed pane {pane:?} still has a registry record")
+        format!("removed pane {pane_id:?} still has a registry record")
     );
 }
 
@@ -275,15 +271,15 @@ fn tab_key_mismatch_display_names_the_key_then_the_tabs_own_id() {
 
 #[test]
 fn client_session_mismatch_display_names_the_client_and_the_session_it_carries() {
-    let client = ClientId::new();
+    let client_id = ClientId::new();
     let found_session_id = SessionId::new();
     let consistency_error = SessionConsistencyError::ClientSessionMismatch {
-        client_id: client,
+        client_id,
         found_session_id,
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("client {client:?} belongs to session {found_session_id:?}, not this one")
+        format!("client {client_id:?} belongs to session {found_session_id:?}, not this one")
     );
 }
 
@@ -291,90 +287,190 @@ fn client_session_mismatch_display_names_the_client_and_the_session_it_carries()
 fn orphaned_pane_record_display_carries_a_closing_lifecycle() {
     // Every state but `Removed` reaches this variant, `Closing` included, and
     // the state's own fields land in the message.
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let close_requested_at = SystemTime::UNIX_EPOCH;
     let consistency_error = SessionConsistencyError::OrphanedPaneRecord {
-        pane_id: pane,
+        pane_id,
         pane_lifecycle: PaneLifecycle::Closing { close_requested_at },
     };
     assert_eq!(
         consistency_error.to_string(),
-        format!("pane {pane:?} is Closing {{ close_requested_at: {close_requested_at:?} }} but absent from every layout")
+        format!("pane {pane_id:?} is Closing {{ close_requested_at: {close_requested_at:?} }} but absent from every layout and from the floating panes")
     );
 }
 
 #[test]
 fn consistency_errors_compare_by_variant_and_by_every_field() {
-    // `Session::validate` returns a list callers assert against, so two
-    // violations differing in one id must not compare equal.
-    let (client, tab, pane) = (ClientId::new(), TabId::new(), PaneId::new());
-    let other_pane = PaneId::new();
+    // Two violations that differ in one id compare unequal.
+    let (client_id, tab_id, pane_id) = (ClientId::new(), TabId::new(), PaneId::new());
+    let other_pane_id = PaneId::new();
 
     assert_eq!(
         SessionConsistencyError::FocusTargetMissing {
-            client_id: client,
-            tab_id: tab,
-            pane_id: pane,
+            client_id,
+            tab_id,
+            pane_id,
         },
         SessionConsistencyError::FocusTargetMissing {
-            client_id: client,
-            tab_id: tab,
-            pane_id: pane,
+            client_id,
+            tab_id,
+            pane_id,
         }
     );
     assert_ne!(
         SessionConsistencyError::FocusTargetMissing {
-            client_id: client,
-            tab_id: tab,
-            pane_id: pane,
+            client_id,
+            tab_id,
+            pane_id,
         },
         SessionConsistencyError::FocusTargetMissing {
-            client_id: client,
-            tab_id: tab,
-            pane_id: other_pane
+            client_id,
+            tab_id,
+            pane_id: other_pane_id
         }
     );
     // Same fields, different variant.
     assert_ne!(
         SessionConsistencyError::FocusTargetMissing {
-            client_id: client,
-            tab_id: tab,
-            pane_id: pane,
+            client_id,
+            tab_id,
+            pane_id,
         },
         SessionConsistencyError::FocusPaneNotInRegistry {
-            client_id: client,
-            tab_id: tab,
-            pane_id: pane,
+            client_id,
+            tab_id,
+            pane_id,
         }
     );
 }
 
 #[test]
 fn invalid_transitions_compare_by_state_and_by_event() {
-    let stopping = InvalidTransition {
+    let transition_from_stopping = InvalidTransition {
         previous_lifecycle: SessionLifecycle::Stopping,
         lifecycle_event: SessionLifecycleEvent::ClientAttached,
     };
 
     assert_eq!(
-        stopping,
+        transition_from_stopping,
         InvalidTransition {
             previous_lifecycle: SessionLifecycle::Stopping,
             lifecycle_event: SessionLifecycleEvent::ClientAttached,
         }
     );
     assert_ne!(
-        stopping,
+        transition_from_stopping,
         InvalidTransition {
             previous_lifecycle: SessionLifecycle::Stopped,
             lifecycle_event: SessionLifecycleEvent::ClientAttached,
         }
     );
     assert_ne!(
-        stopping,
+        transition_from_stopping,
         InvalidTransition {
             previous_lifecycle: SessionLifecycle::Stopping,
             lifecycle_event: SessionLifecycleEvent::StopCompleted,
         }
+    );
+}
+
+#[test]
+fn floating_set_error_display_names_the_repeated_pane_and_the_limit() {
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        FloatingSetError::DuplicatePane { pane_id }.to_string(),
+        format!("pane-{} is already a floating pane", pane_id.get_uuid())
+    );
+    assert_eq!(
+        FloatingSetError::TooManyPanes.to_string(),
+        "a session holds at most 12 floating panes"
+    );
+}
+
+#[test]
+fn too_many_floating_panes_display_names_the_count_and_the_limit() {
+    assert_eq!(
+        SessionConsistencyError::TooManyFloatingPanes { member_count: 13 }.to_string(),
+        "floating panes list 13 panes, more than 12"
+    );
+}
+
+#[test]
+fn floating_member_errors_display_the_pane() {
+    let pane_id = PaneId::new();
+    let (first_tab_id, second_tab_id) = (TabId::new(), TabId::new());
+
+    assert_eq!(
+        SessionConsistencyError::FloatingPaneNotInRegistry { pane_id }.to_string(),
+        format!("floating pane {pane_id:?} has no registry record")
+    );
+    assert_eq!(
+        SessionConsistencyError::RemovedPaneInFloatingSet { pane_id }.to_string(),
+        format!("floating panes still hold removed pane {pane_id:?}")
+    );
+    assert_eq!(
+        SessionConsistencyError::DuplicateFloatingPane { pane_id }.to_string(),
+        format!("floating panes list pane {pane_id:?} more than once")
+    );
+    assert_eq!(
+        SessionConsistencyError::FloatingPaneInLayout {
+            pane_id,
+            tab_ids: vec![first_tab_id, second_tab_id],
+        }
+        .to_string(),
+        format!(
+            "floating pane {pane_id:?} is also a layout leaf in tabs [{first_tab_id:?}, {second_tab_id:?}]"
+        )
+    );
+}
+
+#[test]
+fn client_floating_view_errors_display_the_client_and_the_pane() {
+    let client_id = ClientId::new();
+    let pane_id = PaneId::new();
+
+    assert_eq!(
+        SessionConsistencyError::FloatingViewTargetMissing {
+            client_id,
+            pane_id,
+        }
+        .to_string(),
+        format!("client {client_id:?} stores a floating view of pane {pane_id:?}, which is not floating")
+    );
+    assert_eq!(
+        SessionConsistencyError::FloatingFocusOrderTargetMissing {
+            client_id,
+            pane_id,
+        }
+        .to_string(),
+        format!(
+            "client {client_id:?} floating focus order lists pane {pane_id:?}, which is not floating"
+        )
+    );
+    assert_eq!(
+        SessionConsistencyError::DuplicateFloatingFocusOrderEntry { client_id, pane_id }
+            .to_string(),
+        format!("client {client_id:?} floating focus order lists pane {pane_id:?} more than once")
+    );
+    assert_eq!(
+        SessionConsistencyError::FocusedFloatingPaneMissing { client_id, pane_id }.to_string(),
+        format!(
+            "client {client_id:?} focuses pane {pane_id:?} as floating, and it is not floating"
+        )
+    );
+    assert_eq!(
+        SessionConsistencyError::FocusedFloatingPaneNotOnTop {
+            client_id,
+            pane_id,
+        }
+        .to_string(),
+        format!(
+            "client {client_id:?} focuses floating pane {pane_id:?}, which is not last in its floating focus order"
+        )
+    );
+    assert_eq!(
+        SessionConsistencyError::FocusedFloatingPaneMinimized { client_id, pane_id }.to_string(),
+        format!("client {client_id:?} focuses floating pane {pane_id:?}, which it minimized")
     );
 }

@@ -139,7 +139,7 @@ fn a_surface_no_release_carries_is_checked_on_the_floor_alone() {
 
 /// Each row is `(surface_name, minimum_version, maximum_version,
 /// released_version)`. `released_version` is the `max` the surface reads in
-/// the `v0.4.0` tag, which is the last release; `None` marks a surface that tag
+/// the `v0.5.0` tag, which is the last release; `None` marks a surface that tag
 /// does not carry.
 #[test]
 fn the_table_pins_every_surface_by_name_and_numbers() {
@@ -158,18 +158,18 @@ fn the_table_pins_every_surface_by_name_and_numbers() {
     assert_eq!(
         surface_versions,
         [
-            ("session protocol", 4, 4, Some(3)),
-            ("control plane", 3, 3, Some(2)),
-            ("supervisor link", 2, 2, Some(1)),
-            ("token store format", 1, 2, Some(1)),
-            ("remote protocol", 2, 2, Some(1)),
-            ("saved server file format", 1, 2, Some(1)),
-            ("remote certificate file format", 1, 2, Some(1)),
-            ("remote access record format", 1, 2, Some(1)),
-            ("resume file format", 1, 4, Some(3)),
-            ("config schema", 1, 2, Some(1)),
-            ("endpoint file format", 1, 2, Some(1)),
-            ("program file format", 1, 1, None),
+            ("session protocol", 4, 4, Some(4)),
+            ("control plane", 3, 3, Some(3)),
+            ("supervisor link", 2, 2, Some(2)),
+            ("token store format", 1, 2, Some(2)),
+            ("remote protocol", 2, 2, Some(2)),
+            ("saved server file format", 1, 2, Some(2)),
+            ("remote certificate file format", 1, 2, Some(2)),
+            ("remote access record format", 1, 2, Some(2)),
+            ("resume file format", 1, 5, Some(4)),
+            ("config schema", 1, 2, Some(2)),
+            ("endpoint file format", 1, 2, Some(2)),
+            ("program file format", 1, 1, Some(1)),
         ]
     );
 }

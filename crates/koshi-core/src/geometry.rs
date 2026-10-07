@@ -1,7 +1,9 @@
 //! Terminal-cell geometry.
 //!
-//! Coordinates and layout sizes are measured in terminal cells. Pixel cell
-//! measurements describe the conversion used by terminal image protocols.
+//! Coordinates and layout sizes are measured in terminal cells. A floating
+//! pane's desired size is measured per axis in cells or in a percent of that
+//! axis. Pixel cell measurements describe the conversion used by terminal image
+//! protocols.
 //! The origin `(0, 0)` is the top-left cell; `column` grows rightward and
 //! `row` grows downward.
 //!
@@ -10,6 +12,8 @@
 //! its right and bottom edges are exclusive. Zero-size rects are valid and
 //! representable (used for suppressed panes); every helper handles them and
 //! the grid boundaries without panicking.
+
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -102,6 +106,75 @@ pub enum PaneArea {
     Reported(Size),
     /// The client has no room to draw a pane.
     Starving,
+}
+
+/// One axis of a floating pane's desired size: a number of cells, or a whole
+/// percent of that axis.
+///
+/// Encodes as `{"Cells":80}` or `{"Percent":60}`. Decoding refuses
+/// `{"Cells":0}`, `{"Percent":0}` and a percent above `100`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatingPaneDimension {
+    /// A nonzero number of cells.
+    Cells(std::num::NonZeroU16),
+    /// A whole percent of the axis, from `1` to `100`.
+    Percent(AxisPercent),
+}
+
+/// A whole percent of one axis, from `1` to `100`.
+///
+/// Decoding refuses a value outside `1..=100` with [`AxisPercentError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u8")]
+pub struct AxisPercent(u8);
+
+/// The value [`AxisPercent::try_from`] refused: `0`, or `101` to `255`.
+///
+/// Displays as `percent 101 is outside 1 to 100`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AxisPercentError {
+    /// The refused value.
+    pub percent: u8,
+}
+
+impl fmt::Display for AxisPercentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "percent {} is outside 1 to 100", self.percent)
+    }
+}
+
+impl std::error::Error for AxisPercentError {}
+
+impl TryFrom<u8> for AxisPercent {
+    type Error = AxisPercentError;
+
+    /// Accepts a percent from `1` to `100`.
+    ///
+    /// # Errors
+    /// Returns [`AxisPercentError`] for `0` and for `101` to `255`.
+    fn try_from(percent: u8) -> Result<Self, Self::Error> {
+        if !(1..=100).contains(&percent) {
+            return Err(AxisPercentError { percent });
+        }
+        Ok(Self(percent))
+    }
+}
+
+impl AxisPercent {
+    /// The percent, from `1` to `100`.
+    #[must_use]
+    pub fn get_percent(self) -> u8 {
+        self.0
+    }
+}
+
+/// The size a floating pane asks for: one [`FloatingPaneDimension`] per axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FloatingPaneSize {
+    /// The width: a number of columns, or a percent of the horizontal axis.
+    pub width: FloatingPaneDimension,
+    /// The height: a number of rows, or a percent of the vertical axis.
+    pub height: FloatingPaneDimension,
 }
 
 /// A rectangular region of cells, anchored at `origin` with the given cell size.

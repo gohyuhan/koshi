@@ -1108,8 +1108,8 @@ fn a_binary_reading_no_format_this_one_writes_is_refused_naming_both_ranges() {
         Ok(())
     );
 
-    // The real case behind the refusal: a koshi that reads formats 1 through
-    // 2 is an older build, and this one writes a body with format 4.
+    // A binary that reads only formats 1 and 2 is refused, and the error
+    // names both ranges.
     assert_eq!(
         reads_the_format_this_build_writes(
             ResumeSupport {
@@ -3124,7 +3124,10 @@ fn a_body_that_does_not_read_brings_each_carried_pane_back_in_a_tab_of_its_own()
     let (mut session_server, _pty_owner) = build_from_carried_state(
         &resume_header,
         Err(StorageError::Corrupt {
-            detail: "resume body format 5 is outside the 4 to 4 range this build reads".to_string(),
+            detail: format!(
+                "resume body format {} is outside the {RESUME_FORMAT_MIN} to {RESUME_FORMAT} range this build reads",
+                RESUME_FORMAT + 1
+            ),
         }),
         &mut session_start,
         Some(build_plain_shell_config()),
