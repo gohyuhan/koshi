@@ -534,6 +534,7 @@ fn runtime_directory_says_nothing_about_the_router() {
         RemoteConnections::Answered(0),
         RemoteConnections::NotRunning,
         RemoteConnections::OlderBuild,
+        RemoteConnections::PreviousRelease,
         RemoteConnections::NoAnswer {
             error_detail: "connection refused".to_string(),
             router_process_id: Some(5000),
@@ -657,6 +658,24 @@ fn router_warns_on_an_older_build_and_does_not_fail_the_run() {
         DoctorOutcome {
             verdict: Verdict::Warn,
             reason: "the running router is an older koshi build".to_string(),
+            help: Some("run: koshi restart-servers".to_string()),
+            detail: None,
+        }
+    );
+}
+
+#[test]
+fn router_fails_on_a_router_of_koshi_0_4_0_and_names_restart_servers() {
+    let test_directory = TempDir::new().unwrap();
+    let mut doctor_context = build_doctor_context(test_directory.path());
+    doctor_context.router_connections = RemoteConnections::PreviousRelease;
+
+    assert_eq!(
+        check_router(&doctor_context),
+        DoctorOutcome {
+            verdict: Verdict::Fail,
+            reason: "the running router runs koshi 0.4.0 or older, which this koshi cannot talk to"
+                .to_string(),
             help: Some("run: koshi restart-servers".to_string()),
             detail: None,
         }
@@ -1233,6 +1252,7 @@ fn remote_connections_reports_not_known_and_never_rates_a_router_that_did_not_an
 
     for router_connections in [
         RemoteConnections::OlderBuild,
+        RemoteConnections::PreviousRelease,
         RemoteConnections::NoAnswer {
             error_detail: "connection refused".to_string(),
             router_process_id: Some(5000),
@@ -1292,6 +1312,7 @@ fn no_session_or_remote_access_check_ever_fails() {
         RemoteConnections::Answered(3),
         RemoteConnections::NotRunning,
         RemoteConnections::OlderBuild,
+        RemoteConnections::PreviousRelease,
         RemoteConnections::NoAnswer {
             error_detail: "connection refused".to_string(),
             router_process_id: Some(5000),

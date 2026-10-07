@@ -34,6 +34,7 @@
 //! characters is cut to
 //! [`MAX_REPORTED_TEXT_BYTE_COUNT`](koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT).
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::de::{DeserializeOwned, Error as _, IgnoredAny, MapAccess, Visitor};
@@ -204,6 +205,24 @@ impl<'de> Visitor<'de> for WireVariantNameVisitor {
         // `IgnoredAny` walks the payload's syntax and allocates nothing.
         variant_object.next_value::<IgnoredAny>()?;
         Ok(variant_name)
+    }
+}
+
+/// Whether `json_bytes` is a JSON object whose field names are exactly
+/// `field_names`, in any order.
+///
+/// Example — `{"request_id":null,"result":{}}` with `["request_id", "result"]`
+/// gives `true`. `{"request_id":1}`, `{"request_id":1,"result":{},"extra":0}`
+/// and `7` give `false`.
+pub(crate) fn has_exactly_json_fields(json_bytes: &[u8], field_names: &[&str]) -> bool {
+    match serde_json::from_slice::<BTreeMap<String, IgnoredAny>>(json_bytes) {
+        Ok(json_fields) => {
+            json_fields.len() == field_names.len()
+                && field_names
+                    .iter()
+                    .all(|field_name| json_fields.contains_key(*field_name))
+        }
+        Err(_) => false,
     }
 }
 

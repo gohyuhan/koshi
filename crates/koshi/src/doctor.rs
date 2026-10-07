@@ -460,6 +460,11 @@ fn check_router(doctor_context: &DoctorContext) -> DoctorOutcome {
             "the running router is an older koshi build".to_string(),
             "run: koshi restart-servers",
         ),
+        RemoteConnections::PreviousRelease => DoctorOutcome::build_failure_outcome(
+            "the running router runs koshi 0.4.0 or older, which this koshi cannot talk to"
+                .to_string(),
+            "run: koshi restart-servers",
+        ),
         RemoteConnections::NoAnswer {
             error_detail: router_error_detail,
             router_process_id,
@@ -600,11 +605,11 @@ fn check_remote_connections(doctor_context: &DoctorContext) -> DoctorOutcome {
         RemoteConnections::NotRunning => DoctorOutcome::build_success_outcome(
             "no koshi is running, so nothing from another machine is connected".to_string(),
         ),
-        RemoteConnections::OlderBuild | RemoteConnections::NoAnswer { .. } => {
-            DoctorOutcome::build_success_outcome(
-                "the running router did not answer, so this is not known".to_string(),
-            )
-        }
+        RemoteConnections::OlderBuild
+        | RemoteConnections::PreviousRelease
+        | RemoteConnections::NoAnswer { .. } => DoctorOutcome::build_success_outcome(
+            "the running router did not answer, so this is not known".to_string(),
+        ),
     }
 }
 

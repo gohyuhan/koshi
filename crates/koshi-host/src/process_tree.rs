@@ -13,6 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::program_path::is_backup_program_file_name;
+
 #[cfg(test)]
 mod tests;
 
@@ -77,12 +79,17 @@ pub fn list_process_records() -> io::Result<Vec<ProcessRecord>> {
     platform::list_process_records()
 }
 
-/// Whether `executable_name` names koshi: `koshi`, or `koshi.exe` in any mix
-/// of upper and lower case. Example: `KOSHI.EXE` gives `true`, and
-/// `koshi-dev` gives `false`.
+/// Whether `executable_name` names koshi: `koshi`; `koshi.exe` in any mix of
+/// upper and lower case; or, in any mix of upper and lower case, a backup name
+/// that a Windows update gives the running `koshi.exe`, as
+/// [`is_backup_program_file_name`] reads it with the stem `koshi`:
+/// `koshi.old`, or `koshi.<n>.old`. Example: `KOSHI.EXE` and `koshi.2.old`
+/// give `true`, and `koshi-dev` and `KOSHI` give `false`.
 #[must_use]
 pub fn is_koshi_executable_name(executable_name: &str) -> bool {
-    executable_name == "koshi" || executable_name.eq_ignore_ascii_case("koshi.exe")
+    executable_name == "koshi"
+        || executable_name.eq_ignore_ascii_case("koshi.exe")
+        || is_backup_program_file_name(&executable_name.to_ascii_lowercase(), "koshi")
 }
 
 /// The processes in `process_records` that run under `root_records`: their

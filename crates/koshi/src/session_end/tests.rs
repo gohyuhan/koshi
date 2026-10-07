@@ -233,6 +233,29 @@ pub(crate) fn format_stand_in_file_name(is_koshi: bool) -> &'static str {
 }
 
 #[test]
+fn a_quit_refused_by_a_server_of_koshi_0_4_0_reads_as_the_format_sentence_alone() {
+    let quit_error = CliError::PreviousReleaseServer {
+        detail: "the server answered in the format of koshi 0.4.0 or older, which this koshi \
+                 cannot talk to"
+            .to_string(),
+    };
+
+    assert_eq!(
+        format_quit_failure(&quit_error),
+        "the server answered in the format of koshi 0.4.0 or older, which this koshi cannot \
+         talk to"
+    );
+}
+
+#[test]
+fn any_other_quit_failure_reads_as_the_errors_own_sentence() {
+    assert_eq!(
+        format_quit_failure(&CliError::SessionAnswerTimedOut),
+        "IPC unavailable: the session did not answer in time"
+    );
+}
+
+#[test]
 fn format_process_kill_command_names_the_command_of_this_platform() {
     let expected_kill_command = if cfg!(windows) {
         "taskkill /PID 5000 /T /F"
@@ -318,6 +341,30 @@ fn find_server_process_record_accepts_koshi_that_started_before_its_endpoint_fil
     );
 
     end_stand_in_session(child, &member_records);
+}
+
+#[test]
+fn find_server_process_record_accepts_koshi_whose_program_file_was_renamed_to_a_backup_name() {
+    let runtime_directory = build_short_runtime_directory();
+    let (child, child_record, member_records) =
+        start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(true));
+    std::fs::rename(
+        runtime_directory
+            .path()
+            .join(format_stand_in_file_name(true)),
+        runtime_directory.path().join("koshi.old"),
+    )
+    .expect("the running program file is renamed");
+    let endpoint_file_path =
+        write_endpoint_file_naming_process(runtime_directory.path(), SessionId::new(), child.id());
+
+    let server_record = find_server_process_record(&endpoint_file_path, child.id());
+
+    end_stand_in_session(child, &member_records);
+    assert_eq!(
+        server_record.map(|server_record| (server_record.process_id, server_record.started_at)),
+        Some((child_record.process_id, child_record.started_at))
+    );
 }
 
 #[test]

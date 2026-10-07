@@ -66,7 +66,7 @@ use std::time::{Duration, SystemTime};
 use koshi_core::command::{CommandEnvelope, CommandSource};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_ipc::endpoint::{
-    compute_socket_address, remove_advertisement_marker, remove_socket_file,
+    compute_socket_address, delete_advertisement_marker, delete_socket_file,
     resolve_advertisement_marker_path, write_advertisement_marker, EndpointFile, ServerProgramFile,
 };
 use koshi_ipc::error::IpcError;
@@ -389,7 +389,7 @@ impl IpcServer {
         if other_users.is_some() {
             if let Err(socket_error) = widen_socket(&socket_address) {
                 drop(listener);
-                remove_socket_file(&socket_address);
+                delete_socket_file(&socket_address);
                 return Err(socket_error);
             }
         }
@@ -427,7 +427,7 @@ impl IpcServer {
             }
             let _ = std::fs::remove_file(&endpoint_path);
             drop(listener);
-            remove_socket_file(&socket_address);
+            delete_socket_file(&socket_address);
             return Err(advertisement_error);
         }
 
@@ -555,9 +555,9 @@ impl IpcServer {
         }
         let _ = std::fs::remove_file(&self.endpoint_path);
         if let Some(shared_socket_marker_path) = &self.shared_socket_marker_path {
-            remove_advertisement_marker(shared_socket_marker_path);
+            delete_advertisement_marker(shared_socket_marker_path);
         }
-        remove_socket_file(&self.socket_address);
+        delete_socket_file(&self.socket_address);
     }
 }
 

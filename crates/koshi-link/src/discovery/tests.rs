@@ -1138,7 +1138,7 @@ fn a_sweep_keeps_an_endpoint_file_rewritten_since_the_session_was_asked() {
     let endpoint_path = write_endpoint_file(runtime_directory.path(), session_id, socket_address);
 
     let sweep_result =
-        remove_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
+        delete_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
 
     let Err(CliError::IpcUnavailable { detail }) = sweep_result else {
         panic!("expected IpcUnavailable, got {sweep_result:?}");
@@ -1170,7 +1170,7 @@ fn a_sweep_keeps_an_endpoint_file_it_cannot_read() {
     };
 
     let sweep_result =
-        remove_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
+        delete_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
 
     let Err(CliError::IpcUnavailable { detail }) = sweep_result else {
         panic!("expected IpcUnavailable, got {sweep_result:?}");
@@ -1206,7 +1206,7 @@ fn a_sweep_after_asking_another_users_session_removes_nothing() {
     };
 
     let sweep_result =
-        remove_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
+        delete_stale_session_files(runtime_directory.path(), session_id, &asked_endpoint_file);
 
     assert!(
         sweep_result.is_ok(),

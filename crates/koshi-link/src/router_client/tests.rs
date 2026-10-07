@@ -20,7 +20,8 @@ use koshi_ipc::router::{
 use koshi_ipc::transport::Listener;
 use koshi_test_support::fixtures::{
     build_test_runtime_directory, close_connection_after_peer_hangs_up, hold_update_lock,
-    write_router_endpoint_file,
+    spawn_previous_release_router, write_router_endpoint_file,
+    PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
 };
 
 /// How the stand-in router answers the caller.
@@ -439,6 +440,24 @@ fn a_router_with_no_such_request_kind_reads_as_an_older_build() {
 }
 
 #[test]
+fn a_router_of_koshi_0_4_0_reads_as_a_previous_release() {
+    let runtime_directory = build_test_runtime_directory();
+    let router = spawn_previous_release_router(
+        runtime_directory.path(),
+        "k7QxSecret",
+        vec![vec![
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string()
+        ]],
+    );
+
+    assert_eq!(
+        query_running_router_remote_connections(runtime_directory.path()),
+        RemoteConnections::PreviousRelease
+    );
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
 fn any_other_refusal_of_the_count_carries_the_sentence_the_router_gave() {
     let runtime_directory = build_test_runtime_directory();
     let router = spawn_fake_router(
@@ -596,6 +615,17 @@ fn the_running_routers_version_is_read_from_its_hello() {
         find_running_router_version(runtime_directory.path()).expect("the exchange succeeds");
 
     assert_eq!(router_version, Some("9.9.9".to_string()));
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn start_router_gives_the_version_of_a_router_that_already_answers() {
+    let runtime_directory = build_test_runtime_directory();
+    let router = spawn_fake_router_for_hello(runtime_directory.path(), build_hello_result("9.9.9"));
+
+    let router_version = start_router(runtime_directory.path()).expect("the router answers");
+
+    assert_eq!(router_version, "9.9.9");
     router.join().expect("the stand-in router exits");
 }
 

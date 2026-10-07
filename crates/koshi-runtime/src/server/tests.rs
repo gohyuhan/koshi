@@ -2179,6 +2179,20 @@ fn closing_the_grace_window_with_nobody_awaited_detaches_nobody() {
 }
 
 #[test]
+fn closing_the_grace_window_keeps_a_session_left_with_no_client_under_auto_close() {
+    let (mut server, client_id) = boot_server();
+    let (session_id, _tab_id, _pane_id) = get_booted_parts(&server, client_id);
+    server.config.should_auto_close_session = true;
+    server.client_ids_awaiting_reconnect.insert(client_id);
+
+    server.handle_drop_unclaimed_clients(Instant::now());
+
+    assert_eq!(server.session_by_id[&session_id].clients.count_clients(), 0);
+    assert!(server.client_ids_awaiting_reconnect.is_empty());
+    assert!(!server.is_quit_requested());
+}
+
+#[test]
 fn a_quit_applied_before_the_swap_is_carried_to_the_next_image() {
     // A quit can land after the clients were told the session is restarting.
     // They are already waiting for the next socket by then, so the swap runs to

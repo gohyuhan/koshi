@@ -3,7 +3,9 @@
 //! serialization, the restart confirmation wait, the bounded call to a peer,
 //! the router restart, the walk that restarts every running session, a peer
 //! that refuses this build's protocol version, the end of a router that
-//! refuses it, and the update lock held while servers restart.
+//! refuses it, the update lock held while servers restart, and the runtime
+//! directories of koshi 0.1.0 and 0.2.0: which ones are walked, how many
+//! sessions run from one, and the line `list-sessions` prints about them.
 
 use super::*;
 
@@ -21,7 +23,12 @@ use koshi_ipc::router::{
     RouterRequestKind, RouterResponse, RouterResult, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
-use koshi_test_support::fixtures::build_test_runtime_directory;
+use koshi_test_support::fixtures::{
+    build_test_runtime_directory, spawn_previous_release_session,
+    write_koshi_0_1_0_window_endpoint_file, write_session_endpoint_file,
+    KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT, KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+    KOSHI_0_4_0_RESTARTING_ANSWER_TEXT, PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
+};
 #[cfg(unix)]
 use koshi_test_support::fixtures::{
     BUSY_PROGRAM_RETRY_INTERVAL_DURATION, BUSY_PROGRAM_WAIT_DURATION,
@@ -363,11 +370,12 @@ fn stop_incompatible_router_ends_the_confirmed_router_process_and_nothing_under_
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(true));
     write_router_endpoint_naming_process(runtime_directory.path(), router_child.id());
 
-    assert!(stop_incompatible_router(
-        runtime_directory.path(),
-        "3.3.3",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(runtime_directory.path(), "3.3.3", VERSION_REFUSAL_SENTENCE),
+        IncompatibleRouterStop::Stopped {
+            router_process_id: router_child.id()
+        }
+    );
 
     assert!(process_tree::wait_for_processes_to_end(
         std::slice::from_ref(&router_record),
@@ -385,38 +393,70 @@ fn stop_incompatible_router_leaves_an_unconfirmed_process_running() {
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(false));
     write_router_endpoint_naming_process(runtime_directory.path(), router_child.id());
 
-    assert!(!stop_incompatible_router(
-        runtime_directory.path(),
-        "3.3.3",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(runtime_directory.path(), "3.3.3", VERSION_REFUSAL_SENTENCE),
+        IncompatibleRouterStop::NotStopped
+    );
 
     assert!(process_tree::is_process_running(&router_record));
     assert!(member_records.iter().all(process_tree::is_process_running));
     end_stand_in_session(router_child, &member_records);
 }
 
-#[test]
-fn restart_router_into_version_ends_a_confirmed_router_that_refuses_this_builds_protocol_version() {
-    // The test serves the router's socket and refuses the Hello for its
-    // protocol version. The endpoint file names a stand-in koshi process.
+/// Accept two callers on `listener`. The first one's Hello is answered with
+/// `first_hello_answer_text`, as a router this build cannot talk to answers
+/// it, and the request it writes after its Hello is read. The second one's
+/// Hello is answered as a router on `3.3.3` answers it, as the router started
+/// once the first one ended.
+fn spawn_router_replaced_after_its_first_hello(
+    listener: Listener,
+    first_hello_answer_text: String,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut first_connection = listener.accept().expect("accept the first caller");
+        let _hello_request: Box<serde_json::value::RawValue> =
+            first_connection.recv().expect("read the hello");
+        first_connection
+            .send(
+                &serde_json::value::RawValue::from_string(first_hello_answer_text)
+                    .expect("the answer is JSON"),
+            )
+            .expect("send the hello answer");
+        let _next_request: Result<Box<serde_json::value::RawValue>, _> = first_connection.recv();
+        let mut second_connection = listener.accept().expect("accept the second caller");
+        let hello_request: RouterRequest = second_connection.recv().expect("read the hello");
+        send_router_response(
+            &mut second_connection,
+            hello_request.request_id,
+            RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                build_version: "3.3.3".to_string(),
+            },
+        );
+    })
+}
+
+/// Serve the router of `runtime_directory` from a stand-in koshi process that
+/// answers its first Hello with `first_hello_answer_text`, run
+/// [`restart_router_into_version`] for `3.3.3`, and check that the stand-in
+/// process ended, that nothing under it did, and that a router on `3.3.3`
+/// answered after it. Hands back what [`restart_router_into_version`] gave.
+fn replace_stand_in_router(first_hello_answer_text: String) -> bool {
     let runtime_directory = build_test_runtime_directory();
     let (mut router_child, router_record, member_records) =
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(true));
-    let router_socket_address = compute_router_socket_address(runtime_directory.path());
-    let router_listener = Listener::bind(&router_socket_address).expect("bind the stand-in router");
+    let router_listener = Listener::bind(&compute_router_socket_address(runtime_directory.path()))
+        .expect("bind the stand-in router");
     write_router_endpoint_naming_process(runtime_directory.path(), router_child.id());
-    let refusing_router_thread =
-        spawn_router_refusing_this_builds_protocol_version(router_listener);
+    let router_thread =
+        spawn_router_replaced_after_its_first_hello(router_listener, first_hello_answer_text);
 
     let has_router_restarted =
         restart_router_into_version(runtime_directory.path(), "3.3.3", RestartScope::EveryServer);
 
-    let _ = Connection::connect(&router_socket_address);
-    refusing_router_thread
+    router_thread
         .join()
-        .expect("the stand-in served its connection");
-    assert!(has_router_restarted);
+        .expect("the stand-in served both connections");
     assert!(process_tree::wait_for_processes_to_end(
         std::slice::from_ref(&router_record),
         Duration::from_secs(5)
@@ -424,17 +464,68 @@ fn restart_router_into_version_ends_a_confirmed_router_that_refuses_this_builds_
     router_child.wait().expect("the router process is reaped");
     assert!(member_records.iter().all(process_tree::is_process_running));
     process_tree::stop_processes(&member_records, Duration::ZERO);
+    has_router_restarted
+}
+
+#[test]
+fn restart_router_into_version_replaces_a_confirmed_router_that_refuses_this_builds_protocol_version(
+) {
+    let version_refusal_text = serde_json::to_string(&RouterResponse {
+        request_id: Some(1),
+        answer_result: RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: VERSION_REFUSAL_SENTENCE.to_string(),
+        }),
+    })
+    .expect("the refusal serializes");
+
+    assert!(replace_stand_in_router(version_refusal_text));
+}
+
+#[test]
+fn restart_router_into_version_replaces_a_confirmed_router_of_koshi_0_4_0() {
+    assert!(replace_stand_in_router(
+        PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string()
+    ));
+}
+
+#[test]
+fn a_started_router_on_the_expected_version_confirms_the_replacement() {
+    assert!(report_started_router(
+        5000,
+        "3.3.3",
+        Ok("3.3.3".to_string())
+    ));
+}
+
+#[test]
+fn a_started_router_on_another_version_fails_the_replacement() {
+    assert!(!report_started_router(
+        5000,
+        "3.3.3",
+        Ok("3.3.2".to_string())
+    ));
+}
+
+#[test]
+fn a_router_that_did_not_start_fails_the_replacement() {
+    assert!(!report_started_router(
+        5000,
+        "3.3.3",
+        Err(CliError::IpcUnavailable {
+            detail: "the router did not start".to_string(),
+        })
+    ));
 }
 
 #[test]
 fn stop_incompatible_router_ends_nothing_without_a_router_endpoint_file() {
     let runtime_directory = build_test_runtime_directory();
 
-    assert!(!stop_incompatible_router(
-        runtime_directory.path(),
-        "3.3.3",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(runtime_directory.path(), "3.3.3", VERSION_REFUSAL_SENTENCE),
+        IncompatibleRouterStop::NotStopped
+    );
 }
 
 #[test]
@@ -450,11 +541,14 @@ fn stop_incompatible_router_leaves_a_router_on_the_newer_installed_version_runni
         Path::new("/usr/local/bin/koshi"),
     );
 
-    assert!(stop_incompatible_router(
-        runtime_directory.path(),
-        "9999.0.0",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(
+            runtime_directory.path(),
+            "9999.0.0",
+            VERSION_REFUSAL_SENTENCE
+        ),
+        IncompatibleRouterStop::AlreadyOnVersion
+    );
 
     assert!(process_tree::is_process_running(&router_record));
     end_stand_in_session(router_child, &member_records);
@@ -473,11 +567,14 @@ fn stop_incompatible_router_leaves_a_router_on_another_newer_version_running() {
         Path::new("/usr/local/bin/koshi"),
     );
 
-    assert!(!stop_incompatible_router(
-        runtime_directory.path(),
-        "9999.0.0",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(
+            runtime_directory.path(),
+            "9999.0.0",
+            VERSION_REFUSAL_SENTENCE
+        ),
+        IncompatibleRouterStop::NotStopped
+    );
 
     assert!(process_tree::is_process_running(&router_record));
     end_stand_in_session(router_child, &member_records);
@@ -496,11 +593,16 @@ fn stop_incompatible_router_ends_a_router_whose_program_file_names_an_older_vers
         Path::new("/usr/local/bin/koshi"),
     );
 
-    assert!(stop_incompatible_router(
-        runtime_directory.path(),
-        "9999.0.0",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(
+            runtime_directory.path(),
+            "9999.0.0",
+            VERSION_REFUSAL_SENTENCE
+        ),
+        IncompatibleRouterStop::Stopped {
+            router_process_id: router_child.id()
+        }
+    );
 
     assert!(process_tree::wait_for_processes_to_end(
         std::slice::from_ref(&router_record),
@@ -753,6 +855,149 @@ fn a_session_reporting_the_installed_version_confirms_its_restart() {
     assert_eq!(
         session_outcomes,
         vec![(session_id, SessionOutcome::Confirmed)]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+/// The Hello answer of this build's envelope from a session on
+/// `build_version`, as its JSON text.
+fn format_current_session_hello_answer_text(build_version: &str) -> String {
+    serde_json::to_string(&IpcResponse {
+        request_id: Some(1),
+        answer_result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: build_version.to_string(),
+        },
+    })
+    .expect("the answer serializes")
+}
+
+/// The answer texts of the stand-in koshi 0.2.0 to 0.4.0 session that refuses
+/// this build's exchange, then answers the exchange of its own envelope with
+/// `previous_release_answer_texts`, then answers one connection per entry of
+/// `later_answer_texts_by_connection`.
+fn build_previous_release_session_script(
+    previous_release_answer_texts: [&str; 2],
+    later_answer_texts_by_connection: Vec<Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut answer_texts_by_connection = vec![
+        vec![
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+        ],
+        previous_release_answer_texts
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    ];
+    answer_texts_by_connection.extend(later_answer_texts_by_connection);
+    answer_texts_by_connection
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_restarted_in_its_own_envelope_confirms_on_the_installed_version() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        build_previous_release_session_script(
+            [
+                KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+                KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+            ],
+            vec![vec![format_current_session_hello_answer_text("3.3.3")]],
+        ),
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(5),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(session_id, SessionOutcome::Confirmed)]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_whose_restart_did_not_start_still_reports_0_4_0_after_the_wait() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        build_previous_release_session_script(
+            [
+                KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+                KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+            ],
+            vec![
+                vec![PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string()],
+                vec![KOSHI_0_4_0_HELLO_ANSWER_TEXT.to_string()],
+            ],
+        ),
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(1),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(
+            session_id,
+            SessionOutcome::StillOnVersion("0.4.0".to_string())
+        )]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_of_koshi_0_2_0_is_reported_without_a_restart_request() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        build_previous_release_session_script(
+            [
+                KOSHI_0_2_0_HELLO_ANSWER_TEXT,
+                KOSHI_0_2_0_RESTART_REFUSAL_TEXT,
+            ],
+            Vec::new(),
+        ),
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(5),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(session_id, SessionOutcome::WithoutRestartRequest)]
     );
     session_thread
         .join()
@@ -1473,6 +1718,119 @@ fn a_windows_swap_replaces_the_executable_and_cleans_the_backup() {
     assert!(!staged_binary_path.exists());
 }
 
+#[cfg(windows)]
+#[test]
+fn a_windows_swap_takes_the_next_backup_name_while_a_process_runs_from_the_first() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("swap directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let first_backup_path = test_directory.path().join("koshi.old");
+    let (stand_in_child, _, member_records) =
+        start_stand_in_session(test_directory.path(), "koshi.exe");
+    fs::rename(&executable_path, &first_backup_path)
+        .expect("rename the running executable to the first backup name");
+    fs::write(&executable_path, b"installed-binary").expect("write the installed executable");
+    let new_binary_path = test_directory.path().join("new-binary.exe");
+    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+
+    let swap_result = swap_executable(&new_binary_path, &executable_path);
+    let is_first_backup_left = first_backup_path.exists();
+    end_stand_in_session(stand_in_child, &member_records);
+
+    assert_eq!(swap_result, Ok(()));
+    assert_eq!(
+        fs::read(&executable_path).expect("read the replacement executable"),
+        b"new-binary"
+    );
+    assert!(is_first_backup_left);
+    assert!(!test_directory.path().join("koshi.1.old").exists());
+}
+
+#[test]
+fn the_first_backup_name_is_the_program_file_with_the_old_extension() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+
+    assert_eq!(
+        prepare_backup_executable_path(&test_directory.path().join("koshi.exe"))
+            .expect("a backup path"),
+        test_directory.path().join("koshi.old")
+    );
+}
+
+#[test]
+fn a_backup_file_that_can_be_removed_is_removed_and_its_name_taken() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+    let first_backup_path = test_directory.path().join("koshi.old");
+    fs::write(&first_backup_path, b"old-binary").expect("write the first backup");
+
+    assert_eq!(
+        prepare_backup_executable_path(&test_directory.path().join("koshi.exe"))
+            .expect("a backup path"),
+        first_backup_path
+    );
+    assert!(!first_backup_path.exists());
+}
+
+#[test]
+fn a_backup_name_whose_entry_cannot_be_removed_passes_to_the_next_number() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+    fs::create_dir(test_directory.path().join("koshi.old")).expect("a directory at koshi.old");
+    fs::create_dir(test_directory.path().join("koshi.1.old")).expect("a directory at koshi.1.old");
+
+    assert_eq!(
+        prepare_backup_executable_path(&test_directory.path().join("koshi.exe"))
+            .expect("a backup path"),
+        test_directory.path().join("koshi.2.old")
+    );
+    assert!(test_directory.path().join("koshi.old").is_dir());
+    assert!(test_directory.path().join("koshi.1.old").is_dir());
+}
+
+#[test]
+fn the_backup_list_names_only_the_backups_of_the_program_file() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+    for entry_name in [
+        "koshi.exe",
+        "koshi.old",
+        "koshi.1.old",
+        "koshi.12.old",
+        "koshi.x.old",
+        "koshi..old",
+        "koshi.old.txt",
+        "notes.old",
+        "koshi-update-5000.exe",
+    ] {
+        fs::write(test_directory.path().join(entry_name), b"").expect("write a directory entry");
+    }
+
+    let mut backup_executable_paths =
+        list_backup_executable_paths(&test_directory.path().join("koshi.exe"));
+    backup_executable_paths.sort();
+
+    assert_eq!(
+        backup_executable_paths,
+        vec![
+            test_directory.path().join("koshi.1.old"),
+            test_directory.path().join("koshi.12.old"),
+            test_directory.path().join("koshi.old"),
+        ]
+    );
+}
+
 #[test]
 fn update_state_defaults_when_deserialized_from_empty_object() {
     let update_state: UpdateState =
@@ -1493,6 +1851,27 @@ fn update_state_survives_a_serialize_deserialize_round_trip() {
         restored_update_state.last_check_unix_seconds,
         original_update_state.last_check_unix_seconds
     );
+}
+
+#[test]
+fn update_state_written_by_koshi_0_4_0_keeps_its_last_check_time() {
+    assert_eq!(
+        parse_update_state(r#"{"last_check":1700000000}"#).last_check_unix_seconds,
+        Some(1_700_000_000)
+    );
+}
+
+#[test]
+fn update_state_in_the_current_shape_reads_as_written() {
+    assert_eq!(
+        parse_update_state(r#"{"last_check_unix_seconds":1700000000}"#).last_check_unix_seconds,
+        Some(1_700_000_000)
+    );
+}
+
+#[test]
+fn update_state_that_parses_as_neither_shape_reads_as_never_checked() {
+    assert_eq!(parse_update_state("not json").last_check_unix_seconds, None);
 }
 
 // --- release JSON parsing (no network: fixture strings only) ---
@@ -2011,5 +2390,114 @@ fn a_swap_through_a_symbolic_link_replaces_the_file_it_names_and_keeps_the_link(
     assert_eq!(
         fs::read(&program_path).expect("read the replaced file"),
         b"new-binary"
+    );
+}
+
+#[test]
+fn the_runtime_directory_itself_is_left_out_of_the_other_runtime_directories() {
+    let runtime_directory = build_test_runtime_directory();
+    let other_directory = build_test_runtime_directory();
+
+    assert_eq!(
+        list_other_runtime_directories(
+            vec![
+                runtime_directory.path().to_path_buf(),
+                other_directory.path().to_path_buf(),
+            ],
+            runtime_directory.path(),
+        ),
+        vec![other_directory.path().to_path_buf()]
+    );
+}
+
+#[test]
+fn a_runtime_directory_that_does_not_exist_is_compared_as_it_is() {
+    let runtime_directory = build_test_runtime_directory();
+    let missing_directory = runtime_directory.path().join("missing");
+
+    assert_eq!(
+        list_other_runtime_directories(
+            vec![missing_directory.clone()],
+            &runtime_directory.path().join("also-missing"),
+        ),
+        vec![missing_directory]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_to_the_runtime_directory_is_left_out_of_the_other_runtime_directories() {
+    let runtime_directory = build_test_runtime_directory();
+    let link_directory = build_test_runtime_directory();
+    let link_path = link_directory.path().join("runtime-link");
+    std::os::unix::fs::symlink(runtime_directory.path(), &link_path)
+        .expect("link the runtime directory");
+
+    assert_eq!(
+        list_other_runtime_directories(vec![link_path], runtime_directory.path()),
+        Vec::<PathBuf>::new()
+    );
+}
+
+#[test]
+fn a_runtime_directory_of_koshi_0_2_0_that_does_not_exist_counts_no_session() {
+    let runtime_directory = build_test_runtime_directory();
+
+    assert_eq!(
+        count_previous_release_sessions(&runtime_directory.path().join("missing")),
+        0
+    );
+}
+
+#[test]
+fn an_endpoint_file_naming_a_process_that_is_not_a_koshi_server_counts_no_session() {
+    let runtime_directory = build_test_runtime_directory();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        SessionId::new(),
+        "k7QxSecret",
+        std::process::id(),
+    );
+
+    assert_eq!(count_previous_release_sessions(runtime_directory.path()), 0);
+}
+
+#[test]
+fn the_endpoint_file_of_a_koshi_0_1_0_window_counts_no_session() {
+    let runtime_directory = build_test_runtime_directory();
+    write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), SessionId::new());
+
+    assert_eq!(count_previous_release_sessions(runtime_directory.path()), 0);
+}
+
+#[test]
+fn no_session_running_from_a_runtime_directory_of_koshi_0_2_0_prints_no_line() {
+    assert_eq!(
+        format_previous_release_session_note(Path::new("/home/user/.local/share/koshi/run"), 0),
+        None
+    );
+}
+
+#[test]
+fn one_session_running_from_a_runtime_directory_of_koshi_0_2_0_is_named_with_restart_servers() {
+    assert_eq!(
+        format_previous_release_session_note(Path::new("/home/user/.local/share/koshi/run"), 1),
+        Some(
+            "1 session that an older koshi started runs from /home/user/.local/share/koshi/run, \
+             which this koshi does not list; run koshi restart-servers to move it or end it"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn several_sessions_running_from_a_runtime_directory_of_koshi_0_2_0_are_counted_in_one_line() {
+    assert_eq!(
+        format_previous_release_session_note(Path::new("/home/user/.local/share/koshi/run"), 2),
+        Some(
+            "2 sessions that an older koshi started run from /home/user/.local/share/koshi/run, \
+             which this koshi does not list; run koshi restart-servers to move them or end them"
+                .to_string()
+        )
     );
 }

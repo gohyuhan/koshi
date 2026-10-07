@@ -39,4 +39,6 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 koshi-pty.workspace = true
 koshi-test-support.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 uuid.workspace = true

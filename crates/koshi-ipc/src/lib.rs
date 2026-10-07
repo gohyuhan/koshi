@@ -38,6 +38,9 @@ pub mod placement;
 /// What every server does the same way, on whichever protocol it speaks: the
 /// framing faults, the unknown request kind, and the Hello.
 pub mod plane;
+/// The session wire of koshi 0.2.0 to 0.4.0, cut down to the Hello and the
+/// Restart that move a session such a release started to this build.
+pub mod previous_release;
 /// Wire messages between a client and a session server: the requests, the
 /// answer that repeats a request's `request_id`, and the Hello that opens a
 /// connection.

@@ -28,9 +28,15 @@
 //! once every symbolic link is followed. `koshi restart-servers`
 //! (`run_restart_servers_command`) asks every running server to restart,
 //! without an install.
+//!
+//! The restart also walks the runtime directories koshi 0.1.0 and 0.2.0 used.
+//! A session that koshi 0.2.0 or one of its pre-releases started has no
+//! restart request: once every session is asked, the restart names each such
+//! session, asks once whether to end them, and ends them or leaves them
+//! running.
 
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -51,10 +57,14 @@ use ureq::Agent;
 
 use koshi_core::text::sanitize_reported_text;
 use koshi_link::error::CliError;
+use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client::{
-    self, find_running_session_version, restart_running_session, SessionRestart, UnreadPath,
+    self, find_previous_release_session_version, find_running_session_version,
+    restart_running_session, SessionRestart, UnreadPath,
 };
-use koshi_link::router_client::{find_running_router_version, restart_running_router};
+use koshi_link::router_client::{
+    find_running_router_version, restart_running_router, start_router,
+};
 use koshi_link::server_build::{
     compare_program_files, find_advertised_server_program_file, find_server_program_file,
     ProgramFileMatch,
@@ -66,7 +76,8 @@ use install_source::{
 };
 
 use crate::session_end::{
-    find_server_process_record, format_process_kill_command, PROCESS_STOP_GRACE_DURATION,
+    end_session, find_server_process_record, format_process_kill_command,
+    PROCESS_STOP_GRACE_DURATION,
 };
 
 /// This build's version, from the crate version bumped before each release.
@@ -222,7 +233,7 @@ pub fn run_restart_servers_command() -> Result<(), CliError> {
 /// install that worked then prints `relaunch koshi to use the new version`
 /// and ends this process with status `0`.
 pub fn prompt_startup_update() {
-    remove_stale_backup();
+    delete_stale_backups();
     let update_config = load_update_config();
     if !update_config.should_auto_check_for_updates {
         return;
@@ -347,14 +358,17 @@ fn upgrade_through_homebrew(brew_path: &Path, formula_name: &str) -> Result<(), 
 /// [`restart_servers_into_version`] states with `restart_scope`, expecting
 /// the version `<program_path> --version` prints. A version that cannot be
 /// read prints `koshi: the running servers keep the builds they run:
-/// <failure>` and restarts nothing.
+/// <failure>; run koshi restart-servers to move them` and restarts nothing.
 fn restart_servers_into_program_file(program_path: &Path, restart_scope: RestartScope) {
     match read_installed_version(program_path) {
         Ok(installed_version) => {
             let _ = restart_servers_into_version(&installed_version, restart_scope);
         }
         Err(version_read_error) => {
-            eprintln!("koshi: the running servers keep the builds they run: {version_read_error}");
+            eprintln!(
+                "koshi: the running servers keep the builds they run: {version_read_error}; run \
+                 koshi restart-servers to move them"
+            );
         }
     }
 }
@@ -388,13 +402,14 @@ const RESTART_PROBE_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 /// [`restart_sessions_into_version`] and [`restart_router_into_version`] do,
 /// while this process holds the update lock [`take_update_lock`] takes. The
 /// lock is released once both return. A lock that cannot be taken runs both
-/// restarts without it.
+/// restarts without it. Then the sessions of koshi 0.2.0 that the session
+/// restart found go to [`end_sessions_without_restart_request`].
 ///
-/// `true` when both give `true`: every server that ran now runs
-/// `expected_version`, or ended as [`restart_router_into_version`] states. A
-/// runtime directory that cannot be resolved restarts nothing, prints `koshi:
-/// the running sessions and the router could not be reached: <failure>`, and
-/// gives `false`.
+/// `true` when all three give `true`: every server that ran now runs
+/// `expected_version`, or ended as [`restart_router_into_version`] and
+/// [`end_sessions_without_restart_request`] state. A runtime directory that
+/// cannot be resolved restarts nothing, prints `koshi: the running sessions
+/// and the router could not be reached: <failure>`, and gives `false`.
 fn restart_servers_into_version(expected_version: &str, restart_scope: RestartScope) -> bool {
     let runtime_directory = match ipc_client::resolve_runtime_directory() {
         Ok(runtime_directory) => runtime_directory,
@@ -407,12 +422,14 @@ fn restart_servers_into_version(expected_version: &str, restart_scope: RestartSc
         }
     };
     let update_lock_file = take_update_lock(&runtime_directory);
-    let has_every_session_restarted =
+    let (has_every_session_restarted, sessions_without_restart_request) =
         restart_sessions_into_version(&runtime_directory, expected_version, restart_scope);
     let has_router_restarted =
         restart_router_into_version(&runtime_directory, expected_version, restart_scope);
     drop(update_lock_file);
-    has_every_session_restarted && has_router_restarted
+    let has_every_session_ended =
+        end_sessions_without_restart_request(&sessions_without_restart_request, expected_version);
+    has_every_session_restarted && has_router_restarted && has_every_session_ended
 }
 
 /// Open the lock file at [`resolve_update_lock_path`] in `runtime_directory`,
@@ -466,13 +483,18 @@ fn take_update_lock(runtime_directory: &Path) -> Option<fs::File> {
 /// runs `expected_version` is not asked, and prints `the running router
 /// already runs koshi <version>; every session keeps running`. Success is
 /// printed only after the router's Hello reports `expected_version`. A router
-/// that refuses this build's protocol version goes to
-/// [`stop_incompatible_router`]. Any other refusal, a router still on another
-/// build, or no answer within [`RESTART_CONFIRM_WAIT_DURATION`] prints a note
-/// on standard error.
+/// that refuses this build's protocol version, and a router that answers in
+/// the envelope of koshi 0.1.0 to 0.4.0, go to [`stop_incompatible_router`].
+/// Once that router's process ended, a router of the program this process runs
+/// starts at once, through [`start_router`], and [`report_started_router`]
+/// says what it reports. Any other refusal, a router still on another build,
+/// or no answer within [`RESTART_CONFIRM_WAIT_DURATION`] prints a note on
+/// standard error.
 ///
-/// `true` when no router runs, when the router runs `expected_version`, and
-/// when [`stop_incompatible_router`] gives `true`.
+/// `true` when no router runs, when the router runs `expected_version`, when
+/// [`stop_incompatible_router`] gives
+/// [`IncompatibleRouterStop::AlreadyOnVersion`], and when the router started
+/// after it reports `expected_version`.
 fn restart_router_into_version(
     runtime_directory: &Path,
     expected_version: &str,
@@ -519,9 +541,22 @@ fn restart_router_into_version(
             );
             false
         }
-        Err(CliError::ProtocolVersionRefused {
-            detail: refusal_detail,
-        }) => stop_incompatible_router(runtime_directory, expected_version, &refusal_detail),
+        Err(
+            CliError::ProtocolVersionRefused {
+                detail: refusal_detail,
+            }
+            | CliError::PreviousReleaseServer {
+                detail: refusal_detail,
+            },
+        ) => match stop_incompatible_router(runtime_directory, expected_version, &refusal_detail) {
+            IncompatibleRouterStop::Stopped { router_process_id } => report_started_router(
+                router_process_id,
+                expected_version,
+                start_router(runtime_directory),
+            ),
+            IncompatibleRouterStop::AlreadyOnVersion => true,
+            IncompatibleRouterStop::NotStopped => false,
+        },
         Err(router_restart_error) => {
             eprintln!(
                 "koshi: the running router could not be restarted: {router_restart_error}; it keeps serving the old \
@@ -532,22 +567,36 @@ fn restart_router_into_version(
     }
 }
 
-/// End the router `runtime_directory` advertises, which refused this build's
-/// protocol version with `refusal_detail`, once
+/// What [`stop_incompatible_router`] did with the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IncompatibleRouterStop {
+    /// The router's process, `router_process_id`, ended.
+    Stopped { router_process_id: u32 },
+    /// The router runs the expected version, newer than this build, and keeps
+    /// running.
+    AlreadyOnVersion,
+    /// The router was not ended, for the reason printed on standard error.
+    NotStopped,
+}
+
+/// End the router `runtime_directory` advertises, which this build cannot
+/// talk to for the reason `refusal_detail` names, once
 /// [`find_server_process_record`] confirms its process. Only the router's own
-/// process ends: every session keeps running, and the next koshi command that
-/// needs a router starts a new one. Prints what happened.
+/// process ends: every session keeps running.
 ///
 /// A router whose program file, as [`find_server_program_file`] reads it,
 /// names a version newer than this build keeps running:
 ///
 /// - `expected_version` prints `the running router already runs koshi
-///   <version>; every session keeps running`, and gives `true`.
+///   <version>; every session keeps running`, and gives
+///   [`IncompatibleRouterStop::AlreadyOnVersion`].
 /// - Any other newer version prints `koshi: the running router runs koshi
 ///   <version> from <path>, which is newer than this koshi <this version>; it
-///   keeps running; every session keeps running`, and gives `false`.
+///   keeps running; every session keeps running`, and gives
+///   [`IncompatibleRouterStop::NotStopped`].
 ///
-/// `true` once the router's process has ended. `false`, with a note on
+/// [`IncompatibleRouterStop::Stopped`] once the router's process has ended,
+/// with nothing printed. [`IncompatibleRouterStop::NotStopped`], with a note on
 /// standard error, for an endpoint file that cannot be read, for a process the
 /// proof does not confirm, which is left running, and for a process that still
 /// runs [`PROCESS_STOP_GRACE_DURATION`] after koshi ended it.
@@ -555,7 +604,7 @@ fn stop_incompatible_router(
     runtime_directory: &Path,
     expected_version: &str,
     refusal_detail: &str,
-) -> bool {
+) -> IncompatibleRouterStop {
     let router_endpoint_path = resolve_router_endpoint_path(runtime_directory);
     let router_endpoint_file = match EndpointFile::load_from_path(&router_endpoint_path) {
         Ok(router_endpoint_file) => router_endpoint_file,
@@ -564,7 +613,7 @@ fn stop_incompatible_router(
                 "koshi: the running router runs a koshi version this one cannot talk to \
                  ({refusal_detail}), and its endpoint file could not be read: {endpoint_file_error}"
             );
-            return false;
+            return IncompatibleRouterStop::NotStopped;
         }
     };
     let router_process_id = router_endpoint_file.process_id;
@@ -581,7 +630,7 @@ fn stop_incompatible_router(
                 "the running router already runs koshi {expected_version}; every session keeps \
                  running"
             );
-            return true;
+            return IncompatibleRouterStop::AlreadyOnVersion;
         }
         Some(router_program_file) => {
             eprintln!(
@@ -590,7 +639,7 @@ fn stop_incompatible_router(
                 sanitize_reported_text(&router_program_file.build_version),
                 sanitize_reported_text(&router_program_file.program_path)
             );
-            return false;
+            return IncompatibleRouterStop::NotStopped;
         }
         None => {}
     }
@@ -602,7 +651,7 @@ fn stop_incompatible_router(
              router, and leaves it running. If it is, end it with: {}",
             format_process_kill_command(router_process_id)
         );
-        return false;
+        return IncompatibleRouterStop::NotStopped;
     };
     let router_records = std::slice::from_ref(&router_record);
     process_tree::stop_processes(router_records, PROCESS_STOP_GRACE_DURATION);
@@ -611,14 +660,60 @@ fn stop_incompatible_router(
             "koshi: the running router (process {router_process_id}) runs a koshi version this \
              one cannot talk to ({refusal_detail}), and still runs after koshi ended it"
         );
-        return false;
+        return IncompatibleRouterStop::NotStopped;
     }
-    println!(
-        "koshi ended the running router (process {router_process_id}): it ran a koshi version \
-         this one cannot talk to; the next koshi command starts a new router; every session \
-         keeps running"
+    IncompatibleRouterStop::Stopped { router_process_id }
+}
+
+/// Say what starting a router gave, after koshi ended the router
+/// `router_process_id`, which ran a koshi version this one cannot talk to.
+/// `started_router_version` is what [`start_router`] gave. `true` when the
+/// started router reports `expected_version`.
+///
+/// - `expected_version` prints `koshi ended the running router (process
+///   <id>), which ran a koshi version this one cannot talk to, and started a
+///   router on koshi <version>; every session keeps running`.
+/// - Another version prints `koshi: koshi ended the running router (process
+///   <id>), which ran a koshi version this one cannot talk to; the router
+///   started after it reports koshi <version>, not <expected version>; every
+///   session keeps running` on standard error.
+/// - A failure prints `koshi: koshi ended the running router (process <id>),
+///   which ran a koshi version this one cannot talk to, and could not start a
+///   new one: <failure>; the next koshi command starts one; every session keeps
+///   running` on standard error.
+fn report_started_router(
+    router_process_id: u32,
+    expected_version: &str,
+    started_router_version: Result<String, CliError>,
+) -> bool {
+    let router_end_clause = format!(
+        "koshi ended the running router (process {router_process_id}), which ran a koshi version \
+         this one cannot talk to"
     );
-    true
+    match started_router_version {
+        Ok(started_router_version) if started_router_version == expected_version => {
+            println!(
+                "{router_end_clause}, and started a router on koshi {expected_version}; every \
+                 session keeps running"
+            );
+            true
+        }
+        Ok(started_router_version) => {
+            eprintln!(
+                "koshi: {router_end_clause}; the router started after it reports koshi {}, not \
+                 {expected_version}; every session keeps running",
+                sanitize_reported_text(&started_router_version)
+            );
+            false
+        }
+        Err(router_start_error) => {
+            eprintln!(
+                "koshi: {router_end_clause}, and could not start a new one: {router_start_error}; \
+                 the next koshi command starts one; every session keeps running"
+            );
+            false
+        }
+    }
 }
 
 /// Ask the router `runtime_directory` advertises to restart, and wait up to
@@ -734,7 +829,10 @@ fn probe_router_version(runtime_directory: &Path) -> Option<String> {
 /// [`RESTART_PROBE_TIMEOUT_DURATION`]. A probe that runs out the bound reads as
 /// no answer. A session that refuses this build's protocol version reports
 /// the version its program file holds, as
-/// [`find_advertised_server_program_file`] reads it.
+/// [`find_advertised_server_program_file`] reads it. A session that answers in
+/// the envelope of koshi 0.1.0 to 0.4.0 reports the build it names in the
+/// Hello of that envelope, as [`find_previous_release_session_version`] reads
+/// it: `0.4.0` from a koshi 0.4.0 session whose restart did not start.
 fn probe_session_version(runtime_directory: &Path, session_id: SessionId) -> Option<String> {
     let runtime_directory = runtime_directory.to_path_buf();
     run_peer_call_within(
@@ -749,6 +847,11 @@ fn probe_session_version(runtime_directory: &Path, session_id: SessionId) -> Opt
                 &EndpointFile::resolve_endpoint_file_path(&runtime_directory, session_id),
             )
             .map(|session_program_file| session_program_file.build_version),
+            Err(CliError::PreviousReleaseServer { .. }) => {
+                find_previous_release_session_version(&runtime_directory, session_id)
+                    .ok()
+                    .flatten()
+            }
             Err(_) => None,
         },
     )
@@ -779,11 +882,16 @@ enum SessionOutcome {
     /// The session's program file, carried here, names another file than the
     /// one the update installed into. The session was not asked to restart.
     OnOtherProgramFile(ServerProgramFile),
+    /// The session runs koshi 0.2.0 or one of its pre-releases, which has no
+    /// restart request.
+    WithoutRestartRequest,
 }
 
-/// Ask every session `runtime_directory` advertises that `restart_scope`
-/// names to restart into the koshi program it runs from, and print one line
-/// per session.
+/// Ask every session that `restart_scope` names to restart into the koshi
+/// program it runs from, and print one line per session. The sessions are the
+/// ones `runtime_directory` advertises, then the ones each runtime directory
+/// of koshi 0.1.0 and 0.2.0 advertises, as [`list_other_runtime_directories`]
+/// gives them.
 ///
 /// Prints nothing for a session that is no longer listening. Success is printed
 /// only after that session's Hello reports `expected_version`. A session
@@ -792,83 +900,290 @@ enum SessionOutcome {
 /// standard error. A session that refused this build's protocol version, and
 /// did not restart by itself within the wait [`restart_running_session`]
 /// makes, is not ended: its note names the command that ends it,
-/// `koshi kill-session <session id>`. A runtime directory that cannot be read
-/// prints `koshi: the running sessions could not be listed: <path> could not
-/// be read: <failure>; each keeps serving the old build until it is ended and
-/// started again`, and restarts nothing.
+/// `koshi kill-session <session id>`. A session of koshi 0.2.0, which has no
+/// restart request, prints nothing: it is handed back beside the directory
+/// that advertises it. A directory that cannot be read prints `koshi: the
+/// running sessions could not be listed: <path> could not be read: <failure>;
+/// each keeps serving the old build until it is ended and started again`, and
+/// restarts nothing in it.
 ///
-/// `true` when every session now runs `expected_version`, and when none was
-/// running.
+/// The `bool` is `true` when every session asked now runs `expected_version`,
+/// and when none was running. The sessions of koshi 0.2.0 do not change it.
 fn restart_sessions_into_version(
     runtime_directory: &Path,
     expected_version: &str,
     restart_scope: RestartScope,
-) -> bool {
-    let session_outcomes = match restart_advertised_sessions(
-        runtime_directory,
-        expected_version,
-        restart_scope,
-        RESTART_CONFIRM_WAIT_DURATION,
-    ) {
-        Ok(session_outcomes) => session_outcomes,
-        Err(unread_path) => {
-            eprintln!(
-                "koshi: the running sessions could not be listed: {unread_path}; each keeps \
-                 serving the old build until it is ended and started again"
-            );
-            return false;
-        }
-    };
+) -> (bool, Vec<(PathBuf, SessionId)>) {
     let mut has_every_session_restarted = true;
-    for (session_id, session_outcome) in session_outcomes {
-        match session_outcome {
-            SessionOutcome::Confirmed => println!(
-                "{session_id} restarted into koshi {expected_version}; its panes keep running"
-            ),
-            SessionOutcome::StillOnVersion(reported_version) => {
+    let mut sessions_without_restart_request = Vec::new();
+    let session_runtime_directories =
+        std::iter::once(runtime_directory.to_path_buf()).chain(list_other_runtime_directories(
+            koshi_paths::resolve_previous_release_runtime_directories(),
+            runtime_directory,
+        ));
+    for session_runtime_directory in session_runtime_directories {
+        let session_outcomes = match restart_advertised_sessions(
+            &session_runtime_directory,
+            expected_version,
+            restart_scope,
+            RESTART_CONFIRM_WAIT_DURATION,
+        ) {
+            Ok(session_outcomes) => session_outcomes,
+            Err(unread_path) => {
                 eprintln!(
-                    "koshi: {session_id} still reports {reported_version} after the restart; it keeps serving \
-                     that build; its panes keep running"
+                    "koshi: the running sessions could not be listed: {unread_path}; each keeps \
+                     serving the old build until it is ended and started again"
                 );
                 has_every_session_restarted = false;
+                continue;
             }
-            SessionOutcome::Unconfirmed => {
-                eprintln!(
-                    "koshi: the restart of {session_id} was not confirmed: it answered nothing \
-                     within {} seconds; its panes keep running",
-                    RESTART_CONFIRM_WAIT_DURATION.as_secs()
-                );
-                has_every_session_restarted = false;
-            }
-            SessionOutcome::Failed(error_detail) => {
-                eprintln!(
-                    "koshi: {session_id} could not be restarted: {error_detail}; it keeps serving the old \
-                     build until you end that session and start it again"
-                );
-                has_every_session_restarted = false;
-            }
-            SessionOutcome::Incompatible(refusal_detail) => {
-                eprintln!(
-                    "koshi: {session_id} runs a koshi version this one cannot talk to: \
-                     {refusal_detail}"
-                );
-                has_every_session_restarted = false;
-            }
-            SessionOutcome::AlreadyOnVersion => println!(
-                "{session_id} already runs koshi {expected_version}; its panes keep running"
-            ),
-            SessionOutcome::OnOtherProgramFile(session_program_file) => {
-                let running_version = sanitize_reported_text(&session_program_file.build_version);
-                eprintln!(
-                    "koshi: {session_id} runs koshi {running_version} from {}, a program file \
-                     this koshi does not replace; it keeps running koshi {running_version}",
-                    sanitize_reported_text(&session_program_file.program_path)
-                );
-                has_every_session_restarted = false;
+        };
+        for (session_id, session_outcome) in session_outcomes {
+            match session_outcome {
+                SessionOutcome::Confirmed => println!(
+                    "{session_id} restarted into koshi {expected_version}; its panes keep running"
+                ),
+                SessionOutcome::StillOnVersion(reported_version) => {
+                    eprintln!(
+                        "koshi: {session_id} still reports {reported_version} after the restart; it keeps serving \
+                         that build; its panes keep running"
+                    );
+                    has_every_session_restarted = false;
+                }
+                SessionOutcome::Unconfirmed => {
+                    eprintln!(
+                        "koshi: the restart of {session_id} was not confirmed: it answered nothing \
+                         within {} seconds; its panes keep running",
+                        RESTART_CONFIRM_WAIT_DURATION.as_secs()
+                    );
+                    has_every_session_restarted = false;
+                }
+                SessionOutcome::Failed(error_detail) => {
+                    eprintln!(
+                        "koshi: {session_id} could not be restarted: {error_detail}; it keeps serving the old \
+                         build until you end that session and start it again"
+                    );
+                    has_every_session_restarted = false;
+                }
+                SessionOutcome::Incompatible(refusal_detail) => {
+                    eprintln!(
+                        "koshi: {session_id} runs a koshi version this one cannot talk to: \
+                         {refusal_detail}"
+                    );
+                    has_every_session_restarted = false;
+                }
+                SessionOutcome::AlreadyOnVersion => println!(
+                    "{session_id} already runs koshi {expected_version}; its panes keep running"
+                ),
+                SessionOutcome::OnOtherProgramFile(session_program_file) => {
+                    let running_version =
+                        sanitize_reported_text(&session_program_file.build_version);
+                    eprintln!(
+                        "koshi: {session_id} runs koshi {running_version} from {}, a program file \
+                         this koshi does not replace; it keeps running koshi {running_version}",
+                        sanitize_reported_text(&session_program_file.program_path)
+                    );
+                    has_every_session_restarted = false;
+                }
+                SessionOutcome::WithoutRestartRequest => {
+                    sessions_without_restart_request
+                        .push((session_runtime_directory.clone(), session_id));
+                }
             }
         }
     }
-    has_every_session_restarted
+    (
+        has_every_session_restarted,
+        sessions_without_restart_request,
+    )
+}
+
+/// Name the sessions in `sessions_without_restart_request`, each beside the
+/// runtime directory that advertises it, which koshi 0.2.0 or one of its
+/// pre-releases started and so cannot restart into `expected_version`. Then
+/// ask whether to end them, as [`read_yes_answer`](crate::prompt::read_yes_answer)
+/// asks: `koshi 0.6.0 cannot move session-<uuid>, which koshi 0.2.0 started.
+/// End it and the programs in its panes? [y/N] `, or `cannot move
+/// session-<uuid>, session-<uuid>, which ... End them and the programs in their
+/// panes? [y/N] ` for several.
+///
+/// - Yes: from then on this process ignores `SIGHUP`, `SIGINT` and `SIGQUIT`,
+///   or Ctrl+C on Windows, through
+///   [`ignore_terminal_signals`](process_tree::ignore_terminal_signals). Each
+///   session ends as [`end_session`] ends it, with every process started under
+///   it, and prints `<session id> ran koshi 0.2.0; koshi ended it and the
+///   programs in its panes`. A session that is already gone prints `<session
+///   id> ran koshi 0.2.0 and no longer runs`. A session that cannot be ended
+///   prints `koshi: <session id> could not be ended: <failure>` on standard
+///   error. The session that `KOSHI_SESSION_ID` names, as
+///   [`InSessionContext::from_env`] reads it, which runs the pane this command
+///   runs in, ends after every other session. A line that cannot be written,
+///   such as one to the terminal of a session that just ended, is dropped,
+///   and the next session still ends.
+/// - Any other answer, the end of standard input included: each session
+///   prints `koshi: <session id> keeps running koshi 0.2.0, and so do its
+///   panes; run koshi restart-servers again to end it` on standard error.
+///
+/// `true` when no session is left running. An empty
+/// `sessions_without_restart_request` asks nothing and gives `true`.
+fn end_sessions_without_restart_request(
+    sessions_without_restart_request: &[(PathBuf, SessionId)],
+    expected_version: &str,
+) -> bool {
+    if sessions_without_restart_request.is_empty() {
+        return true;
+    }
+    let session_id_list = sessions_without_restart_request
+        .iter()
+        .map(|(_, session_id)| session_id.to_string())
+        .collect::<Vec<String>>()
+        .join(", ");
+    let end_question = match sessions_without_restart_request.len() {
+        1 => format!(
+            "koshi {expected_version} cannot move {session_id_list}, which koshi 0.2.0 started. \
+             End it and the programs in its panes? [y/N] "
+        ),
+        _ => format!(
+            "koshi {expected_version} cannot move {session_id_list}, which koshi 0.2.0 started. \
+             End them and the programs in their panes? [y/N] "
+        ),
+    };
+    if !crate::prompt::read_yes_answer(&end_question) {
+        for (_, session_id) in sessions_without_restart_request {
+            eprintln!(
+                "koshi: {session_id} keeps running koshi 0.2.0, and so do its panes; run koshi \
+                 restart-servers again to end it"
+            );
+        }
+        return false;
+    }
+    process_tree::ignore_terminal_signals();
+    let own_pane_session_id = InSessionContext::from_env()
+        .ok()
+        .flatten()
+        .map(|in_session_context| in_session_context.session_id);
+    let (own_pane_sessions, other_sessions): (Vec<_>, Vec<_>) = sessions_without_restart_request
+        .iter()
+        .partition(|(_, session_id)| Some(*session_id) == own_pane_session_id);
+    let mut has_every_session_ended = true;
+    for (session_runtime_directory, session_id) in
+        other_sessions.into_iter().chain(own_pane_sessions)
+    {
+        match end_session(session_runtime_directory, None, *session_id) {
+            Ok(_) => {
+                let _ = writeln!(
+                    io::stdout(),
+                    "{session_id} ran koshi 0.2.0; koshi ended it and the programs in its panes"
+                );
+            }
+            Err(CliError::SessionNotFound { .. }) => {
+                let _ = writeln!(
+                    io::stdout(),
+                    "{session_id} ran koshi 0.2.0 and no longer runs"
+                );
+            }
+            Err(end_error) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "koshi: {session_id} could not be ended: {end_error}"
+                );
+                has_every_session_ended = false;
+            }
+        }
+    }
+    has_every_session_ended
+}
+
+/// The directories of `candidate_runtime_directories` that are not
+/// `runtime_directory`: neither the same path, nor a path that
+/// [`fs::canonicalize`] resolves to the path `runtime_directory` resolves to.
+/// A path that cannot be resolved, such as one that does not exist, is
+/// compared as it is.
+///
+/// Example: candidates `/tmp/link` and `/home/user/.local/share/koshi/run`,
+/// where `/tmp/link` is a symbolic link to the runtime directory `/tmp/run`,
+/// give `/home/user/.local/share/koshi/run`.
+#[must_use]
+pub fn list_other_runtime_directories(
+    candidate_runtime_directories: Vec<PathBuf>,
+    runtime_directory: &Path,
+) -> Vec<PathBuf> {
+    let canonical_runtime_directory = fs::canonicalize(runtime_directory).ok();
+    candidate_runtime_directories
+        .into_iter()
+        .filter(|candidate_runtime_directory| {
+            if candidate_runtime_directory == runtime_directory {
+                return false;
+            }
+            match (
+                fs::canonicalize(candidate_runtime_directory),
+                &canonical_runtime_directory,
+            ) {
+                (Ok(canonical_candidate_directory), Some(canonical_runtime_directory)) => {
+                    canonical_candidate_directory != *canonical_runtime_directory
+                }
+                _ => true,
+            }
+        })
+        .collect()
+}
+
+/// How many sessions run from `previous_release_runtime_directory`: each
+/// endpoint file there, as [`ipc_client::list_advertised_sessions`] lists
+/// them, whose process passes the check `koshi kill-session` makes: it runs
+/// as this user, runs a program that
+/// [`is_koshi_executable_name`](process_tree::is_koshi_executable_name)
+/// accepts, such as `koshi` or `koshi.old`, and started in the second the
+/// endpoint file was last written or before it. A directory that cannot be
+/// read counts nothing, and so does an endpoint file that
+/// cannot be read, such as the one a koshi 0.1.0 window writes.
+#[must_use]
+pub fn count_previous_release_sessions(previous_release_runtime_directory: &Path) -> usize {
+    let Ok(session_ids) = ipc_client::list_advertised_sessions(previous_release_runtime_directory)
+    else {
+        return 0;
+    };
+    session_ids
+        .into_iter()
+        .filter(|session_id| {
+            let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
+                previous_release_runtime_directory,
+                *session_id,
+            );
+            EndpointFile::load_from_path(&endpoint_file_path).is_ok_and(|endpoint_file| {
+                find_server_process_record(&endpoint_file_path, endpoint_file.process_id).is_some()
+            })
+        })
+        .count()
+}
+
+/// The line `koshi list-sessions` prints on standard error for
+/// `session_count` sessions that run from `previous_release_runtime_directory`,
+/// a runtime directory of koshi 0.1.0 and 0.2.0, and `None` for `0`.
+///
+/// Example: `1` and `/home/user/.local/share/koshi/run` give `1 session that
+/// an older koshi started runs from /home/user/.local/share/koshi/run, which
+/// this koshi does not list; run koshi restart-servers to move it or end it`.
+/// `2` gives `2 sessions that an older koshi started run from ..., which this
+/// koshi does not list; run koshi restart-servers to move them or end them`.
+#[must_use]
+pub fn format_previous_release_session_note(
+    previous_release_runtime_directory: &Path,
+    session_count: usize,
+) -> Option<String> {
+    let previous_release_runtime_directory = previous_release_runtime_directory.display();
+    match session_count {
+        0 => None,
+        1 => Some(format!(
+            "1 session that an older koshi started runs from {previous_release_runtime_directory}, \
+             which this koshi does not list; run koshi restart-servers to move it or end it"
+        )),
+        session_count => Some(format!(
+            "{session_count} sessions that an older koshi started run from \
+             {previous_release_runtime_directory}, which this koshi does not list; run koshi \
+             restart-servers to move them or end them"
+        )),
+    }
 }
 
 /// Ask every session `runtime_directory` advertises to restart, waiting up to
@@ -886,9 +1201,10 @@ fn restart_sessions_into_version(
 /// [`SessionOutcome::Unconfirmed`]. A session that refuses this build's
 /// protocol version gives [`SessionOutcome::AlreadyOnVersion`] when its
 /// program file says it runs `installed_version` and that version is newer
-/// than this build, and [`SessionOutcome::Incompatible`] otherwise. One
-/// session's failure never ends the walk: every advertised session is asked,
-/// whatever the one before it answered.
+/// than this build, and [`SessionOutcome::Incompatible`] otherwise. A session
+/// of koshi 0.2.0 or older gives [`SessionOutcome::WithoutRestartRequest`].
+/// One session's failure never ends the walk: every advertised session is
+/// asked, whatever the one before it answered.
 ///
 /// # Errors
 /// [`UnreadPath`] naming `runtime_directory` when it cannot be read, other than
@@ -934,6 +1250,9 @@ fn restart_advertised_sessions(
         });
         let session_outcome = match session_restart {
             Some(Ok(SessionRestart::NotRunning)) => continue,
+            Some(Ok(SessionRestart::WithoutRestartRequest)) => {
+                SessionOutcome::WithoutRestartRequest
+            }
             Some(Ok(SessionRestart::Restarting)) => {
                 match wait_for_version(installed_version, wait_duration, || {
                     probe_session_version(runtime_directory, session_id)
@@ -1331,16 +1650,98 @@ fn get_binary_file_name() -> &'static str {
     }
 }
 
-/// Removes the `<exe>.old` a prior Windows self-update left beside the file
-/// the running executable's path names once every symbolic link and junction
-/// in it is followed. The swap leaves that file while the old image still
-/// runs from it, and the next launch removes it. A no-op on other platforms,
-/// where the swap leaves no file behind.
-fn remove_stale_backup() {
+/// Deletes every backup that a Windows update left beside the file the running
+/// executable's path names once every symbolic link and junction in it is
+/// followed: each entry [`list_backup_executable_paths`] lists. A backup that a
+/// running process still runs from cannot be deleted, and stays. A no-op on
+/// other platforms, where the swap leaves no file behind.
+fn delete_stale_backups() {
     #[cfg(windows)]
     if let Ok(executable_path) = std::env::current_exe().and_then(fs::canonicalize) {
-        let _ = fs::remove_file(executable_path.with_extension("old"));
+        for backup_executable_path in list_backup_executable_paths(&executable_path) {
+            let _ = fs::remove_file(backup_executable_path);
+        }
     }
+}
+
+/// The backup path number `backup_index` of the program file at
+/// `executable_path`: `<stem>.old` for `0`, and `<stem>.<backup_index>.old`
+/// for every other number.
+///
+/// Example: `C:\koshi\koshi.exe` and `0` give `C:\koshi\koshi.old`, and `2`
+/// gives `C:\koshi\koshi.2.old`.
+#[cfg(any(windows, test))]
+fn compute_backup_executable_path(executable_path: &Path, backup_index: u64) -> PathBuf {
+    match backup_index {
+        0 => executable_path.with_extension("old"),
+        backup_index => executable_path.with_extension(format!("{backup_index}.old")),
+    }
+}
+
+/// Delete what stands at the backup path of the program file at
+/// `executable_path`, and give that path, which the Windows swap renames the
+/// program file to: the path [`compute_backup_executable_path`] gives for the
+/// lowest number, from `0` up, where no file is left. A file found at a path
+/// is deleted first. A file that cannot be deleted, such as a backup that a
+/// running process still runs from, moves the search to the next number.
+///
+/// Example: a process still runs from `koshi.old`, and `koshi.1.old` does not
+/// exist: `koshi.1.old`.
+///
+/// # Errors
+/// The failure to read the metadata of a path, other than a missing path.
+#[cfg(any(windows, test))]
+fn prepare_backup_executable_path(executable_path: &Path) -> io::Result<PathBuf> {
+    let mut backup_index: u64 = 0;
+    loop {
+        let backup_executable_path = compute_backup_executable_path(executable_path, backup_index);
+        match fs::symlink_metadata(&backup_executable_path) {
+            Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {
+                return Ok(backup_executable_path);
+            }
+            Err(metadata_error) => return Err(metadata_error),
+            Ok(_) if fs::remove_file(&backup_executable_path).is_ok() => {
+                return Ok(backup_executable_path);
+            }
+            Ok(_) => backup_index += 1,
+        }
+    }
+}
+
+/// Every backup beside the program file at `executable_path`: each entry of
+/// its directory whose name
+/// [`is_backup_program_file_name`](koshi_host::program_path::is_backup_program_file_name)
+/// accepts with the stem of that file, `<stem>.old` or `<stem>.<n>.old`. A
+/// directory that cannot be read lists nothing, and an entry that cannot be
+/// read is left out.
+///
+/// Example: beside `koshi.exe`, the entries `koshi.old`, `koshi.3.old`,
+/// `koshi.x.old` and `notes.old` give `koshi.old` and `koshi.3.old`.
+#[cfg(any(windows, test))]
+fn list_backup_executable_paths(executable_path: &Path) -> Vec<PathBuf> {
+    let (Some(program_directory), Some(program_stem)) = (
+        executable_path.parent(),
+        executable_path
+            .file_stem()
+            .and_then(|program_stem| program_stem.to_str()),
+    ) else {
+        return Vec::new();
+    };
+    let Ok(directory_entries) = fs::read_dir(program_directory) else {
+        return Vec::new();
+    };
+    directory_entries
+        .filter_map(Result::ok)
+        .map(|directory_entry| directory_entry.path())
+        .filter(|entry_path| {
+            entry_path
+                .file_name()
+                .and_then(|entry_name| entry_name.to_str())
+                .is_some_and(|entry_name| {
+                    koshi_host::program_path::is_backup_program_file_name(entry_name, program_stem)
+                })
+        })
+        .collect()
 }
 
 /// Replace the program file on Unix: the file `executable_path` names once
@@ -1398,24 +1799,27 @@ fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), Stri
 /// `executable_path` keeps naming that file.
 ///
 /// Copies `new_binary` beside that file as `koshi-update-<pid>.exe`, renames
-/// the running file to `<name>.old`, and renames the copy into its place. When
-/// that last rename fails, the `.old` file is renamed back, and a restore that
-/// fails too returns both errors and the `.old` path. A `.old` file that
-/// cannot be removed while it runs is removed at the next launch by
-/// [`remove_stale_backup`].
+/// the running file to the backup path [`prepare_backup_executable_path`]
+/// gives, such as `koshi.old`, and renames the copy into its place. When that
+/// last rename fails, the backup is renamed back, and a restore that fails too
+/// returns both errors and the backup path. A backup that a running process
+/// still runs from stays, and [`delete_stale_backups`] removes it at the first
+/// interactive launch after that process ends.
 ///
 /// # Errors
-/// The failure of the path lookup, the copy, or a rename, as text.
+/// The failure of the path lookup, the backup path lookup, the copy, or a
+/// rename, as text.
 #[cfg(windows)]
 fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), String> {
     let executable_path = &fs::canonicalize(executable_path)
         .map_err(|executable_path_error| executable_path_error.to_string())?;
+    let backup_executable_path = prepare_backup_executable_path(executable_path)
+        .map_err(|backup_path_error| backup_path_error.to_string())?;
     // The copy sits beside the program file, on the same volume.
     let staged_binary_path =
         executable_path.with_file_name(format!("koshi-update-{}.exe", std::process::id()));
     fs::copy(new_binary, &staged_binary_path)
         .map_err(|staged_copy_error| staged_copy_error.to_string())?;
-    let backup_executable_path = executable_path.with_extension("old");
     if let Err(backup_rename_error) = fs::rename(executable_path, &backup_executable_path) {
         let _ = fs::remove_file(&staged_binary_path);
         return Err(backup_rename_error.to_string());
@@ -1433,8 +1837,9 @@ fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), Stri
         }
         return Err(staged_rename_error.to_string());
     }
-    // A `.old` file that still runs is not removed here; `remove_stale_backup`
-    // removes it at the next launch.
+    // A backup that a running process still runs from stays, and
+    // `delete_stale_backups` removes it at the first interactive launch after
+    // that process ends.
     let _ = fs::remove_file(&backup_executable_path);
     Ok(())
 }
@@ -1491,16 +1896,42 @@ fn resolve_update_state_path() -> Option<PathBuf> {
         .map(|state_directory| state_directory.join("update.json"))
 }
 
-/// Reads the update state, defaulting on a missing or unreadable file.
+/// The update state file koshi 0.2.0 to 0.4.0 write: `{"last_check": <unix seconds>}`.
+#[derive(Deserialize)]
+struct PreviousReleaseUpdateState {
+    /// Unix seconds of the last completed check.
+    last_check: Option<u64>,
+}
+
+/// Reads the update state, as [`parse_update_state`] parses it, defaulting on
+/// a missing or unreadable file.
 fn load_update_state() -> UpdateState {
     let Some(update_state_file_path) = resolve_update_state_path() else {
         return UpdateState::default();
     };
     match fs::read_to_string(&update_state_file_path) {
-        Ok(serialized_update_state) => {
-            serde_json::from_str(&serialized_update_state).unwrap_or_default()
-        }
+        Ok(serialized_update_state) => parse_update_state(&serialized_update_state),
         Err(_) => UpdateState::default(),
+    }
+}
+
+/// Parse `serialized_update_state`, the text of `update.json`.
+///
+/// A file in the shape koshi 0.2.0 to 0.4.0 write gives its last-check time:
+/// `{"last_check": 1700000000}` gives `last_check_unix_seconds`
+/// `Some(1700000000)`. [`save_update_state`] writes the current shape. Text
+/// that parses as neither shape gives no state.
+fn parse_update_state(serialized_update_state: &str) -> UpdateState {
+    let update_state: UpdateState =
+        serde_json::from_str(serialized_update_state).unwrap_or_default();
+    if update_state.last_check_unix_seconds.is_some() {
+        return update_state;
+    }
+    match serde_json::from_str::<PreviousReleaseUpdateState>(serialized_update_state) {
+        Ok(previous_release_update_state) => UpdateState {
+            last_check_unix_seconds: previous_release_update_state.last_check,
+        },
+        Err(_) => update_state,
     }
 }
 

@@ -399,6 +399,12 @@ Every way of leaving counts: the quit keybinding (`<leader>q` by default),
 session with `koshi attach <session>` from inside a pane. A terminal that moves
 away has left, so a session it leaves empty ends.
 
+A restart into a new build, such as the one `koshi update` starts, is not a
+leaving. Each attached terminal reconnects by itself. A terminal that does not
+come back is dropped, for example a terminal that runs koshi 0.4.0, which
+cannot attach to a newer session. The session keeps running even when no
+terminal is left; rejoin it with `koshi attach <session>`.
+
 Quit leaves the session; it never ends one on its own. With this setting off,
 `<leader>q` detaches your terminal and the session keeps running. With it on,
 `<leader>q` ends the session only when no other terminal is attached. To end a

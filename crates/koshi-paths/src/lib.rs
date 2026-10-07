@@ -13,6 +13,7 @@
 //! | [`resolve_state_directory`] | `~/.local/state/koshi` | `~/Library/Application Support/koshi` | `%LOCALAPPDATA%\koshi\data` |
 //! | [`resolve_runtime_directory`] | `/tmp/koshi-<uid>` | `/tmp/koshi-<uid>` | `<data_directory>\run` |
 //! | [`resolve_shared_sessions_directory`] | `/tmp/koshi` | `/tmp/koshi` | `%ProgramData%\koshi` |
+//! | [`resolve_previous_release_runtime_directories`] | `$XDG_RUNTIME_DIR/koshi` or `/run/user/<uid>/koshi`, `~/.local/share/koshi/run` | `~/Library/Application Support/koshi/run` | `%APPDATA%\koshi\data\run` |
 //!
 //! The [`directories`] crate resolves [`resolve_config_directory`], [`resolve_data_directory`], and
 //! [`resolve_state_directory`]. On Linux, an absolute `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, or
@@ -197,6 +198,46 @@ pub fn resolve_runtime_directory_with_rule() -> Option<(PathBuf, RuntimeDirector
 #[must_use]
 pub fn resolve_runtime_directory() -> Option<PathBuf> {
     resolve_runtime_directory_with_rule().map(|(runtime_directory, _)| runtime_directory)
+}
+
+/// Returns the runtime directories that koshi 0.1.0 and 0.2.0 used, in this
+/// order:
+///
+/// 1. On Linux only: `koshi` under `XDG_RUNTIME_DIR` when that variable holds
+///    an absolute path. Otherwise `/run/user/<effective uid>/koshi`, which is
+///    `koshi` under the `XDG_RUNTIME_DIR` that `pam_systemd` sets.
+/// 2. `run` under [`resolve_data_directory`]. This entry is left out when
+///    [`resolve_data_directory`] gives `None`.
+///
+/// Example: on Linux with `XDG_RUNTIME_DIR` set to `/run/user/1000`, the
+/// result is `/run/user/1000/koshi` and `~/.local/share/koshi/run`. With
+/// `XDG_RUNTIME_DIR` unset for user id `1000`, the result is the same. On
+/// macOS, the result is `~/Library/Application Support/koshi/run`.
+///
+/// On Windows, the one directory is the one [`resolve_runtime_directory`]
+/// gives when no absolute `KOSHI_RUNTIME_DIR` is set. koshi 0.2.0 read the
+/// `%APPDATA%` known folder. If an absolute `APPDATA` names another folder,
+/// the directory is not the one koshi 0.2.0 used.
+#[must_use]
+pub fn resolve_previous_release_runtime_directories() -> Vec<PathBuf> {
+    let mut previous_release_runtime_directories = Vec::new();
+    match resolve_project_directories()
+        .and_then(|project_directories| project_directories.runtime_dir().map(Path::to_path_buf))
+    {
+        Some(xdg_runtime_directory) => {
+            previous_release_runtime_directories.push(xdg_runtime_directory)
+        }
+        #[cfg(target_os = "linux")]
+        None => previous_release_runtime_directories.push(PathBuf::from(format!(
+            "/run/user/{}/koshi",
+            get_effective_user_id()
+        ))),
+        #[cfg(not(target_os = "linux"))]
+        None => {}
+    }
+    previous_release_runtime_directories
+        .extend(resolve_data_directory().map(|data_directory| data_directory.join("run")));
+    previous_release_runtime_directories
 }
 
 /// Returns the machine-wide directory for shared session sockets. Windows

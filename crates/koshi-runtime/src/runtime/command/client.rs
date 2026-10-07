@@ -646,90 +646,84 @@ impl Server {
     /// before this is reached. With `auto-close-session` on, a detach that
     /// leaves the session with no client requests a graceful quit.
     ///
-    /// A detach for a client that is still awaiting reconnect is dropped: that
-    /// record's fate belongs to the grace window, which detaches it through
-    /// `handle_drop_unclaimed_clients` after removing it from the set.
+    /// A detach for a client that is still awaiting reconnect is dropped.
+    /// `handle_drop_unclaimed_clients` removes that client from the set and
+    /// detaches it when the grace window closes.
     pub fn handle_client_detach(&mut self, client_id: ClientId) -> Vec<Event> {
         if self.client_ids_awaiting_reconnect.contains(&client_id) {
             return Vec::new();
         }
 
-        // Clone the shared backend before borrowing the session: the reflow then
-        // needs no `&self` across the mutation.
-        let pty_backend = Arc::clone(self.get_pty_backend());
-
-        // A detach for a client no session holds is dropped.
-        let Some(session_id) = self
-            .get_session_for_client(client_id)
-            .map(|session| session.session_id)
-        else {
-            return Vec::new();
-        };
-        let Some(session) = self.session_by_id.get(&session_id) else {
-            return Vec::new();
-        };
-        let Some(removed_client) = session.clients.get_client_by_id(client_id) else {
-            return Vec::new();
-        };
-        let active_tab_id = removed_client.get_active_tab_id();
-        let affected_client_ids: Vec<ClientId> =
-            list_clients_affected_by_tabs(session, &[active_tab_id], None)
-                .into_iter()
-                .filter(|affected_client_id| *affected_client_id != client_id)
-                .collect();
-        let session = self
-            .session_by_id
-            .get_mut(&session_id)
-            .expect("session located above");
-
-        // Removing the client returns its record; its `active_tab` is the tab
-        // whose tab size may now grow.
-        let removed_client = session.detach_client(client_id);
-        let active_tab_id = removed_client
-            .as_ref()
-            .map(|client| client.get_active_tab_id());
-        if removed_client.is_some() {
-            advance_session_placement_revision(session);
-            advance_client_placement_revisions(session, &affected_client_ids);
-        }
-        // A client did leave, and none is left attached.
-        let is_session_empty = removed_client.is_some() && !session.clients.has_clients();
-        self.unsubscribe_client(client_id);
-
         let mut emitted_events = Vec::new();
-        // Reflow the tab the client left, if any other client still views it; a
-        // tab whose last viewer just left has no tab size and keeps its sizes.
-        if let Some(active_tab_id) = active_tab_id {
-            self.reflow_tab_if_viewed(
-                pty_backend.as_ref(),
-                session_id,
-                active_tab_id,
-                &mut emitted_events,
-            );
-        }
-
-        self.render_scheduler.invalidate();
+        let session_id_of_removed_client =
+            self.remove_client_record(client_id, &mut emitted_events);
+        let is_session_left_without_client = session_id_of_removed_client
+            .and_then(|session_id| self.session_by_id.get(&session_id))
+            .is_some_and(|session| !session.clients.has_clients());
 
         // `auto-close-session` ends the session when its last client leaves.
         // Each pane's child is asked to stop and given the graceful window
         // before it is killed; a stop request that cannot be delivered goes
         // straight to the kill.
-        if is_session_empty && self.config.should_auto_close_session {
+        if is_session_left_without_client && self.config.should_auto_close_session {
             self.request_graceful_quit();
         }
 
         emitted_events
     }
 
+    /// Remove the record of the client `client_id`, reflow the tab it was
+    /// viewing, and schedule a redraw, as
+    /// [`handle_client_detach`](Self::handle_client_detach) states. Pushes one
+    /// [`Event::PtyResized`] per reflowed pane onto `emitted_events`. Requests
+    /// no quit.
+    ///
+    /// The id of the session that held the client, once its record is removed.
+    /// `None` for a client no session holds, which changes nothing.
+    fn remove_client_record(
+        &mut self,
+        client_id: ClientId,
+        emitted_events: &mut Vec<Event>,
+    ) -> Option<SessionId> {
+        // A detach for a client no session holds is dropped.
+        let session = self.get_session_for_client_mut(client_id)?;
+        let session_id = session.session_id;
+        // Removing the client returns its record; its `active_tab` is the tab
+        // whose tab size may now grow.
+        let removed_client = session
+            .detach_client(client_id)
+            .expect("the session found for the client holds it");
+        let active_tab_id = removed_client.get_active_tab_id();
+        let affected_client_ids = list_clients_affected_by_tabs(session, &[active_tab_id], None);
+        advance_session_placement_revision(session);
+        advance_client_placement_revisions(session, &affected_client_ids);
+        self.unsubscribe_client(client_id);
+
+        // Reflow the tab the client left, if any other client still views it; a
+        // tab whose last viewer just left has no tab size and keeps its sizes.
+        let pty_backend = Arc::clone(self.get_pty_backend());
+        self.reflow_tab_if_viewed(
+            pty_backend.as_ref(),
+            session_id,
+            active_tab_id,
+            emitted_events,
+        );
+
+        self.render_scheduler.invalidate();
+
+        Some(session_id)
+    }
+
     /// Detach every client whose record came across an image swap and has not
     /// attached again by `unclaimed_client_deadline`.
     ///
-    /// Each one goes through
-    /// [`handle_client_detach`](Self::handle_client_detach), so its tab reflows
-    /// and `auto-close-session` still ends a session left with no client. A
-    /// client that attached again already left the set, so the usual case
-    /// detaches nobody and emits nothing. The detaches run in client-id order,
-    /// so the events they emit arrive in one settled order.
+    /// Each one's record is removed as
+    /// [`handle_client_detach`](Self::handle_client_detach) removes one, and its
+    /// tab reflows. No quit is requested: a session these removals leave with no
+    /// client keeps running, with `auto-close-session` on or off. A client that
+    /// attached again is no longer in the set: in the usual case no client is
+    /// removed and no event is emitted. The removals run in client-id order, and
+    /// the events they emit arrive in that order.
     ///
     /// `unclaimed_client_deadline` is when the grace window closed, supplied by the producer;
     /// the handler never reads the clock to decide anything.
@@ -754,7 +748,7 @@ impl Server {
         );
         let mut emitted_events = Vec::new();
         for client_id in unclaimed_client_ids {
-            emitted_events.extend(self.handle_client_detach(client_id));
+            self.remove_client_record(client_id, &mut emitted_events);
         }
         emitted_events
     }

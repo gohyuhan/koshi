@@ -105,6 +105,74 @@ fn each_resolver_routes_to_its_own_platform_dir() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn the_runtime_directories_of_koshi_0_2_0_are_the_xdg_one_then_the_data_one() {
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.set_environment_variable("XDG_RUNTIME_DIR", "/run/user/1000");
+    let data_runtime_directory = resolve_data_directory()
+        .expect("test machine has a home directory")
+        .join("run");
+
+    let previous_release_runtime_directories = resolve_previous_release_runtime_directories();
+
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            previous_release_runtime_directories,
+            vec![data_runtime_directory]
+        );
+    } else {
+        assert_eq!(
+            previous_release_runtime_directories,
+            vec![
+                PathBuf::from("/run/user/1000/koshi"),
+                data_runtime_directory
+            ]
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_relative_or_unset_xdg_runtime_dir_gives_the_systemd_runtime_directory_on_linux() {
+    let mut environment_guard = EnvGuard::new();
+    let data_runtime_directory = resolve_data_directory()
+        .expect("test machine has a home directory")
+        .join("run");
+    let expected_previous_release_runtime_directories = if cfg!(target_os = "linux") {
+        vec![
+            PathBuf::from(format!("/run/user/{}/koshi", get_effective_user_id())),
+            data_runtime_directory,
+        ]
+    } else {
+        vec![data_runtime_directory]
+    };
+
+    environment_guard.set_environment_variable("XDG_RUNTIME_DIR", "run/user/1000");
+    assert_eq!(
+        resolve_previous_release_runtime_directories(),
+        expected_previous_release_runtime_directories
+    );
+
+    environment_guard.unset_environment_variable("XDG_RUNTIME_DIR");
+    assert_eq!(
+        resolve_previous_release_runtime_directories(),
+        expected_previous_release_runtime_directories
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_runtime_directory_of_koshi_0_2_0_on_windows_follows_an_absolute_appdata() {
+    let mut environment_guard = EnvGuard::new();
+    environment_guard.set_environment_variable("APPDATA", r"C:\override\roaming");
+
+    assert_eq!(
+        resolve_previous_release_runtime_directories(),
+        vec![PathBuf::from(r"C:\override\roaming\koshi\data\run")]
+    );
+}
+
 #[test]
 fn unrecognized_koshi_directory_environment_variables_are_ignored() {
     // Setting `KOSHI_CONFIG_DIR`, `KOSHI_DATA_DIR` and `KOSHI_STATE_DIR`

@@ -13784,6 +13784,52 @@ fn client_detach_reflows_the_shared_tab_back_to_the_remaining_viewport() {
 }
 
 #[test]
+fn client_detach_advances_the_placement_revision_of_each_client_still_viewing_the_tab() {
+    let (mut runtime, _fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
+    let viewport_size = Size {
+        column_count: 80,
+        row_count: 24,
+    };
+    let remaining_client_id = runtime
+        .bootstrap_local(SessionId::new(), viewport_size, SystemTime::now())
+        .expect("bootstrap the genesis client");
+    let (session_id, tab_id, _pane_id) = get_only_session_slot(&runtime);
+    let leaving_client_id = ClientId::new();
+    runtime.handle_client_attach(
+        session_id,
+        leaving_client_id,
+        viewport_size,
+        None,
+        tab_id,
+        None,
+        SystemTime::now(),
+        false,
+    );
+    let session_revision_before = runtime.session_by_id[&session_id].get_placement_revision();
+    let remaining_client_revision_before = runtime.session_by_id[&session_id]
+        .clients
+        .get_client_by_id(remaining_client_id)
+        .expect("the remaining client is attached")
+        .get_placement_revision();
+
+    runtime.handle_client_detach(leaving_client_id);
+
+    let session = &runtime.session_by_id[&session_id];
+    assert_eq!(
+        session.get_placement_revision(),
+        session_revision_before + 1
+    );
+    assert_eq!(
+        session
+            .clients
+            .get_client_by_id(remaining_client_id)
+            .expect("the remaining client stays attached")
+            .get_placement_revision(),
+        remaining_client_revision_before + 1
+    );
+}
+
+#[test]
 fn last_client_detach_keeps_pty_sizes_and_emits_no_resize() {
     let (mut runtime, fake_pty_backend, _runtime_event_sender) = build_runtime_with_fake();
     let viewport_size = Size {

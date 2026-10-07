@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -25,13 +26,15 @@ use std::time::{Duration, Instant};
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_ipc::error::IpcError;
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::supervisor::migration::{
-    encode_previous_supervisor_request, PreviousSupervisorMessage,
+    serialize_previous_supervisor_request, PreviousSupervisorMessage,
+    PREVIOUS_SUPERVISOR_PROTOCOL_VERSION,
 };
 use koshi_ipc::supervisor::{
     IncomingSupervisorMessage, SupervisorEvent, SupervisorMessage, SupervisorRequest,
-    SupervisorRequestKind, SupervisorResponse, SupervisorResult,
+    SupervisorRequestKind, SupervisorResponse, SupervisorResult, SUPERVISOR_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, FrameReader, FrameWriter};
 use koshi_ipc::wire::{MaybeKnown, WireName};
@@ -72,8 +75,31 @@ struct Link {
     response_receiver: Receiver<SupervisorResponse<MaybeKnown<SupervisorResult>>>,
     /// The id the next request carries.
     next_request_id: u64,
-    /// Protocol of the supervisor process that stays alive across this session's swap.
+    /// The supervisor-link protocol version every frame on this link is written
+    /// and read in: [`SUPERVISOR_PROTOCOL_VERSION`], or
+    /// [`PREVIOUS_SUPERVISOR_PROTOCOL_VERSION`] for a supervisor that koshi
+    /// 0.3.0 or 0.4.0 started.
     supervisor_protocol_version: u32,
+}
+
+/// Why one link did not open.
+#[derive(Debug)]
+enum LinkOpenError {
+    /// The Hello failed after a frame from the supervisor did not parse at the
+    /// protocol version the link spoke. Carries the failure the Hello reported.
+    UnreadableHelloAnswer { hello_error: PtyError },
+    /// Every other failure. `link_error` is that failure.
+    OtherFailure { link_error: PtyError },
+}
+
+impl LinkOpenError {
+    /// The failure this carries.
+    fn into_pty_error(self) -> PtyError {
+        match self {
+            LinkOpenError::UnreadableHelloAnswer { hello_error } => hello_error,
+            LinkOpenError::OtherFailure { link_error } => link_error,
+        }
+    }
 }
 
 /// A [`PtyBackend`] whose panes live in a supervisor process.
@@ -124,11 +150,20 @@ impl SupervisorPtyBackend {
     /// Every remaining pane is driven by the returned backend, at the process
     /// id and size the supervisor listed.
     ///
+    /// The first link speaks [`SUPERVISOR_PROTOCOL_VERSION`]. When its Hello
+    /// fails after a frame from the supervisor did not parse, that link is
+    /// closed and a second link speaks [`PREVIOUS_SUPERVISOR_PROTOCOL_VERSION`],
+    /// the version of a supervisor that koshi 0.3.0 or 0.4.0 started. Such a
+    /// supervisor answers a Hello it cannot read with `MalformedRequest` and
+    /// then serves the next link. Every other failure of the first link is the
+    /// result, and no second link is opened.
+    ///
     /// # Errors
     /// Returns [`PtyError::Io`] when the link cannot be opened, when the
     /// supervisor does not answer within the answer wait, when it refuses the
     /// Hello, pane list, or a recorded exit's kill, or when it answers a request
-    /// with the wrong response kind.
+    /// with the wrong response kind. After a second link was opened, the
+    /// failure is that link's.
     /// Any of those closes the link's read direction, so the reader thread
     /// ends and the supervisor is free to serve the next link.
     ///
@@ -140,57 +175,65 @@ impl SupervisorPtyBackend {
         pty_sink: Arc<dyn PtySink>,
         pane_ids: &[PaneId],
     ) -> Result<SupervisorPtyBackend, PtyError> {
-        Self::connect_with_supervisor_protocol(
+        match Self::open_link(
+            supervisor_address,
+            connection_token.clone(),
+            Arc::clone(&pty_sink),
+            pane_ids,
+            SUPERVISOR_PROTOCOL_VERSION,
+        ) {
+            Ok(backend) => return Ok(backend),
+            Err(LinkOpenError::OtherFailure { link_error }) => return Err(link_error),
+            Err(LinkOpenError::UnreadableHelloAnswer { .. }) => {}
+        }
+        Self::open_link(
             supervisor_address,
             connection_token,
             pty_sink,
             pane_ids,
-            koshi_ipc::supervisor::SUPERVISOR_PROTOCOL_VERSION,
+            PREVIOUS_SUPERVISOR_PROTOCOL_VERSION,
         )
+        .map_err(LinkOpenError::into_pty_error)
     }
 
-    /// Reconnect to a version 1 supervisor that still owns the carried panes.
+    /// Open one link that writes and reads every frame in
+    /// `supervisor_protocol_version`, present `connection_token` in its Hello,
+    /// and reconcile `pane_ids` as [`connect`](Self::connect) states.
     ///
     /// # Errors
-    /// Returns the connection, handshake, and reconciliation failures of [`connect`](Self::connect).
-    pub fn connect_previous_supervisor(
-        supervisor_address: &str,
-        connection_token: ConnectionToken,
-        pty_sink: Arc<dyn PtySink>,
-        pane_ids: &[PaneId],
-    ) -> Result<SupervisorPtyBackend, PtyError> {
-        Self::connect_with_supervisor_protocol(
-            supervisor_address,
-            connection_token,
-            pty_sink,
-            pane_ids,
-            1,
-        )
-    }
-
-    fn connect_with_supervisor_protocol(
+    /// [`LinkOpenError::UnreadableHelloAnswer`] when the Hello fails after the
+    /// link's reader met a frame that does not parse in
+    /// `supervisor_protocol_version`. [`LinkOpenError::OtherFailure`] for every other
+    /// failure [`connect`](Self::connect) names. Either way the link's read
+    /// direction is closed.
+    fn open_link(
         supervisor_address: &str,
         connection_token: ConnectionToken,
         pty_sink: Arc<dyn PtySink>,
         pane_ids: &[PaneId],
         supervisor_protocol_version: u32,
-    ) -> Result<SupervisorPtyBackend, PtyError> {
-        let connection =
-            Connection::connect(supervisor_address).map_err(|io_error| PtyError::Io {
-                detail: format!(
-                    "the supervisor at {supervisor_address} could not be reached: {io_error}"
-                ),
-            })?;
+    ) -> Result<SupervisorPtyBackend, LinkOpenError> {
+        let connection = Connection::connect(supervisor_address).map_err(|io_error| {
+            LinkOpenError::OtherFailure {
+                link_error: PtyError::Io {
+                    detail: format!(
+                        "the supervisor at {supervisor_address} could not be reached: {io_error}"
+                    ),
+                },
+            }
+        })?;
         let link_closer = connection.create_read_closer().ok();
         let (frame_reader, frame_writer) = connection.split();
         let (response_sender, response_receiver) = channel();
         let exit_status_by_pane_id_during_connect = Arc::new(Mutex::new(Some(HashMap::new())));
+        let has_unreadable_frame = Arc::new(AtomicBool::new(false));
         start_link_reader_thread(
             frame_reader,
             response_sender,
             Arc::clone(&pty_sink),
             Arc::clone(&exit_status_by_pane_id_during_connect),
             supervisor_protocol_version,
+            Arc::clone(&has_unreadable_frame),
         );
 
         let backend = SupervisorPtyBackend {
@@ -206,19 +249,50 @@ impl SupervisorPtyBackend {
             pty_sink,
         };
 
-        match backend.reconcile_panes(connection_token, pane_ids) {
+        let link_open_result = match backend.send_hello_request(connection_token) {
+            Err(hello_error) if has_unreadable_frame.load(Ordering::SeqCst) => {
+                Err(LinkOpenError::UnreadableHelloAnswer { hello_error })
+            }
+            Err(hello_error) => Err(LinkOpenError::OtherFailure {
+                link_error: hello_error,
+            }),
+            Ok(()) => backend
+                .reconcile_panes(pane_ids)
+                .map_err(|reconcile_error| LinkOpenError::OtherFailure {
+                    link_error: reconcile_error,
+                }),
+        };
+        match link_open_result {
             Ok(()) => Ok(backend),
-            Err(reconcile_error) => {
+            Err(link_open_error) => {
                 if let Some(link_closer) = link_closer {
                     link_closer.close();
                 }
-                Err(reconcile_error)
+                Err(link_open_error)
             }
         }
     }
 
-    /// Present `connection_token`, read the pane list, and reconcile it against
-    /// `pane_ids`, the panes the caller believes are running.
+    /// Present `connection_token` in a Hello and require the supervisor's Hello
+    /// answer.
+    ///
+    /// # Errors
+    /// Returns [`PtyError::Io`] when the supervisor refuses the Hello, answers
+    /// it with another response kind, or does not answer it.
+    fn send_hello_request(&self, connection_token: ConnectionToken) -> Result<(), PtyError> {
+        match self.send_request_and_receive_result(SupervisorRequestKind::build_hello_request(
+            connection_token,
+        ))? {
+            SupervisorResult::Hello { .. } => Ok(()),
+            unexpected_supervisor_result => Err(build_unexpected_supervisor_result_error(
+                "Hello",
+                &unexpected_supervisor_result,
+            )),
+        }
+    }
+
+    /// Read the pane list, and reconcile it against `pane_ids`, the panes the
+    /// caller believes are running.
     ///
     /// A pane the supervisor holds that `pane_ids` does not name is killed with
     /// [`KillPolicy::Tree`]; a pane `pane_ids` names that the supervisor does not
@@ -227,25 +301,10 @@ impl SupervisorPtyBackend {
     /// Every remaining pane is written into this backend's pane map.
     ///
     /// # Errors
-    /// Returns [`PtyError::Io`] when the supervisor refuses the Hello, pane
-    /// list, or a recorded exit's kill, answers with the wrong response kind,
-    /// or does not answer.
-    fn reconcile_panes(
-        &self,
-        connection_token: ConnectionToken,
-        pane_ids: &[PaneId],
-    ) -> Result<(), PtyError> {
-        match self.send_request_and_receive_result(SupervisorRequestKind::build_hello_request(
-            connection_token,
-        ))? {
-            SupervisorResult::Hello { .. } => {}
-            unexpected_supervisor_result => {
-                return Err(build_unexpected_supervisor_result_error(
-                    "Hello",
-                    &unexpected_supervisor_result,
-                ))
-            }
-        }
+    /// Returns [`PtyError::Io`] when the supervisor refuses the pane list or a
+    /// recorded exit's kill, answers with the wrong response kind, or does not
+    /// answer.
+    fn reconcile_panes(&self, pane_ids: &[PaneId]) -> Result<(), PtyError> {
         let supervisor_panes =
             match self.send_request_and_receive_result(SupervisorRequestKind::ListPanes)? {
                 SupervisorResult::Panes(supervisor_panes) => supervisor_panes,
@@ -458,8 +517,10 @@ impl SupervisorPtyBackend {
             request_id,
             request_kind,
         };
-        let send_result = if link_state.supervisor_protocol_version == 1 {
-            let previous_request = encode_previous_supervisor_request(&supervisor_request)
+        let send_result = if link_state.supervisor_protocol_version
+            == PREVIOUS_SUPERVISOR_PROTOCOL_VERSION
+        {
+            let previous_request = serialize_previous_supervisor_request(&supervisor_request)
                 .map_err(|conversion_error| PtyError::Io {
                     detail: format!("{request_kind_name} cannot be encoded for the running supervisor: {conversion_error}"),
                 })?;
@@ -745,10 +806,13 @@ fn build_unexpected_supervisor_result_error(
 /// Start the thread that reads the link: it hands each response to whoever is
 /// waiting on [`Link::response_receiver`] and each event to `pty_sink`.
 ///
-/// The thread ends when the link breaks, when a frame does not decode, or when
+/// The thread ends when the link breaks, when a frame does not parse, or when
 /// no one holds the receiving end of `response_sender`. Ending drops
 /// `response_sender`: a caller waiting for an answer reads the link as closed. An event this build
 /// has no name for is passed over, and the link keeps carrying the rest.
+///
+/// Every frame is parsed in `supervisor_protocol_version`. A frame that does
+/// not parse sets `has_unreadable_frame` before the thread ends.
 ///
 /// A pane whose output chunk `pty_sink` refused takes nothing more, its exit included;
 /// every other pane keeps being delivered.
@@ -761,6 +825,7 @@ fn start_link_reader_thread(
     pty_sink: Arc<dyn PtySink>,
     exit_status_by_pane_id_during_connect: Arc<Mutex<Option<HashMap<PaneId, ExitStatus>>>>,
     supervisor_protocol_version: u32,
+    has_unreadable_frame: Arc<AtomicBool>,
 ) {
     let _ = thread::Builder::new()
         .name("koshi-pty-link".to_string())
@@ -770,15 +835,21 @@ fn start_link_reader_thread(
             // being delivered.
             let mut output_rejected_pane_ids: HashSet<PaneId> = HashSet::new();
             loop {
-                let incoming_supervisor_message = if supervisor_protocol_version == 1 {
-                    frame_reader
-                        .recv::<PreviousSupervisorMessage>()
-                        .map(|previous_message| previous_message.decoded_message)
-                } else {
-                    frame_reader.recv::<IncomingSupervisorMessage>()
-                };
-                let Ok(incoming_supervisor_message) = incoming_supervisor_message else {
-                    break;
+                let incoming_supervisor_message =
+                    if supervisor_protocol_version == PREVIOUS_SUPERVISOR_PROTOCOL_VERSION {
+                        frame_reader
+                            .recv::<PreviousSupervisorMessage>()
+                            .map(|previous_message| previous_message.supervisor_message)
+                    } else {
+                        frame_reader.recv::<IncomingSupervisorMessage>()
+                    };
+                let incoming_supervisor_message = match incoming_supervisor_message {
+                    Ok(incoming_supervisor_message) => incoming_supervisor_message,
+                    Err(IpcError::MalformedFrame { .. }) => {
+                        has_unreadable_frame.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Err(_) => break,
                 };
                 match incoming_supervisor_message {
                     SupervisorMessage::Response(supervisor_response) => {

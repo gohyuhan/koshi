@@ -42,7 +42,8 @@ use koshi_link::remote_client::{self, DIAL_TIMEOUT_DURATION};
 #[cfg(unix)]
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, count_program_runs, write_printing_program, NO_SUCH_PROCESS_ID,
+    build_test_runtime_directory, count_program_runs, write_koshi_0_1_0_window_endpoint_file,
+    write_printing_program, NO_SUCH_PROCESS_ID,
 };
 
 #[test]
@@ -573,6 +574,61 @@ fn the_startup_keeps_every_endpoint_file_it_cannot_read() {
         "the endpoint file of a session nothing listens for stays"
     );
     drop(listener);
+}
+
+#[test]
+fn the_startup_removes_the_endpoint_file_of_a_closed_koshi_0_1_0_window() {
+    // A koshi 0.1.0 window left its endpoint file behind, and nothing listens
+    // at its address. The file is removed, and no reason is recorded for it.
+    let window_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory();
+    let window_endpoint_path =
+        write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), window_session_id);
+
+    let router_sessions = create_settled_router_sessions(runtime_directory.path(), None);
+
+    assert_eq!(router_sessions.session_registry, SessionRegistry::new());
+    assert_eq!(
+        router_sessions
+            .unanswered_reason_by_session_id
+            .keys()
+            .copied()
+            .collect::<Vec<SessionId>>(),
+        Vec::<SessionId>::new()
+    );
+    assert!(
+        !window_endpoint_path.exists(),
+        "the endpoint file of the closed window is removed"
+    );
+}
+
+#[test]
+fn the_startup_keeps_the_endpoint_file_of_an_open_koshi_0_1_0_window_and_names_the_window() {
+    let window_session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory();
+    let window_listener = bind_test_session_listener(&compute_socket_address(
+        runtime_directory.path(),
+        window_session_id,
+    ));
+    let window_endpoint_path =
+        write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), window_session_id);
+
+    let router_sessions = create_settled_router_sessions(runtime_directory.path(), None);
+
+    assert_eq!(router_sessions.session_registry, SessionRegistry::new());
+    assert_eq!(
+        find_unanswered_session_reason(&router_sessions, window_session_id),
+        Some(format!(
+            "endpoint file {} is unreadable: a koshi 0.1.0 window wrote it, and this koshi \
+             cannot talk to that window; the window ends when its terminal closes",
+            window_endpoint_path.display()
+        ))
+    );
+    assert!(
+        window_endpoint_path.exists(),
+        "the endpoint file of the open window stays"
+    );
+    drop(window_listener);
 }
 
 /// Write an empty resume file for `session_id` in `runtime_directory`, stamped
@@ -1248,7 +1304,7 @@ fn the_orphan_sweep_leaves_an_old_resume_file_beside_any_endpoint_file() {
         PAST_RESTART_WINDOW_DURATION,
     );
 
-    remove_orphan_resume_files(runtime_directory.path());
+    delete_orphan_resume_files(runtime_directory.path());
 
     assert!(
         readable_resume_file_path.exists(),

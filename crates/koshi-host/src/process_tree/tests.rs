@@ -90,14 +90,21 @@ fn wait_for_process_record(process_id: u32) -> ProcessRecord {
 }
 
 #[test]
-fn is_koshi_executable_name_accepts_koshi_and_koshi_exe_in_any_case() {
+fn is_koshi_executable_name_accepts_koshi_koshi_exe_and_its_backup_names() {
     let name_checks = [
         ("koshi", true),
         ("koshi.exe", true),
         ("KOSHI.EXE", true),
         ("Koshi.Exe", true),
+        ("koshi.old", true),
+        ("KOSHI.OLD", true),
+        ("koshi.2.old", true),
+        ("Koshi.12.Old", true),
         ("koshi-dev", false),
         ("koshi.ex", false),
+        ("koshi.x.old", false),
+        ("koshi..old", false),
+        ("other.old", false),
         ("KOSHI", false),
         ("zsh", false),
         ("", false),

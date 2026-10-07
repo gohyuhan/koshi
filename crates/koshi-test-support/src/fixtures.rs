@@ -3,6 +3,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::SessionId;
@@ -12,7 +13,8 @@ use koshi_core::key::{
 use koshi_ipc::endpoint::{compute_socket_address, EndpointFile};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_ipc::router::{compute_router_socket_address, resolve_router_endpoint_path};
-use koshi_ipc::transport::Connection;
+use koshi_ipc::transport::{Connection, Listener};
+use serde_json::value::RawValue;
 use tempfile::TempDir;
 
 /// How long [`start_program_process`] keeps trying while the operating system
@@ -185,6 +187,129 @@ pub fn write_session_endpoint_file(
         ))
         .expect("write the session endpoint file");
     session_endpoint
+}
+
+/// Write the endpoint file a koshi 0.1.0 window writes for `session_id` in
+/// `runtime_directory`, the fields `{socket, token}` alone, and hand back its
+/// path.
+///
+/// # Panics
+///
+/// Panics when the endpoint file cannot be written.
+pub fn write_koshi_0_1_0_window_endpoint_file(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> PathBuf {
+    let endpoint_file_path =
+        EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
+    let window_endpoint_text = serde_json::json!({
+        "socket": compute_socket_address(runtime_directory, session_id),
+        "token": "k7QxSecret",
+    })
+    .to_string();
+    std::fs::write(&endpoint_file_path, window_endpoint_text)
+        .expect("write the window's endpoint file");
+    endpoint_file_path
+}
+
+/// The answer a session of koshi 0.2.0 to 0.4.0 gives a frame in this build's
+/// envelope, such as this build's Hello: `malformed_request`, in the envelope
+/// of that release.
+pub const PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT: &str = r#"{"request_id":null,"result":{"Error":{"code":"malformed_request","message":"unknown field `request_kind`, expected `request_id` or `kind`"}}}"#;
+
+/// The answer a koshi 0.4.0 session gives the Hello of its own envelope.
+pub const KOSHI_0_4_0_HELLO_ANSWER_TEXT: &str =
+    r#"{"request_id":1,"result":{"Hello":{"protocol_version":3,"version":"0.4.0"}}}"#;
+
+/// The answer a koshi 0.4.0 session gives the Restart of its own envelope.
+pub const KOSHI_0_4_0_RESTARTING_ANSWER_TEXT: &str = r#"{"request_id":2,"result":"Restarting"}"#;
+
+/// The answer a koshi 0.2.0 session gives the Hello of its own envelope: it
+/// names no build.
+pub const KOSHI_0_2_0_HELLO_ANSWER_TEXT: &str =
+    r#"{"request_id":1,"result":{"Hello":{"protocol_version":2}}}"#;
+
+/// The answer a koshi 0.2.0 session gives a Restart: `unsupported_kind`.
+pub const KOSHI_0_2_0_RESTART_REFUSAL_TEXT: &str = r#"{"request_id":2,"result":{"Error":{"code":"unsupported_kind","message":"this Koshi has no request kind named Restart"}}}"#;
+
+/// Serve the session `session_id` in `runtime_directory` as a session of koshi
+/// 0.2.0 to 0.4.0 would: one connection for each entry of
+/// `answer_texts_by_connection`, in order. The endpoint file names this
+/// process and the token made from `connection_secret`.
+///
+/// On each connection, the stand-in reads one frame and writes the next
+/// answer of the entry, until the entry has no answer left or a read fails.
+/// An answer is written whether or not the caller still reads. The connection
+/// closes once the caller hung up. Hands back the frames each connection read,
+/// as their JSON text.
+///
+/// # Panics
+///
+/// Panics when the socket cannot be bound, the endpoint file cannot be
+/// written, a caller cannot be accepted, or an answer is not JSON.
+pub fn spawn_previous_release_session(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    connection_secret: &str,
+    answer_texts_by_connection: Vec<Vec<String>>,
+) -> JoinHandle<Vec<Vec<String>>> {
+    let session_listener = Listener::bind(&compute_socket_address(runtime_directory, session_id))
+        .expect("bind the stand-in session");
+    write_session_endpoint_file(
+        runtime_directory,
+        session_id,
+        connection_secret,
+        std::process::id(),
+    );
+    spawn_previous_release_server(session_listener, answer_texts_by_connection)
+}
+
+/// Serve the router of `runtime_directory` as a router of koshi 0.2.0 to 0.4.0
+/// would, the way [`spawn_previous_release_session`] serves a session. The
+/// endpoint file is the one [`write_router_endpoint_file`] writes for
+/// `connection_secret`, naming the process id `5000`.
+///
+/// # Panics
+///
+/// Panics when the socket cannot be bound, the endpoint file cannot be
+/// written, a caller cannot be accepted, or an answer is not JSON.
+pub fn spawn_previous_release_router(
+    runtime_directory: &Path,
+    connection_secret: &str,
+    answer_texts_by_connection: Vec<Vec<String>>,
+) -> JoinHandle<Vec<Vec<String>>> {
+    let router_listener = Listener::bind(&compute_router_socket_address(runtime_directory))
+        .expect("bind the stand-in router");
+    write_router_endpoint_file(runtime_directory, connection_secret);
+    spawn_previous_release_server(router_listener, answer_texts_by_connection)
+}
+
+/// Serve one connection on `server_listener` for each entry of
+/// `answer_texts_by_connection`, in order, on a thread of its own. Each
+/// connection runs as [`spawn_previous_release_session`] describes, and the
+/// thread hands back the frames each connection read, as their JSON text.
+fn spawn_previous_release_server(
+    server_listener: Listener,
+    answer_texts_by_connection: Vec<Vec<String>>,
+) -> JoinHandle<Vec<Vec<String>>> {
+    std::thread::spawn(move || {
+        let mut request_texts_by_connection = Vec::new();
+        for answer_texts in answer_texts_by_connection {
+            let mut server_connection = server_listener.accept().expect("accept the caller");
+            let mut request_texts = Vec::new();
+            for answer_text in answer_texts {
+                let Ok(request_frame) = server_connection.recv::<Box<RawValue>>() else {
+                    break;
+                };
+                request_texts.push(request_frame.get().to_string());
+                let answer_frame = RawValue::from_string(answer_text).expect("the answer is JSON");
+                let _ = server_connection.send(&answer_frame);
+            }
+            close_connection_after_peer_hangs_up(server_connection);
+            request_texts_by_connection.push(request_texts);
+        }
+        request_texts_by_connection
+    })
 }
 
 /// Advertise a router in `runtime_directory` under the token made from

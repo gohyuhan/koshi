@@ -23,4 +23,5 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true

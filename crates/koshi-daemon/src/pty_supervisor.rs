@@ -334,7 +334,7 @@ pub fn run_pty_supervisor(
     );
     // On Unix the address is a socket file, which stays on disk after the
     // listener is dropped.
-    koshi_ipc::endpoint::remove_socket_file(&supervisor_socket_address);
+    koshi_ipc::endpoint::delete_socket_file(&supervisor_socket_address);
     Ok(())
 }
 

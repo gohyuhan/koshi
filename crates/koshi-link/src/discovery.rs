@@ -558,10 +558,12 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
 /// asked again once it has restarted. A refused connect is made again
 /// through [`repeat_while_live_session_refuses`]. Nothing listening then is
 /// [`CliError::SessionNotFound`]. When that last attempt read this user's own
-/// endpoint file, the session's files go through `remove_stale_session_files`,
+/// endpoint file, the session's files go through `delete_stale_session_files`,
 /// and a session that function keeps is the [`CliError::IpcUnavailable`] it
-/// gives. Something listening whose exchange failed — a token that no longer
-/// matches, say — is [`CliError::IpcUnavailable`].
+/// gives. Something listening that replies in the envelope of koshi 0.4.0 or
+/// older is [`CliError::PreviousReleaseServer`]. Something listening whose
+/// exchange failed in any other way — a token that no longer matches, say — is
+/// [`CliError::IpcUnavailable`].
 ///
 /// With `answer_deadline`, each connect and every write and read after it end
 /// by that moment, as
@@ -612,7 +614,7 @@ pub fn fetch_session_overview(
     if let (Err(CliError::SessionNotFound { .. }), Some(asked_endpoint_file)) =
         (&session_overview_result, &asked_endpoint_file)
     {
-        remove_stale_session_files(runtime_directory, session_id, asked_endpoint_file)?;
+        delete_stale_session_files(runtime_directory, session_id, asked_endpoint_file)?;
     }
     session_overview_result
 }
@@ -643,7 +645,7 @@ pub fn fetch_session_overview(
 /// [`CliError::IpcUnavailable`] reading `process 5000 runs but accepts no
 /// connection` when the endpoint file names process `5000` and
 /// [`is_refusal_from_live_session`] accepts it.
-fn remove_stale_session_files(
+fn delete_stale_session_files(
     runtime_directory: &Path,
     session_id: SessionId,
     asked_endpoint_file: &EndpointFile,

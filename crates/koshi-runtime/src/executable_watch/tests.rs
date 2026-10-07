@@ -82,6 +82,37 @@ fn read_installed_version_takes_the_version_after_the_program_name() {
 }
 
 #[test]
+fn read_installed_version_takes_a_version_printed_after_3_seconds() {
+    let program_directory = TempDir::new().expect("a test directory");
+    #[cfg(unix)]
+    let program_path = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let program_path = program_directory.path().join("koshi");
+        std::fs::write(&program_path, "#!/bin/sh\nsleep 3\necho 'koshi 0.6.0'\n")
+            .expect("the program is written");
+        std::fs::set_permissions(&program_path, std::fs::Permissions::from_mode(0o755))
+            .expect("the program runs");
+        program_path
+    };
+    #[cfg(windows)]
+    let program_path = {
+        let program_path = program_directory.path().join("koshi.cmd");
+        std::fs::write(
+            &program_path,
+            "@echo off\r\nping -n 4 127.0.0.1 >nul\r\necho koshi 0.6.0\r\n",
+        )
+        .expect("the program is written");
+        program_path
+    };
+
+    let read_started_at = Instant::now();
+    let installed_version = read_installed_version(&program_path);
+
+    assert_eq!(installed_version, Ok("0.6.0".to_string()));
+    assert!(read_started_at.elapsed() >= Duration::from_millis(2500));
+}
+
+#[test]
 fn read_installed_version_refuses_a_line_that_names_another_program() {
     let program_directory = TempDir::new().expect("a test directory");
     let program_path = write_printing_program(

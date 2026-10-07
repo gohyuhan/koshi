@@ -20,14 +20,14 @@
 //!
 //! From an open link a caller lists the sessions the secret reaches, attaches
 //! to one, submits one command to one, or asks one to describe itself.
-//! [`reach_all_saved_servers`] asks every saved server at
-//! once and returns inside one deadline, whatever the servers do.
+//! [`list_saved_server_session_rows`] asks every saved server at once and
+//! returns, inside one deadline, the sessions of each server that answered.
 //!
 //! Every TLS and remote-frame detail stays inside this module. Callers name
 //! sessions, secrets and addresses, and never a certificate or a frame.
 
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -53,7 +53,7 @@ use koshi_ipc::remote_wire::{
     REMOTE_PROTOCOL_VERSION,
 };
 use koshi_ipc::router::{SessionSelector, ROUTER_RESTARTING_MESSAGE};
-use koshi_ipc::transport::{FrameReader, FrameWriter};
+use koshi_ipc::transport::{parse_answer, FrameReader, FrameWriter};
 use serde_json::value::RawValue;
 
 use crate::error::CliError;
@@ -92,7 +92,7 @@ const MAX_CONCURRENT_REACH_COUNT: usize = 16;
 
 /// How long [`reach_all_saved_servers`] waits for every saved server together, one deadline
 /// over the whole sweep.
-pub const REACH_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
+const REACH_TIMEOUT_DURATION: Duration = Duration::from_secs(2);
 
 /// How long a change to the saved-server store waits for another koshi to
 /// finish its own change before it gives up. The operating system releases the
@@ -177,7 +177,7 @@ impl From<DialError> for CliError {
 
 /// What asking one saved server for its sessions produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Reach {
+enum Reach {
     /// The server answered with the sessions this machine's secret reaches.
     Reached {
         /// The server's name when it has one, else its address.
@@ -191,6 +191,8 @@ pub enum Reach {
     Refused {
         /// The server's name when it has one, else its address.
         server_label: String,
+        /// The sentence a dial to that server reports for the same refusal.
+        refusal_detail: String,
     },
     /// The server answered and presented a certificate other than the one
     /// pinned for it.
@@ -531,9 +533,9 @@ pub fn resolve_server_connection_token(server_address: &str) -> Result<Connectio
     Ok(ConnectionToken::from_secret(trimmed_secret_text))
 }
 
-/// Print `prompt`, then read one secret from the terminal without printing
-/// what is typed, with surrounding whitespace trimmed. The answer can be
-/// empty.
+/// Print `prompt` on standard error, then read one secret from the terminal
+/// without printing what is typed, with surrounding whitespace trimmed. The
+/// answer can be empty.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, when the
@@ -543,33 +545,32 @@ pub fn prompt_secret(prompt: &str) -> Result<String, CliError> {
     Ok(read_terminal_secret(prompt)?.trim().to_string())
 }
 
-/// Print `prompt`, then read one line from the terminal, which the terminal
-/// echoes, with surrounding whitespace trimmed. The answer can be empty.
+/// Print `prompt` on standard error, then read one line from the terminal,
+/// which the terminal echoes, with surrounding whitespace trimmed. The answer
+/// can be empty.
 ///
 /// # Errors
 /// [`CliError::InvalidArgs`] when the terminal could not be read, and when the
 /// input ended before a line arrived.
 pub fn prompt_line(prompt: &str) -> Result<String, CliError> {
-    print!("{prompt}");
-    io::stdout().flush().map_err(build_prompt_error)?;
+    eprint!("{prompt}");
     Ok(read_terminal_line()?.trim().to_string())
 }
 
-/// Print `prompt`, then read one secret from the terminal without printing
-/// what is typed.
+/// Print `prompt` on standard error, then read one secret from the terminal
+/// without printing what is typed.
 ///
-/// The terminal is put in raw mode while the secret is typed. A terminal that
-/// cannot be put in raw mode reads one plain line instead, which the terminal
-/// echoes.
+/// The terminal is put in raw mode while the secret is typed, and a line break
+/// follows on standard error once the secret is read. A terminal that cannot
+/// be put in raw mode reads one plain line instead, which the terminal echoes.
 fn read_terminal_secret(prompt: &str) -> Result<String, CliError> {
-    print!("{prompt}");
-    io::stdout().flush().map_err(build_prompt_error)?;
+    eprint!("{prompt}");
     if crossterm::terminal::enable_raw_mode().is_err() {
         return read_terminal_line();
     }
     let hidden_line_read = read_hidden_terminal_line(&mut io::stdin().lock());
     let _ = crossterm::terminal::disable_raw_mode();
-    println!();
+    eprintln!();
     hidden_line_read.map_err(build_prompt_error)
 }
 
@@ -704,9 +705,15 @@ fn classify_dial_failure(ipc_error: IpcError) -> DialError {
 /// [`REMOTE_PROTOCOL_VERSION`], else the [`DialError::Refused`] to report.
 ///
 /// A `Refused` frame carrying
-/// [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) reads as a
-/// rejected or revoked token and names both ways to replace it. Any other
-/// refusal message is the server's own sentence, filtered by
+/// [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED) gives a refusal
+/// that names two causes and the step for each:
+///
+/// - The server runs koshi 0.3.0 or 0.4.0: update koshi on that machine.
+/// - The token was rejected or revoked: run `koshi share grant` on that
+///   machine, then store the new secret with `koshi remote set-secret` for a
+///   saved server, or give it when the next dial asks.
+///
+/// Any other refusal message is the server's own sentence, filtered by
 /// [`sanitize_reported_text`], with `server_address` after it.
 ///
 /// Every refusal built here carries [`CliError::Runtime`].
@@ -731,24 +738,23 @@ fn validate_remote_server_answer(
         }
         RemoteServerFrame::Welcome {
             remote_protocol_version,
-        } => {
-            Err(DialError::Refused(CliError::Runtime {
-                detail: format!(
-                    "server {server_address} settled on remote protocol version \
-                     {remote_protocol_version}, which this koshi does not speak: it speaks \
-                     {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}"
-                ),
-            }))
-        }
+        } => Err(DialError::Refused(CliError::Runtime {
+            detail: format!(
+                "server {server_address} settled on remote protocol version \
+                 {remote_protocol_version}, which this koshi does not speak: it speaks \
+                 {MIN_REMOTE_PROTOCOL_VERSION} to {REMOTE_PROTOCOL_VERSION}"
+            ),
+        })),
         RemoteServerFrame::Refused {
             message: refusal_message,
         } if refusal_message == remote_wire::REMOTE_REFUSED => {
             Err(DialError::Refused(CliError::Runtime {
                 detail: format!(
-                    "the server {server_address} did not admit the connection: the token was rejected \
-                     or revoked. re-grant it on that machine with `koshi share grant`; store \
-                     the new secret with `koshi remote set-secret` for a saved server, or \
-                     give it when the next dial asks"
+                    "the server {server_address} did not admit the connection. if that machine \
+                     runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was \
+                     rejected or revoked: re-grant it on that machine with `koshi share grant`, \
+                     then store the new secret with `koshi remote set-secret` for a saved \
+                     server, or give it when the next dial asks"
                 ),
             }))
         }
@@ -962,18 +968,24 @@ pub fn attach_remote_session(
 /// Two senders write this one frame: the serving machine writes a refusal when
 /// it does not attach the caller, and otherwise the session server's own
 /// answer arrives unread through the bridge. The frame is held as its JSON
-/// text and decoded as a refusal first, then as an [`IncomingResponse`].
+/// text and parsed as a refusal first, then as an [`IncomingResponse`].
 ///
 /// Example — a `Refused` frame carrying [`ROUTER_RESTARTING_MESSAGE`] is
 /// [`DialError::Restarting`]; one carrying any other sentence for the selector
 /// `quiet-lake` is [`DialError::Refused`] reading `the token this server saved
-/// does not reach session quiet-lake`.
+/// does not reach session quiet-lake`. An answer from a koshi 0.4.0 session
+/// `quiet-lake` is [`DialError::Refused`] reading `session quiet-lake answered
+/// in the format of koshi 0.4.0 or older, which this koshi cannot talk to; on
+/// the machine that serves it, the user who started it runs: koshi
+/// restart-servers`.
 ///
 /// # Errors
 /// [`DialError::Unreachable`] when the frame could not be read at all.
 /// [`DialError::Restarting`] for a refusal carrying
 /// [`ROUTER_RESTARTING_MESSAGE`]. [`DialError::Refused`] for every other
-/// refusal, and for an answer that decodes as neither.
+/// refusal, for an answer from a session that koshi 0.1.0 to 0.4.0 started,
+/// and for an answer that parses as neither, carrying the parse error
+/// filtered by [`sanitize_reported_text`].
 pub fn read_forwarded_hello_answer(
     frame_reader: &mut FrameReader,
     session_selector: &SessionSelector,
@@ -997,13 +1009,28 @@ pub fn read_forwarded_hello_answer(
             ),
         }));
     }
-    serde_json::from_str(hello_answer_frame.get()).map_err(|response_parse_error| {
-        DialError::Refused(CliError::IpcUnavailable {
+    match parse_answer(hello_answer_frame.get().as_bytes()) {
+        Ok(incoming_response) => Ok(incoming_response),
+        Err(IpcError::PreviousReleaseAnswer) => Err(DialError::Refused(CliError::Runtime {
             detail: format!(
-                "the server answered with a frame this attach cannot read: {response_parse_error}"
+                "session {} answered in the format of koshi 0.4.0 or older, which this koshi \
+                 cannot talk to; on the machine that serves it, the user who started it runs: \
+                 koshi restart-servers",
+                format_session_selector_name(session_selector)
             ),
-        })
-    })
+        })),
+        Err(IpcError::MalformedFrame { error_detail }) => {
+            Err(DialError::Refused(CliError::IpcUnavailable {
+                detail: format!(
+                    "the server answered with a frame this attach cannot read: {}",
+                    sanitize_reported_text(&error_detail)
+                ),
+            }))
+        }
+        Err(answer_parse_error) => Err(DialError::Refused(build_ipc_unavailable_error(
+            answer_parse_error,
+        ))),
+    }
 }
 
 /// How a selector reads in a message: the id itself, or the display name.
@@ -1149,9 +1176,72 @@ fn send_remote_ipc_request(
     frame_writer
         .send(&ipc_request)
         .map_err(build_ipc_unavailable_error)?;
-    let incoming_response: IncomingResponse =
-        frame_reader.recv().map_err(build_ipc_unavailable_error)?;
+    let incoming_response: IncomingResponse = frame_reader
+        .recv_answer()
+        .map_err(build_ipc_unavailable_error)?;
     talk::SESSION_PEER_WORDS.take_response_result(incoming_response)
+}
+
+/// The sessions on every saved server that answered within 2 seconds, each
+/// beside the label of the server serving it: its saved name, else its
+/// address. The rows come in the order of the server labels.
+///
+/// At most 16 saved servers are asked, all at once. When the store holds more,
+/// one line on standard error names the count, and the rest add no row:
+/// ``koshi: asking the first 16 of <count> saved servers; name one with
+/// `--remote <server>` to reach the rest``.
+///
+/// Every other asked server prints one line on standard error and adds no row:
+///
+/// - a refusal: `koshi: <server>: <the sentence a dial to it reports>`;
+/// - a changed certificate: `koshi: <server>: <the certificate failure> its
+///   sessions are not listed`;
+/// - no answer: `koshi: <server> did not answer; its sessions are not listed`;
+/// - no pinned certificate: ``koshi: <server> has no pinned certificate yet;
+///   run `koshi <pinning_command_name> --remote <server>` to connect and pin
+///   it``.
+///
+/// `pinning_command_name` is the koshi command the last line names, such as
+/// `attach`.
+#[must_use]
+pub fn list_saved_server_session_rows(
+    pinning_command_name: &str,
+) -> Vec<(String, RemoteSessionRow)> {
+    let mut saved_server_session_rows = Vec::new();
+    for reach in reach_all_saved_servers(REACH_TIMEOUT_DURATION) {
+        match reach {
+            Reach::Reached {
+                server_label,
+                session_rows,
+            } => {
+                saved_server_session_rows.extend(
+                    session_rows
+                        .into_iter()
+                        .map(|remote_session_row| (server_label.clone(), remote_session_row)),
+                );
+            }
+            Reach::Refused {
+                server_label,
+                refusal_detail,
+            } => eprintln!("koshi: {server_label}: {refusal_detail}"),
+            Reach::CertificateChanged {
+                server_label,
+                certificate_error_detail,
+            } => {
+                eprintln!(
+                    "koshi: {server_label}: {certificate_error_detail} its sessions are not listed"
+                );
+            }
+            Reach::Unreachable { server_label } => {
+                eprintln!("koshi: {server_label} did not answer; its sessions are not listed");
+            }
+            Reach::Unchecked { server_label } => eprintln!(
+                "koshi: {server_label} has no pinned certificate yet; \
+                 run `koshi {pinning_command_name} --remote {server_label}` to connect and pin it"
+            ),
+        }
+    }
+    saved_server_session_rows
 }
 
 /// Ask every saved server for its sessions at once, and return inside
@@ -1170,10 +1260,10 @@ fn send_remote_ipc_request(
 /// presented a certificate other than the pinned one is
 /// [`Reach::CertificateChanged`]. A server that could not be reached or was
 /// still unanswered at the deadline is [`Reach::Unreachable`]. Every
-/// record comes back as exactly one entry, sorted by server name. A store that
+/// record comes back as exactly one entry, sorted by server label. A store that
 /// cannot be read reads as no saved servers.
 #[must_use]
-pub fn reach_all_saved_servers(reach_timeout: Duration) -> Vec<Reach> {
+fn reach_all_saved_servers(reach_timeout: Duration) -> Vec<Reach> {
     let reach_deadline = Instant::now() + reach_timeout;
     let Ok((_, saved_server_store)) = load_saved_server_store() else {
         return Vec::new();
@@ -1231,7 +1321,7 @@ pub fn reach_all_saved_servers(reach_timeout: Duration) -> Vec<Reach> {
 fn get_reach_server_label(reach: &Reach) -> &str {
     match reach {
         Reach::Reached { server_label, .. }
-        | Reach::Refused { server_label }
+        | Reach::Refused { server_label, .. }
         | Reach::CertificateChanged { server_label, .. }
         | Reach::Unreachable { server_label }
         | Reach::Unchecked { server_label } => server_label,
@@ -1307,7 +1397,14 @@ fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant
             }
         }
         Err(dial_error) => match CliError::from(dial_error) {
-            CliError::Runtime { .. } => return Reach::Refused { server_label },
+            CliError::Runtime {
+                detail: refusal_detail,
+            } => {
+                return Reach::Refused {
+                    server_label,
+                    refusal_detail,
+                }
+            }
             _ => return Reach::Unreachable { server_label },
         },
     };
@@ -1316,7 +1413,12 @@ fn probe_saved_server(saved_server_record: &SavedServer, reach_deadline: Instant
             server_label,
             session_rows,
         },
-        Err(CliError::Runtime { .. }) => Reach::Refused { server_label },
+        Err(CliError::Runtime {
+            detail: refusal_detail,
+        }) => Reach::Refused {
+            server_label,
+            refusal_detail,
+        },
         Err(_) => Reach::Unreachable { server_label },
     }
 }

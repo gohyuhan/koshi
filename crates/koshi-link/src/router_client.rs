@@ -96,8 +96,9 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 /// refusal, then `; `, then what
 /// [`RefusingServerBuild::format_refusal_hint`](crate::server_build::RefusingServerBuild::format_refusal_hint)
 /// gives for the router's program file read at that moment, with the clause
-/// `run: koshi restart-servers`. Every other refused Hello, a reply answering
-/// nothing that was asked, and every failure to talk are
+/// `run: koshi restart-servers`. A reply in the envelope of koshi 0.4.0 or
+/// older is [`CliError::PreviousReleaseServer`]. Every other refused Hello, a
+/// reply answering nothing that was asked, and every other failure to talk are
 /// [`CliError::IpcUnavailable`].
 pub fn submit_router_request(
     runtime_directory: &Path,
@@ -160,12 +161,50 @@ pub fn submit_router_request(
     if let Some(router_result) = first_router_result {
         return Ok(router_result);
     }
+    start_router_and_exchange(runtime_directory, || {
+        exchange_router_request(runtime_directory, &request_kind)
+    })
+}
+
+/// The build version a router serving `runtime_directory` reports in its Hello
+/// answer. With no router running, starts one detached and asks again every
+/// 100 milliseconds until it answers or 5 seconds pass.
+///
+/// Example: right after koshi ended a koshi 0.4.0 router, this starts a router
+/// of the program this process runs, and gives `0.6.0`.
+///
+/// # Errors
+/// What [`find_running_router_version`] gives, a router that cannot be
+/// started, and [`CliError::IpcUnavailable`] reading `the router did not start`
+/// when no router answers within 5 seconds.
+pub fn start_router(runtime_directory: &Path) -> Result<String, CliError> {
+    if let Some(router_version) = find_running_router_version(runtime_directory)? {
+        return Ok(router_version);
+    }
+    start_router_and_exchange(runtime_directory, || {
+        find_running_router_version(runtime_directory)
+    })
+}
+
+/// Start the router detached, then run `router_exchange` every
+/// [`ROUTER_START_POLL_INTERVAL_DURATION`] until it gives an answer, and hand
+/// that answer back. `Ok(None)` from `router_exchange` means no router
+/// answered yet.
+///
+/// # Errors
+/// The failure of the start, the first failure `router_exchange` gives, and
+/// [`CliError::IpcUnavailable`] reading `the router did not start` once
+/// [`ROUTER_START_TIMEOUT_DURATION`] passes with no answer.
+fn start_router_and_exchange<RouterAnswer>(
+    runtime_directory: &Path,
+    mut router_exchange: impl FnMut() -> Result<Option<RouterAnswer>, CliError>,
+) -> Result<RouterAnswer, CliError> {
     spawn_router_detached(runtime_directory)?;
 
     let deadline = Instant::now() + ROUTER_START_TIMEOUT_DURATION;
     loop {
-        if let Some(router_result) = exchange_router_request(runtime_directory, &request_kind)? {
-            return Ok(router_result);
+        if let Some(router_answer) = router_exchange()? {
+            return Ok(router_answer);
         }
         if Instant::now() >= deadline {
             return Err(CliError::IpcUnavailable {
@@ -209,6 +248,9 @@ pub enum RemoteConnections {
     NotRunning,
     /// A router is listening and has no request kind by this name.
     OlderBuild,
+    /// A router is listening and replies in the envelope of koshi 0.4.0 or
+    /// older, which this koshi cannot talk to.
+    PreviousRelease,
     /// A router is listening and did not answer the question.
     NoAnswer {
         /// Why there is no count: the sentence the router refused with, the
@@ -228,9 +270,11 @@ pub enum RemoteConnections {
 ///
 /// A router whose build has no such request kind refuses it with
 /// [`IpcErrorCode::UnsupportedKind`], which is
-/// [`RemoteConnections::OlderBuild`]. Every other refusal, unexpected reply
-/// and transport failure is [`RemoteConnections::NoAnswer`], carrying the
-/// process id `router.json` names at that moment.
+/// [`RemoteConnections::OlderBuild`]. A router that replies in the envelope of
+/// koshi 0.4.0 or older is [`RemoteConnections::PreviousRelease`]. Every other
+/// refusal, unexpected reply and transport failure is
+/// [`RemoteConnections::NoAnswer`], carrying the process id `router.json`
+/// names at that moment.
 #[must_use]
 pub fn query_running_router_remote_connections(runtime_directory: &Path) -> RemoteConnections {
     let error_detail =
@@ -249,7 +293,10 @@ pub fn query_running_router_remote_connections(runtime_directory: &Path) -> Remo
             Ok(Some(unexpected_router_result)) => talk::ROUTER_PEER_WORDS
                 .build_unexpected_reply_error(&unexpected_router_result)
                 .to_string(),
-            Err(ipc_error) => ipc_error.to_string(),
+            Err(CliError::PreviousReleaseServer { .. }) => {
+                return RemoteConnections::PreviousRelease
+            }
+            Err(router_exchange_error) => router_exchange_error.to_string(),
         };
     RemoteConnections::NoAnswer {
         error_detail,
@@ -276,8 +323,9 @@ pub fn find_running_router_version(runtime_directory: &Path) -> Result<Option<St
     connection
         .send(&hello_request)
         .map_err(build_ipc_unavailable_error)?;
-    let hello_response: IncomingRouterResponse =
-        connection.recv().map_err(build_ipc_unavailable_error)?;
+    let hello_response: IncomingRouterResponse = connection
+        .recv_answer()
+        .map_err(build_ipc_unavailable_error)?;
     talk::parse_router_hello_version(hello_response).map(Some)
 }
 
@@ -307,7 +355,10 @@ pub fn wait_for_router_restart(
             {
                 return true;
             }
-            Err(IpcError::EndpointFileUnreadable { .. }) => return true,
+            Err(
+                IpcError::EndpointFileUnreadable { .. }
+                | IpcError::Koshi010WindowEndpointFile { .. },
+            ) => return true,
             Ok(_) | Err(_) => {}
         }
         if Instant::now() >= restart_deadline && !is_update_restarting_servers(runtime_directory) {
@@ -378,12 +429,14 @@ fn exchange_router_request_on_connection(
         .send(&router_request)
         .map_err(build_ipc_unavailable_error)?;
 
-    let hello_response: IncomingRouterResponse =
-        connection.recv().map_err(build_ipc_unavailable_error)?;
+    let hello_response: IncomingRouterResponse = connection
+        .recv_answer()
+        .map_err(build_ipc_unavailable_error)?;
     let router_version = talk::parse_router_hello_version(hello_response)?;
 
-    let router_response: IncomingRouterResponse =
-        connection.recv().map_err(build_ipc_unavailable_error)?;
+    let router_response: IncomingRouterResponse = connection
+        .recv_answer()
+        .map_err(build_ipc_unavailable_error)?;
     talk::ROUTER_PEER_WORDS
         .take_response_result(router_response)
         .map(|router_result| rewrite_router_result_for_build(router_result, &router_version))

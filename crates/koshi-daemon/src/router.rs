@@ -113,11 +113,11 @@ use koshi_core::discovery::SessionOverview;
 use koshi_core::ids::SessionId;
 use koshi_core::naming::{generate_name, NameKind};
 use koshi_ipc::endpoint::{
-    compute_socket_address, is_refusal_from_live_session, is_replacing_its_image,
-    remove_socket_file, resolve_resume_file_path, EndpointFile, ServerProgramFile,
+    compute_socket_address, delete_socket_file, is_refusal_from_live_session,
+    is_replacing_its_image, resolve_resume_file_path, EndpointFile, ServerProgramFile,
 };
 #[cfg(windows)]
-use koshi_ipc::endpoint::{remove_advertisement_marker, resolve_advertisement_marker_path};
+use koshi_ipc::endpoint::{delete_advertisement_marker, resolve_advertisement_marker_path};
 use koshi_ipc::error::{IpcError, RemoteFile};
 use koshi_ipc::plane::{self, RequestDisposition};
 use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcErrorPayload};
@@ -890,7 +890,7 @@ pub fn run_router(
     };
     if let Err(endpoint_write_error) = router_endpoint_file.write_to_path(&endpoint_path) {
         drop(listener);
-        remove_socket_file(&router_socket_address);
+        delete_socket_file(&router_socket_address);
         return Err(endpoint_write_error.into());
     }
     let program_file_path = resolve_router_program_file_path(runtime_directory);
@@ -900,7 +900,7 @@ pub fn run_router(
     {
         let _ = std::fs::remove_file(&endpoint_path);
         drop(listener);
-        remove_socket_file(&router_socket_address);
+        delete_socket_file(&router_socket_address);
         return Err(program_file_write_error.into());
     }
 
@@ -929,7 +929,7 @@ pub fn run_router(
         Err(accept_thread_error) => {
             let _ = std::fs::remove_file(&program_file_path);
             let _ = std::fs::remove_file(&endpoint_path);
-            remove_socket_file(&router_socket_address);
+            delete_socket_file(&router_socket_address);
             return Err(accept_thread_error.into());
         }
     };
@@ -1006,7 +1006,7 @@ pub fn run_router(
     }
     let _ = std::fs::remove_file(&program_file_path);
     let _ = std::fs::remove_file(&endpoint_path);
-    remove_socket_file(&router_socket_address);
+    delete_socket_file(&router_socket_address);
     // Shutdown waits `DRAIN_GRACE_DURATION` and does not join the serving
     // threads. A caller that loses its last reply retries as it does against
     // a router that has exited.
@@ -2474,12 +2474,12 @@ fn finish_session_creation(
 }
 
 /// Kill a starting session server, remove the files it advertised through
-/// [`remove_session_files`], and refuse its creation with `refusal_message`. A
+/// [`delete_session_files`], and refuse its creation with `refusal_message`. A
 /// session server that bound its socket before it was killed left an endpoint
 /// file behind: that file, and what it advertised in the shared directory, are
 /// removed.
 ///
-/// `config_directory` goes to [`remove_session_files`].
+/// `config_directory` goes to [`delete_session_files`].
 fn refuse_starting_session_server(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
@@ -2492,7 +2492,7 @@ fn refuse_starting_session_server(
         load_session_endpoint_file(runtime_directory, starting_session_server.session_id)
             .ok()
             .flatten();
-    remove_session_files(
+    delete_session_files(
         runtime_directory,
         config_directory,
         session_registry,
@@ -2975,7 +2975,7 @@ fn is_session_gone_error(cli_error: &CliError) -> bool {
 /// The router's sessions at startup: an empty list, with every session already
 /// running asked to describe itself.
 ///
-/// [`remove_orphan_resume_files`] runs first. Then every advertised session
+/// [`delete_orphan_resume_files`] runs first. Then every advertised session
 /// goes through [`start_unlisted_session_descriptions`]: the sessions this user
 /// started, and, while `shared_sessions_base_directory` is given, the sessions
 /// other local users started, as
@@ -2988,7 +2988,7 @@ fn create_router_sessions(
     shared_sessions_base_directory: Option<&Path>,
     router_events_sender: &Sender<RouterEvent>,
 ) -> RouterSessions {
-    remove_orphan_resume_files(runtime_directory);
+    delete_orphan_resume_files(runtime_directory);
     let mut router_sessions = RouterSessions::from_session_registry(SessionRegistry::new());
     start_unlisted_session_descriptions(
         runtime_directory,
@@ -3092,9 +3092,14 @@ fn list_foreign_sessions_for_lookup(
 ///   it is not asked, [`UnansweredSessionReason::ReplacingItsImage`] is
 ///   recorded for it, and it is handed back.
 /// - Its endpoint file is gone otherwise: it is skipped and not handed back.
-/// - Its endpoint file exists and cannot be read, such as one written with
-///   fields this build does not know: it is not asked, its files stay, and
-///   [`UnansweredSessionReason::EndpointFileUnreadable`] is recorded for it.
+/// - Its endpoint file is the one a koshi 0.1.0 window writes: it is asked
+///   through [`start_session_description`], and
+///   [`fetch_own_session_description`] removes that file on the thread that
+///   asks when the window is closed.
+/// - Its endpoint file exists and cannot be read otherwise, such as one
+///   written with fields this build does not know: it is not asked, its files
+///   stay, and [`UnansweredSessionReason::EndpointFileUnreadable`] is recorded
+///   for it.
 /// - Otherwise it is asked through [`start_session_description`].
 ///
 /// Every other user's session is asked through [`start_session_description`]
@@ -3154,13 +3159,15 @@ fn start_unlisted_session_descriptions(
                     .insert(session_id, UnansweredSessionReason::ReplacingItsImage);
             }
             Ok(None) => continue,
-            Ok(Some(_)) => start_session_description(
-                runtime_directory,
-                router_sessions,
-                router_events_sender,
-                session_id,
-                DescribedSessionOrigin::ThisUser,
-            ),
+            Ok(Some(_)) | Err(IpcError::Koshi010WindowEndpointFile { .. }) => {
+                start_session_description(
+                    runtime_directory,
+                    router_sessions,
+                    router_events_sender,
+                    session_id,
+                    DescribedSessionOrigin::ThisUser,
+                );
+            }
             Err(endpoint_file_error) => {
                 router_sessions.unanswered_reason_by_session_id.insert(
                     session_id,
@@ -3311,9 +3318,11 @@ fn start_session_description(
 ///
 /// For a session of this user's, its endpoint file in `runtime_directory` is
 /// read first, and the session is asked at the address and with the token it
-/// names. An endpoint file that is gone answers [`CliError::SessionNotFound`];
-/// one that cannot be read answers [`CliError::IpcUnavailable`] naming the
-/// failure. A refused connect is made again through
+/// names, as [`fetch_own_session_description`] states. An endpoint file that
+/// is gone answers [`CliError::SessionNotFound`], and so does the removed
+/// endpoint file of a closed koshi 0.1.0 window. Every other one that cannot
+/// be read answers [`CliError::IpcUnavailable`] naming the failure. A refused
+/// connect is made again through
 /// [`repeat_while_live_session_refuses`], which reads the endpoint file again
 /// each time. Another user's session is asked at the address the origin names.
 ///
@@ -3353,8 +3362,12 @@ fn fetch_session_description(
 /// `runtime_directory`, and ask the session at the address and with the token
 /// it names, ending the exchange by `answer_deadline`. Hands back the endpoint
 /// file read, and the answer. An endpoint file that is gone answers
-/// [`CliError::SessionNotFound`]; one that cannot be read answers
-/// [`CliError::IpcUnavailable`] naming the failure.
+/// [`CliError::SessionNotFound`]. The endpoint file a koshi 0.1.0 window wrote
+/// is removed while
+/// [`is_koshi_0_1_0_window_closed`](ipc_client::is_koshi_0_1_0_window_closed)
+/// finds that window closed, and answers [`CliError::SessionNotFound`]. Every
+/// other endpoint file that cannot be read, an open koshi 0.1.0 window's
+/// included, answers [`CliError::IpcUnavailable`] naming the failure.
 fn fetch_own_session_description(
     runtime_directory: &Path,
     session_id: SessionId,
@@ -3375,6 +3388,20 @@ fn fetch_own_session_description(
                 session_name: session_id.to_string(),
             }),
         ),
+        Err(IpcError::Koshi010WindowEndpointFile { .. })
+            if ipc_client::is_koshi_0_1_0_window_closed(runtime_directory, session_id) =>
+        {
+            let _ = std::fs::remove_file(EndpointFile::resolve_endpoint_file_path(
+                runtime_directory,
+                session_id,
+            ));
+            (
+                None,
+                Err(CliError::SessionNotFound {
+                    session_name: session_id.to_string(),
+                }),
+            )
+        }
         Err(endpoint_file_error) => (
             None,
             Err(CliError::IpcUnavailable {
@@ -3866,7 +3893,7 @@ fn resolve_session_selector(
 }
 
 /// Drop one session that nothing answered for from the list, and remove every
-/// file it left through [`remove_session_files`], once nothing says it is
+/// file it left through [`delete_session_files`], once nothing says it is
 /// still there. `expected_endpoint_file` is the endpoint file the caller read
 /// before it found nothing listening, or `None` when there was none.
 ///
@@ -3887,7 +3914,7 @@ fn resolve_session_selector(
 ///
 /// Otherwise the session is removed, and this gives [`SessionRemoval::Removed`].
 ///
-/// `config_directory` goes to [`remove_session_files`].
+/// `config_directory` goes to [`delete_session_files`].
 fn remove_session_from_registry(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
@@ -3913,7 +3940,7 @@ fn remove_session_from_registry(
             };
         }
     }
-    remove_session_files(
+    delete_session_files(
         runtime_directory,
         config_directory,
         session_registry,
@@ -3929,13 +3956,13 @@ fn remove_session_from_registry(
 /// an entry that was never in the list is cleaned the same way.
 ///
 /// What the session advertised in the shared directory goes through
-/// [`remove_shared_session_advertisement`], from the socket address
+/// [`delete_shared_session_advertisement`], from the socket address
 /// `advertised_endpoint_file` names. A session another local user started has
 /// no endpoint file here: nothing of that user's is removed.
 ///
 /// `config_directory` holds the `koshi.kdl` that names the shared directory a
 /// removed session's Windows marker sits in.
-fn remove_session_files(
+fn delete_session_files(
     runtime_directory: &Path,
     config_directory: Option<&Path>,
     session_registry: &mut SessionRegistry,
@@ -3952,9 +3979,9 @@ fn remove_session_files(
         session_id,
     ));
     let _ = std::fs::remove_file(resolve_resume_file_path(runtime_directory, session_id));
-    remove_socket_file(&compute_socket_address(runtime_directory, session_id));
+    delete_socket_file(&compute_socket_address(runtime_directory, session_id));
     if let Some(advertised_endpoint_file) = advertised_endpoint_file {
-        remove_shared_session_advertisement(
+        delete_shared_session_advertisement(
             session_id,
             &advertised_endpoint_file.socket_address,
             config_directory,
@@ -3982,7 +4009,7 @@ fn convert_to_unix_process_id(process_id: u32) -> Option<libc::pid_t> {
 /// `session-<uuid>` for `session_id` in the shared directory `koshi.kdl` in
 /// `config_directory` names is removed, whether or not `allow-other-users` is
 /// on.
-fn remove_shared_session_advertisement(
+fn delete_shared_session_advertisement(
     session_id: SessionId,
     advertised_socket_address: &str,
     config_directory: Option<&Path>,
@@ -3997,7 +4024,7 @@ fn remove_shared_session_advertisement(
                 socket_file_name == advertised_socket_file_name.as_str()
             })
         {
-            remove_socket_file(advertised_socket_address);
+            delete_socket_file(advertised_socket_address);
         }
     }
     #[cfg(windows)]
@@ -4008,7 +4035,7 @@ fn remove_shared_session_advertisement(
                 &koshi_link::config::load_current_server_config(config_directory),
             )
         {
-            remove_advertisement_marker(&resolve_advertisement_marker_path(
+            delete_advertisement_marker(&resolve_advertisement_marker_path(
                 &shared_sessions_directory,
                 session_id,
             ));
@@ -4030,7 +4057,7 @@ fn remove_shared_session_advertisement(
 /// file with an endpoint file beside it, readable or not, and a file whose
 /// endpoint file cannot be looked up, are left in place. A runtime directory
 /// that cannot be read removes nothing.
-fn remove_orphan_resume_files(runtime_directory: &Path) {
+fn delete_orphan_resume_files(runtime_directory: &Path) {
     let Ok(resumable_session_ids) = ipc_client::list_sessions_with_resume_files(runtime_directory)
     else {
         return;

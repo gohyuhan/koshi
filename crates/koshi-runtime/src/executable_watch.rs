@@ -25,8 +25,8 @@ use koshi_ipc::endpoint::ServerProgramFile;
 #[cfg(test)]
 mod tests;
 
-/// How long `<path> --version` has to print its first line: 2 s.
-pub const VERSION_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(2);
+/// How long `<path> --version` has to print its first line: 70 s.
+pub const VERSION_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(70);
 
 /// How long after a restart that did not happen a check reads the version of
 /// the same program file again: 30 s.

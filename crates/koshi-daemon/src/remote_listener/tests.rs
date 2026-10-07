@@ -450,7 +450,7 @@ fn a_warning_written_exactly_one_window_ago_is_written_again() {
 
 /// One frame's bytes as a caller sends them: a 4-byte big-endian length, then
 /// the JSON.
-fn build_remote_client_frame_bytes(remote_client_frame: &RemoteClientFrame) -> Vec<u8> {
+fn build_remote_client_frame_bytes(remote_client_frame: &impl serde::Serialize) -> Vec<u8> {
     let payload_bytes = serde_json::to_vec(remote_client_frame).expect("the frame encodes");
     let frame_byte_count =
         u32::try_from(payload_bytes.len()).expect("a test frame fits in a length prefix");
@@ -532,6 +532,37 @@ fn unreadable_remote_client_json_is_refused_and_truncated_frame_is_closed() {
         ),
         RemoteClientFrameRead::Closed,
         "and so does a length prefix that ends early"
+    );
+}
+
+/// The Hello koshi 0.3.0 and 0.4.0 open with: remote protocol version 1 only,
+/// under the field names those releases send.
+fn build_previous_release_remote_hello_json() -> serde_json::Value {
+    serde_json::json!({
+        "Hello": {
+            "min_remote_version": 1,
+            "max_remote_version": 1,
+            "min_protocol_version": 2,
+            "max_protocol_version": 3,
+            "token": "k7QxSecret",
+        }
+    })
+}
+
+#[test]
+fn the_hello_of_koshi_0_4_0_reads_as_the_remote_protocol_range_it_names() {
+    let previous_release_hello_frame_bytes =
+        build_remote_client_frame_bytes(&build_previous_release_remote_hello_json());
+
+    assert_eq!(
+        read_client_frame(
+            &mut Cursor::new(previous_release_hello_frame_bytes),
+            REMOTE_HELLO_MAX_BYTE_COUNT
+        ),
+        RemoteClientFrameRead::PreviousReleaseHello {
+            minimum_remote_version: 1,
+            maximum_remote_version: 1,
+        }
     );
 }
 
@@ -774,6 +805,36 @@ fn a_second_hello_on_an_admitted_connection_is_refused() {
         maximum_protocol_version: 1,
         connection_token: ConnectionToken::from_secret("alreadyAdmitted"),
     }));
+    let mut writer = RecordedWriter {
+        written_frame_bytes: Vec::new(),
+    };
+    let admitted_connection = RemoteConnectionAdmission {
+        scope: TokenScope::HostWide,
+        remote_connection_id: 3,
+    };
+
+    let attached_session_endpoint_path = process_admitted_remote_frames(
+        &mut reader,
+        &mut writer,
+        &admitted_connection,
+        &router_events_sender,
+    );
+
+    assert_eq!(attached_session_endpoint_path, None);
+    assert_eq!(
+        parse_remote_server_frames(&writer.written_frame_bytes),
+        vec![RemoteServerFrame::Refused {
+            message: REMOTE_REFUSED.to_string(),
+        }],
+    );
+}
+
+#[test]
+fn the_hello_of_koshi_0_4_0_on_an_admitted_connection_is_refused() {
+    let (router_events_sender, _router_events_receiver) = mpsc::channel();
+    let mut reader = Cursor::new(build_remote_client_frame_bytes(
+        &build_previous_release_remote_hello_json(),
+    ));
     let mut writer = RecordedWriter {
         written_frame_bytes: Vec::new(),
     };
@@ -1057,9 +1118,9 @@ fn a_remote_connection_makes_the_restart_due_when_the_program_file_holds_another
 mod admission_answers {
     //! What [`serve_remote_connection`] answers a caller before it is admitted,
     //! read by a real client over real TLS on loopback: a caller speaking no
-    //! remote protocol version this build speaks, a secret the dispatcher
-    //! refuses, an opening frame that is not a Hello, and a caller the
-    //! dispatcher admits.
+    //! remote protocol version this build speaks, a caller opening with the
+    //! Hello of koshi 0.3.0 or 0.4.0, a secret the dispatcher refuses, an
+    //! opening frame that is not a Hello, and a caller the dispatcher admits.
 
     use super::*;
 
@@ -1193,6 +1254,42 @@ mod admission_answers {
                     REMOTE_PROTOCOL_VERSION + 2,
                 ),
             }
+        );
+    }
+
+    #[test]
+    fn a_caller_opening_with_the_hello_of_koshi_0_4_0_is_told_both_ranges() {
+        // This dispatcher admits every secret, and the answer is still the
+        // version refusal: no secret is read from that Hello.
+        let remote_listen_address = start_test_remote_listener(true);
+        let (mut tls_reader, mut tls_writer, _certificate_fingerprint) =
+            tls::connect_tls_stream(&remote_listen_address, None, REMOTE_DIAL_TIMEOUT_DURATION)
+                .expect("the listener finishes the TLS handshake");
+
+        tls_writer
+            .write_all(&build_remote_client_frame_bytes(
+                &build_previous_release_remote_hello_json(),
+            ))
+            .expect("the Hello is written");
+        let mut answer_frame_bytes = vec![0u8; 4];
+        tls_reader
+            .read_exact(&mut answer_frame_bytes)
+            .expect("the listener answers with a length");
+        let payload_byte_count =
+            u32::from_be_bytes(answer_frame_bytes[..4].try_into().expect("a 4-byte length"))
+                as usize;
+        answer_frame_bytes.resize(4 + payload_byte_count, 0);
+        tls_reader
+            .read_exact(&mut answer_frame_bytes[4..])
+            .expect("the listener answers with a whole frame");
+
+        assert_eq!(
+            parse_remote_server_frames(&answer_frame_bytes),
+            vec![RemoteServerFrame::Refused {
+                message: "the caller speaks remote protocol versions 1 to 1, this koshi speaks \
+                          2 to 2"
+                    .to_string(),
+            }]
         );
     }
 

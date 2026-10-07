@@ -17,7 +17,11 @@ use koshi_ipc::protocol::{ConnectionToken, IpcErrorCode, IpcResponse};
 use koshi_ipc::transport::Listener;
 use koshi_layout::tree::LayoutNode;
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, close_connection_after_peer_hangs_up, write_session_endpoint_file,
+    build_test_runtime_directory, close_connection_after_peer_hangs_up,
+    spawn_previous_release_session, write_koshi_0_1_0_window_endpoint_file,
+    write_session_endpoint_file, KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT,
+    KOSHI_0_4_0_HELLO_ANSWER_TEXT, KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+    PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
 };
 
 use super::*;
@@ -394,6 +398,57 @@ fn an_endpoint_file_that_holds_no_endpoint_reports_ipc_unavailable() {
         panic!("expected IpcUnavailable, got {endpoint_error:?}");
     };
     assert_eq!(detail, endpoint_file_error.to_string());
+}
+
+#[test]
+fn the_endpoint_file_of_a_closed_koshi_0_1_0_window_names_no_running_session() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), session_id);
+
+    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id)
+        .expect_err("a closed window is no running session");
+
+    let CliError::SessionNotFound { session_name } = endpoint_error else {
+        panic!("expected SessionNotFound, got {endpoint_error:?}");
+    };
+    assert_eq!(session_name, session_id.to_string());
+    assert!(is_koshi_0_1_0_window_closed(
+        runtime_directory.path(),
+        session_id
+    ));
+}
+
+#[test]
+fn the_endpoint_file_of_an_open_koshi_0_1_0_window_names_that_window() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let _window_listener = Listener::bind(&compute_socket_address(
+        runtime_directory.path(),
+        session_id,
+    ))
+    .expect("bind the stand-in window");
+    let endpoint_file_path =
+        write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), session_id);
+
+    let endpoint_error = load_session_endpoint(runtime_directory.path(), None, session_id)
+        .expect_err("an open window speaks no wire this build reads");
+
+    let CliError::IpcUnavailable { detail } = endpoint_error else {
+        panic!("expected IpcUnavailable, got {endpoint_error:?}");
+    };
+    assert_eq!(
+        detail,
+        format!(
+            "endpoint file {} is unreadable: a koshi 0.1.0 window wrote it, and this koshi \
+             cannot talk to that window; the window ends when its terminal closes",
+            endpoint_file_path.display()
+        )
+    );
+    assert!(!is_koshi_0_1_0_window_closed(
+        runtime_directory.path(),
+        session_id
+    ));
 }
 
 #[test]
@@ -3525,6 +3580,229 @@ fn wait_for_new_session_endpoint_reads_past_an_endpoint_file_this_build_cannot_r
     assert!(
         Instant::now() >= wait_deadline,
         "the wait sat out its whole window rather than giving up on the first read"
+    );
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_names_restart_servers_without_waiting_for_a_restart() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let stand_in_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        vec![vec![
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+        ]],
+    );
+    let submit_start = Instant::now();
+
+    let submit_error = submit_external_command_via_runtime_directory(
+        runtime_directory.path(),
+        None,
+        session_id,
+        None,
+        Command::ToggleLockMode(ToggleLockModeArgs::default()),
+    )
+    .expect_err("a session of koshi 0.4.0 reads no frame this build writes");
+
+    assert!(
+        submit_start.elapsed() < REFUSED_SERVER_RESTART_START_WAIT_DURATION,
+        "the command did not wait for a restart"
+    );
+    stand_in_thread
+        .join()
+        .expect("the stand-in served its connection");
+    assert_eq!(
+        submit_error.to_string(),
+        "IPC unavailable: the server answered in the format of koshi 0.4.0 or older, which this \
+         koshi cannot talk to; the user who started it runs: koshi restart-servers"
+    );
+    let CliError::PreviousReleaseServer { .. } = submit_error else {
+        panic!("expected PreviousReleaseServer, got {submit_error:?}");
+    };
+}
+
+/// The Hello and the Restart this build sends a session of koshi 0.2.0 to
+/// 0.4.0 whose endpoint file carries the token `connection_secret`, as their
+/// JSON text.
+fn format_previous_release_request_texts(connection_secret: &str) -> Vec<String> {
+    vec![
+        format!(
+            r#"{{"request_id":1,"kind":{{"Hello":{{"min_protocol_version":2,"max_protocol_version":3,"token":"{connection_secret}"}}}}}}"#
+        ),
+        r#"{"request_id":2,"kind":"Restart"}"#.to_string(),
+    ]
+}
+
+/// Ask the stand-in session of koshi 0.2.0 to 0.4.0 that answers this build's
+/// exchange with `malformed_request`, then the exchange of its own envelope
+/// with `previous_release_answer_texts`, to restart. Hands back what
+/// [`restart_running_session`] gave and the frames of the second connection.
+fn restart_previous_release_stand_in(
+    previous_release_answer_texts: Vec<&'static str>,
+) -> (Result<SessionRestart, CliError>, Vec<String>) {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let stand_in_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        vec![
+            vec![
+                PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+                PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+            ],
+            previous_release_answer_texts
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ],
+    );
+
+    let session_restart = restart_running_session(runtime_directory.path(), None, session_id);
+
+    let mut request_texts_by_connection = stand_in_thread
+        .join()
+        .expect("the stand-in served both connections");
+    (session_restart, request_texts_by_connection.remove(1))
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_is_asked_again_in_its_own_envelope_and_restarts() {
+    let (session_restart, previous_release_request_texts) =
+        restart_previous_release_stand_in(vec![
+            KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+            KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+        ]);
+
+    assert_eq!(
+        session_restart.expect("the session restarts"),
+        SessionRestart::Restarting
+    );
+    assert_eq!(
+        previous_release_request_texts,
+        format_previous_release_request_texts("k7QxSecret")
+    );
+}
+
+#[test]
+fn a_session_of_koshi_0_2_0_refusing_the_restart_has_no_restart_request() {
+    let (session_restart, previous_release_request_texts) =
+        restart_previous_release_stand_in(vec![
+            KOSHI_0_2_0_HELLO_ANSWER_TEXT,
+            KOSHI_0_2_0_RESTART_REFUSAL_TEXT,
+        ]);
+
+    assert_eq!(
+        session_restart.expect("the session answers"),
+        SessionRestart::WithoutRestartRequest
+    );
+    assert_eq!(
+        previous_release_request_texts,
+        format_previous_release_request_texts("k7QxSecret")
+    );
+}
+
+#[test]
+fn a_session_of_koshi_0_2_0_pr_1_refusing_the_hello_has_no_restart_request() {
+    let (session_restart, previous_release_request_texts) =
+        restart_previous_release_stand_in(vec![
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
+        ]);
+
+    assert_eq!(
+        session_restart.expect("the session answers"),
+        SessionRestart::WithoutRestartRequest
+    );
+    assert_eq!(
+        previous_release_request_texts,
+        format_previous_release_request_texts("k7QxSecret")
+    );
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_refusing_the_token_gives_the_sentence_it_sent() {
+    let (session_restart, _) = restart_previous_release_stand_in(vec![
+        r#"{"request_id":1,"result":{"Error":{"code":"bad_token","message":"the token presented does not match this Koshi's"}}}"#,
+        r#"{"request_id":2,"result":{"Error":{"code":"hello_required","message":"Restart arrived before a Hello opened the connection"}}}"#,
+    ]);
+
+    let Err(CliError::IpcUnavailable { detail }) = session_restart else {
+        panic!("expected IpcUnavailable, got {session_restart:?}");
+    };
+    assert_eq!(detail, "the token presented does not match this Koshi's");
+}
+
+#[test]
+fn a_restart_answered_with_a_hello_names_the_unexpected_reply() {
+    let (session_restart, _) = restart_previous_release_stand_in(vec![
+        KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+        KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+    ]);
+
+    let Err(CliError::IpcUnavailable { detail }) = session_restart else {
+        panic!("expected IpcUnavailable, got {session_restart:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Hello reply"
+    );
+}
+
+#[test]
+fn a_hello_answered_with_restarting_names_the_unexpected_reply() {
+    let (session_restart, _) = restart_previous_release_stand_in(vec![
+        KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+        KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+    ]);
+
+    let Err(CliError::IpcUnavailable { detail }) = session_restart else {
+        panic!("expected IpcUnavailable, got {session_restart:?}");
+    };
+    assert_eq!(
+        detail,
+        "the session answered with an unexpected Restarting reply"
+    );
+}
+
+#[test]
+fn find_previous_release_session_version_reads_the_build_a_koshi_0_4_0_session_names() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let stand_in_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        vec![vec![KOSHI_0_4_0_HELLO_ANSWER_TEXT.to_string()]],
+    );
+
+    let session_version =
+        find_previous_release_session_version(runtime_directory.path(), session_id)
+            .expect("the session answers its Hello");
+
+    let request_texts_by_connection = stand_in_thread
+        .join()
+        .expect("the stand-in served its connection");
+    assert_eq!(session_version, Some("0.4.0".to_string()));
+    assert_eq!(
+        request_texts_by_connection,
+        vec![vec![
+            format_previous_release_request_texts("k7QxSecret").remove(0)
+        ]]
+    );
+}
+
+#[test]
+fn find_previous_release_session_version_finds_no_session_without_an_endpoint_file() {
+    let runtime_directory = build_test_runtime_directory();
+
+    assert_eq!(
+        find_previous_release_session_version(runtime_directory.path(), SessionId::new())
+            .expect("no session is no failure"),
+        None
     );
 }
 

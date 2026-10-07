@@ -46,9 +46,8 @@ if (-not (Test-Path $installation_directory)) {
     New-Item -ItemType Directory -Path $installation_directory | Out-Null
 }
 
-# Extract to a staging directory, so the binary is placed at the install root
-# regardless of how the archive nests it — and an upgrade never leaves an old
-# root binary shadowing a newly-extracted nested one.
+# Extract to a staging directory. Only koshi.exe moves from there to the
+# install root, wherever the archive nests it.
 $extraction_directory = Join-Path $staging_directory "koshi-extract-$PID"
 if (Test-Path $extraction_directory) { Remove-Item $extraction_directory -Recurse -Force }
 Write-Host "Extracting..." -ForegroundColor Cyan
@@ -65,8 +64,48 @@ if (-not $binary_file) {
     exit 1
 }
 $binary_path = Join-Path $installation_directory "koshi.exe"
-Move-Item $binary_file.FullName $binary_path -Force
+
+# Rename the installed koshi.exe to the first backup name where no file is
+# left: koshi.old, then koshi.1.old, koshi.2.old, and so on. A file at a backup
+# name is removed first. A file that cannot be removed, such as a backup that a
+# running koshi runs from, passes the search to the next name. Then the new
+# koshi.exe moves into place. If that move fails, the backup is renamed back.
+$backup_path = $null
+try {
+    if (Test-Path $binary_path) {
+        $backup_index = 0
+        while ($true) {
+            if ($backup_index -eq 0) {
+                $backup_name = "koshi.old"
+            } else {
+                $backup_name = "koshi.$backup_index.old"
+            }
+            $backup_path = Join-Path $installation_directory $backup_name
+            if (Test-Path $backup_path -PathType Leaf) {
+                Remove-Item $backup_path -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path $backup_path)) {
+                break
+            }
+            $backup_index++
+        }
+        Move-Item $binary_path $backup_path
+    }
+    Move-Item $binary_file.FullName $binary_path
+} catch {
+    if ($backup_path -and (Test-Path $backup_path) -and -not (Test-Path $binary_path)) {
+        Move-Item $backup_path $binary_path -ErrorAction SilentlyContinue
+    }
+    Remove-Item $extraction_directory -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Error "Failed to install koshi.exe: $_"
+    exit 1
+}
 Remove-Item $extraction_directory -Recurse -Force -ErrorAction SilentlyContinue
+
+# Remove every backup that no running koshi runs from.
+Get-ChildItem -Path $installation_directory -File |
+    Where-Object { $_.Name -cmatch '^koshi(\.[0-9]+)?\.old$' } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host "Installed to: $binary_path" -ForegroundColor Green
 

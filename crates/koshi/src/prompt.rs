@@ -1,6 +1,6 @@
 //! Reading a yes-or-no answer from the terminal koshi was typed in.
 
-use std::io::{self, Write};
+use koshi_link::remote_client::prompt_line;
 
 /// True for `y` and `yes` in any letter case, once `answer_text` is trimmed of
 /// surrounding whitespace. False for every other answer, an empty one
@@ -14,18 +14,13 @@ pub(crate) fn is_yes_answer(answer_text: &str) -> bool {
     )
 }
 
-/// Print `prompt_text` on standard output, flush it, read one line from standard
-/// input, and answer it with [`is_yes_answer`].
+/// Print `prompt_text` on standard error and read one line from standard input
+/// through [`prompt_line`], then answer that line with [`is_yes_answer`].
 ///
-/// False for standard input that cannot be read.
+/// False for standard input that cannot be read, and for standard input that
+/// ends before a line arrives.
 pub(crate) fn read_yes_answer(prompt_text: &str) -> bool {
-    print!("{prompt_text}");
-    let _ = io::stdout().flush();
-    let mut answer_line = String::new();
-    if io::stdin().read_line(&mut answer_line).is_err() {
-        return false;
-    }
-    is_yes_answer(&answer_line)
+    prompt_line(prompt_text).is_ok_and(|answer_line| is_yes_answer(&answer_line))
 }
 
 #[cfg(test)]
