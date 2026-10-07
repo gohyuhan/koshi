@@ -98,6 +98,93 @@ fn migrate_format_two_restores_tabs_clients_selection_and_screens() {
 }
 
 #[test]
+fn migrate_format_four_restores_the_session_with_no_floating_panes_and_empty_client_views() {
+    let (resume_header, resume_body) =
+        read_released_resume_fixture(include_bytes!("fixtures/format_four.json"));
+    assert_eq!(resume_header.resume_format, 4);
+    assert_eq!(resume_header.session_name, "carried");
+    assert_eq!(resume_header.carried_panes.len(), 4);
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 4);
+    assert_eq!(resume_body.carried_quit, None);
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    assert_eq!(session.tabs.len(), 2);
+    assert_eq!(session.panes.count_pane_records(), 4);
+    assert_eq!(session.clients.count_clients(), 2);
+    assert_eq!(session.get_placement_revision(), 4);
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+    assert_eq!(session.validate_session_consistency(), Ok(()));
+    assert_eq!(
+        session
+            .clients
+            .list_attached_clients()
+            .map(|client| (client.get_label(), client.get_placement_revision()))
+            .collect::<BTreeMap<&str, u64>>(),
+        BTreeMap::from([("C-silver-marble", 4), ("C-自在-月亮", 0)])
+    );
+    let session_json = serde_json::to_value(session).expect("serialize migrated session");
+    assert_eq!(
+        session_json["floating_set"],
+        serde_json::json!({"members": []})
+    );
+    let client_records = session_json["clients"]["client_by_id"]
+        .as_object()
+        .expect("client records");
+    assert_eq!(client_records.len(), 2);
+    for client_record in client_records.values() {
+        assert_eq!(
+            client_record["floating_pane_view_by_pane_id"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            client_record["floating_pane_focus_order"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            client_record["focused_floating_pane_id"],
+            serde_json::Value::Null
+        );
+    }
+    let first_pane_id = resume_header.carried_panes[0].pane_id;
+    assert_eq!(
+        get_joined_screen_text(
+            resumed_server.terminal_engine_by_pane_id[&first_pane_id].get_terminal_state()
+        ),
+        "pane 0 output"
+    );
+}
+
+#[test]
+fn migrate_format_four_keeps_other_panes_when_one_pane_state_is_unreadable() {
+    let mut fixture_json: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/format_four.json"))
+            .expect("format four fixture is JSON");
+    let damaged_pane_key = fixture_json["header"]["carried_panes"][0]["pane_id"]
+        .as_str()
+        .expect("released pane key")
+        .to_string();
+    let damaged_pane_id: PaneId =
+        serde_json::from_value(serde_json::Value::String(damaged_pane_key.clone()))
+            .expect("released pane id");
+    fixture_json["raw_body"]["carried_pane_state_by_pane_id"]
+        .get_mut(&damaged_pane_key)
+        .expect("released pane state")["terminal_state"] = serde_json::json!("unreadable");
+    let damaged_fixture_bytes = serde_json::to_vec(&fixture_json).expect("encode damaged pane");
+
+    let (resume_header, resume_body) = read_released_resume_fixture(&damaged_fixture_bytes);
+
+    assert_eq!(resume_body.carried_pane_state_by_pane_id.len(), 3);
+    assert!(!resume_body
+        .carried_pane_state_by_pane_id
+        .contains_key(&damaged_pane_id));
+    let (resumed_server, _inbox_sender) = build_resumed_server(&resume_header, resume_body);
+    let session = &resumed_server.session_by_id[&resume_header.session_id];
+    assert_eq!(session.tabs.len(), 2);
+    assert_eq!(session.panes.count_pane_records(), 4);
+    assert_eq!(resumed_server.terminal_engine_by_pane_id.len(), 4);
+}
+
+#[test]
 fn migrate_format_three_without_image_fields_restores_running_panes() {
     let mut fixture_json: serde_json::Value =
         serde_json::from_slice(include_bytes!("fixtures/format_three.json"))
@@ -1902,6 +1989,59 @@ fn a_body_format_below_the_oldest_this_build_reads_is_refused_by_both_numbers() 
 }
 
 #[test]
+fn a_previous_shape_header_reads_formats_one_to_three_and_refuses_every_other_format() {
+    let resume_test_directory = TempDir::new().expect("create temp dir");
+    let resume_file_path = resume_test_directory.path().join("previous.resume");
+    let session_id = SessionId::new();
+    let write_previous_shape_file = |previous_header_format: u32| {
+        let previous_resume_file_json = serde_json::json!({
+            "header": {
+                "format": previous_header_format,
+                "session_id": session_id,
+                "session_name": "carried",
+                "panes": []
+            },
+            "body": {}
+        });
+        std::fs::write(
+            &resume_file_path,
+            serde_json::to_vec(&previous_resume_file_json).expect("encode the previous shape"),
+        )
+        .expect("write the previous shape");
+    };
+
+    for read_header_format in [1, 2, 3] {
+        write_previous_shape_file(read_header_format);
+        let (resume_header, raw_body) =
+            read_resume_header(&resume_file_path).expect("a previous-shape header reads");
+        assert_eq!(
+            resume_header,
+            ResumeHeader {
+                resume_format: read_header_format,
+                session_id,
+                session_name: "carried".to_string(),
+                carried_panes: Vec::new(),
+            }
+        );
+        assert_eq!(raw_body.get(), "{}");
+    }
+    for refused_header_format in [0, 4, 5, 6, u32::MAX] {
+        write_previous_shape_file(refused_header_format);
+        match read_resume_header(&resume_file_path) {
+            Err(StorageError::Corrupt { detail }) => assert_eq!(
+                detail,
+                format!(
+                    "resume format {refused_header_format} is outside the 1 to 3 range of the previous header shape"
+                )
+            ),
+            unexpected_read_result => {
+                panic!("expected a refused format, got {unexpected_read_result:?}")
+            }
+        }
+    }
+}
+
+#[test]
 fn a_resume_file_whose_bytes_stop_part_way_is_a_corrupt_failure_naming_the_path() {
     // The header and the body are one JSON document. A file cut in half fails
     // whole, with a corrupt error that names the path.
@@ -2439,8 +2579,8 @@ fn a_carried_session_with_its_client_comes_back_whole() {
         let (read_header, raw_body) =
             read_resume_header(&resume_file_path).expect("read the header back");
 
-        // Format 4 writes the origin and no authority key, and the header
-        // names format 4.
+        // Format 5 writes the origin and no authority key, and the header
+        // names format 5.
         let body_json: serde_json::Value =
             serde_json::from_str(raw_body.get()).expect("the body is json");
         let client_record_json = &body_json["session_by_id"][session_id.get_uuid().to_string()]
@@ -2459,7 +2599,7 @@ fn a_carried_session_with_its_client_comes_back_whole() {
             read_resume_body(read_header.resume_format, &raw_body).expect("read the body back");
 
         assert_eq!(read_header.resume_format, RESUME_FORMAT);
-        assert_eq!(RESUME_FORMAT, 4);
+        assert_eq!(RESUME_FORMAT, 5);
         let resumed_session = &read_body.session_by_id[&session_id];
         assert_eq!(resumed_session.session_id, session_id);
         let resumed_client = resumed_session

@@ -48,16 +48,21 @@ fn list_json_paths_lost_by_decoding(
 #[test]
 fn every_migrated_field_of_each_released_fixture_survives_decoding() {
     let mut lost_json_paths = Vec::new();
-    for (source_resume_format, fixture_text) in [
-        (2, include_str!("../fixtures/format_two.json")),
-        (3, include_str!("../fixtures/format_three.json")),
+    for (source_resume_format, body_field_name, fixture_text) in [
+        (2, "body", include_str!("../fixtures/format_two.json")),
+        (3, "body", include_str!("../fixtures/format_three.json")),
+        (4, "raw_body", include_str!("../fixtures/format_four.json")),
     ] {
+        let body_field_names = get_resume_body_field_names(source_resume_format);
         let fixture_fields =
             parse_unique_json_object(fixture_text, "fixture").expect("read the fixture");
-        let body_fields =
-            parse_unique_json_object(fixture_fields["body"].get(), "body").expect("read the body");
-        let sessions = parse_unique_json_object(body_fields["sessions"].get(), "body.sessions")
-            .expect("read the sessions");
+        let body_fields = parse_unique_json_object(fixture_fields[body_field_name].get(), "body")
+            .expect("read the body");
+        let sessions = parse_unique_json_object(
+            body_fields[body_field_names.sessions_field_name].get(),
+            "sessions",
+        )
+        .expect("read the sessions");
         for (session_key, raw_session) in sessions {
             let migrated_session_bytes =
                 migrate_previous_session_json(source_resume_format, &session_key, raw_session)
@@ -73,7 +78,7 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
             ));
         }
         let mut ancillary_pane_fields = BTreeMap::new();
-        for field_name in ANCILLARY_PANE_FIELD_NAMES {
+        for &field_name in body_field_names.ancillary_pane_field_names {
             if let Some(raw_fields) = body_fields.get(field_name) {
                 ancillary_pane_fields.insert(
                     field_name,
@@ -82,17 +87,24 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
                 );
             }
         }
-        let terminal_engines =
-            parse_unique_json_object(body_fields["engines"].get(), "body.engines")
-                .expect("read the terminal engines");
-        for (pane_key, raw_terminal_engine) in terminal_engines {
-            let migrated_pane_bytes = migrate_previous_pane_json(
-                source_resume_format,
-                &pane_key,
-                raw_terminal_engine,
-                &ancillary_pane_fields,
-            )
-            .expect("migrate the pane");
+        let pane_states = parse_unique_json_object(
+            body_fields[body_field_names.pane_states_field_name].get(),
+            "panes",
+        )
+        .expect("read the pane states");
+        for (pane_key, raw_pane_state) in pane_states {
+            let migrated_pane_bytes =
+                if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+                    raw_pane_state.get().as_bytes().to_vec()
+                } else {
+                    migrate_previous_pane_json(
+                        source_resume_format,
+                        &pane_key,
+                        raw_pane_state,
+                        &ancillary_pane_fields,
+                    )
+                    .expect("migrate the pane")
+                };
             let migrated_pane: Value =
                 serde_json::from_slice(&migrated_pane_bytes).expect("read the migrated pane");
             let decoded_pane: CarriedPaneState =
@@ -463,4 +475,166 @@ fn migrate_animation_marks_a_frame_without_gapless_as_not_gapless() {
             ]
         })
     );
+}
+
+#[test]
+fn migrate_resume_body_reads_each_format_by_its_own_field_names() {
+    for (source_resume_format, resume_body, expected_detail) in [
+        (3, r#"{"engines":{}}"#, "body.sessions is missing"),
+        (3, r#"{"sessions":{}}"#, "body.engines is missing"),
+        (
+            4,
+            r#"{"sessions":{},"engines":{}}"#,
+            "body.session_by_id is missing",
+        ),
+        (
+            4,
+            r#"{"session_by_id":{}}"#,
+            "body.carried_pane_state_by_pane_id is missing",
+        ),
+        (
+            4,
+            r#"{"session_by_id":{},"session_by_id":{},"carried_pane_state_by_pane_id":{}}"#,
+            "resume body has duplicate field body.session_by_id",
+        ),
+    ] {
+        match migrate_resume_body(source_resume_format, resume_body) {
+            Err(StorageError::Corrupt { detail }) => {
+                assert_eq!(detail, expected_detail, "{resume_body}");
+            }
+            unexpected_result => {
+                panic!("expected a corrupt body for {resume_body}, got {unexpected_result:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn migrate_resume_body_reads_a_format_four_carried_quit() {
+    let migrated_body = migrate_resume_body(
+        4,
+        r#"{"session_by_id":{},"carried_pane_state_by_pane_id":{},"carried_quit":"Immediate"}"#,
+    )
+    .expect("an empty format-4 body migrates");
+
+    assert_eq!(migrated_body.carried_quit, Some(CarriedQuit::Immediate));
+    assert!(migrated_body.session_by_id.is_empty());
+    assert!(migrated_body.carried_pane_state_by_pane_id.is_empty());
+}
+
+#[test]
+fn migrate_resume_body_refuses_format_four_session_ids_repeated_with_different_letter_case() {
+    let fixture_json: Value = serde_json::from_str(include_str!("../fixtures/format_four.json"))
+        .expect("parse released resume fixture");
+    let saved_sessions = fixture_json["raw_body"]["session_by_id"]
+        .as_object()
+        .expect("released sessions");
+    assert_eq!(saved_sessions.len(), 1);
+    let (session_key, saved_session) = saved_sessions.iter().next().expect("one session");
+    let session_id = serde_json::from_value::<SessionId>(Value::String(session_key.clone()))
+        .expect("released session id");
+    let uppercase_session_key = session_key.to_ascii_uppercase();
+    assert_ne!(uppercase_session_key, *session_key);
+    let saved_session_json = serde_json::to_string(saved_session).expect("encode released session");
+    let saved_body_json = format!(
+        r#"{{"session_by_id":{{"{session_key}":{saved_session_json},"{uppercase_session_key}":{saved_session_json}}},"carried_pane_state_by_pane_id":{{}}}}"#
+    );
+
+    match migrate_resume_body(4, &saved_body_json) {
+        Err(StorageError::Corrupt { detail }) => assert_eq!(
+            detail,
+            format!("resume body has duplicate session id {session_id}")
+        ),
+        unexpected_result => panic!("expected a corrupt body, got {unexpected_result:?}"),
+    }
+}
+
+#[test]
+fn step_four_adds_the_missing_floating_fields_and_keeps_the_ones_present() {
+    let mut resume_body = serde_json::json!({
+        "session_by_id": {
+            "first": {
+                "session_name": "carried",
+                "clients": {"client_by_id": {
+                    "fresh": {"label": "C-fresh"},
+                    "kept": {"label": "C-kept", "floating_pane_focus_order": ["kept-pane"]}
+                }}
+            },
+            "second": {
+                "floating_set": {"members": ["kept-member"]},
+                "clients": {"client_by_id": {}}
+            }
+        },
+        "carried_pane_state_by_pane_id": {}
+    });
+
+    migrate_resume_four_to_five(&mut resume_body).expect("step 4 converts the body");
+
+    assert_eq!(
+        resume_body,
+        serde_json::json!({
+            "session_by_id": {
+                "first": {
+                    "session_name": "carried",
+                    "floating_set": {"members": []},
+                    "clients": {"client_by_id": {
+                        "fresh": {
+                            "label": "C-fresh",
+                            "floating_pane_view_by_pane_id": {},
+                            "floating_pane_focus_order": [],
+                            "focused_floating_pane_id": null
+                        },
+                        "kept": {
+                            "label": "C-kept",
+                            "floating_pane_view_by_pane_id": {},
+                            "floating_pane_focus_order": ["kept-pane"],
+                            "focused_floating_pane_id": null
+                        }
+                    }}
+                },
+                "second": {
+                    "floating_set": {"members": ["kept-member"]},
+                    "clients": {"client_by_id": {}}
+                }
+            },
+            "carried_pane_state_by_pane_id": {}
+        })
+    );
+}
+
+#[test]
+fn step_four_names_the_missing_or_misshapen_field() {
+    for (resume_body, expected_detail) in [
+        (serde_json::json!({}), "body.session_by_id is missing"),
+        (
+            serde_json::json!({"session_by_id": 7}),
+            "body.session_by_id must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": 7}}),
+            "body.session_by_id.S must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {}}}),
+            "body.session_by_id.S.clients is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"clients": 7}}}),
+            "session.clients must be an object",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"clients": {}}}}),
+            "session.clients.client_by_id is missing",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {"clients": {"client_by_id": {"C": 7}}}}}),
+            "session.clients.client_by_id.C must be an object",
+        ),
+    ] {
+        let mut resume_body = resume_body;
+        match migrate_resume_four_to_five(&mut resume_body) {
+            Err(StorageError::Corrupt { detail }) => assert_eq!(detail, expected_detail),
+            unexpected_result => panic!("expected a corrupt body, got {unexpected_result:?}"),
+        }
+    }
 }

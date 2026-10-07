@@ -1,5 +1,6 @@
 //! Session domain errors.
 
+use koshi_core::constant::MAX_FLOATING_PANES_PER_SESSION;
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_pane::pane::lifecycle::PaneLifecycle;
 use thiserror::Error;
@@ -16,26 +17,45 @@ pub struct InvalidTransition {
     pub lifecycle_event: SessionLifecycleEvent,
 }
 
-/// A way a session's tabs, layout trees, pane registry, pane and tab lifecycles, and client focus
-/// and zoom can disagree with one another.
+/// Why [`FloatingSet::add_member`](crate::session::state::FloatingSet::add_member) refused a
+/// member. The set is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum FloatingSetError {
+    /// The member's pane is already a floating pane of the session. `PaneId`
+    /// displays as `pane-<uuid>`, so the message reads `pane-<uuid> is already
+    /// a floating pane`.
+    #[error("{pane_id} is already a floating pane")]
+    DuplicatePane { pane_id: PaneId },
+
+    /// The session already holds [`MAX_FLOATING_PANES_PER_SESSION`] floating
+    /// panes.
+    #[error(
+        "a session holds at most {} floating panes",
+        MAX_FLOATING_PANES_PER_SESSION
+    )]
+    TooManyPanes,
+}
+
+/// A way a session's tabs, layout trees, floating panes, pane registry, pane and tab lifecycles,
+/// and client focus, zoom and floating views can disagree with one another.
 /// [`Session::validate_session_consistency`](crate::session::state::Session::validate_session_consistency)
 /// returns every violation it finds in one pass. Each variant names what it found: the offending
-/// pane, tab or client, or the bar index two tabs claim.
+/// pane, tab or client, the bar index two tabs claim, or the number of floating members.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SessionConsistencyError {
     /// A layout leaf references a pane with no record in the registry.
     #[error("tab {tab_id:?} layout references pane {pane_id:?} with no registry record")]
     PaneNotInRegistry { tab_id: TabId, pane_id: PaneId },
 
-    /// A layout leaf points to a pane already in the `Removed` state, which
-    /// should have left both the layout and the registry.
+    /// A layout leaf names a pane whose registry record is in the `Removed`
+    /// state.
     #[error("tab {tab_id:?} layout still holds removed pane {pane_id:?}")]
     RemovedPaneInLayout { tab_id: TabId, pane_id: PaneId },
 
     /// A registry record in any state but `Removed` — `Spawning`, `Running`,
-    /// `Exited` or `Closing` — is not a leaf in any tab's layout.
-    /// `pane_lifecycle` is the state the record holds.
-    #[error("pane {pane_id:?} is {pane_lifecycle:?} but absent from every layout")]
+    /// `Exited` or `Closing` — is neither a leaf in any tab's layout nor a
+    /// floating pane. `pane_lifecycle` is the state the record holds.
+    #[error("pane {pane_id:?} is {pane_lifecycle:?} but absent from every layout and from the floating panes")]
     OrphanedPaneRecord {
         pane_id: PaneId,
         pane_lifecycle: PaneLifecycle,
@@ -79,37 +99,36 @@ pub enum SessionConsistencyError {
         pane_id: PaneId,
     },
 
-    /// A client's active tab is not one of the session's tabs. Reported only
-    /// while the session still has tabs; a session emptied by its last tab
-    /// closing is quitting, and its viewers' active-tab references dangle by
-    /// definition until the transport disconnects them.
+    /// A client's active tab is not one of the session's tabs. Not reported
+    /// while the session holds no tabs: after its last tab closes, every
+    /// client's active tab names that closed tab until the transport
+    /// disconnects the client.
     #[error("client {client_id:?} active tab {tab_id:?} is not in the session")]
     ActiveTabMissing { client_id: ClientId, tab_id: TabId },
 
-    /// A `Removed`-lifecycle record still lingers in the registry instead of
-    /// having been dropped by teardown.
+    /// The registry still holds a record in the `Removed` state.
     #[error("removed pane {pane_id:?} still has a registry record")]
     LingeringRemovedRecord { pane_id: PaneId },
 
     /// The same pane is a leaf in more than one place — across two tabs, or
-    /// twice within one tab's tree. A pane belongs to exactly one tab at one
-    /// position, so a non-`Removed` record must map to exactly one leaf.
+    /// twice within one tab's tree. `tab_ids` names the tab of each leaf, one
+    /// entry per leaf.
     #[error("pane {pane_id:?} appears as a layout leaf in tabs {tab_ids:?}")]
     PaneInMultipleLayouts {
         pane_id: PaneId,
         tab_ids: Vec<TabId>,
     },
 
-    /// A tab is stored under a map key that is not its own id, so lookups by id
-    /// reach the wrong entry or miss it entirely.
+    /// A tab is stored under the map key `stored_tab_id`, and its own id is
+    /// `reported_tab_id`.
     #[error("tab stored under key {stored_tab_id:?} reports its own id as {reported_tab_id:?}")]
     TabKeyMismatch {
         stored_tab_id: TabId,
         reported_tab_id: TabId,
     },
 
-    /// A client in this session's registry carries a different session id, so
-    /// it was routed to the wrong session aggregate.
+    /// A client in this session's registry carries another session's id,
+    /// `found_session_id`.
     #[error("client {client_id:?} belongs to session {found_session_id:?}, not this one")]
     ClientSessionMismatch {
         client_id: ClientId,
@@ -119,6 +138,83 @@ pub enum SessionConsistencyError {
     /// Two tabs claim the same bar position.
     #[error("multiple tabs claim bar index {tab_index}")]
     DuplicateTabIndex { tab_index: usize },
+
+    /// The floating panes number more than [`MAX_FLOATING_PANES_PER_SESSION`].
+    /// `member_count` counts every entry, a repeated pane included.
+    #[error(
+        "floating panes list {member_count} panes, more than {}",
+        MAX_FLOATING_PANES_PER_SESSION
+    )]
+    TooManyFloatingPanes { member_count: usize },
+
+    /// A floating pane has no record in the registry.
+    #[error("floating pane {pane_id:?} has no registry record")]
+    FloatingPaneNotInRegistry { pane_id: PaneId },
+
+    /// A floating member names a pane whose registry record is in the
+    /// `Removed` state.
+    #[error("floating panes still hold removed pane {pane_id:?}")]
+    RemovedPaneInFloatingSet { pane_id: PaneId },
+
+    /// The floating panes list the same pane more than once.
+    #[error("floating panes list pane {pane_id:?} more than once")]
+    DuplicateFloatingPane { pane_id: PaneId },
+
+    /// A floating pane is also a leaf in the layout of each tab in `tab_ids`.
+    #[error("floating pane {pane_id:?} is also a layout leaf in tabs {tab_ids:?}")]
+    FloatingPaneInLayout {
+        pane_id: PaneId,
+        tab_ids: Vec<TabId>,
+    },
+
+    /// A client stores a floating view of a pane that is not a floating pane.
+    #[error(
+        "client {client_id:?} stores a floating view of pane {pane_id:?}, which is not floating"
+    )]
+    FloatingViewTargetMissing {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
+
+    /// A client's floating focus order lists a pane that is not a floating
+    /// pane.
+    #[error(
+        "client {client_id:?} floating focus order lists pane {pane_id:?}, which is not floating"
+    )]
+    FloatingFocusOrderTargetMissing {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
+
+    /// A client's floating focus order lists the same pane more than once.
+    /// Reported once for each repeat after the first entry.
+    #[error("client {client_id:?} floating focus order lists pane {pane_id:?} more than once")]
+    DuplicateFloatingFocusOrderEntry {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
+
+    /// A client's floating focus names a pane that is not a floating pane.
+    #[error("client {client_id:?} focuses pane {pane_id:?} as floating, and it is not floating")]
+    FocusedFloatingPaneMissing {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
+
+    /// A client's floating focus names a pane that is not the last entry of
+    /// that client's floating focus order.
+    #[error("client {client_id:?} focuses floating pane {pane_id:?}, which is not last in its floating focus order")]
+    FocusedFloatingPaneNotOnTop {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
+
+    /// A client's floating focus names a pane that client minimized.
+    #[error("client {client_id:?} focuses floating pane {pane_id:?}, which it minimized")]
+    FocusedFloatingPaneMinimized {
+        client_id: ClientId,
+        pane_id: PaneId,
+    },
 }
 
 #[cfg(test)]

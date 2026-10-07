@@ -2,17 +2,21 @@
 //!
 //! Tests verify the server-set identity (origin, label, color), client
 //! state tracking (focus, viewport, lock mode, zoom, scrollback view,
-//! highlights) and registry operations (attach, detach, lookup, mutation).
+//! highlights, floating pane views) and registry operations (attach, detach,
+//! lookup, mutation).
 
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 use koshi_core::command::{GridPosition, Selection, SelectionKind};
-use koshi_core::geometry::{PaneArea, Size};
+use koshi_core::geometry::{PaneArea, Point, Size};
 use koshi_core::ids::{ClientId, PaneId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_layout::mode::LayoutMode;
 
-use super::{compute_default_pane_area_size, Client, ClientOrigin, ClientRegistry};
+use super::{
+    compute_default_pane_area_size, Client, ClientOrigin, ClientRegistry, FloatingPaneView,
+};
 
 /// A local test client with id `client_id` on an 80x24 viewport, viewing
 /// `active_tab_id` and reporting `pane_area`.
@@ -1509,4 +1513,386 @@ fn detaching_one_of_two_clients_leaves_the_other_attached() {
             .collect::<Vec<ClientId>>(),
         vec![staying_client_id]
     );
+}
+
+#[test]
+fn focusing_a_floating_pane_moves_exactly_that_pane_to_the_top() {
+    let mut client = build_test_client(TabId::new());
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+
+    for pane_id in [first_pane_id, second_pane_id, third_pane_id] {
+        assert!(client.focus_floating_pane(pane_id));
+    }
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [first_pane_id, second_pane_id, third_pane_id]
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), Some(third_pane_id));
+
+    assert!(client.focus_floating_pane(second_pane_id));
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [first_pane_id, third_pane_id, second_pane_id]
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), Some(second_pane_id));
+}
+
+#[test]
+fn pinning_a_floating_pane_keeps_the_focus_order_and_unpinning_drops_its_stored_view() {
+    let mut client = build_test_client(TabId::new());
+    let (pinned_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(pinned_pane_id));
+    assert!(client.focus_floating_pane(focused_pane_id));
+
+    client.set_floating_pane_pinned(pinned_pane_id, true);
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [pinned_pane_id, focused_pane_id]
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
+    assert_eq!(
+        client.get_floating_pane_view(pinned_pane_id),
+        FloatingPaneView {
+            placement: None,
+            is_pinned: true,
+            is_minimized: false,
+        }
+    );
+
+    client.set_floating_pane_pinned(pinned_pane_id, false);
+
+    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [pinned_pane_id, focused_pane_id]
+    );
+}
+
+#[test]
+fn minimizing_the_focused_floating_pane_clears_the_focus_and_keeps_the_order() {
+    let mut client = build_test_client(TabId::new());
+    let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(lower_pane_id));
+    assert!(client.focus_floating_pane(top_pane_id));
+
+    client.minimize_floating_pane(top_pane_id);
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [lower_pane_id, top_pane_id]
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(
+        client.get_floating_pane_view(top_pane_id),
+        FloatingPaneView {
+            placement: None,
+            is_pinned: false,
+            is_minimized: true,
+        }
+    );
+}
+
+#[test]
+fn minimizing_an_unfocused_floating_pane_keeps_the_focus_and_the_order() {
+    let mut client = build_test_client(TabId::new());
+    let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(lower_pane_id));
+    assert!(client.focus_floating_pane(top_pane_id));
+
+    client.minimize_floating_pane(lower_pane_id);
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [lower_pane_id, top_pane_id]
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), Some(top_pane_id));
+}
+
+#[test]
+fn focusing_a_minimized_floating_pane_is_refused_and_changes_nothing() {
+    let mut client = build_test_client(TabId::new());
+    let (focused_pane_id, minimized_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(focused_pane_id));
+    client.minimize_floating_pane(minimized_pane_id);
+
+    assert!(!client.focus_floating_pane(minimized_pane_id));
+
+    assert_eq!(client.list_floating_pane_focus_order(), [focused_pane_id]);
+    assert_eq!(client.get_focused_floating_pane_id(), Some(focused_pane_id));
+    assert_eq!(
+        client.list_floating_pane_views(),
+        &HashMap::from([(
+            minimized_pane_id,
+            FloatingPaneView {
+                placement: None,
+                is_pinned: false,
+                is_minimized: true,
+            },
+        )])
+    );
+}
+
+#[test]
+fn restoring_a_minimized_floating_pane_focuses_it_and_puts_it_on_top() {
+    let mut client = build_test_client(TabId::new());
+    let (restored_pane_id, focused_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(restored_pane_id));
+    assert!(client.focus_floating_pane(focused_pane_id));
+    client.minimize_floating_pane(restored_pane_id);
+
+    client.restore_floating_pane(restored_pane_id);
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [focused_pane_id, restored_pane_id]
+    );
+    assert_eq!(
+        client.get_focused_floating_pane_id(),
+        Some(restored_pane_id)
+    );
+    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+}
+
+#[test]
+fn restoring_a_floating_pane_this_client_never_focused_appends_and_focuses_it() {
+    let mut client = build_test_client(TabId::new());
+    let (focused_pane_id, never_focused_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(focused_pane_id));
+    client.minimize_floating_pane(never_focused_pane_id);
+    assert_eq!(client.list_floating_pane_focus_order(), [focused_pane_id]);
+
+    client.restore_floating_pane(never_focused_pane_id);
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        [focused_pane_id, never_focused_pane_id]
+    );
+    assert_eq!(
+        client.get_focused_floating_pane_id(),
+        Some(never_focused_pane_id)
+    );
+    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+}
+
+#[test]
+fn restoring_a_floating_pane_keeps_its_placement_and_its_pin() {
+    let mut client = build_test_client(TabId::new());
+    let pane_id = PaneId::new();
+    let placement = Point { column: 3, row: 4 };
+    assert!(client.set_floating_pane_placement(pane_id, placement));
+    client.set_floating_pane_pinned(pane_id, true);
+    client.minimize_floating_pane(pane_id);
+
+    client.restore_floating_pane(pane_id);
+
+    assert_eq!(
+        client.get_floating_pane_view(pane_id),
+        FloatingPaneView {
+            placement: Some(placement),
+            is_pinned: true,
+            is_minimized: false,
+        }
+    );
+}
+
+#[test]
+fn a_pinned_floating_pane_refuses_a_placement_and_an_unpinned_one_accepts_it() {
+    let mut client = build_test_client(TabId::new());
+    let pane_id = PaneId::new();
+    let placement = Point { column: 3, row: 4 };
+    client.set_floating_pane_pinned(pane_id, true);
+
+    assert!(!client.set_floating_pane_placement(pane_id, placement));
+    assert_eq!(
+        client.get_floating_pane_view(pane_id),
+        FloatingPaneView {
+            placement: None,
+            is_pinned: true,
+            is_minimized: false,
+        }
+    );
+
+    client.set_floating_pane_pinned(pane_id, false);
+
+    assert!(client.set_floating_pane_placement(pane_id, placement));
+    assert_eq!(
+        client.get_floating_pane_view(pane_id),
+        FloatingPaneView {
+            placement: Some(placement),
+            is_pinned: false,
+            is_minimized: false,
+        }
+    );
+}
+
+#[test]
+fn remove_floating_pane_view_drops_the_view_the_order_entry_and_a_matching_focus() {
+    let mut client = build_test_client(TabId::new());
+    let (lower_pane_id, top_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(lower_pane_id));
+    assert!(client.focus_floating_pane(top_pane_id));
+    client.set_floating_pane_pinned(lower_pane_id, true);
+    client.set_floating_pane_pinned(top_pane_id, true);
+
+    client.remove_floating_pane_view(lower_pane_id);
+
+    assert_eq!(client.list_floating_pane_focus_order(), [top_pane_id]);
+    assert_eq!(client.get_focused_floating_pane_id(), Some(top_pane_id));
+    assert_eq!(
+        client.list_floating_pane_views(),
+        &HashMap::from([(
+            top_pane_id,
+            FloatingPaneView {
+                placement: None,
+                is_pinned: true,
+                is_minimized: false,
+            },
+        )])
+    );
+
+    client.remove_floating_pane_view(top_pane_id);
+
+    assert_eq!(
+        client.list_floating_pane_focus_order(),
+        Vec::<PaneId>::new()
+    );
+    assert_eq!(client.get_focused_floating_pane_id(), None);
+    assert_eq!(client.list_floating_pane_views(), &HashMap::new());
+}
+
+#[test]
+fn a_client_floating_view_survives_a_serde_round_trip() {
+    let mut client = build_test_client(TabId::new());
+    let (minimized_pane_id, placed_pane_id) = (PaneId::new(), PaneId::new());
+    assert!(client.focus_floating_pane(minimized_pane_id));
+    assert!(client.focus_floating_pane(placed_pane_id));
+    assert!(client.set_floating_pane_placement(placed_pane_id, Point { column: 3, row: 4 }));
+    client.set_floating_pane_pinned(placed_pane_id, true);
+    client.minimize_floating_pane(minimized_pane_id);
+
+    let client_json = serde_json::to_value(&client).expect("the client encodes");
+    let placed_pane_key = serde_json::to_value(placed_pane_id).expect("the pane id encodes");
+    assert_eq!(
+        client_json["floating_pane_view_by_pane_id"][placed_pane_key
+            .as_str()
+            .expect("a pane id encodes as a string")],
+        serde_json::json!({
+            "placement": {"column": 3, "row": 4},
+            "is_pinned": true,
+            "is_minimized": false
+        })
+    );
+    assert_eq!(
+        client_json["floating_pane_focus_order"],
+        serde_json::json!([minimized_pane_id, placed_pane_id])
+    );
+    assert_eq!(
+        client_json["focused_floating_pane_id"],
+        serde_json::json!(placed_pane_id)
+    );
+
+    let decoded_client: Client =
+        serde_json::from_value(client_json.clone()).expect("the client decodes");
+
+    assert_eq!(
+        decoded_client.list_floating_pane_views(),
+        client.list_floating_pane_views()
+    );
+    assert_eq!(
+        decoded_client.list_floating_pane_focus_order(),
+        [minimized_pane_id, placed_pane_id]
+    );
+    assert_eq!(
+        decoded_client.get_focused_floating_pane_id(),
+        Some(placed_pane_id)
+    );
+    assert_eq!(
+        serde_json::to_value(&decoded_client).expect("the decoded client encodes"),
+        client_json
+    );
+}
+
+#[test]
+fn one_clients_floating_view_changes_leave_another_clients_bytes_unchanged() {
+    let mut client_registry = ClientRegistry::new();
+    let (moving_client_id, watching_client_id) = (ClientId::new(), ClientId::new());
+    let pane_id = PaneId::new();
+    for client_id in [moving_client_id, watching_client_id] {
+        client_registry.attach_client(build_test_client_from_parts(client_id, TabId::new(), None));
+        assert!(client_registry
+            .get_client_mut_by_id(client_id)
+            .expect("the client was just attached")
+            .focus_floating_pane(pane_id));
+    }
+    let watching_client_bytes = serde_json::to_vec(
+        client_registry
+            .get_client_by_id(watching_client_id)
+            .expect("the client is attached"),
+    )
+    .expect("the client encodes");
+
+    let moving_client = client_registry
+        .get_client_mut_by_id(moving_client_id)
+        .expect("the client is attached");
+    assert!(moving_client.set_floating_pane_placement(pane_id, Point { column: 1, row: 2 }));
+    moving_client.set_floating_pane_pinned(pane_id, true);
+    moving_client.minimize_floating_pane(pane_id);
+
+    assert_eq!(
+        serde_json::to_vec(
+            client_registry
+                .get_client_by_id(watching_client_id)
+                .expect("the client is attached"),
+        )
+        .expect("the client encodes"),
+        watching_client_bytes
+    );
+    let moving_client = client_registry
+        .get_client_by_id(moving_client_id)
+        .expect("the client is attached");
+    assert_eq!(
+        moving_client.get_floating_pane_view(pane_id),
+        FloatingPaneView {
+            placement: Some(Point { column: 1, row: 2 }),
+            is_pinned: true,
+            is_minimized: true,
+        }
+    );
+    assert_eq!(moving_client.get_focused_floating_pane_id(), None);
+}
+
+#[test]
+fn floating_view_fields_are_required_and_a_missing_floating_focus_decodes_as_none() {
+    let client_json =
+        serde_json::to_value(build_test_client(TabId::new())).expect("the client encodes");
+    for required_field_name in ["floating_pane_view_by_pane_id", "floating_pane_focus_order"] {
+        let mut incomplete_client_json = client_json.clone();
+        incomplete_client_json
+            .as_object_mut()
+            .expect("a client encodes as a json object")
+            .remove(required_field_name)
+            .expect("the encoded client carries the field");
+
+        assert_eq!(
+            serde_json::from_value::<Client>(incomplete_client_json)
+                .expect_err("a client without the field is refused")
+                .to_string(),
+            format!("missing field `{required_field_name}`")
+        );
+    }
+    let mut client_json_without_floating_focus = client_json;
+    client_json_without_floating_focus
+        .as_object_mut()
+        .expect("a client encodes as a json object")
+        .remove("focused_floating_pane_id")
+        .expect("the encoded client carries the floating focus");
+
+    let decoded_client: Client = serde_json::from_value(client_json_without_floating_focus)
+        .expect("a client without a floating focus decodes");
+
+    assert_eq!(decoded_client.get_focused_floating_pane_id(), None);
 }

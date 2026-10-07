@@ -7,6 +7,9 @@ use std::time::Duration;
 /// recording another drops the oldest.
 pub const MAX_TAB_FOCUS_MRU_ENTRY_COUNT: u16 = 16;
 
+/// The most floating panes one session holds at once.
+pub const MAX_FLOATING_PANES_PER_SESSION: usize = 12;
+
 /// Default timeout of a `Graceful` close: the time a child gets to exit on its
 /// own before the close escalates to a forced kill.
 pub const GRACEFUL_TIMEOUT_DURATION: Duration = Duration::from_secs(3);

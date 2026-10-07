@@ -463,11 +463,15 @@ fn try_from_accepts_the_four_modifier_bits_and_refuses_every_other() {
     );
     assert_eq!(
         BindingModifierFlags::try_from(16),
-        Err("modifier bits 0b00010000 name no modifier; the modifiers are 0b00001111".to_string())
+        Err(BindingModifierFlagsError { modifier_bits: 16 })
     );
     assert_eq!(
         BindingModifierFlags::try_from(255),
-        Err("modifier bits 0b11111111 name no modifier; the modifiers are 0b00001111".to_string())
+        Err(BindingModifierFlagsError { modifier_bits: 255 })
+    );
+    assert_eq!(
+        BindingModifierFlagsError { modifier_bits: 255 }.to_string(),
+        "modifier bits 0b11111111 name no modifier; the modifiers are 0b00001111"
     );
 }
 

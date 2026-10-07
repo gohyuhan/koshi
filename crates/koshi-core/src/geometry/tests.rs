@@ -1,7 +1,8 @@
 //! Unit tests for rectangular geometry operations and layout enums.
 //!
 //! Tests `Rect` containment, intersection, insetting, and serde round-trips;
-//! `Direction` and `SplitDirection` enum serialization.
+//! `Direction` and `SplitDirection` enum serialization; the range
+//! `AxisPercent` and `FloatingPaneDimension` accept and their encoding.
 
 use super::*;
 
@@ -472,4 +473,69 @@ fn point_ignores_an_unknown_field() {
         serde_json::from_str(r#"{"column":1,"row":2,"extra":3}"#).expect("deserialize");
 
     assert_eq!(point, Point { column: 1, row: 2 });
+}
+
+#[test]
+fn axis_percent_accepts_one_to_one_hundred_and_refuses_the_rest() {
+    for (percent, expected_percent) in [
+        (0, Err(AxisPercentError { percent: 0 })),
+        (1, Ok(1)),
+        (100, Ok(100)),
+        (101, Err(AxisPercentError { percent: 101 })),
+        (u8::MAX, Err(AxisPercentError { percent: u8::MAX })),
+    ] {
+        assert_eq!(
+            AxisPercent::try_from(percent).map(AxisPercent::get_percent),
+            expected_percent,
+            "{percent}"
+        );
+    }
+    assert_eq!(
+        AxisPercentError { percent: 101 }.to_string(),
+        "percent 101 is outside 1 to 100"
+    );
+}
+
+#[test]
+fn floating_pane_size_encodes_each_axis_as_its_variant_and_count() {
+    let floating_pane_size = FloatingPaneSize {
+        width: FloatingPaneDimension::Cells(std::num::NonZeroU16::new(80).expect("80 is nonzero")),
+        height: FloatingPaneDimension::Percent(AxisPercent::try_from(60).expect("60 is a percent")),
+    };
+
+    let encoded_size = serde_json::to_string(&floating_pane_size).expect("serialize");
+
+    assert_eq!(
+        encoded_size,
+        r#"{"width":{"Cells":80},"height":{"Percent":60}}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<FloatingPaneSize>(&encoded_size).expect("deserialize"),
+        floating_pane_size
+    );
+}
+
+#[test]
+fn floating_pane_dimension_decoding_refuses_zero_cells_and_an_out_of_range_percent() {
+    for (refused_json, expected_message) in [
+        (
+            serde_json::json!({"Cells": 0}),
+            "invalid value: integer `0`, expected a nonzero u16",
+        ),
+        (
+            serde_json::json!({"Percent": 0}),
+            "percent 0 is outside 1 to 100",
+        ),
+        (
+            serde_json::json!({"Percent": 101}),
+            "percent 101 is outside 1 to 100",
+        ),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<FloatingPaneDimension>(refused_json)
+                .expect_err("an out-of-range dimension is refused")
+                .to_string(),
+            expected_message
+        );
+    }
 }

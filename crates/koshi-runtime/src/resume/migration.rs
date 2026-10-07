@@ -287,14 +287,54 @@ fn migrate_json_array_elements(
     Ok(())
 }
 
-/// The body fields besides `engines` that hold one entry per pane, keyed by
-/// pane id. Each pane's entries travel with its terminal through the steps.
-const ANCILLARY_PANE_FIELD_NAMES: [&str; 4] = [
-    "undecoded",
-    "graphics_events",
-    "graphics_transport",
-    "synchronized_output",
-];
+/// The top-level field names of a resume body saved at one format.
+struct ResumeBodyFieldNames {
+    /// The name of the field that holds the sessions, keyed by session id.
+    sessions_field_name: &'static str,
+    /// The name of the field that holds each pane's saved state, keyed by pane
+    /// id.
+    pane_states_field_name: &'static str,
+    /// The name of the field that holds the carried quit.
+    carried_quit_field_name: &'static str,
+    /// The names of the other fields that hold one entry per pane, keyed by
+    /// pane id. Each pane's entries pass through the steps together with its
+    /// saved state.
+    ancillary_pane_field_names: &'static [&'static str],
+}
+
+/// The field names of a body saved at formats 1 through 3.
+const FORMAT_ONE_TO_THREE_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames {
+    sessions_field_name: "sessions",
+    pane_states_field_name: "engines",
+    carried_quit_field_name: "quit",
+    ancillary_pane_field_names: &[
+        "undecoded",
+        "graphics_events",
+        "graphics_transport",
+        "synchronized_output",
+    ],
+};
+
+/// The field names of a body saved at format 4.
+const FORMAT_FOUR_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames {
+    sessions_field_name: "session_by_id",
+    pane_states_field_name: "carried_pane_state_by_pane_id",
+    carried_quit_field_name: "carried_quit",
+    ancillary_pane_field_names: &[],
+};
+
+/// The oldest format whose saved pane states have the current
+/// [`CarriedPaneState`] shape. A pane state saved at this format or a newer
+/// one decodes with no migration step.
+const OLDEST_FORMAT_WITH_CURRENT_PANE_STATE: u32 = 4;
+
+/// The top-level field names of a body saved at `resume_format`.
+fn get_resume_body_field_names(resume_format: u32) -> &'static ResumeBodyFieldNames {
+    if resume_format <= 3 {
+        return &FORMAT_ONE_TO_THREE_BODY_FIELD_NAMES;
+    }
+    &FORMAT_FOUR_BODY_FIELD_NAMES
+}
 
 pub(super) fn migrate_resume_body(
     source_resume_format: u32,
@@ -306,18 +346,21 @@ pub(super) fn migrate_resume_body(
             RESUME_FORMAT - 1
         )));
     }
+    let body_field_names = get_resume_body_field_names(source_resume_format);
     let root_fields = parse_unique_json_object(raw_resume_body, "body")?;
+    let sessions_path = format!("body.{}", body_field_names.sessions_field_name);
     let raw_sessions = root_fields
-        .get("sessions")
-        .ok_or_else(|| build_invalid_resume_error("body.sessions is missing"))?;
-    let sessions = parse_unique_json_object(raw_sessions.get(), "body.sessions")?;
-    let raw_terminal_engines = root_fields
-        .get("engines")
-        .ok_or_else(|| build_invalid_resume_error("body.engines is missing"))?;
-    let terminal_engines = parse_json_object_fields(raw_terminal_engines.get(), "body.engines")?;
+        .get(body_field_names.sessions_field_name)
+        .ok_or_else(|| build_invalid_resume_error(format!("{sessions_path} is missing")))?;
+    let sessions = parse_unique_json_object(raw_sessions.get(), &sessions_path)?;
+    let pane_states_path = format!("body.{}", body_field_names.pane_states_field_name);
+    let raw_pane_states = root_fields
+        .get(body_field_names.pane_states_field_name)
+        .ok_or_else(|| build_invalid_resume_error(format!("{pane_states_path} is missing")))?;
+    let pane_states = parse_json_object_fields(raw_pane_states.get(), &pane_states_path)?;
     let mut ancillary_pane_fields = BTreeMap::new();
-    let mut repeated_pane_keys = terminal_engines.repeated_json_field_names;
-    for field_name in ANCILLARY_PANE_FIELD_NAMES {
+    let mut repeated_pane_keys = pane_states.repeated_json_field_names;
+    for &field_name in body_field_names.ancillary_pane_field_names {
         if let Some(raw_fields) = root_fields.get(field_name) {
             let ancillary_fields_for_panes =
                 parse_json_object_fields(raw_fields.get(), field_name)?;
@@ -326,7 +369,7 @@ pub(super) fn migrate_resume_body(
         }
     }
     let carried_quit = root_fields
-        .get("quit")
+        .get(body_field_names.carried_quit_field_name)
         .map(|raw_quit| serde_json::from_str::<Option<CarriedQuit>>(raw_quit.get()))
         .transpose()
         .map_err(|parse_error| {
@@ -359,7 +402,7 @@ pub(super) fn migrate_resume_body(
 
     let mut seen_pane_ids = HashSet::new();
     let mut repeated_pane_ids = HashSet::new();
-    for pane_key in terminal_engines.json_fields.keys() {
+    for pane_key in pane_states.json_fields.keys() {
         if let Ok(pane_id) = serde_json::from_value::<PaneId>(Value::String(pane_key.clone())) {
             if !seen_pane_ids.insert(pane_id) {
                 repeated_pane_ids.insert(pane_id);
@@ -371,9 +414,8 @@ pub(super) fn migrate_resume_body(
             repeated_pane_ids.insert(pane_id);
         }
     }
-    let mut carried_pane_state_by_pane_id =
-        HashMap::with_capacity(terminal_engines.json_fields.len());
-    for (pane_key, raw_terminal_engine) in terminal_engines.json_fields {
+    let mut carried_pane_state_by_pane_id = HashMap::with_capacity(pane_states.json_fields.len());
+    for (pane_key, raw_pane_state) in pane_states.json_fields {
         let pane_id = match serde_json::from_value::<PaneId>(Value::String(pane_key.clone())) {
             Ok(pane_id) if !repeated_pane_ids.contains(&pane_id) => pane_id,
             _ => {
@@ -387,7 +429,7 @@ pub(super) fn migrate_resume_body(
         match migrate_previous_pane_state(
             source_resume_format,
             &pane_key,
-            raw_terminal_engine,
+            raw_pane_state,
             &ancillary_pane_fields,
         ) {
             Ok(carried_pane_state) => {
@@ -424,11 +466,18 @@ fn migrate_previous_session_json(
         parse_json_fragment(raw_session.get(), &mut opaque_byte_arrays).map_err(|parse_error| {
             build_invalid_resume_error(format!("resume body is unreadable: {parse_error}"))
         })?;
+    let body_field_names = get_resume_body_field_names(source_resume_format);
     let mut single_session_by_id = Map::new();
     single_session_by_id.insert(session_key.to_string(), session_json);
     let mut body_fields = Map::new();
-    body_fields.insert("sessions".to_string(), Value::Object(single_session_by_id));
-    body_fields.insert("engines".to_string(), Value::Object(Map::new()));
+    body_fields.insert(
+        body_field_names.sessions_field_name.to_string(),
+        Value::Object(single_session_by_id),
+    );
+    body_fields.insert(
+        body_field_names.pane_states_field_name.to_string(),
+        Value::Object(Map::new()),
+    );
     let mut single_session_body = Value::Object(body_fields);
     apply_resume_migrations(source_resume_format, &mut single_session_body)?;
     let migrated_session = get_required_json_field(
@@ -451,16 +500,30 @@ fn migrate_previous_session_json(
     Ok(migrated_session_bytes)
 }
 
+/// Read the saved pane state `raw_pane_state`, stored under `pane_key` in a
+/// body saved at `source_resume_format`, as a [`CarriedPaneState`]. A pane
+/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_PANE_STATE`] or a newer format
+/// decodes as it is. An older one passes through every step together with its
+/// entries in `ancillary_pane_fields`.
+///
+/// # Errors
+/// Returns an invalid-resume error when the pane state cannot be read, a step
+/// cannot convert it, or the result does not decode.
 fn migrate_previous_pane_state(
     source_resume_format: u32,
     pane_key: &str,
-    raw_terminal_engine: &RawValue,
+    raw_pane_state: &RawValue,
     ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
 ) -> Result<CarriedPaneState, StorageError> {
+    if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+        return serde_json::from_str(raw_pane_state.get()).map_err(|parse_error| {
+            build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
+        });
+    }
     let migrated_pane_bytes = migrate_previous_pane_json(
         source_resume_format,
         pane_key,
-        raw_terminal_engine,
+        raw_pane_state,
         ancillary_pane_fields,
     )?;
     serde_json::from_slice(&migrated_pane_bytes).map_err(|parse_error| {
@@ -470,10 +533,10 @@ fn migrate_previous_pane_state(
     })
 }
 
-/// Run every resume step from `source_resume_format` on the saved terminal
-/// `raw_terminal_engine` of the pane stored under `pane_key`, together with
-/// that pane's entry in each of `ancillary_pane_fields`, and hand back the
-/// migrated pane as JSON bytes in the current [`CarriedPaneState`] shape.
+/// Run every resume step from `source_resume_format` on the saved pane state
+/// `raw_pane_state` of the pane stored under `pane_key`, together with that
+/// pane's entry in each of `ancillary_pane_fields`, and hand back the migrated
+/// pane as JSON bytes in the current [`CarriedPaneState`] shape.
 ///
 /// # Errors
 /// Returns an invalid-resume error when the pane JSON cannot be read or a step
@@ -481,21 +544,25 @@ fn migrate_previous_pane_state(
 fn migrate_previous_pane_json(
     source_resume_format: u32,
     pane_key: &str,
-    raw_terminal_engine: &RawValue,
+    raw_pane_state: &RawValue,
     ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
 ) -> Result<Vec<u8>, StorageError> {
     let mut opaque_byte_arrays = Vec::new();
-    let terminal_engine = parse_json_fragment(raw_terminal_engine.get(), &mut opaque_byte_arrays)
+    let pane_state_json = parse_json_fragment(raw_pane_state.get(), &mut opaque_byte_arrays)
         .map_err(|parse_error| {
-        build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
-    })?;
-    let mut single_engine_by_pane_id = Map::new();
-    single_engine_by_pane_id.insert(pane_key.to_string(), terminal_engine);
+            build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
+        })?;
+    let body_field_names = get_resume_body_field_names(source_resume_format);
+    let mut single_pane_state_by_pane_key = Map::new();
+    single_pane_state_by_pane_key.insert(pane_key.to_string(), pane_state_json);
     let mut body_fields = Map::new();
-    body_fields.insert("sessions".to_string(), Value::Object(Map::new()));
     body_fields.insert(
-        "engines".to_string(),
-        Value::Object(single_engine_by_pane_id),
+        body_field_names.sessions_field_name.to_string(),
+        Value::Object(Map::new()),
+    );
+    body_fields.insert(
+        body_field_names.pane_states_field_name.to_string(),
+        Value::Object(single_pane_state_by_pane_key),
     );
     for (field_name, pane_fields) in ancillary_pane_fields {
         if let Some(raw_pane_field) = pane_fields.get(pane_key) {
@@ -569,9 +636,9 @@ fn write_migrated_json(
 
 /// Runs the steps from `source_resume_format` up to [`RESUME_FORMAT`] on
 /// `resume_body`, in order. Step 1 converts format 1 to format 2. Step 2 adds
-/// the format-3 fields. Step 3 converts format 3 to format 4. A body saved at
-/// format 3 also gets the step-2 fields before step 3. Step 2 adds only the
-/// fields that are missing.
+/// the format-3 fields. Step 3 converts format 3 to format 4. Step 4 adds the
+/// format-5 floating fields. A body saved at format 3 also gets the step-2
+/// fields before step 3. Steps 2 and 4 add only the fields that are missing.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a step cannot convert `resume_body`.
@@ -589,6 +656,7 @@ fn apply_resume_migrations(
                 }
                 migrate_resume_three_to_four(resume_body)?;
             }
+            4 => migrate_resume_four_to_five(resume_body)?,
             _ => {
                 return Err(build_invalid_resume_error(format!(
                     "no resume migration from format {migration_format}"
@@ -1071,6 +1139,52 @@ fn migrate_client(client: &mut Value, json_path: &str) -> Result<(), StorageErro
             Ok(())
         },
     )
+}
+
+/// Adds the format-5 floating fields that `resume_body` lacks: `floating_set`
+/// `{"members":[]}` on each session, and `floating_pane_view_by_pane_id` `{}`,
+/// `floating_pane_focus_order` `[]` and `focused_floating_pane_id` `null` on
+/// each of its clients. A field that is present keeps its value.
+///
+/// # Errors
+/// Returns an invalid-resume error when `body.session_by_id`, a session's
+/// `clients` or `clients.client_by_id` is missing, or when the body, a value
+/// on that path, or a client is not an object.
+fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageError> {
+    let sessions = get_required_json_field(
+        get_json_object(resume_body, "body")?,
+        "session_by_id",
+        "body",
+    )?;
+    migrate_json_object_members(sessions, "body.session_by_id", |session, session_path| {
+        let session_fields = get_json_object(session, session_path)?;
+        session_fields
+            .entry("floating_set")
+            .or_insert(serde_json::json!({"members": []}));
+        let clients = get_required_json_field(session_fields, "clients", session_path)?;
+        let client_by_id = get_required_json_field(
+            get_json_object(clients, "session.clients")?,
+            "client_by_id",
+            "session.clients",
+        )?;
+        migrate_json_object_members(
+            client_by_id,
+            "session.clients.client_by_id",
+            |client, client_path| {
+                let client_fields = get_json_object(client, client_path)?;
+                client_fields
+                    .entry("floating_pane_view_by_pane_id")
+                    .or_insert(Value::Object(Map::new()));
+                client_fields
+                    .entry("floating_pane_focus_order")
+                    .or_insert(Value::Array(Vec::new()));
+                client_fields
+                    .entry("focused_floating_pane_id")
+                    .or_insert(Value::Null);
+                Ok(())
+            },
+        )
+    })
 }
 
 fn migrate_size(size: &mut Value) -> Result<(), StorageError> {
