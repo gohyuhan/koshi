@@ -1105,7 +1105,7 @@ fn a_destination_too_small_for_the_result_is_refused_with_both_sizes() {
     );
     assert_eq!(
         compute_minimum_size(&expected_tree, PaneSizing::default()),
-        Size {
+        RequiredSize {
             column_count: 12,
             row_count: 3
         }
@@ -1134,7 +1134,7 @@ fn a_same_tab_insertion_that_needs_more_rows_than_the_tab_has_is_refused() {
             PaneSizing::default(),
         ),
         Err(PlacementError::DestinationTooSmall {
-            required_size: Size {
+            required_size: RequiredSize {
                 column_count: 8,
                 row_count: 6
             },

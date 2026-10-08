@@ -8,6 +8,3 @@ pub mod pane_ops;
 pub mod placement;
 pub mod state;
 pub mod tab_ops;
-
-#[cfg(test)]
-mod tests;

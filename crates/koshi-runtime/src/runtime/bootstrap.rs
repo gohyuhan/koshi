@@ -28,7 +28,9 @@ use koshi_session::session::state::Session;
 use koshi_session::session::tab_ops;
 
 use crate::resume::LAYOUT_NOT_RESTORED_NOTICE_BYTES;
-use crate::runtime::command::{compute_pane_spawn_sizes, compute_root_pane_pty_size};
+use crate::runtime::command::{
+    compute_pane_spawn_sizes, compute_root_pane_pty_size, generate_tab_name,
+};
 use crate::runtime::spawn_env::build_koshi_environment;
 use crate::server::Server;
 
@@ -137,12 +139,7 @@ impl Server {
             session_started_at,
         );
 
-        let tab_name = generate_name(NameKind::Tab, |candidate| {
-            session
-                .tabs
-                .values()
-                .any(|tab| tab.get_tab_name() == candidate)
-        });
+        let tab_name = generate_tab_name(&session);
         let new_pane_spec = NewPaneSpec {
             working_directory: None,
             spawn_spec: None,
@@ -189,12 +186,7 @@ impl Server {
             ClientRegistry::new(),
         );
         for (pane_id, pty_size) in carried_pane_sizes {
-            let tab_name = generate_name(NameKind::Tab, |candidate| {
-                session
-                    .tabs
-                    .values()
-                    .any(|tab| tab.get_tab_name() == candidate)
-            });
+            let tab_name = generate_tab_name(&session);
             let new_pane_spec = NewPaneSpec {
                 working_directory: None,
                 spawn_spec: None,
@@ -367,12 +359,7 @@ impl Server {
 
         // Commit each tab; only the focused one moves the client onto it.
         for (tab_index, tab_plan) in profile_tab_plans.into_iter().enumerate() {
-            let tab_name = generate_name(NameKind::Tab, |candidate| {
-                session
-                    .tabs
-                    .values()
-                    .any(|tab| tab.get_tab_name() == candidate)
-            });
+            let tab_name = generate_tab_name(&session);
             let _ = tab_ops::commit_profile_tab(
                 &mut session,
                 tab_plan.tab_id,

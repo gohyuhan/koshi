@@ -216,9 +216,7 @@ fn resolve_terminal_too_small_cause(
             let default_pane_area = compute_default_pane_area_size(client.get_viewport_size());
             let clamped_pane_area =
                 reported_pane_area.compute_minimum_axes(client.get_viewport_size());
-            if clamped_pane_area.column_count < default_pane_area.column_count
-                || clamped_pane_area.row_count < default_pane_area.row_count
-            {
+            if !default_pane_area.can_fit_inside(clamped_pane_area) {
                 return TerminalTooSmallCause::Regions;
             }
         }

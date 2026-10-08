@@ -33,6 +33,7 @@ use koshi_core::{
         Selection, SelectionKind, SetSelectionArgs, SwitchSessionArgs, TabTarget,
         ToggleLockModeArgs, VisualCommand, WriteToPaneArgs,
     },
+    constant::FLOATING_PANE_CHROME_SIZE,
     event::{
         Event, InputModeChanged, LayoutChanged, MouseSelectChanged, PaneFocused,
         PanePlacementCommitted, PaneProcessExited, PtyResized, RejectReason, SelectionChanged,
@@ -63,7 +64,7 @@ use koshi_session::session::{
     lifecycle::SessionLifecycle,
     pane_ops::{self, NewPaneSpec},
     placement::commit_cross_tab_placement,
-    state::Session,
+    state::{FloatingPaneSizeSolve, Session},
     tab_ops,
 };
 
@@ -136,6 +137,19 @@ fn advance_client_placement_revisions(session: &mut Session, client_ids: &[Clien
             let _ = client.advance_placement_revision();
         }
     }
+}
+
+/// A generated tab name that no tab of `session` holds: [`generate_name`] for
+/// [`NameKind::Tab`], with each tab's name counted as taken. Each call starts
+/// its walk at a random name: two calls on the same session can return
+/// different names.
+pub(crate) fn generate_tab_name(session: &Session) -> String {
+    generate_name(NameKind::Tab, |candidate_tab_name| {
+        session
+            .tabs
+            .values()
+            .any(|tab| tab.get_tab_name() == candidate_tab_name)
+    })
 }
 
 /// The PTY size for a tab's sole root pane filling `tab_size`: solve the
@@ -886,12 +900,11 @@ impl Server {
 
     /// Reflow `tab_id`'s live PTYs to its current tab size when a client
     /// still views it, appending one [`Event::PtyResized`] per pane actually
-    /// resized. A tab no viewer contributes a pane area to has no
-    /// [`Session::get_tab_size`] and keeps its sizes. The one spelling of a
-    /// full-tab reflow: every caller that changed what the tab's viewers
-    /// display — a moved border, a moved focus, a flipped zoom, a viewer
-    /// joining or leaving — reaches it here, with no freshly-spawned pane to
-    /// skip.
+    /// resized. First sets [`Session::get_tab_cell_size`] on the terminal
+    /// engine of each pane in the tab; with no reported cell size, each engine
+    /// keeps its own. A tab no viewer contributes a pane area to has no
+    /// [`Session::get_tab_size`] and keeps its sizes. Every live pane of the
+    /// tab whose PTY size changed is resized; none is skipped.
     pub(crate) fn reflow_tab_if_viewed(
         &mut self,
         backend: &dyn PtyBackend,
@@ -917,6 +930,72 @@ impl Server {
         let rects =
             Self::compute_tab_content_rects(session, tab_id, tab_size, self.get_pane_sizing());
         self.reflow_changed(backend, rects, None, emitted_events);
+    }
+
+    /// Solve every floating pane of `session_id` against the session's shared
+    /// floating viewport, then resize each live PTY whose size changed,
+    /// appending one [`Event::PtyResized`] per resized pane, in creation order.
+    ///
+    /// First sets [`Session::get_floating_cell_size`] on each floating pane's
+    /// terminal engine; with no reported cell size, each engine keeps its own.
+    /// With no [`Session::get_shared_floating_viewport`] — no client attached,
+    /// or every client `Starving` — every solved size and every PTY size stays
+    /// as it is. Otherwise [`FloatingSet::update_member_sizes`] solves each pane
+    /// with the pane minimum of [`Server::get_pane_sizing`]. A
+    /// [`FloatingPaneSizeSolve::Sized`] pane's PTY takes its outer size less
+    /// [`FLOATING_PANE_CHROME_SIZE`]: `40x12` → `38x8`. A
+    /// [`FloatingPaneSizeSolve::Suppressed`] pane's PTY keeps its size. A
+    /// session this server does not hold changes nothing.
+    ///
+    /// [`FloatingSet::update_member_sizes`]: koshi_session::session::state::FloatingSet::update_member_sizes
+    fn reflow_floating_panes(
+        &mut self,
+        backend: &dyn PtyBackend,
+        session_id: SessionId,
+        emitted_events: &mut Vec<Event>,
+    ) {
+        let pane_minimum_size = self.get_pane_sizing().minimum_size;
+        let Some(session) = self.session_by_id.get_mut(&session_id) else {
+            return;
+        };
+        if let Some(cell_size) = session.get_floating_cell_size() {
+            for floating_member in session.floating_set.list_members() {
+                if let Some(engine) = self
+                    .terminal_engine_by_pane_id
+                    .get_mut(&floating_member.pane_id)
+                {
+                    engine.set_cell_size(cell_size);
+                }
+            }
+        }
+        let Some(shared_floating_viewport) = session.get_shared_floating_viewport() else {
+            return;
+        };
+        session
+            .floating_set
+            .update_member_sizes(shared_floating_viewport, pane_minimum_size);
+        let content_rects: Vec<(PaneId, Option<Rect>)> = session
+            .floating_set
+            .list_members()
+            .iter()
+            .map(|floating_member| {
+                let content_rect = match floating_member.solved_size {
+                    FloatingPaneSizeSolve::Sized(outer_size) => {
+                        Some(Rect::from_size_at_origin(Size {
+                            column_count: outer_size
+                                .column_count
+                                .saturating_sub(FLOATING_PANE_CHROME_SIZE.column_count),
+                            row_count: outer_size
+                                .row_count
+                                .saturating_sub(FLOATING_PANE_CHROME_SIZE.row_count),
+                        }))
+                    }
+                    FloatingPaneSizeSolve::Suppressed => None,
+                };
+                (floating_member.pane_id, content_rect)
+            })
+            .collect();
+        self.reflow_changed(backend, content_rects, None, emitted_events);
     }
 
     /// Resize the live PTYs in `content_rects` whose size actually changed, routing the

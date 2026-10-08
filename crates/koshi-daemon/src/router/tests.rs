@@ -42,8 +42,8 @@ use koshi_link::remote_client::{self, DIAL_TIMEOUT_DURATION};
 #[cfg(unix)]
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, count_program_runs, write_koshi_0_1_0_window_endpoint_file,
-    write_printing_program, NO_SUCH_PROCESS_ID,
+    build_test_runtime_directory, count_program_runs, spawn_session_listening_before_it_advertises,
+    write_koshi_0_1_0_window_endpoint_file, write_printing_program, NO_SUCH_PROCESS_ID,
 };
 
 #[test]
@@ -942,6 +942,49 @@ fn a_description_whose_session_does_not_answer_ends_at_its_answer_deadline() {
         panic!("expected SessionAnswerTimedOut, got {description_answer:?}");
     };
     drop(session_listener);
+}
+
+#[test]
+fn a_description_refused_for_the_old_token_is_asked_again_once_the_session_advertises_its_own() {
+    let session_id = SessionId::new();
+    let runtime_directory = build_test_runtime_directory();
+    let session_overview = build_test_session_overview(session_id, "S-quiet-lake", UNIX_EPOCH);
+    let answered_session_overview = session_overview.clone();
+    let session_thread = spawn_session_listening_before_it_advertises(
+        runtime_directory.path(),
+        session_id,
+        "the token of the session before",
+        "the token of this session",
+        move |request_kind| {
+            assert_eq!(request_kind.get_request_kind_name(), "Discovery");
+            IpcResult::Overview(answered_session_overview.clone())
+        },
+    );
+
+    let session_described = fetch_session_description(
+        runtime_directory.path(),
+        session_id,
+        DescribedSessionOrigin::ThisUser,
+        Instant::now() + PROMPT_ANSWER_DURATION,
+    );
+
+    let RouterEvent::SessionDescribed {
+        described_endpoint_file,
+        description_answer,
+        ..
+    } = session_described
+    else {
+        panic!("a description reports as SessionDescribed");
+    };
+    assert_eq!(
+        description_answer.expect("the second ask is answered"),
+        session_overview
+    );
+    assert_eq!(
+        described_endpoint_file.map(|endpoint_file| endpoint_file.connection_token),
+        Some(ConnectionToken::from_secret("the token of this session"))
+    );
+    session_thread.join().expect("the stand-in session exits");
 }
 
 #[cfg(target_os = "macos")]

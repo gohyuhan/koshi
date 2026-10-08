@@ -119,12 +119,7 @@ impl Server {
 
         // Resolve the tab's name before the spawn: a generated one no
         // existing tab in the session already uses.
-        let tab_name = generate_name(NameKind::Tab, |candidate_tab_name| {
-            session
-                .tabs
-                .values()
-                .any(|tab| tab.get_tab_name() == candidate_tab_name)
-        });
+        let tab_name = generate_tab_name(session);
 
         let launch_working_directory = spawn_spec.working_directory.clone();
         spawn_spec

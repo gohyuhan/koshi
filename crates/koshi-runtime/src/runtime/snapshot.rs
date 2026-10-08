@@ -184,9 +184,7 @@ impl Server {
             build_placement_not_found_error("the requesting client is not attached")
         })?;
         let source_tab = session
-            .tabs
-            .values()
-            .find(|tab| tab.get_layout_tree().has_pane(source_pane_id))
+            .find_tab_by_pane_id(source_pane_id)
             .ok_or_else(|| build_placement_not_found_error("the source pane does not exist"))?;
         let destination_tab = session
             .tabs

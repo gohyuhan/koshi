@@ -1,9 +1,9 @@
 //! Tests for the client side of the router socket, against a stand-in router
 //! serving a real socket in a temporary runtime directory.
 //!
-//! Every test that starts the stand-in finds it already listening, so the
-//! exchange succeeds on its first attempt and no router is ever started.
-//! Starting one is covered by the integration tests.
+//! Every test that starts the stand-in finds it already listening at each
+//! connect, so no router is ever started. Starting one is covered by the
+//! integration tests.
 
 use super::*;
 use koshi_ipc::router::ROUTER_PROTOCOL_VERSION;
@@ -198,25 +198,104 @@ fn an_answer_comes_back_exactly_as_the_router_sent_it() {
 }
 
 #[test]
-fn an_endpoint_file_carrying_the_wrong_token_reports_the_refusal() {
+fn a_router_refusing_the_token_of_two_endpoint_files_in_a_row_reports_the_refusal() {
     let runtime_directory = build_test_runtime_directory();
-    let router = spawn_fake_router(runtime_directory.path(), vec![RouterScript::RefuseHello]);
+    let router = spawn_fake_router(
+        runtime_directory.path(),
+        vec![RouterScript::RefuseHello, RouterScript::RefuseHello],
+    );
 
     let router_request_error =
         submit_router_request(runtime_directory.path(), RouterRequestKind::RemoteStatus)
-            .expect_err("the hello is refused");
+            .expect_err("both hellos are refused");
 
-    let CliError::IpcUnavailable {
+    let CliError::ConnectionTokenRefused {
         detail: error_detail,
     } = router_request_error
     else {
-        panic!("expected IpcUnavailable, got {router_request_error:?}");
+        panic!("expected ConnectionTokenRefused, got {router_request_error:?}");
     };
     assert_eq!(
         error_detail,
         "the token presented does not match the router's"
     );
-    router.join().expect("the stand-in router exits");
+    let (router_exit_sender, router_exit_receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || router_exit_sender.send(router.join()));
+    router_exit_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the stand-in router served the second connection")
+        .expect("the stand-in router exits");
+}
+
+#[test]
+fn a_request_refused_for_its_token_is_answered_once_the_router_advertises_its_own() {
+    let runtime_directory = build_test_runtime_directory();
+    let sent_session_address = SessionAddress {
+        session_id: SessionId::new(),
+        session_name: "S-quiet-lake".to_string(),
+        socket_address: "/nowhere.sock".to_string(),
+        process_id: 5000,
+    };
+    let router = spawn_fake_router(
+        runtime_directory.path(),
+        vec![
+            RouterScript::RefuseHello,
+            RouterScript::AcceptAndAnswer(RouterResult::Found(sent_session_address.clone())),
+        ],
+    );
+
+    let router_result = submit_router_request(
+        runtime_directory.path(),
+        RouterRequestKind::AttachLookup {
+            session_selector: SessionSelector::SessionName("S-quiet-lake".to_string()),
+        },
+    )
+    .expect("the second hello presents the router's own token");
+
+    assert_eq!(router_result, RouterResult::Found(sent_session_address));
+    assert_eq!(
+        router.join().expect("the stand-in router exits"),
+        RouterRequestKind::AttachLookup {
+            session_selector: SessionSelector::SessionName("S-quiet-lake".to_string()),
+        }
+    );
+}
+
+#[test]
+fn a_token_retry_hands_back_the_endpoint_file_its_second_run_used() {
+    let runtime_directory = build_test_runtime_directory();
+    let router = spawn_fake_router(
+        runtime_directory.path(),
+        vec![
+            RouterScript::RefuseHello,
+            RouterScript::AcceptAndAnswer(build_remote_status_result(0)),
+        ],
+    );
+
+    let (exchanged_router_endpoint, router_result) =
+        run_router_exchange(runtime_directory.path(), |connection, router_endpoint| {
+            exchange_router_request_on_connection(
+                connection,
+                router_endpoint,
+                &RouterRequestKind::RemoteStatus,
+            )
+        })
+        .expect("the endpoint file is read")
+        .expect("the stand-in router listens");
+
+    assert_eq!(
+        router_result.expect("the second run is answered"),
+        build_remote_status_result(0)
+    );
+    assert_eq!(
+        exchanged_router_endpoint,
+        EndpointFile::load_from_path(&resolve_router_endpoint_path(runtime_directory.path()))
+            .expect("the endpoint file the router wrote last is read")
+    );
+    assert_eq!(
+        router.join().expect("the stand-in router exits"),
+        RouterRequestKind::RemoteStatus
+    );
 }
 
 #[test]
@@ -588,22 +667,34 @@ fn spawn_fake_router_for_hello(
     .expect("write the router endpoint file");
 
     std::thread::spawn(move || {
-        let mut router_connection = router_listener.accept().expect("accept the caller");
-        let mut router_handshake = RouterHandshake::from_connection_token(router_connection_token);
-        let hello_request: RouterRequest = router_connection.recv().expect("read the hello");
-        let hello_answer_result =
-            match router_handshake.validate_request_kind(&hello_request.request_kind) {
-                Ok(()) => hello_result,
-                Err(refusal) => RouterResult::Error(refusal),
-            };
-        router_connection
-            .send(&RouterResponse {
-                request_id: Some(hello_request.request_id),
-                answer_result: hello_answer_result,
-            })
-            .expect("send the hello reply");
-        close_connection_after_peer_hangs_up(router_connection);
+        answer_router_hello(&router_listener, router_connection_token, hello_result);
     })
+}
+
+/// Accept one caller on `router_listener` and answer its Hello with
+/// `hello_result`. A Hello that does not carry `router_connection_token` is
+/// answered with the handshake's own refusal instead. Returns when the caller
+/// hangs up.
+fn answer_router_hello(
+    router_listener: &Listener,
+    router_connection_token: ConnectionToken,
+    hello_result: RouterResult,
+) {
+    let mut router_connection = router_listener.accept().expect("accept the caller");
+    let mut router_handshake = RouterHandshake::from_connection_token(router_connection_token);
+    let hello_request: RouterRequest = router_connection.recv().expect("read the hello");
+    let hello_answer_result =
+        match router_handshake.validate_request_kind(&hello_request.request_kind) {
+            Ok(()) => hello_result,
+            Err(refusal) => RouterResult::Error(refusal),
+        };
+    router_connection
+        .send(&RouterResponse {
+            request_id: Some(hello_request.request_id),
+            answer_result: hello_answer_result,
+        })
+        .expect("send the hello reply");
+    close_connection_after_peer_hangs_up(router_connection);
 }
 
 #[test]
@@ -624,6 +715,39 @@ fn start_router_gives_the_version_of_a_router_that_already_answers() {
     let router = spawn_fake_router_for_hello(runtime_directory.path(), build_hello_result("9.9.9"));
 
     let router_version = start_router(runtime_directory.path()).expect("the router answers");
+
+    assert_eq!(router_version, "9.9.9");
+    router.join().expect("the stand-in router exits");
+}
+
+#[test]
+fn start_router_gives_the_version_of_a_router_that_listens_before_it_writes_its_endpoint_file() {
+    // The first Hello carries the token of the endpoint file the router before
+    // this one wrote. This router refuses that token, writes its own endpoint
+    // file 200 ms later, and answers the next Hello.
+    let runtime_directory = build_test_runtime_directory();
+    write_router_endpoint_file(runtime_directory.path(), OLD_CONNECTION_TOKEN);
+    let router_listener = Listener::bind(&compute_router_socket_address(runtime_directory.path()))
+        .expect("bind the stand-in router");
+    let advertising_router_directory = runtime_directory.path().to_path_buf();
+    let router = std::thread::spawn(move || {
+        let router_connection_token = ConnectionToken::from_secret(NEW_CONNECTION_TOKEN);
+        answer_router_hello(
+            &router_listener,
+            router_connection_token.clone(),
+            build_hello_result("9.9.9"),
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        write_router_endpoint_file(&advertising_router_directory, NEW_CONNECTION_TOKEN);
+        answer_router_hello(
+            &router_listener,
+            router_connection_token,
+            build_hello_result("9.9.9"),
+        );
+    });
+
+    let router_version =
+        start_router(runtime_directory.path()).expect("the second hello is answered");
 
     assert_eq!(router_version, "9.9.9");
     router.join().expect("the stand-in router exits");
@@ -675,8 +799,8 @@ fn a_router_refusing_the_hello_reports_the_sentence_it_sent() {
     let router = spawn_fake_router_for_hello(
         runtime_directory.path(),
         RouterResult::Error(IpcErrorPayload {
-            code: IpcErrorCode::BadToken,
-            message: "the token presented does not match the router's".to_string(),
+            code: IpcErrorCode::MalformedRequest,
+            message: "the bytes received are not a request".to_string(),
         }),
     );
 
@@ -689,10 +813,7 @@ fn a_router_refusing_the_hello_reports_the_sentence_it_sent() {
     else {
         panic!("expected IpcUnavailable, got {router_version_error:?}");
     };
-    assert_eq!(
-        error_detail,
-        "the token presented does not match the router's"
-    );
+    assert_eq!(error_detail, "the bytes received are not a request");
     router.join().expect("the stand-in router exits");
 }
 
@@ -1059,4 +1180,29 @@ fn a_newer_router_refusing_this_builds_protocol_version_is_named_at_once() {
     refusing_router_thread
         .join()
         .expect("the refusing router exits");
+}
+
+#[test]
+fn wait_for_router_endpoint_change_gives_up_at_its_deadline_while_an_update_holds_the_lock() {
+    // The deadline has passed and the router keeps its token. The update lock
+    // is released 1 s after the wait starts.
+    let runtime_directory = build_test_runtime_directory();
+    write_router_endpoint_file(runtime_directory.path(), OLD_CONNECTION_TOKEN);
+    let update_lock_file = hold_update_lock(runtime_directory.path());
+    let wait_started_at = Instant::now();
+    let finishing_update = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        drop(update_lock_file);
+    });
+
+    let has_endpoint_changed = wait_for_router_endpoint_change(
+        runtime_directory.path(),
+        &ConnectionToken::from_secret(OLD_CONNECTION_TOKEN),
+        Instant::now(),
+    );
+    let wait_duration = wait_started_at.elapsed();
+
+    finishing_update.join().expect("the update thread ends");
+    assert!(!has_endpoint_changed);
+    assert!(wait_duration < Duration::from_secs(1));
 }

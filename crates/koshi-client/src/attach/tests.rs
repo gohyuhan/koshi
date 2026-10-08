@@ -10,7 +10,9 @@
 //! in, and what a pass must move before the loop draws again on its own. It also
 //! covers coming back after the session replaces its own process image: that
 //! the join names the client record this terminal holds, and every way back
-//! that fails reporting the death a broken connection already reports. It also
+//! that fails reporting the death a broken connection already reports, and a
+//! first dial that a session refuses for the token it advertised before, which
+//! joins once the session advertises its own. It also
 //! covers a remote viewer whose link broke: the pause each redial waits, that
 //! dialing again moves what the viewer paints, what the drain of the stretch
 //! with no link keeps and what it drops, and what a viewer that stopped dialing
@@ -74,7 +76,8 @@ use crate::attach::paint::build_render_snapshot;
 use crate::tests::TEST_VIEWPORT_SIZE;
 use crate::{PlacementMode, PlacementModeLifetime};
 use koshi_test_support::fixtures::{
-    build_test_runtime_directory, write_router_endpoint_file, write_session_endpoint_file,
+    build_test_runtime_directory, spawn_session_listening_before_it_advertises,
+    write_router_endpoint_file, write_session_endpoint_file,
 };
 
 impl<B: Backend> Screen<B> {
@@ -942,8 +945,27 @@ const OLD_CONNECTION_TOKEN: &str = "the token this client attached under";
 /// The token the image replacing the session mints when it binds again.
 const NEW_CONNECTION_TOKEN: &str = "the token the new image minted";
 
-/// Build an Attach answer naming `client_id` and `session_id`, echoing
-/// `pane_area`.
+/// The Attach result naming `client_id` and `session_id`, echoing `pane_area`:
+/// a session named `session` with no tabs, and no resume token.
+fn build_attached_result(
+    client_id: ClientId,
+    session_id: SessionId,
+    pane_area: Option<PaneArea>,
+) -> IpcResult {
+    IpcResult::Attached {
+        client_id,
+        session_id,
+        session_structure: AttachedSessionStructureSnapshot {
+            session_id,
+            session_name: String::from("session"),
+            tabs: Vec::new(),
+        },
+        resume_token: None,
+        pane_area,
+    }
+}
+
+/// Build an Attach answer, request 2, carrying [`build_attached_result`].
 fn build_attached_response(
     client_id: ClientId,
     session_id: SessionId,
@@ -951,17 +973,7 @@ fn build_attached_response(
 ) -> IncomingResponse {
     IpcResponse {
         request_id: Some(2),
-        answer_result: MaybeKnown::Known(IpcResult::Attached {
-            client_id,
-            session_id,
-            session_structure: AttachedSessionStructureSnapshot {
-                session_id,
-                session_name: String::from("session"),
-                tabs: Vec::new(),
-            },
-            resume_token: None,
-            pane_area,
-        }),
+        answer_result: MaybeKnown::Known(build_attached_result(client_id, session_id, pane_area)),
     }
 }
 
@@ -1014,17 +1026,7 @@ fn spawn_restarted_session(
                         .expect("the slot outlives every panic") =
                         Some(request.request_kind.clone());
                     match attach_answer {
-                        Ok(client_id) => IpcResult::Attached {
-                            client_id,
-                            session_id,
-                            session_structure: AttachedSessionStructureSnapshot {
-                                session_id,
-                                session_name: String::from("session"),
-                                tabs: Vec::new(),
-                            },
-                            resume_token: None,
-                            pane_area: None,
-                        },
+                        Ok(client_id) => build_attached_result(client_id, session_id, None),
                         Err(message) => IpcResult::Error(IpcErrorPayload {
                             code: IpcErrorCode::BadToken,
                             message: String::from(message),
@@ -1415,47 +1417,41 @@ fn a_restart_whose_new_image_refuses_this_client_reports_the_refusal_and_the_att
 const PROTOCOL_VERSION_REFUSAL_MESSAGE: &str =
     "the client speaks protocol version 4 to 4, this session speaks 5 to 5";
 
-/// A session's answer to the Hello, request 1: a refusal carrying `code` and
-/// `message`.
-fn build_hello_refusal_response(code: IpcErrorCode, message: &str) -> IncomingResponse {
-    IpcResponse {
-        request_id: Some(1),
-        answer_result: MaybeKnown::Known(IpcResult::Error(IpcErrorPayload {
-            code,
-            message: String::from(message),
-        })),
-    }
-}
-
 #[test]
-fn a_hello_refused_for_its_protocol_version_is_a_protocol_version_refusal() {
-    let hello_refusal_response = build_hello_refusal_response(
-        IpcErrorCode::UnsupportedVersion,
-        "\u{1b}[2Jthe client speaks protocol version 4 to 4, this session speaks 5 to 5",
+fn a_dial_refused_for_the_old_token_joins_once_the_session_advertises_its_own() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let client_id = ClientId::new();
+    let session_thread = spawn_session_listening_before_it_advertises(
+        runtime_directory.path(),
+        session_id,
+        OLD_CONNECTION_TOKEN,
+        NEW_CONNECTION_TOKEN,
+        move |request_kind| {
+            assert_eq!(request_kind.get_request_kind_name(), "Attach");
+            build_attached_result(client_id, session_id, None)
+        },
     );
 
-    let Err(CliError::ProtocolVersionRefused { detail }) =
-        validate_session_protocol_version(hello_refusal_response)
-    else {
-        panic!("a version refusal is a protocol version refusal");
-    };
+    let joined_session = dial_session(
+        &Home::Local {
+            runtime_directory: runtime_directory.path().to_path_buf(),
+        },
+        &SessionSelector::SessionId(session_id),
+        terminal::GraphicsSupport::Unsupported,
+        None,
+        None,
+    )
+    .expect("the second dial presents the session's own token");
+
+    assert_eq!(joined_session.client_id, client_id);
+    assert_eq!(joined_session.session_id, session_id);
     assert_eq!(
-        detail,
-        "[2Jthe client speaks protocol version 4 to 4, this session speaks 5 to 5"
+        joined_session.connection_token,
+        ConnectionToken::from_secret(NEW_CONNECTION_TOKEN)
     );
-}
-
-#[test]
-fn a_hello_refused_for_its_token_is_an_unavailable_session() {
-    let hello_refusal_response =
-        build_hello_refusal_response(IpcErrorCode::BadToken, "the token is stale");
-
-    let Err(CliError::IpcUnavailable { detail }) =
-        validate_session_protocol_version(hello_refusal_response)
-    else {
-        panic!("a token refusal is an unavailable session");
-    };
-    assert_eq!(detail, "the token is stale");
+    drop(joined_session);
+    session_thread.join().expect("the stand-in session exits");
 }
 
 #[test]

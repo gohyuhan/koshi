@@ -2470,7 +2470,8 @@ fn compute_incoming_image_byte_count(incoming_event: &Incoming) -> usize {
 /// first. A session with no endpoint file in the runtime directory is looked
 /// up in the shared directory `koshi.kdl` in `config_directory` names, read
 /// again on every dial. A session of this user's that refuses this build's
-/// protocol version is dialed again once it has restarted, as
+/// protocol version is dialed again once it has restarted, and one that
+/// refuses the connection token is dialed again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait)
 /// states. On a server the whole admission runs — TLS with the
 /// pinned certificate, the secret, and the scope check on the session asked
@@ -2578,7 +2579,7 @@ fn dial_remote(
         remote_client::attach_remote_session(link, session_selector.clone())
             .map_err(DialError::Unreachable)?;
     let hello_response = remote_client::read_forwarded_hello_answer(&mut reader, session_selector)?;
-    validate_session_protocol_version(hello_response).map_err(DialError::Refused)?;
+    talk::parse_session_hello_version(hello_response).map_err(DialError::Refused)?;
     writer
         .send(&build_attach_request(
             resume_client_id,
@@ -3219,7 +3220,7 @@ fn join_session(
         ))
         .map_err(build_link_failure)?;
 
-    validate_session_protocol_version(connection.recv_answer().map_err(build_link_failure)?)
+    talk::parse_session_hello_version(connection.recv_answer().map_err(build_link_failure)?)
         .map_err(DialError::Refused)?;
     parse_attached_session(connection.recv_answer().map_err(build_link_failure)?)
         .map_err(DialError::Refused)
@@ -3252,23 +3253,6 @@ fn build_attach_request(
     }
 }
 
-/// Check the protocol version a Hello answer settled on against the range this
-/// build asked for.
-///
-/// A refusal is what [`build_peer_refusal_error`](talk::build_peer_refusal_error)
-/// gives: [`CliError::ProtocolVersionRefused`] for
-/// [`IpcErrorCode::UnsupportedVersion`](koshi_ipc::protocol::IpcErrorCode::UnsupportedVersion),
-/// and [`CliError::IpcUnavailable`] for every other code.
-fn validate_session_protocol_version(incoming_response: IncomingResponse) -> Result<(), CliError> {
-    match talk::SESSION_PEER_WORDS.take_response_result(incoming_response)? {
-        IpcResult::Hello {
-            protocol_version, ..
-        } => talk::SESSION_PEER_WORDS.validate_settled_protocol_version(protocol_version),
-        IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),
-        other => Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&other)),
-    }
-}
-
 /// The client the server minted for this terminal, the session it says that
 /// client joined, and the secret this attach minted, out of an Attach answer.
 ///
@@ -3291,7 +3275,9 @@ fn parse_attached_session(
             Ok((client_id, session_id, resume_token))
         }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),
-        other => Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&other)),
+        unexpected_result => {
+            Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
+        }
     }
 }
 

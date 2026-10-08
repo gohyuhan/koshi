@@ -5,8 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use koshi_core::{
-    constant::{MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT},
-    geometry::{FloatingPaneSize, PixelCellSize, Size},
+    constant::{
+        FLOATING_PANE_CHROME_SIZE, MAX_FLOATING_PANES_PER_SESSION, MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
+    },
+    geometry::{
+        compute_percent_cell_count, FloatingPaneDimension, FloatingPaneSize, PixelCellSize,
+        RequiredSize, Size,
+    },
     ids::{ClientId, PaneId, SessionId, TabId},
 };
 use koshi_layout::tree::LayoutNode;
@@ -120,6 +125,17 @@ impl Tab {
     }
 }
 
+/// What a floating pane's last size solve gave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FloatingPaneSizeSolve {
+    /// The pane's outer size in cells, chrome included. Its PTY is this size
+    /// less [`FLOATING_PANE_CHROME_SIZE`].
+    Sized(Size),
+    /// The shared floating viewport cannot hold the pane's minimum outer size.
+    /// The pane's PTY keeps its last size.
+    Suppressed,
+}
+
 /// One floating pane: the pane, the size it asks for, and the size it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FloatingMember {
@@ -128,8 +144,8 @@ pub struct FloatingMember {
     pub pane_id: PaneId,
     /// The size the pane asks for, per axis.
     pub desired_size: FloatingPaneSize,
-    /// The size in cells that the pane holds.
-    pub solved_size: Size,
+    /// What the pane's last size solve gave it.
+    pub solved_size: FloatingPaneSizeSolve,
 }
 
 /// The floating panes of one session, in creation order: a new member is
@@ -137,6 +153,7 @@ pub struct FloatingMember {
 ///
 /// [`FloatingSet::add_member`] holds each pane once and at most
 /// [`MAX_FLOATING_PANES_PER_SESSION`] members.
+/// [`FloatingSet::update_member_sizes`] writes each member's solved size.
 /// [`Session::remove_floating_member`] removes a member and every client's
 /// view of it.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +168,14 @@ impl FloatingSet {
         &self.members
     }
 
+    /// Whether a member holds `pane_id`.
+    #[must_use]
+    pub fn has_pane(&self, pane_id: PaneId) -> bool {
+        self.members
+            .iter()
+            .any(|floating_member| floating_member.pane_id == pane_id)
+    }
+
     /// Append `floating_member` as the newest member.
     ///
     /// # Errors
@@ -160,11 +185,7 @@ impl FloatingSet {
     /// the set holds [`MAX_FLOATING_PANES_PER_SESSION`] members or more. The set
     /// does not change on an error.
     pub fn add_member(&mut self, floating_member: FloatingMember) -> Result<(), FloatingSetError> {
-        if self
-            .members
-            .iter()
-            .any(|member| member.pane_id == floating_member.pane_id)
-        {
+        if self.has_pane(floating_member.pane_id) {
             return Err(FloatingSetError::DuplicatePane {
                 pane_id: floating_member.pane_id,
             });
@@ -175,6 +196,63 @@ impl FloatingSet {
         self.members.push(floating_member);
         Ok(())
     }
+
+    /// Solve every member's outer size against `shared_floating_viewport`,
+    /// with `pane_minimum_size` as the smallest content size. Writes only
+    /// `solved_size`.
+    ///
+    /// The floating minimum is `pane_minimum_size` plus
+    /// [`FLOATING_PANE_CHROME_SIZE`]: `20x6` → `22x10`, and `65534x6` →
+    /// `65536x10`. When `shared_floating_viewport` is smaller than the floating
+    /// minimum on either axis, every member is
+    /// [`FloatingPaneSizeSolve::Suppressed`]. Otherwise each axis of a member's
+    /// `desired_size` resolves to cells against the same axis of
+    /// `shared_floating_viewport`, a percent rounding down, then is cut to that
+    /// axis and raised to the floating minimum: `Percent(60)` by `Percent(60)`
+    /// on `80x22` → `Sized(48x13)`.
+    pub fn update_member_sizes(&mut self, shared_floating_viewport: Size, pane_minimum_size: Size) {
+        let fitting_floating_pane_minimum_size =
+            RequiredSize::from_size_sum(pane_minimum_size, FLOATING_PANE_CHROME_SIZE)
+                .fit_inside(shared_floating_viewport);
+        for floating_member in &mut self.members {
+            floating_member.solved_size = match fitting_floating_pane_minimum_size {
+                Some(floating_pane_minimum_size) => FloatingPaneSizeSolve::Sized(Size {
+                    column_count: solve_floating_pane_axis(
+                        floating_member.desired_size.width,
+                        shared_floating_viewport.column_count,
+                        floating_pane_minimum_size.column_count,
+                    ),
+                    row_count: solve_floating_pane_axis(
+                        floating_member.desired_size.height,
+                        shared_floating_viewport.row_count,
+                        floating_pane_minimum_size.row_count,
+                    ),
+                }),
+                None => FloatingPaneSizeSolve::Suppressed,
+            };
+        }
+    }
+}
+
+/// The cells `floating_pane_dimension` takes on an axis `axis_cell_count`
+/// cells long, given a floating minimum of `minimum_cell_count` on that axis:
+/// the cell count, or the percent of the axis rounded down, cut to
+/// `axis_cell_count`, then raised to `minimum_cell_count`. `Percent(60)` of
+/// `22` with a minimum of `5` → `13`.
+fn solve_floating_pane_axis(
+    floating_pane_dimension: FloatingPaneDimension,
+    axis_cell_count: u16,
+    minimum_cell_count: u16,
+) -> u16 {
+    let requested_cell_count = match floating_pane_dimension {
+        FloatingPaneDimension::Cells(cell_count) => cell_count.get(),
+        FloatingPaneDimension::Percent(axis_percent) => {
+            compute_percent_cell_count(axis_cell_count, axis_percent.get_percent())
+        }
+    };
+    requested_cell_count
+        .min(axis_cell_count)
+        .max(minimum_cell_count)
 }
 
 /// One running session: the aggregate root owning the tabs, the floating
@@ -331,6 +409,13 @@ impl Session {
         detached_client
     }
 
+    /// The tab whose layout holds `pane_id` as a leaf. `None` when no tab
+    /// does: a floating pane, or a pane this session does not hold.
+    #[must_use]
+    pub fn find_tab_by_pane_id(&self, pane_id: PaneId) -> Option<&Tab> {
+        self.tabs.values().find(|tab| tab.layout.has_pane(pane_id))
+    }
+
     /// The pane region to size tab `tab_id` against: each viewing client's own
     /// pane area, reduced to the per-axis minimum (`column_count` and `row_count`
     /// independently), which is the largest grid that fits inside *every*
@@ -344,11 +429,11 @@ impl Session {
     /// issued the command, nor on the order the viewers attached.
     #[must_use]
     pub fn get_tab_size(&self, tab_id: TabId) -> Option<Size> {
-        self.clients
-            .list_attached_clients()
-            .filter(|client| client.get_active_tab_id() == tab_id)
-            .filter_map(Client::get_pane_area)
-            .reduce(Size::compute_minimum_axes)
+        compute_minimum_pane_area(
+            self.clients
+                .list_attached_clients()
+                .filter(|client| client.get_active_tab_id() == tab_id),
+        )
     }
 
     /// The cell size of the earliest-attached client viewing `tab_id` that
@@ -356,13 +441,34 @@ impl Session {
     /// viewing `tab_id` reported a cell size.
     #[must_use]
     pub fn get_tab_cell_size(&self, tab_id: TabId) -> Option<PixelCellSize> {
-        self.clients
-            .list_attached_clients()
-            .filter(|client| {
-                client.get_active_tab_id() == tab_id && client.get_cell_size().is_some()
-            })
-            .min_by_key(|client| (client.get_attached_at(), client.get_client_id()))
-            .and_then(Client::get_cell_size)
+        find_earliest_reported_cell_size(
+            self.clients
+                .list_attached_clients()
+                .filter(|client| client.get_active_tab_id() == tab_id),
+        )
+    }
+
+    /// The pane region to size the session's floating panes against: every
+    /// attached client's own pane area, whichever tab that client views,
+    /// reduced to the per-axis minimum.
+    ///
+    /// Each attached client contributes its [`Client::get_pane_area`]; a client
+    /// that reports [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
+    /// contributes nothing. Returns `None` when no attached client contributes
+    /// a size. A `120x40` client viewing tab `db` and an `80x22` client viewing
+    /// tab `web` → `80x22`.
+    #[must_use]
+    pub fn get_shared_floating_viewport(&self) -> Option<Size> {
+        compute_minimum_pane_area(self.clients.list_attached_clients())
+    }
+
+    /// The cell size the session's floating panes take: that of the
+    /// earliest-attached client that reported one, whichever tab that client
+    /// views, ties broken by the lower client id. `None` when no attached client
+    /// reported a cell size.
+    #[must_use]
+    pub fn get_floating_cell_size(&self) -> Option<PixelCellSize> {
+        find_earliest_reported_cell_size(self.clients.list_attached_clients())
     }
 
     /// Remove `pane_id` from the floating set, keeping the order of the other
@@ -688,6 +794,28 @@ impl Session {
             Err(consistency_violations)
         }
     }
+}
+
+/// The per-axis minimum of the pane areas of `clients`: the largest grid that
+/// fits inside every one of them on both axes. A client that reports
+/// [`PaneArea::Starving`](koshi_core::geometry::PaneArea::Starving)
+/// contributes nothing. `None` when no client contributes a size.
+fn compute_minimum_pane_area<'a>(clients: impl Iterator<Item = &'a Client>) -> Option<Size> {
+    clients
+        .filter_map(Client::get_pane_area)
+        .reduce(Size::compute_minimum_axes)
+}
+
+/// The cell size of the earliest-attached of `clients` that reported one,
+/// ties broken by the lower client id. `None` when none of `clients` reported
+/// a cell size.
+fn find_earliest_reported_cell_size<'a>(
+    clients: impl Iterator<Item = &'a Client>,
+) -> Option<PixelCellSize> {
+    clients
+        .filter(|client| client.get_cell_size().is_some())
+        .min_by_key(|client| (client.get_attached_at(), client.get_client_id()))
+        .and_then(Client::get_cell_size)
 }
 
 #[cfg(test)]

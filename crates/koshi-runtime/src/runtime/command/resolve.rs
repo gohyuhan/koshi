@@ -629,17 +629,15 @@ impl Server {
         }
     }
 
-    /// The id of the tab in `session` whose layout holds `pane` as a leaf, or
+    /// The id of the tab in `session` whose layout holds `pane_id` as a leaf, or
     /// [`RejectReason::TargetNotFound`] when no tab does.
     pub(super) fn resolve_tab_id_for_pane(
         session: &Session,
         pane_id: PaneId,
     ) -> Result<TabId, Rejection> {
         session
-            .tabs
-            .values()
-            .find(|tab_state| tab_state.get_layout_tree().has_pane(pane_id))
-            .map(|tab_state| tab_state.get_tab_id())
+            .find_tab_by_pane_id(pane_id)
+            .map(|tab| tab.get_tab_id())
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))
     }
 

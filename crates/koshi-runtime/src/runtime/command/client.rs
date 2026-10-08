@@ -12,6 +12,15 @@ use crate::runtime::event::AttachAccepted;
 use crate::runtime::saved_view::SavedView;
 
 impl Server {
+    /// Record `cell_size` as the measured cell size of `client_id`, reflow the
+    /// tab it views and the session's floating panes, and schedule a frame.
+    ///
+    /// A changed measurement advances the session's placement revision and the
+    /// placement revision of every client whose view of that tab can change,
+    /// `client_id` included. A client that no session holds changes nothing.
+    /// Publishes one [`Event::PtyResized`] per resized PTY: the tab's panes
+    /// first, then the floating panes
+    /// ([`reflow_floating_panes`](Self::reflow_floating_panes)).
     pub(crate) fn handle_client_cell_size(
         &mut self,
         client_id: ClientId,
@@ -48,6 +57,7 @@ impl Server {
             active_tab_id,
             &mut emitted_events,
         );
+        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
         self.render_scheduler.invalidate();
         self.publish_events(&emitted_events);
     }
@@ -337,10 +347,12 @@ impl Server {
     /// minimum of every viewing client's pane area; a client reporting [`PaneArea::Starving`]
     /// contributes none), so a smaller client shrinks a tab and a departing one lets it grow: the
     /// tab's live panes reflow to the new size, one [`Event::PtyResized`] each. A tab with no
-    /// tab size keeps its sizes. The attach always marks the screen stale so every client
-    /// repaints from the reconciled snapshot. An attach naming an unknown session, or a tab the
-    /// session does not hold, is dropped. `attached_at` is supplied by the producer; the handler
-    /// never reads the clock itself.
+    /// tab size keeps its sizes. After the tabs, the session's floating panes reflow to the new
+    /// [`Session::get_shared_floating_viewport`], and so do the floating panes of a session the
+    /// client moved out of. The attach always marks the screen stale: every client repaints
+    /// from the reconciled snapshot. An attach naming an unknown session, or a tab the session
+    /// does not hold, is dropped. `attached_at` is supplied by the producer; the handler never
+    /// reads the clock itself.
     // Carries the whole of one attach: where it lands (`session_id`,
     // `client_id`, `active_tab_id`), the view it arrives with (`viewport_size`,
     // `pane_area`, `cell_size`), and where it came from (`attached_at`,
@@ -400,6 +412,11 @@ impl Server {
                         pty_backend.as_ref(),
                         old_session_id,
                         old_tab_id,
+                        &mut emitted_events,
+                    );
+                    self.reflow_floating_panes(
+                        pty_backend.as_ref(),
+                        old_session_id,
                         &mut emitted_events,
                     );
                 }
@@ -521,6 +538,7 @@ impl Server {
                 );
             }
         }
+        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
 
         self.render_scheduler.invalidate();
 
@@ -528,12 +546,14 @@ impl Server {
     }
 
     /// Update one client's full terminal viewport, reconcile the active tab's
-    /// pane region and PTYs, then schedule a frame for the new terminal size.
+    /// pane region and PTYs, reflow the session's floating panes to the new
+    /// [`Session::get_shared_floating_viewport`], then schedule a frame for the
+    /// new terminal size.
     ///
     /// `pane_area` and `cell_size` replace the client's reports, `None`
     /// included. A resize reporting [`PaneArea::Starving`] from the tab's only
-    /// viewer resizes no PTY; that client's next frame carries every pane
-    /// suppressed.
+    /// viewer resizes no PTY of that tab; that client's next frame carries
+    /// every pane suppressed.
     pub fn handle_client_resize(
         &mut self,
         client_id: ClientId,
@@ -579,6 +599,7 @@ impl Server {
             active_tab_id,
             &mut emitted_events,
         );
+        self.reflow_floating_panes(pty_backend.as_ref(), session_id, &mut emitted_events);
         self.render_scheduler.invalidate();
         emitted_events
     }
@@ -625,16 +646,19 @@ impl Server {
     }
 
     /// Detach the client `client_id`, then reconcile the PTY sizes of the tab it
-    /// was viewing and schedule a redraw.
+    /// was viewing and of the session's floating panes, and schedule a redraw.
     ///
     /// Removing the client hands back its record, whose active tab names the
     /// tab whose viewer set shrank. The departing viewer is dropped from that
     /// tab's size, so if larger viewers remain the tab grows back: its
     /// live panes reflow to the new [`Session::get_tab_size`], one
     /// [`Event::PtyResized`] each. When it was the last viewer the tab has no
-    /// tab size and keeps its sizes. The detach always marks the screen stale so
-    /// the remaining clients repaint. A detach for a client this runtime does
-    /// not hold is dropped.
+    /// tab size and keeps its sizes. The session's floating panes then reflow
+    /// to the new [`Session::get_shared_floating_viewport`]: they grow when the
+    /// departing client was the smallest, and keep their sizes when no client
+    /// is left. The detach always marks the screen stale: the remaining
+    /// clients repaint. A detach for a client this runtime does not hold is
+    /// dropped.
     ///
     /// Every subscription registered as viewing this client is dropped with the
     /// record, closing the sending end of each one's queue.
@@ -673,7 +697,7 @@ impl Server {
     }
 
     /// Remove the record of the client `client_id`, reflow the tab it was
-    /// viewing, and schedule a redraw, as
+    /// viewing and the session's floating panes, and schedule a redraw, as
     /// [`handle_client_detach`](Self::handle_client_detach) states. Pushes one
     /// [`Event::PtyResized`] per reflowed pane onto `emitted_events`. Requests
     /// no quit.
@@ -708,6 +732,7 @@ impl Server {
             active_tab_id,
             emitted_events,
         );
+        self.reflow_floating_panes(pty_backend.as_ref(), session_id, emitted_events);
 
         self.render_scheduler.invalidate();
 
@@ -719,11 +744,12 @@ impl Server {
     ///
     /// Each one's record is removed as
     /// [`handle_client_detach`](Self::handle_client_detach) removes one, and its
-    /// tab reflows. No quit is requested: a session these removals leave with no
-    /// client keeps running, with `auto-close-session` on or off. A client that
-    /// attached again is no longer in the set: in the usual case no client is
-    /// removed and no event is emitted. The removals run in client-id order, and
-    /// the events they emit arrive in that order.
+    /// tab and the session's floating panes reflow. No quit is requested: a
+    /// session these removals leave with no client keeps running, with
+    /// `auto-close-session` on or off. A client that attached again is no
+    /// longer in the set: in the usual case no client is removed and no event
+    /// is emitted. The removals run in client-id order, and the events they
+    /// emit arrive in that order.
     ///
     /// `unclaimed_client_deadline` is when the grace window closed, supplied by the producer;
     /// the handler never reads the clock to decide anything.

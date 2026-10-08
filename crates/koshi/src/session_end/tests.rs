@@ -1,18 +1,21 @@
 //! Tests for ending a session: which process counts as the session's, which
-//! processes hold its panes, how a session that does not quit is ended, how a
-//! session that exits while its quit runs is ended, how a pane holder that
-//! still runs after its session quit is ended, and which processes listed
-//! under a pane holder are ended and counted once the session quit.
+//! processes hold its panes, when a quit refused for its connection token is
+//! sent again, how a session that does not quit is ended, how a session that
+//! exits while its quit runs is ended, how a pane holder that still runs after
+//! its session quit is ended, and which processes listed under a pane holder
+//! are ended and counted once the session quit.
 
 use std::path::PathBuf;
 use std::process::{Child, Command as ProcessCommand, Stdio};
 
 use koshi_core::ids::parse_prefixed_uuid;
 use koshi_ipc::endpoint::compute_socket_address;
-use koshi_ipc::protocol::ConnectionToken;
+use koshi_ipc::protocol::{ConnectionToken, IpcRequestKind, IpcResult};
 use koshi_ipc::supervisor::compute_supervisor_socket_address;
 use koshi_ipc::transport::{Connection, Listener};
-use koshi_test_support::fixtures::{start_program_process, NO_SUCH_PROCESS_ID};
+use koshi_test_support::fixtures::{
+    spawn_session_listening_before_it_advertises, start_program_process, NO_SUCH_PROCESS_ID,
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -253,6 +256,37 @@ fn any_other_quit_failure_reads_as_the_errors_own_sentence() {
         format_quit_failure(&CliError::SessionAnswerTimedOut),
         "IPC unavailable: the session did not answer in time"
     );
+}
+
+#[test]
+fn a_quit_refused_for_the_old_token_is_sent_again_once_the_session_advertises_its_own() {
+    let runtime_directory = build_short_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_session_listening_before_it_advertises(
+        runtime_directory.path(),
+        session_id,
+        "the token of the session before",
+        "the token of this session",
+        |request_kind| {
+            let IpcRequestKind::SubmitCommand(command_envelope) = request_kind else {
+                panic!("expected a SubmitCommand, got {request_kind:?}");
+            };
+            assert_eq!(command_envelope.command, Command::Quit);
+            IpcResult::CommandResult(CommandResult::Ok {
+                command_id: command_envelope.command_id,
+                emitted_events: Vec::new(),
+            })
+        },
+    );
+    let stale_endpoint_file = EndpointFile::load_from_path(
+        &EndpointFile::resolve_endpoint_file_path(runtime_directory.path(), session_id),
+    )
+    .expect("the endpoint file is read");
+
+    submit_quit(runtime_directory.path(), &stale_endpoint_file, session_id)
+        .expect("the second Quit is applied");
+
+    session_thread.join().expect("the stand-in session exits");
 }
 
 #[test]

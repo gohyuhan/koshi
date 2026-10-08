@@ -39,6 +39,10 @@ pub enum CliError {
     /// one this build speaks. `detail` is the peer's own sentence.
     #[error("IPC unavailable: {detail}")]
     ProtocolVersionRefused { detail: String },
+    /// The peer refused the Hello: the connection token presented is not the
+    /// one it accepts. `detail` is the peer's own sentence.
+    #[error("IPC unavailable: {detail}")]
+    ConnectionTokenRefused { detail: String },
     /// The server was started by koshi 0.1.0 to 0.4.0, which reads no frame
     /// this build writes. `detail` is the sentence the read failure gave.
     #[error("IPC unavailable: {detail}; the user who started it runs: koshi restart-servers")]
@@ -86,9 +90,10 @@ fn format_rejection_message(reason: RejectReason, help: Option<&str>) -> String 
 /// The single error-to-exit-code table: every [`CliError`] class maps to the
 /// [`CliExitCode`] the binary reports to the OS. A usage or config problem
 /// exits 2, a session that is not running exits 3, an unreachable IPC
-/// endpoint, a refused protocol version, a server that koshi 0.1.0 to 0.4.0
-/// started, or a session that did not answer in time exits 4, and a runtime
-/// error, a rejected command, or a failed update exits 1.
+/// endpoint, a refused protocol version, a refused connection token, a server
+/// that koshi 0.1.0 to 0.4.0 started, or a session that did not answer in time
+/// exits 4, and a runtime error, a rejected command, or a failed update exits
+/// 1.
 impl From<&CliError> for CliExitCode {
     fn from(cli_error: &CliError) -> Self {
         match cli_error {
@@ -100,6 +105,7 @@ impl From<&CliError> for CliExitCode {
             | CliError::InSessionEnv { .. } => CliExitCode::UsageOrConfig,
             CliError::IpcUnavailable { .. }
             | CliError::ProtocolVersionRefused { .. }
+            | CliError::ConnectionTokenRefused { .. }
             | CliError::PreviousReleaseServer { .. }
             | CliError::SessionAnswerTimedOut => CliExitCode::IpcUnavailable,
             CliError::SessionNotFound { .. } | CliError::NoSessions => CliExitCode::SessionNotFound,

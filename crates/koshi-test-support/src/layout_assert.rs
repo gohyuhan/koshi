@@ -251,9 +251,7 @@ pub fn check_minimum_size_respected(
         if pane_rect.is_empty() {
             continue;
         }
-        if pane_rect.size.column_count < minimum_size.column_count
-            || pane_rect.size.row_count < minimum_size.row_count
-        {
+        if !minimum_size.can_fit_inside(pane_rect.size) {
             return Err(LayoutAssertionError::MinimumSizeViolated {
                 pane_id,
                 pane_size: pane_rect.size,

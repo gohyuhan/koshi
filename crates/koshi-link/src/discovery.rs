@@ -521,11 +521,10 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
     mut make_attempt: impl FnMut() -> AttemptOutcome,
     is_refused: impl Fn(&AttemptOutcome) -> bool,
 ) -> AttemptOutcome {
-    let recheck_window_end = Instant::now() + REFUSED_SESSION_RECHECK_WINDOW_DURATION;
-    let recheck_end = match answer_deadline {
-        Some(answer_deadline) => recheck_window_end.min(answer_deadline),
-        None => recheck_window_end,
-    };
+    let recheck_end = ipc_client::bound_by_answer_deadline(
+        Instant::now() + REFUSED_SESSION_RECHECK_WINDOW_DURATION,
+        answer_deadline,
+    );
     let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
     let mut attempt_outcome = make_attempt();
     while is_refused(&attempt_outcome) {
@@ -555,22 +554,25 @@ pub fn repeat_while_live_session_refuses<AttemptOutcome>(
 /// Each attempt reads how to reach the session and asks it through
 /// [`run_session_exchange_with_restart_wait`](ipc_client::run_session_exchange_with_restart_wait):
 /// a session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted. A refused connect is made again
-/// through [`repeat_while_live_session_refuses`]. Nothing listening then is
-/// [`CliError::SessionNotFound`]. When that last attempt read this user's own
-/// endpoint file, the session's files go through `delete_stale_session_files`,
-/// and a session that function keeps is the [`CliError::IpcUnavailable`] it
-/// gives. Something listening that replies in the envelope of koshi 0.4.0 or
-/// older is [`CliError::PreviousReleaseServer`]. Something listening whose
-/// exchange failed in any other way — a token that no longer matches, say — is
-/// [`CliError::IpcUnavailable`].
+/// asked again once it has restarted, and one that refuses the connection
+/// token is asked again once it advertises another. A refused connect is made
+/// again through [`repeat_while_live_session_refuses`]. Nothing listening then
+/// is [`CliError::SessionNotFound`]. When that last attempt read this user's
+/// own endpoint file, the session's files go through
+/// `delete_stale_session_files`, and a session that function keeps is the
+/// [`CliError::IpcUnavailable`] it gives. Something listening that replies in
+/// the envelope of koshi 0.4.0 or older is [`CliError::PreviousReleaseServer`].
+/// Something listening that refuses the connection token is
+/// [`CliError::ConnectionTokenRefused`]: at once for another user's session,
+/// and after that wait for one of this user's. Something listening whose
+/// exchange failed in any other way is [`CliError::IpcUnavailable`].
 ///
 /// With `answer_deadline`, each connect and every write and read after it end
 /// by that moment, as
 /// [`fetch_session_overview_from_endpoint`](ipc_client::fetch_session_overview_from_endpoint)
-/// states, and the recheck of a refused connect and the wait for a restart end
-/// by it too. With `None`, the exchange waits for the answer however long it
-/// takes.
+/// states, and the recheck of a refused connect, the wait for a restart, and
+/// the wait for another token end by it too. With `None`, the exchange waits
+/// for the answer however long it takes.
 ///
 /// `shared_sessions_base_directory` is searched for `session_id` when
 /// `runtime_directory` holds no endpoint file for it, through

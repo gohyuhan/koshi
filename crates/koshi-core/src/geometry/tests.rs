@@ -1,8 +1,10 @@
 //! Unit tests for rectangular geometry operations and layout enums.
 //!
 //! Tests `Rect` containment, intersection, insetting, and serde round-trips;
-//! `Direction` and `SplitDirection` enum serialization; the range
-//! `AxisPercent` and `FloatingPaneDimension` accept and their encoding.
+//! the `Size` fit check; the `RequiredSize` sum and fit check; `Direction` and
+//! `SplitDirection` enum serialization; the range `AxisPercent` and
+//! `FloatingPaneDimension` accept and their encoding; and the cell count of a
+//! percent of an axis.
 
 use super::*;
 
@@ -297,6 +299,129 @@ fn inset_origin_does_not_overflow() {
 }
 
 #[test]
+fn required_size_sum_adds_each_axis_past_the_largest_size() {
+    let chrome_size = Size {
+        column_count: 2,
+        row_count: 4,
+    };
+    assert_eq!(
+        RequiredSize::from_size_sum(
+            Size {
+                column_count: 20,
+                row_count: 6,
+            },
+            chrome_size
+        ),
+        RequiredSize {
+            column_count: 22,
+            row_count: 10,
+        }
+    );
+    assert_eq!(
+        RequiredSize::from_size_sum(
+            Size {
+                column_count: u16::MAX - 1,
+                row_count: u16::MAX,
+            },
+            chrome_size
+        ),
+        RequiredSize {
+            column_count: 65_536,
+            row_count: 65_539,
+        }
+    );
+}
+
+#[test]
+fn a_required_size_fits_inside_a_container_only_when_both_axes_fit() {
+    let full_width_container_size = Size {
+        column_count: u16::MAX,
+        row_count: 22,
+    };
+    for (required_size, fitted_size) in [
+        (
+            RequiredSize {
+                column_count: 22,
+                row_count: 10,
+            },
+            Some(Size {
+                column_count: 22,
+                row_count: 10,
+            }),
+        ),
+        (
+            RequiredSize {
+                column_count: 65_535,
+                row_count: 22,
+            },
+            Some(full_width_container_size),
+        ),
+        (
+            RequiredSize {
+                column_count: 65_536,
+                row_count: 10,
+            },
+            None,
+        ),
+        (
+            RequiredSize {
+                column_count: 22,
+                row_count: 23,
+            },
+            None,
+        ),
+        (
+            RequiredSize {
+                column_count: 22,
+                row_count: u32::MAX,
+            },
+            None,
+        ),
+    ] {
+        assert_eq!(
+            required_size.fit_inside(full_width_container_size),
+            fitted_size,
+            "{required_size:?} inside 65535x22"
+        );
+        assert_eq!(
+            required_size.can_fit_inside(full_width_container_size),
+            fitted_size.is_some(),
+            "{required_size:?} inside 65535x22"
+        );
+    }
+}
+
+#[test]
+fn a_size_fits_inside_a_container_only_when_both_axes_fit() {
+    let inner_size = Size {
+        column_count: 22,
+        row_count: 10,
+    };
+    for (container_size, can_fit) in [
+        ((22, 10), true),
+        ((80, 22), true),
+        ((21, 40), false),
+        ((80, 9), false),
+        ((21, 9), false),
+    ] {
+        let (column_count, row_count) = container_size;
+        assert_eq!(
+            inner_size.can_fit_inside(Size {
+                column_count,
+                row_count,
+            }),
+            can_fit,
+            "22x10 inside {column_count}x{row_count}"
+        );
+    }
+    let empty_size = Size {
+        column_count: 0,
+        row_count: 0,
+    };
+    assert!(empty_size.can_fit_inside(empty_size));
+}
+
+#[test]
 fn intersection_at_grid_max_edge_no_overflow() {
     // Right/bottom edges land at u16::MAX + 1.
     let first_rect = build_rect(u16::MAX - 3, u16::MAX - 3, 4, 4);
@@ -538,4 +663,29 @@ fn floating_pane_dimension_decoding_refuses_zero_cells_and_an_out_of_range_perce
             expected_message
         );
     }
+}
+
+#[test]
+fn percent_cell_count_rounds_down_to_whole_cells() {
+    for (axis_cell_count, percent, expected_cell_count) in [
+        (22, 60, 13),
+        (10, 33, 3),
+        (80, 100, 80),
+        (80, 0, 0),
+        (0, 60, 0),
+        (u16::MAX, 100, u16::MAX),
+    ] {
+        assert_eq!(
+            compute_percent_cell_count(axis_cell_count, percent),
+            expected_cell_count,
+            "{percent} percent of {axis_cell_count} cells"
+        );
+    }
+}
+
+#[test]
+fn percent_cell_count_counts_a_percent_above_100_as_100() {
+    assert_eq!(compute_percent_cell_count(80, 101), 80);
+    assert_eq!(compute_percent_cell_count(80, u8::MAX), 80);
+    assert_eq!(compute_percent_cell_count(u16::MAX, u8::MAX), u16::MAX);
 }

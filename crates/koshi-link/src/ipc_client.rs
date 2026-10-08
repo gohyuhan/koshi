@@ -76,6 +76,11 @@ pub const RESTART_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(25);
 /// image: 3 s.
 pub const REFUSED_SERVER_RESTART_START_WAIT_DURATION: Duration = Duration::from_secs(3);
 
+/// How long the CLI and the router wait, after a server of this user's refused
+/// the connection token its endpoint file carried, for that file to carry
+/// another token: 5 s.
+pub const REFUSED_TOKEN_ADVERTISE_WAIT_DURATION: Duration = Duration::from_secs(5);
+
 /// The most sessions [`list_foreign_sessions`] lists for one owner on Unix,
 /// across every folder of the shared directory.
 pub const MAX_SHARED_SESSION_COUNT_PER_OWNER: usize = 256;
@@ -122,14 +127,17 @@ pub fn resolve_shared_sessions_base_directory() -> Option<PathBuf> {
 /// Reads the session's endpoint file, connects, writes the Hello and the
 /// command back to back, and reads the two replies in order. A missing
 /// endpoint file or a socket nothing listens on reports the session as not
-/// running ([`CliError::SessionNotFound`]). A reply in the envelope of koshi
-/// 0.4.0 or older is [`CliError::PreviousReleaseServer`], and every other
-/// failure to talk is [`CliError::IpcUnavailable`]. The result itself —
-/// applied or rejected — comes back for the caller to map to an exit code,
-/// with a rejection's hint filtered by [`sanitize_reported_text`].
+/// running ([`CliError::SessionNotFound`]). A Hello refused for its protocol
+/// version is [`CliError::ProtocolVersionRefused`], one refused for its
+/// connection token is [`CliError::ConnectionTokenRefused`], a reply in the
+/// envelope of koshi 0.4.0 or older is [`CliError::PreviousReleaseServer`],
+/// and every other failure to talk is [`CliError::IpcUnavailable`]. The result
+/// itself — applied or rejected — comes back for the caller to map to an exit
+/// code, with a rejection's hint filtered by [`sanitize_reported_text`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, as
+/// asked again once it has restarted, and one that refuses the connection
+/// token is asked again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`] states.
 pub fn submit_in_session_command(
     in_session_context: &InSessionContext,
@@ -201,7 +209,8 @@ fn submit_command_via_runtime_directory(
 /// [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, as
+/// asked again once it has restarted, and one that refuses the connection
+/// token is asked again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`] states.
 pub fn submit_external_command_via_runtime_directory(
     runtime_directory: &Path,
@@ -367,7 +376,8 @@ pub fn fetch_session_overview_from_endpoint(
 /// [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, as
+/// asked again once it has restarted, and one that refuses the connection
+/// token is asked again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`] states.
 pub fn fetch_layout(
     runtime_directory: &Path,
@@ -412,7 +422,8 @@ pub fn fetch_layout(
 /// [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, as
+/// asked again once it has restarted, and one that refuses the connection
+/// token is asked again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`] states.
 pub fn fetch_recent_events(
     runtime_directory: &Path,
@@ -456,8 +467,9 @@ pub enum SessionRestart {
 
 /// Ask the running session `session_id` to restart into the binary on disk.
 ///
-/// Sends one Restart exchange, and one more after the restart wait stated
-/// below, and never starts a session. Every pane, its child process, its
+/// Sends one Restart exchange, one more after each wait stated below, and
+/// never starts a session. A session runs at most one of them: a Restart
+/// behind a refused Hello is refused. Every pane, its child process, its
 /// terminal and its scrollback stay as they are. A client that was attached
 /// attaches again and finds the session it left.
 ///
@@ -473,7 +485,8 @@ pub enum SessionRestart {
 /// [`load_session_endpoint`].
 ///
 /// A session of this user's that refuses this build's protocol version is
-/// asked again once it has restarted, as
+/// asked again once it has restarted, and one that refuses the connection
+/// token is asked again once it advertises another, as
 /// [`run_session_exchange_with_restart_wait`] states. Example: a session that
 /// restarted by itself into the program on disk is asked to restart once more,
 /// and restarts into the same program.
@@ -705,7 +718,8 @@ fn build_previous_release_answer_error(previous_release_result: PreviousReleaseR
 ///
 /// `shared_sessions_base_directory` is searched for `session_id` when
 /// `runtime_directory` holds no endpoint file for it, through
-/// [`load_session_endpoint`].
+/// [`load_session_endpoint`]. A session that refuses the connection token is
+/// asked once more, as [`run_session_exchange_with_token_wait`] states.
 pub fn find_running_session_version(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
@@ -718,7 +732,20 @@ pub fn find_running_session_version(
         session_id,
     ) {
         Ok(session_endpoint) => {
-            find_session_version_from_endpoint(&session_endpoint, session_id, answer_deadline)
+            let (_, session_version_result) = run_session_exchange_with_token_wait(
+                runtime_directory,
+                session_id,
+                session_endpoint,
+                answer_deadline,
+                |session_endpoint| {
+                    find_session_version_from_endpoint(
+                        session_endpoint,
+                        session_id,
+                        answer_deadline,
+                    )
+                },
+            );
+            session_version_result
         }
         Err(CliError::SessionNotFound { .. }) => Ok(None),
         Err(ipc_error) => Err(ipc_error),
@@ -966,14 +993,12 @@ pub fn wait_for_refused_session_restart(
     refusal_detail: String,
     answer_deadline: Option<Instant>,
 ) -> Result<EndpointFile, CliError> {
-    let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
-    let is_own_session = EndpointFile::load_from_path(&endpoint_path).is_ok()
-        || is_replacing_its_image(runtime_directory, session_id);
-    if !is_own_session {
+    if !is_own_session(runtime_directory, session_id) {
         return Err(CliError::ProtocolVersionRefused {
             detail: refusal_detail,
         });
     }
+    let endpoint_path = EndpointFile::resolve_endpoint_file_path(runtime_directory, session_id);
     let program_file_path =
         ServerProgramFile::resolve_session_program_file_path(runtime_directory, session_id);
     let build_refusal_error =
@@ -989,12 +1014,10 @@ pub fn wait_for_refused_session_restart(
     if !refusing_server_build.is_restart_expected() {
         return Err(build_refusal_error(&refusing_server_build));
     }
-    let bound_by_answer_deadline = |wait_end: Instant| match answer_deadline {
-        Some(answer_deadline) => wait_end.min(answer_deadline),
-        None => wait_end,
-    };
-    let start_deadline =
-        bound_by_answer_deadline(Instant::now() + REFUSED_SERVER_RESTART_START_WAIT_DURATION);
+    let start_deadline = bound_by_answer_deadline(
+        Instant::now() + REFUSED_SERVER_RESTART_START_WAIT_DURATION,
+        answer_deadline,
+    );
     loop {
         if let Ok(endpoint) = EndpointFile::load_from_path(&endpoint_path) {
             if endpoint.connection_token != refused_endpoint.connection_token {
@@ -1003,7 +1026,7 @@ pub fn wait_for_refused_session_restart(
         }
         if is_replacing_its_image(runtime_directory, session_id) {
             let restart_deadline =
-                bound_by_answer_deadline(Instant::now() + RESTART_WINDOW_DURATION);
+                bound_by_answer_deadline(Instant::now() + RESTART_WINDOW_DURATION, answer_deadline);
             if let Some(restarted_endpoint) = wait_for_new_session_endpoint(
                 runtime_directory,
                 session_id,
@@ -1026,10 +1049,11 @@ pub fn wait_for_refused_session_restart(
 }
 
 /// Run `make_exchange` over the endpoint of the session `session_id`, found as
-/// [`load_session_endpoint`] finds it. An exchange that ends in
+/// [`load_session_endpoint`] finds it, through
+/// [`run_session_exchange_with_token_wait`]. An exchange that ends in
 /// [`CliError::ProtocolVersionRefused`] runs once more, over the endpoint
 /// [`wait_for_refused_session_restart`] hands back, and that wait's failure is
-/// what this gives otherwise. `answer_deadline` bounds the wait.
+/// what this gives otherwise. `answer_deadline` bounds each wait.
 ///
 /// # Errors
 /// What [`load_session_endpoint`] gives, then what the last `make_exchange`
@@ -1046,20 +1070,98 @@ pub fn run_session_exchange_with_restart_wait<ExchangeAnswer>(
         shared_sessions_base_directory,
         session_id,
     )?;
-    match make_exchange(&session_endpoint) {
+    let (exchanged_endpoint, exchange_result) = run_session_exchange_with_token_wait(
+        runtime_directory,
+        session_id,
+        session_endpoint,
+        answer_deadline,
+        &mut make_exchange,
+    );
+    match exchange_result {
         Err(CliError::ProtocolVersionRefused {
             detail: refusal_detail,
         }) => {
             let restarted_endpoint = wait_for_refused_session_restart(
                 runtime_directory,
                 session_id,
-                &session_endpoint,
+                &exchanged_endpoint,
                 refusal_detail,
                 answer_deadline,
             )?;
             make_exchange(&restarted_endpoint)
         }
         exchange_result => exchange_result,
+    }
+}
+
+/// Run `make_exchange` over `session_endpoint`, the endpoint the session
+/// `session_id` advertised, and hand back the endpoint the last exchange ran
+/// over with what that exchange gave.
+///
+/// An exchange that gives [`CliError::ConnectionTokenRefused`] met a session
+/// that does not accept the token `session_endpoint` carries. For a session of
+/// this user's, one whose endpoint file in `runtime_directory` can be read or
+/// that [`is_replacing_its_image`] accepts, this waits with
+/// [`wait_for_new_session_endpoint`] for an endpoint file under another token,
+/// for up to [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`] and at most until
+/// `answer_deadline`, then runs `make_exchange` once more over that file. The
+/// refusal of another user's session, and a refusal whose wait ends with the
+/// token unchanged, are handed back as they are. Example: a session that
+/// restarted in place accepts its fresh token before it writes its endpoint
+/// file; a command that read the file before the write is refused, then runs
+/// once more under the fresh token.
+pub fn run_session_exchange_with_token_wait<ExchangeAnswer>(
+    runtime_directory: &Path,
+    session_id: SessionId,
+    session_endpoint: EndpointFile,
+    answer_deadline: Option<Instant>,
+    mut make_exchange: impl FnMut(&EndpointFile) -> Result<ExchangeAnswer, CliError>,
+) -> (EndpointFile, Result<ExchangeAnswer, CliError>) {
+    let exchange_result = make_exchange(&session_endpoint);
+    if !matches!(
+        exchange_result,
+        Err(CliError::ConnectionTokenRefused { .. })
+    ) || !is_own_session(runtime_directory, session_id)
+    {
+        return (session_endpoint, exchange_result);
+    }
+    let advertise_deadline = bound_by_answer_deadline(
+        Instant::now() + REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
+        answer_deadline,
+    );
+    match wait_for_new_session_endpoint(
+        runtime_directory,
+        session_id,
+        &session_endpoint.connection_token,
+        advertise_deadline,
+    ) {
+        Some(advertised_endpoint) => {
+            let exchange_result = make_exchange(&advertised_endpoint);
+            (advertised_endpoint, exchange_result)
+        }
+        None => (session_endpoint, exchange_result),
+    }
+}
+
+/// Whether the session `session_id` is this user's: its endpoint file in
+/// `runtime_directory` can be read, or [`is_replacing_its_image`] accepts it.
+fn is_own_session(runtime_directory: &Path, session_id: SessionId) -> bool {
+    EndpointFile::load_from_path(&EndpointFile::resolve_endpoint_file_path(
+        runtime_directory,
+        session_id,
+    ))
+    .is_ok()
+        || is_replacing_its_image(runtime_directory, session_id)
+}
+
+/// `wait_end`, or `answer_deadline` when one is given and comes first.
+pub(crate) fn bound_by_answer_deadline(
+    wait_end: Instant,
+    answer_deadline: Option<Instant>,
+) -> Instant {
+    match answer_deadline {
+        Some(answer_deadline) => wait_end.min(answer_deadline),
+        None => wait_end,
     }
 }
 

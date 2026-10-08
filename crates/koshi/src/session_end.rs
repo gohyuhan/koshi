@@ -112,7 +112,7 @@ pub fn end_session(
     let Some(session_record) =
         find_server_process_record(&endpoint_file_path, endpoint_file.process_id)
     else {
-        return quit_unconfirmed_session(&endpoint_file, session_id);
+        return quit_unconfirmed_session(runtime_directory, &endpoint_file, session_id);
     };
 
     let session_records = std::slice::from_ref(&session_record);
@@ -122,7 +122,7 @@ pub fn end_session(
         process_tree::list_member_records(session_records, &first_process_records);
     let first_holder_member_records =
         process_tree::list_member_records(&first_pane_holder_records, &first_process_records);
-    let quit_failure = match submit_quit(&endpoint_file, session_id) {
+    let quit_failure = match submit_quit(runtime_directory, &endpoint_file, session_id) {
         Ok(()) => {
             let has_session_exited = process_tree::wait_for_processes_to_end(
                 session_records,
@@ -337,20 +337,38 @@ fn is_other_koshi_process_of_current_user(process_record: &ProcessRecord) -> boo
         && process_record.process_id != std::process::id()
 }
 
-/// Send `Quit` to the session `session_id` at `endpoint_file`, which has 5 s
-/// to answer.
+/// Send `Quit` to the session `session_id` at `endpoint_file`, read from
+/// `runtime_directory` or the shared directory, which has 5 s to answer. A
+/// session of this user's that refuses the connection token is sent the `Quit`
+/// once more inside those 5 s, as
+/// [`run_session_exchange_with_token_wait`](ipc_client::run_session_exchange_with_token_wait)
+/// states.
 ///
 /// # Errors
 /// A rejected `Quit` is [`CliError::CommandRejected`]. Every other failure is
 /// what [`submit_external_command_to_endpoint`](ipc_client::submit_external_command_to_endpoint)
 /// gives.
-fn submit_quit(endpoint_file: &EndpointFile, session_id: SessionId) -> Result<(), CliError> {
-    match ipc_client::submit_external_command_to_endpoint(
-        endpoint_file,
+fn submit_quit(
+    runtime_directory: &Path,
+    endpoint_file: &EndpointFile,
+    session_id: SessionId,
+) -> Result<(), CliError> {
+    let answer_deadline = Instant::now() + QUIT_ANSWER_TIMEOUT_DURATION;
+    let (_, quit_result) = ipc_client::run_session_exchange_with_token_wait(
+        runtime_directory,
         session_id,
-        Command::Quit,
-        Some(Instant::now() + QUIT_ANSWER_TIMEOUT_DURATION),
-    )? {
+        endpoint_file.clone(),
+        Some(answer_deadline),
+        |session_endpoint| {
+            ipc_client::submit_external_command_to_endpoint(
+                session_endpoint,
+                session_id,
+                Command::Quit,
+                Some(answer_deadline),
+            )
+        },
+    );
+    match quit_result? {
         CommandResult::Ok { .. } => Ok(()),
         CommandResult::Rejected { reason, help, .. } => {
             Err(CliError::CommandRejected { reason, help })
@@ -368,10 +386,11 @@ fn submit_quit(endpoint_file: &EndpointFile, session_id: SessionId) -> Result<()
 /// that process 5000 is session-…, and leaves it running. If it is, end it
 /// with: kill 5000`.
 fn quit_unconfirmed_session(
+    runtime_directory: &Path,
     endpoint_file: &EndpointFile,
     session_id: SessionId,
 ) -> Result<SessionEnding, CliError> {
-    let Err(quit_error) = submit_quit(endpoint_file, session_id) else {
+    let Err(quit_error) = submit_quit(runtime_directory, endpoint_file, session_id) else {
         return Ok(SessionEnding::Quit {
             stopped_process_count: 0,
         });

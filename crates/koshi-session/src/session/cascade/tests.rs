@@ -845,16 +845,16 @@ fn the_removed_pane_leaves_the_tab_focus_history() {
 #[test]
 fn removing_the_last_pane_closes_the_tab_and_quits() {
     let tab_id = TabId::new();
-    let only = PaneId::new();
+    let only_pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, only)],
-        vec![build_pane_record(only, PaneLifecycle::Running)],
+        vec![build_single_pane_tab(tab_id, only_pane_id)],
+        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
     );
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
-        only,
+        only_pane_id,
         build_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -872,9 +872,11 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
     assert_eq!(
         emitted_events,
         vec![
-            Event::PaneClosing(PaneClosing { pane_id: only }),
+            Event::PaneClosing(PaneClosing {
+                pane_id: only_pane_id
+            }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: only,
+                pane_id: only_pane_id,
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
@@ -887,24 +889,24 @@ fn removing_the_last_pane_closes_the_tab_and_quits() {
 }
 
 /// Emptying the only tab while a client focuses its last pane leaves nothing
-/// dangling: the pane pane record, the tab and the client's focus entry all go, and
+/// dangling: the pane record, the tab and the client's focus entry all go, and
 /// the session passes its own consistency check.
 #[test]
 fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
     let tab_id = TabId::new();
-    let only = PaneId::new();
+    let only_pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, only)],
-        vec![build_pane_record(only, PaneLifecycle::Running)],
+        vec![build_single_pane_tab(tab_id, only_pane_id)],
+        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
     );
-    let client = build_focused_client(session.session_id, tab_id, only);
+    let client = build_focused_client(session.session_id, tab_id, only_pane_id);
     let client_id = client.get_client_id();
     session.attach_client(client);
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
-        only,
+        only_pane_id,
         build_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -916,9 +918,11 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
     assert_eq!(
         emitted_events,
         vec![
-            Event::PaneClosing(PaneClosing { pane_id: only }),
+            Event::PaneClosing(PaneClosing {
+                pane_id: only_pane_id
+            }),
             Event::PaneRemoved(PaneRemoved {
-                pane_id: only,
+                pane_id: only_pane_id,
                 tab_id,
             }),
             Event::TabClosed(TabClosed { tab_id }),
@@ -931,7 +935,7 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(only)
+            .get_pane_record_by_id(only_pane_id)
             .map(PaneRecord::get_pane_id),
         None
     );
@@ -952,23 +956,23 @@ fn removing_the_last_pane_a_client_focuses_leaves_a_consistent_session() {
 
 #[test]
 fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
-    let (tab_one, tab_two) = (TabId::new(), TabId::new());
-    let (pane_one, pane_two) = (PaneId::new(), PaneId::new());
+    let (first_tab_id, second_tab_id) = (TabId::new(), TabId::new());
+    let (first_pane_id, second_pane_id) = (PaneId::new(), PaneId::new());
     let mut session = build_session_with(
         vec![
-            build_single_pane_tab(tab_one, pane_one),
-            build_single_pane_tab(tab_two, pane_two),
+            build_single_pane_tab(first_tab_id, first_pane_id),
+            build_single_pane_tab(second_tab_id, second_pane_id),
         ],
         vec![
-            build_pane_record(pane_one, PaneLifecycle::Running),
-            build_pane_record(pane_two, PaneLifecycle::Running),
+            build_pane_record(first_pane_id, PaneLifecycle::Running),
+            build_pane_record(second_pane_id, PaneLifecycle::Running),
         ],
     );
 
     let emitted_events = remove_pane_cascade(
         &mut session,
-        tab_one,
-        pane_one,
+        first_tab_id,
+        first_pane_id,
         build_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -979,39 +983,43 @@ fn closing_the_last_pane_of_one_tab_among_several_does_not_quit() {
 
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
-        vec![tab_two]
+        vec![second_tab_id]
     );
     // The emptied tab closes, but a tab survives, so no `Quit` follows.
     assert_eq!(
         emitted_events,
         vec![
-            Event::PaneClosing(PaneClosing { pane_id: pane_one }),
-            Event::PaneRemoved(PaneRemoved {
-                pane_id: pane_one,
-                tab_id: tab_one,
+            Event::PaneClosing(PaneClosing {
+                pane_id: first_pane_id
             }),
-            Event::TabClosed(TabClosed { tab_id: tab_one }),
+            Event::PaneRemoved(PaneRemoved {
+                pane_id: first_pane_id,
+                tab_id: first_tab_id,
+            }),
+            Event::TabClosed(TabClosed {
+                tab_id: first_tab_id
+            }),
         ]
     );
 }
 
 #[test]
 fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
-    // The exit fact is reported unconditionally, but there is no pane pane record
-    // to read a policy off of, so nothing else in the session may change.
+    // An unknown pane still reports its exit fact. It has no pane record: no
+    // exit policy applies, and nothing else in the session changes.
     let tab_id = TabId::new();
-    let only = PaneId::new();
+    let only_pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, only)],
-        vec![build_pane_record(only, PaneLifecycle::Running)],
+        vec![build_single_pane_tab(tab_id, only_pane_id)],
+        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
     );
-    let unknown = PaneId::new();
+    let unknown_pane_id = PaneId::new();
 
     let emitted_events = apply_child_exit(
         &mut session,
         tab_id,
         PaneProcessExited {
-            pane_id: unknown,
+            pane_id: unknown_pane_id,
             exit_code: Some(1),
             signal: None,
         },
@@ -1025,7 +1033,7 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
     assert_eq!(
         emitted_events,
         vec![Event::PaneProcessExited(PaneProcessExited {
-            pane_id: unknown,
+            pane_id: unknown_pane_id,
             exit_code: Some(1),
             signal: None,
         })]
@@ -1034,23 +1042,23 @@ fn on_child_exit_for_an_unknown_pane_only_emits_the_exit_fact() {
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(only)
+            .get_pane_record_by_id(only_pane_id)
             .map(PaneRecord::get_pane_id),
-        Some(only)
+        Some(only_pane_id)
     );
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
-        &LayoutNode::Pane(only)
+        &LayoutNode::Pane(only_pane_id)
     );
 }
 
 #[test]
 fn removing_an_unknown_pane_emits_nothing() {
     let tab_id = TabId::new();
-    let only = PaneId::new();
+    let only_pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, only)],
-        vec![build_pane_record(only, PaneLifecycle::Running)],
+        vec![build_single_pane_tab(tab_id, only_pane_id)],
+        vec![build_pane_record(only_pane_id, PaneLifecycle::Running)],
     );
 
     let emitted_events = remove_pane_cascade(
@@ -1069,13 +1077,13 @@ fn removing_an_unknown_pane_emits_nothing() {
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(only)
+            .get_pane_record_by_id(only_pane_id)
             .map(PaneRecord::get_pane_id),
-        Some(only)
+        Some(only_pane_id)
     );
     assert_eq!(
         session.tabs[&tab_id].get_layout_tree(),
-        &LayoutNode::Pane(only)
+        &LayoutNode::Pane(only_pane_id)
     );
 }
 
@@ -1124,17 +1132,17 @@ fn removing_a_pane_under_an_unknown_tab_changes_nothing_and_emits_nothing() {
 #[test]
 fn a_close_on_exit_pane_runs_the_removal_cascade() {
     let tab_id = TabId::new();
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, pane)],
-        vec![build_pane_record(pane, PaneLifecycle::Running)],
+        vec![build_single_pane_tab(tab_id, pane_id)],
+        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
     );
 
     let emitted_events = apply_child_exit(
         &mut session,
         tab_id,
         PaneProcessExited {
-            pane_id: pane,
+            pane_id,
             exit_code: Some(0),
             signal: None,
         },
@@ -1148,7 +1156,7 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
     assert_eq!(
         session
             .panes
-            .get_pane_record_by_id(pane)
+            .get_pane_record_by_id(pane_id)
             .map(PaneRecord::get_pane_id),
         None
     );
@@ -1161,20 +1169,17 @@ fn a_close_on_exit_pane_runs_the_removal_cascade() {
         emitted_events,
         vec![
             Event::PaneProcessExited(PaneProcessExited {
-                pane_id: pane,
+                pane_id,
                 exit_code: Some(0),
                 signal: None,
             }),
-            Event::PaneClosing(PaneClosing { pane_id: pane }),
-            Event::PaneRemoved(PaneRemoved {
-                pane_id: pane,
-                tab_id,
-            }),
+            Event::PaneClosing(PaneClosing { pane_id }),
+            Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
                 tab_id,
                 pane_exit: Some(PaneProcessExited {
-                    pane_id: pane,
+                    pane_id,
                     exit_code: Some(0),
                     signal: None,
                 }),
@@ -1308,19 +1313,19 @@ fn closing_a_tab_a_client_is_not_viewing_leaves_its_active_tab() {
 #[test]
 fn closing_the_last_tab_prunes_client_focus_and_quits() {
     let tab_id = TabId::new();
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, pane)],
-        vec![build_pane_record(pane, PaneLifecycle::Running)],
+        vec![build_single_pane_tab(tab_id, pane_id)],
+        vec![build_pane_record(pane_id, PaneLifecycle::Running)],
     );
-    let client = build_focused_client(session.session_id, tab_id, pane);
+    let client = build_focused_client(session.session_id, tab_id, pane_id);
     let client_id = client.get_client_id();
     session.attach_client(client);
 
     let emitted_events = remove_pane_cascade(
         &mut session,
         tab_id,
-        pane,
+        pane_id,
         build_rect(),
         PaneSizing {
             minimum_size: MIN_PANE_SIZE,
@@ -1333,11 +1338,8 @@ fn closing_the_last_tab_prunes_client_focus_and_quits() {
     assert_eq!(
         emitted_events,
         vec![
-            Event::PaneClosing(PaneClosing { pane_id: pane }),
-            Event::PaneRemoved(PaneRemoved {
-                pane_id: pane,
-                tab_id,
-            }),
+            Event::PaneClosing(PaneClosing { pane_id }),
+            Event::PaneRemoved(PaneRemoved { pane_id, tab_id }),
             Event::TabClosed(TabClosed { tab_id }),
             Event::Quit(QuitCause::LastTabClosed {
                 tab_id,
@@ -1545,11 +1547,11 @@ fn a_registry_pane_missing_from_the_layout_is_dropped_without_touching_the_tab()
 #[test]
 fn a_repeated_exit_still_removes_the_pane() {
     let tab_id = TabId::new();
-    let pane = PaneId::new();
+    let pane_id = PaneId::new();
     let mut session = build_session_with(
-        vec![build_single_pane_tab(tab_id, pane)],
+        vec![build_single_pane_tab(tab_id, pane_id)],
         vec![build_pane_record(
-            pane,
+            pane_id,
             PaneLifecycle::Exited {
                 exit_code: Some(1),
                 exited_at: SystemTime::UNIX_EPOCH,
@@ -1561,7 +1563,7 @@ fn a_repeated_exit_still_removes_the_pane() {
         &mut session,
         tab_id,
         PaneProcessExited {
-            pane_id: pane,
+            pane_id,
             exit_code: Some(2),
             signal: None,
         },
@@ -1575,12 +1577,12 @@ fn a_repeated_exit_still_removes_the_pane() {
     assert_eq!(
         emitted_events.first(),
         Some(&Event::PaneProcessExited(PaneProcessExited {
-            pane_id: pane,
+            pane_id,
             exit_code: Some(2),
             signal: None,
         }))
     );
-    assert_eq!(session.panes.get_pane_record_by_id(pane), None);
+    assert_eq!(session.panes.get_pane_record_by_id(pane_id), None);
     assert_eq!(
         session.tabs.keys().copied().collect::<Vec<TabId>>(),
         Vec::new()

@@ -11,9 +11,14 @@
 //! until the new router answers or the wait runs out — the same path a request
 //! takes when it arrives just as an idle router exits.
 //!
+//! An exchange that the router refuses for the connection token its endpoint
+//! file carries waits until the file carries another token or cannot be read,
+//! for up to 5 seconds, and runs once more.
+//!
 //! Three asks never start one: restarting the running router, reading its
 //! build version, and counting the connections it holds from another machine.
-//! Each opens one connection, and reports back when no router was running.
+//! Each opens one connection, or a second one after a Hello refused for its
+//! connection token, and reports back when no router was running.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -31,7 +36,8 @@ use koshi_ipc::transport::Connection;
 
 use crate::error::CliError;
 use crate::ipc_client::{
-    REFUSED_SERVER_RESTART_START_WAIT_DURATION, RESTART_POLL_INTERVAL_DURATION,
+    REFUSED_SERVER_RESTART_START_WAIT_DURATION, REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
+    RESTART_POLL_INTERVAL_DURATION,
 };
 use crate::server_build::{find_refusing_server_build, RefusingServerBuild};
 use crate::talk::{self, build_ipc_unavailable_error};
@@ -56,6 +62,10 @@ const ROUTER_START_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 /// a freshly started router.
 const ROUTER_START_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
 
+/// The endpoint file the last run of a [`run_router_exchange`] used, with what
+/// that run gave.
+type RouterExchangeOutcome<RouterAnswer> = (EndpointFile, Result<RouterAnswer, CliError>);
+
 /// Ask the router for `request_kind` and hand back its answer.
 ///
 /// Tries the exchange once. With no router running it starts one detached and
@@ -78,6 +88,10 @@ const ROUTER_START_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100)
 /// the router refuses the lookup, restarts into `0.5.1`, and the new router
 /// answers it.
 ///
+/// A router that refuses the connection token its endpoint file carries is
+/// asked once more when that file carries another token or cannot be read, or
+/// after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`].
+///
 /// The answer is the router's own result for `request_kind`, including a
 /// [`RouterResult::Error`] refusing it. A Hello refused for its protocol
 /// version is [`CliError::ProtocolVersionRefused`] when the router is not
@@ -85,67 +99,66 @@ const ROUTER_START_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100)
 /// refusal, then `; `, then what
 /// [`RefusingServerBuild::format_refusal_hint`](crate::server_build::RefusingServerBuild::format_refusal_hint)
 /// gives for the router's program file read at that moment, with the clause
-/// `run: koshi restart-servers`. A reply in the envelope of koshi 0.4.0 or
-/// older is [`CliError::PreviousReleaseServer`]. Every other refused Hello, a
-/// reply answering nothing that was asked, and every other failure to talk are
-/// [`CliError::IpcUnavailable`].
+/// `run: koshi restart-servers`. A Hello refused for its connection token on
+/// the second ask too is [`CliError::ConnectionTokenRefused`]. A reply in the
+/// envelope of koshi 0.4.0 or older is [`CliError::PreviousReleaseServer`].
+/// Every other refused Hello, a reply answering nothing that was asked, and
+/// every other failure to talk are [`CliError::IpcUnavailable`].
 pub fn submit_router_request(
     runtime_directory: &Path,
     request_kind: RouterRequestKind,
 ) -> Result<RouterResult, CliError> {
-    let first_router_result = match connect_to_running_router(runtime_directory)? {
+    let first_router_exchange =
+        run_router_exchange(runtime_directory, |connection, router_endpoint| {
+            exchange_router_request_on_connection(connection, router_endpoint, &request_kind)
+        })?;
+    let first_router_result = match first_router_exchange {
         None => None,
-        Some((connection, router_endpoint)) => {
-            match exchange_router_request_on_connection(connection, &router_endpoint, &request_kind)
-            {
-                Err(CliError::ProtocolVersionRefused {
-                    detail: refusal_detail,
-                }) => {
-                    let router_program_file_path =
-                        resolve_router_program_file_path(runtime_directory);
-                    let find_router_build = || {
-                        find_refusing_server_build(
-                            &router_program_file_path,
-                            router_endpoint.process_id,
-                        )
-                    };
-                    let build_refusal_error = |refusing_server_build: &RefusingServerBuild| {
-                        CliError::ProtocolVersionRefused {
-                            detail: format!(
-                                "{refusal_detail}; {}",
-                                refusing_server_build
-                                    .format_refusal_hint("run: koshi restart-servers")
-                            ),
-                        }
-                    };
-                    let refusing_server_build = find_router_build();
-                    if !refusing_server_build.is_restart_expected() {
-                        return Err(build_refusal_error(&refusing_server_build));
+        Some((router_endpoint, exchange_result)) => match exchange_result {
+            Err(CliError::ProtocolVersionRefused {
+                detail: refusal_detail,
+            }) => {
+                let router_program_file_path = resolve_router_program_file_path(runtime_directory);
+                let find_router_build = || {
+                    find_refusing_server_build(
+                        &router_program_file_path,
+                        router_endpoint.process_id,
+                    )
+                };
+                let build_refusal_error = |refusing_server_build: &RefusingServerBuild| {
+                    CliError::ProtocolVersionRefused {
+                        detail: format!(
+                            "{refusal_detail}; {}",
+                            refusing_server_build.format_refusal_hint("run: koshi restart-servers")
+                        ),
                     }
-                    let restart_deadline =
-                        Instant::now() + REFUSED_SERVER_RESTART_START_WAIT_DURATION;
-                    if !wait_for_router_restart(
-                        runtime_directory,
-                        &router_endpoint.connection_token,
-                        restart_deadline,
-                    ) {
-                        return Err(build_refusal_error(&find_router_build()));
-                    }
-                    exchange_router_request(runtime_directory, &request_kind)?
+                };
+                let refusing_server_build = find_router_build();
+                if !refusing_server_build.is_restart_expected() {
+                    return Err(build_refusal_error(&refusing_server_build));
                 }
-                Ok(RouterResult::Error(router_refusal))
-                    if router_refusal.message == ROUTER_RESTARTING_MESSAGE =>
-                {
-                    let _ = wait_for_router_restart(
-                        runtime_directory,
-                        &router_endpoint.connection_token,
-                        Instant::now() + RESTART_WINDOW_DURATION,
-                    );
-                    exchange_router_request(runtime_directory, &request_kind)?
+                let restart_deadline = Instant::now() + REFUSED_SERVER_RESTART_START_WAIT_DURATION;
+                if !wait_for_router_restart(
+                    runtime_directory,
+                    &router_endpoint.connection_token,
+                    restart_deadline,
+                ) {
+                    return Err(build_refusal_error(&find_router_build()));
                 }
-                exchange_result => Some(exchange_result?),
+                exchange_router_request(runtime_directory, &request_kind)?
             }
-        }
+            Ok(RouterResult::Error(router_refusal))
+                if router_refusal.message == ROUTER_RESTARTING_MESSAGE =>
+            {
+                let _ = wait_for_router_restart(
+                    runtime_directory,
+                    &router_endpoint.connection_token,
+                    Instant::now() + RESTART_WINDOW_DURATION,
+                );
+                exchange_router_request(runtime_directory, &request_kind)?
+            }
+            exchange_result => Some(exchange_result?),
+        },
     };
     if let Some(router_result) = first_router_result {
         return Ok(router_result);
@@ -206,7 +219,10 @@ fn start_router_and_exchange<RouterAnswer>(
 
 /// Ask the router that is already running to restart into the binary on disk.
 ///
-/// Sends exactly one Restart exchange and never starts a router. `Ok(false)`
+/// Sends one Restart exchange. After a Hello refused for its connection token,
+/// it sends one more when the endpoint file carries another token or cannot be
+/// read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`]. A router refuses
+/// the Restart behind a refused Hello. Never starts a router. `Ok(false)`
 /// means no router was running, so nothing restarted.
 ///
 /// A router that refuses the request is [`CliError::IpcUnavailable`] carrying
@@ -255,7 +271,10 @@ pub enum RemoteConnections {
 /// How many connections from another machine the running router holds
 /// admitted, whether they have attached to a session or not.
 ///
-/// Sends exactly one RemoteStatus exchange and never starts a router.
+/// Sends one RemoteStatus exchange. After a Hello refused for its connection
+/// token, it sends one more when the endpoint file carries another token or
+/// cannot be read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`]. Never
+/// starts a router.
 ///
 /// A router whose build has no such request kind refuses it with
 /// [`IpcErrorCode::UnsupportedKind`], which is
@@ -300,14 +319,28 @@ pub fn query_running_router_remote_connections(runtime_directory: &Path) -> Remo
 /// The build version the running router reports in its Hello answer.
 ///
 /// `Ok(None)` means no router is running. Sends nothing besides the Hello;
-/// never starts a router.
+/// never starts a router. A router that refuses the connection token its
+/// endpoint file carries is asked once more when that file carries another
+/// token or cannot be read, or after [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`].
 pub fn find_running_router_version(runtime_directory: &Path) -> Result<Option<String>, CliError> {
-    let Some((mut connection, endpoint)) = connect_to_running_router(runtime_directory)? else {
-        return Ok(None);
-    };
+    match run_router_exchange(runtime_directory, exchange_router_hello)? {
+        None => Ok(None),
+        Some((_, router_version_result)) => router_version_result.map(Some),
+    }
+}
+
+/// Send the Hello alone on `connection`, opened to the router
+/// `router_endpoint` names, and give the build the router names in its
+/// answer, as [`talk::parse_router_hello_version`] reads it.
+fn exchange_router_hello(
+    mut connection: Connection,
+    router_endpoint: &EndpointFile,
+) -> Result<String, CliError> {
     let hello_request = RouterRequest {
         request_id: 1,
-        request_kind: RouterRequestKind::build_hello_request(endpoint.connection_token),
+        request_kind: RouterRequestKind::build_hello_request(
+            router_endpoint.connection_token.clone(),
+        ),
     };
     connection
         .send(&hello_request)
@@ -315,7 +348,7 @@ pub fn find_running_router_version(runtime_directory: &Path) -> Result<Option<St
     let hello_response: IncomingRouterResponse = connection
         .recv_answer()
         .map_err(build_ipc_unavailable_error)?;
-    talk::parse_router_hello_version(hello_response).map(Some)
+    talk::parse_router_hello_version(hello_response)
 }
 
 /// Wait until the router's endpoint file in `runtime_directory` no longer
@@ -326,22 +359,45 @@ pub fn find_running_router_version(runtime_directory: &Path) -> Result<Option<St
 /// A file with another token ends the wait, and so does a file this build
 /// cannot read. A missing file and a file with the same token are read again
 /// every [`RESTART_POLL_INTERVAL_DURATION`]. The first read happens before the
-/// deadline is checked, so a deadline already passed still sees a router that
-/// already restarted. Example: a `koshi update` that restarts sessions for 50
-/// seconds before it restarts the router holds the lock all that time, and a
-/// wait with a 30-second deadline ends on the router's new token.
+/// deadline is checked: with a deadline already passed, that one read still
+/// sees a file that already changed. Example: a `koshi update` that restarts
+/// sessions for 50 seconds before it restarts the router holds the lock all
+/// that time, and a wait with a 30-second deadline ends on the router's new
+/// token.
 #[must_use]
 pub fn wait_for_router_restart(
     runtime_directory: &Path,
     router_connection_token_before_restart: &ConnectionToken,
     restart_deadline: Instant,
 ) -> bool {
+    loop {
+        if wait_for_router_endpoint_change(
+            runtime_directory,
+            router_connection_token_before_restart,
+            restart_deadline,
+        ) {
+            return true;
+        }
+        if !is_update_restarting_servers(runtime_directory) {
+            return false;
+        }
+        std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
+    }
+}
+
+/// Wait until the router's endpoint file in `runtime_directory` no longer
+/// carries `connection_token`, and return `true`. Return `false` once
+/// `wait_deadline` has passed, whether or not a `koshi update` holds the
+/// update lock. The file is read as [`wait_for_router_restart`] states.
+fn wait_for_router_endpoint_change(
+    runtime_directory: &Path,
+    connection_token: &ConnectionToken,
+    wait_deadline: Instant,
+) -> bool {
     let router_endpoint_path = resolve_router_endpoint_path(runtime_directory);
     loop {
         match EndpointFile::load_from_path(&router_endpoint_path) {
-            Ok(router_endpoint)
-                if router_endpoint.connection_token != *router_connection_token_before_restart =>
-            {
+            Ok(router_endpoint) if router_endpoint.connection_token != *connection_token => {
                 return true;
             }
             Err(
@@ -350,11 +406,55 @@ pub fn wait_for_router_restart(
             ) => return true,
             Ok(_) | Err(_) => {}
         }
-        if Instant::now() >= restart_deadline && !is_update_restarting_servers(runtime_directory) {
+        if Instant::now() >= wait_deadline {
             return false;
         }
         std::thread::sleep(RESTART_POLL_INTERVAL_DURATION);
     }
+}
+
+/// Read the router's endpoint file in `runtime_directory`, connect to the
+/// address it names, and run `router_exchange` on that connection with that
+/// file. Gives back the file the last run used, with what that run gave.
+/// `Ok(None)` means no router is running — the endpoint file is missing, or
+/// nothing listens at the address it names — and nothing was sent.
+///
+/// A run that gives [`CliError::ConnectionTokenRefused`] met a router that
+/// does not accept the token the file carries. This then waits with
+/// [`wait_for_router_endpoint_change`] for up to
+/// [`REFUSED_TOKEN_ADVERTISE_WAIT_DURATION`], reads the file again, and runs
+/// `router_exchange` once more, whatever the wait saw. Example: a router that
+/// has bound its socket and not yet written `router.json` refuses the token
+/// of the router before it; once it writes `router.json`, the second run
+/// presents its token and gets its answer.
+///
+/// # Errors
+/// The endpoint file exists and cannot be read, or the connect fails for a
+/// reason other than nothing listening.
+fn run_router_exchange<RouterAnswer>(
+    runtime_directory: &Path,
+    mut router_exchange: impl FnMut(Connection, &EndpointFile) -> Result<RouterAnswer, CliError>,
+) -> Result<Option<RouterExchangeOutcome<RouterAnswer>>, CliError> {
+    let Some((connection, router_endpoint)) = connect_to_running_router(runtime_directory)? else {
+        return Ok(None);
+    };
+    let exchange_result = router_exchange(connection, &router_endpoint);
+    if !matches!(
+        exchange_result,
+        Err(CliError::ConnectionTokenRefused { .. })
+    ) {
+        return Ok(Some((router_endpoint, exchange_result)));
+    }
+    let _ = wait_for_router_endpoint_change(
+        runtime_directory,
+        &router_endpoint.connection_token,
+        Instant::now() + REFUSED_TOKEN_ADVERTISE_WAIT_DURATION,
+    );
+    let Some((connection, router_endpoint)) = connect_to_running_router(runtime_directory)? else {
+        return Ok(None);
+    };
+    let exchange_result = router_exchange(connection, &router_endpoint);
+    Ok(Some((router_endpoint, exchange_result)))
 }
 
 /// A connection to the running router, with the endpoint file that named it.
@@ -377,8 +477,8 @@ fn connect_to_running_router(
     }
 }
 
-/// One exchange with a running router: read its endpoint file, connect, and
-/// run [`exchange_router_request_on_connection`].
+/// One exchange with a running router: [`exchange_router_request_on_connection`]
+/// run through [`run_router_exchange`].
 ///
 /// `Ok(None)` means no router is running — the endpoint file is missing, or
 /// nothing listens at the address it names — and nothing was sent.
@@ -386,10 +486,12 @@ fn exchange_router_request(
     runtime_directory: &Path,
     request_kind: &RouterRequestKind,
 ) -> Result<Option<RouterResult>, CliError> {
-    let Some((connection, endpoint)) = connect_to_running_router(runtime_directory)? else {
-        return Ok(None);
-    };
-    exchange_router_request_on_connection(connection, &endpoint, request_kind).map(Some)
+    match run_router_exchange(runtime_directory, |connection, router_endpoint| {
+        exchange_router_request_on_connection(connection, router_endpoint, request_kind)
+    })? {
+        None => Ok(None),
+        Some((_, router_result)) => router_result.map(Some),
+    }
 }
 
 /// Pipeline the Hello and `request_kind` back to back on `connection`, opened
