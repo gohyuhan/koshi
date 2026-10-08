@@ -752,7 +752,6 @@ fn open_session_panes(
             &supervisor_token,
             pty_sink,
             &[],
-            false,
         )?;
         session_start.supervisor_token = Some(supervisor_token.expose_secret().to_string());
         session_start.supervisor_process_id = Some(supervisor_process_id);
@@ -1106,7 +1105,6 @@ fn take_panes_back(
         &ConnectionToken::from_secret(supervisor_token),
         Arc::clone(&pty_sink),
         &claimed_pane_ids,
-        resume_header.resume_format < resume::RESUME_FORMAT,
     ) {
         Ok(pty_owner) => pty_owner,
         Err(link_error) => {
@@ -1325,26 +1323,14 @@ fn release_panes_without_header(
     let Some(supervisor_process_id) = supervisor_process_id else {
         return;
     };
-    let previous_link = link_to_supervisor(
+    let Ok(pty_owner) = link_to_supervisor(
         session_id,
         supervisor_process_id,
         runtime_directory,
         &ConnectionToken::from_secret(supervisor_token),
-        Arc::clone(&pty_sink),
+        pty_sink,
         &[],
-        true,
-    );
-    let Ok(pty_owner) = previous_link.or_else(|_| {
-        link_to_supervisor(
-            session_id,
-            supervisor_process_id,
-            runtime_directory,
-            &ConnectionToken::from_secret(supervisor_token),
-            pty_sink,
-            &[],
-            false,
-        )
-    }) else {
+    ) else {
         return;
     };
     end_every_pane(&pty_owner);
@@ -1354,7 +1340,8 @@ fn release_panes_without_header(
 /// `claimed_pane_ids` and no other pane.
 ///
 /// `supervisor_process_id` is that helper's process id, which its address is derived
-/// from.
+/// from. The link speaks the protocol version the helper answers in, as
+/// [`SupervisorPtyBackend::connect`] states.
 ///
 /// A link that cannot be opened is tried again every
 /// [`SUPERVISOR_LINK_POLL_INTERVAL_DURATION`] until
@@ -1373,27 +1360,17 @@ fn link_to_supervisor(
     supervisor_token: &ConnectionToken,
     pty_sink: Arc<dyn PtySink>,
     claimed_pane_ids: &[PaneId],
-    is_previous_supervisor: bool,
 ) -> Result<Arc<PtyOwner>, koshi_pty::error::PtyError> {
     let supervisor_socket_address =
         compute_supervisor_socket_address(runtime_directory, session_id, supervisor_process_id);
     let supervisor_link_deadline = Instant::now() + SUPERVISOR_LINK_WAIT_DURATION;
     loop {
-        let linked_pty_owner = if is_previous_supervisor {
-            SupervisorPtyBackend::connect_previous_supervisor(
-                &supervisor_socket_address,
-                supervisor_token.clone(),
-                Arc::clone(&pty_sink),
-                claimed_pane_ids,
-            )
-        } else {
-            SupervisorPtyBackend::connect(
-                &supervisor_socket_address,
-                supervisor_token.clone(),
-                Arc::clone(&pty_sink),
-                claimed_pane_ids,
-            )
-        };
+        let linked_pty_owner = SupervisorPtyBackend::connect(
+            &supervisor_socket_address,
+            supervisor_token.clone(),
+            Arc::clone(&pty_sink),
+            claimed_pane_ids,
+        );
         match linked_pty_owner {
             Ok(connected_pty_backend) => return Ok(Arc::new(connected_pty_backend)),
             Err(link_error) if Instant::now() >= supervisor_link_deadline => {
@@ -2181,7 +2158,7 @@ fn hand_over_session_to_new_image(
     session_start: &SessionStart,
     resume_file_path: &Path,
 ) -> std::io::Result<()> {
-    crate::process::configure_detached_process(&mut build_resume_command(
+    koshi_host::detached_process::configure_detached_process(&mut build_resume_command(
         session_start,
         resume_file_path,
     ))

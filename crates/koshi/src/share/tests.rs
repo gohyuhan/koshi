@@ -1009,6 +1009,41 @@ fn a_refused_confirm_stops_neither_grant() {
 }
 
 #[test]
+fn a_session_revoke_asks_with_the_host_wide_warning_before_the_question() {
+    let session_id = SessionId::new();
+    let session_scope = TokenScope::Session(session_id);
+    let mut stand_in_router = StandInRouter::from_token_entries(vec![build_token_entry(
+        "alice",
+        TokenScope::HostWide,
+        None,
+    )]);
+    let mut asked_questions: Vec<String> = Vec::new();
+
+    revoke_share_grants(
+        "alice",
+        Some(&session_scope),
+        |question_text| {
+            asked_questions.push(question_text.to_string());
+            false
+        },
+        |router_request_kind| stand_in_router.submit_router_request(router_request_kind),
+    )
+    .expect("the router answers");
+
+    assert_eq!(
+        asked_questions,
+        vec![format!(
+            "alice also holds a host-wide grant, which reaches {session_id}.\n\
+             stopping the grant on {session_id} alone leaves alice reaching it through the \
+             host-wide one.\n\
+             stopping both leaves alice reaching no session on this machine, not just \
+             {session_id}.\n\
+             stop both the grant on that session and alice's host-wide grant? [y/N] "
+        )]
+    );
+}
+
+#[test]
 fn a_session_revoke_with_no_host_wide_grant_asks_nothing_and_stops_that_one() {
     let session_scope = TokenScope::Session(SessionId::new());
     let requested_revoke_scopes = run_session_revoke(

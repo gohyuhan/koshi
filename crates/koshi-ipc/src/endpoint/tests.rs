@@ -150,17 +150,17 @@ fn a_written_advertisement_marker_is_an_empty_file() {
 }
 
 #[test]
-fn removing_the_advertisement_marker_takes_it_off_the_disk() {
+fn deleting_the_advertisement_marker_takes_it_off_the_disk() {
     let test_directory = TempDir::new().expect("create test directory");
     let advertisement_marker_path =
         resolve_advertisement_marker_path(test_directory.path(), SessionId::new());
     write_advertisement_marker(&advertisement_marker_path).expect("write advertisement marker");
 
-    remove_advertisement_marker(&advertisement_marker_path);
+    delete_advertisement_marker(&advertisement_marker_path);
 
     assert!(!advertisement_marker_path.exists());
-    // A second removal of a path with nothing at it does nothing and reports nothing.
-    remove_advertisement_marker(&advertisement_marker_path);
+    // A second deletion of a path with nothing at it does nothing and reports nothing.
+    delete_advertisement_marker(&advertisement_marker_path);
     assert!(!advertisement_marker_path.exists());
 }
 
@@ -379,6 +379,39 @@ fn a_format_one_file_with_a_short_name_and_a_field_it_does_not_know_is_unreadabl
             panic!("expected EndpointFileUnreadable, got {unexpected_result:?}")
         }
     }
+}
+
+#[test]
+fn the_file_a_koshi_0_1_0_window_writes_is_that_windows_endpoint_file() {
+    let test_directory = TempDir::new().expect("create test directory");
+    let endpoint_file_path = test_directory.path().join("session-window.json");
+    std::fs::write(
+        &endpoint_file_path,
+        r#"{"socket":"/run/koshi/session-abc.sock","token":"k7QxSecret"}"#,
+    )
+    .expect("write file");
+
+    let load_error = EndpointFile::load_from_path(&endpoint_file_path)
+        .expect_err("a koshi 0.1.0 window's file is not this build's endpoint file");
+
+    let IpcError::Koshi010WindowEndpointFile {
+        endpoint_file_path: reported_endpoint_file_path,
+    } = &load_error
+    else {
+        panic!("expected Koshi010WindowEndpointFile, got {load_error:?}");
+    };
+    assert_eq!(
+        reported_endpoint_file_path,
+        &endpoint_file_path.display().to_string()
+    );
+    assert_eq!(
+        load_error.to_string(),
+        format!(
+            "endpoint file {} is unreadable: a koshi 0.1.0 window wrote it, and this koshi \
+             cannot talk to that window; the window ends when its terminal closes",
+            endpoint_file_path.display()
+        )
+    );
 }
 
 #[test]
@@ -605,23 +638,23 @@ fn the_compute_socket_address_passes_the_socket_location_check() {
 
 #[cfg(unix)]
 #[test]
-fn removing_the_socket_file_takes_the_path_off_the_disk() {
+fn deleting_the_socket_file_takes_the_path_off_the_disk() {
     let test_directory = TempDir::new().expect("create test directory");
     let session_id = SessionId::new();
     let socket_address = compute_socket_address(test_directory.path(), session_id);
     std::fs::write(&socket_address, b"").expect("create the leftover socket file");
 
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 
     assert!(!Path::new(&socket_address).exists());
-    // A second removal of a path with nothing at it does nothing and reports nothing.
-    remove_socket_file(&socket_address);
+    // A second deletion of a path with nothing at it does nothing and reports nothing.
+    delete_socket_file(&socket_address);
     assert!(!Path::new(&socket_address).exists());
 }
 
 #[cfg(windows)]
 #[test]
-fn removing_a_pipe_name_leaves_the_filesystem_untouched() {
+fn deleting_a_pipe_name_leaves_the_filesystem_untouched() {
     // A Windows address is a pipe name. A file in the working directory that
     // carries the same name stays on the disk.
     let test_directory = TempDir::new().expect("create test directory");
@@ -630,7 +663,7 @@ fn removing_a_pipe_name_leaves_the_filesystem_untouched() {
     let pipe_name_file_path = test_directory.path().join(&socket_address);
     std::fs::write(&pipe_name_file_path, b"").expect("create the pipe-name file");
 
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 
     assert!(pipe_name_file_path.exists());
 }

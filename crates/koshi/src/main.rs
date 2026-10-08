@@ -29,11 +29,16 @@ use koshi_link::discovery::{self, SessionRow};
 use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
-use koshi_link::remote_client::{self, Reach, REACH_TIMEOUT_DURATION};
+use koshi_link::remote_client;
 
 const CLI_PARSER_STACK_SIZE_BYTES: usize = 2 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    // On Windows, the standard handles of this process pass to no child
+    // process by inheritance.
+    #[cfg(windows)]
+    koshi_host::standard_handles::clear_standard_handle_inheritance();
+
     // Usage errors print through clap and exit 2; --help/--version exit 0.
     let cli = parse_cli_arguments();
 
@@ -504,10 +509,16 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// `list-sessions` also lists the sessions on the saved servers: a bare one
 /// sweeps every saved server and appends each session that answered, named
 /// under its server in the `server` column; `--remote <server>` lists that one
-/// server's sessions alone. A saved server that refused the secret, did not
-/// answer, or pins no certificate yet is named on stderr and its sessions are
-/// left out; only a session on this machine that could not answer fails the
-/// listing.
+/// server's sessions alone. A saved server that refused, did not answer, or
+/// pins no certificate yet is named on stderr and its sessions are left out;
+/// a refusal carries the sentence a dial to that server reports. Only a
+/// session on this machine that could not answer fails the listing. A bare
+/// one also names on stderr each runtime directory of koshi 0.1.0 and 0.2.0
+/// that sessions or koshi 0.1.0 windows still run from, as
+/// [`format_previous_release_session_note`](updater::format_previous_release_session_note)
+/// and
+/// [`format_koshi_0_1_0_window_note`](updater::format_koshi_0_1_0_window_note)
+/// word it.
 fn run_discovery(
     command: &CliCommand,
     remote_server_reference: Option<&str>,
@@ -547,46 +558,37 @@ fn run_discovery(
 
     let rendered_output = match command {
         CliCommand::ListSessions { output_format } => {
-            let mut session_rows = discovery::build_session_rows(session_overviews);
-            for reach in remote_client::reach_all_saved_servers(REACH_TIMEOUT_DURATION) {
-                match reach {
-                    Reach::Reached {
-                        server_label,
-                        session_rows: remote_session_rows,
-                    } => {
-                        session_rows.extend(remote_session_rows.into_iter().map(
-                            |remote_session_row| {
-                                SessionRow::from_session(
-                                    remote_session_row.session_id,
-                                    &remote_session_row.session_name,
-                                    Some(server_label.clone()),
-                                )
-                            },
-                        ));
-                    }
-                    Reach::Refused { server_label } => eprintln!(
-                        "koshi: {server_label}: the saved secret was refused; \
-                         run `koshi remote set-secret {server_label}`"
-                    ),
-                    Reach::CertificateChanged {
-                        server_label,
-                        certificate_error_detail,
-                    } => {
-                        eprintln!(
-                            "koshi: {server_label}: {certificate_error_detail} its sessions are not listed"
-                        );
-                    }
-                    Reach::Unreachable { server_label } => {
-                        eprintln!(
-                            "koshi: {server_label} did not answer; its sessions are not listed"
-                        );
-                    }
-                    Reach::Unchecked { server_label } => eprintln!(
-                        "koshi: {server_label} has no pinned certificate yet; \
-                         run `koshi list-sessions --remote {server_label}` to connect and pin it"
-                    ),
+            for previous_release_runtime_directory in updater::list_other_runtime_directories(
+                koshi_paths::resolve_previous_release_runtime_directories(),
+                &runtime_directory,
+            ) {
+                let server_count =
+                    updater::count_previous_release_servers(&previous_release_runtime_directory);
+                if let Some(session_note) = updater::format_previous_release_session_note(
+                    &previous_release_runtime_directory,
+                    server_count.session_count,
+                ) {
+                    eprintln!("koshi: {session_note}");
+                }
+                if let Some(window_note) = updater::format_koshi_0_1_0_window_note(
+                    &previous_release_runtime_directory,
+                    server_count.open_window_count,
+                ) {
+                    eprintln!("koshi: {window_note}");
                 }
             }
+            let mut session_rows = discovery::build_session_rows(session_overviews);
+            session_rows.extend(
+                remote_client::list_saved_server_session_rows("list-sessions")
+                    .into_iter()
+                    .map(|(server_label, remote_session_row)| {
+                        SessionRow::from_session(
+                            remote_session_row.session_id,
+                            &remote_session_row.session_name,
+                            Some(server_label),
+                        )
+                    }),
+            );
             output::render_sessions(&session_rows, *output_format)
         }
         CliCommand::ListTabs { output_format, .. } => output::render_tabs(

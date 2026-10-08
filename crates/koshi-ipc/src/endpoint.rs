@@ -20,7 +20,7 @@
 //!
 //! The same module holds the address helpers every writer and reader shares:
 //! [`compute_socket_address`](crate::endpoint::compute_socket_address) builds the control-socket
-//! address a session listens on, and [`remove_socket_file`](crate::endpoint::remove_socket_file)
+//! address a session listens on, and [`delete_socket_file`](crate::endpoint::delete_socket_file)
 //! takes that address off the disk once the session is gone.
 //! [`resolve_resume_file_path`](crate::endpoint::resolve_resume_file_path) names the file a session
 //! replacing its own process image leaves its state in,
@@ -32,7 +32,7 @@
 //! that lock is held, and
 //! [`resolve_advertisement_marker_path`](crate::endpoint::resolve_advertisement_marker_path),
 //! [`write_advertisement_marker`](crate::endpoint::write_advertisement_marker) and
-//! [`remove_advertisement_marker`](crate::endpoint::remove_advertisement_marker) handle the empty
+//! [`delete_advertisement_marker`](crate::endpoint::delete_advertisement_marker) handle the empty
 //! marker file that names such a session on Windows.
 
 use std::path::{Path, PathBuf};
@@ -45,6 +45,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::IpcError;
 use crate::protocol::ConnectionToken;
 use crate::remote_state::find_format_mismatch;
+use crate::wire::has_exactly_json_fields;
 
 /// The format number this build writes into an endpoint file, and the
 /// highest one it reads.
@@ -192,14 +193,14 @@ pub fn write_advertisement_marker(advertisement_marker_path: &Path) -> Result<()
 }
 
 /// Delete the marker at `advertisement_marker_path`. A path with nothing at it is left alone.
-pub fn remove_advertisement_marker(advertisement_marker_path: &Path) {
+pub fn delete_advertisement_marker(advertisement_marker_path: &Path) {
     let _ = std::fs::remove_file(advertisement_marker_path);
 }
 
 /// Unlink the socket file at `socket_address` on Unix, where the address is a
 /// filesystem path. A path with nothing at it is left alone. On Windows the
 /// address is a pipe name, and nothing is removed.
-pub fn remove_socket_file(socket_address: &str) {
+pub fn delete_socket_file(socket_address: &str) {
     #[cfg(unix)]
     {
         let _ = std::fs::remove_file(socket_address);
@@ -308,7 +309,8 @@ struct FileFormatField {
     file_format: Option<u32>,
 }
 
-/// The format 1 endpoint file `v0.4.0` writes: `{socket, token, pid}`.
+/// The format 1 endpoint file `v0.2.0-pr.1` to `v0.4.0` write: `{socket,
+/// token, pid}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FormatOneShortNamedEndpointFile {
@@ -407,11 +409,14 @@ impl EndpointFile {
     /// Read the endpoint file at `endpoint_file_path`, in format
     /// [`ENDPOINT_FILE_FORMAT`], or in format 1, which it converts: the
     /// `v0.5.0-pr.1` shape `{socket_address, connection_token, process_id}`, or
-    /// the `v0.4.0` shape `{socket, token, pid}`.
+    /// the shape `v0.2.0-pr.1` to `v0.4.0` write, `{socket, token, pid}`.
     ///
     /// A path with no file is [`IpcError::EndpointFileMissing`]: no running
-    /// Koshi has advertised a socket there. A file that cannot be read, or
-    /// whose bytes fit neither format, is [`IpcError::EndpointFileUnreadable`].
+    /// Koshi has advertised a socket there. A file that holds the fields
+    /// `{socket, token}` alone, which a koshi 0.1.0 window writes, is
+    /// [`IpcError::Koshi010WindowEndpointFile`]. Any other file that cannot be
+    /// read, or whose bytes fit neither format, is
+    /// [`IpcError::EndpointFileUnreadable`].
     pub fn load_from_path(endpoint_file_path: &Path) -> Result<EndpointFile, IpcError> {
         let build_endpoint_file_unreadable_error =
             |error_detail: String| IpcError::EndpointFileUnreadable {
@@ -427,7 +432,15 @@ impl EndpointFile {
                 build_endpoint_file_unreadable_error(read_error.to_string())
             }
         })?;
-        parse_endpoint_file(&endpoint_file_bytes).map_err(build_endpoint_file_unreadable_error)
+        parse_endpoint_file(&endpoint_file_bytes).map_err(|error_detail| {
+            if has_exactly_json_fields(&endpoint_file_bytes, &["socket", "token"]) {
+                IpcError::Koshi010WindowEndpointFile {
+                    endpoint_file_path: endpoint_file_path.display().to_string(),
+                }
+            } else {
+                build_endpoint_file_unreadable_error(error_detail)
+            }
+        })
     }
 }
 

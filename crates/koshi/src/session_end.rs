@@ -136,7 +136,7 @@ pub fn end_session(
             })
         }
         Err(_) if !process_tree::is_process_running(&session_record) => None,
-        Err(quit_error) => Some(quit_error.to_string()),
+        Err(quit_error) => Some(format_quit_failure(&quit_error)),
     };
     let mut pane_holder_records = list_pane_holder_records(runtime_directory, session_id);
     append_unlisted_records(
@@ -381,11 +381,25 @@ fn quit_unconfirmed_session(
     }
     Err(CliError::Runtime {
         detail: format!(
-            "{quit_error}; koshi cannot confirm that process {process_id} is {session_id}, and leaves it running. If it is, end it with: {kill_command}",
+            "{quit_failure}; koshi cannot confirm that process {process_id} is {session_id}, and leaves it running. If it is, end it with: {kill_command}",
+            quit_failure = format_quit_failure(&quit_error),
             process_id = endpoint_file.process_id,
             kill_command = format_process_kill_command(endpoint_file.process_id),
         ),
     })
+}
+
+/// The sentence a failed `Quit` reports: the `detail` of
+/// [`CliError::PreviousReleaseServer`], without its `koshi restart-servers`
+/// advice, and the error's own sentence for every other failure.
+///
+/// Example — a koshi 0.4.0 session gives `the server answered in the format of
+/// koshi 0.4.0 or older, which this koshi cannot talk to`.
+fn format_quit_failure(quit_error: &CliError) -> String {
+    match quit_error {
+        CliError::PreviousReleaseServer { detail } => detail.clone(),
+        other_quit_error => other_quit_error.to_string(),
+    }
 }
 
 /// The command a user types to end the process `process_id`: `kill 5000` on

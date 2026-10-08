@@ -71,6 +71,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::System::IO::CancelIoEx;
 
 use crate::error::IpcError;
+use crate::wire::{has_exactly_json_fields, Answer};
 
 /// The largest frame either side sends or accepts: 16 MiB. A received length
 /// over it is refused before the payload is allocated; a message that encodes
@@ -257,7 +258,7 @@ impl Connection {
         write_message(&mut self.socket_stream, message)
     }
 
-    /// Read one frame and decode its message as `Message`. Blocks until a
+    /// Read one frame and parse its message as `Message`. Blocks until a
     /// whole frame arrives. A connection whose read direction is closed reports
     /// [`IpcError::Disconnected`].
     pub fn recv<Message: DeserializeOwned>(&mut self) -> Result<Message, IpcError> {
@@ -265,6 +266,18 @@ impl Connection {
             return Err(IpcError::Disconnected);
         }
         read_message(&mut self.socket_stream)
+    }
+
+    /// Read one frame and parse it as an [`Answer`] carrying `Response`, as
+    /// [`parse_answer`] does. Blocks until a whole frame arrives. A connection
+    /// whose read direction is closed reports [`IpcError::Disconnected`].
+    pub fn recv_answer<Response: DeserializeOwned>(
+        &mut self,
+    ) -> Result<Answer<Response>, IpcError> {
+        if self.is_read_closed.load(Ordering::SeqCst) {
+            return Err(IpcError::Disconnected);
+        }
+        read_answer(&mut self.socket_stream)
     }
 
     /// Take the handle on this connection's read direction, for another thread
@@ -796,7 +809,7 @@ impl std::fmt::Debug for FrameReader {
 }
 
 impl FrameReader {
-    /// Read one frame and decode its message as `Message`. Blocks until a
+    /// Read one frame and parse its message as `Message`. Blocks until a
     /// whole frame arrives. The peer closing its writing end, and a read direction
     /// this side closed, are both [`IpcError::Disconnected`].
     pub fn recv<Message: DeserializeOwned>(&mut self) -> Result<Message, IpcError> {
@@ -804,6 +817,19 @@ impl FrameReader {
             return Err(IpcError::Disconnected);
         }
         read_message(&mut self.reader_half)
+    }
+
+    /// Read one frame and parse it as an [`Answer`] carrying `Response`, as
+    /// [`parse_answer`] does. Blocks until a whole frame arrives. The peer
+    /// closing its writing end, and a read direction this side closed, are both
+    /// [`IpcError::Disconnected`].
+    pub fn recv_answer<Response: DeserializeOwned>(
+        &mut self,
+    ) -> Result<Answer<Response>, IpcError> {
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Err(IpcError::Disconnected);
+        }
+        read_answer(&mut self.reader_half)
     }
 }
 
@@ -959,11 +985,53 @@ pub(crate) fn write_message<Message: Serialize>(
         .map_err(convert_io_error)
 }
 
-/// Read one frame and decode its JSON payload as `Message`. The length prefix is
+/// Read one frame and parse its JSON payload as `Message`. The length prefix is
 /// checked against [`MAX_FRAME_BYTE_COUNT`] before the payload buffer is allocated.
 pub(crate) fn read_message<Message: DeserializeOwned>(
     reader: &mut impl Read,
 ) -> Result<Message, IpcError> {
+    let payload_bytes = read_frame_payload(reader)?;
+    serde_json::from_slice(&payload_bytes).map_err(|parse_error| IpcError::MalformedFrame {
+        error_detail: parse_error.to_string(),
+    })
+}
+
+/// Read one frame and parse its JSON payload as [`parse_answer`] does.
+pub(crate) fn read_answer<Response: DeserializeOwned>(
+    reader: &mut impl Read,
+) -> Result<Answer<Response>, IpcError> {
+    let payload_bytes = read_frame_payload(reader)?;
+    parse_answer(&payload_bytes)
+}
+
+/// Parse `answer_bytes` as an [`Answer`] carrying `Response`.
+///
+/// # Errors
+/// [`IpcError::PreviousReleaseAnswer`] for an object whose only fields are
+/// `request_id` and `result`, the answer envelope of a server that koshi 0.1.0
+/// to 0.4.0 started. [`IpcError::MalformedFrame`] for any other bytes that do
+/// not parse.
+///
+/// Example — `{"request_id":null,"result":{"Error":{"code":"malformed_request",
+/// "message":"…"}}}`, a koshi 0.4.0 session's answer to this build's Hello, is
+/// [`IpcError::PreviousReleaseAnswer`].
+pub fn parse_answer<Response: DeserializeOwned>(
+    answer_bytes: &[u8],
+) -> Result<Answer<Response>, IpcError> {
+    serde_json::from_slice(answer_bytes).map_err(|parse_error| {
+        if has_exactly_json_fields(answer_bytes, &["request_id", "result"]) {
+            IpcError::PreviousReleaseAnswer
+        } else {
+            IpcError::MalformedFrame {
+                error_detail: parse_error.to_string(),
+            }
+        }
+    })
+}
+
+/// Read one frame's payload. The length prefix is checked against
+/// [`MAX_FRAME_BYTE_COUNT`] before the payload buffer is allocated.
+fn read_frame_payload(reader: &mut impl Read) -> Result<Vec<u8>, IpcError> {
     let mut frame_header_bytes = [0u8; 4];
     reader
         .read_exact(&mut frame_header_bytes)
@@ -979,9 +1047,7 @@ pub(crate) fn read_message<Message: DeserializeOwned>(
     reader
         .read_exact(&mut payload_bytes)
         .map_err(convert_io_error)?;
-    serde_json::from_slice(&payload_bytes).map_err(|decode_error| IpcError::MalformedFrame {
-        error_detail: decode_error.to_string(),
-    })
+    Ok(payload_bytes)
 }
 
 /// Read the user of `process_handle`'s token: the bytes `GetTokenInformation`

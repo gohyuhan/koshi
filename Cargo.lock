@@ -1028,6 +1028,8 @@ dependencies = [
  "koshi-storage",
  "koshi-test-support",
  "libc",
+ "rcgen",
+ "rustls",
  "semver",
  "serde",
  "serde_json",
@@ -1294,6 +1296,7 @@ dependencies = [
  "libc",
  "nix",
  "portable-pty",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
@@ -1397,6 +1400,7 @@ dependencies = [
  "koshi-ipc",
  "koshi-pty",
  "libc",
+ "serde_json",
  "tempfile",
 ]
 

@@ -4,7 +4,8 @@
 //! the sink in the order they arrive, holding the readers still asks the
 //! supervisor to hold its pane output and fails when it cannot, and
 //! [`SupervisorPtyBackend::connect`] reconciles the pane list with claimed panes
-//! and exits received during connection.
+//! and exits received during connection. A supervisor that answers the Hello in
+//! supervisor protocol 1 is linked again, and driven, in protocol 1.
 //!
 //! The peer here is a hand-written supervisor over a real socket: it answers
 //! whatever the test queued and records what it was asked. The backend is
@@ -239,6 +240,92 @@ impl FakeSupervisor {
             .map(|(request_id, _)| *request_id)
             .collect()
     }
+}
+
+/// A hand-written supervisor that reads and writes raw JSON frames, one link
+/// after another.
+///
+/// It serves one link per member of `answer_frames_by_link`, in order. On each
+/// link it reads frames until the link closes, and answers the frame at index
+/// `n` with that link's answer frame at index `n`. A frame past the link's last
+/// answer frame is recorded and not answered. Every frame read is recorded,
+/// per link.
+struct RawFrameFakeSupervisor {
+    /// The address the backend connects to.
+    supervisor_address: String,
+    /// The frames this supervisor read, one list per link it served.
+    recorded_frames_by_link: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    /// The socket file's directory. Outlives the links on Unix.
+    _runtime_directory: tempfile::TempDir,
+}
+
+impl RawFrameFakeSupervisor {
+    /// Start a supervisor that answers each link's frames with that link's
+    /// member of `answer_frames_by_link`.
+    fn start(answer_frames_by_link: Vec<Vec<serde_json::Value>>) -> RawFrameFakeSupervisor {
+        let runtime_directory = tempfile::tempdir().expect("an isolated test directory is created");
+        let supervisor_address = build_test_supervisor_address(runtime_directory.path());
+        let supervisor_listener =
+            Listener::bind(&supervisor_address).expect("the fake supervisor binds its link");
+        let recorded_frames_by_link = Arc::new(Mutex::new(Vec::new()));
+
+        let recorded_frames_for_thread = Arc::clone(&recorded_frames_by_link);
+        thread::Builder::new()
+            .name("raw-frame-fake-supervisor".to_string())
+            .spawn(move || {
+                for (link_index, answer_frames) in answer_frames_by_link.into_iter().enumerate() {
+                    let supervisor_connection =
+                        supervisor_listener.accept().expect("the backend connects");
+                    recorded_frames_for_thread
+                        .lock()
+                        .expect("recorded frames")
+                        .push(Vec::new());
+                    let (mut frame_reader, mut frame_writer) = supervisor_connection.split();
+                    let mut answer_frames = answer_frames.into_iter();
+                    while let Ok(received_frame) = frame_reader.recv::<serde_json::Value>() {
+                        recorded_frames_for_thread.lock().expect("recorded frames")[link_index]
+                            .push(received_frame);
+                        if let Some(answer_frame) = answer_frames.next() {
+                            if frame_writer.send(&answer_frame).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("the fake supervisor thread starts");
+
+        RawFrameFakeSupervisor {
+            supervisor_address,
+            recorded_frames_by_link,
+            _runtime_directory: runtime_directory,
+        }
+    }
+
+    /// The frames this supervisor read, one list per link, oldest first.
+    fn list_recorded_frames_by_link(&self) -> Vec<Vec<serde_json::Value>> {
+        self.recorded_frames_by_link
+            .lock()
+            .expect("recorded frames")
+            .clone()
+    }
+}
+
+/// A protocol 1 answer to request `request_id`, carrying `result_json`.
+fn build_previous_answer(request_id: u64, result_json: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "Response": {
+            "request_id": request_id,
+            "result": result_json,
+        },
+    })
+}
+
+/// The JSON frame `supervisor_request` is written as in the current protocol.
+fn serialize_current_supervisor_request(
+    supervisor_request: &SupervisorRequest,
+) -> serde_json::Value {
+    serde_json::to_value(supervisor_request).expect("a supervisor request serializes")
 }
 
 /// An address for one test's link. On Unix it is a socket file inside
@@ -1534,6 +1621,128 @@ fn a_hello_answered_with_something_else_fails_the_opening() {
         PtyError::Io {
             detail: "the supervisor answered Hello with Done".to_string(),
         }
+    );
+}
+
+#[test]
+fn a_supervisor_answering_in_protocol_one_is_linked_and_driven_in_protocol_one() {
+    let pane_id = PaneId::new();
+    let peer = RawFrameFakeSupervisor::start(vec![
+        vec![serde_json::json!({
+            "Response": {
+                "request_id": null,
+                "result": {
+                    "Error": {
+                        "code": "malformed_request",
+                        "message": "the bytes received are not a request this build can read",
+                    },
+                },
+            },
+        })],
+        vec![
+            build_previous_answer(1, serde_json::json!({"Hello": {"protocol_version": 1}})),
+            build_previous_answer(
+                2,
+                serde_json::json!({"Panes": [{
+                    "pane_id": pane_id,
+                    "pid": 5000,
+                    "size": {"cols": 80, "rows": 24},
+                }]}),
+            ),
+            build_previous_answer(3, serde_json::json!("Done")),
+        ],
+    ]);
+    let sink = RecordingSink::new();
+
+    let backend = SupervisorPtyBackend::connect(
+        &peer.supervisor_address,
+        ConnectionToken::from_secret("k7QxSecret"),
+        Arc::clone(&sink) as Arc<dyn PtySink>,
+        &[pane_id],
+    )
+    .expect("the backend links in protocol 1");
+    backend
+        .write_pane_input(pane_id, b"ls\r")
+        .expect("the supervisor takes the bytes");
+
+    assert_eq!(
+        backend.list_carried_panes(),
+        vec![CarriedPtyPane {
+            pane_id,
+            #[cfg(unix)]
+            terminal_fd: None,
+            process_id: 5000,
+            pty_size: STANDARD_PTY_SIZE,
+            exit_status: None,
+        }]
+    );
+    assert_eq!(
+        peer.list_recorded_frames_by_link(),
+        vec![
+            vec![serialize_current_supervisor_request(&SupervisorRequest {
+                request_id: 1,
+                request_kind: SupervisorRequestKind::build_hello_request(
+                    ConnectionToken::from_secret("k7QxSecret")
+                ),
+            })],
+            vec![
+                serde_json::json!({
+                    "request_id": 1,
+                    "kind": {"Hello": {
+                        "min_protocol_version": 1,
+                        "max_protocol_version": 1,
+                        "token": "k7QxSecret",
+                    }},
+                }),
+                serde_json::json!({"request_id": 2, "kind": "ListPanes"}),
+                serialize_previous_supervisor_request(&SupervisorRequest {
+                    request_id: 3,
+                    request_kind: SupervisorRequestKind::Write {
+                        pane_id,
+                        input_bytes: b"ls\r".to_vec(),
+                    },
+                })
+                .expect("a Write serializes in protocol 1"),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn a_hello_answer_neither_protocol_reads_fails_after_the_second_link() {
+    let unreadable_frame = serde_json::json!({"Banner": "not a supervisor"});
+    let peer =
+        RawFrameFakeSupervisor::start(vec![vec![unreadable_frame.clone()], vec![unreadable_frame]]);
+    let sink = RecordingSink::new();
+
+    let supervisor_error = SupervisorPtyBackend::connect(
+        &peer.supervisor_address,
+        ConnectionToken::from_secret("k7QxSecret"),
+        Arc::clone(&sink) as Arc<dyn PtySink>,
+        &[],
+    )
+    .err()
+    .expect("a Hello answer neither protocol reads fails the opening");
+
+    assert_eq!(
+        supervisor_error,
+        PtyError::Io {
+            detail: "the supervisor link closed while Hello was in flight".to_string(),
+        }
+    );
+    let hello_request = SupervisorRequest {
+        request_id: 1,
+        request_kind: SupervisorRequestKind::build_hello_request(ConnectionToken::from_secret(
+            "k7QxSecret",
+        )),
+    };
+    assert_eq!(
+        peer.list_recorded_frames_by_link(),
+        vec![
+            vec![serialize_current_supervisor_request(&hello_request)],
+            vec![serialize_previous_supervisor_request(&hello_request)
+                .expect("a Hello serializes in protocol 1")],
+        ]
     );
 }
 

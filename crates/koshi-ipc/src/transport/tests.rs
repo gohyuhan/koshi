@@ -256,6 +256,114 @@ fn bytes_after_the_json_inside_one_frame_are_malformed_and_consumed() {
     assert_eq!(reader.position(), 9);
 }
 
+/// The answer a koshi 0.4.0 session gives this build's Hello: the old envelope
+/// fields `request_id` and `result`.
+const PREVIOUS_RELEASE_ANSWER_JSON: &str = r#"{"request_id":null,"result":{"Error":{"code":"malformed_request","message":"unknown field `request_kind`, expected `request_id` or `kind`"}}}"#;
+
+/// `answer_json` behind its four-byte length prefix.
+fn build_frame_bytes(answer_json: &str) -> Vec<u8> {
+    let mut frame_bytes = u32::try_from(answer_json.len())
+        .expect("a short answer")
+        .to_be_bytes()
+        .to_vec();
+    frame_bytes.extend_from_slice(answer_json.as_bytes());
+    frame_bytes
+}
+
+#[test]
+fn an_answer_in_the_envelope_of_koshi_0_4_0_is_a_previous_release_answer() {
+    let parse_error =
+        parse_answer::<IpcResult>(PREVIOUS_RELEASE_ANSWER_JSON.as_bytes()).unwrap_err();
+    let IpcError::PreviousReleaseAnswer = parse_error else {
+        panic!("wrong error: {parse_error}");
+    };
+}
+
+#[test]
+fn an_answer_in_this_builds_envelope_parses_to_the_answer_sent() {
+    let hello_answer = IpcResponse {
+        request_id: Some(3),
+        answer_result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: "0.6.0".to_string(),
+        },
+    };
+    let answer_bytes = serde_json::to_vec(&hello_answer).expect("the answer serializes");
+
+    let parsed_answer = parse_answer::<IpcResult>(&answer_bytes).expect("the answer parses");
+
+    assert_eq!(parsed_answer, hello_answer);
+}
+
+#[test]
+fn an_answer_with_a_third_field_beside_request_id_and_result_is_malformed() {
+    let parse_error =
+        parse_answer::<IpcResult>(br#"{"request_id":null,"result":{},"error":1}"#).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = parse_error else {
+        panic!("wrong error: {parse_error}");
+    };
+    assert_eq!(
+        error_detail,
+        "unknown field `result`, expected `request_id` or `answer_result` at line 1 column 27"
+    );
+}
+
+#[test]
+fn an_answer_whose_two_fields_are_not_request_id_and_result_is_malformed() {
+    let parse_error = parse_answer::<IpcResult>(br#"{"request_id":1,"answer":{}}"#).unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = parse_error else {
+        panic!("wrong error: {parse_error}");
+    };
+    assert_eq!(
+        error_detail,
+        "unknown field `answer`, expected `request_id` or `answer_result` at line 1 column 24"
+    );
+}
+
+#[test]
+fn an_answer_that_is_not_an_object_is_malformed() {
+    let parse_error = parse_answer::<IpcResult>(b"7").unwrap_err();
+    let IpcError::MalformedFrame { error_detail } = parse_error else {
+        panic!("wrong error: {parse_error}");
+    };
+    assert_eq!(
+        error_detail,
+        "invalid type: integer `7`, expected struct Answer at line 1 column 1"
+    );
+}
+
+#[test]
+fn read_answer_reads_a_whole_frame_in_the_envelope_of_koshi_0_4_0_as_a_previous_release_answer() {
+    let frame_bytes = build_frame_bytes(PREVIOUS_RELEASE_ANSWER_JSON);
+    let frame_byte_count = frame_bytes.len() as u64;
+    let mut reader = Cursor::new(frame_bytes);
+
+    let read_error = read_answer::<IpcResult>(&mut reader).unwrap_err();
+
+    let IpcError::PreviousReleaseAnswer = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+    assert_eq!(reader.position(), frame_byte_count);
+}
+
+#[test]
+fn read_message_reads_the_envelope_of_koshi_0_4_0_as_a_malformed_frame() {
+    let frame_bytes = build_frame_bytes(PREVIOUS_RELEASE_ANSWER_JSON);
+    let frame_byte_count = frame_bytes.len() as u64;
+    let mut reader = Cursor::new(frame_bytes);
+
+    let read_error = read_message::<IpcResponse>(&mut reader).unwrap_err();
+
+    let IpcError::MalformedFrame { error_detail } = read_error else {
+        panic!("wrong error: {read_error}");
+    };
+    assert_eq!(
+        error_detail,
+        "unknown field `result`, expected `request_id` or `answer_result` at line 1 column 27"
+    );
+    assert_eq!(reader.position(), frame_byte_count);
+}
+
 #[test]
 fn end_of_stream_before_a_header_reads_as_disconnected() {
     let read_error = read_message::<String>(&mut Cursor::new(Vec::<u8>::new())).unwrap_err();

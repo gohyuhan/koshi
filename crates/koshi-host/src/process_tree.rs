@@ -1,5 +1,6 @@
-//! The processes running on this machine: reading them, finding the processes
-//! started under a given process, and ending them.
+//! The processes running on this machine: reading them, telling whether a
+//! process id is free, finding the processes started under a given process,
+//! and ending them.
 //!
 //! A [`ProcessRecord`] names one process by its id and its start time. Every
 //! signal and every kill reads the process again first, and acts only when
@@ -12,6 +13,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::{Duration, Instant, SystemTime};
+
+use crate::program_path::is_backup_program_file_name;
 
 #[cfg(test)]
 mod tests;
@@ -77,12 +80,47 @@ pub fn list_process_records() -> io::Result<Vec<ProcessRecord>> {
     platform::list_process_records()
 }
 
-/// Whether `executable_name` names koshi: `koshi`, or `koshi.exe` in any mix
-/// of upper and lower case. Example: `KOSHI.EXE` gives `true`, and
-/// `koshi-dev` gives `false`.
+/// Whether no process has the id `process_id`, whatever user runs it. `true`
+/// only when the system reports it: on Linux and macOS, `kill` with signal `0`
+/// fails with `ESRCH`; on Windows, a `TH32CS_SNAPPROCESS` snapshot holds no
+/// process with that id. `false` for `0`, for a process that this process may
+/// not read or signal, for an id above `i32::MAX` on Linux and macOS, and when
+/// the system gives no answer.
+///
+/// Example: the id of this process gives `false`, and `2147483647`, which no
+/// process has, gives `true`.
+#[must_use]
+pub fn is_process_id_free(process_id: u32) -> bool {
+    if process_id == 0 {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        platform::is_process_id_free(process_id)
+    }
+    #[cfg(unix)]
+    {
+        let Ok(unix_process_id) = libc::pid_t::try_from(process_id) else {
+            return false;
+        };
+        // SAFETY: `kill` takes a process id and a signal number, and reads no
+        // memory of this process. Signal `0` sends no signal.
+        let kill_answer = unsafe { libc::kill(unix_process_id, 0) };
+        kill_answer == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+}
+
+/// Whether `executable_name` names koshi: `koshi`; `koshi.exe` in any mix of
+/// upper and lower case; or, in any mix of upper and lower case, a backup name
+/// that a Windows update gives the running `koshi.exe`, as
+/// [`is_backup_program_file_name`] reads it with the stem `koshi`:
+/// `koshi.old`, or `koshi.<n>.old`. Example: `KOSHI.EXE` and `koshi.2.old`
+/// give `true`, and `koshi-dev` and `KOSHI` give `false`.
 #[must_use]
 pub fn is_koshi_executable_name(executable_name: &str) -> bool {
-    executable_name == "koshi" || executable_name.eq_ignore_ascii_case("koshi.exe")
+    executable_name == "koshi"
+        || executable_name.eq_ignore_ascii_case("koshi.exe")
+        || is_backup_program_file_name(&executable_name.to_ascii_lowercase(), "koshi")
 }
 
 /// The processes in `process_records` that run under `root_records`: their
@@ -705,6 +743,14 @@ mod platform {
             .iter()
             .filter_map(build_process_record)
             .collect())
+    }
+
+    pub(super) fn is_process_id_free(process_id: u32) -> bool {
+        list_process_entries().is_ok_and(|process_entries| {
+            process_entries
+                .iter()
+                .all(|process_entry| process_entry.th32ProcessID != process_id)
+        })
     }
 
     pub(super) fn stop_processes(

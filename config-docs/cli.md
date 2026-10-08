@@ -3,6 +3,10 @@
 This page lists commands that work now. Run `koshi <command> --help` for every
 flag and accepted value.
 
+A command that asks a question, such as one that ends with `[y/N]`, prints the
+question and the lines that explain it on standard error, then reads the answer
+from standard input.
+
 ## Starting koshi
 
 | Command | Result |
@@ -36,6 +40,61 @@ followed:
 4. A koshi built from source downloads nothing. A build is a release build only
    when the release workflow built it.
 
+When `koshi update` replaces the file in place, it first writes the new release
+beside it: `<name>.koshi-update-<process id>` on Linux and macOS, such as
+`koshi.koshi-update-5000`, and `koshi-update-<process id>.exe` on Windows. Then
+it renames that copy into place. `install.sh` and `install.ps1` name their
+copies the same way. An update or install that is killed between the two steps
+leaves its copy. The next `koshi update` deletes each such copy first. A copy
+stays while a process with the process id in its name runs. `koshi update` of
+koshi 0.5.0 or older deletes no such copy.
+
+Before the rename, `koshi update` runs that copy with `--version`. If it does
+not print `koshi <release version>` within 70 seconds, the update stops with
+`koshi: update failed: ...`. The copy is deleted, and the installed koshi stays
+as it was. What the new release writes on standard error shows above that line.
+Example: a release that needs a newer glibc than the system has does not start,
+and the update stops before it replaces anything.
+
+If only root can write the folder, such as a root-owned `/usr/local/bin`,
+`koshi update` writes the copy as root, in one `sudo` command. That command
+also deletes the copies that ended updates left in the folder. Then
+`koshi update` runs the check as the user, and renames the copy as root, in a
+second `sudo` command. If `sudo` keeps no credentials between commands, it asks
+for the password at each command. If the check or the rename fails, also when
+`sudo` refuses the second command, `koshi update` deletes a copy that is still
+there with `sudo rm -f`, which can ask for the password once more. If the copy
+stays, the error names it and the `sudo rm -f` command that deletes it.
+
+`install.sh` installs into `/usr/local/bin` the same way: it writes
+`koshi.koshi-update-<process id of its shell>`, runs it with `--version`, then
+renames that copy to `koshi`. It reads the version from the first line on
+standard output, and what the copy writes on standard error shows on the
+terminal. If only root can write the folder, `install.sh` runs the copy, the
+mode change, and the rename through `sudo`, and the check as the user. If the
+copy does not print `koshi <release version>`, or a step fails, `install.sh`
+deletes its copy, and the installed `koshi` stays as it was. If Ctrl+C stops
+the script, `install.sh` deletes its copy too, and the installed `koshi` is the
+old release or the complete new one.
+
+On Windows, the replacement renames the running `koshi.exe` to `koshi.old`, or
+to `koshi.1.old`, `koshi.2.old` and onward while a koshi still runs from an
+older backup. `install.ps1` does the same: it first moves the new `koshi.exe` to
+`koshi-update-<process id>.exe` beside the installed one, runs it with
+`--version`, and stops when it does not print `koshi <release version>`. Each
+interactive launch removes the backups that no koshi runs from. `koshi update`
+of koshi 0.5.0 or older stops with `Access is denied` while a koshi still runs
+from `koshi.old`. Rename that file to the next free backup name, such as
+`koshi.1.old`, and run the update again.
+
+`koshi update` and `install.ps1` hold a lock on the file `koshi.lock` beside
+`koshi.exe` while they replace it. If another install holds that lock, each one
+waits until it is free, and `koshi update` prints `koshi: waiting while another
+koshi install holds <path>`. An interactive launch removes backups only while it
+holds that lock. If an install holds the lock, the launch leaves the backups in
+place. `koshi update` of koshi 0.5.0 or older, and a launch of one, take no
+lock.
+
 After every update, whether or not it installed a release, `koshi update`
 restarts each running session, then the background process that tracks sessions.
 It skips a server whose program file says it already runs the version that
@@ -62,10 +121,12 @@ starts, each with the files as they are, and the next start migrates them again.
 problem. A file that does not parse applies no settings, as before the update.
 
 Live session handoff is available for sessions started by koshi 0.3.0, 0.4.0,
-0.5.0-pr.1, 0.5.0-pr.2, or 0.5.0. A session started by 0.1.0 or 0.2.0 has
-no restart handoff. The update replaces the installed binary while that session
-keeps running its older build. End that session and start a new one to use the
-installed build.
+0.5.0-pr.1, 0.5.0-pr.2, or 0.5.0. A session started by koshi 0.2.0 or one of
+its pre-releases has no restart handoff, and an update that koshi 0.2.0 runs
+leaves that session on koshi 0.2.0. `koshi update` and `koshi restart-servers`
+from the installed build name such a session and ask whether to end it, as the
+`koshi restart-servers` paragraphs below state. A koshi 0.1.0 window serves its
+session from its own terminal. It keeps its build until that terminal closes.
 
 While the router restarts, it first finishes the lookups and session starts it
 already holds. A new `koshi attach` or a new session start that reaches it in
@@ -127,11 +188,61 @@ panes keep running`. If any server does not come back on that version, it exits
 1 with `not every running koshi server now runs koshi 0.5.0; see the lines
 above`.
 
+A session or router that koshi 0.3.0 or 0.4.0 started does not restart by
+itself when a package manager replaces its program file. A koshi command that
+reaches such a server prints the failure, then `; the user who started it runs:
+koshi restart-servers`. `koshi restart-servers` asks such a session to restart
+into the program file it started from, in the request format of its release.
+It ends such a router as the router paragraph below states, and starts a router
+of the koshi that runs the command at once.
+
+`koshi update` and `koshi restart-servers` also look for sessions in the
+runtime directories that koshi 0.1.0 and 0.2.0 used: `$XDG_RUNTIME_DIR/koshi`
+and `~/.local/share/koshi/run` on Linux, and
+`~/Library/Application Support/koshi/run` on macOS. When `XDG_RUNTIME_DIR` is
+unset or not an absolute path, the command looks in `/run/user/<uid>/koshi`
+instead, the directory that a systemd login gives these releases. A session
+that one of these releases started under another `XDG_RUNTIME_DIR` is found
+when the command runs with that same value. On Windows, these releases used
+the runtime directory of this koshi. A session started by koshi 0.2.0 or
+one of its pre-releases cannot restart. When every other session was asked,
+the command names each such session and asks once:
+
+```text
+koshi 0.6.0 cannot move session-3f2a1c94-8e7b-4d15-9a02-6c5138ef7b40, which koshi 0.2.0 started. End it and the programs in its panes? [y/N]
+```
+
+If the answer is `y` or `yes`, in any letter case, each session ends as `koshi
+kill-session` ends it, together with the programs in its panes. Each one prints
+`session-<uuid> ran koshi 0.2.0; koshi ended it and the programs in its panes`.
+If the command runs in a pane of one of these sessions, that session ends after
+the others, and the terminal of that pane closes with it. Every other answer,
+and the end of standard input, keeps each session and its panes on koshi 0.2.0,
+and prints `koshi: session-<uuid> keeps running koshi 0.2.0, and so do its
+panes; run koshi restart-servers again to end it`. Then `koshi restart-servers`
+exits 1.
+
+A koshi 0.1.0 window serves its session from its own terminal and cannot
+restart. For each open 0.1.0 window, the command prints a line that names the
+window, leaves the window running, and exits 1. The window keeps its build until
+its terminal closes. Koshi lists no session for the endpoint file that a closed
+0.1.0 window left behind, and the router removes such a file from its runtime
+directory.
+
+`koshi list-sessions` does not list the sessions in a runtime directory of koshi
+0.1.0 or 0.2.0. For each such directory where a session runs, it prints one line
+on standard error, such as `koshi: 1 session that an older koshi started runs
+from /home/user/.local/share/koshi/run, which this koshi does not list; run
+koshi restart-servers to move it or end it`. For each such directory where a
+koshi 0.1.0 window is open, it prints one more line, such as `koshi: 1 koshi
+0.1.0 window runs from /home/user/.local/share/koshi/run; this koshi cannot
+talk to it, and it ends when its terminal closes`.
+
 A running session or router also restarts by itself when the koshi program it
 started from now holds another koshi version. Each new connection, such as one
 from `koshi attach` or `koshi list-sessions`, makes the server compare its program file
 with the file it started from. If the file changed, the server runs `<program>
---version`, which has 2 seconds to print `koshi <version>`. A file that prints
+--version`, which has 70 seconds to print `koshi <version>`. A file that prints
 the running version, or prints no version, is not run again at a connection
 until it changes again. If the server refuses a command for its protocol
 version, it runs `<program> --version` again, unless the last run of the same
@@ -207,9 +318,12 @@ which is newer than this koshi 0.6.0; it keeps running; every session keeps
 running`. Every other router that refuses their protocol version is ended if
 koshi confirms its process, as `koshi kill-session` confirms the process of a
 session. Only the router's own process ends. Every session keeps running, and
-the next koshi command starts a new router. If koshi cannot confirm the process,
-it leaves that process running and prints the command that ends it, such as
-`kill 5000`.
+koshi starts a router of the koshi that runs the command at once, such as
+`koshi ended the running router (process 5000), which ran a koshi version this
+one cannot talk to, and started a router on koshi 0.6.0; every session keeps
+running`. If that start fails, the next koshi command starts a router. If koshi
+cannot confirm the process, it leaves that process running and prints the
+command that ends it, such as `kill 5000`.
 
 `--headless` prints `[SESSION ID]: session-<uuid>` and exits. Nothing is drawn.
 Attach to it later with `koshi attach session-<uuid>`.
@@ -775,12 +889,22 @@ granted, never the token itself. A token nobody kept is replaced by a fresh
 Bare `koshi attach` lists the sessions on every reachable saved server beside
 this machine's own, each row naming the server it belongs to. The remote check
 waits two seconds in total, not two seconds per server. A server not heard from
-inside that wait is left out. A server that answers and refuses the saved secret is not hidden — it
-prints the command that replaces that secret:
+inside that wait is left out. A server that answers with a refusal is not
+hidden. It prints the same sentence that `koshi attach --remote work` prints,
+which names what to do:
 
 ```text
-work: the saved secret was refused; run `koshi remote set-secret work`
+koshi: work: the server 192.0.2.10:7654 did not admit the connection. if that machine runs koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or revoked: re-grant it on that machine with `koshi share grant`, then store the new secret with `koshi remote set-secret` for a saved server, or give it when the next dial asks
 ```
+
+A machine that runs koshi 0.3.0 or 0.4.0 prints its own sentence for a saved
+server that runs this koshi. Its `koshi list-sessions` prints ``koshi: work:
+the saved secret was refused; run `koshi remote set-secret work` ``, and its
+bare `koshi attach` prints the same sentence without `koshi: `, also when the
+cause is the version difference. There, `koshi attach --remote work` names
+both protocol ranges, such as `the caller speaks remote protocol versions 1 to
+1, this koshi speaks 2 to 2 (server 192.0.2.10:7654)`. A new secret does not
+help. Update koshi on that machine.
 
 `--remote` never creates a session. It takes `attach`, `list-sessions`, and the
 action verbs — the verbs that open, close, resize, focus, and type into panes
@@ -936,9 +1060,12 @@ can be written.
 
 The `router` row is the only row that rates the running router. A router whose
 build has no such question is `warn`, and its help reads `run: koshi
-restart-servers`; a router that is listening and does not answer is `fail`.
-Either way the `remote connections` row reads `the running router did not
-answer, so this is not known`.
+restart-servers`. A router that koshi 0.2.0 to 0.4.0 started is `fail`: `the
+running router runs koshi 0.4.0 or older, which this koshi cannot talk to`,
+and its help reads `run: koshi restart-servers`. Any other router that is
+listening and does not answer is `fail`. In each of these cases the `remote
+connections` row reads `the running router did not answer, so this is not
+known`.
 
 A row whose `reason` is shortened to fit the table carries the whole text in a
 `detail` field, which `--format json` prints and the table leaves out. Every

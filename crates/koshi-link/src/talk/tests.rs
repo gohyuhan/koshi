@@ -194,6 +194,20 @@ fn a_transport_fault_carries_the_faults_own_words() {
 }
 
 #[test]
+fn an_answer_from_a_server_of_koshi_0_4_0_or_older_names_the_step_that_moves_it() {
+    let cli_error = build_ipc_unavailable_error(IpcError::PreviousReleaseAnswer);
+
+    let CliError::PreviousReleaseServer { detail } = cli_error else {
+        panic!("expected PreviousReleaseServer, got {cli_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the server answered in the format of koshi 0.4.0 or older, which this koshi cannot \
+         talk to"
+    );
+}
+
+#[test]
 fn a_protocol_refusal_carries_the_sentence_the_peer_sent() {
     let refusal = IpcErrorPayload {
         code: IpcErrorCode::BadToken,

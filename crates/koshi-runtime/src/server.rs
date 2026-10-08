@@ -790,10 +790,9 @@ impl Server {
     /// Whether any client's record came across an image swap and has not been
     /// claimed again.
     ///
-    /// A session that still expects a client does not end: the client was told
-    /// to come back, so it is given its window to do so and read what ended the
-    /// session. The window is what empties this — see
-    /// `handle_drop_unclaimed_clients` — so the wait is always bounded.
+    /// A requested quit does not end the session while this is true.
+    /// `handle_drop_unclaimed_clients` empties the set when the grace window
+    /// closes.
     #[must_use]
     pub fn is_awaiting_client(&self) -> bool {
         !self.client_ids_awaiting_reconnect.is_empty()

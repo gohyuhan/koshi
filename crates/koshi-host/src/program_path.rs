@@ -1,5 +1,6 @@
 //! The path of the koshi program this process runs, with the symbolic links it
-//! was started through kept.
+//! was started through kept, and the names a Windows update gives a backup of
+//! that program file.
 //!
 //! Example: a package manager links `/usr/local/bin/koshi` to
 //! `/opt/koshi/0.5.0/koshi`, and the user runs `koshi`.
@@ -47,6 +48,34 @@ pub fn resolve_program_path() -> io::Result<PathBuf> {
     #[cfg(not(target_os = "linux"))]
     let program_path = std::env::current_exe()?;
     Ok(PROGRAM_PATH.get_or_init(|| program_path).clone())
+}
+
+/// Whether `file_name` is a backup name of a program file whose name has the
+/// stem `program_stem`: `<stem>.old`, or `<stem>.<n>.old` where `<n>` is one
+/// or more ASCII digits. A Windows update renames the running program file to
+/// such a name. The comparison is byte for byte.
+///
+/// Example: with the stem `koshi`, `koshi.old` and `koshi.3.old` give `true`,
+/// and `koshi.x.old`, `koshi..old`, `Koshi.old` and `notes.old` give `false`.
+#[must_use]
+pub fn is_backup_program_file_name(file_name: &str, program_stem: &str) -> bool {
+    let Some(name_after_stem) = file_name
+        .strip_prefix(program_stem)
+        .and_then(|name_after_stem| name_after_stem.strip_prefix('.'))
+    else {
+        return false;
+    };
+    if name_after_stem == "old" {
+        return true;
+    }
+    name_after_stem
+        .strip_suffix(".old")
+        .is_some_and(|backup_number| {
+            !backup_number.is_empty()
+                && backup_number
+                    .bytes()
+                    .all(|number_byte| number_byte.is_ascii_digit())
+        })
 }
 
 /// The path that `execve` received to start this process: the `AT_EXECFN`

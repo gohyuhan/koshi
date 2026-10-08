@@ -1205,3 +1205,36 @@ fn an_unknown_name_is_cut_to_the_reported_text_cap() {
         koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT
     );
 }
+
+#[test]
+fn an_object_with_exactly_the_named_fields_in_any_order_has_them() {
+    assert!(has_exactly_json_fields(
+        br#"{"result":{},"request_id":null}"#,
+        &["request_id", "result"]
+    ));
+}
+
+#[test]
+fn an_object_missing_a_named_field_or_carrying_another_does_not_have_them() {
+    assert!(!has_exactly_json_fields(
+        br#"{"request_id":1}"#,
+        &["request_id", "result"]
+    ));
+    assert!(!has_exactly_json_fields(
+        br#"{"request_id":1,"result":{},"extra":0}"#,
+        &["request_id", "result"]
+    ));
+    assert!(!has_exactly_json_fields(
+        br#"{"request_id":1,"answer":{}}"#,
+        &["request_id", "result"]
+    ));
+}
+
+#[test]
+fn a_value_that_is_not_an_object_has_no_fields() {
+    assert!(!has_exactly_json_fields(b"7", &["request_id", "result"]));
+    assert!(!has_exactly_json_fields(
+        b"not json",
+        &["request_id", "result"]
+    ));
+}

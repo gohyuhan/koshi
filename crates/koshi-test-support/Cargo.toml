@@ -8,6 +8,7 @@ license.workspace = true
 koshi-core.workspace = true
 koshi-ipc.workspace = true
 koshi-pty.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 
 [target."cfg(unix)".dependencies]

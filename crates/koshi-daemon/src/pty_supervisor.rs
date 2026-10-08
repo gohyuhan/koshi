@@ -334,7 +334,7 @@ pub fn run_pty_supervisor(
     );
     // On Unix the address is a socket file, which stays on disk after the
     // listener is dropped.
-    koshi_ipc::endpoint::remove_socket_file(&supervisor_socket_address);
+    koshi_ipc::endpoint::delete_socket_file(&supervisor_socket_address);
     Ok(())
 }
 
@@ -662,7 +662,7 @@ pub(crate) fn spawn_pty_supervisor(
     session_id: SessionId,
     connection_token: &ConnectionToken,
 ) -> std::io::Result<u32> {
-    crate::process::configure_detached_process(&mut std::process::Command::new(
+    koshi_host::detached_process::configure_detached_process(&mut std::process::Command::new(
         koshi_host::program_path::resolve_program_path()?,
     ))
     .arg(PTY_SUPERVISOR_SUBCOMMAND)

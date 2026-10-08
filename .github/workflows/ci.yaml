@@ -84,6 +84,11 @@ jobs:
     # Compiles the workspace on each of the three runners, including the
     # `aws-lc-sys` C library described on the fmt + clippy job.
     timeout-minutes: 25
+    # The Windows runner adds -C target-feature=+crt-static, the flag the
+    # Windows release binaries build with: it links the C runtime into each
+    # binary.
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-D warnings -C target-feature=+crt-static' || '-D warnings' }}
     steps:
       - uses: actions/checkout@v7
 

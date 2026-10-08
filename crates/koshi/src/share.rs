@@ -225,8 +225,9 @@ pub fn run_share_command(
 ///
 /// Grants on other sessions are never touched: each request names one scope.
 ///
-/// `confirm_revoke` is asked once, with the question to print; `prompt::read_yes_answer` is what
-/// the command passes. `request_router` carries one control-plane request to the router
+/// `confirm_revoke` is asked once, with the warning and the question to print;
+/// `prompt::read_yes_answer` is what the command passes, which prints both on
+/// standard error. `request_router` carries one control-plane request to the router
 /// and hands back its answer; the command passes
 /// [`router_client::submit_router_request`].
 ///
@@ -264,12 +265,9 @@ fn revoke_share_grants(
         return Ok(());
     }
 
-    print!(
-        "{}",
-        output::render_revoke_host_wide_warning(identity, session_scope)
-    );
     if !confirm_revoke(&format!(
-        "stop both the grant on that session and {identity}'s host-wide grant? [y/N] "
+        "{}stop both the grant on that session and {identity}'s host-wide grant? [y/N] ",
+        output::render_revoke_host_wide_warning(identity, session_scope)
     )) {
         println!("nothing was revoked.");
         return Ok(());
@@ -396,7 +394,11 @@ fn resolve_remote_ready_or_unknown(
 ///
 /// - no address — [`RemoteReady::NoAddress`], nothing asked;
 /// - on and listening — [`RemoteReady::On`], nothing asked;
-/// - otherwise prompts, and a yes sends [`RouterRequestKind::EnableRemote`].
+/// - otherwise asks on standard error, and a yes sends
+///   [`RouterRequestKind::EnableRemote`]. With remote access off, the question
+///   reads `remote access is off.` then `turn it on and open <address>? [y/N]`;
+///   with it on and nothing listening, `remote access is on, and nothing is
+///   listening on <address>.` then `try to open <address> now? [y/N]`.
 ///
 /// A yes that opens the port is [`RemoteReady::On`]. A no is
 /// [`RemoteReady::Off`] when remote access was off, and
@@ -434,11 +436,12 @@ fn resolve_remote_access_ready(runtime_directory: &Path) -> Result<RemoteReady, 
         });
     }
     let prompt_text = if is_remote_access_enabled {
-        println!("remote access is on, and nothing is listening on {remote_listen_address}.");
-        format!("try to open {remote_listen_address} now? [y/N] ")
+        format!(
+            "remote access is on, and nothing is listening on {remote_listen_address}.\n\
+             try to open {remote_listen_address} now? [y/N] "
+        )
     } else {
-        println!("remote access is off.");
-        format!("turn it on and open {remote_listen_address}? [y/N] ")
+        format!("remote access is off.\nturn it on and open {remote_listen_address}? [y/N] ")
     };
     if !prompt::read_yes_answer(&prompt_text) {
         return Ok(if is_remote_access_enabled {

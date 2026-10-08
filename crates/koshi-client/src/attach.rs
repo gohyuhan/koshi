@@ -151,8 +151,7 @@ use koshi_link::error::CliError;
 use koshi_link::in_session::InSessionContext;
 use koshi_link::ipc_client;
 use koshi_link::remote_client::{
-    self, DialError, Reach, ServerReference, REACH_TIMEOUT_DURATION,
-    REMOTE_RESTART_POLL_INTERVAL_DURATION,
+    self, DialError, ServerReference, REMOTE_RESTART_POLL_INTERVAL_DURATION,
 };
 use koshi_link::router_client::{self, submit_router_request};
 use koshi_link::talk;
@@ -1565,9 +1564,10 @@ pub fn attach_remote_session(
 /// Join the session a bare `koshi attach` picks, from this user's own sessions
 /// and the sessions on every saved server that answered.
 ///
-/// A saved server that answered and did not admit its secret prints one line
-/// on stderr naming the command that replaces that secret. A server not heard
-/// from inside [`REACH_TIMEOUT_DURATION`] prints one stderr line and is left off the list.
+/// The saved servers are asked through
+/// [`list_saved_server_session_rows`](remote_client::list_saved_server_session_rows),
+/// which prints one stderr line for each server whose sessions it does not
+/// list, such as a server that refused or did not answer.
 ///
 /// `config_directory` holds the `koshi.kdl` that names the shared directory
 /// other users' sessions are listed from, and the config the attachment reads.
@@ -1575,7 +1575,7 @@ fn attach_selected_session_from_listing(
     runtime_directory: PathBuf,
     config_directory: Option<&Path>,
 ) -> Result<(), CliError> {
-    let reachable_session_rows = list_reachable_session_rows();
+    let reachable_session_rows = remote_client::list_saved_server_session_rows("attach");
     let remote_session_rows = reachable_session_rows
         .iter()
         .map(|(server_label, remote_session_row)| {
@@ -1612,51 +1612,6 @@ fn attach_selected_session_from_listing(
         SessionSelector::SessionId(selected_session_row.session_id),
         config_directory,
     )
-}
-
-/// The sessions on every saved server that answered inside [`REACH_TIMEOUT_DURATION`], each
-/// beside the name of the server serving it.
-///
-/// A refused secret prints one stderr line naming the command that replaces
-/// it. A server whose certificate changed, a server not heard from, and a
-/// server pinning no certificate yet, each print one stderr line and
-/// contribute no rows.
-fn list_reachable_session_rows() -> Vec<(String, RemoteSessionRow)> {
-    let mut reachable_session_rows = Vec::new();
-    for reach in remote_client::reach_all_saved_servers(REACH_TIMEOUT_DURATION) {
-        match reach {
-            Reach::Reached {
-                server_label,
-                session_rows,
-            } => {
-                reachable_session_rows.extend(
-                    session_rows
-                        .into_iter()
-                        .map(|remote_session_row| (server_label.clone(), remote_session_row)),
-                );
-            }
-            Reach::Refused { server_label } => eprintln!(
-                "{server_label}: the saved secret was refused; \
-                 run `koshi remote set-secret {server_label}`"
-            ),
-            Reach::CertificateChanged {
-                server_label,
-                certificate_error_detail,
-            } => {
-                eprintln!(
-                    "koshi: {server_label}: {certificate_error_detail} its sessions are not listed"
-                );
-            }
-            Reach::Unreachable { server_label } => {
-                eprintln!("koshi: {server_label} did not answer; its sessions are not listed");
-            }
-            Reach::Unchecked { server_label } => eprintln!(
-                "koshi: {server_label} has no pinned certificate yet; \
-                 run `koshi attach --remote {server_label}` to connect and pin it"
-            ),
-        }
-    }
-    reachable_session_rows
 }
 
 /// The session a `koshi attach --remote <server>` with no session named joins,
@@ -2632,7 +2587,7 @@ fn dial_remote(
             cell_size,
         ))
         .map_err(build_link_failure)?;
-    let attach_response = reader.recv().map_err(build_link_failure)?;
+    let attach_response = reader.recv_answer().map_err(build_link_failure)?;
     let (client_id, session_id, minted_resume_token) =
         parse_attached_session(attach_response).map_err(DialError::Refused)?;
 
@@ -2649,11 +2604,18 @@ fn dial_remote(
     })
 }
 
-/// The [`DialError::Unreachable`] a failed read or write on an open link to a
-/// server, or on an open connection to a session, maps to, carrying
-/// [`talk::build_ipc_unavailable_error`]'s message.
+/// The [`DialError`] a failed read or write on an open link to a server, or on
+/// an open connection to a session, maps to. It carries what
+/// [`talk::build_ipc_unavailable_error`] gives: [`DialError::Refused`] for
+/// [`CliError::PreviousReleaseServer`], a server that koshi 0.1.0 to 0.4.0
+/// started, and [`DialError::Unreachable`] for every other failure.
 fn build_link_failure(ipc_error: IpcError) -> DialError {
-    DialError::Unreachable(talk::build_ipc_unavailable_error(ipc_error))
+    match talk::build_ipc_unavailable_error(ipc_error) {
+        previous_release_refusal @ CliError::PreviousReleaseServer { .. } => {
+            DialError::Refused(previous_release_refusal)
+        }
+        link_failure => DialError::Unreachable(link_failure),
+    }
 }
 
 /// Come back into `session_id` after it said it is replacing its own process
@@ -3257,9 +3219,9 @@ fn join_session(
         ))
         .map_err(build_link_failure)?;
 
-    validate_session_protocol_version(connection.recv().map_err(build_link_failure)?)
+    validate_session_protocol_version(connection.recv_answer().map_err(build_link_failure)?)
         .map_err(DialError::Refused)?;
-    parse_attached_session(connection.recv().map_err(build_link_failure)?)
+    parse_attached_session(connection.recv_answer().map_err(build_link_failure)?)
         .map_err(DialError::Refused)
 }
 

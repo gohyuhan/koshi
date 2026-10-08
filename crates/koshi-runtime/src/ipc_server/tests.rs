@@ -67,9 +67,9 @@ fn build_test_runtime_directory(directory_tag: &str) -> PathBuf {
     ))
 }
 
-/// Remove a directory a test made, and everything inside it. A directory that
+/// Delete a directory a test made, and everything inside it. A directory that
 /// is already gone is left alone.
-fn remove_test_directory(runtime_directory: &Path) {
+fn delete_test_directory(runtime_directory: &Path) {
     let _ = std::fs::remove_dir_all(runtime_directory);
 }
 
@@ -379,7 +379,7 @@ fn read_first_frame_of_ending_session(
     drop(connection);
     ipc_server.shutdown();
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
     first_frame
 }
 
@@ -639,7 +639,7 @@ fn an_attach_forwards_its_initial_cell_measurement_before_the_session_reply() {
     drop(delivery_sender);
     drop(connection);
     ipc_server.shutdown();
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 /// The graphics report of a terminal that speaks the Kitty image protocol and
@@ -713,7 +713,7 @@ impl AttachedFrameStream {
         drop(self.delivery_sender);
         self.ipc_server.shutdown();
         self.dispatcher_thread.join().expect("dispatcher exits");
-        remove_test_directory(&self.runtime_directory);
+        delete_test_directory(&self.runtime_directory);
     }
 }
 
@@ -1364,7 +1364,7 @@ fn stop_test_server(
 ) {
     ipc_server.shutdown();
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_test_directory(runtime_directory);
+    delete_test_directory(runtime_directory);
 }
 
 /// A tiny layout to answer a layout request with, distinguishable by its name.
@@ -2641,7 +2641,7 @@ fn a_gone_dispatcher_closes_the_connection_instead_of_answering() {
 
     drop(connection);
     ipc_server.shutdown();
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2674,7 +2674,7 @@ fn the_endpoint_file_lives_while_serving_and_both_files_go_at_shutdown() {
         panic!("nothing listens after shutdown");
     };
     assert_eq!(socket_address, endpoint_file.socket_address);
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2695,7 +2695,7 @@ fn dropping_the_server_without_shutdown_still_removes_both_files() {
         panic!("nothing listens after drop");
     };
     assert_eq!(socket_address, endpoint_file.socket_address);
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[cfg(unix)]
@@ -2718,7 +2718,7 @@ fn shutdown_returns_and_removes_the_endpoint_even_when_the_wake_cannot_connect()
         "endpoint file gone even though the accept loop could not be woken",
     );
     drop(dispatcher_thread);
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[cfg(unix)]
@@ -2735,7 +2735,7 @@ fn a_leftover_socket_file_is_reclaimed_at_start() {
         .expect("start reclaims the leftover and serves");
 
     ipc_server.shutdown();
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2762,7 +2762,7 @@ fn a_runtime_directory_that_cannot_be_created_refuses_to_start() {
     // A file where the directory would go: creating the directory under it
     // fails, and the start stops before it binds anything.
     let blocking_file_path = build_test_runtime_directory("runtime-dir-blocked");
-    remove_test_directory(&blocking_file_path);
+    delete_test_directory(&blocking_file_path);
     std::fs::write(&blocking_file_path, b"").expect("plant a file where the directory would go");
     let runtime_directory = blocking_file_path.join("session");
     let (inbox_sender, _inbox_receiver) = mpsc::channel();
@@ -2820,7 +2820,7 @@ fn a_start_whose_endpoint_file_cannot_be_written_leaves_nothing_listening() {
     };
     assert_eq!(refused_socket_address, socket_address);
 
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -2860,7 +2860,7 @@ fn a_session_other_local_users_may_reach_keeps_its_endpoint_file_private() {
     }
 
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
-    remove_test_directory(&shared_directory);
+    delete_test_directory(&shared_directory);
 }
 
 #[cfg(unix)]
@@ -2891,7 +2891,7 @@ fn the_socket_of_a_session_other_local_users_may_reach_is_open_to_every_local_us
     assert_eq!(socket_permission_mode, 0o666);
 
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
-    remove_test_directory(&shared_directory);
+    delete_test_directory(&shared_directory);
 }
 
 #[cfg(windows)]
@@ -2914,8 +2914,8 @@ fn the_marker_naming_a_shared_session_lives_while_serving_and_goes_at_shutdown()
         !advertisement_marker_path.exists(),
         "marker gone after shutdown"
     );
-    remove_test_directory(&runtime_directory);
-    remove_test_directory(&shared_directory);
+    delete_test_directory(&runtime_directory);
+    delete_test_directory(&shared_directory);
 }
 
 #[test]
@@ -2943,7 +2943,7 @@ fn the_user_who_started_the_session_attaches_over_the_shared_socket_with_the_tok
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
-    remove_test_directory(&shared_directory);
+    delete_test_directory(&shared_directory);
 }
 
 // --- Serving one connection from another local user ---
@@ -2976,7 +2976,7 @@ fn serve_other_user(
     inbox_sender: Sender<RuntimeEvent>,
 ) -> (Connection, JoinHandle<()>, String) {
     let socket_address = build_test_socket_address(socket_tag);
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
     let listener = Listener::bind(&socket_address).expect("bind");
     let other_user_access_setting = Arc::clone(is_other_user_access_enabled);
     let serving_thread = std::thread::spawn(move || {
@@ -3093,7 +3093,7 @@ fn another_local_user_keeps_being_served_while_the_setting_stays_on() {
     drop(caller_connection);
     serving_thread.join().expect("serving thread");
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 }
 
 #[test]
@@ -3146,7 +3146,7 @@ fn another_local_users_connection_is_cut_when_the_setting_goes_off() {
     drop(caller_connection);
     serving_thread.join().expect("serving thread");
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 }
 
 #[test]
@@ -3211,7 +3211,7 @@ fn an_attached_client_of_another_local_user_is_detached_when_the_setting_goes_of
     drop(caller_connection);
     serving_thread.join().expect("serving thread");
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 }
 
 #[test]
@@ -3256,7 +3256,7 @@ fn a_withdrawn_local_user_is_detached_by_a_frame_this_build_cannot_read() {
     drop(caller_connection);
     serving_thread.join().expect("serving thread");
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 }
 
 #[test]
@@ -3288,7 +3288,7 @@ fn a_lost_connection_ends_an_attached_clients_reading_half() {
 
     serving_thread.join().expect("serving thread");
     dispatcher_thread.join().expect("dispatcher exits");
-    remove_socket_file(&socket_address);
+    delete_socket_file(&socket_address);
 }
 
 #[test]
@@ -3328,7 +3328,7 @@ fn the_directory_other_local_users_reach_holds_only_the_socket() {
     assert_eq!(directory_entry_names, vec![session_id.to_string()]);
 
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
-    remove_test_directory(&shared_directory);
+    delete_test_directory(&shared_directory);
 }
 
 /// A stand-in dispatcher that answers every restart request with
@@ -3526,7 +3526,7 @@ fn a_restart_naming_a_binary_that_cannot_run_is_refused_and_the_session_keeps_se
 
     drop(connection);
     stop_test_server(ipc_server, dispatcher_thread, &runtime_directory);
-    remove_test_directory(&binary_directory);
+    delete_test_directory(&binary_directory);
 }
 
 /// A restart with a pane whose terminal exposes no descriptor is refused
@@ -4536,7 +4536,7 @@ fn a_session_without_an_executable_watch_writes_no_program_file() {
             .exists()
     );
     ipc_server.shutdown();
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 #[test]
@@ -4589,7 +4589,7 @@ fn a_start_whose_program_file_cannot_be_written_leaves_no_endpoint_file_and_noth
         panic!("nothing listens after a refused start");
     };
     assert_eq!(refused_socket_address, socket_address);
-    remove_test_directory(&runtime_directory);
+    delete_test_directory(&runtime_directory);
 }
 
 /// Run [`restart_into_installed_version`] for `9.9.9` against a stand-in

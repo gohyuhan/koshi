@@ -4,7 +4,8 @@
 //! session's control socket, and the router, on the router's. Both exchanges
 //! read a Hello answer and settle a version from it, unwrap an answer that may
 //! name a result this build does not have, and turn a transport fault into the
-//! one error the CLI reports. Those steps are here once.
+//! error the CLI reports: `IpcUnavailable`, or `PreviousReleaseServer` for a
+//! reply in the envelope of koshi 0.4.0 or older. Those steps are here once.
 //!
 //! What differs between the two peers is only what they are called and which
 //! versions they speak, which is what [`PeerWords`]
@@ -121,14 +122,17 @@ impl PeerWords {
 
 /// A failure to talk to a peer, in the words the fault itself used:
 /// [`CliError::IpcUnavailable`] carrying `error.to_string()` filtered by
-/// [`sanitize_reported_text`].
+/// [`sanitize_reported_text`]. [`IpcError::PreviousReleaseAnswer`] is
+/// [`CliError::PreviousReleaseServer`] carrying that same sentence.
 ///
 /// The same sentence for either peer — it names the fault, not who was on the
 /// other end. [`IpcError::MalformedFrame`] carries the decoder's own message,
 /// which quotes the field or variant name the peer sent.
 pub fn build_ipc_unavailable_error(ipc_error: IpcError) -> CliError {
-    CliError::IpcUnavailable {
-        detail: sanitize_reported_text(&ipc_error.to_string()),
+    let detail = sanitize_reported_text(&ipc_error.to_string());
+    match ipc_error {
+        IpcError::PreviousReleaseAnswer => CliError::PreviousReleaseServer { detail },
+        _ => CliError::IpcUnavailable { detail },
     }
 }
 

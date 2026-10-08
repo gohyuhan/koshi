@@ -1,9 +1,28 @@
-//! Tests for the self-update helpers: version comparison, check scheduling,
-//! archive URL construction, bounded downloads, checksum verification, state
-//! serialization, the restart confirmation wait, the bounded call to a peer,
-//! the router restart, the walk that restarts every running session, a peer
-//! that refuses this build's protocol version, the end of a router that
-//! refuses it, and the update lock held while servers restart.
+//! Tests for the self-update helpers:
+//!
+//! - version comparison, check scheduling, and release list parsing;
+//! - archive URL construction, bounded downloads, checksum verification, and
+//!   archive extraction;
+//! - state serialization;
+//! - the restart confirmation wait, the bounded call to a peer, the router
+//!   restart, the walk that restarts every running session, a peer that
+//!   refuses this build's protocol version, and the end of a router that
+//!   refuses it;
+//! - the update lock held while servers restart;
+//! - the Homebrew upgrade;
+//! - the version check of a new binary, the program file swap, its backup
+//!   names, a swap whose copy or version check fails, the staged copy names,
+//!   and the deletion of the staged copies that ended updates left;
+//! - the scripts that write and rename the staged copy through `sudo`, and the
+//!   install lines of `install.sh`: their copy, mode change, version check,
+//!   rename, and cleanup;
+//! - the install lock held while the staged copy replaces the program file and
+//!   while backups are deleted, the lock calls that `install.ps1` makes on the
+//!   same lock file, and the staged copy and version check of `install.ps1`;
+//! - the runtime directories of koshi 0.1.0 and 0.2.0: which ones are walked,
+//!   how many sessions and koshi 0.1.0 windows run from one, and the lines
+//!   `list-sessions` prints about them;
+//! - the binary file name, the update error, and the clock reading.
 
 use super::*;
 
@@ -21,7 +40,12 @@ use koshi_ipc::router::{
     RouterRequestKind, RouterResponse, RouterResult, ROUTER_PROTOCOL_VERSION,
 };
 use koshi_ipc::transport::{Connection, Listener};
-use koshi_test_support::fixtures::build_test_runtime_directory;
+use koshi_test_support::fixtures::{
+    build_test_runtime_directory, count_program_runs, spawn_previous_release_session,
+    write_koshi_0_1_0_window_endpoint_file, write_printing_program, write_session_endpoint_file,
+    KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT, KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+    KOSHI_0_4_0_RESTARTING_ANSWER_TEXT, PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT,
+};
 #[cfg(unix)]
 use koshi_test_support::fixtures::{
     BUSY_PROGRAM_RETRY_INTERVAL_DURATION, BUSY_PROGRAM_WAIT_DURATION,
@@ -363,11 +387,12 @@ fn stop_incompatible_router_ends_the_confirmed_router_process_and_nothing_under_
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(true));
     write_router_endpoint_naming_process(runtime_directory.path(), router_child.id());
 
-    assert!(stop_incompatible_router(
-        runtime_directory.path(),
-        "3.3.3",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(runtime_directory.path(), "3.3.3", VERSION_REFUSAL_SENTENCE),
+        IncompatibleRouterStop::Stopped {
+            router_process_id: router_child.id()
+        }
+    );
 
     assert!(process_tree::wait_for_processes_to_end(
         std::slice::from_ref(&router_record),
@@ -385,38 +410,70 @@ fn stop_incompatible_router_leaves_an_unconfirmed_process_running() {
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(false));
     write_router_endpoint_naming_process(runtime_directory.path(), router_child.id());
 
-    assert!(!stop_incompatible_router(
-        runtime_directory.path(),
-        "3.3.3",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(runtime_directory.path(), "3.3.3", VERSION_REFUSAL_SENTENCE),
+        IncompatibleRouterStop::NotStopped
+    );
 
     assert!(process_tree::is_process_running(&router_record));
     assert!(member_records.iter().all(process_tree::is_process_running));
     end_stand_in_session(router_child, &member_records);
 }
 
-#[test]
-fn restart_router_into_version_ends_a_confirmed_router_that_refuses_this_builds_protocol_version() {
-    // The test serves the router's socket and refuses the Hello for its
-    // protocol version. The endpoint file names a stand-in koshi process.
+/// Accept two callers on `listener`. The first one's Hello is answered with
+/// `first_hello_answer_text`, as a router this build cannot talk to answers
+/// it, and the request it writes after its Hello is read. The second one's
+/// Hello is answered as a router on `3.3.3` answers it, as the router started
+/// once the first one ended.
+fn spawn_router_replaced_after_its_first_hello(
+    listener: Listener,
+    first_hello_answer_text: String,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut first_connection = listener.accept().expect("accept the first caller");
+        let _hello_request: Box<serde_json::value::RawValue> =
+            first_connection.recv().expect("read the hello");
+        first_connection
+            .send(
+                &serde_json::value::RawValue::from_string(first_hello_answer_text)
+                    .expect("the answer is JSON"),
+            )
+            .expect("send the hello answer");
+        let _next_request: Result<Box<serde_json::value::RawValue>, _> = first_connection.recv();
+        let mut second_connection = listener.accept().expect("accept the second caller");
+        let hello_request: RouterRequest = second_connection.recv().expect("read the hello");
+        send_router_response(
+            &mut second_connection,
+            hello_request.request_id,
+            RouterResult::Hello {
+                protocol_version: ROUTER_PROTOCOL_VERSION,
+                build_version: "3.3.3".to_string(),
+            },
+        );
+    })
+}
+
+/// Serve the router of `runtime_directory` from a stand-in koshi process that
+/// answers its first Hello with `first_hello_answer_text`, run
+/// [`restart_router_into_version`] for `3.3.3`, and check that the stand-in
+/// process ended, that nothing under it did, and that a router on `3.3.3`
+/// answered after it. Hands back what [`restart_router_into_version`] gave.
+fn replace_stand_in_router(first_hello_answer_text: String) -> bool {
     let runtime_directory = build_test_runtime_directory();
     let (mut router_child, router_record, member_records) =
         start_stand_in_session(runtime_directory.path(), format_stand_in_file_name(true));
-    let router_socket_address = compute_router_socket_address(runtime_directory.path());
-    let router_listener = Listener::bind(&router_socket_address).expect("bind the stand-in router");
+    let router_listener = Listener::bind(&compute_router_socket_address(runtime_directory.path()))
+        .expect("bind the stand-in router");
     write_router_endpoint_naming_process(runtime_directory.path(), router_child.id());
-    let refusing_router_thread =
-        spawn_router_refusing_this_builds_protocol_version(router_listener);
+    let router_thread =
+        spawn_router_replaced_after_its_first_hello(router_listener, first_hello_answer_text);
 
     let has_router_restarted =
         restart_router_into_version(runtime_directory.path(), "3.3.3", RestartScope::EveryServer);
 
-    let _ = Connection::connect(&router_socket_address);
-    refusing_router_thread
+    router_thread
         .join()
-        .expect("the stand-in served its connection");
-    assert!(has_router_restarted);
+        .expect("the stand-in served both connections");
     assert!(process_tree::wait_for_processes_to_end(
         std::slice::from_ref(&router_record),
         Duration::from_secs(5)
@@ -424,17 +481,68 @@ fn restart_router_into_version_ends_a_confirmed_router_that_refuses_this_builds_
     router_child.wait().expect("the router process is reaped");
     assert!(member_records.iter().all(process_tree::is_process_running));
     process_tree::stop_processes(&member_records, Duration::ZERO);
+    has_router_restarted
+}
+
+#[test]
+fn restart_router_into_version_replaces_a_confirmed_router_that_refuses_this_builds_protocol_version(
+) {
+    let version_refusal_text = serde_json::to_string(&RouterResponse {
+        request_id: Some(1),
+        answer_result: RouterResult::Error(IpcErrorPayload {
+            code: IpcErrorCode::UnsupportedVersion,
+            message: VERSION_REFUSAL_SENTENCE.to_string(),
+        }),
+    })
+    .expect("the refusal serializes");
+
+    assert!(replace_stand_in_router(version_refusal_text));
+}
+
+#[test]
+fn restart_router_into_version_replaces_a_confirmed_router_of_koshi_0_4_0() {
+    assert!(replace_stand_in_router(
+        PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string()
+    ));
+}
+
+#[test]
+fn a_started_router_on_the_expected_version_confirms_the_replacement() {
+    assert!(report_started_router(
+        5000,
+        "3.3.3",
+        Ok("3.3.3".to_string())
+    ));
+}
+
+#[test]
+fn a_started_router_on_another_version_fails_the_replacement() {
+    assert!(!report_started_router(
+        5000,
+        "3.3.3",
+        Ok("3.3.2".to_string())
+    ));
+}
+
+#[test]
+fn a_router_that_did_not_start_fails_the_replacement() {
+    assert!(!report_started_router(
+        5000,
+        "3.3.3",
+        Err(CliError::IpcUnavailable {
+            detail: "the router did not start".to_string(),
+        })
+    ));
 }
 
 #[test]
 fn stop_incompatible_router_ends_nothing_without_a_router_endpoint_file() {
     let runtime_directory = build_test_runtime_directory();
 
-    assert!(!stop_incompatible_router(
-        runtime_directory.path(),
-        "3.3.3",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(runtime_directory.path(), "3.3.3", VERSION_REFUSAL_SENTENCE),
+        IncompatibleRouterStop::NotStopped
+    );
 }
 
 #[test]
@@ -450,11 +558,14 @@ fn stop_incompatible_router_leaves_a_router_on_the_newer_installed_version_runni
         Path::new("/usr/local/bin/koshi"),
     );
 
-    assert!(stop_incompatible_router(
-        runtime_directory.path(),
-        "9999.0.0",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(
+            runtime_directory.path(),
+            "9999.0.0",
+            VERSION_REFUSAL_SENTENCE
+        ),
+        IncompatibleRouterStop::AlreadyOnVersion
+    );
 
     assert!(process_tree::is_process_running(&router_record));
     end_stand_in_session(router_child, &member_records);
@@ -473,11 +584,14 @@ fn stop_incompatible_router_leaves_a_router_on_another_newer_version_running() {
         Path::new("/usr/local/bin/koshi"),
     );
 
-    assert!(!stop_incompatible_router(
-        runtime_directory.path(),
-        "9999.0.0",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(
+            runtime_directory.path(),
+            "9999.0.0",
+            VERSION_REFUSAL_SENTENCE
+        ),
+        IncompatibleRouterStop::NotStopped
+    );
 
     assert!(process_tree::is_process_running(&router_record));
     end_stand_in_session(router_child, &member_records);
@@ -496,11 +610,16 @@ fn stop_incompatible_router_ends_a_router_whose_program_file_names_an_older_vers
         Path::new("/usr/local/bin/koshi"),
     );
 
-    assert!(stop_incompatible_router(
-        runtime_directory.path(),
-        "9999.0.0",
-        VERSION_REFUSAL_SENTENCE
-    ));
+    assert_eq!(
+        stop_incompatible_router(
+            runtime_directory.path(),
+            "9999.0.0",
+            VERSION_REFUSAL_SENTENCE
+        ),
+        IncompatibleRouterStop::Stopped {
+            router_process_id: router_child.id()
+        }
+    );
 
     assert!(process_tree::wait_for_processes_to_end(
         std::slice::from_ref(&router_record),
@@ -753,6 +872,149 @@ fn a_session_reporting_the_installed_version_confirms_its_restart() {
     assert_eq!(
         session_outcomes,
         vec![(session_id, SessionOutcome::Confirmed)]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+/// The Hello answer of this build's envelope from a session on
+/// `build_version`, as its JSON text.
+fn format_current_session_hello_answer_text(build_version: &str) -> String {
+    serde_json::to_string(&IpcResponse {
+        request_id: Some(1),
+        answer_result: IpcResult::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            build_version: build_version.to_string(),
+        },
+    })
+    .expect("the answer serializes")
+}
+
+/// The answer texts of the stand-in koshi 0.2.0 to 0.4.0 session that refuses
+/// this build's exchange, then answers the exchange of its own envelope with
+/// `previous_release_answer_texts`, then answers one connection per entry of
+/// `later_answer_texts_by_connection`.
+fn build_previous_release_session_script(
+    previous_release_answer_texts: [&str; 2],
+    later_answer_texts_by_connection: Vec<Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut answer_texts_by_connection = vec![
+        vec![
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+            PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string(),
+        ],
+        previous_release_answer_texts
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    ];
+    answer_texts_by_connection.extend(later_answer_texts_by_connection);
+    answer_texts_by_connection
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_restarted_in_its_own_envelope_confirms_on_the_installed_version() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        build_previous_release_session_script(
+            [
+                KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+                KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+            ],
+            vec![vec![format_current_session_hello_answer_text("3.3.3")]],
+        ),
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(5),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(session_id, SessionOutcome::Confirmed)]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_of_koshi_0_4_0_whose_restart_did_not_start_still_reports_0_4_0_after_the_wait() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        build_previous_release_session_script(
+            [
+                KOSHI_0_4_0_HELLO_ANSWER_TEXT,
+                KOSHI_0_4_0_RESTARTING_ANSWER_TEXT,
+            ],
+            vec![
+                vec![PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string()],
+                vec![KOSHI_0_4_0_HELLO_ANSWER_TEXT.to_string()],
+            ],
+        ),
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(1),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(
+            session_id,
+            SessionOutcome::StillOnVersion("0.4.0".to_string())
+        )]
+    );
+    session_thread
+        .join()
+        .expect("the stand-in served its connections");
+}
+
+#[test]
+fn a_session_of_koshi_0_2_0_is_reported_without_a_restart_request() {
+    let runtime_directory = build_test_runtime_directory();
+    let session_id = SessionId::new();
+    let session_thread = spawn_previous_release_session(
+        runtime_directory.path(),
+        session_id,
+        "k7QxSecret",
+        build_previous_release_session_script(
+            [
+                KOSHI_0_2_0_HELLO_ANSWER_TEXT,
+                KOSHI_0_2_0_RESTART_REFUSAL_TEXT,
+            ],
+            Vec::new(),
+        ),
+    );
+
+    let session_outcomes = restart_advertised_sessions(
+        runtime_directory.path(),
+        "3.3.3",
+        RestartScope::EveryServer,
+        Duration::from_secs(5),
+    )
+    .expect("read the runtime directory");
+
+    assert_eq!(
+        session_outcomes,
+        vec![(session_id, SessionOutcome::WithoutRestartRequest)]
     );
     session_thread
         .join()
@@ -1447,30 +1709,755 @@ fn get_binary_file_name_is_platform_specific() {
     }
 }
 
+#[test]
+fn a_new_binary_that_prints_the_expected_version_passes_the_version_check() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let run_log_path = program_directory.path().join("new-binary-runs");
+    let new_binary_path = write_printing_program(
+        program_directory.path(),
+        "new-binary",
+        &run_log_path,
+        "koshi 9.9.9",
+    );
+
+    assert_eq!(validate_release_binary(&new_binary_path, "v9.9.9"), Ok(()));
+    assert_eq!(count_program_runs(&run_log_path), 1);
+}
+
+#[test]
+fn a_new_binary_that_prints_another_version_fails_the_version_check() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let new_binary_path = write_printing_program(
+        program_directory.path(),
+        "new-binary",
+        &program_directory.path().join("new-binary-runs"),
+        "koshi 9.9.8",
+    );
+
+    assert_eq!(
+        validate_release_binary(&new_binary_path, "v9.9.9"),
+        Err("the new koshi prints version 9.9.8, not 9.9.9".to_string())
+    );
+}
+
+#[test]
+fn a_new_binary_that_prints_no_version_fails_the_version_check_with_its_line() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let new_binary_path = write_printing_program(
+        program_directory.path(),
+        "new-binary",
+        &program_directory.path().join("new-binary-runs"),
+        "unknown option --version",
+    );
+
+    assert_eq!(
+        validate_release_binary(&new_binary_path, "v9.9.9"),
+        Err(format!(
+            "the new koshi 9.9.9 does not run on this system: the binary at {} printed \
+             \"unknown option --version\" for --version",
+            new_binary_path.display()
+        ))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_whose_new_binary_prints_another_version_keeps_the_program_file_and_leaves_no_copy() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let program_path = program_directory.path().join("koshi");
+    let run_log_path = program_directory.path().join("new-binary-runs");
+    let new_binary_path = write_printing_program(
+        program_directory.path(),
+        "new-binary",
+        &run_log_path,
+        "koshi 9.9.8",
+    );
+    fs::write(&program_path, b"old-binary").expect("write the old executable");
+
+    let swap_result = swap_executable(&new_binary_path, &program_path, "v9.9.9");
+
+    assert_eq!(
+        swap_result,
+        Err("the new koshi prints version 9.9.8, not 9.9.9".to_string())
+    );
+    assert_eq!(
+        fs::read(&program_path).expect("read the program file"),
+        b"old-binary"
+    );
+    assert_eq!(count_program_runs(&run_log_path), 1);
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        ["koshi", "new-binary", "new-binary-runs"]
+    );
+}
+
 #[cfg(windows)]
 #[test]
-fn a_windows_swap_replaces_the_executable_and_cleans_the_backup() {
+fn a_windows_swap_whose_staged_copy_cannot_run_keeps_the_program_file_and_takes_no_install_lock() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let program_path = program_directory.path().join("koshi.exe");
+    fs::write(&program_path, b"old-binary").expect("write the old executable");
+    let new_binary_path = program_directory.path().join("new-binary");
+    fs::write(&new_binary_path, b"new-binary").expect("write the replacement bytes");
+    fs::write(
+        program_directory
+            .path()
+            .join(format!("koshi-update-{FREE_PROCESS_ID}.exe")),
+        b"stray-binary",
+    )
+    .expect("write the stray staged copy");
+    let probe_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("probe directory");
+    let probe_path = probe_directory.path().join("probe.exe");
+    fs::write(&probe_path, b"new-binary").expect("write the probe");
+    let spawn_error = std::process::Command::new(&probe_path)
+        .arg("--version")
+        .spawn()
+        .expect_err("bytes that are no program do not start");
+    let staged_binary_path = fs::canonicalize(&program_path)
+        .expect("canonicalize the program file")
+        .with_file_name(format!("koshi-update-{}.exe", std::process::id()));
+
+    let swap_result = swap_executable(&new_binary_path, &program_path, "v9.9.9");
+
+    assert_eq!(
+        swap_result,
+        Err(format!(
+            "the new koshi 9.9.9 does not run on this system: the binary at {} could not be run: \
+             {spawn_error}",
+            staged_binary_path.display()
+        ))
+    );
+    assert_eq!(
+        fs::read(&program_path).expect("read the program file"),
+        b"old-binary"
+    );
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        ["koshi.exe", "new-binary"]
+    );
+}
+
+#[test]
+fn replacing_the_program_file_with_the_staged_copy_leaves_its_bytes_and_no_backup() {
     let test_directory = Builder::new()
         .prefix("koshi-test-")
         .tempdir()
-        .expect("swap directory");
+        .expect("program directory");
     let executable_path = test_directory.path().join("koshi.exe");
-    let new_binary_path = test_directory.path().join("new-binary.exe");
-    let staged_binary_path = test_directory
-        .path()
-        .join(format!("koshi-update-{}.exe", std::process::id()));
-    let backup_executable_path = executable_path.with_extension("old");
+    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
     fs::write(&executable_path, b"old-binary").expect("write the old executable");
-    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
 
-    swap_executable(&new_binary_path, &executable_path).expect("replace the executable");
+    let replace_result =
+        replace_program_file_with_staged_copy(&staged_binary_path, &executable_path);
 
+    assert_eq!(replace_result, Ok(()));
     assert_eq!(
-        fs::read(&executable_path).expect("read the replacement executable"),
+        fs::read(&executable_path).expect("read the replaced executable"),
         b"new-binary"
     );
-    assert!(!backup_executable_path.exists());
-    assert!(!staged_binary_path.exists());
+    assert_eq!(
+        list_sorted_entry_names(test_directory.path()),
+        ["koshi.exe", "koshi.lock"]
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_replacement_takes_the_next_backup_name_while_a_process_runs_from_the_first() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let first_backup_path = test_directory.path().join("koshi.old");
+    let (stand_in_child, _, member_records) =
+        start_stand_in_session(test_directory.path(), "koshi.exe");
+    fs::rename(&executable_path, &first_backup_path)
+        .expect("rename the running executable to the first backup name");
+    fs::write(&executable_path, b"installed-binary").expect("write the installed executable");
+    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+
+    let replace_result =
+        replace_program_file_with_staged_copy(&staged_binary_path, &executable_path);
+    let is_first_backup_left = first_backup_path.exists();
+    end_stand_in_session(stand_in_child, &member_records);
+
+    assert_eq!(replace_result, Ok(()));
+    assert_eq!(
+        fs::read(&executable_path).expect("read the replaced executable"),
+        b"new-binary"
+    );
+    assert!(is_first_backup_left);
+    assert!(!test_directory.path().join("koshi.1.old").exists());
+}
+
+#[test]
+fn replacing_the_program_file_waits_while_another_install_holds_the_install_lock() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    fs::write(&executable_path, b"old-binary").expect("write the old executable");
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+    let holding_lock_file =
+        take_install_lock(&executable_path).expect("another install holds the install lock");
+    let (replace_sender, replace_receiver) = mpsc::channel();
+    let replace_thread = std::thread::spawn({
+        let executable_path = executable_path.clone();
+        let staged_binary_path = staged_binary_path.clone();
+        move || {
+            let _ = replace_sender.send(replace_program_file_with_staged_copy(
+                &staged_binary_path,
+                &executable_path,
+            ));
+        }
+    });
+
+    let answer_while_held = replace_receiver.recv_timeout(Duration::from_millis(200));
+    let executable_bytes_while_held = fs::read(&executable_path).expect("read the old executable");
+    drop(holding_lock_file);
+    let answer_once_free = replace_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the replacement ends once the install lock is free");
+    replace_thread.join().expect("the replacement thread ends");
+
+    assert_eq!(answer_while_held, Err(mpsc::RecvTimeoutError::Timeout));
+    assert_eq!(executable_bytes_while_held, b"old-binary");
+    assert_eq!(answer_once_free, Ok(()));
+    assert_eq!(
+        fs::read(&executable_path).expect("read the replaced executable"),
+        b"new-binary"
+    );
+}
+
+#[test]
+fn replacing_the_program_file_with_a_missing_staged_copy_renames_the_backup_back() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let missing_staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    fs::write(&executable_path, b"old-binary").expect("write the old executable");
+    let rename_error = fs::rename(
+        &missing_staged_binary_path,
+        test_directory.path().join("probe"),
+    )
+    .expect_err("a missing file does not rename");
+
+    let replace_result =
+        replace_program_file_with_staged_copy(&missing_staged_binary_path, &executable_path);
+
+    assert_eq!(replace_result, Err(rename_error.to_string()));
+    assert_eq!(
+        fs::read(&executable_path).expect("read the restored executable"),
+        b"old-binary"
+    );
+    assert_eq!(
+        list_sorted_entry_names(test_directory.path()),
+        ["koshi.exe", "koshi.lock"]
+    );
+}
+
+#[test]
+fn replacing_the_program_file_changes_nothing_when_the_install_lock_cannot_be_taken() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let staged_binary_path = test_directory.path().join("koshi-update-5000.exe");
+    let install_lock_path = test_directory.path().join("koshi.lock");
+    fs::write(&executable_path, b"old-binary").expect("write the old executable");
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+    fs::create_dir(&install_lock_path).expect("a directory at koshi.lock");
+    let open_error =
+        open_lock_file(&install_lock_path).expect_err("a directory does not open as the lock file");
+
+    let replace_result =
+        replace_program_file_with_staged_copy(&staged_binary_path, &executable_path);
+
+    assert_eq!(
+        replace_result,
+        Err(format!(
+            "the install lock {} could not be taken: {open_error}",
+            install_lock_path.display()
+        ))
+    );
+    assert_eq!(
+        fs::read(&executable_path).expect("read the program file"),
+        b"old-binary"
+    );
+    assert_eq!(
+        fs::read(&staged_binary_path).expect("read the staged copy"),
+        b"new-binary"
+    );
+}
+
+#[test]
+fn the_first_backup_name_is_the_program_file_with_the_old_extension() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+
+    assert_eq!(
+        prepare_backup_executable_path(&test_directory.path().join("koshi.exe"))
+            .expect("a backup path"),
+        test_directory.path().join("koshi.old")
+    );
+}
+
+#[test]
+fn a_backup_file_that_can_be_removed_is_removed_and_its_name_taken() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+    let first_backup_path = test_directory.path().join("koshi.old");
+    fs::write(&first_backup_path, b"old-binary").expect("write the first backup");
+
+    assert_eq!(
+        prepare_backup_executable_path(&test_directory.path().join("koshi.exe"))
+            .expect("a backup path"),
+        first_backup_path
+    );
+    assert!(!first_backup_path.exists());
+}
+
+#[test]
+fn a_backup_name_whose_entry_cannot_be_removed_passes_to_the_next_number() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+    fs::create_dir(test_directory.path().join("koshi.old")).expect("a directory at koshi.old");
+    fs::create_dir(test_directory.path().join("koshi.1.old")).expect("a directory at koshi.1.old");
+
+    assert_eq!(
+        prepare_backup_executable_path(&test_directory.path().join("koshi.exe"))
+            .expect("a backup path"),
+        test_directory.path().join("koshi.2.old")
+    );
+    assert!(test_directory.path().join("koshi.old").is_dir());
+    assert!(test_directory.path().join("koshi.1.old").is_dir());
+}
+
+#[test]
+fn the_backup_list_names_only_the_backups_of_the_program_file() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("backup directory");
+    for entry_name in [
+        "koshi.exe",
+        "koshi.old",
+        "koshi.1.old",
+        "koshi.12.old",
+        "koshi.x.old",
+        "koshi..old",
+        "koshi.old.txt",
+        "notes.old",
+        "koshi-update-5000.exe",
+    ] {
+        fs::write(test_directory.path().join(entry_name), b"").expect("write a directory entry");
+    }
+
+    let mut backup_executable_paths =
+        list_backup_executable_paths(&test_directory.path().join("koshi.exe"));
+    backup_executable_paths.sort();
+
+    assert_eq!(
+        backup_executable_paths,
+        vec![
+            test_directory.path().join("koshi.1.old"),
+            test_directory.path().join("koshi.12.old"),
+            test_directory.path().join("koshi.old"),
+        ]
+    );
+}
+
+/// The names of the entries of `directory`, sorted.
+fn list_sorted_entry_names(directory: &Path) -> Vec<String> {
+    let mut entry_names: Vec<String> = fs::read_dir(directory)
+        .expect("read the test directory")
+        .map(|directory_entry| {
+            directory_entry
+                .expect("read a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    entry_names.sort();
+    entry_names
+}
+
+#[test]
+fn the_install_lock_of_koshi_exe_is_koshi_lock_beside_it_and_is_held_until_its_file_is_dropped() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let install_lock_file = take_install_lock(&test_directory.path().join("koshi.exe"))
+        .expect("the install lock is taken");
+    let other_lock_file = open_lock_file(&test_directory.path().join("koshi.lock"))
+        .expect("open koshi.lock beside koshi.exe");
+
+    assert!(matches!(
+        other_lock_file.try_lock(),
+        Err(fs::TryLockError::WouldBlock)
+    ));
+    drop(install_lock_file);
+    assert!(matches!(other_lock_file.try_lock(), Ok(())));
+}
+
+#[test]
+fn taking_the_install_lock_waits_until_its_holder_drops_it() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let holding_lock_file =
+        take_install_lock(&executable_path).expect("the first holder takes the install lock");
+    let (lock_sender, lock_receiver) = mpsc::channel();
+    let waiting_thread = std::thread::spawn({
+        let executable_path = executable_path.clone();
+        move || {
+            let _ = lock_sender.send(take_install_lock(&executable_path));
+        }
+    });
+
+    let answer_while_held = lock_receiver.recv_timeout(Duration::from_millis(200));
+    drop(holding_lock_file);
+    let answer_once_free = lock_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiting thread takes the install lock once it is free");
+    waiting_thread.join().expect("the waiting thread ends");
+
+    assert!(matches!(
+        answer_while_held,
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(answer_once_free.map(|_| ()), Ok(()));
+}
+
+#[test]
+fn stale_backups_stay_while_the_install_lock_is_held_and_are_deleted_once_it_is_free() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    for entry_name in ["koshi.exe", "koshi.old", "koshi.2.old", "notes.old"] {
+        fs::write(test_directory.path().join(entry_name), b"").expect("write a directory entry");
+    }
+    let holding_lock_file =
+        take_install_lock(&executable_path).expect("another install holds the install lock");
+
+    delete_stale_backups_beside(&executable_path);
+    let entry_names_while_held = list_sorted_entry_names(test_directory.path());
+    drop(holding_lock_file);
+    delete_stale_backups_beside(&executable_path);
+
+    assert_eq!(
+        entry_names_while_held,
+        vec![
+            "koshi.2.old",
+            "koshi.exe",
+            "koshi.lock",
+            "koshi.old",
+            "notes.old"
+        ]
+    );
+    assert_eq!(
+        list_sorted_entry_names(test_directory.path()),
+        vec!["koshi.exe", "koshi.lock", "notes.old"]
+    );
+}
+
+#[test]
+fn deleting_stale_backups_when_there_is_none_creates_no_install_lock_file() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    fs::write(&executable_path, b"").expect("write the program file");
+
+    delete_stale_backups_beside(&executable_path);
+
+    assert_eq!(
+        list_sorted_entry_names(test_directory.path()),
+        vec!["koshi.exe"]
+    );
+}
+
+#[test]
+fn taking_the_install_lock_fails_with_the_lock_path_when_the_lock_file_cannot_be_opened() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let install_lock_path = test_directory.path().join("koshi.lock");
+    fs::create_dir(&install_lock_path).expect("a directory at koshi.lock");
+    let open_error =
+        open_lock_file(&install_lock_path).expect_err("a directory does not open as the lock file");
+
+    assert_eq!(
+        take_install_lock(&test_directory.path().join("koshi.exe")).map(|_| ()),
+        Err(format!(
+            "the install lock {} could not be taken: {open_error}",
+            install_lock_path.display()
+        ))
+    );
+}
+
+#[test]
+fn stale_backups_stay_when_the_install_lock_file_cannot_be_opened() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    for entry_name in ["koshi.exe", "koshi.old"] {
+        fs::write(test_directory.path().join(entry_name), b"").expect("write a directory entry");
+    }
+    fs::create_dir(test_directory.path().join("koshi.lock")).expect("a directory at koshi.lock");
+
+    delete_stale_backups_beside(&executable_path);
+
+    assert_eq!(
+        list_sorted_entry_names(test_directory.path()),
+        vec!["koshi.exe", "koshi.lock", "koshi.old"]
+    );
+}
+
+/// The line of `install.ps1` that opens `koshi.lock`, whose path
+/// `$install_lock_path` holds.
+const INSTALL_SCRIPT_LOCK_FILE_OPEN_LINE: &str = "$install_lock = [System.IO.File]::Open($install_lock_path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)";
+
+/// The line of `install.ps1` that tries the install lock once.
+const INSTALL_SCRIPT_LOCK_CALL_LINE: &str = "$install_lock.Lock(0, 1)";
+
+/// The `HResult` that `install.ps1` reads as another process holding the
+/// install lock: `0x80070021`, `ERROR_LOCK_VIOLATION`.
+const INSTALL_SCRIPT_LOCK_VIOLATION_HRESULT: &str = "-2147024863";
+
+#[test]
+fn install_ps1_holds_each_lock_call_that_the_windows_lock_test_runs_once() {
+    let install_script = include_str!("../../../../install.ps1");
+    let lock_violation_check = format!("HResult -ne {INSTALL_SCRIPT_LOCK_VIOLATION_HRESULT})");
+
+    for install_script_line in [
+        r#"$install_lock_path = Join-Path $installation_directory "koshi.lock""#,
+        INSTALL_SCRIPT_LOCK_FILE_OPEN_LINE,
+        INSTALL_SCRIPT_LOCK_CALL_LINE,
+        lock_violation_check.as_str(),
+    ] {
+        assert_eq!(
+            install_script.matches(install_script_line).count(),
+            1,
+            "{install_script_line}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn the_install_ps1_lock_call_fails_with_lock_violation_while_the_install_lock_is_held() {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let executable_path = test_directory.path().join("koshi.exe");
+    let _install_lock_file =
+        take_install_lock(&executable_path).expect("the install lock is taken");
+    let escaped_install_lock_path = compute_install_lock_path(&executable_path)
+        .display()
+        .to_string()
+        .replace('\'', "''");
+
+    let powershell_output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(
+            "$ErrorActionPreference = 'Stop'; \
+             $install_lock_path = '{escaped_install_lock_path}'; \
+             {INSTALL_SCRIPT_LOCK_FILE_OPEN_LINE}; \
+             try {{ {INSTALL_SCRIPT_LOCK_CALL_LINE}; 'locked' }} \
+             catch [System.IO.IOException] {{ $_.Exception.GetBaseException().HResult }} \
+             finally {{ $install_lock.Dispose() }}"
+        ))
+        .output()
+        .expect("run Windows PowerShell");
+
+    assert_eq!(
+        String::from_utf8_lossy(&powershell_output.stdout).trim(),
+        INSTALL_SCRIPT_LOCK_VIOLATION_HRESULT,
+        "Windows PowerShell wrote on standard error: {}",
+        String::from_utf8_lossy(&powershell_output.stderr)
+    );
+}
+
+/// The line of `install.ps1` that names the staged copy of the new
+/// `koshi.exe`: `koshi-update-<process id>.exe` beside the installed one.
+const INSTALL_SCRIPT_STAGED_COPY_LINE: &str =
+    r#"$staged_binary_path = Join-Path $installation_directory "koshi-update-$PID.exe""#;
+
+/// The lines of `install.ps1` that move the new `koshi.exe`, whose `FileInfo`
+/// `$binary_file` holds, to `$staged_binary_path`, run it there with
+/// `--version`, and stop the install with an error when its first output line
+/// is not `koshi $release_version_number`. The `if` block closes on the line
+/// after the last one.
+const INSTALL_SCRIPT_VERSION_CHECK_LINES: [&str; 4] = [
+    "Move-Item -Force $binary_file.FullName $staged_binary_path",
+    "$new_version_line = & $staged_binary_path --version | Select-Object -First 1",
+    r#"if ("$new_version_line" -ne "koshi $release_version_number") {"#,
+    r#"Write-Error "The new koshi printed '$new_version_line' for --version, not 'koshi $release_version_number'""#,
+];
+
+/// The lines of `install.ps1` that move the staged copy into place under the
+/// install lock, and that delete a staged copy that is left when the install
+/// stops.
+const INSTALL_SCRIPT_STAGED_COPY_INSTALL_LINES: [&str; 2] = [
+    "Move-Item $staged_binary_path $binary_path",
+    "Remove-Item $staged_binary_path -ErrorAction SilentlyContinue",
+];
+
+#[test]
+fn install_ps1_runs_the_staged_copy_before_the_install_lock_and_moves_it_in_after() {
+    let install_script = include_str!("../../../../install.ps1");
+    let lock_open_position = install_script
+        .find(INSTALL_SCRIPT_LOCK_FILE_OPEN_LINE)
+        .expect("install.ps1 opens the install lock");
+
+    for staged_copy_line in
+        std::iter::once(INSTALL_SCRIPT_STAGED_COPY_LINE).chain(INSTALL_SCRIPT_VERSION_CHECK_LINES)
+    {
+        assert_eq!(
+            install_script.matches(staged_copy_line).count(),
+            1,
+            "{staged_copy_line}"
+        );
+        let line_position = install_script
+            .find(staged_copy_line)
+            .expect("install.ps1 holds the staged copy line");
+        assert!(line_position < lock_open_position, "{staged_copy_line}");
+    }
+    for staged_copy_line in INSTALL_SCRIPT_STAGED_COPY_INSTALL_LINES {
+        assert_eq!(
+            install_script.matches(staged_copy_line).count(),
+            1,
+            "{staged_copy_line}"
+        );
+        let line_position = install_script
+            .find(staged_copy_line)
+            .expect("install.ps1 holds the staged copy line");
+        assert!(line_position > lock_open_position, "{staged_copy_line}");
+    }
+}
+
+/// Runs [`INSTALL_SCRIPT_VERSION_CHECK_LINES`] in Windows PowerShell under
+/// `$ErrorActionPreference = 'Stop'`, with `$release_version_number` set to
+/// `9.9.9`, `$binary_file` naming a `koshi.cmd` that prints `printed_line`, and
+/// `$staged_binary_path` naming `koshi-update-5000.cmd` beside it, which runs
+/// as the batch file it holds. Hands back what the run prints on standard
+/// output, trimmed: `installed` once the check passes, or the message of the
+/// error that stops it.
+#[cfg(windows)]
+fn run_install_ps1_version_check(printed_line: &str) -> String {
+    let test_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("test directory");
+    let new_binary_path = write_printing_program(
+        test_directory.path(),
+        "koshi",
+        &test_directory.path().join("koshi-runs"),
+        printed_line,
+    );
+    let escaped_new_binary_path = new_binary_path.display().to_string().replace('\'', "''");
+    let escaped_staged_binary_path = test_directory
+        .path()
+        .join("koshi-update-5000.cmd")
+        .display()
+        .to_string()
+        .replace('\'', "''");
+    let [move_line, version_line, compare_line, error_line] = INSTALL_SCRIPT_VERSION_CHECK_LINES;
+    let check_script_path = test_directory.path().join("version-check.ps1");
+    fs::write(
+        &check_script_path,
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $release_version_number = '9.9.9'\n\
+             $binary_file = Get-Item -LiteralPath '{escaped_new_binary_path}'\n\
+             $staged_binary_path = '{escaped_staged_binary_path}'\n\
+             try {{\n\
+             {move_line}\n\
+             {version_line}\n\
+             {compare_line}\n\
+             {error_line}\n\
+             }}\n\
+             'installed'\n\
+             }} catch {{\n\
+             $_.Exception.Message\n\
+             }}\n"
+        ),
+    )
+    .expect("write the version check script");
+
+    let powershell_output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&check_script_path)
+        .output()
+        .expect("run Windows PowerShell");
+    String::from_utf8_lossy(&powershell_output.stdout)
+        .trim()
+        .to_string()
+}
+
+#[cfg(windows)]
+#[test]
+fn the_install_ps1_version_check_passes_a_koshi_that_prints_the_release_version() {
+    assert_eq!(run_install_ps1_version_check("koshi 9.9.9"), "installed");
+}
+
+#[cfg(windows)]
+#[test]
+fn the_install_ps1_version_check_stops_the_install_for_a_koshi_that_prints_another_version() {
+    assert_eq!(
+        run_install_ps1_version_check("koshi 9.9.8"),
+        "The new koshi printed 'koshi 9.9.8' for --version, not 'koshi 9.9.9'"
+    );
 }
 
 #[test]
@@ -1493,6 +2480,27 @@ fn update_state_survives_a_serialize_deserialize_round_trip() {
         restored_update_state.last_check_unix_seconds,
         original_update_state.last_check_unix_seconds
     );
+}
+
+#[test]
+fn update_state_written_by_koshi_0_4_0_keeps_its_last_check_time() {
+    assert_eq!(
+        parse_update_state(r#"{"last_check":1700000000}"#).last_check_unix_seconds,
+        Some(1_700_000_000)
+    );
+}
+
+#[test]
+fn update_state_in_the_current_shape_reads_as_written() {
+    assert_eq!(
+        parse_update_state(r#"{"last_check_unix_seconds":1700000000}"#).last_check_unix_seconds,
+        Some(1_700_000_000)
+    );
+}
+
+#[test]
+fn update_state_that_parses_as_neither_shape_reads_as_never_checked() {
+    assert_eq!(parse_update_state("not json").last_check_unix_seconds, None);
 }
 
 // --- release JSON parsing (no network: fixture strings only) ---
@@ -1999,10 +3007,15 @@ fn a_swap_through_a_symbolic_link_replaces_the_file_it_names_and_keeps_the_link(
     let (program_directory, program_path, _other_program_path) = build_program_files();
     let link_path = program_directory.path().join("koshi-link");
     std::os::unix::fs::symlink(&program_path, &link_path).expect("link the program file");
-    let new_binary_path = program_directory.path().join("new-binary");
-    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+    let new_binary_path = write_printing_program(
+        program_directory.path(),
+        "new-binary",
+        &program_directory.path().join("new-binary-runs"),
+        "koshi 9.9.9",
+    );
+    let new_binary_bytes = fs::read(&new_binary_path).expect("read the replacement executable");
 
-    swap_executable(&new_binary_path, &link_path).expect("replace the executable");
+    swap_executable(&new_binary_path, &link_path, "v9.9.9").expect("replace the executable");
 
     assert_eq!(
         fs::read_link(&link_path).expect("the link is still a link"),
@@ -2010,6 +3023,879 @@ fn a_swap_through_a_symbolic_link_replaces_the_file_it_names_and_keeps_the_link(
     );
     assert_eq!(
         fs::read(&program_path).expect("read the replaced file"),
+        new_binary_bytes
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_whose_copy_fails_removes_the_staged_copy_and_keeps_the_program_file() {
+    let (program_directory, program_path, _other_program_path) = build_program_files();
+    fs::write(&program_path, b"old-binary").expect("write the old executable");
+    let new_binary_path = program_directory.path().join("new-binary");
+    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+    let staged_binary_path = program_directory
+        .path()
+        .join(format!("koshi.koshi-update-{}", std::process::id()));
+    std::os::unix::fs::symlink(
+        program_directory.path().join("missing-directory/koshi"),
+        &staged_binary_path,
+    )
+    .expect("link the staged copy path into a missing directory");
+
+    let swap_result = swap_executable(&new_binary_path, &program_path, "v9.9.9");
+
+    assert_eq!(
+        swap_result,
+        Err("No such file or directory (os error 2)".to_string())
+    );
+    assert_eq!(
+        fs::symlink_metadata(&staged_binary_path)
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+    assert_eq!(
+        fs::read(&program_path).expect("read the program file"),
+        b"old-binary"
+    );
+    assert_eq!(
+        fs::read(&new_binary_path).expect("read the replacement executable"),
         b"new-binary"
+    );
+}
+
+/// A process id above every id that Linux, macOS, and Windows give a process:
+/// `2147483647`.
+const FREE_PROCESS_ID: u32 = 2_147_483_647;
+
+#[test]
+fn a_staged_copy_name_gives_back_the_process_id_it_was_formatted_with() {
+    let staged_copy_name = StagedCopyName::from_program_path(Path::new("/opt/koshi/koshi"));
+    let expected_file_name = if cfg!(windows) {
+        "koshi-update-5000.exe"
+    } else {
+        "koshi.koshi-update-5000"
+    };
+
+    assert_eq!(staged_copy_name.format_file_name(5000), expected_file_name);
+    assert_eq!(
+        staged_copy_name.parse_process_id(expected_file_name),
+        Some(5000)
+    );
+}
+
+#[test]
+fn a_name_that_is_not_a_staged_copy_name_gives_no_process_id() {
+    let staged_copy_name = StagedCopyName::from_program_path(Path::new("/opt/koshi/koshi"));
+    let other_entry_names = if cfg!(windows) {
+        [
+            "koshi-update-.exe",
+            "koshi-update-+5.exe",
+            "koshi-update-5x.exe",
+            "koshi-update-4294967296.exe",
+            "koshi-update-5000.exe.old",
+            "koshi-update-5000",
+            "koshi.old",
+        ]
+    } else {
+        [
+            "koshi.koshi-update-",
+            "koshi.koshi-update-+5",
+            "koshi.koshi-update-5x",
+            "koshi.koshi-update-4294967296",
+            "koshi.koshi-update-5000.old",
+            "koshi-dev.koshi-update-5000",
+            "koshi.old",
+        ]
+    };
+
+    for other_entry_name in other_entry_names {
+        assert_eq!(
+            staged_copy_name.parse_process_id(other_entry_name),
+            None,
+            "{other_entry_name}"
+        );
+    }
+}
+
+#[test]
+fn staged_copies_of_ended_updates_are_deleted_and_the_copy_of_a_running_process_stays() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let program_path = program_directory.path().join(get_binary_file_name());
+    let staged_copy_name = StagedCopyName::from_program_path(&program_path);
+    let running_staged_copy_file_name = staged_copy_name.format_file_name(std::process::id());
+    for entry_name in [
+        get_binary_file_name().to_string(),
+        staged_copy_name.format_file_name(FREE_PROCESS_ID),
+        running_staged_copy_file_name.clone(),
+        "notes.txt".to_string(),
+    ] {
+        let entry_path = program_directory.path().join(entry_name);
+        fs::write(entry_path, b"").expect("write a directory entry");
+    }
+
+    delete_staged_copies_of_ended_updates(&program_path);
+
+    let mut expected_entry_names = vec![
+        get_binary_file_name().to_string(),
+        running_staged_copy_file_name,
+        "notes.txt".to_string(),
+    ];
+    expected_entry_names.sort();
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        expected_entry_names
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_with_the_staged_copy_name_of_an_ended_update_is_deleted_and_its_target_stays() {
+    let (program_directory, program_path, other_program_path) = build_program_files();
+    fs::write(&other_program_path, b"other-binary").expect("write the link target");
+    let staged_copy_name = StagedCopyName::from_program_path(&program_path);
+    let staged_link_path = program_directory
+        .path()
+        .join(staged_copy_name.format_file_name(FREE_PROCESS_ID));
+    std::os::unix::fs::symlink(&other_program_path, &staged_link_path)
+        .expect("link the staged copy name to the other program file");
+
+    delete_staged_copies_of_ended_updates(&program_path);
+
+    assert_eq!(
+        fs::symlink_metadata(&staged_link_path)
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+    assert_eq!(
+        fs::read(&other_program_path).expect("read the link target"),
+        b"other-binary"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_swap_deletes_the_staged_copy_that_an_ended_update_left() {
+    let program_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("program directory");
+    let program_path = program_directory.path().join("koshi");
+    let new_binary_path = write_printing_program(
+        program_directory.path(),
+        "new-binary",
+        &program_directory.path().join("new-binary-runs"),
+        "koshi 9.9.9",
+    );
+    let new_binary_bytes = fs::read(&new_binary_path).expect("read the replacement executable");
+    let staged_copy_name = StagedCopyName::from_program_path(&program_path);
+    let stray_staged_binary_path = program_directory
+        .path()
+        .join(staged_copy_name.format_file_name(FREE_PROCESS_ID));
+    fs::write(&program_path, b"old-binary").expect("write the old executable");
+    fs::write(&stray_staged_binary_path, b"stray-binary").expect("write the stray staged copy");
+
+    let swap_result = swap_executable(&new_binary_path, &program_path, "v9.9.9");
+
+    assert_eq!(swap_result, Ok(()));
+    assert_eq!(
+        fs::read(&program_path).expect("read the replaced executable"),
+        new_binary_bytes
+    );
+    assert_eq!(
+        fs::symlink_metadata(&stray_staged_binary_path)
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_staged_copy_write_script_copies_the_release_with_mode_755_and_deletes_ended_copies() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (program_directory, program_path, _other_program_path) = build_program_files();
+    fs::write(&program_path, b"old-binary").expect("write the old executable");
+    let new_binary_path = program_directory.path().join("new-binary");
+    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+    let staged_copy_name = StagedCopyName::from_program_path(&program_path);
+    let staged_copy_file_name = staged_copy_name.format_file_name(std::process::id());
+    let staged_binary_path = program_directory.path().join(&staged_copy_file_name);
+    let ended_staged_copy_path = program_directory
+        .path()
+        .join(staged_copy_name.format_file_name(FREE_PROCESS_ID));
+    fs::write(&ended_staged_copy_path, b"stray-binary").expect("write the stray staged copy");
+
+    let script_status = std::process::Command::new("sh")
+        .args(list_staged_copy_write_arguments(
+            &new_binary_path,
+            &staged_binary_path,
+            &[ended_staged_copy_path],
+        ))
+        .status()
+        .expect("run the staged copy write script");
+
+    assert_eq!(script_status.code(), Some(0));
+    assert_eq!(
+        fs::read(&staged_binary_path).expect("read the staged copy"),
+        b"new-binary"
+    );
+    let permission_mode = fs::metadata(&staged_binary_path)
+        .expect("read the staged copy's metadata")
+        .permissions()
+        .mode();
+    assert_eq!(permission_mode & 0o777, 0o755);
+    assert_eq!(
+        fs::read(&program_path).expect("read the program file"),
+        b"old-binary"
+    );
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        [
+            "koshi",
+            staged_copy_file_name.as_str(),
+            "new-binary",
+            "other-koshi"
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_staged_copy_write_script_whose_copy_fails_removes_the_copy_path() {
+    let (program_directory, program_path, _other_program_path) = build_program_files();
+    let new_binary_path = program_directory.path().join("new-binary");
+    fs::write(&new_binary_path, b"new-binary").expect("write the replacement executable");
+    let staged_binary_path = program_directory.path().join(
+        StagedCopyName::from_program_path(&program_path).format_file_name(std::process::id()),
+    );
+    std::os::unix::fs::symlink(
+        program_directory.path().join("missing-directory/koshi"),
+        &staged_binary_path,
+    )
+    .expect("link the staged copy path into a missing directory");
+
+    let script_status = std::process::Command::new("sh")
+        .args(list_staged_copy_write_arguments(
+            &new_binary_path,
+            &staged_binary_path,
+            &[],
+        ))
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run the staged copy write script");
+
+    assert_eq!(script_status.code(), Some(1));
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        ["koshi", "new-binary", "other-koshi"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_staged_copy_rename_script_renames_the_copy_over_the_program_file() {
+    let (program_directory, program_path, _other_program_path) = build_program_files();
+    fs::write(&program_path, b"old-binary").expect("write the old executable");
+    let staged_binary_path = program_directory.path().join(
+        StagedCopyName::from_program_path(&program_path).format_file_name(std::process::id()),
+    );
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+
+    let script_status = std::process::Command::new("sh")
+        .args(list_staged_copy_rename_arguments(
+            &staged_binary_path,
+            &program_path,
+        ))
+        .status()
+        .expect("run the staged copy rename script");
+
+    assert_eq!(script_status.code(), Some(0));
+    assert_eq!(
+        fs::read(&program_path).expect("read the replaced executable"),
+        b"new-binary"
+    );
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        ["koshi", "other-koshi"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_staged_copy_rename_script_whose_rename_fails_removes_the_copy() {
+    let (program_directory, program_path, _other_program_path) = build_program_files();
+    let staged_binary_path = program_directory.path().join(
+        StagedCopyName::from_program_path(&program_path).format_file_name(std::process::id()),
+    );
+    fs::write(&staged_binary_path, b"new-binary").expect("write the staged copy");
+    let missing_program_path = program_directory.path().join("missing-directory/koshi");
+
+    let script_status = std::process::Command::new("sh")
+        .args(list_staged_copy_rename_arguments(
+            &staged_binary_path,
+            &missing_program_path,
+        ))
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run the staged copy rename script");
+
+    assert_eq!(script_status.code(), Some(1));
+    assert_eq!(
+        list_sorted_entry_names(program_directory.path()),
+        ["koshi", "other-koshi"]
+    );
+}
+
+/// The line of `install.sh` that names the staged copy of the binary.
+const INSTALL_SH_STAGED_COPY_LINE: &str =
+    r#"staged_binary_path="${installation_directory}/koshi.koshi-update-$$""#;
+
+/// The line of `install.sh` that ends the script with status `1` on `HUP`,
+/// `INT` and `TERM`, which runs its `EXIT` trap.
+const INSTALL_SH_SIGNAL_TRAP_LINE: &str = "trap 'exit 1' HUP INT TERM";
+
+/// The `EXIT` trap of `install.sh` for an installation directory this user
+/// may write: it deletes the staging directory and the staged copy.
+const INSTALL_SH_CLEANUP_TRAP_LINE: &str =
+    r#"trap 'rm -rf "${staging_directory}"; rm -f "${staged_binary_path}"' EXIT"#;
+
+/// The lines of `install.sh` that define `validate_staged_binary`: it runs the
+/// staged copy with `--version`, and a first line on standard output other
+/// than `koshi <release_version_number>` logs an error and ends the script
+/// with status `1`. What the copy writes on standard error passes through.
+const INSTALL_SH_VALIDATE_FUNCTION_LINES: [&str; 7] = [
+    "validate_staged_binary() {",
+    r#"staged_version_line="$("${staged_binary_path}" --version | head -n 1)""#,
+    r#"if [ "${staged_version_line}" != "koshi ${release_version_number}" ]; then"#,
+    r#"log_error "The new koshi printed '${staged_version_line}' for --version, not 'koshi ${release_version_number}'""#,
+    "exit 1",
+    "fi",
+    "}",
+];
+
+/// The lines of `install.sh` that copy the binary beside the installed one,
+/// set mode `755` on the copy, check the copy, and rename the copy over the
+/// installed one, for an installation directory this user may write.
+const INSTALL_SH_INSTALL_LINES: [&str; 4] = [
+    r#"cp "${binary_path}" "${staged_binary_path}""#,
+    r#"chmod 755 "${staged_binary_path}""#,
+    "validate_staged_binary",
+    r#"mv -f "${staged_binary_path}" "${installed_binary_path}""#,
+];
+
+/// The lines of [`INSTALL_SH_INSTALL_LINES`] for an installation directory
+/// that only root may write: the copy, the mode change, and the rename run
+/// through `sudo`, and the check runs as this user.
+const INSTALL_SH_SUDO_INSTALL_LINES: [&str; 4] = [
+    r#"sudo cp "${binary_path}" "${staged_binary_path}""#,
+    r#"sudo chmod 755 "${staged_binary_path}""#,
+    "validate_staged_binary",
+    r#"sudo mv -f "${staged_binary_path}" "${installed_binary_path}""#,
+];
+
+/// A `bash` program that runs the install lines of `install.sh` in their
+/// order, under `set -e`, with the release version number `9.9.9` and a
+/// `log_error` that prints its message on standard error. `$1` is the
+/// installation directory, `$2` the staging directory that holds `koshi`, and
+/// `$3` the installed binary path. After the copy, its mode change, and its
+/// check, the program prints the staged copy file name and runs
+/// `step_before_rename`, then renames the copy.
+#[cfg(unix)]
+fn build_install_sh_program(step_before_rename: &str) -> String {
+    let [copy_line, mode_line, validate_line, rename_line] = INSTALL_SH_INSTALL_LINES;
+    let mut program_lines = vec![
+        "set -e",
+        r#"release_version_number="9.9.9""#,
+        r#"installation_directory="$1""#,
+        r#"staging_directory="$2""#,
+        r#"binary_path="${staging_directory}/koshi""#,
+        r#"installed_binary_path="$3""#,
+        r#"log_error() { echo "$1" >&2; }"#,
+        INSTALL_SH_SIGNAL_TRAP_LINE,
+        INSTALL_SH_STAGED_COPY_LINE,
+    ];
+    program_lines.extend(INSTALL_SH_VALIDATE_FUNCTION_LINES);
+    program_lines.extend([
+        INSTALL_SH_CLEANUP_TRAP_LINE,
+        copy_line,
+        mode_line,
+        validate_line,
+        r#"echo "${staged_binary_path##*/}""#,
+        step_before_rename,
+        rename_line,
+    ]);
+    program_lines.join("\n")
+}
+
+/// An installation directory holding `koshi` with the bytes `old-binary`, and
+/// a staging directory holding a `koshi` program that prints `printed_line`,
+/// as [`write_printing_program`] writes it.
+#[cfg(unix)]
+fn build_install_sh_directories(printed_line: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let installation_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("an installation directory");
+    let staging_directory = Builder::new()
+        .prefix("koshi-test-")
+        .tempdir()
+        .expect("a staging directory");
+    fs::write(installation_directory.path().join("koshi"), b"old-binary")
+        .expect("write the installed binary");
+    write_printing_program(
+        staging_directory.path(),
+        "koshi",
+        &staging_directory.path().join("koshi-runs"),
+        printed_line,
+    );
+    (installation_directory, staging_directory)
+}
+
+#[test]
+fn install_sh_holds_each_install_line_that_the_unix_install_tests_run() {
+    let install_script_lines: Vec<&str> = include_str!("../../../../install.sh")
+        .lines()
+        .map(str::trim)
+        .collect();
+
+    for pinned_line in [
+        INSTALL_SH_STAGED_COPY_LINE,
+        INSTALL_SH_SIGNAL_TRAP_LINE,
+        INSTALL_SH_CLEANUP_TRAP_LINE,
+    ] {
+        assert_eq!(
+            install_script_lines
+                .iter()
+                .filter(|install_script_line| **install_script_line == pinned_line)
+                .count(),
+            1,
+            "{pinned_line}"
+        );
+    }
+    for pinned_lines in [
+        INSTALL_SH_VALIDATE_FUNCTION_LINES.as_slice(),
+        INSTALL_SH_INSTALL_LINES.as_slice(),
+        INSTALL_SH_SUDO_INSTALL_LINES.as_slice(),
+    ] {
+        assert_eq!(
+            install_script_lines
+                .windows(pinned_lines.len())
+                .filter(|install_script_window| *install_script_window == pinned_lines)
+                .count(),
+            1,
+            "{pinned_lines:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_install_sh_lines_rename_a_copy_with_the_staged_copy_name_over_the_installed_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (installation_directory, staging_directory) = build_install_sh_directories("koshi 9.9.9");
+    let installed_binary_path = installation_directory.path().join("koshi");
+    let new_binary_bytes =
+        fs::read(staging_directory.path().join("koshi")).expect("read the extracted binary");
+
+    let install_process = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(build_install_sh_program(""))
+        .arg("bash")
+        .arg(installation_directory.path())
+        .arg(staging_directory.path())
+        .arg(&installed_binary_path)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the install lines");
+    let install_process_id = install_process.id();
+    let install_output = install_process
+        .wait_with_output()
+        .expect("wait for the install lines");
+
+    assert_eq!(install_output.status.code(), Some(0));
+    let staged_copy_file_name = StagedCopyName::from_program_path(&installed_binary_path)
+        .format_file_name(install_process_id);
+    assert_eq!(
+        String::from_utf8(install_output.stdout).expect("a UTF-8 staged copy file name"),
+        format!("{staged_copy_file_name}\n")
+    );
+    assert_eq!(
+        fs::read(&installed_binary_path).expect("read the installed binary"),
+        new_binary_bytes
+    );
+    let permission_mode = fs::metadata(&installed_binary_path)
+        .expect("read the installed binary's metadata")
+        .permissions()
+        .mode();
+    assert_eq!(permission_mode & 0o777, 0o755);
+    assert_eq!(
+        list_sorted_entry_names(installation_directory.path()),
+        ["koshi"]
+    );
+    assert_eq!(
+        fs::symlink_metadata(staging_directory.path())
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_sh_lines_install_a_copy_that_writes_a_warning_on_standard_error_before_its_version() {
+    let (installation_directory, staging_directory) = build_install_sh_directories("koshi 9.9.9");
+    let installed_binary_path = installation_directory.path().join("koshi");
+    let extracted_binary_path = staging_directory.path().join("koshi");
+    let loader_warning_line =
+        "ERROR: ld.so: object '/missing.so' from LD_PRELOAD cannot be preloaded: ignored.";
+    fs::write(
+        &extracted_binary_path,
+        format!("#!/bin/sh\necho \"{loader_warning_line}\" >&2\necho 'koshi 9.9.9'\n"),
+    )
+    .expect("write a binary that warns on standard error before its version");
+    let new_binary_bytes = fs::read(&extracted_binary_path).expect("read the extracted binary");
+
+    let install_output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(build_install_sh_program(""))
+        .arg("bash")
+        .arg(installation_directory.path())
+        .arg(staging_directory.path())
+        .arg(&installed_binary_path)
+        .output()
+        .expect("run the install lines");
+
+    assert_eq!(install_output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&install_output.stderr),
+        format!("{loader_warning_line}\n")
+    );
+    assert_eq!(
+        fs::read(&installed_binary_path).expect("read the installed binary"),
+        new_binary_bytes
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_sh_lines_whose_rename_fails_remove_the_copy_and_the_staging_directory() {
+    let (installation_directory, staging_directory) = build_install_sh_directories("koshi 9.9.9");
+    let missing_installed_binary_path = installation_directory
+        .path()
+        .join("missing-directory/koshi");
+
+    let install_status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(build_install_sh_program(""))
+        .arg("bash")
+        .arg(installation_directory.path())
+        .arg(staging_directory.path())
+        .arg(&missing_installed_binary_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run the install lines");
+
+    assert_eq!(install_status.code(), Some(1));
+    assert_eq!(
+        list_sorted_entry_names(installation_directory.path()),
+        ["koshi"]
+    );
+    assert_eq!(
+        fs::read(installation_directory.path().join("koshi")).expect("read the installed binary"),
+        b"old-binary"
+    );
+    assert_eq!(
+        fs::symlink_metadata(staging_directory.path())
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_sh_lines_stopped_by_ctrl_c_remove_the_copy_and_keep_the_installed_binary() {
+    use std::io::BufRead as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let (installation_directory, staging_directory) = build_install_sh_directories("koshi 9.9.9");
+    let installed_binary_path = installation_directory.path().join("koshi");
+
+    let mut install_process = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(build_install_sh_program(
+            "sh -c 'echo running; exec sleep 30'",
+        ))
+        .arg("bash")
+        .arg(installation_directory.path())
+        .arg(staging_directory.path())
+        .arg(&installed_binary_path)
+        .stdout(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .expect("start the install lines");
+    let install_output_pipe = install_process
+        .stdout
+        .take()
+        .expect("the install lines output");
+    let mut install_output_reader = std::io::BufReader::new(install_output_pipe);
+    let mut staged_copy_line = String::new();
+    install_output_reader
+        .read_line(&mut staged_copy_line)
+        .expect("read the staged copy file name");
+    let mut running_line = String::new();
+    install_output_reader
+        .read_line(&mut running_line)
+        .expect("read the line of the step before the rename");
+    let install_process_group_id =
+        libc::pid_t::try_from(install_process.id()).expect("a process group id that fits pid_t");
+    // SAFETY: `kill` takes a process group id and a signal number, and reads
+    // no memory of this process.
+    let kill_answer = unsafe { libc::kill(-install_process_group_id, libc::SIGINT) };
+    let install_status = install_process.wait().expect("wait for the install lines");
+
+    let staged_copy_file_name = StagedCopyName::from_program_path(&installed_binary_path)
+        .format_file_name(install_process.id());
+    assert_eq!(staged_copy_line, format!("{staged_copy_file_name}\n"));
+    assert_eq!(running_line, "running\n");
+    assert_eq!(kill_answer, 0);
+    assert_eq!(install_status.code(), Some(1));
+    assert_eq!(
+        fs::read(&installed_binary_path).expect("read the installed binary"),
+        b"old-binary"
+    );
+    assert_eq!(
+        list_sorted_entry_names(installation_directory.path()),
+        ["koshi"]
+    );
+    assert_eq!(
+        fs::symlink_metadata(staging_directory.path())
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_sh_lines_whose_copy_prints_another_version_remove_the_copy_and_keep_the_installed_binary(
+) {
+    let (installation_directory, staging_directory) = build_install_sh_directories("koshi 9.9.8");
+    let installed_binary_path = installation_directory.path().join("koshi");
+
+    let install_output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(build_install_sh_program(""))
+        .arg("bash")
+        .arg(installation_directory.path())
+        .arg(staging_directory.path())
+        .arg(&installed_binary_path)
+        .output()
+        .expect("run the install lines");
+
+    assert_eq!(install_output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(install_output.stderr).expect("a UTF-8 error message"),
+        "The new koshi printed 'koshi 9.9.8' for --version, not 'koshi 9.9.9'\n"
+    );
+    assert_eq!(install_output.stdout, b"");
+    assert_eq!(
+        fs::read(&installed_binary_path).expect("read the installed binary"),
+        b"old-binary"
+    );
+    assert_eq!(
+        list_sorted_entry_names(installation_directory.path()),
+        ["koshi"]
+    );
+    assert_eq!(
+        fs::symlink_metadata(staging_directory.path())
+            .err()
+            .map(|metadata_error| metadata_error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+}
+
+#[test]
+fn the_runtime_directory_itself_is_left_out_of_the_other_runtime_directories() {
+    let runtime_directory = build_test_runtime_directory();
+    let other_directory = build_test_runtime_directory();
+
+    assert_eq!(
+        list_other_runtime_directories(
+            vec![
+                runtime_directory.path().to_path_buf(),
+                other_directory.path().to_path_buf(),
+            ],
+            runtime_directory.path(),
+        ),
+        vec![other_directory.path().to_path_buf()]
+    );
+}
+
+#[test]
+fn a_runtime_directory_that_does_not_exist_is_compared_as_it_is() {
+    let runtime_directory = build_test_runtime_directory();
+    let missing_directory = runtime_directory.path().join("missing");
+
+    assert_eq!(
+        list_other_runtime_directories(
+            vec![missing_directory.clone()],
+            &runtime_directory.path().join("also-missing"),
+        ),
+        vec![missing_directory]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_to_the_runtime_directory_is_left_out_of_the_other_runtime_directories() {
+    let runtime_directory = build_test_runtime_directory();
+    let link_directory = build_test_runtime_directory();
+    let link_path = link_directory.path().join("runtime-link");
+    std::os::unix::fs::symlink(runtime_directory.path(), &link_path)
+        .expect("link the runtime directory");
+
+    assert_eq!(
+        list_other_runtime_directories(vec![link_path], runtime_directory.path()),
+        Vec::<PathBuf>::new()
+    );
+}
+
+#[test]
+fn a_runtime_directory_of_koshi_0_2_0_that_does_not_exist_counts_nothing() {
+    let runtime_directory = build_test_runtime_directory();
+
+    assert_eq!(
+        count_previous_release_servers(&runtime_directory.path().join("missing")),
+        PreviousReleaseServerCount {
+            session_count: 0,
+            open_window_count: 0,
+        }
+    );
+}
+
+#[test]
+fn an_endpoint_file_naming_a_process_that_is_not_a_koshi_server_counts_nothing() {
+    let runtime_directory = build_test_runtime_directory();
+    write_session_endpoint_file(
+        runtime_directory.path(),
+        SessionId::new(),
+        "k7QxSecret",
+        std::process::id(),
+    );
+
+    assert_eq!(
+        count_previous_release_servers(runtime_directory.path()),
+        PreviousReleaseServerCount {
+            session_count: 0,
+            open_window_count: 0,
+        }
+    );
+}
+
+#[test]
+fn the_endpoint_file_of_a_closed_koshi_0_1_0_window_counts_nothing() {
+    let runtime_directory = build_test_runtime_directory();
+    write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), SessionId::new());
+
+    assert_eq!(
+        count_previous_release_servers(runtime_directory.path()),
+        PreviousReleaseServerCount {
+            session_count: 0,
+            open_window_count: 0,
+        }
+    );
+}
+
+#[test]
+fn the_endpoint_file_of_an_open_koshi_0_1_0_window_counts_one_open_window() {
+    let runtime_directory = build_test_runtime_directory();
+    let window_session_id = SessionId::new();
+    let _window_listener = Listener::bind(&compute_socket_address(
+        runtime_directory.path(),
+        window_session_id,
+    ))
+    .expect("bind the stand-in window");
+    write_koshi_0_1_0_window_endpoint_file(runtime_directory.path(), window_session_id);
+
+    assert_eq!(
+        count_previous_release_servers(runtime_directory.path()),
+        PreviousReleaseServerCount {
+            session_count: 0,
+            open_window_count: 1,
+        }
+    );
+}
+
+#[test]
+fn no_session_running_from_a_runtime_directory_of_koshi_0_2_0_prints_no_line() {
+    assert_eq!(
+        format_previous_release_session_note(Path::new("/home/user/.local/share/koshi/run"), 0),
+        None
+    );
+}
+
+#[test]
+fn one_session_running_from_a_runtime_directory_of_koshi_0_2_0_is_named_with_restart_servers() {
+    assert_eq!(
+        format_previous_release_session_note(Path::new("/home/user/.local/share/koshi/run"), 1),
+        Some(
+            "1 session that an older koshi started runs from /home/user/.local/share/koshi/run, \
+             which this koshi does not list; run koshi restart-servers to move it or end it"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn several_sessions_running_from_a_runtime_directory_of_koshi_0_2_0_are_counted_in_one_line() {
+    assert_eq!(
+        format_previous_release_session_note(Path::new("/home/user/.local/share/koshi/run"), 2),
+        Some(
+            "2 sessions that an older koshi started run from /home/user/.local/share/koshi/run, \
+             which this koshi does not list; run koshi restart-servers to move them or end them"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn no_koshi_0_1_0_window_running_from_a_runtime_directory_prints_no_line() {
+    assert_eq!(
+        format_koshi_0_1_0_window_note(Path::new("/home/user/.local/share/koshi/run"), 0),
+        None
+    );
+}
+
+#[test]
+fn one_koshi_0_1_0_window_running_from_a_runtime_directory_is_named_with_how_it_ends() {
+    assert_eq!(
+        format_koshi_0_1_0_window_note(Path::new("/home/user/.local/share/koshi/run"), 1),
+        Some(
+            "1 koshi 0.1.0 window runs from /home/user/.local/share/koshi/run; this koshi cannot \
+             talk to it, and it ends when its terminal closes"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn several_koshi_0_1_0_windows_running_from_a_runtime_directory_are_counted_in_one_line() {
+    assert_eq!(
+        format_koshi_0_1_0_window_note(Path::new("/home/user/.local/share/koshi/run"), 2),
+        Some(
+            "2 koshi 0.1.0 windows run from /home/user/.local/share/koshi/run; this koshi cannot \
+             talk to them, and each one ends when its terminal closes"
+                .to_string()
+        )
     );
 }

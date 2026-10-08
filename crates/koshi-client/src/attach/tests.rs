@@ -712,6 +712,30 @@ fn two_refusals_after_a_restart_are_equal_only_when_their_refusals_print_the_sam
 }
 
 #[test]
+fn a_link_answering_in_the_format_of_koshi_0_4_0_is_a_refused_dial() {
+    let dial_error = build_link_failure(IpcError::PreviousReleaseAnswer);
+
+    let DialError::Refused(CliError::PreviousReleaseServer { detail }) = dial_error else {
+        panic!("expected a refused dial, got {dial_error:?}");
+    };
+    assert_eq!(
+        detail,
+        "the server answered in the format of koshi 0.4.0 or older, which this koshi cannot \
+         talk to"
+    );
+}
+
+#[test]
+fn a_link_that_breaks_is_an_unreachable_dial() {
+    let dial_error = build_link_failure(IpcError::Disconnected);
+
+    let DialError::Unreachable(CliError::IpcUnavailable { detail }) = dial_error else {
+        panic!("expected an unreachable dial, got {dial_error:?}");
+    };
+    assert_eq!(detail, "ipc peer disconnected");
+}
+
+#[test]
 fn a_refused_dial_ends_the_redial_at_once_and_is_the_cause_it_stops_on() {
     let mut client = build_test_client();
     let mut screen = build_test_screen();

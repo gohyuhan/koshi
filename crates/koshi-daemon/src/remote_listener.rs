@@ -26,7 +26,9 @@
 //!
 //! Every refusal closes the connection. An admitted caller whose attach
 //! arrives while the router is about to restart into a new build is refused
-//! with [`ROUTER_RESTARTING_MESSAGE`], whatever its selector names. Every
+//! with [`ROUTER_RESTARTING_MESSAGE`], whatever its selector names. A caller
+//! that opens with the Hello of koshi 0.3.0 or 0.4.0 gets the refusal naming
+//! both version ranges, and no secret is read from it. Every
 //! other refusal but the one naming both version ranges is
 //! [`REMOTE_REFUSED`](koshi_ipc::remote_wire::REMOTE_REFUSED). A wrong secret,
 //! a revoked secret, a session that does not exist, a session the secret holds
@@ -56,6 +58,7 @@ use std::time::{Duration, Instant};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection};
+use serde::Deserialize;
 
 use koshi_ipc::endpoint::EndpointFile;
 use koshi_ipc::protocol::{
@@ -506,11 +509,35 @@ impl PeerAddressRateTable {
 enum RemoteClientFrameRead {
     /// A readable frame.
     Frame(RemoteClientFrame),
+    /// The Hello that koshi 0.3.0 and 0.4.0 open with, which speaks remote
+    /// protocol version 1. Carries the remote protocol range it names.
+    PreviousReleaseHello {
+        minimum_remote_version: u32,
+        maximum_remote_version: u32,
+    },
     /// Bytes that are not a readable frame. The caller is refused.
     Unreadable,
     /// A length prefix past the cap, or a stream that ended or timed out.
     /// Nothing is written back.
     Closed,
+}
+
+/// The Hello that koshi 0.3.0 and 0.4.0 open with, read as far as the remote
+/// protocol range it names. The fields it also carries are not read.
+///
+/// Example — `{"Hello":{"min_remote_version":1,"max_remote_version":1,
+/// "min_protocol_version":2,"max_protocol_version":3,"token":"k7QxSecret"}}`
+/// reads as the range 1 to 1.
+#[derive(Deserialize)]
+enum PreviousReleaseRemoteClientFrame {
+    Hello {
+        /// The lowest remote protocol version the client speaks.
+        #[serde(rename = "min_remote_version")]
+        minimum_remote_version: u32,
+        /// The highest remote protocol version the client speaks.
+        #[serde(rename = "max_remote_version")]
+        maximum_remote_version: u32,
+    },
 }
 
 /// Serve one remote connection: the TLS handshake, the secret, and then either
@@ -573,6 +600,17 @@ fn serve_remote_connection(
             (minimum_protocol_version, maximum_protocol_version),
             connection_token,
         ),
+        RemoteClientFrameRead::PreviousReleaseHello {
+            minimum_remote_version,
+            maximum_remote_version,
+        } => {
+            send_refusal_message(
+                &mut writer,
+                &format_version_refusal(minimum_remote_version, maximum_remote_version),
+                admission_deadline,
+            );
+            return;
+        }
         RemoteClientFrameRead::Frame(_) | RemoteClientFrameRead::Unreadable => {
             send_refusal_with_deadline(&mut writer, compute_refusal_deadline(admission_deadline));
             return;
@@ -588,11 +626,10 @@ fn serve_remote_connection(
         MIN_REMOTE_PROTOCOL_VERSION,
         REMOTE_PROTOCOL_VERSION,
     ) else {
-        let _ = send_remote_frame(
+        send_refusal_message(
             &mut writer,
-            &RemoteServerFrame::Refused {
-                message: format_version_refusal(minimum_remote_version, maximum_remote_version),
-            },
+            &format_version_refusal(minimum_remote_version, maximum_remote_version),
+            admission_deadline,
         );
         return;
     };
@@ -699,7 +736,8 @@ fn process_admitted_remote_frames(
     loop {
         let remote_client_frame = match read_client_frame(reader, MAX_FRAME_BYTE_COUNT) {
             RemoteClientFrameRead::Frame(remote_client_frame) => remote_client_frame,
-            RemoteClientFrameRead::Unreadable => {
+            RemoteClientFrameRead::PreviousReleaseHello { .. }
+            | RemoteClientFrameRead::Unreadable => {
                 send_refusal(writer);
                 return None;
             }
@@ -997,7 +1035,8 @@ fn send_refusal(writer: &mut (impl Write + Deadlined)) {
 /// buffer is allocated. Callers pass [`REMOTE_HELLO_MAX_BYTE_COUNT`] before
 /// admission and [`MAX_FRAME_BYTE_COUNT`] after it. A length over
 /// `maximum_frame_byte_count` is [`RemoteClientFrameRead::Closed`] and reads no
-/// payload.
+/// payload. A payload that is not a [`RemoteClientFrame`] and reads as a
+/// [`PreviousReleaseRemoteClientFrame`] is [`RemoteClientFrameRead::PreviousReleaseHello`].
 fn read_client_frame<Reader: Read>(
     reader: &mut Reader,
     maximum_frame_byte_count: u32,
@@ -1014,8 +1053,17 @@ fn read_client_frame<Reader: Read>(
     if reader.read_exact(&mut payload_bytes).is_err() {
         return RemoteClientFrameRead::Closed;
     }
+    if let Ok(remote_client_frame) = serde_json::from_slice(&payload_bytes) {
+        return RemoteClientFrameRead::Frame(remote_client_frame);
+    }
     match serde_json::from_slice(&payload_bytes) {
-        Ok(remote_client_frame) => RemoteClientFrameRead::Frame(remote_client_frame),
+        Ok(PreviousReleaseRemoteClientFrame::Hello {
+            minimum_remote_version,
+            maximum_remote_version,
+        }) => RemoteClientFrameRead::PreviousReleaseHello {
+            minimum_remote_version,
+            maximum_remote_version,
+        },
         Err(_) => RemoteClientFrameRead::Unreadable,
     }
 }

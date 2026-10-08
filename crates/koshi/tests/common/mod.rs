@@ -194,6 +194,11 @@ pub struct RunningRouter {
 }
 
 impl RunningRouter {
+    /// The id of the router process.
+    pub fn get_process_id(&self) -> u32 {
+        self.child_process.id()
+    }
+
     /// True once the router process has ended.
     pub fn has_router_exited(&mut self) -> bool {
         self.child_process
@@ -293,6 +298,33 @@ pub fn resolve_config_directory_under_home(home_directory: &Path) -> PathBuf {
         .join("config")
 }
 
+/// The data directory a `koshi` started by [`build_koshi_command_at`] with
+/// `home_directory` reads: macOS derives it from the home directory alone.
+#[cfg(target_os = "macos")]
+pub fn resolve_data_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join("Library/Application Support/koshi")
+}
+
+/// The data directory a `koshi` started by [`build_koshi_command_at`] with
+/// `home_directory` reads: `.local/share/koshi` inside the home directory,
+/// under the `XDG_DATA_HOME` that command sets.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn resolve_data_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory.join(".local/share/koshi")
+}
+
+/// The data directory a `koshi` started by [`build_koshi_command_at`] with
+/// `home_directory` reads: `AppData\Roaming\koshi\data` inside the home
+/// directory, under the `APPDATA` that command sets.
+#[cfg(windows)]
+pub fn resolve_data_directory_under_home(home_directory: &Path) -> PathBuf {
+    home_directory
+        .join("AppData")
+        .join("Roaming")
+        .join("koshi")
+        .join("data")
+}
+
 /// Write `config_text` as the `koshi.kdl` a process started under
 /// `home_directory` reads.
 pub fn write_test_config(home_directory: &Path, config_text: &str) {
@@ -309,11 +341,12 @@ pub fn write_test_config(home_directory: &Path, config_text: &str) {
 /// directory the child serves is [`resolve_runtime_directory_under_home`].
 ///
 /// `HOME` and `USERPROFILE` name `home_directory`. On Unix other than macOS,
-/// `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` name `.config`,
-/// `.local/share` and `.local/state` inside it. On Windows, `APPDATA` and
-/// `LOCALAPPDATA` name `AppData\Roaming` and `AppData\Local` inside it. On
-/// every platform the config, data and state directories the child resolves
-/// all sit inside `home_directory`.
+/// `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR`
+/// name `.config`, `.local/share`, `.local/state` and `.xdg-runtime` inside
+/// it. On Windows, `APPDATA` and `LOCALAPPDATA` name `AppData\Roaming` and
+/// `AppData\Local` inside it. On every platform the config, data and state
+/// directories the child resolves, and the runtime directories of koshi 0.1.0
+/// and 0.2.0 it walks, all sit inside `home_directory`.
 ///
 /// The child runs in `home_directory`, so a pane it opens starts there. On Unix
 /// `SHELL` names `/bin/sh`, and `ENV`, `BASH_ENV` and `ZDOTDIR` are removed: a
@@ -349,7 +382,8 @@ pub fn build_koshi_command_at(binary_path: &Path, home_directory: &Path) -> Comm
     process_command
         .env("XDG_CONFIG_HOME", home_directory.join(".config"))
         .env("XDG_DATA_HOME", home_directory.join(".local/share"))
-        .env("XDG_STATE_HOME", home_directory.join(".local/state"));
+        .env("XDG_STATE_HOME", home_directory.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home_directory.join(".xdg-runtime"));
     #[cfg(windows)]
     process_command
         .env("APPDATA", home_directory.join("AppData").join("Roaming"))

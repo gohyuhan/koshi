@@ -11,13 +11,16 @@ use thiserror::Error;
 /// [`ConnectTimedOut`](IpcError::ConnectTimedOut),
 /// [`TlsHandshakeFailed`](IpcError::TlsHandshakeFailed),
 /// [`CertificateChanged`](IpcError::CertificateChanged)), a refused frame
-/// ([`FrameTooLarge`](IpcError::FrameTooLarge)), a socket address that fails
+/// ([`FrameTooLarge`](IpcError::FrameTooLarge)), an answer from a server that
+/// koshi 0.1.0 to 0.4.0 started
+/// ([`PreviousReleaseAnswer`](IpcError::PreviousReleaseAnswer)), a socket address that fails
 /// its trust or liveness checks
 /// ([`UntrustedSocket`](IpcError::UntrustedSocket),
 /// [`NoListener`](IpcError::NoListener), [`SocketBusy`](IpcError::SocketBusy)),
 /// an endpoint file the caller cannot read
 /// ([`EndpointFileMissing`](IpcError::EndpointFileMissing),
-/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable)), a program
+/// [`EndpointFileUnreadable`](IpcError::EndpointFileUnreadable),
+/// [`Koshi010WindowEndpointFile`](IpcError::Koshi010WindowEndpointFile)), a program
 /// file the caller cannot read
 /// ([`ProgramFileUnreadable`](IpcError::ProgramFileUnreadable)), and a remote
 /// access file the caller cannot read or write
@@ -62,6 +65,14 @@ pub enum IpcError {
     /// whole but did not decode, or a message failed to encode.
     #[error("ipc frame is not a readable message: {error_detail}")]
     MalformedFrame { error_detail: String },
+    /// An answer in the envelope that a server started by koshi 0.1.0 to
+    /// 0.4.0 writes, `{"request_id": …, "result": …}`. Such a server reads no
+    /// frame this build writes.
+    #[error(
+        "the server answered in the format of koshi 0.4.0 or older, which this koshi cannot \
+         talk to"
+    )]
+    PreviousReleaseAnswer,
     /// A socket address that failed a trust check, named in `trust_failure_reason`: the
     /// path is not directly inside the directory it must sit in, that
     /// directory is a symbolic link, is not a directory, carries the wrong
@@ -90,6 +101,14 @@ pub enum IpcError {
         endpoint_file_path: String,
         error_detail: String,
     },
+    /// An endpoint file that holds the fields `{socket, token}` alone, which a
+    /// koshi 0.1.0 window writes. Such a window runs its own server in its
+    /// terminal, and speaks a wire this build does not.
+    #[error(
+        "endpoint file {endpoint_file_path} is unreadable: a koshi 0.1.0 window wrote it, and \
+         this koshi cannot talk to that window; the window ends when its terminal closes"
+    )]
+    Koshi010WindowEndpointFile { endpoint_file_path: String },
     /// Writing the endpoint file failed during session startup. No caller
     /// finds this session's socket.
     #[error("endpoint file {endpoint_file_path} could not be written: {error_detail}")]

@@ -25,8 +25,8 @@ use koshi_ipc::endpoint::ServerProgramFile;
 #[cfg(test)]
 mod tests;
 
-/// How long `<path> --version` has to print its first line: 2 s.
-pub const VERSION_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(2);
+/// How long `<path> --version` has to print its first line: 70 s.
+pub const VERSION_ANSWER_WAIT_DURATION: Duration = Duration::from_secs(70);
 
 /// How long after a restart that did not happen a check reads the version of
 /// the same program file again: 30 s.
@@ -324,7 +324,8 @@ pub enum OutputLineError {
 /// Run the program at `executable_path` with the one argument
 /// `program_argument` and no input, and hand back the first line it prints on
 /// standard output, its newline included. A stream that ends before a newline
-/// gives what it held.
+/// gives what it held. The program writes its standard error to the standard
+/// error of this process.
 ///
 /// A program file that another process holds open for writing (`ETXTBSY` on
 /// Unix, `ERROR_SHARING_VIOLATION` on Windows) is started again every
@@ -350,7 +351,7 @@ pub fn read_first_output_line(
             .arg(program_argument)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
         {
             Ok(child_process) => break child_process,

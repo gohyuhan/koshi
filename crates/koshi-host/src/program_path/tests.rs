@@ -149,3 +149,30 @@ fn resolve_program_path_gives_a_path_to_the_running_program() {
             .expect("the test binary resolves to a file")
     );
 }
+
+#[test]
+fn is_backup_program_file_name_accepts_the_two_backup_shapes_of_the_stem_alone() {
+    let name_checks = [
+        ("koshi.old", true),
+        ("koshi.1.old", true),
+        ("koshi.12.old", true),
+        ("koshi.exe", false),
+        ("koshi.x.old", false),
+        ("koshi..old", false),
+        ("koshi.1.2.old", false),
+        ("koshi.old.old", false),
+        ("koshi.1old", false),
+        ("koshiold", false),
+        ("Koshi.old", false),
+        ("notes.old", false),
+        ("koshi-update-5000.exe", false),
+        ("", false),
+    ];
+    for (file_name, is_expected_backup) in name_checks {
+        assert_eq!(
+            is_backup_program_file_name(file_name, "koshi"),
+            is_expected_backup,
+            "{file_name:?}"
+        );
+    }
+}

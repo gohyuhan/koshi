@@ -15,7 +15,7 @@ use crate::wire::MaybeKnown;
 use super::*;
 
 #[test]
-fn encode_previous_hello_uses_version_one_and_previous_field_names() {
+fn serialize_previous_hello_uses_version_one_and_previous_field_names() {
     let request = SupervisorRequest {
         request_id: 7,
         request_kind: SupervisorRequestKind::Hello {
@@ -25,7 +25,7 @@ fn encode_previous_hello_uses_version_one_and_previous_field_names() {
         },
     };
     assert_eq!(
-        encode_previous_supervisor_request(&request).expect("encode previous Hello"),
+        serialize_previous_supervisor_request(&request).expect("serialize previous Hello"),
         serde_json::json!({
             "request_id": 7,
             "kind": {"Hello": {
@@ -38,7 +38,7 @@ fn encode_previous_hello_uses_version_one_and_previous_field_names() {
 }
 
 #[test]
-fn encode_previous_spawn_write_resize_and_kill_preserves_payloads() {
+fn serialize_previous_spawn_write_resize_and_kill_preserves_payloads() {
     let pane_id = PaneId::new();
     let spawn_spec = SpawnSpec {
         program: PathBuf::from("cmd.exe"),
@@ -61,7 +61,7 @@ fn encode_previous_spawn_write_resize_and_kill_preserves_payloads() {
         },
     };
     assert_eq!(
-        encode_previous_supervisor_request(&spawn).expect("encode previous Spawn"),
+        serialize_previous_supervisor_request(&spawn).expect("serialize previous Spawn"),
         serde_json::json!({
             "request_id": 8,
             "kind": {"Spawn": {
@@ -88,7 +88,7 @@ fn encode_previous_spawn_write_resize_and_kill_preserves_payloads() {
         },
     };
     assert_eq!(
-        encode_previous_supervisor_request(&resize).expect("encode previous Resize"),
+        serialize_previous_supervisor_request(&resize).expect("serialize previous Resize"),
         serde_json::json!({"request_id": 9, "kind": {"Resize": {
             "pane_id": pane_id, "size": {"cols": 100, "rows": 30}
         }}})
@@ -101,7 +101,7 @@ fn encode_previous_spawn_write_resize_and_kill_preserves_payloads() {
         },
     };
     assert_eq!(
-        encode_previous_supervisor_request(&write).expect("encode previous Write"),
+        serialize_previous_supervisor_request(&write).expect("serialize previous Write"),
         serde_json::json!({"request_id": 10, "kind": {"Write": {
             "pane_id": pane_id, "bytes": "aGk="
         }}})
@@ -116,7 +116,7 @@ fn encode_previous_spawn_write_resize_and_kill_preserves_payloads() {
         },
     };
     assert_eq!(
-        encode_previous_supervisor_request(&kill).expect("encode previous Kill"),
+        serialize_previous_supervisor_request(&kill).expect("serialize previous Kill"),
         serde_json::json!({"request_id": 11, "kind": {"Kill": {
             "pane_id": pane_id, "kill_policy": {"GracefulTree": {"timeout": 3}}
         }}})
@@ -124,7 +124,7 @@ fn encode_previous_spawn_write_resize_and_kill_preserves_payloads() {
 }
 
 #[test]
-fn decode_previous_supervisor_responses_and_events_preserves_panes_and_bytes() {
+fn deserialize_previous_supervisor_responses_and_events_preserves_panes_and_bytes() {
     let pane_id = PaneId::new();
     let previous_panes = serde_json::json!({"Response": {
         "request_id": 12,
@@ -133,7 +133,7 @@ fn decode_previous_supervisor_responses_and_events_preserves_panes_and_bytes() {
         }]}
     }});
     assert_eq!(
-        decode_previous_supervisor_message(previous_panes).expect("decode pane list"),
+        deserialize_previous_supervisor_message(previous_panes).expect("deserialize pane list"),
         SupervisorMessage::Response(crate::supervisor::SupervisorResponse {
             request_id: Some(12),
             answer_result: MaybeKnown::Known(SupervisorResult::Panes(vec![
@@ -152,7 +152,7 @@ fn decode_previous_supervisor_responses_and_events_preserves_panes_and_bytes() {
         "pane_id": pane_id, "bytes": "aGk="
     }}});
     assert_eq!(
-        decode_previous_supervisor_message(previous_output).expect("decode pane output"),
+        deserialize_previous_supervisor_message(previous_output).expect("deserialize pane output"),
         SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Output {
             pane_id,
             output_bytes: b"hi".to_vec(),
@@ -162,7 +162,7 @@ fn decode_previous_supervisor_responses_and_events_preserves_panes_and_bytes() {
         "pane_id": pane_id, "status": {"ExitCode": 7}
     }}});
     assert_eq!(
-        decode_previous_supervisor_message(previous_exit).expect("decode pane exit"),
+        deserialize_previous_supervisor_message(previous_exit).expect("deserialize pane exit"),
         SupervisorMessage::Event(MaybeKnown::Known(SupervisorEvent::Exited {
             pane_id,
             exit_status: koshi_core::process::ExitStatus::ExitCode(7),

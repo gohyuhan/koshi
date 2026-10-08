@@ -6,9 +6,16 @@ use serde_json::{Map, Value};
 
 use super::{IncomingSupervisorMessage, SupervisorRequest};
 
-/// One frame decoded from a supervisor started by the previous release.
+/// The supervisor-link protocol version of a supervisor that koshi 0.3.0 or
+/// 0.4.0 started. [`serialize_previous_supervisor_request`] writes, and
+/// [`deserialize_previous_supervisor_message`] reads, the frames of this version.
+pub const PREVIOUS_SUPERVISOR_PROTOCOL_VERSION: u32 = 1;
+
+/// One frame from a supervisor that koshi 0.3.0 or 0.4.0 started, read as
+/// [`deserialize_previous_supervisor_message`] reads it.
 pub struct PreviousSupervisorMessage {
-    pub decoded_message: IncomingSupervisorMessage,
+    /// The frame, with each field under the name this build reads.
+    pub supervisor_message: IncomingSupervisorMessage,
 }
 
 impl<'de> Deserialize<'de> for PreviousSupervisorMessage {
@@ -19,8 +26,8 @@ impl<'de> Deserialize<'de> for PreviousSupervisorMessage {
         DeserializerType: Deserializer<'de>,
     {
         let message_json = Value::deserialize(deserializer)?;
-        decode_previous_supervisor_message(message_json)
-            .map(|decoded_message| PreviousSupervisorMessage { decoded_message })
+        deserialize_previous_supervisor_message(message_json)
+            .map(|supervisor_message| PreviousSupervisorMessage { supervisor_message })
             .map_err(DeserializerType::Error::custom)
     }
 }
@@ -53,27 +60,30 @@ fn get_required_json_field<'a>(
         .ok_or_else(|| format!("{field_name} is missing"))
 }
 
-fn encode_previous_pty_size(pty_size: &mut Value) -> Result<(), String> {
+fn rename_pty_size_fields_to_previous(pty_size: &mut Value) -> Result<(), String> {
     let size_fields = get_json_object(pty_size, "pty_size")?;
     rename_json_field(size_fields, "column_count", "cols");
     rename_json_field(size_fields, "row_count", "rows");
     Ok(())
 }
 
-fn decode_previous_pty_size(pty_size: &mut Value) -> Result<(), String> {
+fn rename_pty_size_fields_to_current(pty_size: &mut Value) -> Result<(), String> {
     let size_fields = get_json_object(pty_size, "pty_size")?;
     rename_json_field(size_fields, "cols", "column_count");
     rename_json_field(size_fields, "rows", "row_count");
     Ok(())
 }
 
-/// Encode one current request for a supervisor that the previous release started.
+/// Serialize `request` as the frame that a supervisor of koshi 0.3.0 or 0.4.0
+/// reads: the Hello names protocol [`PREVIOUS_SUPERVISOR_PROTOCOL_VERSION`] only,
+/// and each field carries the name of that release.
 ///
 /// # Errors
-/// Returns a message when the request cannot be encoded or has no expected shape.
-pub fn encode_previous_supervisor_request(request: &SupervisorRequest) -> Result<Value, String> {
+/// Returns a message when `request` cannot be serialized, or when its JSON
+/// lacks a field this function renames.
+pub fn serialize_previous_supervisor_request(request: &SupervisorRequest) -> Result<Value, String> {
     let mut request_json = serde_json::to_value(request)
-        .map_err(|encode_error| format!("encode supervisor request: {encode_error}"))?;
+        .map_err(|serialize_error| format!("encode supervisor request: {serialize_error}"))?;
     let request_fields = get_json_object(&mut request_json, "supervisor request")?;
     rename_json_field(request_fields, "request_kind", "kind");
     let request_kind_json = get_required_json_field(request_fields, "kind")?;
@@ -83,8 +93,14 @@ pub fn encode_previous_supervisor_request(request: &SupervisorRequest) -> Result
     let request_kinds = get_json_object(request_kind_json, "request kind")?;
     if let Some(hello_request) = request_kinds.get_mut("Hello") {
         let hello_fields = get_json_object(hello_request, "Hello")?;
-        hello_fields.insert("min_protocol_version".to_string(), Value::from(1));
-        hello_fields.insert("max_protocol_version".to_string(), Value::from(1));
+        hello_fields.insert(
+            "min_protocol_version".to_string(),
+            Value::from(PREVIOUS_SUPERVISOR_PROTOCOL_VERSION),
+        );
+        hello_fields.insert(
+            "max_protocol_version".to_string(),
+            Value::from(PREVIOUS_SUPERVISOR_PROTOCOL_VERSION),
+        );
         hello_fields.remove("minimum_protocol_version");
         hello_fields.remove("maximum_protocol_version");
         rename_json_field(hello_fields, "connection_token", "token");
@@ -98,12 +114,12 @@ pub fn encode_previous_supervisor_request(request: &SupervisorRequest) -> Result
         rename_json_field(spec_fields, "arguments", "args");
         rename_json_field(spec_fields, "working_directory", "cwd");
         rename_json_field(spec_fields, "environment_variables", "env");
-        encode_previous_pty_size(get_required_json_field(spawn_fields, "size")?)?;
+        rename_pty_size_fields_to_previous(get_required_json_field(spawn_fields, "size")?)?;
     }
     if let Some(resize_request) = request_kinds.get_mut("Resize") {
         let resize_fields = get_json_object(resize_request, "Resize")?;
         rename_json_field(resize_fields, "pty_size", "size");
-        encode_previous_pty_size(get_required_json_field(resize_fields, "size")?)?;
+        rename_pty_size_fields_to_previous(get_required_json_field(resize_fields, "size")?)?;
     }
     if let Some(write_request) = request_kinds.get_mut("Write") {
         rename_json_field(
@@ -130,11 +146,12 @@ pub fn encode_previous_supervisor_request(request: &SupervisorRequest) -> Result
     Ok(request_json)
 }
 
-/// Decode one frame from a supervisor that the previous release started.
+/// Deserialize `message_json`, one frame from a supervisor that koshi 0.3.0 or
+/// 0.4.0 started, once each field carries the name this build reads.
 ///
 /// # Errors
 /// Returns a message when the frame is malformed or its known payload is invalid.
-pub fn decode_previous_supervisor_message(
+pub fn deserialize_previous_supervisor_message(
     mut message_json: Value,
 ) -> Result<IncomingSupervisorMessage, String> {
     let message_fields = get_json_object(&mut message_json, "supervisor message")?;
@@ -143,12 +160,7 @@ pub fn decode_previous_supervisor_message(
         rename_json_field(response_fields, "result", "answer_result");
         let answer_result_json = get_required_json_field(response_fields, "answer_result")?;
         if answer_result_json.is_string() {
-            let migrated_frame = serde_json::to_string(&message_json).map_err(|encode_error| {
-                format!("encode migrated supervisor frame: {encode_error}")
-            })?;
-            return serde_json::from_str(&migrated_frame).map_err(|decode_error| {
-                format!("decode previous supervisor frame: {decode_error}")
-            });
+            return deserialize_migrated_frame(&message_json);
         }
         let answer_variants = get_json_object(answer_result_json, "answer result")?;
         if let Some(spawned_pane) = answer_variants.get_mut("Spawned") {
@@ -166,7 +178,10 @@ pub fn decode_previous_supervisor_message(
                 let pane_fields = get_json_object(supervisor_pane, "Panes member")?;
                 rename_json_field(pane_fields, "pid", "process_id");
                 rename_json_field(pane_fields, "size", "pty_size");
-                decode_previous_pty_size(get_required_json_field(pane_fields, "pty_size")?)?;
+                rename_pty_size_fields_to_current(get_required_json_field(
+                    pane_fields,
+                    "pty_size",
+                )?)?;
             }
         }
         if let Some(supervisor_error) = answer_variants.get_mut("Error") {
@@ -205,10 +220,24 @@ pub fn decode_previous_supervisor_message(
             );
         }
     }
-    let migrated_frame = serde_json::to_string(&message_json)
-        .map_err(|encode_error| format!("encode migrated supervisor frame: {encode_error}"))?;
-    serde_json::from_str(&migrated_frame)
-        .map_err(|decode_error| format!("decode previous supervisor frame: {decode_error}"))
+    deserialize_migrated_frame(&message_json)
+}
+
+/// Serialize `message_json`, a supervisor frame whose fields carry the names
+/// this build reads, to JSON text, and deserialize that text as an
+/// [`IncomingSupervisorMessage`].
+///
+/// # Errors
+/// Returns `encode migrated supervisor frame: <failure>` when the JSON cannot
+/// be serialized, and `decode previous supervisor frame: <failure>` when the
+/// text is no supervisor message.
+fn deserialize_migrated_frame(message_json: &Value) -> Result<IncomingSupervisorMessage, String> {
+    let migrated_frame = serde_json::to_string(message_json).map_err(|serialize_error| {
+        format!("encode migrated supervisor frame: {serialize_error}")
+    })?;
+    serde_json::from_str(&migrated_frame).map_err(|deserialize_error| {
+        format!("decode previous supervisor frame: {deserialize_error}")
+    })
 }
 
 #[cfg(test)]

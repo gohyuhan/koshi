@@ -5,11 +5,13 @@
 //! one sweep of the saved servers reports, and how the lock that guards a
 //! change to the saved-server store behaves.
 
+use std::io::Write;
 use std::time::SystemTime;
 
 use koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT;
 use koshi_ipc::protocol::{IpcErrorCode, IpcErrorPayload, IpcResponse};
 use koshi_ipc::wire::MaybeKnown;
+use koshi_test_support::fixtures::PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT;
 
 use super::*;
 
@@ -328,7 +330,7 @@ fn a_saved_server_is_named_by_its_name_and_a_new_one_by_its_address() {
 }
 
 #[test]
-fn the_refusal_every_rejected_token_carries_names_both_ways_to_replace_it() {
+fn the_refusal_every_rejected_token_carries_names_an_old_server_and_both_ways_to_replace_it() {
     let server_frame = RemoteServerFrame::Refused {
         message: remote_wire::REMOTE_REFUSED.to_string(),
     };
@@ -341,8 +343,9 @@ fn the_refusal_every_rejected_token_carries_names_both_ways_to_replace_it() {
     };
     assert_eq!(
         detail,
-        "the server desk.local:7654 did not admit the connection: the token was rejected \
-         or revoked. re-grant it on that machine with `koshi share grant`; store the new \
+        "the server desk.local:7654 did not admit the connection. if that machine runs \
+         koshi 0.3.0 or 0.4.0, update koshi there. otherwise the token was rejected or \
+         revoked: re-grant it on that machine with `koshi share grant`, then store the new \
          secret with `koshi remote set-secret` for a saved server, or give it when the \
          next dial asks"
     );
@@ -500,6 +503,7 @@ fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
     let received_reaches = vec![
         Reach::Refused {
             server_label: "work".to_string(),
+            refusal_detail: "this server did not admit the connection".to_string(),
         },
         Reach::Reached {
             server_label: "desk".to_string(),
@@ -517,6 +521,7 @@ fn a_sweep_with_every_server_heard_adds_nothing_and_sorts_by_server() {
             },
             Reach::Refused {
                 server_label: "work".to_string(),
+                refusal_detail: "this server did not admit the connection".to_string(),
             },
         ]
     );
@@ -601,8 +606,8 @@ fn build_remote_link(server_frame_bytes: Vec<u8>) -> (RemoteLink, SharedWrittenB
     )
 }
 
-/// Encode the `server_frame` bytes a server sends.
-fn encode_server_frame(server_frame: &impl serde::Serialize) -> Vec<u8> {
+/// Serialize `server_frame` as the bytes a server sends.
+fn serialize_server_frame(server_frame: &impl serde::Serialize) -> Vec<u8> {
     let (remote_link, written_bytes) = build_remote_link(Vec::new());
     let mut frame_writer = remote_link.frame_writer;
     frame_writer
@@ -615,16 +620,19 @@ fn encode_server_frame(server_frame: &impl serde::Serialize) -> Vec<u8> {
     server_frame_bytes
 }
 
-/// Decode the one client frame held in `client_frame_bytes`.
-fn decode_client_frame(client_frame_bytes: Vec<u8>) -> RemoteClientFrame {
+/// Deserialize the one client frame held in `client_frame_bytes`.
+fn deserialize_client_frame(client_frame_bytes: Vec<u8>) -> RemoteClientFrame {
     let (mut remote_link, _) = build_remote_link(client_frame_bytes);
-    remote_link.frame_reader.recv().expect("the frame decodes")
+    remote_link
+        .frame_reader
+        .recv()
+        .expect("the frame deserializes")
 }
 
 /// A link whose server side already answered `server_frame`, and whose own writes
 /// go into a kept buffer nobody reads.
 fn build_link_with_server_response(server_frame: &RemoteServerFrame) -> RemoteLink {
-    build_remote_link(encode_server_frame(server_frame)).0
+    build_remote_link(serialize_server_frame(server_frame)).0
 }
 
 #[test]
@@ -736,7 +744,7 @@ fn attaching_writes_one_attach_frame_naming_the_session() {
         .expect("the frame writer is finished")
         .clone();
     assert_eq!(
-        decode_client_frame(sent_frame_bytes),
+        deserialize_client_frame(sent_frame_bytes),
         RemoteClientFrame::Attach {
             session_selector: SessionSelector::SessionId(session_id),
         }
@@ -1109,9 +1117,10 @@ fn build_frame_reader(server_frame_bytes: Vec<u8>) -> FrameReader {
 
 #[test]
 fn a_forwarded_answer_carrying_the_restarting_sentence_reads_as_restarting() {
-    let mut frame_reader = build_frame_reader(encode_server_frame(&RemoteServerFrame::Refused {
-        message: ROUTER_RESTARTING_MESSAGE.to_string(),
-    }));
+    let mut frame_reader =
+        build_frame_reader(serialize_server_frame(&RemoteServerFrame::Refused {
+            message: ROUTER_RESTARTING_MESSAGE.to_string(),
+        }));
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
@@ -1127,9 +1136,10 @@ fn a_forwarded_answer_carrying_the_restarting_sentence_reads_as_restarting() {
 
 #[test]
 fn any_other_forwarded_refusal_reads_as_the_token_not_reaching_the_session() {
-    let mut frame_reader = build_frame_reader(encode_server_frame(&RemoteServerFrame::Refused {
-        message: remote_wire::REMOTE_REFUSED.to_string(),
-    }));
+    let mut frame_reader =
+        build_frame_reader(serialize_server_frame(&RemoteServerFrame::Refused {
+            message: remote_wire::REMOTE_REFUSED.to_string(),
+        }));
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
@@ -1146,12 +1156,12 @@ fn any_other_forwarded_refusal_reads_as_the_token_not_reaching_the_session() {
 }
 
 #[test]
-fn a_forwarded_session_answer_decodes_as_the_session_response() {
+fn a_forwarded_session_answer_parses_as_the_session_response() {
     let session_refusal = IpcErrorPayload {
         code: IpcErrorCode::RequestFailed,
         message: "the session is ending".to_string(),
     };
-    let mut frame_reader = build_frame_reader(encode_server_frame(&IpcResponse {
+    let mut frame_reader = build_frame_reader(serialize_server_frame(&IpcResponse {
         request_id: Some(1),
         answer_result: IpcResult::Error(session_refusal.clone()),
     }));
@@ -1172,15 +1182,15 @@ fn a_forwarded_session_answer_decodes_as_the_session_response() {
 }
 
 #[test]
-fn a_forwarded_answer_that_decodes_as_neither_is_refused_naming_the_decode_error() {
+fn a_forwarded_answer_that_parses_as_neither_is_refused_naming_the_parse_error() {
     let welcome_frame = RemoteServerFrame::Welcome {
         remote_protocol_version: REMOTE_PROTOCOL_VERSION,
     };
     let response_parse_error = serde_json::from_str::<IncomingResponse>(
-        &serde_json::to_string(&welcome_frame).expect("a frame encodes"),
+        &serde_json::to_string(&welcome_frame).expect("a frame serializes"),
     )
     .expect_err("a Welcome is no session answer");
-    let mut frame_reader = build_frame_reader(encode_server_frame(&welcome_frame));
+    let mut frame_reader = build_frame_reader(serialize_server_frame(&welcome_frame));
 
     let forwarded_answer_result = read_forwarded_hello_answer(
         &mut frame_reader,
@@ -1194,6 +1204,52 @@ fn a_forwarded_answer_that_decodes_as_neither_is_refused_naming_the_decode_error
     assert_eq!(
         detail,
         format!("the server answered with a frame this attach cannot read: {response_parse_error}")
+    );
+}
+
+#[test]
+fn a_forwarded_answer_quoting_escape_bytes_is_refused_with_them_filtered_out() {
+    let mut frame_reader = build_frame_reader(serialize_server_frame(
+        &RawValue::from_string(r#"{"request_id":1,"\u001b[2Jx":1}"#.to_string())
+            .expect("the answer is JSON"),
+    ));
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Refused(CliError::IpcUnavailable { detail })) = forwarded_answer_result
+    else {
+        panic!("expected a refusal, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(
+        detail,
+        "the server answered with a frame this attach cannot read: unknown field `[2Jx`, \
+         expected `request_id` or `answer_result` at line 1 column 28"
+    );
+}
+
+#[test]
+fn a_forwarded_answer_from_a_session_of_koshi_0_4_0_names_the_step_on_the_serving_machine() {
+    let mut frame_reader = build_frame_reader(serialize_server_frame(
+        &RawValue::from_string(PREVIOUS_RELEASE_MALFORMED_REQUEST_ANSWER_TEXT.to_string())
+            .expect("the answer is JSON"),
+    ));
+
+    let forwarded_answer_result = read_forwarded_hello_answer(
+        &mut frame_reader,
+        &SessionSelector::SessionName(String::from("quiet-lake")),
+    );
+
+    let Err(DialError::Refused(CliError::Runtime { detail })) = forwarded_answer_result else {
+        panic!("expected a refusal, got {forwarded_answer_result:?}");
+    };
+    assert_eq!(
+        detail,
+        "session quiet-lake answered in the format of koshi 0.4.0 or older, which this koshi \
+         cannot talk to; on the machine that serves it, the user who started it runs: koshi \
+         restart-servers"
     );
 }
 

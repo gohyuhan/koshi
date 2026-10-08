@@ -64,6 +64,16 @@ fn list_every_error_class() -> Vec<(CliError, &'static str, i32)> {
             4,
         ),
         (
+            CliError::PreviousReleaseServer {
+                detail: "the server answered in the format of koshi 0.4.0 or older, which this \
+                         koshi cannot talk to"
+                    .into(),
+            },
+            "IPC unavailable: the server answered in the format of koshi 0.4.0 or older, which \
+             this koshi cannot talk to; the user who started it runs: koshi restart-servers",
+            4,
+        ),
+        (
             CliError::SessionAnswerTimedOut,
             "IPC unavailable: the session did not answer in time",
             4,

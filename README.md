@@ -21,6 +21,7 @@ process, terminal screen, and scrollback.
 ## Requirements
 
 - Linux, macOS, or Windows
+- On Linux, glibc 2.34 or newer, such as Ubuntu 22.04 or Debian 12 and newer
 - x86-64 or ARM64
 - A terminal with true color and 256-color support
 - Rust 1.96 to build from source
@@ -145,6 +146,22 @@ Install with PowerShell:
 ```powershell
 powershell -c "irm https://github.com/gohyuhan/koshi/releases/latest/download/install.ps1 | iex"
 ```
+
+Run the same command to upgrade, also while Koshi runs. The script first moves
+the new `koshi.exe` beside the installed one, as
+`koshi-update-<process id>.exe`, and runs it with `--version`. If it does not
+print the version of the release, the script deletes it and stops, and the
+installed `koshi.exe` stays as it was. The script then renames the installed
+`koshi.exe` to `koshi.old`, or to `koshi.1.old` and onward while a Koshi still
+runs from an older backup, and moves the new one into place. Each interactive
+launch, such as `koshi` with no command, removes the backups that no Koshi runs
+from. `koshi update` of Koshi 0.5.0 or older stops with `Access is denied` while
+a Koshi still runs from `koshi.old`. Rename that file to the next free backup
+name, such as `koshi.1.old`, and run the update again. The script, and
+`koshi update` of a Koshi newer than 0.5.0, hold a lock on the file `koshi.lock`
+beside `koshi.exe` while they replace it. A second install waits for that lock.
+While an install holds it, a launch of a Koshi newer than 0.5.0 leaves the
+backups in place.
 
 Or install with Scoop:
 
@@ -513,9 +530,14 @@ the koshi program on disk, and installs nothing. Use it after koshi is installed
 another way, such as by a package manager.
 
 Sessions started by koshi 0.3.0, 0.4.0, 0.5.0-pr.1, 0.5.0-pr.2, or 0.5.0
-support this live handoff. An update from 0.1.0 or 0.2.0 replaces the
-installed binary while existing sessions keep running their older build. End
-those sessions and start new ones to use the installed build.
+support this live handoff. A session or router of koshi 0.3.0 or 0.4.0 does not
+restart by itself after a package manager installs a new koshi: run
+`koshi restart-servers` once. A session started by koshi 0.2.0 or one of its
+pre-releases cannot move to a new build. `koshi update` and
+`koshi restart-servers` name each such session and ask once whether to end it
+and the programs in its panes. If you answer in a pane of one of these sessions,
+that session ends last, and the terminal of that pane closes with it. A koshi
+0.1.0 window keeps its build until its terminal closes.
 
 A client attached while the update runs comes back to its session by itself. If
 the restarted session does not speak that client's protocol version, the client

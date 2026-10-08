@@ -35,6 +35,7 @@ use koshi_core::discovery::SessionOverview;
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, CommandId, SessionId, TabId};
 use koshi_core::recent_event::RecentEvent;
+use koshi_core::text::sanitize_reported_text;
 #[cfg(windows)]
 use koshi_ipc::endpoint::resolve_advertisement_marker_path;
 use koshi_ipc::endpoint::{
@@ -43,6 +44,10 @@ use koshi_ipc::endpoint::{
 };
 use koshi_ipc::error::IpcError;
 use koshi_ipc::layout::SessionLayout;
+use koshi_ipc::previous_release::{
+    PreviousReleaseAnswer, PreviousReleaseErrorCode, PreviousReleaseRequest,
+    PreviousReleaseRequestKind, PreviousReleaseResult,
+};
 use koshi_ipc::protocol::{
     ConnectionToken, IncomingResponse, IpcRequest, IpcRequestKind, IpcResult,
 };
@@ -117,10 +122,11 @@ pub fn resolve_shared_sessions_base_directory() -> Option<PathBuf> {
 /// Reads the session's endpoint file, connects, writes the Hello and the
 /// command back to back, and reads the two replies in order. A missing
 /// endpoint file or a socket nothing listens on reports the session as not
-/// running ([`CliError::SessionNotFound`]); every other failure to talk is
-/// [`CliError::IpcUnavailable`]. The result itself — applied or rejected —
-/// comes back for the caller to map to an exit code, with a rejection's hint
-/// filtered by [`sanitize_reported_text`](koshi_core::text::sanitize_reported_text).
+/// running ([`CliError::SessionNotFound`]). A reply in the envelope of koshi
+/// 0.4.0 or older is [`CliError::PreviousReleaseServer`], and every other
+/// failure to talk is [`CliError::IpcUnavailable`]. The result itself —
+/// applied or rejected — comes back for the caller to map to an exit code,
+/// with a rejection's hint filtered by [`sanitize_reported_text`].
 ///
 /// A session of this user's that refuses this build's protocol version is
 /// asked again once it has restarted, as
@@ -443,6 +449,9 @@ pub enum SessionRestart {
     /// Nothing advertises that session, or nothing listens behind the address
     /// it advertises. Nothing restarted.
     NotRunning,
+    /// The session runs koshi 0.2.0 or one of its pre-releases, which has no
+    /// restart request. Nothing restarted.
+    WithoutRestartRequest,
 }
 
 /// Ask the running session `session_id` to restart into the binary on disk.
@@ -468,6 +477,13 @@ pub enum SessionRestart {
 /// [`run_session_exchange_with_restart_wait`] states. Example: a session that
 /// restarted by itself into the program on disk is asked to restart once more,
 /// and restarts into the same program.
+///
+/// A session that answers in the envelope of koshi 0.1.0 to 0.4.0
+/// ([`CliError::PreviousReleaseServer`]) is asked again in the envelope of
+/// koshi 0.2.0 to 0.4.0, with a Hello and a Restart. `Restarting`, which koshi
+/// 0.3.0 and 0.4.0 answer, gives [`SessionRestart::Restarting`]. The refusals
+/// of koshi 0.2.0 and `v0.2.0-pr.1` give
+/// [`SessionRestart::WithoutRestartRequest`].
 pub fn restart_running_session(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
@@ -493,7 +509,189 @@ pub fn restart_running_session(
             Err(talk::SESSION_PEER_WORDS.build_unexpected_reply_error(&unexpected_result))
         }
         Err(CliError::SessionNotFound { .. }) => Ok(SessionRestart::NotRunning),
+        Err(CliError::PreviousReleaseServer { .. }) => restart_previous_release_session(
+            runtime_directory,
+            shared_sessions_base_directory,
+            session_id,
+        ),
         Err(ipc_error) => Err(ipc_error),
+    }
+}
+
+/// Ask the session `session_id`, which koshi 0.2.0 to 0.4.0 started, to
+/// restart into the program file it started from. The Hello of
+/// [`PreviousReleaseRequestKind::build_hello_request`] and the Restart go out
+/// back to back, in the envelope of that release.
+///
+/// - `Restarting`, which koshi 0.3.0 and 0.4.0 answer, gives
+///   [`SessionRestart::Restarting`].
+/// - A Restart refused with `unsupported_kind`, which koshi 0.2.0 answers, and
+///   a Hello refused with `malformed_request`, which `v0.2.0-pr.1` answers,
+///   give [`SessionRestart::WithoutRestartRequest`].
+/// - A session no endpoint file advertises, or one nothing listens behind,
+///   gives [`SessionRestart::NotRunning`].
+///
+/// `shared_sessions_base_directory` is searched as [`load_session_endpoint`]
+/// searches it.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] for every other refusal, carrying its sentence
+/// filtered by [`sanitize_reported_text`], and for an answer of the wrong kind,
+/// as [`build_previous_release_answer_error`] states. The failure of the
+/// endpoint file read, the connect, a write or a read.
+fn restart_previous_release_session(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+) -> Result<SessionRestart, CliError> {
+    let Some((mut session_connection, connection_token)) = connect_to_previous_release_session(
+        runtime_directory,
+        shared_sessions_base_directory,
+        session_id,
+    )?
+    else {
+        return Ok(SessionRestart::NotRunning);
+    };
+    send_previous_release_request(
+        &mut session_connection,
+        1,
+        PreviousReleaseRequestKind::build_hello_request(connection_token),
+    )?;
+    send_previous_release_request(
+        &mut session_connection,
+        2,
+        PreviousReleaseRequestKind::Restart,
+    )?;
+    match read_previous_release_result(&mut session_connection)? {
+        PreviousReleaseResult::Hello { .. } => {}
+        PreviousReleaseResult::Error(refusal)
+            if refusal.code == PreviousReleaseErrorCode::MalformedRequest =>
+        {
+            return Ok(SessionRestart::WithoutRestartRequest);
+        }
+        hello_answer => return Err(build_previous_release_answer_error(hello_answer)),
+    }
+    match read_previous_release_result(&mut session_connection)? {
+        PreviousReleaseResult::Restarting => Ok(SessionRestart::Restarting),
+        PreviousReleaseResult::Error(refusal)
+            if refusal.code == PreviousReleaseErrorCode::UnsupportedKind =>
+        {
+            Ok(SessionRestart::WithoutRestartRequest)
+        }
+        restart_answer => Err(build_previous_release_answer_error(restart_answer)),
+    }
+}
+
+/// The build the session `session_id`, which koshi 0.2.0 to 0.4.0 started,
+/// names in its answer to the Hello of that release, filtered by
+/// [`sanitize_reported_text`], such as `0.4.0`.
+///
+/// `Ok(None)` means no session is running under that id. An empty string is
+/// the answer of koshi 0.2.0, which names no build. Sends nothing besides the
+/// Hello.
+///
+/// # Errors
+/// [`CliError::IpcUnavailable`] for a refused Hello, carrying its sentence
+/// filtered by [`sanitize_reported_text`], and for a `Restarting` answer:
+/// `the session answered with an unexpected Restarting reply`. The failure of
+/// the endpoint file read, the connect, the write or the read.
+pub fn find_previous_release_session_version(
+    runtime_directory: &Path,
+    session_id: SessionId,
+) -> Result<Option<String>, CliError> {
+    let Some((mut session_connection, connection_token)) =
+        connect_to_previous_release_session(runtime_directory, None, session_id)?
+    else {
+        return Ok(None);
+    };
+    send_previous_release_request(
+        &mut session_connection,
+        1,
+        PreviousReleaseRequestKind::build_hello_request(connection_token),
+    )?;
+    match read_previous_release_result(&mut session_connection)? {
+        PreviousReleaseResult::Hello { build_version } => {
+            Ok(Some(sanitize_reported_text(&build_version)))
+        }
+        hello_answer => Err(build_previous_release_answer_error(hello_answer)),
+    }
+}
+
+/// A connection to the session `session_id`, found as
+/// [`load_session_endpoint`] finds it, with the token its endpoint file
+/// carries. `Ok(None)` means no endpoint file advertises the session, or
+/// nothing listens behind it. The connect waits at most
+/// [`CONNECT_WAIT_DURATION`].
+///
+/// # Errors
+/// The failure of the endpoint file read or of the connect.
+fn connect_to_previous_release_session(
+    runtime_directory: &Path,
+    shared_sessions_base_directory: Option<&Path>,
+    session_id: SessionId,
+) -> Result<Option<(Connection, ConnectionToken)>, CliError> {
+    let session_endpoint = match load_session_endpoint(
+        runtime_directory,
+        shared_sessions_base_directory,
+        session_id,
+    ) {
+        Ok(session_endpoint) => session_endpoint,
+        Err(CliError::SessionNotFound { .. }) => return Ok(None),
+        Err(load_error) => return Err(load_error),
+    };
+    match connect_to_session(&session_endpoint, session_id, None) {
+        Ok(session_connection) => Ok(Some((
+            session_connection,
+            session_endpoint.connection_token,
+        ))),
+        Err(CliError::SessionNotFound { .. }) => Ok(None),
+        Err(connect_error) => Err(connect_error),
+    }
+}
+
+/// Write `request_kind` as request `request_id` on `session_connection`, in
+/// the envelope of koshi 0.2.0 to 0.4.0.
+fn send_previous_release_request(
+    session_connection: &mut Connection,
+    request_id: u64,
+    request_kind: PreviousReleaseRequestKind,
+) -> Result<(), CliError> {
+    session_connection
+        .send(&PreviousReleaseRequest {
+            request_id,
+            request_kind,
+        })
+        .map_err(build_ipc_unavailable_error)
+}
+
+/// Read the next answer on `session_connection`, in the envelope of koshi
+/// 0.2.0 to 0.4.0.
+fn read_previous_release_result(
+    session_connection: &mut Connection,
+) -> Result<PreviousReleaseResult, CliError> {
+    let previous_release_answer: PreviousReleaseAnswer = session_connection
+        .recv()
+        .map_err(build_ipc_unavailable_error)?;
+    Ok(previous_release_answer.answer_result)
+}
+
+/// The failure for `previous_release_result`, an answer that is not the one
+/// its request asks for: a refusal is [`CliError::IpcUnavailable`] carrying
+/// its sentence filtered by [`sanitize_reported_text`], and a `Hello` or a
+/// `Restarting` is the failure
+/// [`PeerWords::build_unexpected_wire_name_error`](talk::PeerWords::build_unexpected_wire_name_error)
+/// names, such as `the session answered with an unexpected Restarting reply`.
+fn build_previous_release_answer_error(previous_release_result: PreviousReleaseResult) -> CliError {
+    match previous_release_result {
+        PreviousReleaseResult::Error(refusal) => CliError::IpcUnavailable {
+            detail: sanitize_reported_text(&refusal.message),
+        },
+        PreviousReleaseResult::Hello { .. } => {
+            talk::SESSION_PEER_WORDS.build_unexpected_wire_name_error("Hello")
+        }
+        PreviousReleaseResult::Restarting => {
+            talk::SESSION_PEER_WORDS.build_unexpected_wire_name_error("Restarting")
+        }
     }
 }
 
@@ -573,7 +771,9 @@ fn find_session_version_from_endpoint(
     request_writer
         .send(&hello_request)
         .map_err(build_exchange_error)?;
-    let hello_response: IncomingResponse = response_reader.recv().map_err(build_exchange_error)?;
+    let hello_response: IncomingResponse = response_reader
+        .recv_answer()
+        .map_err(build_exchange_error)?;
     talk::parse_session_hello_version(hello_response).map(|(_, version)| Some(version))
 }
 
@@ -1739,10 +1939,14 @@ fn exchange_session_request(
     request_writer
         .send(&ipc_request)
         .map_err(build_exchange_error)?;
-    let hello_response: IncomingResponse = response_reader.recv().map_err(build_exchange_error)?;
+    let hello_response: IncomingResponse = response_reader
+        .recv_answer()
+        .map_err(build_exchange_error)?;
     talk::parse_session_hello_version(hello_response)?;
 
-    let ipc_response: IncomingResponse = response_reader.recv().map_err(build_exchange_error)?;
+    let ipc_response: IncomingResponse = response_reader
+        .recv_answer()
+        .map_err(build_exchange_error)?;
     talk::SESSION_PEER_WORDS.take_response_result(ipc_response)
 }
 
@@ -1779,11 +1983,14 @@ fn is_answer_deadline_reached(answer_deadline: Option<Instant>) -> bool {
 /// directory is not searched for it.
 ///
 /// # Errors
-/// [`CliError::SessionNotFound`] for an id no searched place holds; the
-/// failure [`build_session_restarting_error`] gives for a session that is
-/// restarting; [`CliError::IpcUnavailable`] carrying the sentence of a failure
+/// [`CliError::SessionNotFound`] for an id no searched place holds, and for
+/// the endpoint file of a koshi 0.1.0 window that
+/// [`is_koshi_0_1_0_window_closed`] finds closed; the failure
+/// [`build_session_restarting_error`] gives for a session that is restarting;
+/// [`CliError::IpcUnavailable`] carrying the sentence of a failure
 /// [`find_foreign_session_address`] gives; and [`CliError::IpcUnavailable`]
-/// for an endpoint file that exists and cannot be read.
+/// for an endpoint file that exists and cannot be read, a koshi 0.1.0
+/// window's that is still open included.
 pub fn load_session_endpoint(
     runtime_directory: &Path,
     shared_sessions_base_directory: Option<&Path>,
@@ -1810,10 +2017,34 @@ pub fn load_session_endpoint(
                     session_name: session_id.to_string(),
                 })
         }
+        Err(IpcError::Koshi010WindowEndpointFile { .. })
+            if is_koshi_0_1_0_window_closed(runtime_directory, session_id) =>
+        {
+            Err(CliError::SessionNotFound {
+                session_name: session_id.to_string(),
+            })
+        }
         Err(ipc_error) => Err(CliError::IpcUnavailable {
             detail: ipc_error.to_string(),
         }),
     }
+}
+
+/// Whether nothing listens at
+/// [`compute_socket_address`]`(runtime_directory, session_id)`, where a koshi
+/// 0.1.0 window of the session `session_id` listens while it is open. Its
+/// endpoint file names no process to check. Any connect failure other than
+/// [`IpcError::NoListener`] gives `false`. A connect that succeeds is closed
+/// at once.
+///
+/// Example: a window that crashed left `session-<uuid>.json` behind, and
+/// nothing listens at its socket: `true`.
+#[must_use]
+pub fn is_koshi_0_1_0_window_closed(runtime_directory: &Path, session_id: SessionId) -> bool {
+    matches!(
+        Connection::connect(&compute_socket_address(runtime_directory, session_id)),
+        Err(IpcError::NoListener { .. })
+    )
 }
 
 /// Connect to the advertised socket, waiting at most

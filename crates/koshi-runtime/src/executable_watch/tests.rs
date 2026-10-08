@@ -82,6 +82,37 @@ fn read_installed_version_takes_the_version_after_the_program_name() {
 }
 
 #[test]
+fn read_installed_version_takes_a_version_printed_after_3_seconds() {
+    let program_directory = TempDir::new().expect("a test directory");
+    #[cfg(unix)]
+    let program_path = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let program_path = program_directory.path().join("koshi");
+        std::fs::write(&program_path, "#!/bin/sh\nsleep 3\necho 'koshi 0.6.0'\n")
+            .expect("the program is written");
+        std::fs::set_permissions(&program_path, std::fs::Permissions::from_mode(0o755))
+            .expect("the program runs");
+        program_path
+    };
+    #[cfg(windows)]
+    let program_path = {
+        let program_path = program_directory.path().join("koshi.cmd");
+        std::fs::write(
+            &program_path,
+            "@echo off\r\nping -n 4 127.0.0.1 >nul\r\necho koshi 0.6.0\r\n",
+        )
+        .expect("the program is written");
+        program_path
+    };
+
+    let read_started_at = Instant::now();
+    let installed_version = read_installed_version(&program_path);
+
+    assert_eq!(installed_version, Ok("0.6.0".to_string()));
+    assert!(read_started_at.elapsed() >= Duration::from_millis(2500));
+}
+
+#[test]
 fn read_installed_version_refuses_a_line_that_names_another_program() {
     let program_directory = TempDir::new().expect("a test directory");
     let program_path = write_printing_program(
@@ -164,6 +195,77 @@ fn read_first_output_line_starts_a_program_file_once_its_writer_closes_it() {
     };
     assert_eq!(output_line.trim_end(), "koshi 1.0.0");
     writer_thread.join().expect("the writer thread ends");
+}
+
+/// The line that the program of [`run_output_line_read_of_an_error_writing_program`]
+/// writes on standard error.
+const PROGRAM_ERROR_LINE: &str = "version GLIBC_2.99 not found";
+
+/// Runs [`read_first_output_line`] on a program that writes
+/// [`PROGRAM_ERROR_LINE`] on standard error, then `koshi 1.0.0` on standard
+/// output. [`read_first_output_line_hands_the_program_the_standard_error_of_its_caller`]
+/// runs this test alone in a child copy of this test binary.
+#[test]
+#[ignore = "runs as the child process of read_first_output_line_hands_the_program_the_standard_error_of_its_caller"]
+fn run_output_line_read_of_an_error_writing_program() {
+    let program_directory = TempDir::new().expect("a test directory");
+    #[cfg(unix)]
+    let program_path = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let program_path = program_directory.path().join("koshi");
+        std::fs::write(
+            &program_path,
+            format!("#!/bin/sh\necho '{PROGRAM_ERROR_LINE}' >&2\necho 'koshi 1.0.0'\n"),
+        )
+        .expect("the program is written");
+        std::fs::set_permissions(&program_path, std::fs::Permissions::from_mode(0o755))
+            .expect("the program runs");
+        program_path
+    };
+    #[cfg(windows)]
+    let program_path = {
+        let program_path = program_directory.path().join("koshi.cmd");
+        std::fs::write(
+            &program_path,
+            format!("@echo off\r\necho {PROGRAM_ERROR_LINE}>&2\r\necho koshi 1.0.0\r\n"),
+        )
+        .expect("the program is written");
+        program_path
+    };
+
+    let output_line_result =
+        read_first_output_line(&program_path, "--version", VERSION_READ_TEST_WAIT_DURATION);
+
+    let Ok(output_line) = output_line_result else {
+        panic!("expected the program's line, got {output_line_result:?}");
+    };
+    assert_eq!(output_line.trim_end(), "koshi 1.0.0");
+}
+
+#[test]
+fn read_first_output_line_hands_the_program_the_standard_error_of_its_caller() {
+    let child_output =
+        ProcessCommand::new(std::env::current_exe().expect("the test binary has a path"))
+            .args([
+                "--exact",
+                "executable_watch::tests::run_output_line_read_of_an_error_writing_program",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .stdin(Stdio::null())
+            .output()
+            .expect("the child copy of this test binary runs");
+
+    assert_eq!(
+        child_output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&child_output.stdout)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&child_output.stderr).trim_end(),
+        PROGRAM_ERROR_LINE
+    );
 }
 
 #[cfg(target_os = "linux")]
