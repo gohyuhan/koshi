@@ -1,4 +1,5 @@
-//! Tests for reading, walking and ending processes.
+//! Tests for reading, walking and ending processes, and for telling whether a
+//! process id is free.
 
 use std::process::{Child, Command, Stdio};
 use std::time::UNIX_EPOCH;
@@ -732,6 +733,31 @@ fn list_process_records_holds_this_process() {
     let process_records = list_process_records().expect("the process list is readable");
 
     assert!(process_records.contains(&this_process_record));
+}
+
+/// A process id above every id that Linux, macOS, and Windows give a process:
+/// `2147483647`.
+const FREE_PROCESS_ID: u32 = 2_147_483_647;
+
+#[test]
+fn is_process_id_free_gives_true_for_an_id_that_no_process_has() {
+    assert!(is_process_id_free(FREE_PROCESS_ID));
+}
+
+#[test]
+fn is_process_id_free_gives_false_for_this_process() {
+    assert!(!is_process_id_free(std::process::id()));
+}
+
+#[test]
+fn is_process_id_free_gives_false_for_process_id_zero() {
+    assert!(!is_process_id_free(0));
+}
+
+#[cfg(unix)]
+#[test]
+fn is_process_id_free_gives_false_for_the_first_process_the_system_starts() {
+    assert!(!is_process_id_free(INIT_PROCESS_ID));
 }
 
 #[cfg(unix)]

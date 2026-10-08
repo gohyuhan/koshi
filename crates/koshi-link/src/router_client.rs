@@ -16,7 +16,6 @@
 //! Each opens one connection, and reports back when no router was running.
 
 use std::path::Path;
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use koshi_core::ids::SessionId;
@@ -56,16 +55,6 @@ const ROUTER_START_TIMEOUT_DURATION: Duration = Duration::from_secs(5);
 /// How long the retry loop pauses between connect attempts while it waits for
 /// a freshly started router.
 const ROUTER_START_POLL_INTERVAL_DURATION: Duration = Duration::from_millis(100);
-
-/// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
-/// console and does not inherit the caller's.
-#[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
-
-/// The Win32 `CREATE_NEW_PROCESS_GROUP` creation flag: the started process
-/// begins a process group of its own.
-#[cfg(windows)]
-const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Ask the router for `request_kind` and hand back its answer.
 ///
@@ -482,8 +471,9 @@ fn rewrite_router_result_for_build(
 
 /// Start the router as a detached process serving `runtime_directory`.
 ///
-/// It gets no standard input, output, or error, and a process group of its
-/// own: it keeps running after the shell that started it goes away, and writes
+/// It is detached as [`koshi_host::detached_process::configure_detached_process`]
+/// sets it: no standard input, output, or error, and a process group of its
+/// own. It keeps running after the shell that started it goes away, and writes
 /// nothing over the caller's terminal.
 fn spawn_router_detached(runtime_directory: &Path) -> Result<(), CliError> {
     let program_path = koshi_host::program_path::resolve_program_path().map_err(|io_error| {
@@ -491,34 +481,19 @@ fn spawn_router_detached(runtime_directory: &Path) -> Result<(), CliError> {
             detail: format!("this binary's own path could not be read: {io_error}"),
         }
     })?;
-    let mut router_process_command = std::process::Command::new(program_path);
-    router_process_command
-        .arg(ROUTER_SUBCOMMAND)
-        .arg(RUNTIME_DIRECTORY_FLAG)
-        .arg(runtime_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        router_process_command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        router_process_command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-
     // The child handle is dropped. On Unix, a router that exits while this
     // process remains alive stays a zombie until this process exits.
-    router_process_command
-        .spawn()
-        .map(|_| ())
-        .map_err(|io_error| CliError::IpcUnavailable {
-            detail: format!("the router could not be started: {io_error}"),
-        })
+    koshi_host::detached_process::configure_detached_process(&mut std::process::Command::new(
+        program_path,
+    ))
+    .arg(ROUTER_SUBCOMMAND)
+    .arg(RUNTIME_DIRECTORY_FLAG)
+    .arg(runtime_directory)
+    .spawn()
+    .map(|_| ())
+    .map_err(|io_error| CliError::IpcUnavailable {
+        detail: format!("the router could not be started: {io_error}"),
+    })
 }
 
 /// Ask the router to make a new session and hand back its id. Starts a router

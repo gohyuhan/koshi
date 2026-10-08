@@ -1,13 +1,10 @@
-//! Starting this crate's own processes, and listing and reaping their
-//! children.
+//! Blocking SIGPIPE on serving threads, and listing and reaping the children
+//! of this process.
 //!
-//! The router, the session server and the pty supervisor each start a helper
-//! that outlives them. On Unix each of the three runs serving threads with
-//! SIGPIPE blocked. On Unix the router and the session server list the
-//! children an earlier image of their process left, and reap them. Those
+//! The router blocks SIGPIPE on the threads that serve its connections and
+//! the threads of its remote listener. The router and the session server list
+//! the children an earlier image of their process left, and reap them. Those
 //! steps live here, once each.
-
-use std::process::{Command, Stdio};
 
 #[cfg(test)]
 mod tests;
@@ -17,7 +14,6 @@ mod tests;
 /// The blocked signal stays pending and is discarded when the thread ends; a
 /// write to a hung-up peer returns an `EPIPE` error under every process-wide
 /// disposition.
-#[cfg(unix)]
 pub(crate) fn block_sigpipe_on_this_thread() {
     let mut signal_set: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe {
@@ -25,39 +21,6 @@ pub(crate) fn block_sigpipe_on_this_thread() {
         libc::sigaddset(&mut signal_set, libc::SIGPIPE);
         libc::pthread_sigmask(libc::SIG_BLOCK, &signal_set, std::ptr::null_mut());
     }
-}
-
-/// The Win32 `DETACHED_PROCESS` creation flag: the started process gets no
-/// console and does not inherit the caller's.
-#[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
-
-/// The Win32 `CREATE_NEW_PROCESS_GROUP` creation flag: the started process
-/// begins a process group of its own.
-#[cfg(windows)]
-const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-
-/// Set `command` to start a process that outlives this one: a process group of
-/// its own, and input and output going nowhere. On Windows the process also
-/// gets no console.
-///
-/// Hands back the same `command` for the caller to spawn.
-pub(crate) fn configure_detached_process(command: &mut Command) -> &mut Command {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    command
 }
 
 /// How many process ids the first read of this process's children makes room
@@ -165,7 +128,7 @@ pub(crate) fn list_child_process_ids() -> std::io::Result<Vec<u32>> {
 }
 
 /// Every child process of this one. This platform cannot list child processes.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn list_child_process_ids() -> std::io::Result<Vec<u32>> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -179,7 +142,6 @@ pub(crate) fn list_child_process_ids() -> std::io::Result<Vec<u32>> {
 ///
 /// Before → after: `child_process_id = 4821`, a child killed by `SIGKILL` →
 /// its exit status is collected and it is no longer a zombie.
-#[cfg(unix)]
 pub(crate) fn wait_for_child_exit(child_process_id: libc::pid_t) {
     loop {
         let mut wait_status: libc::c_int = 0;

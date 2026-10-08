@@ -147,6 +147,7 @@ use koshi_link::router_client::{ROUTER_SUBCOMMAND, RUNTIME_DIRECTORY_FLAG};
 use koshi_runtime::executable_watch::ExecutableWatch;
 use koshi_runtime::server::is_binary_runnable;
 
+#[cfg(unix)]
 use crate::process;
 use crate::remote_listener::{
     self, AdmissionAsk, LocateRefusal, RemoteConnectionAdmission, WarningRateLimiter,
@@ -1168,19 +1169,22 @@ fn restart_by_exec(executable_path: &Path, runtime_directory: &Path) -> std::io:
 /// Start the binary at `executable_path` as a new router over the same runtime directory,
 /// waiting for the lock this router still holds.
 ///
-/// The new router is detached as [`process::configure_detached_process`] sets
-/// it. An error means nothing was started.
+/// The new router is detached as
+/// [`koshi_host::detached_process::configure_detached_process`] sets it. An
+/// error means nothing was started.
 fn hand_over_router_to_next_process(
     executable_path: &Path,
     runtime_directory: &Path,
 ) -> std::io::Result<()> {
-    process::configure_detached_process(&mut std::process::Command::new(executable_path))
-        .arg(ROUTER_SUBCOMMAND)
-        .arg(RUNTIME_DIRECTORY_FLAG)
-        .arg(runtime_directory)
-        .arg(WAIT_FOR_LOCK_FLAG)
-        .spawn()
-        .map(|_| ())
+    koshi_host::detached_process::configure_detached_process(&mut std::process::Command::new(
+        executable_path,
+    ))
+    .arg(ROUTER_SUBCOMMAND)
+    .arg(RUNTIME_DIRECTORY_FLAG)
+    .arg(runtime_directory)
+    .arg(WAIT_FOR_LOCK_FLAG)
+    .spawn()
+    .map(|_| ())
 }
 
 /// Start the thread that accepts router connections.

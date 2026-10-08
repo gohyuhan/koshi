@@ -6,8 +6,9 @@
 //! `brew`. A Scoop install and a file no package manager tracks check the
 //! project's GitHub releases and, when a newer one exists, download the
 //! prebuilt archive for this OS/arch, verify its SHA-256 checksum, unpack the
-//! `koshi` binary, and swap it for the program file in place. A build from
-//! source downloads nothing. An interactive launch also calls
+//! `koshi` binary, copy it beside the program file, run the copy with
+//! `--version`, and swap the copy in once it prints the release's version. A
+//! build from source downloads nothing. An interactive launch also calls
 //! `prompt_startup_update`, which does the same check on a timer and offers to
 //! install.
 //!
@@ -46,6 +47,7 @@ use koshi_config::types::{ClientConfig, UpdateConfig};
 use koshi_core::ids::SessionId;
 use koshi_host::process_tree;
 use koshi_ipc::endpoint::{resolve_update_lock_path, EndpointFile, ServerProgramFile};
+use koshi_ipc::error::IpcError;
 use koshi_ipc::router::{resolve_router_endpoint_path, resolve_router_program_file_path};
 use koshi_runtime::executable_watch::read_installed_version;
 use semver::Version;
@@ -220,8 +222,9 @@ pub fn run_restart_servers_command() -> Result<(), CliError> {
     }
 }
 
-/// On an interactive launch, when auto-check is enabled and a check is due,
-/// look for a newer release and offer to install it. Every failure is
+/// On an interactive launch, delete the stale backups as
+/// `delete_stale_backups` states. Then, when auto-check is enabled and a check
+/// is due, look for a newer release and offer to install it. Every failure is
 /// swallowed and the launch continues. Runs before the terminal enters raw
 /// mode, and reads the answer from plain standard input.
 ///
@@ -442,18 +445,7 @@ fn restart_servers_into_version(expected_version: &str, restart_scope: RestartSc
 /// standard error and gives `None`.
 fn take_update_lock(runtime_directory: &Path) -> Option<fs::File> {
     let update_lock_path = resolve_update_lock_path(runtime_directory);
-    let mut update_lock_options = fs::File::options();
-    update_lock_options
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        update_lock_options.mode(0o600);
-    }
-    let update_lock_file = match update_lock_options.open(&update_lock_path) {
+    let update_lock_file = match open_lock_file(&update_lock_path) {
         Ok(update_lock_file) => update_lock_file,
         Err(open_error) if open_error.kind() == io::ErrorKind::NotFound => return None,
         Err(open_error) => {
@@ -472,6 +464,27 @@ fn take_update_lock(runtime_directory: &Path) -> Option<fs::File> {
         return None;
     }
     Some(update_lock_file)
+}
+
+/// Open the lock file at `lock_path` for reading and writing, creating it with
+/// mode `0600` on Unix when it does not exist. An existing file keeps its
+/// content.
+///
+/// # Errors
+/// The failure to open or create the file.
+fn open_lock_file(lock_path: &Path) -> io::Result<fs::File> {
+    let mut lock_file_options = fs::File::options();
+    lock_file_options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_file_options.mode(0o600);
+    }
+    lock_file_options.open(lock_path)
 }
 
 /// Ask the router `runtime_directory` advertises to restart into the koshi
@@ -1128,33 +1141,64 @@ pub fn list_other_runtime_directories(
         .collect()
 }
 
-/// How many sessions run from `previous_release_runtime_directory`: each
+/// What runs from a runtime directory of koshi 0.1.0 and 0.2.0, as
+/// [`count_previous_release_servers`] counts it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviousReleaseServerCount {
+    /// How many sessions run from the directory.
+    pub session_count: usize,
+    /// How many koshi 0.1.0 windows run from the directory.
+    pub open_window_count: usize,
+}
+
+/// What runs from `previous_release_runtime_directory`, counted over each
 /// endpoint file there, as [`ipc_client::list_advertised_sessions`] lists
-/// them, whose process passes the check `koshi kill-session` makes: it runs
-/// as this user, runs a program that
-/// [`is_koshi_executable_name`](process_tree::is_koshi_executable_name)
-/// accepts, such as `koshi` or `koshi.old`, and started in the second the
-/// endpoint file was last written or before it. A directory that cannot be
-/// read counts nothing, and so does an endpoint file that
-/// cannot be read, such as the one a koshi 0.1.0 window writes.
+/// them:
+///
+/// - A session is an endpoint file whose process passes the check
+///   `koshi kill-session` makes: it runs as this user, runs a program that
+///   [`is_koshi_executable_name`](process_tree::is_koshi_executable_name)
+///   accepts, such as `koshi` or `koshi.old`, and started in the second the
+///   endpoint file was last written or before it.
+/// - An open window is the endpoint file of a koshi 0.1.0 window that
+///   [`is_koshi_0_1_0_window_closed`](ipc_client::is_koshi_0_1_0_window_closed)
+///   does not find closed.
+///
+/// A directory that cannot be read counts nothing, and so does every other
+/// endpoint file.
 #[must_use]
-pub fn count_previous_release_sessions(previous_release_runtime_directory: &Path) -> usize {
+pub fn count_previous_release_servers(
+    previous_release_runtime_directory: &Path,
+) -> PreviousReleaseServerCount {
+    let mut server_count = PreviousReleaseServerCount::default();
     let Ok(session_ids) = ipc_client::list_advertised_sessions(previous_release_runtime_directory)
     else {
-        return 0;
+        return server_count;
     };
-    session_ids
-        .into_iter()
-        .filter(|session_id| {
-            let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
-                previous_release_runtime_directory,
-                *session_id,
-            );
-            EndpointFile::load_from_path(&endpoint_file_path).is_ok_and(|endpoint_file| {
-                find_server_process_record(&endpoint_file_path, endpoint_file.process_id).is_some()
-            })
-        })
-        .count()
+    for session_id in session_ids {
+        let endpoint_file_path = EndpointFile::resolve_endpoint_file_path(
+            previous_release_runtime_directory,
+            session_id,
+        );
+        match EndpointFile::load_from_path(&endpoint_file_path) {
+            Ok(endpoint_file)
+                if find_server_process_record(&endpoint_file_path, endpoint_file.process_id)
+                    .is_some() =>
+            {
+                server_count.session_count += 1;
+            }
+            Err(IpcError::Koshi010WindowEndpointFile { .. })
+                if !ipc_client::is_koshi_0_1_0_window_closed(
+                    previous_release_runtime_directory,
+                    session_id,
+                ) =>
+            {
+                server_count.open_window_count += 1;
+            }
+            _ => {}
+        }
+    }
+    server_count
 }
 
 /// The line `koshi list-sessions` prints on standard error for
@@ -1182,6 +1226,35 @@ pub fn format_previous_release_session_note(
             "{session_count} sessions that an older koshi started run from \
              {previous_release_runtime_directory}, which this koshi does not list; run koshi \
              restart-servers to move them or end them"
+        )),
+    }
+}
+
+/// The line `koshi list-sessions` prints on standard error for
+/// `open_window_count` koshi 0.1.0 windows that run from
+/// `previous_release_runtime_directory`, and `None` for `0`.
+///
+/// Example: `1` and `/home/user/.local/share/koshi/run` give `1 koshi 0.1.0
+/// window runs from /home/user/.local/share/koshi/run; this koshi cannot talk
+/// to it, and it ends when its terminal closes`. `2` gives `2 koshi 0.1.0
+/// windows run from ...; this koshi cannot talk to them, and each one ends
+/// when its terminal closes`.
+#[must_use]
+pub fn format_koshi_0_1_0_window_note(
+    previous_release_runtime_directory: &Path,
+    open_window_count: usize,
+) -> Option<String> {
+    let previous_release_runtime_directory = previous_release_runtime_directory.display();
+    match open_window_count {
+        0 => None,
+        1 => Some(format!(
+            "1 koshi 0.1.0 window runs from {previous_release_runtime_directory}; this koshi \
+             cannot talk to it, and it ends when its terminal closes"
+        )),
+        open_window_count => Some(format!(
+            "{open_window_count} koshi 0.1.0 windows run from \
+             {previous_release_runtime_directory}; this koshi cannot talk to them, and each one \
+             ends when its terminal closes"
         )),
     }
 }
@@ -1363,9 +1436,9 @@ fn is_release_newer(release_tag: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Downloads the release archive `release_tag` names, verifies its checksum, unpacks the binary,
-/// and swaps it for the running executable, as [`swap_executable`] states. The temp files are
-/// securely created and auto-removed when their [`TempPath`] drops at the end of this function,
-/// whichever way it ends.
+/// and swaps it for the running executable once it prints the version of `release_tag`, as
+/// [`swap_executable`] states. The temp files are created exclusively under random names, and
+/// are removed when their [`TempPath`] drops at the end of this function, whichever way it ends.
 fn install_release(release_tag: &str) -> Result<(), String> {
     let archive_url = compute_binary_url(release_tag).ok_or_else(|| {
         format!(
@@ -1407,7 +1480,7 @@ fn install_release(release_tag: &str) -> Result<(), String> {
     )?;
     let executable_path = std::env::current_exe()
         .map_err(|executable_path_error| executable_path_error.to_string())?;
-    swap_executable(release_binary.as_ref(), &executable_path)
+    swap_executable(release_binary.as_ref(), &executable_path, release_tag)
 }
 
 /// The download URL for this platform's release archive at `release_tag`, or `None`
@@ -1650,18 +1723,96 @@ fn get_binary_file_name() -> &'static str {
     }
 }
 
-/// Deletes every backup that a Windows update left beside the file the running
-/// executable's path names once every symbolic link and junction in it is
-/// followed: each entry [`list_backup_executable_paths`] lists. A backup that a
-/// running process still runs from cannot be deleted, and stays. A no-op on
-/// other platforms, where the swap leaves no file behind.
+/// On Windows, deletes the backups beside the file the running executable's
+/// path names once every symbolic link and junction in it is followed, as
+/// [`delete_stale_backups_beside`] states. A path that cannot be read or
+/// followed deletes nothing. A no-op on other platforms, where the swap leaves
+/// no file behind.
 fn delete_stale_backups() {
     #[cfg(windows)]
     if let Ok(executable_path) = std::env::current_exe().and_then(fs::canonicalize) {
-        for backup_executable_path in list_backup_executable_paths(&executable_path) {
-            let _ = fs::remove_file(backup_executable_path);
+        delete_stale_backups_beside(&executable_path);
+    }
+}
+
+/// Deletes each backup that [`list_backup_executable_paths`] lists beside the
+/// program file at `executable_path`, while this process holds the install
+/// lock. When at least one backup is listed, opens the lock file that
+/// [`compute_install_lock_path`] names, creating it when it does not exist,
+/// and takes its exclusive lock without waiting. Nothing is deleted when the
+/// lock file cannot be opened or locked, such as while another process holds
+/// the lock. A backup that a running process still runs from cannot be
+/// deleted, and stays.
+///
+/// Example: beside `koshi.exe`, `koshi.old` and `koshi.2.old` are deleted, and
+/// `koshi.lock` is created. While `install.ps1` holds `koshi.lock`, both
+/// backups stay.
+#[cfg(any(windows, test))]
+fn delete_stale_backups_beside(executable_path: &Path) {
+    let backup_executable_paths = list_backup_executable_paths(executable_path);
+    if backup_executable_paths.is_empty() {
+        return;
+    }
+    let Ok(install_lock_file) = open_lock_file(&compute_install_lock_path(executable_path)) else {
+        return;
+    };
+    if install_lock_file.try_lock().is_err() {
+        return;
+    }
+    for backup_executable_path in backup_executable_paths {
+        let _ = fs::remove_file(backup_executable_path);
+    }
+}
+
+/// The install lock file of the program file at `executable_path`:
+/// `<stem>.lock` beside it. `install.ps1`, the Windows swap, and
+/// [`delete_stale_backups_beside`] lock this file before they rename the
+/// program file or delete a backup.
+///
+/// Example: `C:\koshi\koshi.exe` gives `C:\koshi\koshi.lock`.
+#[cfg(any(windows, test))]
+fn compute_install_lock_path(executable_path: &Path) -> PathBuf {
+    executable_path.with_extension("lock")
+}
+
+/// Open the install lock file that [`compute_install_lock_path`] names for the
+/// program file at `executable_path`, creating it when it does not exist, and
+/// take its exclusive lock. While another process holds the lock, such as
+/// `install.ps1` or another `koshi update`, prints `koshi: waiting while
+/// another koshi install holds <path>` on standard error, then waits until
+/// the lock is free. Hands back the open file, which holds the lock until it
+/// is dropped.
+///
+/// # Errors
+/// `the install lock <path> could not be taken: <failure>` when the lock file
+/// cannot be opened or locked.
+#[cfg(any(windows, test))]
+fn take_install_lock(executable_path: &Path) -> Result<fs::File, String> {
+    let install_lock_path = compute_install_lock_path(executable_path);
+    let format_install_lock_error = |lock_error: io::Error| {
+        format!(
+            "the install lock {} could not be taken: {lock_error}",
+            install_lock_path.display()
+        )
+    };
+    let install_lock_file =
+        open_lock_file(&install_lock_path).map_err(format_install_lock_error)?;
+    match install_lock_file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            eprintln!(
+                "koshi: waiting while another koshi install holds {}",
+                install_lock_path.display()
+            );
+            install_lock_file
+                .lock()
+                .map_err(format_install_lock_error)?;
+        }
+        Err(fs::TryLockError::Error(lock_error)) => {
+            return Err(format_install_lock_error(lock_error));
         }
     }
+    Ok(install_lock_file)
 }
 
 /// The backup path number `backup_index` of the program file at
@@ -1744,90 +1895,257 @@ fn list_backup_executable_paths(executable_path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The file name of a staged copy beside a program file: `name_prefix`, the
+/// id of the process that runs the update, then `name_suffix`.
+/// [`swap_executable`], `install.sh`, and `install.ps1` write their copies
+/// under this name.
+///
+/// Example: the process `5000` names its copy of `/usr/local/bin/koshi`
+/// `koshi.koshi-update-5000` on Linux and macOS, and its copy of
+/// `C:\koshi\koshi.exe` `koshi-update-5000.exe` on Windows.
+struct StagedCopyName {
+    /// `<program file name>.koshi-update-` on Linux and macOS, with `koshi` for
+    /// a program file name that is not UTF-8. `koshi-update-` on Windows.
+    name_prefix: String,
+    /// Empty on Linux and macOS. `.exe` on Windows.
+    name_suffix: &'static str,
+}
+
+impl StagedCopyName {
+    /// The staged copy name of the program file at `executable_path`.
+    fn from_program_path(executable_path: &Path) -> StagedCopyName {
+        if cfg!(windows) {
+            return StagedCopyName {
+                name_prefix: "koshi-update-".to_string(),
+                name_suffix: ".exe",
+            };
+        }
+        let program_file_name = executable_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or("koshi");
+        StagedCopyName {
+            name_prefix: format!("{program_file_name}.koshi-update-"),
+            name_suffix: "",
+        }
+    }
+
+    /// The file name that the process `process_id` gives its staged copy.
+    fn format_file_name(&self, process_id: u32) -> String {
+        format!("{}{process_id}{}", self.name_prefix, self.name_suffix)
+    }
+
+    /// The process id in `entry_name` when it is a staged copy name: one or
+    /// more ASCII digits that fit a `u32`, between `name_prefix` and
+    /// `name_suffix`. `None` for every other name.
+    ///
+    /// Example: for `koshi`, `koshi.koshi-update-5000` gives `5000`, and
+    /// `koshi.koshi-update-+5` and `koshi-dev.koshi-update-5000` give `None`.
+    fn parse_process_id(&self, entry_name: &str) -> Option<u32> {
+        let process_id_text = entry_name
+            .strip_prefix(self.name_prefix.as_str())?
+            .strip_suffix(self.name_suffix)?;
+        if !process_id_text
+            .bytes()
+            .all(|process_id_byte| process_id_byte.is_ascii_digit())
+        {
+            return None;
+        }
+        process_id_text.parse().ok()
+    }
+}
+
+/// Lists each staged copy beside the program file at `executable_path` that
+/// an update which no longer runs left: each entry of its directory whose name
+/// [`StagedCopyName::parse_process_id`] reads a process id from, when
+/// [`process_tree::is_process_id_free`] finds no process with that id. The
+/// copy of a running process is left out, and so is every other entry. A
+/// directory that cannot be read lists nothing. A symbolic link with a staged
+/// copy name is listed under the same rule.
+///
+/// Example: beside `koshi`, `koshi.koshi-update-5000` is listed when no
+/// process has the id `5000`, and left out while process `5000` runs.
+fn list_staged_copies_of_ended_updates(executable_path: &Path) -> Vec<PathBuf> {
+    let Some(program_directory) = executable_path.parent() else {
+        return Vec::new();
+    };
+    let Ok(directory_entries) = fs::read_dir(program_directory) else {
+        return Vec::new();
+    };
+    let staged_copy_name = StagedCopyName::from_program_path(executable_path);
+    let mut ended_staged_copy_paths = Vec::new();
+    for directory_entry in directory_entries.filter_map(Result::ok) {
+        let entry_path = directory_entry.path();
+        let Some(writer_process_id) = entry_path
+            .file_name()
+            .and_then(|entry_name| entry_name.to_str())
+            .and_then(|entry_name| staged_copy_name.parse_process_id(entry_name))
+        else {
+            continue;
+        };
+        if process_tree::is_process_id_free(writer_process_id) {
+            ended_staged_copy_paths.push(entry_path);
+        }
+    }
+    ended_staged_copy_paths
+}
+
+/// Deletes each staged copy that [`list_staged_copies_of_ended_updates`] lists
+/// beside the program file at `executable_path`. A copy that cannot be
+/// deleted stays. A symbolic link is deleted, and its target stays.
+fn delete_staged_copies_of_ended_updates(executable_path: &Path) {
+    for ended_staged_copy_path in list_staged_copies_of_ended_updates(executable_path) {
+        let _ = fs::remove_file(ended_staged_copy_path);
+    }
+}
+
+/// Runs `<binary_path> --version`, as [`read_installed_version`] states, and
+/// checks that it prints `koshi <release version>`. The release version is
+/// `release_tag` without its leading `v`: `0.6.0` for `v0.6.0`.
+///
+/// # Errors
+/// - A binary whose version cannot be read: `the new koshi <release version>
+///   does not run on this system: <failure>`. Example failure: `the binary at
+///   /usr/local/bin/koshi.koshi-update-5000 printed "" for --version`.
+/// - A binary that prints another version: `the new koshi prints version
+///   <printed version>, not <release version>`.
+fn validate_release_binary(binary_path: &Path, release_tag: &str) -> Result<(), String> {
+    let release_version = strip_version_prefix(release_tag);
+    let printed_version = read_installed_version(binary_path).map_err(|version_read_error| {
+        format!("the new koshi {release_version} does not run on this system: {version_read_error}")
+    })?;
+    if printed_version != release_version {
+        return Err(format!(
+            "the new koshi prints version {printed_version}, not {release_version}"
+        ));
+    }
+    Ok(())
+}
+
 /// Replace the program file on Unix: the file `executable_path` names once
 /// every symbolic link in it is followed. A symbolic link at
 /// `executable_path` keeps naming that file.
 ///
-/// Copies `new_binary` beside that file as `<name>.koshi-update-<pid>`, sets
-/// mode `0755` on the copy, and renames the copy over the file in one step. A
-/// process that runs the old file keeps running it. `new_binary` is removed
-/// once the rename succeeds. A copy refused with a permission error installs
-/// through `sudo` instead, as [`replace_with_sudo`] states. Every other
-/// failure removes the copy and leaves the program file as it was.
+/// Deletes the staged copies that updates which no longer run left beside that
+/// file, as [`delete_staged_copies_of_ended_updates`] states. Then copies
+/// `new_binary` beside that file as `<name>.koshi-update-<pid>`, sets mode
+/// `0755` on the copy, checks that the copy prints the version of
+/// `release_tag`, as [`validate_release_binary`] states, and renames the copy
+/// over the file in one step. A process that runs the old file keeps running
+/// it. A failed copy, mode change, check, or rename removes the copy. A copy
+/// refused with a permission error then installs through `sudo`, as
+/// [`replace_with_sudo`] states. Every other failure leaves the program file
+/// as it was.
 ///
 /// # Errors
-/// The failure of the path lookup, the copy, the mode change, or the rename,
-/// as text.
+/// The failure of the path lookup, the copy, the mode change, the check, or
+/// the rename, as text.
 #[cfg(unix)]
-fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), String> {
+fn swap_executable(
+    new_binary: &Path,
+    executable_path: &Path,
+    release_tag: &str,
+) -> Result<(), String> {
     let executable_path = &fs::canonicalize(executable_path)
         .map_err(|executable_path_error| executable_path_error.to_string())?;
-    let staged_binary_path = executable_path.with_file_name(format!(
-        "{}.koshi-update-{}",
-        executable_path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .unwrap_or("koshi"),
-        std::process::id()
-    ));
+    delete_staged_copies_of_ended_updates(executable_path);
+    let staged_copy_name = StagedCopyName::from_program_path(executable_path);
+    let staged_binary_path =
+        executable_path.with_file_name(staged_copy_name.format_file_name(std::process::id()));
     if let Err(copy_error) = fs::copy(new_binary, &staged_binary_path) {
+        let _ = fs::remove_file(&staged_binary_path);
         // A copy refused for permission, such as into a root-owned
         // `/usr/local/bin`, installs through `sudo`.
         if copy_error.kind() == io::ErrorKind::PermissionDenied {
-            return replace_with_sudo(new_binary, executable_path);
+            return replace_with_sudo(
+                new_binary,
+                &staged_binary_path,
+                executable_path,
+                release_tag,
+            );
         }
         return Err(copy_error.to_string());
     }
-    if let Err(permission_error) = set_executable_permissions(&staged_binary_path) {
+    let replace_result = set_executable_permissions(&staged_binary_path)
+        .and_then(|()| validate_release_binary(&staged_binary_path, release_tag))
+        .and_then(|()| {
+            fs::rename(&staged_binary_path, executable_path)
+                .map_err(|rename_error| rename_error.to_string())
+        });
+    if let Err(replace_error) = replace_result {
         let _ = fs::remove_file(&staged_binary_path);
-        return Err(permission_error);
+        return Err(replace_error);
     }
-    match fs::rename(&staged_binary_path, executable_path) {
-        Ok(()) => {
-            let _ = fs::remove_file(new_binary);
-            Ok(())
-        }
-        Err(rename_error) => {
-            let _ = fs::remove_file(&staged_binary_path);
-            Err(rename_error.to_string())
-        }
-    }
+    Ok(())
 }
 
 /// Replace the program file on Windows: the file `executable_path` names once
 /// every symbolic link and junction in it is followed. A symbolic link at
 /// `executable_path` keeps naming that file.
 ///
-/// Copies `new_binary` beside that file as `koshi-update-<pid>.exe`, renames
-/// the running file to the backup path [`prepare_backup_executable_path`]
-/// gives, such as `koshi.old`, and renames the copy into its place. When that
-/// last rename fails, the backup is renamed back, and a restore that fails too
-/// returns both errors and the backup path. A backup that a running process
-/// still runs from stays, and [`delete_stale_backups`] removes it at the first
-/// interactive launch after that process ends.
+/// Deletes the staged copies that updates which no longer run left beside that
+/// file, as [`delete_staged_copies_of_ended_updates`] states. Then copies
+/// `new_binary` beside that file as `koshi-update-<pid>.exe`, checks that the
+/// copy prints the version of `release_tag`, as [`validate_release_binary`]
+/// states, and puts the copy in place of the file, as
+/// [`replace_program_file_with_staged_copy`] states. A failed copy, check, or
+/// replacement removes the copy.
 ///
 /// # Errors
-/// The failure of the path lookup, the backup path lookup, the copy, or a
-/// rename, as text.
+/// The failure of the path lookup, the copy, the check, or the replacement, as
+/// text.
 #[cfg(windows)]
-fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), String> {
+fn swap_executable(
+    new_binary: &Path,
+    executable_path: &Path,
+    release_tag: &str,
+) -> Result<(), String> {
     let executable_path = &fs::canonicalize(executable_path)
         .map_err(|executable_path_error| executable_path_error.to_string())?;
+    delete_staged_copies_of_ended_updates(executable_path);
+    // The copy sits beside the program file, on the same volume.
+    let staged_copy_name = StagedCopyName::from_program_path(executable_path);
+    let staged_binary_path =
+        executable_path.with_file_name(staged_copy_name.format_file_name(std::process::id()));
+    let replace_result = fs::copy(new_binary, &staged_binary_path)
+        .map_err(|staged_copy_error| staged_copy_error.to_string())
+        .and_then(|_copied_byte_count| validate_release_binary(&staged_binary_path, release_tag))
+        .and_then(|()| replace_program_file_with_staged_copy(&staged_binary_path, executable_path));
+    if let Err(replace_error) = replace_result {
+        let _ = fs::remove_file(&staged_binary_path);
+        return Err(replace_error);
+    }
+    Ok(())
+}
+
+/// Put the staged copy at `staged_binary_path` in place of the program file at
+/// `executable_path`, while this process holds the install lock, as
+/// [`take_install_lock`] states. Renames the program file to the backup path
+/// [`prepare_backup_executable_path`] gives, such as `koshi.old`, renames the
+/// copy into its place, then deletes the backup. When the second rename fails,
+/// the backup is renamed back, and a restore that fails too returns both errors
+/// and the backup path. A backup that a running process still runs from stays,
+/// and [`delete_stale_backups`] removes it at the first interactive launch
+/// after that process ends. Every failure leaves the copy where it is.
+///
+/// Example: `C:\koshi\koshi-update-5000.exe` and `C:\koshi\koshi.exe` leave
+/// `C:\koshi\koshi.exe` with the bytes of the copy, and no `koshi.old`.
+///
+/// # Errors
+/// The failure of the install lock, the backup path lookup, or a rename, as
+/// text.
+#[cfg(any(windows, test))]
+fn replace_program_file_with_staged_copy(
+    staged_binary_path: &Path,
+    executable_path: &Path,
+) -> Result<(), String> {
+    let _install_lock_file = take_install_lock(executable_path)?;
     let backup_executable_path = prepare_backup_executable_path(executable_path)
         .map_err(|backup_path_error| backup_path_error.to_string())?;
-    // The copy sits beside the program file, on the same volume.
-    let staged_binary_path =
-        executable_path.with_file_name(format!("koshi-update-{}.exe", std::process::id()));
-    fs::copy(new_binary, &staged_binary_path)
-        .map_err(|staged_copy_error| staged_copy_error.to_string())?;
-    if let Err(backup_rename_error) = fs::rename(executable_path, &backup_executable_path) {
-        let _ = fs::remove_file(&staged_binary_path);
-        return Err(backup_rename_error.to_string());
-    }
-    if let Err(staged_rename_error) = fs::rename(&staged_binary_path, executable_path) {
-        let rollback_error = fs::rename(&backup_executable_path, executable_path).err();
-        let _ = fs::remove_file(&staged_binary_path);
-        if let Some(rollback_error) = rollback_error {
+    fs::rename(executable_path, &backup_executable_path)
+        .map_err(|backup_rename_error| backup_rename_error.to_string())?;
+    if let Err(staged_rename_error) = fs::rename(staged_binary_path, executable_path) {
+        if let Err(rollback_error) = fs::rename(&backup_executable_path, executable_path) {
             return Err(format!(
                 "could not install replacement at {}: {staged_rename_error}; could not restore the original executable: {rollback_error}; manual recovery: restore {} as {}",
                 executable_path.display(),
@@ -1844,26 +2162,171 @@ fn swap_executable(new_binary: &Path, executable_path: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Installs `new_binary` over `executable_path` with `sudo`, for a binary in a root-owned
-/// directory. `install -m 755` writes the file and sets its mode in one step.
+/// The `sh` program that [`replace_with_sudo`] runs as root to write the
+/// staged copy, with the arguments that [`list_staged_copy_write_arguments`]
+/// lists. `$1` is the new release, `$2` the staged copy path, and every
+/// further argument a staged copy to delete.
+///
+/// Deletes each staged copy, copies `$1` to `$2`, and sets mode `0755` on the
+/// copy, then exits with status `0`. A failed copy or mode change removes the
+/// copy and exits with status `1`. A staged copy that cannot be deleted stays,
+/// and the copy is still written.
 #[cfg(unix)]
-fn replace_with_sudo(new_binary: &Path, executable_path: &Path) -> Result<(), String> {
+const STAGED_COPY_WRITE_SCRIPT: &str = r#"new_binary=$1
+staged_binary=$2
+shift 2
+rm -f -- "$@"
+if cp "$new_binary" "$staged_binary" && chmod 755 "$staged_binary"; then
+  exit 0
+fi
+rm -f "$staged_binary"
+exit 1"#;
+
+/// The arguments of `sh` that run [`STAGED_COPY_WRITE_SCRIPT`]: `-c`, the
+/// script, `sh` as the name the script runs under, `new_binary`,
+/// `staged_binary_path`, then each path of `ended_staged_copy_paths`.
+#[cfg(unix)]
+fn list_staged_copy_write_arguments(
+    new_binary: &Path,
+    staged_binary_path: &Path,
+    ended_staged_copy_paths: &[PathBuf],
+) -> Vec<std::ffi::OsString> {
+    let mut write_arguments: Vec<std::ffi::OsString> = vec![
+        "-c".into(),
+        STAGED_COPY_WRITE_SCRIPT.into(),
+        "sh".into(),
+        new_binary.into(),
+        staged_binary_path.into(),
+    ];
+    write_arguments.extend(ended_staged_copy_paths.iter().map(Into::into));
+    write_arguments
+}
+
+/// The `sh` program that [`replace_with_sudo`] runs as root to rename the
+/// staged copy, with the arguments that [`list_staged_copy_rename_arguments`]
+/// lists. `$1` is the staged copy path, and `$2` the program file.
+///
+/// Renames `$1` over `$2` in one step and exits with status `0`. A failed
+/// rename removes `$1` and exits with status `1`.
+#[cfg(unix)]
+const STAGED_COPY_RENAME_SCRIPT: &str = r#"if mv -f "$1" "$2"; then
+  exit 0
+fi
+rm -f "$1"
+exit 1"#;
+
+/// The arguments of `sh` that run [`STAGED_COPY_RENAME_SCRIPT`]: `-c`, the
+/// script, `sh` as the name the script runs under, `staged_binary_path`, and
+/// `executable_path`.
+#[cfg(unix)]
+fn list_staged_copy_rename_arguments(
+    staged_binary_path: &Path,
+    executable_path: &Path,
+) -> Vec<std::ffi::OsString> {
+    vec![
+        "-c".into(),
+        STAGED_COPY_RENAME_SCRIPT.into(),
+        "sh".into(),
+        staged_binary_path.into(),
+        executable_path.into(),
+    ]
+}
+
+/// Replaces the program file at `executable_path` through `sudo`, for a
+/// program file in a directory that only root may write. Prints `koshi:
+/// updating <path> needs elevated permissions` on standard error. Then:
+///
+/// 1. Runs [`STAGED_COPY_WRITE_SCRIPT`] as root in one `sudo sh` command: it
+///    deletes each staged copy that [`list_staged_copies_of_ended_updates`]
+///    lists, copies `new_binary` to `staged_binary_path`, and sets mode
+///    `0755` on the copy.
+/// 2. Checks, as this user, that the copy prints the version of
+///    `release_tag`, as [`validate_release_binary`] states.
+/// 3. Runs [`STAGED_COPY_RENAME_SCRIPT`] as root in a second `sudo sh`
+///    command: it renames the copy over `executable_path` in one step.
+///
+/// A process that runs the old file keeps running it. A failed copy or mode
+/// change in step 1 removes the copy there. When step 2 or step 3 fails,
+/// including a `sudo` that refuses step 3 or cannot start, and the copy is
+/// still there, `sudo rm -f <staged_binary_path>` deletes it. Every failure
+/// leaves the program file as it was.
+///
+/// # Errors
+/// The failure to start `sudo`, as text. `` `sudo` could not replace <path> ``
+/// when `sudo` or a script exits with a status other than `0`. The failure of
+/// the check, as [`validate_release_binary`] states. When the copy is still
+/// there after `sudo rm -f`, the error ends with `; the copy <staged path>
+/// stays: delete it with sudo rm -f <staged path>`.
+///
+/// Example: the second `sudo` refuses three wrong passwords, and so does
+/// `sudo rm -f`: `` `sudo` could not replace /usr/local/bin/koshi; the copy
+/// /usr/local/bin/koshi.koshi-update-5000 stays: delete it with sudo rm -f
+/// /usr/local/bin/koshi.koshi-update-5000 ``.
+#[cfg(unix)]
+fn replace_with_sudo(
+    new_binary: &Path,
+    staged_binary_path: &Path,
+    executable_path: &Path,
+    release_tag: &str,
+) -> Result<(), String> {
     eprintln!(
         "koshi: updating {} needs elevated permissions",
         executable_path.display()
     );
-    let install_command_status = std::process::Command::new("sudo")
-        .arg("install")
-        .arg("-m")
-        .arg("755")
-        .arg(new_binary)
-        .arg(executable_path)
+    let ended_staged_copy_paths = list_staged_copies_of_ended_updates(executable_path);
+    let write_command_status = std::process::Command::new("sudo")
+        .arg("sh")
+        .args(list_staged_copy_write_arguments(
+            new_binary,
+            staged_binary_path,
+            &ended_staged_copy_paths,
+        ))
         .status()
         .map_err(|sudo_spawn_error| sudo_spawn_error.to_string())?;
-    if !install_command_status.success() {
-        return Err("`sudo install` failed".to_string());
+    if !write_command_status.success() {
+        return Err(format!(
+            "`sudo` could not replace {}",
+            executable_path.display()
+        ));
     }
-    let _ = fs::remove_file(new_binary);
+    let replace_result = validate_release_binary(staged_binary_path, release_tag).and_then(|()| {
+        let rename_command_status = std::process::Command::new("sudo")
+            .arg("sh")
+            .args(list_staged_copy_rename_arguments(
+                staged_binary_path,
+                executable_path,
+            ))
+            .status()
+            .map_err(|sudo_spawn_error| sudo_spawn_error.to_string())?;
+        if !rename_command_status.success() {
+            return Err(format!(
+                "`sudo` could not replace {}",
+                executable_path.display()
+            ));
+        }
+        Ok(())
+    });
+    if let Err(replace_error) = replace_result {
+        let is_staged_copy_missing = || {
+            fs::symlink_metadata(staged_binary_path)
+                .is_err_and(|metadata_error| metadata_error.kind() == io::ErrorKind::NotFound)
+        };
+        if !is_staged_copy_missing() {
+            let _ = std::process::Command::new("sudo")
+                .arg("rm")
+                .arg("-f")
+                .arg(staged_binary_path)
+                .status();
+        }
+        if is_staged_copy_missing() {
+            return Err(replace_error);
+        }
+        return Err(format!(
+            "{replace_error}; the copy {} stays: delete it with sudo rm -f {}",
+            staged_binary_path.display(),
+            staged_binary_path.display()
+        ));
+    }
     Ok(())
 }
 

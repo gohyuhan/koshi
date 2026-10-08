@@ -6442,9 +6442,7 @@ fn a_liveness_round_reaps_an_exited_unwaited_child_while_a_session_is_listed() {
 }
 
 /// The router hands its place over by starting the new binary with this
-/// argument, the one [`crate::cli`] parses into `wait_for_lock`. On Windows the
-/// two creation flags the handover carries are checked beside them, in
-/// [`crate::process`].
+/// argument, the one [`crate::cli`] parses into `wait_for_lock`.
 #[test]
 fn the_handover_carries_the_argument_that_waits() {
     assert_eq!(WAIT_FOR_LOCK_FLAG, "--wait-for-lock");

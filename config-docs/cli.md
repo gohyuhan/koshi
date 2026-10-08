@@ -40,13 +40,60 @@ followed:
 4. A koshi built from source downloads nothing. A build is a release build only
    when the release workflow built it.
 
+When `koshi update` replaces the file in place, it first writes the new release
+beside it: `<name>.koshi-update-<process id>` on Linux and macOS, such as
+`koshi.koshi-update-5000`, and `koshi-update-<process id>.exe` on Windows. Then
+it renames that copy into place. `install.sh` and `install.ps1` name their
+copies the same way. An update or install that is killed between the two steps
+leaves its copy. The next `koshi update` deletes each such copy first. A copy
+stays while a process with the process id in its name runs. `koshi update` of
+koshi 0.5.0 or older deletes no such copy.
+
+Before the rename, `koshi update` runs that copy with `--version`. If it does
+not print `koshi <release version>` within 70 seconds, the update stops with
+`koshi: update failed: ...`. The copy is deleted, and the installed koshi stays
+as it was. What the new release writes on standard error shows above that line.
+Example: a release that needs a newer glibc than the system has does not start,
+and the update stops before it replaces anything.
+
+If only root can write the folder, such as a root-owned `/usr/local/bin`,
+`koshi update` writes the copy as root, in one `sudo` command. That command
+also deletes the copies that ended updates left in the folder. Then
+`koshi update` runs the check as the user, and renames the copy as root, in a
+second `sudo` command. If `sudo` keeps no credentials between commands, it asks
+for the password at each command. If the check or the rename fails, also when
+`sudo` refuses the second command, `koshi update` deletes a copy that is still
+there with `sudo rm -f`, which can ask for the password once more. If the copy
+stays, the error names it and the `sudo rm -f` command that deletes it.
+
+`install.sh` installs into `/usr/local/bin` the same way: it writes
+`koshi.koshi-update-<process id of its shell>`, runs it with `--version`, then
+renames that copy to `koshi`. It reads the version from the first line on
+standard output, and what the copy writes on standard error shows on the
+terminal. If only root can write the folder, `install.sh` runs the copy, the
+mode change, and the rename through `sudo`, and the check as the user. If the
+copy does not print `koshi <release version>`, or a step fails, `install.sh`
+deletes its copy, and the installed `koshi` stays as it was. If Ctrl+C stops
+the script, `install.sh` deletes its copy too, and the installed `koshi` is the
+old release or the complete new one.
+
 On Windows, the replacement renames the running `koshi.exe` to `koshi.old`, or
 to `koshi.1.old`, `koshi.2.old` and onward while a koshi still runs from an
-older backup. `install.ps1` does the same. Each interactive launch removes the
-backups that no koshi runs from. `koshi update` of koshi 0.5.0 or older stops
-with `Access is denied` while a koshi still runs from `koshi.old`. Rename that
-file to the next free backup name, such as `koshi.1.old`, and run the update
-again.
+older backup. `install.ps1` does the same: it first moves the new `koshi.exe` to
+`koshi-update-<process id>.exe` beside the installed one, runs it with
+`--version`, and stops when it does not print `koshi <release version>`. Each
+interactive launch removes the backups that no koshi runs from. `koshi update`
+of koshi 0.5.0 or older stops with `Access is denied` while a koshi still runs
+from `koshi.old`. Rename that file to the next free backup name, such as
+`koshi.1.old`, and run the update again.
+
+`koshi update` and `install.ps1` hold a lock on the file `koshi.lock` beside
+`koshi.exe` while they replace it. If another install holds that lock, each one
+waits until it is free, and `koshi update` prints `koshi: waiting while another
+koshi install holds <path>`. An interactive launch removes backups only while it
+holds that lock. If an install holds the lock, the launch leaves the backups in
+place. `koshi update` of koshi 0.5.0 or older, and a launch of one, take no
+lock.
 
 After every update, whether or not it installed a release, `koshi update`
 restarts each running session, then the background process that tracks sessions.
@@ -78,8 +125,8 @@ Live session handoff is available for sessions started by koshi 0.3.0, 0.4.0,
 its pre-releases has no restart handoff, and an update that koshi 0.2.0 runs
 leaves that session on koshi 0.2.0. `koshi update` and `koshi restart-servers`
 from the installed build name such a session and ask whether to end it, as the
-`koshi restart-servers` paragraphs below state. A koshi 0.1.0 window runs no
-server. It keeps its build until its terminal closes.
+`koshi restart-servers` paragraphs below state. A koshi 0.1.0 window serves its
+session from its own terminal. It keeps its build until that terminal closes.
 
 While the router restarts, it first finishes the lookups and session starts it
 already holds. A new `koshi attach` or a new session start that reaches it in
@@ -186,7 +233,10 @@ directory.
 0.1.0 or 0.2.0. For each such directory where a session runs, it prints one line
 on standard error, such as `koshi: 1 session that an older koshi started runs
 from /home/user/.local/share/koshi/run, which this koshi does not list; run
-koshi restart-servers to move it or end it`.
+koshi restart-servers to move it or end it`. For each such directory where a
+koshi 0.1.0 window is open, it prints one more line, such as `koshi: 1 koshi
+0.1.0 window runs from /home/user/.local/share/koshi/run; this koshi cannot
+talk to it, and it ends when its terminal closes`.
 
 A running session or router also restarts by itself when the koshi program it
 started from now holds another koshi version. Each new connection, such as one

@@ -71,6 +71,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # The Windows runner adds -C target-feature=+crt-static, the flag the
+    # Windows release binaries build with: it links the C runtime into each
+    # binary.
+    env:
+      RUSTFLAGS: ${{ matrix.os == 'windows-latest' && '-D warnings -C target-feature=+crt-static' || '-D warnings' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -109,20 +114,21 @@ jobs:
     name: build ${{ matrix.os }}-${{ matrix.arch }}
     needs: [test, validate]
     runs-on: ${{ matrix.runner }}
-    # Release binaries must not fail on a stray warning; the gate above already
-    # enforced -D warnings.
+    # RUSTFLAGS holds no -D warnings: the gate jobs above lint with it. The
+    # Windows rows add -C target-feature=+crt-static, which links the C runtime
+    # into koshi.exe. The Linux rows build on Ubuntu 22.04, whose glibc is 2.35.
     env:
-      RUSTFLAGS: ""
+      RUSTFLAGS: ${{ matrix.rustflags }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { runner: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,   os: linux,   arch: amd64 }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu,  os: linux,   arch: arm64 }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu,  os: linux,   arch: arm64 }
           - { runner: macos-15-intel,   target: x86_64-apple-darwin,        os: darwin,  arch: amd64 }
           - { runner: macos-14,         target: aarch64-apple-darwin,       os: darwin,  arch: arm64 }
-          - { runner: windows-2022,     target: x86_64-pc-windows-msvc,     os: windows, arch: amd64 }
-          - { runner: windows-11-arm,   target: aarch64-pc-windows-msvc,    os: windows, arch: arm64 }
+          - { runner: windows-2022,     target: x86_64-pc-windows-msvc,     os: windows, arch: amd64, rustflags: "-C target-feature=+crt-static" }
+          - { runner: windows-11-arm,   target: aarch64-pc-windows-msvc,    os: windows, arch: arm64, rustflags: "-C target-feature=+crt-static" }
     steps:
       - uses: actions/checkout@v7
 
@@ -139,6 +145,20 @@ jobs:
         env:
           KOSHI_RELEASE_BUILD: "1"
         run: cargo build --release -p koshi --target ${{ matrix.target }} --locked
+
+      # Fails when the Linux binary needs a glibc symbol version newer than
+      # GLIBC_2.34, or when no glibc symbol version can be read from it.
+      - name: Check the glibc version floor (linux)
+        if: matrix.os == 'linux'
+        shell: bash
+        run: |
+          newest_glibc_version="$(objdump -T "target/${{ matrix.target }}/release/koshi" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -u -V | tail -n 1)"
+          echo "newest glibc symbol version: ${newest_glibc_version}"
+          newer_of_floor_and_newest="$(printf '%s\n' GLIBC_2.34 "${newest_glibc_version}" | sort -V | tail -n 1)"
+          if [ "${newer_of_floor_and_newest}" != "GLIBC_2.34" ]; then
+            echo "::error::koshi for ${{ matrix.target }} needs ${newest_glibc_version}, past the GLIBC_2.34 floor" >&2
+            exit 1
+          fi
 
       # Archive name matches the koshi self-update convention exactly:
       # koshi-v{version}-{os}-{arch}.{tar.gz|zip} (see updater.rs, install.sh).

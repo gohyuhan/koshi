@@ -34,6 +34,11 @@ use koshi_link::remote_client;
 const CLI_PARSER_STACK_SIZE_BYTES: usize = 2 * 1024 * 1024;
 
 fn main() -> ExitCode {
+    // On Windows, the standard handles of this process pass to no child
+    // process by inheritance.
+    #[cfg(windows)]
+    koshi_host::standard_handles::clear_standard_handle_inheritance();
+
     // Usage errors print through clap and exit 2; --help/--version exit 0.
     let cli = parse_cli_arguments();
 
@@ -509,9 +514,11 @@ fn render_command_result(command_result: CommandResult) -> Result<(), CliError> 
 /// a refusal carries the sentence a dial to that server reports. Only a
 /// session on this machine that could not answer fails the listing. A bare
 /// one also names on stderr each runtime directory of koshi 0.1.0 and 0.2.0
-/// that sessions still run from, as
+/// that sessions or koshi 0.1.0 windows still run from, as
 /// [`format_previous_release_session_note`](updater::format_previous_release_session_note)
-/// words it.
+/// and
+/// [`format_koshi_0_1_0_window_note`](updater::format_koshi_0_1_0_window_note)
+/// word it.
 fn run_discovery(
     command: &CliCommand,
     remote_server_reference: Option<&str>,
@@ -555,13 +562,19 @@ fn run_discovery(
                 koshi_paths::resolve_previous_release_runtime_directories(),
                 &runtime_directory,
             ) {
-                let session_count =
-                    updater::count_previous_release_sessions(&previous_release_runtime_directory);
+                let server_count =
+                    updater::count_previous_release_servers(&previous_release_runtime_directory);
                 if let Some(session_note) = updater::format_previous_release_session_note(
                     &previous_release_runtime_directory,
-                    session_count,
+                    server_count.session_count,
                 ) {
                     eprintln!("koshi: {session_note}");
+                }
+                if let Some(window_note) = updater::format_koshi_0_1_0_window_note(
+                    &previous_release_runtime_directory,
+                    server_count.open_window_count,
+                ) {
+                    eprintln!("koshi: {window_note}");
                 }
             }
             let mut session_rows = discovery::build_session_rows(session_overviews);

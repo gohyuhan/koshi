@@ -6,6 +6,8 @@
 //! starts. A koshi 0.2.0 session is ended once the user answers yes, and keeps
 //! running otherwise. A koshi 0.2.0 session that is ended is a copy of this
 //! test binary saved as `koshi`, running [`run_koshi_0_2_0_session_process`].
+//! `koshi list-sessions` names a koshi 0.1.0 window that still listens in the
+//! runtime directory of that release.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +31,8 @@ use common::{
     resolve_runtime_directory_under_home, start_router_process, start_session_server_under_home,
     write_test_config, RunningProcess, SessionProcess,
 };
+#[cfg(unix)]
+use koshi_test_support::fixtures::write_koshi_0_1_0_window_endpoint_file;
 use koshi_test_support::fixtures::{
     close_connection_after_peer_hangs_up, spawn_previous_release_session, start_program_process,
     KOSHI_0_2_0_HELLO_ANSWER_TEXT, KOSHI_0_2_0_RESTART_REFUSAL_TEXT,
@@ -688,5 +692,42 @@ fn a_session_in_the_runtime_directory_of_koshi_0_2_0_is_named_by_list_sessions_a
     assert_eq!(
         String::from_utf8_lossy(&listing_output_after_restart.stdout),
         empty_listing
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_open_koshi_0_1_0_window_in_the_runtime_directory_of_koshi_0_1_0_is_named_by_list_sessions() {
+    let home_directory = build_short_test_directory();
+    write_test_config(home_directory.path(), "version 1\n");
+    let previous_release_runtime_directory =
+        common::resolve_data_directory_under_home(home_directory.path()).join("run");
+    std::fs::create_dir_all(&previous_release_runtime_directory)
+        .expect("the runtime directory of koshi 0.1.0 under the test home");
+    let window_session_id = SessionId::new();
+    let _window_listener = Listener::bind(&compute_socket_address(
+        &previous_release_runtime_directory,
+        window_session_id,
+    ))
+    .expect("bind the stand-in window");
+    write_koshi_0_1_0_window_endpoint_file(&previous_release_runtime_directory, window_session_id);
+
+    let listing_output = run_koshi_command(home_directory.path(), "list-sessions");
+
+    assert_eq!(
+        String::from_utf8_lossy(&listing_output.stderr),
+        format!(
+            "koshi: 1 koshi 0.1.0 window runs from {}; this koshi cannot talk to it, and it ends \
+             when its terminal closes\n",
+            previous_release_runtime_directory.display()
+        )
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&listing_output.stdout),
+        koshi::output::render_sessions(&[], koshi::cli::OutputFormat::Table)
+    );
+    assert_eq!(
+        listing_output.status.code(),
+        Some(CliExitCode::Success.get_exit_code())
     );
 }

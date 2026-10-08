@@ -2158,7 +2158,7 @@ fn hand_over_session_to_new_image(
     session_start: &SessionStart,
     resume_file_path: &Path,
 ) -> std::io::Result<()> {
-    crate::process::configure_detached_process(&mut build_resume_command(
+    koshi_host::detached_process::configure_detached_process(&mut build_resume_command(
         session_start,
         resume_file_path,
     ))

@@ -2,7 +2,6 @@
 
 use super::*;
 
-#[cfg(unix)]
 use koshi_test_support::child_exit::wait_until_child_has_exited;
 
 /// A serving thread's SIGPIPE block must hold while the process-wide
@@ -10,7 +9,6 @@ use koshi_test_support::child_exit::wait_until_child_has_exited;
 /// raise is thread-directed, like the signal a write to a hung-up peer
 /// raises; blocked, it stays pending, the thread runs on, and the pending
 /// signal dies with the thread.
-#[cfg(unix)]
 #[test]
 fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
     let is_serving_thread_alive_after_sigpipe = std::thread::spawn(|| {
@@ -25,23 +23,6 @@ fn a_serving_threads_sigpipe_block_holds_under_the_default_disposition() {
     assert!(
         is_serving_thread_alive_after_sigpipe,
         "the raise itself reported an error"
-    );
-}
-
-/// A detached helper must survive the process that started it and must draw no
-/// window. A transposed digit in either flag is a different flag, and
-/// `std::process::Command` reports no creation flags, so the values are
-/// checked here.
-#[cfg(windows)]
-#[test]
-fn the_detach_flags_carry_their_win32_values() {
-    assert_eq!(
-        DETACHED_PROCESS, 0x0000_0008,
-        "DETACHED_PROCESS is 8; another value is another flag"
-    );
-    assert_eq!(
-        CREATE_NEW_PROCESS_GROUP, 0x0000_0200,
-        "CREATE_NEW_PROCESS_GROUP is 512; another value is another flag"
     );
 }
 
@@ -91,7 +72,7 @@ fn listing_the_child_processes_names_every_child_running_or_exited() {
     );
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn listing_child_processes_reports_unsupported_platforms() {
     assert_eq!(
@@ -104,7 +85,6 @@ fn listing_child_processes_reports_unsupported_platforms() {
 
 /// The wait returns once the child has exited, and the child is reaped: a
 /// second wait for it finds no such child.
-#[cfg(unix)]
 #[test]
 fn waiting_for_a_child_returns_once_it_exits_and_reaps_it() {
     let mut exiting_child = std::process::Command::new("/bin/sh")

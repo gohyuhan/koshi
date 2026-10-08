@@ -662,7 +662,7 @@ pub(crate) fn spawn_pty_supervisor(
     session_id: SessionId,
     connection_token: &ConnectionToken,
 ) -> std::io::Result<u32> {
-    crate::process::configure_detached_process(&mut std::process::Command::new(
+    koshi_host::detached_process::configure_detached_process(&mut std::process::Command::new(
         koshi_host::program_path::resolve_program_path()?,
     ))
     .arg(PTY_SUPERVISOR_SUBCOMMAND)
